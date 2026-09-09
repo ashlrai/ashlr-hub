@@ -20,6 +20,8 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
   Raycast dependency graph. Retains script-free dependency installation.
 - Clarifies the local-only successor release path and separates pushed source,
   verified packages, registry publication and commissioned fleet operation.
+- Restores runtime command discovery in shell completions, including the
+  supported install, status, rollback and run subcommands.
 
 ### Autonomous feedback and recovery explanations
 
