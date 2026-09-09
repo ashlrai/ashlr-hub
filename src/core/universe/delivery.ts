@@ -1,6 +1,7 @@
 import { lstatSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import type { LocalStoreLock } from '../fleet/local-store-lock.js';
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord,
   type ImmutablePrivateRecordCodec, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
@@ -188,12 +189,17 @@ export async function deliverUniverseElite(universeId: string,
 
 /** Internal composition point: selection and delivery share the same execution lease. */
 export async function deliverUniverseEliteOwned(universeId: string,
-  options: UniverseStoreOptions & { trialId: string; branch: string; signal?: AbortSignal },
+  options: UniverseStoreOptions & { trialId: string; branch: string; signal?: AbortSignal; deadlineMonotonicMs?: number },
   lock: LocalStoreLock): Promise<UniverseDeliveryReceipt> {
   if (!ID.test(universeId) || !TRIAL_ID.test(options.trialId) || !validUniverseDeliveryBranch(options.branch)) throw new Error('Invalid Universe delivery identity or codex/ branch');
+  const checkBudget = (): void => {
+    options.signal?.throwIfAborted();
+    if (options.deadlineMonotonicMs !== undefined && (!Number.isFinite(options.deadlineMonotonicMs) ||
+      performance.now() >= options.deadlineMonotonicMs)) throw new Error('Universe delivery deadline exhausted');
+  };
   const directory = universePath(resolve(options.root ?? defaultUniverseRoot()), universeId);
   assertUniverseExecution(directory, lock);
-  options.signal?.throwIfAborted();
+  checkBudget();
   const records = readRecords(directory);
   const record = manifestRecord(directory, records);
   const universe = projectUniverse(directory, records);
@@ -217,6 +223,7 @@ export async function deliverUniverseEliteOwned(universeId: string,
   if (existing) {
     bindSource(existing, universe, record);
     inspectGit(existing, git);
+    checkBudget();
     if (existing.status !== 'pending') return existing;
   } else {
     if (prior.length >= MAX_DELIVERIES) throw new Error('Universe delivery capacity exhausted');
@@ -234,8 +241,9 @@ export async function deliverUniverseEliteOwned(universeId: string,
     repo: record.manifest.seed.repo, branch: options.branch, baseCommit: record.manifest.seed.revision, commit, tree, changedFiles,
     status: 'pending', createdAt: new Date().toISOString(), completedAt: null };
   assertUniverseExecution(directory, lock);
-  options.signal?.throwIfAborted();
+  checkBudget();
   inspectGit(intent, git);
+  checkBudget();
   if (!existing) persist(directory, intent);
   // The intent is durable before a branch can become visible. Crash recovery
   // accepts only this exact commit, never an unrelated existing branch.
@@ -244,8 +252,9 @@ export async function deliverUniverseEliteOwned(universeId: string,
     if (target !== null && target !== commit) throw new Error('Delivery branch conflicts with an existing ref');
     if (target === null) {
       assertUniverseExecution(directory, lock);
-      options.signal?.throwIfAborted();
+      checkBudget();
       git.assertNotCheckedOut(options.branch);
+      checkBudget();
       await git.createRef(options.branch, commit);
     }
   }

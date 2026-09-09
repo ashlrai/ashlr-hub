@@ -397,7 +397,7 @@ export function UniverseView() {
   return (
     <div ref={containerRef} className={styles.view}>
       <header className={styles.header}>
-        <div><h1>Ashlr Universe</h1><p>Run experiments. Compare futures. Keep what earns its place.</p></div>
+        <div><h1>Ashlrverse</h1><p>Run experiments. Compare futures. Keep what earns its place.</p></div>
         <div className={styles.actions}>
           {overview && overview.universes.length > 1 ? (
             <label className={styles.selectLabel}>Universe<select value={universe?.manifest.id} onChange={(event) => setUniverseId(event.target.value)}>{overview.universes.map((item) => <option value={item.manifest.id} key={item.manifest.id}>{item.manifest.name}</option>)}</select></label>

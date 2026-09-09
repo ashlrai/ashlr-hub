@@ -1,4 +1,6 @@
-# Ashlr Universe — North Star
+<a id="ashlr-universe--north-star"></a>
+
+# Ashlrverse — North Star
 
 > Build for a factory whose models become ten times more capable. The objective
 > should become more ambitious without replacing the factory.
@@ -10,7 +12,7 @@
 
 ## Vision
 
-**Ashlr Universe is an agent-native operating system for engineers and builders, optimizing verified engineering yield: useful accepted changes per token and hour.**
+**Build Ashlrverse into an agent-native operating system for engineers and builders: a self-improving engineering fleet optimizing verified engineering yield—useful accepted changes per token and hour.**
 
 Give it an idea, a starting portfolio, resources, and the scope of work it may
 undertake. It should discover worthwhile opportunities, design experiments,
@@ -18,10 +20,19 @@ build competing approaches, test real artifacts, judge outcomes, and invest its
 next unit of effort using what it learned. Its product vision can evolve from
 evidence rather than freezing into a backlog of the first ideas it generated.
 
-Hub is the local execution and observation kernel. Universe is the continuing
-search, resource allocation, and organizational learning above it. Subscription
+The ambition is continuous invention, not only code maintenance. The fleet should
+challenge its own plans, discover better features and methods, and carry useful
+work through integration and operation. It should improve its harnesses and
+coordination through the same evidence-led process it applies to products.
+
+Hub is the local execution and observation kernel. Ashlrverse is the wider
+product vision: continuing search, resource allocation, and organizational
+learning above it. Universe remains the name of the existing experiment runtime
+and its compatibility interfaces. Subscription
 capacity, cloud models, and local compute are resources to allocate according to
 measured usefulness and provider limits. More tokens spent is not itself progress.
+Preserve operator reserves and compare outcomes before spending more; idle
+capacity is useful only when the next task can produce value.
 
 ## Three pillars (in order of ambition)
 
@@ -44,6 +55,9 @@ Sets intent and delegates scope and resources. Routine decisions and effectivene
 assessment should run automatically from observable evidence. Bring the engineer
 decisions that require new direction or authority, not every implementation step.
 An operator can inspect, interrupt, redirect, and reproduce the system's work.
+Autonomy should expand through demonstrated reliability and delegated scope,
+without making the human approve every routine step or treating an agent's
+confidence as independent proof of success.
 
 ## How we measure "grand" (not vanity)
 
@@ -65,5 +79,5 @@ An operator can inspect, interrupt, redirect, and reproduce the system's work.
 
 `docs/NORTH-STAR.md` and `docs/ECOSYSTEM-MAP.md` ground strategy and invention.
 Goals should be substantive (value ≥ 4), bound to a concrete repo and verifiable
-outcome, and decomposed into shippable milestones. The [Universe architecture](ASHLR-UNIVERSE.md)
+outcome, and decomposed into shippable milestones. The [Ashlrverse operator guide](ASHLR-UNIVERSE.md)
 describes its five engines, current executable scope, and path to the full system.

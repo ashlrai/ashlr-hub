@@ -1,94 +1,92 @@
 import { Experiment } from './experiment';
+import Image from 'next/image';
 import { ProductSections } from './product-sections';
 import evidence from './data/demo.json';
-const source =
-  'https://github.com/ashlrai/ashlr-hub/tree/codex/universe-account-connections';
+
+const source = 'https://github.com/ashlrai/ashlr-hub';
 export default function Home() {
   return (
     <main id="top">
+      <a className="skip-link" href="#experiment">
+        Skip to the experiment
+      </a>
       <header className="masthead">
-        <a className="wordmark" href="#top">
-          Ashlr <span>Universe</span>
+        <a className="wordmark" href="#top" aria-label="Ashlrverse home">
+          ashlrverse<span aria-hidden="true">✳</span>
         </a>
         <nav aria-label="Main">
-          <a href="#experiment">Experiment</a>
-          <a href={`${source}/docs/QUICKSTART.md`}>Documentation</a>
-          <a href={source}>GitHub</a>
+          <a href="#experiment">Observatory</a>
+          <a href="#mission">Mission</a>
+          <a className="nav-source" href={source}>
+            Open source <span aria-hidden="true">↗</span>
+          </a>
         </nav>
       </header>
-      <section className="hero">
-        <div>
-          <p className="release-note">
-            Open source · Local engineering runtime
-          </p>
-          <h1>
-            Give your ideas
-            <br />a working universe.
+      <section className="hero" aria-labelledby="hero-title">
+        <Image
+          className="hero-art"
+          src="/ashlrverse-orbital.png"
+          width={1672}
+          height={941}
+          alt=""
+          fetchPriority="high"
+          unoptimized
+        />
+        <div className="hero-copy">
+          <p className="release-note">An open frontier for builders</p>
+          <h1 id="hero-title">
+            Ideas deserve
+            <br />a universe.
           </h1>
           <p className="lead">
-            Turn an objective into competing approaches, tested artifacts, and a
-            better next attempt. Keep your models, your tools, and your judgment
-            in the loop.
+            An open-source engineering fleet that explores possibilities, tests
+            its work, and builds on what it learns. Your ambition. Many minds.
+            One evolving mission.
           </p>
           <div className="actions">
             <a className="primary-link" href="#experiment">
-              Explore the experiment
+              Enter the observatory <span aria-hidden="true">↗</span>
             </a>
-            <a className="text-link" href={`${source}/docs/QUICKSTART.md`}>
-              Run it locally
+            <a className="text-link" href="#run">
+              Build your fleet
             </a>
           </div>
           <p className="scope-note">
-            Current-source preview. No account connection or paid inference on
-            this page.
+            Local-first runtime. Open models and native workers.
+            <br />
+            Real evidence, not a simulated live fleet.
           </p>
         </div>
-        <div
-          className="loop"
-          aria-label="Engineering loop: objective, candidates, fixed evaluation, retained archive, next generation"
-        >
-          <div className="loop-heading">
-            <span>One objective. Several approaches.</span>
-            <span className="signal">Local loop</span>
-          </div>
-          <div className="objective">
-            Preserve order.
-            <br />
-            Remove duplicates.
-            <br />
-            <strong>Use less code.</strong>
-          </div>
-          <div className="candidates">
-            <span>Compact</span>
-            <span>Readable</span>
-            <span className="rejected">Broken</span>
-          </div>
-          <div className="evaluator">
-            Fixed evaluator <span>Correctness before score</span>
-          </div>
-          <div className="archive">
-            <span>Retain useful differences</span>
-            <strong>Build the next generation</strong>
-          </div>
+        <div className="hero-coordinate" aria-hidden="true">
+          <span>Beyond the single agent</span>
+          <span>Ashlrverse / engineering frontier</span>
         </div>
       </section>
       <section className="section" id="experiment">
         <div className="section-heading">
           <div>
-            <p className="release-note">The mechanism, made visible</p>
-            <h2>Watch evidence shape the next attempt.</h2>
+            <p className="release-note">The observatory</p>
+            <h2>
+              Progress leaves
+              <br />a trace.
+            </h2>
           </div>
           <p>
-            A deterministic demonstration executes actual code. It demonstrates
-            the runtime, not model intelligence or production yield.
+            Inspect two generations of a real code experiment. Follow what
+            passed, what failed, and what the next attempt inherited. Fixed
+            workers make this demonstration reproducible; it is not a measure of
+            AI intelligence.
           </p>
         </div>
         <Experiment evidence={evidence} />
       </section>
       <ProductSections />
       <footer>
-        <span>Ashlr Universe · Built for builders</span>
-        <a href={source}>MIT-licensed source</a>
+        <a className="wordmark" href="#top">
+          ashlrverse<span aria-hidden="true">✳</span>
+        </a>
+        <span>A frontier worth building together.</span>
+        <a href={source + '/blob/master/LICENSE'}>MIT-licensed source</a>
       </footer>
     </main>
   );

@@ -2,9 +2,9 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Ashlr Universe — the local engineering loop',
+  title: 'Ashlrverse — an open frontier for builders',
   description:
-    'Explore a real, credential-free engineering experiment. Competing approaches, fixed evaluation, retained artifacts, and measured improvement.',
+    'An open-source, local-first engineering fleet. Explore possibilities, independently test artifacts, and build on measured progress.',
 };
 
 export default function RootLayout({

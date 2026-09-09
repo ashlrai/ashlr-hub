@@ -27,11 +27,12 @@ describe('resource console scoped bootstrap', () => {
     });
     vi.stubGlobal('fetch', request); const user = userEvent.setup();
     render(<ResourcePoolConsoleApp />);
-    expect(screen.getByRole('heading', { name: 'Connect to Ashlr Resources' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Connect to Ashlrverse resources' })).toBeInTheDocument();
     expect(screen.queryByLabelText('Resource store')).not.toBeInTheDocument();
     await user.type(screen.getByLabelText('Read token'), 'a'.repeat(64));
     await user.click(screen.getByRole('button', { name: 'Connect' }));
     await screen.findByRole('heading', { name: 'Routing board' });
+    expect(screen.getByText('Ashlrverse')).toBeInTheDocument();
     expect(screen.getByLabelText('Resource store')).toHaveTextContent(scope.root);
     expect(request.mock.calls.map(([path]) => path)).toEqual(['/api/session', '/api/resources/console', '/api/resources']);
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
@@ -39,7 +40,7 @@ describe('resource console scoped bootstrap', () => {
     expect(EventSource).not.toHaveBeenCalled();
     expect(request.mock.calls.filter(([path]) => path !== '/api/session').every(([, init]) => init?.method === 'GET')).toBe(true);
     await user.click(screen.getByRole('button', { name: 'Disconnect' }));
-    await screen.findByRole('heading', { name: 'Connect to Ashlr Resources' });
+    await screen.findByRole('heading', { name: 'Connect to Ashlrverse resources' });
     expect(screen.queryByLabelText('Resource store')).not.toBeInTheDocument();
     expect(Object.values(sessionStorage)).not.toContain('a'.repeat(64));
   });
@@ -81,7 +82,7 @@ describe('resource console scoped bootstrap', () => {
     vi.stubGlobal('fetch', vi.fn(async (path: string) => expired ? new Response(null, { status: 401 }) : json(path.endsWith('/console') ? scope : snapshot)));
     const user = userEvent.setup(); render(<ResourcePoolConsoleApp />); await screen.findByRole('heading', { name: 'Routing board' });
     expired = true; await user.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByRole('heading', { name: 'Connect to Ashlr Resources' });
+    await screen.findByRole('heading', { name: 'Connect to Ashlrverse resources' });
     expect(screen.queryByLabelText('Resource store')).not.toBeInTheDocument(); expect(EventSource).not.toHaveBeenCalled();
   });
 

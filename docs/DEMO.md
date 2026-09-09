@@ -7,7 +7,7 @@ predefined scripts, not model-generated ideas or a productivity benchmark.
 
 ## Recorded example
 
-![Parent-linked demo results: compact 274 to 47 bytes, readable 317 to 210 bytes, seven correctness cases for every retained trial, and broken sort rejected in both generations.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/codex/universe-account-connections/docs/images/universe-demo.png)
+![Parent-linked demo results: compact 274 to 47 bytes, readable 317 to 210 bytes, seven correctness cases for every retained trial, and broken sort rejected in both generations.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/universe-demo.png)
 
 This graphic renders the sanitized result captured on 2026-09-09 from source
 `914ebd1f566c0dc4f0a95479d9c4f464289e736e`:
@@ -19,8 +19,8 @@ This graphic renders the sanitized result captured on 2026-09-09 from source
 
 The broken sorting variant was rejected in both generations. These are measurements
 of this deterministic fixture, not model productivity or accepted engineering yield.
-Inspect the [public JSON](https://raw.githubusercontent.com/ashlrai/ashlr-hub/codex/universe-account-connections/docs/images/universe-demo.json)
-or [accessible SVG](https://raw.githubusercontent.com/ashlrai/ashlr-hub/codex/universe-account-connections/docs/images/universe-demo.svg).
+Inspect the [public JSON](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/universe-demo.json)
+or [accessible SVG](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/universe-demo.svg).
 
 ## Before you start
 

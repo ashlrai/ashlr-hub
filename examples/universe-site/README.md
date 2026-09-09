@@ -1,7 +1,9 @@
-# Ashlr Universe public showcase
+# Ashlrverse public observatory
 
 A static, credential-free landing page and interactive replay of a real local
-Universe experiment. This is not an operational dashboard. It never reads the
+Universe experiment, with a selectable lineage graph and measured comparisons.
+Ashlrverse is the public brand; existing Universe commands and evidence stay
+compatible. This is not an operational dashboard. It never reads the
 operator's accounts, private experiment stores or session tokens.
 
 ## Develop and verify
@@ -15,6 +17,10 @@ The static export is `dist/client/`; do not publish `dist/server/` or private
 tool state. `.openai/hosting.json` selects static-only hosting. No Worker, API,
 database, cookies, provider requests, analytics or local-storage state is used
 by this authored page. Tabs and selection are presentation-only React state.
+Copying setup commands requires an explicit click and handles denied clipboard
+access. Motion is limited to one entrance and selection transitions; reduced
+motion renders the same final states without movement. The graph's bounded
+scroll region is keyboard-focusable and keeps labels readable at narrow widths.
 
 ## Update the evidence
 
@@ -30,7 +36,9 @@ actual experiment. This does not measure model capability or accepted product
 yield. Never replace these inputs with raw console/startup JSON.
 
 Fonts are bundled from Hub: Space Grotesk and IBM Plex Sans. Their OFL licenses
-are in `public/licenses/`. The favicon is a code-native letterform.
+are in `public/licenses/`. The favicon is a code-native geometric mark.
+The original orbital concept art and its generation prompt are documented in
+[asset provenance](ASSETS.md). It is artwork, not evidence of a running fleet.
 
 ## Dependency notes
 
