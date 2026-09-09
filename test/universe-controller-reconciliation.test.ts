@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
@@ -9,6 +9,7 @@ import type { UniversePortfolioDefinition } from '../src/core/universe/portfolio
 import { appendPortfolioControllerEvent, foldPortfolioController, portfolioControllerDirectory,
   readPortfolioControllerEvents } from '../src/core/universe/portfolio-controller-store.js';
 import * as records from '../src/core/util/immutable-private-record-store.js';
+import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 
 const hooks = vi.hoisted(() => ({ readiness: vi.fn(), run: vi.fn(), campaign: vi.fn(), plan: vi.fn(),
   proof: vi.fn(), deliveryProof: vi.fn(), preflight: vi.fn(), deliver: vi.fn(), deliveries: vi.fn(), universe: vi.fn(), manifest: vi.fn() }));
@@ -79,6 +80,55 @@ function fixture() {
 }
 
 describe('Controller completed-dispatch recovery', () => {
+  it('preserves staged bytes and a live writer mutex during status and attempted recovery', async () => {
+    const f = fixture(); f.requireRuntime();
+    await runUniversePortfolioController(f.definition, f.options);
+    const ledger = join(f.directory, 'ledger');
+    const saved = f.events();
+    const stage = join(ledger, 'staging', '.unpublished.stage.tmp');
+    const bytes = 'Unpublished fixture evidence: never discard.\n';
+    writeFileSync(stage, bytes, { mode: 0o600, flag: 'wx' });
+    const mutex = acquireLocalStoreLockWithOutcome(join(ledger, '.records.lock'), 0,
+      { anchorPath: f.directory, exactPrivateStorage: true });
+    if (mutex.state !== 'acquired') throw new Error('Fixture writer unavailable');
+    const lockBytes = readFileSync(mutex.lock.path);
+    try {
+      expect(readUniversePortfolioController('controller', f.options).sourceState).toBe('degraded');
+      await expect(runUniversePortfolioController(f.definition, f.options)).rejects.toThrow('publication requires explicit recovery');
+      expect(readFileSync(stage, 'utf8')).toBe(bytes);
+      expect(readFileSync(mutex.lock.path)).toEqual(lockBytes);
+      expect(ownsLocalStoreLock(mutex.lock)).toBe(true);
+      expect(readdirSync(join(ledger, 'records')).sort().map((name) =>
+        JSON.parse(readFileSync(join(ledger, 'records', name), 'utf8')))).toEqual(saved);
+      expect(hooks.run).not.toHaveBeenCalled();
+    } finally { releaseLocalStoreLock(mutex.lock); }
+  });
+
+  it('leaves malformed writer metadata untouched instead of treating it as a dead owner', async () => {
+    const f = fixture(); f.requireRuntime();
+    await runUniversePortfolioController(f.definition, f.options);
+    const writer = join(f.directory, 'ledger', '.records.lock');
+    const bytes = 'Malformed fixture lock; ownership unknown.\n';
+    writeFileSync(writer, bytes, { mode: 0o600, flag: 'wx' });
+    expect(readUniversePortfolioController('controller', f.options).sourceState).toBe('degraded');
+    await expect(runUniversePortfolioController(f.definition, f.options)).rejects.toThrow('record ownership unavailable');
+    expect(readFileSync(writer, 'utf8')).toBe(bytes);
+    expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it('does not initialize a replacement enrollment when an existing records directory is missing', async () => {
+    const f = fixture(); f.requireRuntime();
+    await runUniversePortfolioController(f.definition, f.options);
+    const saved = f.events();
+    const original = join(f.directory, 'ledger', 'records');
+    const retained = join(f.directory, 'retained-records');
+    renameSync(original, retained);
+    await expect(runUniversePortfolioController(f.definition, f.options)).rejects.toThrow();
+    expect(existsSync(original)).toBe(false);
+    expect(readdirSync(retained).sort().map((name) => JSON.parse(readFileSync(join(retained, name), 'utf8')))).toEqual(saved);
+    expect(hooks.run).not.toHaveBeenCalled();
+  });
+
   it('persists a UUID before execution and passes that exact identity to the runner', async () => {
     const f = fixture();
     hooks.run.mockImplementation(async (_id, options) => {

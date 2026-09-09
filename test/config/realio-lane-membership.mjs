@@ -102,6 +102,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-dispatch-recovery-integration.test.ts', // native dispatch-attributed controller recovery without worker replay
   'test/universe-controller-reconciliation.test.ts', // private controller recovery ledger with injected attribution faults
   'test/universe-controller-contention-integration.test.ts', // native execution-lock contention, bounded waiting and cancellation
+  'test/universe-controller-crash-integration.test.ts', // separate-process SIGKILL, stale leases and exact-dispatch recovery
   'test/universe-campaign-owned.test.ts', // exact private execution leases and campaign admission authority
   'test/universe-integration-evaluate.test.ts', // real private candidate artifacts with injected evaluation and ledger faults
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review

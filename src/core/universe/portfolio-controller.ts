@@ -7,6 +7,7 @@ import { canonical, defaultUniverseRoot, digest, inspectPrivateDirectory, privat
 import { readUniverseCampaign } from './campaign-store.js';
 import { readCompletedUniverseCampaignDispatch } from './campaign-dispatch.js';
 import { readCompletedCampaignDelivery } from './campaign-delivery-recovery.js';
+import { recoverControllerRecordLock } from './controller-lock-recovery.js';
 import { runUniverseCampaignOwned } from './campaign.js';
 import { acquireUniverseExecution } from './execution.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadiness } from './campaign-readiness.js';
@@ -156,6 +157,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   };
   signal?.addEventListener('abort', cancel, { once: true });
   try {
+    recoverControllerRecordLock(definition.id, { root }, acquired.lock);
     try { lstatSync(join(directory, 'ledger')); events = readPortfolioControllerEvents(directory); }
     catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;

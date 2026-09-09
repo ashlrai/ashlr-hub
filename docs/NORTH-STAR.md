@@ -156,7 +156,11 @@ remote push or deployment authority.
    never repeats a started attempt or silently refreshes enrollment.
    Planned delivery must already be verified; recovery neither repeats workers
    nor creates missing branches. Legacy, incomplete and mismatched dispatches
-   remain held. Automatic interrupted-session resumption, integration/handoff
+   remain held. Separate-process SIGKILL tests cover pre-intent, pre-start and
+   post-completion boundaries, including an existing planned delivery. Restart
+   can reclaim proven-dead controller writer locks only with empty staging;
+   this is not arbitrary mid-publication or machine-reboot recovery.
+   Automatic interrupted-session resumption, integration/handoff
    nodes and resident supervision remain separate work; this is not yet an
    end-to-end always-on controller.
 3. **Learn the division of labor.** Compare baseline and role-based policies on
