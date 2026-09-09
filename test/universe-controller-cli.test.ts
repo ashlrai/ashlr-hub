@@ -69,6 +69,8 @@ describe('Universe persisted controller CLI', () => {
     expect(await cmdUniverseController([arg])).toBe(0);
     const text = vi.mocked(console.log).mock.calls[0]![0];
     expect(text).toContain('original persisted deadline');
+    expect(text).toContain('wait for a busy Universe execution lock');
+    expect(text).toContain('No dispatch intent or worker request is recorded while waiting');
     expect(text).toContain('not a resident daemon');
     expect(text).toContain('uncertain or paused work');
     expect(files.readResourceJson).not.toHaveBeenCalled();

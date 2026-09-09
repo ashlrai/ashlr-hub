@@ -1718,6 +1718,22 @@ For strict local improvement delivery, supply the existing explicit
 with enrollment and must be repeated identically on restart; omitting it cannot
 remove a saved delivery prerequisite.
 
+Before recording a campaign dispatch intent, the controller acquires that
+Universe's execution lock and checks the original campaign pins again. A busy
+lock leaves never-dispatched work pending; the controller waits within its
+original deadline instead of consuming a dispatch slot. Independent ready
+branches can proceed while it waits. Polling does not append a record on every
+wakeup, renew the allowance, or make a worker request. The same acquired lock is
+passed into campaign execution, so there is no release-and-reacquire gap between
+admission and the runner. It is released before any separately owned delivery.
+
+Waiting does not adopt another process's results or refresh enrolled evidence.
+Changed campaign history, owner pauses, missing evidence or uncertain lock
+ownership still stop automatic admission. Missing resource configuration and
+unresolved dispatches are not treated as temporary lock contention. A pending
+campaign can continue on a later invocation only while its original pins and
+deadline remain valid; an existing held enrollment is not rewritten.
+
 Resource-backed campaigns still require
 `--resource-runtime /absolute/private/resource-runtime.json`. Its locator is not
 persisted; provide it on each invocation that needs those workers. Existing
@@ -1775,6 +1791,9 @@ original deadline, source state, per-campaign outcomes and reason codes.
 recorded settlement, **not** proof that a worker is alive. `held` is not success.
 `dependency-held` identifies untouched work blocked by a held prerequisite;
 `waiting-for-dependencies` identifies prerequisites that have not settled yet.
+`waiting-for-universe-owner` reflects owned-ready campaign evidence. Status does
+not acquire or probe execution locks: a lock-only conflict is detected by `run`,
+and `pending` alone does not establish that capacity is available.
 Read-only status never creates missing stores or reconciles uncertain work.
 
 The controller has a separate local execution lock and bounded immutable history

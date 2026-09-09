@@ -151,6 +151,9 @@ remote push or deployment authority.
    completions can release dependants, untouched branches can continue on
    restart, and completed calls with a lost controller receipt can be reconciled
    using their unique campaign start/settlement identity and exact history.
+   Untouched campaigns can wait for a busy execution lock within that same
+   deadline; authoritative ownership precedes durable dispatch intent. Waiting
+   never repeats a started attempt or silently refreshes enrollment.
    Planned delivery must already be verified; recovery neither repeats workers
    nor creates missing branches. Legacy, incomplete and mismatched dispatches
    remain held. Automatic interrupted-session resumption, integration/handoff

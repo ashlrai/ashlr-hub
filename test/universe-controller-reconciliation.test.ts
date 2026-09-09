@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
@@ -16,7 +16,7 @@ vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampa
 vi.mock('../src/core/universe/campaign-dispatch.js', () => ({ readCompletedUniverseCampaignDispatch: hooks.proof }));
 vi.mock('../src/core/universe/campaign-delivery-recovery.js', () => ({ readCompletedCampaignDelivery: hooks.deliveryProof }));
 vi.mock('../src/core/universe/campaign.js', async (original) => ({
-  ...await original<typeof import('../src/core/universe/campaign.js')>(), runUniverseCampaign: hooks.run,
+  ...await original<typeof import('../src/core/universe/campaign.js')>(), runUniverseCampaignOwned: hooks.run,
 }));
 vi.mock('../src/core/universe/campaign-store.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/campaign-store.js')>(), readUniverseCampaign: hooks.campaign, campaignUniverse: hooks.universe,
@@ -48,6 +48,8 @@ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); for (const path of s
 // capacity accounting are real private IO. Native dispatch proof has its own suite.
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'controller-reconciliation-'))); scratch.push(root);
+  mkdirSync(join(root, 'universes'), { mode: 0o700 });
+  mkdirSync(join(root, 'universes', 'universe-a'), { mode: 0o700 });
   const definition: UniversePortfolioDefinition = { schemaVersion: 1, id: 'controller',
     tasks: [{ campaignId: 'a', dependsOn: [] }], maxParallel: 1, maxDurationMs: 10_000 };
   let campaign = { fixture: 'a', state: 'ready' } as unknown as UniverseCampaignSummary;

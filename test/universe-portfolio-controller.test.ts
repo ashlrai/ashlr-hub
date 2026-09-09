@@ -8,12 +8,16 @@ import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
 import type { UniversePortfolioDefinition } from '../src/core/universe/portfolio-types.js';
 import { readPortfolioControllerEvents, portfolioControllerDirectory } from '../src/core/universe/portfolio-controller-store.js';
 import * as records from '../src/core/util/immutable-private-record-store.js';
+import * as locks from '../src/core/fleet/local-store-lock.js';
 
 const hooks = vi.hoisted(() => ({ readiness: vi.fn(), run: vi.fn(), campaign: vi.fn(), plan: vi.fn(),
-  preflight: vi.fn(), deliver: vi.fn(), deliveries: vi.fn() }));
+  preflight: vi.fn(), deliver: vi.fn(), deliveries: vi.fn(), acquire: vi.fn() }));
 vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampaignReadiness: hooks.readiness }));
 vi.mock('../src/core/universe/campaign.js', async (original) => ({
-  ...await original<typeof import('../src/core/universe/campaign.js')>(), runUniverseCampaign: hooks.run,
+  ...await original<typeof import('../src/core/universe/campaign.js')>(), runUniverseCampaignOwned: hooks.run,
+}));
+vi.mock('../src/core/universe/execution.js', async (original) => ({
+  ...await original<typeof import('../src/core/universe/execution.js')>(), acquireUniverseExecution: hooks.acquire,
 }));
 vi.mock('../src/core/universe/campaign-store.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/campaign-store.js')>(), readUniverseCampaign: hooks.campaign,
@@ -84,12 +88,125 @@ function fixture(ids = ['a'], maxParallel = 1) {
     return structuredClone(summary);
   };
   hooks.run.mockImplementation(async (id: string) => finish(id));
+  const executionLock = { path: '/synthetic/.execution.lock', token: 'fixture', dev: 1n, ino: 1n };
+  hooks.acquire.mockReturnValue({ state: 'acquired', lock: executionLock });
   const options = { root };
   const events = () => readPortfolioControllerEvents(portfolioControllerDirectory(definition.id, options));
-  return { root, definition, options, readiness, summaries, finish, events };
+  return { root, definition, options, readiness, summaries, finish, events, executionLock };
 }
 
 describe('Portfolio controller private-ledger fault acceptance', () => {
+  it('waits for pristine observed ownership with pinned state and no polling records', async () => {
+    const f = fixture(); const readiness = f.readiness.get('a')!;
+    Object.assign(readiness, { disposition: 'owned', reasonCode: 'owner-active', automaticAction: 'none' });
+    const running = runUniversePortfolioController(f.definition, f.options);
+    const before = f.events();
+    expect(readUniversePortfolioController(f.definition.id, f.options).outcomes[0]).toMatchObject({
+      state: 'pending', attempted: false, reasonCode: 'waiting-for-universe-owner',
+    });
+    expect(hooks.acquire).not.toHaveBeenCalled(); expect(hooks.run).not.toHaveBeenCalled();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+    expect(f.events()).toEqual(before);
+    Object.assign(readiness, { disposition: 'startable', reasonCode: 'never-started', automaticAction: 'run' });
+    expect((await running).status).toBe('completed');
+    expect(hooks.run).toHaveBeenCalledOnce();
+    expect(hooks.run.mock.calls[0]?.[1].expectedIdentity.recordsDigest).toBe(INITIAL_RECORDS);
+  });
+
+  it('does not consume a slot while lease contention blocks an independent sibling', async () => {
+    const f = fixture(['a', 'b']);
+    hooks.acquire.mockImplementation((id: string) => id === 'universe-a' && hooks.run.mock.calls.length === 0
+      ? { state: 'contended', lock: null } : { state: 'acquired', lock: f.executionLock });
+    expect((await runUniversePortfolioController(f.definition, f.options)).status).toBe('completed');
+    expect(hooks.run.mock.calls.map(([id]) => id)).toEqual(['b', 'a']);
+    expect(f.events().filter((event) => event.kind === 'observed')).toHaveLength(1);
+  });
+
+  it('does not poll campaign evidence while only admitted workers are active', async () => {
+    const f = fixture(); const started = deferred<void>(); const release = deferred<UniverseCampaignSummary>();
+    hooks.run.mockImplementation(() => { started.resolve(); return release.promise; });
+    const running = runUniversePortfolioController(f.definition, f.options);
+    await started.promise;
+    hooks.readiness.mockClear();
+    try {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 300));
+      expect(hooks.readiness).not.toHaveBeenCalled();
+    } finally { release.resolve(f.finish('a')); }
+    expect((await running).status).toBe('completed');
+  });
+
+  it.each(['unavailable', 'throws'] as const)('refuses %s ownership without a durable intent', async (state) => {
+    const f = fixture();
+    hooks.acquire.mockImplementation(() => { if (state === 'throws') throw new Error('unavailable fixture'); return { state, lock: null }; });
+    const result = await runUniversePortfolioController(f.definition, f.options);
+    expect(result.status).toBe('unavailable');
+    expect(result.reasons).toContain('campaign-execution-ownership-unavailable');
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false); expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it('cancels contention waiting promptly without consuming intent or renewing restart allowance', async () => {
+    const f = fixture(); const controller = new AbortController();
+    hooks.acquire.mockReturnValue({ state: 'contended', lock: null });
+    const running = runUniversePortfolioController(f.definition, { ...f.options, signal: controller.signal });
+    const before = f.events(); controller.abort();
+    const cancelled = await running;
+    expect(cancelled.status).toBe('cancelled'); expect(f.events()).toEqual(before);
+    hooks.acquire.mockReturnValue({ state: 'acquired', lock: f.executionLock });
+    const resumed = await runUniversePortfolioController(f.definition, f.options);
+    expect(resumed).toMatchObject({ status: 'completed', deadlineAt: cancelled.deadlineAt, createdAt: cancelled.createdAt });
+    expect(hooks.run).toHaveBeenCalledOnce();
+  });
+
+  it('stops at the original deadline while contended without an intent', async () => {
+    const f = fixture(); f.definition.maxDurationMs = 50;
+    hooks.acquire.mockReturnValue({ state: 'contended', lock: null });
+    const result = await runUniversePortfolioController(f.definition, f.options);
+    expect(result.status).toBe('timed-out');
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false); expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it('rejects changed raw history under the acquired lease and releases it before intent', async () => {
+    const f = fixture(); const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    hooks.acquire.mockImplementation(() => {
+      f.readiness.get('a')!.recordsDigest = 'f'.repeat(64);
+      return { state: 'acquired', lock: f.executionLock };
+    });
+    expect((await runUniversePortfolioController(f.definition, f.options)).status).toBe('unavailable');
+    expect(release).toHaveBeenCalledWith(f.executionLock);
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false); expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it('releases acquired ownership when cancellation arrives before intent', async () => {
+    const f = fixture(); const controller = new AbortController(); const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    hooks.acquire.mockImplementation(() => {
+      controller.abort(); return { state: 'acquired', lock: f.executionLock };
+    });
+    expect((await runUniversePortfolioController(f.definition, { ...f.options, signal: controller.signal })).status).toBe('cancelled');
+    expect(release).toHaveBeenCalledWith(f.executionLock);
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false); expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it('rechecks delivered dependency evidence after acquiring campaign ownership', async () => {
+    const f = fixture(['a', 'b']); f.finish('a'); f.definition.tasks[1]!.dependsOn = ['a'];
+    const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    hooks.acquire.mockImplementation(() => {
+      f.readiness.get('a')!.recordsDigest = 'f'.repeat(64);
+      return { state: 'acquired', lock: f.executionLock };
+    });
+    const result = await runUniversePortfolioController(f.definition, f.options);
+    expect(result.status).toBe('unavailable'); expect(result.reasons).toContain('controller-dependency-evidence-changed');
+    expect(release).toHaveBeenCalledWith(f.executionLock);
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false); expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it('retains unresolved intent and releases ownership if the owned runner throws', async () => {
+    const f = fixture(); const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    hooks.run.mockRejectedValue(new Error('synthetic failure'));
+    const result = await runUniversePortfolioController(f.definition, f.options);
+    expect(result.outcomes[0]).toMatchObject({ state: 'in-flight', attempted: true });
+    expect(release).toHaveBeenCalledWith(f.executionLock); expect(hooks.run).toHaveBeenCalledOnce();
+  });
+
   it('persists the exact intent before execution and passes raw-history CAS pins', async () => {
     const f = fixture();
     hooks.run.mockImplementation(async (id: string, options) => {
@@ -205,7 +322,7 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
   });
 
   it('does not execute when immutable intent persistence fails', async () => {
-    const f = fixture(); const write = records.writeImmutablePrivateRecord;
+    const f = fixture(); const write = records.writeImmutablePrivateRecord; const release = vi.spyOn(locks, 'releaseLocalStoreLock');
     vi.spyOn(records, 'writeImmutablePrivateRecord').mockImplementation((config, value) => {
       if ((value as { kind?: string }).kind === 'intent') throw new Error('synthetic disk failure');
       return write(config, value);
@@ -213,6 +330,7 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
     await expect(runUniversePortfolioController(f.definition, f.options)).rejects.toThrow();
     expect(hooks.run).not.toHaveBeenCalled();
     expect(f.events().some((event) => event.kind === 'intent')).toBe(false);
+    expect(release).toHaveBeenCalledWith(f.executionLock);
   });
 
   it('aborts and drains owned siblings when settlement persistence fails', async () => {

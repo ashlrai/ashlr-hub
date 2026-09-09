@@ -23,7 +23,7 @@ vi.mock('../src/core/universe/campaign-store.js', async (importOriginal) => {
     },
   };
 });
-vi.mock('../src/core/universe/execution.js', () => ({ withUniverseExecution: async (_id: string, _options: unknown,
+vi.mock('../src/core/universe/execution.js', () => ({ assertUniverseExecution: () => {}, withUniverseExecution: async (_id: string, _options: unknown,
   callback: (lock: unknown) => unknown) => callback({}) }));
 vi.mock('../src/core/fleet/local-store-lock.js', () => ({ ownsLocalStoreLock: () => true,
   verifiedProcessStartRef: () => 'synthetic-owner' }));
