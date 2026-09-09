@@ -123,6 +123,18 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniversePortfolioResult',
   },
   {
+    usage: 'ashlr universe controller run --manifest <private-absolute.json> [--root <absolute>] [--resource-runtime <private-absolute.json>] [--delivery-plan <private-absolute.json>] --json',
+    description: 'Run a checkpointed campaign DAG with one persisted deadline and dispatch history across restarts. Preserve declared priority and account admission; uncertain dispatches are not retried. No resident service or implicit campaign discovery.',
+    safety: 'append',
+    jsonShape: 'UniversePortfolioControllerReport',
+  },
+  {
+    usage: 'ashlr universe controller status <id> [--root <absolute>] --json',
+    description: 'Read persisted controller outcomes and deadline without creating storage, executing work, or reconciling uncertain dispatches. In-flight means no recorded settlement, not verified liveness.',
+    safety: 'read',
+    jsonShape: 'UniversePortfolioControllerReport',
+  },
+  {
     usage: 'ashlr universe run <id> [--root <path>] [--resource-runtime <private-absolute.json>] --json',
     description: 'Execute one budgeted generation and fixed evaluation. Command subprocesses deny network; local-chat uses its declared loopback endpoint. Resource-pool generation requires an explicit private runtime, repeats admission checks and can consume provider/model usage. No merge or deploy.',
     safety: 'append',
@@ -507,6 +519,8 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'universe integration deliver --manifest <private-absolute.json>', desc: 'Deliver an explicitly pinned passing combination to a new local branch, without rerunning its evaluator or advancing an existing branch.', topic: 'autonomy' },
   { cmd: 'universe integration inspect-delivery --manifest <private-absolute.json>', desc: 'Verify a completed combined delivery and read its receipt digest without creating or reconciling branches.', topic: 'autonomy' },
   { cmd: 'universe integration handoff --manifest <private-absolute.json>', desc: 'Register a new explicit downstream experiment from the verified combined commit, with source lineage and a fresh comparator; no execution.', topic: 'autonomy' },
+  { cmd: 'universe controller run --manifest <private-absolute.json>', desc: 'Run an explicitly enrolled campaign DAG with a persisted deadline and dispatch checkpoints across restarts; never retry uncertain work.', topic: 'autonomy' },
+  { cmd: 'universe controller status <id>', desc: 'Read controller deadline, outcomes and unsettled dispatches without execution or recovery writes.', topic: 'autonomy' },
   { cmd: 'universe campaign <init|status|run|resume|pause|stop>', desc: 'Register, inspect, execute or request control of bounded campaigns; run/resume can pair --deliver-branch with --deliver-base for local-only delivery.', topic: 'autonomy' },
   { cmd: 'universe campaign check <id> --root <absolute> [--json]', desc: 'Read recorded recovery evidence only; exit 0 can include held or terminal snapshots and never grants permission to resume.', topic: 'autonomy' },
   { cmd: 'universe resources check --resource-runtime <private-absolute.json> [--json]', desc: 'Check explicit local resource configuration without provider contact; validity is not authentication, quota or campaign admission.', topic: 'autonomy' },

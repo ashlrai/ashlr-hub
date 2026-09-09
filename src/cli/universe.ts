@@ -18,6 +18,7 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
                                Check local resource configuration before execution
   campaign <command>           Run or inspect a bounded multi-generation campaign
   portfolio <plan|run>         Coordinate explicitly declared campaign dependencies
+  controller <run|status>      Resume a persisted campaign graph within its original deadline
   integration <plan|evaluate|inspect|deliver|inspect-delivery|handoff>
                                Compose, verify, deliver, or register a downstream experiment
   deliver <id> --trial <id> --branch codex/<new-branch>
@@ -170,6 +171,10 @@ export async function cmdUniverse(args: string[]): Promise<number> {
   if (args[0] === 'portfolio') {
     const { cmdUniversePortfolio } = await import('./universe-portfolio.js');
     return cmdUniversePortfolio(args.slice(1));
+  }
+  if (args[0] === 'controller') {
+    const { cmdUniverseController } = await import('./universe-controller.js');
+    return cmdUniverseController(args.slice(1));
   }
   if (args[0] === 'integration') {
     const { cmdUniverseIntegration } = await import('./universe-integration.js');
