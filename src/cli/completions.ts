@@ -80,7 +80,7 @@ const SUBCOMMANDS: Record<string, string[]> = {
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
   skills: ['audit'],
   runtime: ['install', 'status', 'rollback', 'run'],
-  universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'deliver', 'deliveries', 'graph', 'compare', 'help'],
+  universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'integration', 'deliver', 'deliveries', 'graph', 'compare', 'help'],
 };
 
 const FLEET_AUTOMERGE_CANARY_SUBCOMMANDS = [

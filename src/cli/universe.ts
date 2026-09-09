@@ -169,6 +169,10 @@ export async function cmdUniverse(args: string[]): Promise<number> {
     const { cmdUniversePortfolio } = await import('./universe-portfolio.js');
     return cmdUniversePortfolio(args.slice(1));
   }
+  if (args[0] === 'integration') {
+    const { cmdUniverseIntegration } = await import('./universe-integration.js');
+    return cmdUniverseIntegration(args.slice(1));
+  }
   if (args[0] === 'graph') {
     const { cmdUniverseGraph } = await import('./universe-graph.js');
     return cmdUniverseGraph(args.slice(1));

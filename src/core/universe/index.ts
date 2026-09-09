@@ -30,6 +30,8 @@ export { validateUniversePortfolioDefinition, readUniversePortfolioPlan, buildUn
 export { runUniversePortfolio } from './portfolio.js';
 export type { UniversePortfolioResult, UniversePortfolioOutcome, UniversePortfolioRunOptions } from './portfolio.js';
 export type * from './portfolio-types.js';
+export { validateUniverseIntegrationDefinition, readUniverseIntegrationPlan } from './integration-plan.js';
+export type * from './integration-types.js';
 export { buildUniverseCampaignComparison } from './comparison.js';
 export { readUniverseCampaignComparison } from './comparison-reader.js';
 export type * from './comparison-types.js';

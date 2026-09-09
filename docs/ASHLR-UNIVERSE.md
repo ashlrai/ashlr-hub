@@ -1249,6 +1249,87 @@ if (report.matching.comparable) {
 `buildUniverseCampaignComparison` is a pure projection of detached, independently
 validated source snapshots. It does not authenticate caller-invented evidence.
 
+## Inspect a combined delivery plan
+
+`integration plan` checks whether exact delivered changes can be composed on one
+common repository base within an explicit file allowlist. This is the first
+integration layer: a **read-only structural recipe**, not a newly evaluated
+artifact, candidate branch, merge or acceptance decision.
+
+Create a private owner-only JSON file (mode `0600`, inside a private directory)
+using pins from `universe deliveries <id> --json`. Enroll two to eight distinct
+delivery receipts. Sources can come from the same Universe, but must use the same
+canonical repository and full base commit. The exact schema is:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "combined-feature",
+  "target": {
+    "repo": "/absolute/path/to/repository",
+    "baseCommit": "0000000000000000000000000000000000000000",
+    "allowedPaths": ["src/parser.ts", "src/formatter.ts"]
+  },
+  "sources": [
+    {
+      "universeId": "parser-search",
+      "deliveryId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "commit": "1111111111111111111111111111111111111111",
+      "tree": "2222222222222222222222222222222222222222"
+    },
+    {
+      "universeId": "formatter-search",
+      "deliveryId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "commit": "3333333333333333333333333333333333333333",
+      "tree": "4444444444444444444444444444444444444444"
+    }
+  ]
+}
+```
+
+The identities above are placeholders, not usable delivery evidence. Replace all
+pins with the selected receipts before running this read-only command:
+
+```sh
+node bin/ashlr universe integration plan \
+  --manifest /absolute/private/integration.json \
+  --root /absolute/private/universe --json
+```
+
+The planner requires healthy delivery reports and settled `delivered` receipts.
+It reuses delivery verification of provenance, archived content and Git refs;
+receipt presence in a degraded report is insufficient. It derives changes from
+the base and delivered trees, including additions, deletions and executable-mode
+changes. All changed paths must appear in `allowedPaths`; this is an exact
+allowlist, not a glob. Paths use the existing portable file-operation spelling:
+NFC Unicode, at most 512 characters and 32 components, with no traversal,
+reserved device names, trailing dots/spaces or Git/runtime metadata. Disjoint
+changes and identical final edits can combine.
+Divergent same-file changes and file/directory or case-fold collisions are held
+as conflicts rather than resolved by source order. Combined-tree entry and byte
+bounds apply even when each individual source is valid.
+
+`entries` lists overlay operations only: unchanged base files are implicit, and
+a null blob identity represents deletion. `compositionReady: true` means the observed inputs are structurally composable,
+not that combined tests passed. `compositionDigest` identifies the deterministic
+composition recipe, **not** a written Git tree or an accepted artifact. A conflict
+or unavailable source withholds that digest; any returned overlay entries then
+are partial diagnostics, not a recipe to execute. Results carry declared private
+repository/path information; keep them private. Diagnostic errors do not forward
+raw underlying storage or Git errors.
+
+No candidate bytes, Git objects, refs, index, checkout, execution leases or
+Universe records are written. The command does not start providers or evaluate
+code. Re-read before any future execution: the plan is a snapshot, not ownership
+of its source branches. Missing stores remain missing. Exit codes are 0 for a
+structurally composable plan, 1 for conflicts/unavailable evidence, and 2 for
+invalid arguments or manifest.
+
+The SDK exposes `validateUniverseIntegrationDefinition(input)` for strict pure
+schema validation and `readUniverseIntegrationPlan(input, { root })` for checked
+local inspection. Combined materialization, fresh fixed-suite evaluation and
+durable candidate publication remain a separate implementation milestone.
+
 ## Coordinate campaigns with a dependency graph
 
 A portfolio composes already registered campaigns across distinct Universes.
