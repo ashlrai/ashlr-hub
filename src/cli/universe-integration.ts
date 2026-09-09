@@ -1,8 +1,10 @@
 import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 import {
-  evaluateUniverseIntegration, readUniverseIntegrationPlan, validateUniverseIntegrationDefinition,
-  validateUniverseIntegrationEvaluationRequest, type UniverseIntegrationEvaluationResult,
-  type UniverseIntegrationEvaluationRequest, type UniverseIntegrationPlan,
+  deliverUniverseIntegration, evaluateUniverseIntegration, readUniverseIntegrationEvaluation,
+  readUniverseIntegrationPlan, validateUniverseIntegrationDefinition, validateUniverseIntegrationDeliveryRequest,
+  validateUniverseIntegrationEvaluationRequest, type UniverseIntegrationDeliveryReceipt,
+  type UniverseIntegrationDeliveryRequest, type UniverseIntegrationEvaluationResult, type UniverseIntegrationEvaluationRequest,
+  type UniverseIntegrationPlan,
 } from '../core/universe/index.js';
 
 const MAX_MANIFEST_BYTES = 256 * 1024;
@@ -11,26 +13,35 @@ const USAGE = `usage: ashlr universe integration <command> --manifest <private a
 
   plan      Read a bounded combined-artifact composition plan without writing Git
   evaluate  Explicitly execute the target's pinned evaluator against the combined artifact
+  inspect   Read a prior durable evaluation result without executing an evaluator
+  deliver   Deliver a settled passing evaluation to a new local codex/ branch
 
 The manifest names one pinned seed repository/base and 2-8 delivered source
 trees. Planning verifies source receipt pins and deterministic path overlays only.
 Evaluate is a separate owner-invoked local action: it runs only the target
 Universe's digest-pinned fixed evaluator and records a frozen private artifact
-and evaluator result. It does not generate model work, contact a provider,
-create a branch/ref/publication, or establish acceptance. A settled identical
-request replays verified evidence; unfinished work is unresolved and is never
-retried automatically. The manifest must be an owner-only (0600) regular JSON
-file with a canonical absolute path, at most 256 KiB. --root defaults to
-~/.ashlr/universe.
+and evaluator result. Inspect reads that exact prior result and never executes
+an evaluator. Deliver accepts only an exact, settled passing result digest and
+writes a private delivery intent/receipt plus local Git objects/ref as needed;
+it never reruns an evaluator or provider and never checks out, pushes, merges,
+deploys, or establishes acceptance. If delivery is interrupted, inspect the
+receipt and Git ref; interruption does not prove that a branch was not
+published. A settled identical request replays verified evidence; unfinished
+work is unresolved and is never retried automatically. The manifest must be
+an owner-only (0600) regular JSON file with a canonical absolute path, at most
+256 KiB. --root defaults to ~/.ashlr/universe.
 Exit codes: plan 0 composition-ready, 1 unavailable/conflicting sources;
             evaluate 0 passed, 1 rejected/failed/timed-out/unavailable,
-            130 cancelled, 2 invalid arguments or manifest.
+            130 cancelled; inspect 0 readable, 1 unavailable, 2 invalid;
+            deliver 0 delivered/unchanged, 1 pending/unavailable, 130 cancelled,
+            2 invalid arguments or manifest.
 `;
 
 class UsageError extends Error {}
+class CancellationError extends Error {}
 
 interface Options {
-  command: 'plan' | 'evaluate' | 'help';
+  command: 'plan' | 'evaluate' | 'inspect' | 'deliver' | 'help';
   manifest?: string;
   root?: string;
   json: boolean;
@@ -46,6 +57,10 @@ function containsControls(value: string): boolean {
 function canonicalAbsolutePath(value: string): boolean {
   return isAbsolute(value) && resolve(value) === value && parsePath(value).root !== value &&
     Buffer.byteLength(value, 'utf8') <= 4_096 && !containsControls(value);
+}
+
+function isActionCommand(value: string | undefined): value is Exclude<Options['command'], 'help'> {
+  return value === 'plan' || value === 'evaluate' || value === 'inspect' || value === 'deliver';
 }
 
 function parse(args: string[]): Options {
@@ -82,11 +97,13 @@ function parse(args: string[]): Options {
   }
   if (positional.length > 1) throw new UsageError('integration accepts one command and no positional manifest');
   const command = positional[0];
-  if (command !== undefined && command !== 'plan' && command !== 'evaluate' && command !== 'help') {
-    throw new UsageError('Expected integration plan, evaluate, or help');
+  if (command !== undefined && !['plan', 'evaluate', 'inspect', 'deliver', 'help'].includes(command)) {
+    throw new UsageError('Expected integration plan, evaluate, inspect, deliver, or help');
   }
   if (help || command === 'help') return { command: 'help', json: false };
-  if (command !== 'plan' && command !== 'evaluate') throw new UsageError('Expected integration plan or evaluate');
+  if (!isActionCommand(command)) {
+    throw new UsageError('Expected integration plan, evaluate, inspect, or deliver');
+  }
   const manifest = values.get('--manifest');
   if (!manifest) throw new UsageError(`${command} requires --manifest <private absolute JSON>`);
   return { command, manifest, root: values.get('--root'), json };
@@ -127,6 +144,38 @@ function renderEvaluation(result: UniverseIntegrationEvaluationResult): string {
   ].join('\n');
 }
 
+function renderInspection(inspection: Awaited<ReturnType<typeof readUniverseIntegrationEvaluation>>): string {
+  const { request, result } = inspection;
+  return [
+    `${request.id} · integration evaluation inspection · ${result.status}`,
+    `Result digest: ${inspection.resultDigest}`,
+    `Request digest: ${result.requestDigest} · composition: ${result.compositionDigest}`,
+    `Pinned comparator: universe ${result.acceptance.universeId} · manifest ${result.acceptance.manifestDigest} · comparator ${result.acceptance.comparatorDigest}`,
+    `Artifact: ${result.artifactPath ?? 'unavailable'} · digest ${result.artifactDigest ?? 'unavailable'}`,
+    `Score: ${result.score ?? 'unavailable'} · metrics: ${Object.keys(result.metrics).length ? JSON.stringify(result.metrics) : 'none'}`,
+    `Elapsed: ${result.durationMs} ms · started ${result.startedAt} · finished ${result.finishedAt}`,
+    ...(result.reason ? [`Reason: ${result.reason}`] : []),
+    'Read-only prior fixed-evaluator evidence. No evaluator, model, provider, scheduler, branch, Git ref, or delivery action occurred.',
+    'The result digest is evidence identity, not acceptance or production authorization.',
+  ].join('\n');
+}
+
+function renderDelivery(receipt: UniverseIntegrationDeliveryReceipt): string {
+  return [
+    `${receipt.evaluationId} · integration delivery · ${receipt.status}`,
+    `Branch: ${receipt.branch} · commit ${receipt.commit} · tree ${receipt.tree}`,
+    `Repository: ${receipt.repo} · pinned base ${receipt.baseCommit}`,
+    `Evaluation request: ${receipt.evaluationRequestDigest} · result: ${receipt.evaluationResultDigest}`,
+    `Composition: ${receipt.compositionDigest} · artifact: ${receipt.artifactDigest}`,
+    `Changed files: ${receipt.changedFiles.length}`,
+    receipt.status === 'delivered' ? 'Local branch delivered. Checkout, index, and HEAD were not changed.' :
+      receipt.status === 'unchanged' ? 'Combined artifact matches the pinned base; no branch was created.' :
+        'Delivery intent recorded; branch publication is not confirmed.',
+    'No evaluator or provider rerun occurred. No merge, push, deploy, or production acceptance occurred.',
+    'If interrupted, inspect the durable receipt and Git ref; interruption does not prove that a branch was not published.',
+  ].join('\n');
+}
+
 function evaluationExitCode(result: UniverseIntegrationEvaluationResult): number {
   return result.status === 'passed' ? 0 : result.status === 'cancelled' ? 130 : 1;
 }
@@ -154,6 +203,39 @@ export async function cmdUniverseIntegration(args: string[]): Promise<number> {
       console.log(options.json ? JSON.stringify(plan, null, 2) : render(plan));
       return plan.sourceState === 'healthy' && plan.compositionReady && plan.conflicts.length === 0 ? 0 : 1;
     }
+    if (options.command === 'inspect') {
+      let inspection: Awaited<ReturnType<typeof readUniverseIntegrationEvaluation>>;
+      let request: UniverseIntegrationEvaluationRequest;
+      try { request = validateUniverseIntegrationEvaluationRequest(input); }
+      catch { throw new UsageError('Integration evaluation request is invalid or unavailable'); }
+      try { inspection = readUniverseIntegrationEvaluation(request, { root: options.root }); }
+      catch { throw new Error('Integration evaluation evidence unavailable'); }
+      console.log(options.json ? JSON.stringify(inspection, null, 2) : renderInspection(inspection));
+      return 0;
+    }
+    if (options.command === 'deliver') {
+      let request: UniverseIntegrationDeliveryRequest;
+      try { request = validateUniverseIntegrationDeliveryRequest(input); }
+      catch { throw new UsageError('Integration delivery request is invalid or unavailable'); }
+      const controller = new AbortController();
+      const abort = (): void => controller.abort();
+      process.once('SIGINT', abort);
+      process.once('SIGTERM', abort);
+      try {
+        let receipt: UniverseIntegrationDeliveryReceipt;
+        try {
+          receipt = await deliverUniverseIntegration(request, { root: options.root, signal: controller.signal });
+        } catch {
+          throw controller.signal.aborted ? new CancellationError('Integration delivery cancelled; inspect the receipt and Git ref') :
+            new Error('Integration delivery unavailable');
+        }
+        console.log(options.json ? JSON.stringify(receipt, null, 2) : renderDelivery(receipt));
+        return receipt.status === 'pending' ? 1 : 0;
+      } finally {
+        process.removeListener('SIGINT', abort);
+        process.removeListener('SIGTERM', abort);
+      }
+    }
     let request: UniverseIntegrationEvaluationRequest;
     try { request = validateUniverseIntegrationEvaluationRequest(input); }
     catch { throw new UsageError('Integration evaluation request is invalid or unavailable'); }
@@ -166,7 +248,8 @@ export async function cmdUniverseIntegration(args: string[]): Promise<number> {
       try {
         result = await evaluateUniverseIntegration(request, { root: options.root, signal: controller.signal });
       } catch {
-        throw new Error('Integration evaluation unavailable');
+        throw controller.signal.aborted ? new CancellationError('Integration evaluation cancelled') :
+          new Error('Integration evaluation unavailable');
       }
       console.log(options.json ? JSON.stringify(result, null, 2) : renderEvaluation(result));
       return evaluationExitCode(result);
@@ -178,6 +261,6 @@ export async function cmdUniverseIntegration(args: string[]): Promise<number> {
     const message = error instanceof Error ? error.message : String(error);
     if (args.includes('--json')) console.log(JSON.stringify({ error: message }));
     else console.error(`universe integration: ${message}`);
-    return error instanceof UsageError ? 2 : 1;
+    return error instanceof UsageError ? 2 : error instanceof CancellationError ? 130 : 1;
   }
 }

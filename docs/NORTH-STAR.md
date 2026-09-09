@@ -106,12 +106,24 @@ These are planned capabilities, not activation instructions. The current
 orders campaigns and can require local branch delivery, but does not import those
 artifacts into dependent seeds or persist a portfolio controller.
 
-The first milestone now has two executable local primitives:
+The first milestone now has three executable local primitives:
 [checked composition planning](ASHLR-UNIVERSE.md#inspect-a-combined-delivery-plan)
-and [fresh combined evaluation](ASHLR-UNIVERSE.md#evaluate-a-pinned-combined-candidate).
+and [fresh combined evaluation](ASHLR-UNIVERSE.md#evaluate-a-pinned-combined-candidate),
+followed by [explicit new-branch delivery](ASHLR-UNIVERSE.md#inspect-and-deliver-an-evaluated-combination).
 Evaluation retains the combined artifact and fixed-suite measurements without
-rerunning a settled request. Publishing that result as a candidate branch and
-handing it to a dependent Universe are still unfinished parts of this milestone.
+rerunning a settled request. Delivery pins that passing outcome and preserves
+existing branches. Automatic branch advancement and handoff to a dependent
+Universe remain unfinished parts of this milestone; existing manifests are not
+silently rewritten.
+
+**Later: automatic branch advancement.** This is a planned extension, not enabled
+by new-branch delivery. An advancement request must name the expected current
+commit and delegated target branch. A changed base requires newly evaluated
+combined evidence; prior passing evidence cannot stand in for that check.
+Use an atomic compare-and-swap update, retain durable intent and completion,
+and reconcile interruption before another update. Preserve unexpected human
+changes instead of overwriting them, and keep local advancement separate from
+remote push or deployment authority.
 
 1. **Accept the combined product.** Define a one-repository integration contract
    with pinned upstream delivery commits/trees, base revision, permitted paths,

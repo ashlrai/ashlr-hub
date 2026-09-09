@@ -11,7 +11,8 @@ import { withUniverseExecution } from '../src/core/universe/execution.js';
 import { deliveryGit } from '../src/core/universe/delivery-git.js';
 import { readUniverseIntegrationPlan } from '../src/core/universe/integration-plan.js';
 import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
-import { evaluateUniverseIntegration } from '../src/core/universe/integration-evaluate.js';
+import { evaluateUniverseIntegration, readUniverseIntegrationEvaluation } from '../src/core/universe/integration-evaluate.js';
+import { deliverUniverseIntegration } from '../src/core/universe/integration-delivery.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -151,6 +152,88 @@ console.log(JSON.stringify({passed:a+b<=3,score:a+b,metrics:{a,b}}));\n`);
     await withUniverseExecution('fixture', { root: f.root }, async () => {
       await expect(evaluateUniverseIntegration(f.request, { root: f.root })).rejects.toThrow(/owner|ownership/);
     });
+  });
+
+  async function publishable(a = 1, b = 2) {
+    const f = await combined(a, b);
+    const result = await evaluateUniverseIntegration(f.request, { root: f.root });
+    const evidence = readUniverseIntegrationEvaluation(f.request, { root: f.root });
+    expect(evidence.result).toEqual(result);
+    return { ...f, result, delivery: { schemaVersion: 1 as const, evaluation: f.request,
+      expectedEvaluationDigest: evidence.resultDigest, branch: 'codex/combined-product', maxDurationMs: 120_000 } };
+  }
+
+  it('delivers the inspected combined bytes to a new local branch and replays through the real CLI without reevaluation', async () => {
+    const f = await publishable();
+    writeFileSync(join(f.repo, 'value.txt'), 'user staged\n'); f.git(['add', 'value.txt']);
+    writeFileSync(join(f.repo, 'value.txt'), 'user unstaged\n');
+    const index = readFileSync(join(f.repo, '.git', 'index')); const head = f.git(['rev-parse', 'HEAD']);
+    const before = projectUniverse(f.directory);
+    const receipt = await deliverUniverseIntegration(f.delivery, { root: f.root });
+    expect(receipt).toMatchObject({ status: 'delivered', changedFiles: ['a.txt', 'b.txt'],
+      evaluationResultDigest: f.delivery.expectedEvaluationDigest, artifactDigest: f.result.artifactDigest,
+      baseCommit: f.manifest.seed.revision, branch: f.delivery.branch });
+    expect(f.git(['rev-parse', f.delivery.branch])).toBe(receipt.commit);
+    expect(f.git(['rev-list', '--parents', '-n', '1', receipt.commit])).toBe(`${receipt.commit} ${head}`);
+    expect(f.git(['show', `${receipt.commit}:a.txt`])).toBe('1');
+    expect(f.git(['show', `${receipt.commit}:b.txt`])).toBe('2');
+    expect(deliveryGit(f.repo).treeDigest(receipt.tree)).toBe(f.result.artifactDigest);
+    const path = join(f.root, 'delivery.json'); writeFileSync(path, JSON.stringify(f.delivery), { mode: 0o600 });
+    const output = execFileSync(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'integration',
+      'deliver', '--manifest', path, '--root', f.root, '--json'], { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000,
+      env: { PATH: process.env.PATH, HOME: f.root, NO_COLOR: '1' } });
+    expect(JSON.parse(output)).toEqual(receipt);
+    expect(readFileSync(join(f.result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
+    expect(readFileSync(join(f.repo, '.git', 'index'))).toEqual(index);
+    expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('user unstaged\n');
+    expect(f.git(['rev-parse', 'HEAD'])).toBe(head); expect(projectUniverse(f.directory)).toEqual(before);
+  });
+
+  it('inspects missing evaluations without creating evidence and never delivers a jointly rejected result', async () => {
+    const missing = await combined(1, 2); const refs = missing.git(['show-ref']);
+    expect(() => readUniverseIntegrationEvaluation(missing.request, { root: missing.root })).toThrow();
+    expect(existsSync(join(missing.directory, 'integration-evaluations'))).toBe(false);
+    expect(missing.git(['show-ref'])).toBe(refs);
+    const rejected = await publishable(2, 2); const before = rejected.git(['show-ref']);
+    await expect(deliverUniverseIntegration(rejected.delivery, { root: rejected.root })).rejects.toThrow();
+    expect(rejected.git(['show-ref'])).toBe(before);
+    expect(readFileSync(join(rejected.result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
+  });
+
+  it('refuses existing targets and a changed evaluation digest without overwriting or adopting refs', async () => {
+    const f = await publishable(); f.git(['branch', f.delivery.branch]); const refs = f.git(['show-ref']);
+    await expect(deliverUniverseIntegration(f.delivery, { root: f.root })).rejects.toThrow();
+    await expect(deliverUniverseIntegration({ ...f.delivery, branch: 'codex/other', expectedEvaluationDigest: '0'.repeat(64) },
+      { root: f.root })).rejects.toThrow();
+    expect(f.git(['show-ref'])).toBe(refs);
+  });
+
+  it('does not recreate a completed branch that was removed or advance one that drifted', async () => {
+    const f = await publishable(); const receipt = await deliverUniverseIntegration(f.delivery, { root: f.root });
+    f.git(['update-ref', `refs/heads/${f.delivery.branch}`, f.manifest.seed.revision]);
+    await expect(deliverUniverseIntegration(f.delivery, { root: f.root })).rejects.toThrow();
+    expect(f.git(['rev-parse', f.delivery.branch])).toBe(f.manifest.seed.revision);
+    f.git(['update-ref', '-d', `refs/heads/${f.delivery.branch}`]);
+    await expect(deliverUniverseIntegration(f.delivery, { root: f.root })).rejects.toThrow();
+    expect(f.git(['for-each-ref', '--format=%(objectname)', `refs/heads/${f.delivery.branch}`])).toBe('');
+    expect(f.git(['rev-parse', `${receipt.commit}^{tree}`])).toBe(receipt.tree);
+  });
+
+  it('reconciles durable pending intent after the exact branch already became visible', async () => {
+    const f = await publishable(); const receipt = await deliverUniverseIntegration(f.delivery, { root: f.root });
+    unlinkSync(join(f.directory, 'integration-deliveries', 'records', `${receipt.id}.receipt.json`));
+    const refs = f.git(['show-ref']);
+    const replay = await deliverUniverseIntegration(f.delivery, { root: f.root });
+    expect(replay).toMatchObject({ id: receipt.id, commit: receipt.commit, tree: receipt.tree, status: 'delivered' });
+    expect(f.git(['show-ref'])).toBe(refs);
+    expect(readFileSync(join(f.result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
+  });
+
+  it('rejects a changed retained artifact before publishing any combined branch', async () => {
+    const f = await publishable(); const refs = f.git(['show-ref']);
+    const path = join(f.result.artifactPath!, 'a.txt'); chmodSync(path, 0o600); writeFileSync(path, 'changed');
+    await expect(deliverUniverseIntegration(f.delivery, { root: f.root })).rejects.toThrow();
+    expect(f.git(['show-ref'])).toBe(refs);
   });
 });
 

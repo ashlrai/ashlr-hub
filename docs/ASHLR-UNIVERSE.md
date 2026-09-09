@@ -1328,7 +1328,9 @@ invalid arguments or manifest.
 The SDK exposes `validateUniverseIntegrationDefinition(input)` for strict pure
 schema validation and `readUniverseIntegrationPlan(input, { root })` for checked
 local inspection. Combined materialization and fresh fixed-suite evaluation use
-the separate operation below. Candidate branch publication remains a later milestone.
+the separate operation below. A passing evaluation can then be explicitly
+delivered to a new local candidate branch; neither operation runs automatically
+from planning.
 
 ### Evaluate a pinned combined candidate
 
@@ -1401,6 +1403,82 @@ cancellation, and `2` for invalid arguments or a malformed private manifest.
 The SDK exports `validateUniverseIntegrationEvaluationRequest(request)` and
 `evaluateUniverseIntegration(request, { root, signal })`. Account reserves,
 resource allocation and background fleet activation are unchanged.
+
+### Inspect and deliver an evaluated combination
+
+Use `integration inspect` to read an existing evaluation without starting work:
+
+```sh
+node bin/ashlr universe integration inspect \
+  --manifest /absolute/private/integration-evaluation.json \
+  --root /absolute/private/universe --json
+```
+
+The private manifest is the same evaluation request used by `evaluate`.
+Inspection verifies its durable intent/result pair, source composition,
+acceptance identities and retained measured artifact. It returns `request`,
+`result` and `resultDigest`. If the evaluation is missing, it fails; it never
+falls through to an evaluator invocation. The result digest binds the complete
+recorded outcome, not just the candidate bytes or composition recipe.
+
+Delivery is a separate local Git mutation. Save a private `0600` delivery request
+with these exact fields:
+
+- `schemaVersion`: `1`.
+- `evaluation`: the complete original evaluation request.
+- `expectedEvaluationDigest`: `resultDigest` from successful inspection.
+- `branch`: an explicit new `codex/` branch, such as `codex/combined-feature`.
+- `maxDurationMs`: an invocation allowance from 1 through 120,000 milliseconds.
+
+Then run:
+
+```sh
+node bin/ashlr universe integration deliver \
+  --manifest /absolute/private/integration-delivery.json \
+  --root /absolute/private/universe --json
+```
+
+Only a verified `passed` evaluation can be delivered. The operation holds the
+acceptance Universe's execution lease, snapshots the evaluated artifact, writes
+its exact Git tree and deterministic commit, and records durable intent before
+creating the branch. The commit's parent is the pinned integration base; the
+commit and receipt retain the evaluation and artifact identities. Ownership,
+budget and evidence are checked immediately before committing the ref
+transaction, and the exact outcome is verified before final evidence is saved.
+The delivery uses its own evidence ledger; it does not invent a selected trial
+or append campaign/elite results.
+
+The receipt distinguishes `delivered`, `unchanged` and `pending`. `delivered`
+means a verified local candidate branch, not a remote push or product acceptance.
+`unchanged` means the artifact equals the base and no new branch is created.
+`pending` is incomplete. The CLI returns `0` for delivered/unchanged, `1` for
+pending or unavailable delivery, and `2` for invalid input. An interrupted
+delivery that cannot settle returns `130`, with no claim that its branch is absent.
+Neither inspection nor delivery generates model work or reruns the evaluator. Delivery does not
+check out files, alter the index, merge, push, deploy or advance an existing ref.
+
+Repeat the exact delivery request to reconcile a matching pending intent: an
+absent branch may be created, or an exact already-created branch may have its
+receipt completed. A matching completed receipt replays after verification.
+An unrelated, symbolic, checked-out or drifted target is refused; a deleted
+completed branch is not automatically recreated. Do not delete evidence or
+overwrite a branch to bypass a refusal. Cancellation or an error after ref
+commit does not prove that no branch exists; retain the intent and reconcile
+the exact request. No new evaluation is implied by this recovery.
+
+Source checks and post-commit settlement can extend elapsed time beyond the
+requested allowance. The delivery ledger reserves both intent and result space
+before ref creation, up to 128 deliveries and 32 MiB per acceptance Universe.
+No automatic artifact or Git-object cleanup is performed.
+
+Automatic branch advancement is a future milestone. A downstream Universe can
+be separately registered against the delivered commit, but delivery does not
+rewrite existing manifests or automatically import the artifact into a campaign.
+Account reserves, scheduling priority and background activation remain unchanged.
+
+The SDK exposes `readUniverseIntegrationEvaluation(evaluation, { root })`,
+`validateUniverseIntegrationDeliveryRequest(delivery)` and
+`deliverUniverseIntegration(delivery, { root, signal })`.
 
 ## Coordinate campaigns with a dependency graph
 

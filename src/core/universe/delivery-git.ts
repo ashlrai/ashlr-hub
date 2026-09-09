@@ -157,7 +157,8 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
     const entries = invoke(['worktree', 'list', '--porcelain', '-z'], undefined, false, {}, cutoff)!.toString('utf8').split('\0');
     if (entries.includes(`branch refs/heads/${branch}`)) throw new Error('Delivery branch is checked out in an existing worktree');
   }
-  async function createRef(branch: string, commit: string): Promise<void> {
+  async function createRef(branch: string, commit: string, beforeCommit?: () => void): Promise<void> {
+    if (beforeCommit !== undefined && typeof beforeCommit !== 'function') throw new Error('Delivery ref pre-commit check must be a function');
     const remaining = Math.min(30_000, Math.floor(deadline - performance.now()));
     if (remaining <= 0) throw new Error('Delivery Git operation deadline exceeded');
     const transactionDeadline = Math.min(deadline, performance.now() + remaining);
@@ -191,6 +192,17 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
             // symbolic ref. Recheck while prepare holds Git's own ref lock.
             if (ref(branch, transactionDeadline) !== null) throw new Error('Delivery refuses an existing branch at publication');
             assertNotCheckedOut(branch, transactionDeadline);
+            if (error || performance.now() >= transactionDeadline) throw new Error('Delivery Git ref transaction deadline exceeded');
+            // The caller can recheck its lease and cancellation under Git's
+            // prepared ref lock. An asynchronous check cannot authorize commit.
+            const checked: unknown = beforeCommit?.();
+            if (checked !== null && (typeof checked === 'object' || typeof checked === 'function') &&
+                typeof (checked as PromiseLike<unknown>).then === 'function') {
+              // Observe rejection even though the transaction must abort now.
+              void Promise.resolve(checked).catch(() => undefined);
+              throw new Error('Delivery ref pre-commit check must be synchronous');
+            }
+            if (checked !== undefined) throw new Error('Delivery ref pre-commit check must return undefined');
             if (error || performance.now() >= transactionDeadline) throw new Error('Delivery Git ref transaction deadline exceeded');
             phase = 'committing';
             child.stdin.end('commit\n');

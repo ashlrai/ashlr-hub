@@ -36,3 +36,10 @@ export interface UniverseIntegrationEvaluationResult {
 
 /** Concise public alias for the durable evaluation receipt. */
 export type UniverseIntegrationEvaluation = UniverseIntegrationEvaluationResult;
+
+/** A revalidated immutable evaluation observation suitable for a later delivery decision. */
+export interface UniverseIntegrationEvaluationEvidence {
+  request: UniverseIntegrationEvaluationRequest;
+  result: UniverseIntegrationEvaluationResult;
+  resultDigest: string;
+}
