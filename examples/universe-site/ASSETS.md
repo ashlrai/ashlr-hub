@@ -3,7 +3,7 @@
 `public/ashlrverse-orbital.png` is original concept artwork created with the
 built-in image-generation tool for this project on 2026-09-09. It is 1672 by 941
 pixels, inspected before integration, and used as decorative hero imagery.
-No third-party image was copied and no model/provider execution is depicted as
+No third-party image was copied into this hero, and no model/provider execution is depicted as
 real. The graph and bars, separately, use the recorded public evidence JSON.
 
 ## Generation prompt
@@ -45,3 +45,31 @@ retains focus, and all outcomes remain explicit in the HTML inspector.
 - [W3C: button pattern](https://www.w3.org/WAI/ARIA/apg/patterns/button/)
 - [MDN: reduced-motion preferences](https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/At-rules/@media/prefers-reduced-motion)
 - [W3C: reflow](https://www.w3.org/WAI/WCAG22/Understanding/reflow.html)
+
+## Provider identification
+
+These unchanged files identify the named third-party products; they are not part
+of Ashlrverse's own logo and do not establish endorsement or connected accounts.
+Their trademarks remain with their respective owners and are not relicensed
+under the project's MIT license. Keep them separate from our wordmark, preserve
+their proportions/colors and maintain the adjacent capability descriptions.
+
+| Local file                 | Official source                                                                                               | Context                                                                                                                                                                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `public/brands/openai.svg` | [OpenAI 2025 logo package](https://cdn.openai.com/brand/OpenAI-Logos-2025.zip)                                | Unchanged black wordmark; accurate service reference under the [brand guidelines](https://openai.com/brand/).                                                                                                                                                    |
+| `public/brands/claude.svg` | [Anthropic press kit](https://www.anthropic.com/press-kit)                                                    | Unchanged Claude slate wordmark; identifies Claude Code's provider, not a partnership.                                                                                                                                                                           |
+| `public/brands/grok.png`   | [Official Grok site icon](https://grok.com/icon-512x512.png)                                                  | Unchanged 512px icon; monitoring-only capability. The linked brand ZIP was unavailable during retrieval; this is the first-party site asset, not a verified copy of that ZIP. Review [brand guidance](https://x.ai/legal/brand-guidelines) before broader reuse. |
+| `public/brands/ollama.svg` | [Official Ollama repository asset](https://raw.githubusercontent.com/ollama/ollama/main/docs/ollama-logo.svg) | Unchanged outline; repository MIT notice retained in `public/licenses/Ollama-MIT.txt`. Software licensing does not grant trademark rights; [Ollama terms](https://ollama.com/terms) reserve branding rights.                                                     |
+
+Retrieved 2026-09-09. SVG files were XML-validated and checked for scripts,
+event handlers, foreign objects and external asset references. The Grok PNG's
+signature and dimensions were checked. Provenance is not a blanket commercial
+brand-use permission; review each owner's guidance for new contexts.
+
+Local-model names are text references to the official Ollama library:
+[Llama](https://ollama.com/library/llama3.3),
+[Qwen](https://ollama.com/library/qwen3),
+[Gemma](https://ollama.com/library/gemma3), and
+[DeepSeek](https://ollama.com/library/deepseek-r1).
+No model-family logo or model weight is bundled. Catalog availability is not
+an Ashlrverse model/hardware compatibility certification.

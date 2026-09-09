@@ -10,8 +10,8 @@
  * the CLI-first usage (consumed by `ashlr wire --claude-md`).
  *
  * Safety classes mirror CONTRACT-M31:
- *   read       — read-only of local stores; always safe.
- *   append     — append-only write under ~/.ashlr/ (genome hub).
+ *   read       — inspection-oriented; consult the command's actual effects.
+ *   append     — writes or executes work; not an append-only storage guarantee.
  *   proposal   — creates a PENDING inbox proposal; never applies anything.
  *   human-gate — listed for awareness only; agents must NOT run it.
  */
@@ -28,14 +28,14 @@ export interface AgentCommandDoc {
   description: string;
   /** Safety classification (CONTRACT-M31). */
   safety: AgentSafety;
-  /** Name of the stable --json output shape (types.ts), or a short note. */
+  /** Name of the command's --json output type, or a short shape note. */
   jsonShape: string;
 }
 
 /**
- * The agent-relevant command registry — the CLI-first contract. Every entry's
- * --json output is stable (typed in src/core/types.ts) and ANSI-free.
- * Exit codes everywhere: 0 success, 1 runtime error, 2 bad usage.
+ * Selected agent-relevant commands, not an exhaustive permission registry.
+ * Preserve the legacy safety vocabulary for consumers; descriptions document
+ * actual effects and command-specific result/exit semantics.
  */
 export const AGENT_COMMANDS: AgentCommandDoc[] = [
   {
@@ -87,10 +87,58 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniversePortfolioResult',
   },
   {
-    usage: 'ashlr universe run <id> [--root <path>] --json',
-    description: 'Execute one budgeted local generation and fixed evaluation. Command subprocesses deny network; optional local-chat uses its declared loopback endpoint. No merge or deploy.',
+    usage: 'ashlr universe run <id> [--root <path>] [--resource-runtime <private-absolute.json>] --json',
+    description: 'Execute one budgeted generation and fixed evaluation. Command subprocesses deny network; local-chat uses its declared loopback endpoint. Resource-pool generation requires an explicit private runtime, repeats admission checks and can consume provider/model usage. No merge or deploy.',
     safety: 'append',
     jsonShape: 'UniverseRun',
+  },
+  {
+    usage: 'ashlr universe campaign init --manifest <file.json> [--root <path>] --json',
+    description: 'Register a bounded campaign for an existing universe in the selected local store. Writes campaign state but does not execute workers; the manifest fixes the original resource and stagnation limits.',
+    safety: 'append',
+    jsonShape: 'UniverseCampaignSummary',
+  },
+  {
+    usage: 'ashlr universe campaign status [id] [--root <path>] --json',
+    description: 'Inspect recorded campaign progress without starting or resuming work. Without an ID, reports the campaign inventory and sourceState; missing inventory is not an active fleet. Completion is local experiment evidence, not production acceptance.',
+    safety: 'read',
+    jsonShape: 'UniverseCampaignSummary | {campaigns: UniverseCampaignSummary[], sourceState, reasons}',
+  },
+  {
+    usage: 'ashlr universe campaign check <id> --root <absolute> --json',
+    description: 'Read recorded campaign recovery evidence from an explicit canonical absolute private root. Inspect disposition, reasonCode, automaticAction and sourceState; automaticAction is advisory, not permission to execute. No provider contact, quota refresh or resume. Exit 0 includes held and terminal healthy snapshots; 1 unavailable/degraded, 2 invalid arguments. Does not accept --resource-runtime.',
+    safety: 'read',
+    jsonShape: 'UniverseCampaignReadiness',
+  },
+  {
+    usage: 'ashlr universe resources check --resource-runtime <private-absolute.json> --json',
+    description: 'Validate explicit local resource configuration and report worker snapshot eligibility, exclusions and warnings without provider contact or quota refresh. evidenceScope is local-configuration-only and providerContacted is false. Exit 0 means valid configuration even when all workers are excluded; 1 invalid/unavailable, 2 invalid arguments. Does not prove authentication, current quota or campaign admission.',
+    safety: 'read',
+    jsonShape: 'ResourceGenerationRuntimeCheck',
+  },
+  {
+    usage: 'ashlr universe campaign run|resume <id> [--root <path>] [--resource-runtime <private-absolute.json>] [--deliver-branch codex/<name> --deliver-base <full-seed-commit>] --json',
+    description: 'Execute generations and evaluators in the foreground within the original campaign budget; resume does not reset limits. Resource-pool execution requires the explicit private runtime and can consume provider/model usage. Paired delivery flags select the best strict measured improvement after completion for an idempotent local branch; repeat them on retry. No merge, push, checkout or service activation. Exit 0 can include withheld/no-strict-improvement; inspect campaign and delivery outcomes, not only the exit code.',
+    safety: 'append',
+    jsonShape: 'UniverseCampaignSummary without delivery flags; UniverseCampaignDeliveryResult {campaign, delivery} with paired flags',
+  },
+  {
+    usage: 'ashlr universe campaign supervise <id> [id ...] --root <absolute> --max-duration-ms <N> [--max-concurrent <1..4>] [--poll-interval-ms <50..60000>] [--resource-runtime <private-absolute.json>] [--delivery-plan <private-absolute.json>] --json',
+    description: 'Supervise a fixed explicit queue of 1-32 registered campaigns in this foreground invocation, retaining original budgets and resource admission checks. Does not automatically resume held, interrupted or failed work or enroll new campaigns. Can consume provider/model usage. Optional private mode-0600 delivery plan names campaign IDs, codex/ branches and full pinned seed commits; completed planned campaigns reconcile local delivery without rerunning workers. No merge, push, checkout or service activation. One final JSON report: inspect outcomes[].delivery separately; attempted tracks campaign execution, not delivery replay. Exit 0 all campaigns completed (not project success), 1 incomplete/failed/timed-out, 2 invalid arguments, 130 caller cancellation.',
+    safety: 'append',
+    jsonShape: 'UniverseCampaignSupervisorResult',
+  },
+  {
+    usage: 'ashlr universe deliver <id> --trial <elite-trial-id> --branch codex/<name> [--root <path>] --json',
+    description: 'Explicitly materialize an exact current elite as a local commit and branch in the pinned seed repository; writes delivery receipts. Does not change checkout, index or HEAD, merge, push or deploy. Unlike campaign delivery, this selects the named current elite, not a campaign strict-improvement winner. Unchanged artifacts create no branch. Exit 0 delivered/unchanged, 1 failed/pending/degraded, 2 invalid arguments; a branch is not production acceptance.',
+    safety: 'append',
+    jsonShape: 'UniverseDeliveryReceipt',
+  },
+  {
+    usage: 'ashlr universe deliveries <id> [--root <path>] --json',
+    description: 'Read and verify recorded local delivery receipts without changing the repository or dispatching work. Inspect sourceState and each receipt status; pending is not completed delivery and degraded evidence is not verified. Exit 1 for pending/degraded evidence, 0 otherwise (including no receipts), 2 invalid arguments. Local receipts do not prove merge, push, deployment or acceptance.',
+    safety: 'read',
+    jsonShape: 'UniverseDeliveryReport',
   },
   {
     usage: 'ashlr orient [--repo <path>] --json',
@@ -179,12 +227,18 @@ export function agentDocsText(): string {
     '',
     'ashlr is a local-first command center: portfolio memory (genome), local RAG,',
     'work discovery (backlog), repo health, and a human-gated approval inbox.',
-    'Use the CLI below from any agent session. Every --json shape is stable and',
-    'ANSI-free; exit codes are 0 success / 1 error / 2 bad usage.',
+    'Selected CLI discovery metadata follows; this is not an exhaustive command list',
+    'or execution permission. JSON output is ANSI-free. Check each command description',
+    'and help for result/exit semantics: exit 0 need not mean ready, delivered or accepted.',
+    'Campaign supervision additionally returns 130 for caller cancellation.',
     '',
-    'Safety classes: read = always safe · append = append-only under ~/.ashlr/ ·',
+    'Legacy safety labels describe command categories, not authorization:',
+    'read = inspection-oriented · append = writes or executes work (not append-only) ·',
     'proposal = creates a PENDING inbox item (never applies) · human-gate = NEVER',
     'run from an agent; the human approves via `ashlr inbox`.',
+    'Descriptions and explicit inputs determine effects, scope and resource use.',
+    'Use an explicit private --root for Universe work; never infer provider readiness',
+    'or permission to resume from recorded evidence or a valid resource configuration.',
     '',
   ];
   for (const c of AGENT_COMMANDS) {
@@ -411,6 +465,12 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'universe graph <id> [--node <node-id>]', desc: 'Read-only experiment evidence graph: trace selected parents, feedback, campaigns, and local branch receipts.', topic: 'autonomy' },
   { cmd: 'universe compare <baseline> <challenger>', desc: 'Compare explicit campaign outcomes and resource coverage; read-only local evidence, not production acceptance.', topic: 'autonomy' },
   { cmd: 'universe portfolio <plan|run> --manifest <file.json>', desc: 'Plan or run explicit campaign dependencies with foreground invocation bounds; completed campaigns are not accepted artifacts.', topic: 'autonomy' },
+  { cmd: 'universe campaign <init|status|run|resume|pause|stop>', desc: 'Register, inspect, execute or request control of bounded campaigns; run/resume can pair --deliver-branch with --deliver-base for local-only delivery.', topic: 'autonomy' },
+  { cmd: 'universe campaign check <id> --root <absolute> [--json]', desc: 'Read recorded recovery evidence only; exit 0 can include held or terminal snapshots and never grants permission to resume.', topic: 'autonomy' },
+  { cmd: 'universe resources check --resource-runtime <private-absolute.json> [--json]', desc: 'Check explicit local resource configuration without provider contact; validity is not authentication, quota or campaign admission.', topic: 'autonomy' },
+  { cmd: 'universe campaign supervise <id> [id ...] --root <absolute> --max-duration-ms <N> [--delivery-plan <private-absolute.json>]', desc: 'Bounded foreground supervision of a fixed queue; optional plan reconciles completed local branch deliveries without rerunning workers.', topic: 'autonomy' },
+  { cmd: 'universe deliver <id> --trial <elite-trial-id> --branch codex/<name>', desc: 'Explicitly write the exact current elite to a local branch; no checkout change, merge, push or deployment.', topic: 'autonomy' },
+  { cmd: 'universe deliveries <id> [--root <path>] [--json]', desc: 'Read local delivery receipts; pending/degraded evidence is not completed or verified delivery.', topic: 'autonomy' },
   { cmd: 'eval [--limit N]',             desc: 'Local-agent eval harness: adaptive prompts OFF vs ON, steps/done/tokens (M44).', topic: 'run' },
   { cmd: 'eval attention [--window 1d|7d|30d]', desc: 'Metadata-only fleet attention report: context pressure, retrieval, yield, routing, and traces.', topic: 'run' },
   { cmd: 'skills audit <pack-path> [--json]', desc: 'Read-only quarantine audit for external skill structure, trigger routing, collisions, and behavioral fixtures.', topic: 'run' },

@@ -159,6 +159,11 @@ p {
   font-size: 0.95rem;
   flex-wrap: wrap;
 }
+.masthead nav a[aria-current='page'] {
+  color: var(--solar);
+  text-decoration: underline;
+  text-underline-offset: 0.45em;
+}
 .nav-source {
   border: 1px solid #526575;
   border-radius: 2rem;
@@ -781,6 +786,316 @@ p {
 }
 .closing-call a {
   flex-shrink: 0;
+}
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1.3rem;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+}
+.provider-grid > li {
+  min-width: 0;
+  border: 1px solid #31495c;
+  border-radius: 0.6rem;
+  overflow: hidden;
+}
+.brand-surface {
+  min-height: 142px;
+  background: #f3f4f1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+}
+.brand-surface img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  object-fit: contain;
+}
+.brand-surface .brand-wordmark {
+  width: 150px;
+  max-height: 46px;
+}
+.brand-surface .brand-icon {
+  width: 64px;
+  height: 64px;
+}
+.brand-surface .brand-ollama {
+  height: 64px;
+  width: auto;
+}
+.provider-copy {
+  padding: 1.5rem;
+}
+.provider-copy h3 {
+  margin: 0 0 0.6rem;
+  font-size: 1.5rem;
+}
+.provider-type {
+  display: block;
+  font-size: 0.875rem;
+  color: var(--solar);
+  margin-bottom: 1.2rem;
+}
+.provider-copy p {
+  font-size: 1rem;
+  color: #b9cbd7;
+  margin: 0;
+}
+.local-models {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4rem;
+  padding: 2.5rem 0;
+  margin-top: 1rem;
+  border-bottom: 1px solid #31495c;
+  align-items: center;
+}
+.local-models h3 {
+  margin-top: 0;
+}
+.local-models p {
+  color: #b9cbd7;
+  margin-bottom: 0;
+}
+.local-models ul {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.local-models a {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: center;
+  min-height: 52px;
+  padding: 0.8rem 1rem;
+  background: #142738;
+  border-radius: 0.3rem;
+}
+.local-models a span {
+  color: var(--ice);
+}
+.provider-notes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4rem;
+  padding: 1.5rem 0 3.5rem;
+}
+.provider-notes p {
+  color: #a7bccb;
+  font-size: 0.875rem;
+  margin: 0;
+}
+@media (max-width: 1100px) {
+  .provider-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 760px) {
+  .local-models,
+  .provider-notes {
+    grid-template-columns: 1fr;
+    gap: 1.5rem;
+  }
+}
+@media (max-width: 440px) {
+  .provider-grid {
+    grid-template-columns: 1fr;
+  }
+  .brand-surface {
+    min-height: 116px;
+  }
+}
+.agent-entry {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 6vw;
+  align-items: center;
+  background: #111f2d;
+}
+.agent-entry p:not(.release-note) {
+  max-width: 36rem;
+  color: #c1ceda;
+  margin: 1.8rem 0;
+}
+.agent-files a {
+  display: block;
+  border-top: 1px solid #456076;
+  padding: 1.5rem 0;
+}
+.agent-files span {
+  display: block;
+  font:
+    500 clamp(1.4rem, 2.2vw, 2rem) Universe,
+    sans-serif;
+}
+.agent-files small {
+  display: block;
+  color: #b0c2d1;
+  font-size: 0.95rem;
+  margin-top: 0.35rem;
+}
+.guide-intro {
+  padding: 5rem 7vw 4rem;
+  display: grid;
+  grid-template-columns: 1.4fr 1fr;
+  gap: 4vw;
+  align-items: end;
+  border-bottom: 1px solid #334b61;
+}
+.guide-intro h1 {
+  font-size: clamp(3rem, 7vw, 7rem);
+}
+.guide-intro .lead {
+  margin-bottom: 0;
+}
+.guide-downloads {
+  padding: 1.5rem 0 0 2rem;
+  border-left: 1px solid #4a657a;
+  display: grid;
+  gap: 0.65rem;
+}
+.guide-downloads > span {
+  color: var(--solar);
+  font-size: 0.95rem;
+  margin-bottom: 0.5rem;
+}
+.guide-downloads a {
+  font-size: 1.1rem;
+  text-decoration: underline;
+  text-underline-offset: 0.3em;
+}
+.guide-layout {
+  display: grid;
+  grid-template-columns: 16rem minmax(0, 1fr);
+  gap: 6vw;
+  padding: 4rem 7vw 6rem;
+  background: #dce6e9;
+  color: #102435;
+}
+.guide-nav nav {
+  display: grid;
+  gap: 0.8rem;
+  position: sticky;
+  top: 2rem;
+}
+.guide-nav a {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  padding: 0.35rem 0;
+  color: #284960;
+}
+.guide-content {
+  max-width: 52rem;
+  min-width: 0;
+}
+.guide-content h2 {
+  font-size: clamp(1.8rem, 3vw, 3.2rem);
+  margin-bottom: 1.5rem;
+}
+.guide-content p {
+  max-width: 65ch;
+}
+.guide-content code {
+  overflow-wrap: anywhere;
+  font-size: 0.9em;
+}
+.guide-content a:focus-visible,
+.guide-nav a:focus-visible {
+  outline-color: #1a557d;
+}
+.guide-content .text-link {
+  color: #164e72;
+  text-decoration-color: #547e94;
+}
+.guide-start {
+  padding-bottom: 2.5rem;
+}
+.guide-command {
+  background: #102333;
+  color: #e4edf1;
+  border-radius: 0.6rem;
+  padding: 1.4rem 1.5rem;
+  margin-top: 2rem;
+}
+.guide-command > p:first-child {
+  color: #c6dde8;
+  font-size: 0.95rem;
+  margin-bottom: 0.8rem;
+}
+.guide-command pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.guide-command .copy-controls {
+  padding: 1.3rem 0 0;
+}
+.guide-command .command-note {
+  font-size: 0.875rem;
+  color: #b4cbd7;
+  margin: 1rem 0 0;
+}
+.guide-task {
+  padding: 2.8rem 0;
+  border-top: 1px solid #9fb4c0;
+  scroll-margin-top: 2rem;
+}
+.task-effect {
+  display: block;
+  font-size: 0.875rem;
+  color: #38596e;
+  margin-bottom: 0.9rem;
+}
+.guide-evidence {
+  border-top: 2px solid #23475d;
+  padding-top: 3rem;
+  margin-top: 1rem;
+}
+.guide-evidence ul {
+  padding-left: 1.2rem;
+  margin: 0 0 2rem;
+}
+.guide-evidence li {
+  padding-left: 0.4rem;
+  margin: 1rem 0;
+}
+@media (max-width: 900px) {
+  .guide-layout {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+  }
+  .guide-nav nav {
+    position: static;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-bottom: 2rem;
+    border-bottom: 1px solid #9fb4c0;
+  }
+  .guide-content {
+    max-width: none;
+  }
+}
+@media (max-width: 760px) {
+  .agent-entry,
+  .guide-intro {
+    grid-template-columns: 1fr;
+    gap: 3rem;
+  }
+  .guide-downloads {
+    padding: 1.5rem 0 0;
+    border-left: 0;
+    border-top: 1px solid #4a657a;
+  }
+  .guide-intro {
+    padding-top: 3.5rem;
+  }
 }
 footer {
   padding: 2.5rem 7vw;

@@ -1,0 +1,8 @@
+{
+  "name": "Ashlrverse",
+  "origin": "https://ashlr-universe.aiingaround.chatgpt.site",
+  "indexable": false,
+  "title": "Ashlrverse — Open-source AI engineering fleet",
+  "description": "Build, evaluate, and improve code with a local-first AI engineering fleet. Explore the evidence, configure worker budgets, and start a reproducible experiment.",
+  "repository": "https://github.com/ashlrai/ashlr-hub"
+}

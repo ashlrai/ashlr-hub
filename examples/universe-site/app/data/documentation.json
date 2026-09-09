@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "product": "Ashlrverse",
+  "scope": "Static documentation index, not a worker API or execution authorization.",
+  "compatibility": {
+    "package": "@ashlr/hub",
+    "cli": "ashlr universe",
+    "sdk": "@ashlr/hub/universe"
+  },
+  "prerequisites": "The source experiment path requires Git, Node.js 24+ and macOS sandbox-exec. Hosted documentation and recorded evidence do not require a worker account.",
+  "discoveryCommand": "node bin/ashlr docs --agent --json",
+  "discoveryNote": "Run from the trusted, built checkout you intend to use. Read each command's help. Discovery describes effects; it does not grant authority or prove worker readiness.",
+  "tasks": [
+    {
+      "id": "start",
+      "title": "Run your first experiment",
+      "description": "Reproduce a two-generation search with fixed workers. No model account is needed; the demo creates local files and executes sandboxed code.",
+      "href": "https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEMO.md",
+      "label": "Reproduce the demo",
+      "effect": "Local execution"
+    },
+    {
+      "id": "inspect",
+      "title": "Inspect before dispatch",
+      "description": "Read campaign state, resource configuration and delivery receipts before choosing the next action. Healthy records are not proof of authenticated workers.",
+      "href": "https://github.com/ashlrai/ashlr-hub/blob/master/docs/README.md#for-coding-agents",
+      "label": "Open the agent command guide",
+      "effect": "Read-only discovery"
+    },
+    {
+      "id": "resources",
+      "title": "Allocate worker capacity",
+      "description": "Commission supported native accounts or local models, preserve your personal reserve, and verify an explicit resource configuration.",
+      "href": "https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity",
+      "label": "Configure resources",
+      "effect": "Operator configuration"
+    },
+    {
+      "id": "campaigns",
+      "title": "Run bounded campaigns",
+      "description": "Turn an objective into competing variants with fixed evaluation, resource limits and recorded outcomes. Continue improving inside the delegated budget.",
+      "href": "https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md#continue-autonomously-with-a-bounded-campaign",
+      "label": "Set up a campaign",
+      "effect": "Explicit execution"
+    },
+    {
+      "id": "delivery",
+      "title": "Deliver and reconcile",
+      "description": "Use an explicit delivery plan for local branches. Reconcile completed campaign receipts without rerunning workers; a branch is not a production release.",
+      "href": "https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md#deliver-supervised-campaign-results",
+      "label": "Follow the delivery contract",
+      "effect": "Local branch handoff"
+    },
+    {
+      "id": "contribute",
+      "title": "Improve the system",
+      "description": "Understand the local kernel and independent ecosystem projects. Use useful accepted changes per token and hour as the target—not activity alone.",
+      "href": "https://github.com/ashlrai/ashlr-hub/blob/master/docs/NORTH-STAR.md",
+      "label": "Read the North Star",
+      "effect": "Architecture and contribution"
+    }
+  ],
+  "interpretation": [
+    "Inspect structured outcomes, not exit code alone. A healthy check can still describe a held or completed campaign.",
+    "Valid resource configuration is not an authenticated connection or proof of remaining provider quota.",
+    "Keep campaign completion, evaluated usefulness, local delivery and production acceptance distinct.",
+    "Keep roots, target branches, budgets and operator reserves explicit. Do not publish raw startup tokens or private runtime records."
+  ],
+  "evidence": {
+    "path": "/evidence/demo.json",
+    "sourceCommit": "914ebd1f566c0dc4f0a95479d9c4f464289e736e",
+    "measurementScope": "Deterministic local experiment, not measured AI engineering yield."
+  }
+}
