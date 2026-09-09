@@ -113,7 +113,7 @@ describe('operator documentation navigation', () => {
     }
     expect(manifest.files).not.toContain('docs');
     expect(manifest.files).not.toContain('src');
-    expect(OPERATOR_DOCUMENTATION).toHaveLength(8);
+    expect(OPERATOR_DOCUMENTATION).toHaveLength(9);
   });
 
   it('keeps checked source entrypoints and their heading targets navigable', () => {

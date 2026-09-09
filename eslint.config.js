@@ -17,6 +17,8 @@ export default tseslint.config(
       'dist-bin/**',
       'node_modules/**',
       'src/raycast/**',
+      // Independently locked public showcase owns its authored-code lint command.
+      'examples/universe-site/**',
       'undefined/**',
     ],
   },

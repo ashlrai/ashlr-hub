@@ -771,6 +771,61 @@ From the built Hub checkout:
    It keeps refreshing while a campaign runs, including gaps between generations.
    The console is read-only; its command examples do not execute automatically.
 
+### Deliver an improvement when this invocation completes
+
+To turn an eligible campaign result into a reviewable local branch, explicitly
+authorize delivery on `campaign run` or its `resume` alias with both flags:
+
+```sh
+node bin/ashlr universe campaign run local-search \
+  --root /absolute/private/universe \
+  --deliver-branch codex/local-search-result \
+  --deliver-base FULL_PINNED_SEED_COMMIT --json
+```
+
+Replace `FULL_PINNED_SEED_COMMIT` with the experiment manifest's exact full
+`seed.revision` (40 or 64 lowercase hexadecimal characters), not the current
+checkout's moving `HEAD`. The healthy experiment must match that base before
+campaign execution begins. Choose the intended new `codex/` branch in its pinned
+seed repository. For resource-backed generation, also supply the existing
+`--resource-runtime /absolute/private/runtime.json` option.
+
+This invocation runs within the campaign's existing budgets, then considers
+delivery only after the campaign reaches `completed`. A new delivery selects the
+best current niche elite attributable to this campaign, ordered by its metric
+direction, that passed and recorded a strict positive improvement over its parent.
+Its artifact must differ from both the parent and the pinned seed. Initial archive
+admissions, passing-but-unchanged artifacts and non-completed campaigns do not
+qualify. Evidence and artifact identities are rechecked under the execution lease.
+
+The mutation creates Git objects and the requested **local branch only**. It does
+not merge, push, check out that branch, edit the working tree or activate production.
+The delivery commit is based on the pinned seed, not a later branch tip. Inspect
+the returned receipt and [verify the local branch](#deliver-a-retained-artifact-to-a-repository)
+before deciding on integration; retain the branch and receipt for review. No
+remote rollback is needed because this operation performs no remote publication.
+
+With these flags, JSON output is `{ "campaign": ..., "delivery": ... }`.
+Check `delivery.status`: a valid invocation can return `withheld` with
+`campaign-not-completed`, `cancelled` or `no-strict-improvement`. A zero command
+exit code is not proof that a branch was created.
+
+Delivery flags express intent for this invocation; they are not saved in the
+campaign definition. Repeat the same paired flags, base, branch and root on an
+intentional resume or interrupted-delivery retry. A completed campaign remains
+terminal. A matching evidence-bound receipt replays idempotently without creating
+another commit, including when a later campaign has replaced the current elite.
+An unrelated existing branch or mismatched receipt is refused; do not delete
+receipts to force a retry. Read `universe deliveries` against the same root to
+reconcile the recorded branch and outcome.
+
+This behavior belongs to the explicit run/resume invocation, implemented by
+`runUniverseCampaignAndDeliver`. Ordinary campaign execution, the campaign
+supervisor and portfolio orchestration do **not** automatically deliver branches.
+Their existing behavior is unchanged when these flags are absent.
+
+### Pause, stop or resume the campaign
+
 Control the exact campaign from a terminal:
 
 ```sh

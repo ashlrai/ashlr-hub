@@ -492,6 +492,7 @@ function rootPackageIsPortable(
     'dist',
     'docs/README.md',
     'docs/QUICKSTART.md',
+    'docs/DEMO.md',
     'docs/ARCHITECTURE.md',
     'docs/ELITE-AGENT-EFFICIENCY.md',
     'docs/MISSION-OS.md',

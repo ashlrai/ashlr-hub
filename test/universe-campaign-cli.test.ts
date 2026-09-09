@@ -5,6 +5,8 @@ import type { UniverseCampaignReadiness } from '../src/core/universe/campaign-re
 const core = vi.hoisted(() => ({
   initUniverseCampaign: vi.fn(), readUniverseCampaign: vi.fn(), readUniverseCampaigns: vi.fn(),
   requestUniverseCampaignControl: vi.fn(), runUniverseCampaign: vi.fn(),
+  runUniverseCampaignAndDeliver: vi.fn(),
+  validUniverseDeliveryBranch: vi.fn(),
 }));
 const files = vi.hoisted(() => ({ readFileSync: vi.fn() }));
 const readiness = vi.hoisted(() => ({ readUniverseCampaignReadiness: vi.fn() }));
@@ -49,6 +51,7 @@ describe('Universe campaign CLI', () => {
     core.readUniverseCampaign.mockReturnValue(campaign());
     core.readUniverseCampaigns.mockReturnValue({ campaigns: [], sourceState: 'healthy', reasons: [] });
     core.runUniverseCampaign.mockResolvedValue(campaign({ state: 'completed', reason: 'generation-limit' }));
+    core.validUniverseDeliveryBranch.mockImplementation((value: string) => value.startsWith('codex/'));
     readiness.readUniverseCampaignReadiness.mockReturnValue(readinessReport());
   });
   afterEach(() => vi.restoreAllMocks());
@@ -68,14 +71,57 @@ describe('Universe campaign CLI', () => {
     ['check', 'search', '--root', '/private/store', '--manifest', '/private/campaign.json'],
     ['check', 'search', 'another', '--root', '/private/store'],
     ['check', 'search', '--root', '/private/store', '--root', '/private/another'],
+    ['run', 'search', '--deliver-branch', 'codex/result'],
+    ['run', 'search', '--deliver-base', 'a'.repeat(40)],
+    ['status', 'search', '--deliver-branch', 'codex/result', '--deliver-base', 'a'.repeat(40)],
+    ['run', 'search', '--deliver-branch', 'main', '--deliver-base', 'a'.repeat(40)],
+    ['run', 'search', '--deliver-branch', 'codex/result', '--deliver-base', 'HEAD'],
+    ['run', 'search', '--deliver-branch', 'codex/result', '--deliver-branch', 'codex/second', '--deliver-base', 'a'.repeat(40)],
   ])('rejects invalid invocation %j before mutation', async (...args) => {
     expect(await cmdUniverseCampaign([...args, '--json'])).toBe(2);
     expect(JSON.parse(output.mock.calls[0]![0] as string)).toHaveProperty('error');
     expect(core.initUniverseCampaign).not.toHaveBeenCalled();
     expect(core.runUniverseCampaign).not.toHaveBeenCalled();
+    expect(core.runUniverseCampaignAndDeliver).not.toHaveBeenCalled();
     expect(core.requestUniverseCampaignControl).not.toHaveBeenCalled();
     expect(files.readFileSync).not.toHaveBeenCalled();
     expect(readiness.readUniverseCampaignReadiness).not.toHaveBeenCalled();
+  });
+
+  it.each(['run', 'resume'])('routes opt-in %s through campaign delivery and exposes withholding truthfully', async (command) => {
+    const result = { campaign: campaign({ state: 'completed' }), delivery: { status: 'withheld', reason: 'no-strict-improvement' } };
+    core.runUniverseCampaignAndDeliver.mockResolvedValue(result);
+    expect(await cmdUniverseCampaign([command, 'search', '--deliver-branch', 'codex/result', '--deliver-base', 'a'.repeat(40), '--json'])).toBe(0);
+    expect(core.runUniverseCampaignAndDeliver).toHaveBeenCalledWith('search', expect.objectContaining({
+      delivery: { branch: 'codex/result', baseCommit: 'a'.repeat(40) }, signal: expect.any(AbortSignal),
+    }));
+    expect(core.runUniverseCampaign).not.toHaveBeenCalled();
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(result);
+  });
+
+  it('renders a delivered local branch without implying merge or publication', async () => {
+    core.runUniverseCampaignAndDeliver.mockResolvedValue({ campaign: campaign({ state: 'completed' }),
+      delivery: { status: 'delivered', receipt: { branch: 'codex/result', commit: 'b'.repeat(40) } } });
+    expect(await cmdUniverseCampaign(['run', 'search', '--deliver-branch', 'codex/result', '--deliver-base', 'a'.repeat(40)])).toBe(0);
+    expect(output.mock.calls[0]![0]).toContain(`Local delivery: codex/result · ${'b'.repeat(40)}`);
+    expect(output.mock.calls[0]![0]).toContain('No merge or push performed.');
+  });
+
+  it('reports delivery failure as a nonzero error instead of claiming the completed campaign was delivered', async () => {
+    core.runUniverseCampaignAndDeliver.mockRejectedValue(new Error('Campaign delivery ledger is degraded'));
+    expect(await cmdUniverseCampaign(['run', 'search', '--deliver-branch', 'codex/result', '--deliver-base', 'a'.repeat(40), '--json'])).toBe(1);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual({ error: 'Campaign delivery ledger is degraded' });
+  });
+
+  it('returns nonzero for cancellation after campaign completion and cleans up signal listeners', async () => {
+    const beforeInt = process.listenerCount('SIGINT');
+    const beforeTerm = process.listenerCount('SIGTERM');
+    const result = { campaign: campaign({ state: 'completed' }), delivery: { status: 'withheld', reason: 'cancelled' } };
+    core.runUniverseCampaignAndDeliver.mockResolvedValue(result);
+    expect(await cmdUniverseCampaign(['run', 'search', '--deliver-branch', 'codex/result', '--deliver-base', 'a'.repeat(40), '--json'])).toBe(1);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(result);
+    expect(process.listenerCount('SIGINT')).toBe(beforeInt);
+    expect(process.listenerCount('SIGTERM')).toBe(beforeTerm);
   });
 
   it('defaults to a read-only machine-readable campaign inventory', async () => {

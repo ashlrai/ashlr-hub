@@ -557,6 +557,7 @@ describe('M454 pinned upstream routing challenge', () => {
       'CHANGELOG.md',
       'docs/README.md',
       'docs/QUICKSTART.md',
+      'docs/DEMO.md',
       'docs/ARCHITECTURE.md',
       'docs/MISSION-OS.md',
       'docs/ASHLR-UNIVERSE.md',

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1440 1010" width="1440" height="1010" role="img" aria-labelledby="title description">
+<title id="title">Ashlr Universe measured offline demonstration</title>
+<desc id="description">Two generations retain compact and readable code variants after seven correctness cases. Compact shrinks from 274 to 47 bytes. Readable shrinks from 317 to 210 bytes. The broken sort variant is rejected in both generations. Arrows show reuse of retained parents. This is a deterministic local demonstration, not measured model engineering yield.</desc>
+<defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M 0 1 L 8 5 L 0 9" fill="none" stroke="#67e8f9" stroke-width="1.5"/></marker></defs>
+<rect width="1440" height="1010" fill="#07111f"/>
+<path d="M80 178H1360 M80 888H1360" stroke="#2c4963"/>
+<rect x="80" y="270" width="540" height="185" rx="14" fill="#10243b" stroke="#2c4963"/>
+<rect x="820" y="270" width="540" height="185" rx="14" fill="#10243b" stroke="#2c4963"/>
+<path d="M 634 350 H 800" fill="none" stroke="#67e8f9" stroke-width="3" marker-end="url(#arrow)"/>
+<rect x="80" y="515" width="540" height="185" rx="14" fill="#10243b" stroke="#2c4963"/>
+<rect x="820" y="515" width="540" height="185" rx="14" fill="#10243b" stroke="#2c4963"/>
+<path d="M 634 595 H 800" fill="none" stroke="#67e8f9" stroke-width="3" marker-end="url(#arrow)"/>
+<rect x="80" y="765" width="540" height="100" rx="14" fill="#10243b" stroke="#805645"/>
+<rect x="820" y="765" width="540" height="100" rx="14" fill="#10243b" stroke="#805645"/>
+<g font-family="'Space Grotesk', Arial, sans-serif"><text x="108" y="313" font-size="28" fill="#e4f7ff" font-weight="600">Compact niche</text>
+<text x="108" y="377" font-size="46" fill="#67e8f9" font-weight="600">274 bytes</text>
+<text x="108" y="421" font-size="25" fill="#e4f7ff" font-weight="400">7 / 7 cases passed</text>
+<text x="395" y="421" font-size="25" fill="#9bb5ca" font-weight="400">Retained</text>
+<text x="848" y="313" font-size="28" fill="#e4f7ff" font-weight="600">Compact niche</text>
+<text x="848" y="377" font-size="46" fill="#67e8f9" font-weight="600">47 bytes</text>
+<text x="848" y="421" font-size="25" fill="#e4f7ff" font-weight="400">7 / 7 cases passed</text>
+<text x="1135" y="421" font-size="25" fill="#9bb5ca" font-weight="400">Retained</text>
+<text x="650" y="324" font-size="20" fill="#9bb5ca" font-weight="400">Parent reused</text>
+<text x="650" y="387" font-size="23" fill="#67e8f9" font-weight="600">−227 bytes</text>
+<text x="108" y="558" font-size="28" fill="#e4f7ff" font-weight="600">Readable niche</text>
+<text x="108" y="622" font-size="46" fill="#67e8f9" font-weight="600">317 bytes</text>
+<text x="108" y="666" font-size="25" fill="#e4f7ff" font-weight="400">7 / 7 cases passed</text>
+<text x="395" y="666" font-size="25" fill="#9bb5ca" font-weight="400">Retained</text>
+<text x="848" y="558" font-size="28" fill="#e4f7ff" font-weight="600">Readable niche</text>
+<text x="848" y="622" font-size="46" fill="#67e8f9" font-weight="600">210 bytes</text>
+<text x="848" y="666" font-size="25" fill="#e4f7ff" font-weight="400">7 / 7 cases passed</text>
+<text x="1135" y="666" font-size="25" fill="#9bb5ca" font-weight="400">Retained</text>
+<text x="650" y="569" font-size="20" fill="#9bb5ca" font-weight="400">Parent reused</text>
+<text x="650" y="632" font-size="23" fill="#67e8f9" font-weight="600">−107 bytes</text>
+<text x="108" y="806" font-size="27" fill="#ffb38a" font-weight="600">Broken sort variant</text>
+<text x="108" y="843" font-size="23" fill="#e4f7ff" font-weight="400">Rejected · order preservation failed</text>
+<text x="848" y="806" font-size="27" fill="#ffb38a" font-weight="600">Broken sort variant</text>
+<text x="848" y="843" font-size="23" fill="#e4f7ff" font-weight="400">Rejected · order preservation failed</text>
+<text x="80" y="90" font-size="58" fill="#e4f7ff" font-weight="600">Ashlr Universe</text>
+<text x="80" y="143" font-size="30" fill="#9bb5ca" font-weight="400">Measured improvement. Preserved correctness.</text>
+<text x="80" y="231" font-size="30" fill="#e4f7ff" font-weight="600">Generation 1</text>
+<text x="820" y="231" font-size="30" fill="#e4f7ff" font-weight="600">Generation 2</text>
+<text x="80" y="925" font-size="26" fill="#e4f7ff" font-weight="400">Deterministic code experiment — not model engineering yield.</text>
+<text x="80" y="965" font-size="21" fill="#9bb5ca" font-weight="400">Source 914ebd1f566c0dc4f0a95479d9c4f464289e736e</text></g>
+</svg>

@@ -1,6 +1,7 @@
 import { lstatSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join, resolve } from 'node:path';
+import type { LocalStoreLock } from '../fleet/local-store-lock.js';
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord,
   type ImmutablePrivateRecordCodec, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import { canonical, defaultUniverseRoot, digest, inspectPrivateDirectory, readArtifactSnapshot } from './artifacts.js';
@@ -182,65 +183,75 @@ export function readUniverseDeliveries(universeId: string, options: UniverseStor
 export async function deliverUniverseElite(universeId: string,
   options: UniverseStoreOptions & { trialId: string; branch: string }): Promise<UniverseDeliveryReceipt> {
   if (!ID.test(universeId) || !TRIAL_ID.test(options.trialId) || !validUniverseDeliveryBranch(options.branch)) throw new Error('Invalid Universe delivery identity or codex/ branch');
-  return withUniverseExecution(universeId, options, async (lock) => {
-    const directory = universePath(resolve(options.root ?? defaultUniverseRoot()), universeId);
-    const records = readRecords(directory);
-    const record = manifestRecord(directory, records);
-    const universe = projectUniverse(directory, records);
-    if (universe.sourceState !== 'healthy' || universe.activeRun) throw new Error('Universe delivery requires healthy, idle experiment evidence');
-    assertComparatorUnchanged(record);
-    const prior = read(directory);
-    const existing = prior.find((receipt) => receipt.branch === options.branch);
-    if (existing && existing.trialId !== options.trialId) throw new Error('Delivery branch is already bound to another trial');
-    const run = universe.runs.find((item) => item.status === 'completed' && item.trials.some((trial) => trial.id === options.trialId && trial.selected));
-    const trial = run?.trials.find((item) => item.id === options.trialId);
-    if (!run || !trial?.artifact || trial.status !== 'passed' || (!existing && !universe.elites.some((elite) => elite.trialId === trial.id))) {
-      throw new Error('Only a current independently selected elite can create a delivery');
-    }
-    const snapshot = readArtifactSnapshot(trial.artifact.path);
-    if (snapshot.digest !== trial.artifact.digest) throw new Error('Elite artifact is missing or changed');
-    const git = deliveryGit(record.manifest.seed.repo);
-    git.invoke(['check-ref-format', '--branch', options.branch]);
-    if (git.oid(['rev-parse', '--verify', `${record.manifest.seed.revision}^{commit}`]) !== record.manifest.seed.revision) throw new Error('Pinned seed commit changed');
-    const baseTree = git.oid(['rev-parse', '--verify', `${record.manifest.seed.revision}^{tree}`]);
-    if (git.treeDigest(baseTree) !== record.seedArtifact.digest) throw new Error('Pinned repository seed differs from experiment seed');
-    if (existing) {
-      bindSource(existing, universe, record);
-      inspectGit(existing, git);
-      if (existing.status !== 'pending') return existing;
-    } else {
-      if (prior.length >= MAX_DELIVERIES) throw new Error('Universe delivery capacity exhausted');
-      if (git.ref(options.branch) !== null) throw new Error('Delivery refuses a pre-existing branch');
+  return withUniverseExecution(universeId, options, (lock) => deliverUniverseEliteOwned(universeId, options, lock));
+}
+
+/** Internal composition point: selection and delivery share the same execution lease. */
+export async function deliverUniverseEliteOwned(universeId: string,
+  options: UniverseStoreOptions & { trialId: string; branch: string; signal?: AbortSignal },
+  lock: LocalStoreLock): Promise<UniverseDeliveryReceipt> {
+  if (!ID.test(universeId) || !TRIAL_ID.test(options.trialId) || !validUniverseDeliveryBranch(options.branch)) throw new Error('Invalid Universe delivery identity or codex/ branch');
+  const directory = universePath(resolve(options.root ?? defaultUniverseRoot()), universeId);
+  assertUniverseExecution(directory, lock);
+  options.signal?.throwIfAborted();
+  const records = readRecords(directory);
+  const record = manifestRecord(directory, records);
+  const universe = projectUniverse(directory, records);
+  if (universe.sourceState !== 'healthy' || universe.activeRun) throw new Error('Universe delivery requires healthy, idle experiment evidence');
+  assertComparatorUnchanged(record);
+  const prior = read(directory);
+  const existing = prior.find((receipt) => receipt.branch === options.branch);
+  if (existing && existing.trialId !== options.trialId) throw new Error('Delivery branch is already bound to another trial');
+  const run = universe.runs.find((item) => item.status === 'completed' && item.trials.some((trial) => trial.id === options.trialId && trial.selected));
+  const trial = run?.trials.find((item) => item.id === options.trialId);
+  if (!run || !trial?.artifact || trial.status !== 'passed' || (!existing && !universe.elites.some((elite) => elite.trialId === trial.id))) {
+    throw new Error('Only a current independently selected elite can create a delivery');
+  }
+  const snapshot = readArtifactSnapshot(trial.artifact.path);
+  if (snapshot.digest !== trial.artifact.digest) throw new Error('Elite artifact is missing or changed');
+  const git = deliveryGit(record.manifest.seed.repo);
+  git.invoke(['check-ref-format', '--branch', options.branch]);
+  if (git.oid(['rev-parse', '--verify', `${record.manifest.seed.revision}^{commit}`]) !== record.manifest.seed.revision) throw new Error('Pinned seed commit changed');
+  const baseTree = git.oid(['rev-parse', '--verify', `${record.manifest.seed.revision}^{tree}`]);
+  if (git.treeDigest(baseTree) !== record.seedArtifact.digest) throw new Error('Pinned repository seed differs from experiment seed');
+  if (existing) {
+    bindSource(existing, universe, record);
+    inspectGit(existing, git);
+    if (existing.status !== 'pending') return existing;
+  } else {
+    if (prior.length >= MAX_DELIVERIES) throw new Error('Universe delivery capacity exhausted');
+    if (git.ref(options.branch) !== null) throw new Error('Delivery refuses a pre-existing branch');
+    git.assertNotCheckedOut(options.branch);
+  }
+  const tree = existing?.tree ?? git.writeTree(snapshot.entries);
+  if (git.treeDigest(tree) !== snapshot.digest) throw new Error('Committed tree differs from the verified artifact');
+  const changedFiles = changedPaths(git, baseTree, tree);
+  const id = deliveryId(universeId, options.branch);
+  const commit = existing?.commit ?? (tree === baseTree ? record.manifest.seed.revision : git.oid(['hash-object', '-t', 'commit', '-w', '--stdin'],
+    commitBytes({ id, universeId, trialId: trial.id, artifactDigest: snapshot.digest, tree, baseCommit: record.manifest.seed.revision }, run.finishedAt!)));
+  const intent: UniverseDeliveryReceipt = existing ?? { schemaVersion: 1, id, universeId, trialId: trial.id, runId: run.id, niche: trial.niche,
+    manifestDigest: record.manifestDigest, comparatorDigest: record.comparatorDigest, artifactDigest: snapshot.digest,
+    repo: record.manifest.seed.repo, branch: options.branch, baseCommit: record.manifest.seed.revision, commit, tree, changedFiles,
+    status: 'pending', createdAt: new Date().toISOString(), completedAt: null };
+  assertUniverseExecution(directory, lock);
+  options.signal?.throwIfAborted();
+  inspectGit(intent, git);
+  if (!existing) persist(directory, intent);
+  // The intent is durable before a branch can become visible. Crash recovery
+  // accepts only this exact commit, never an unrelated existing branch.
+  if (changedFiles.length) {
+    const target = git.ref(options.branch);
+    if (target !== null && target !== commit) throw new Error('Delivery branch conflicts with an existing ref');
+    if (target === null) {
+      assertUniverseExecution(directory, lock);
+      options.signal?.throwIfAborted();
       git.assertNotCheckedOut(options.branch);
+      await git.createRef(options.branch, commit);
     }
-    const tree = existing?.tree ?? git.writeTree(snapshot.entries);
-    if (git.treeDigest(tree) !== snapshot.digest) throw new Error('Committed tree differs from the verified artifact');
-    const changedFiles = changedPaths(git, baseTree, tree);
-    const id = deliveryId(universeId, options.branch);
-    const commit = existing?.commit ?? (tree === baseTree ? record.manifest.seed.revision : git.oid(['hash-object', '-t', 'commit', '-w', '--stdin'],
-      commitBytes({ id, universeId, trialId: trial.id, artifactDigest: snapshot.digest, tree, baseCommit: record.manifest.seed.revision }, run.finishedAt!)));
-    const intent: UniverseDeliveryReceipt = existing ?? { schemaVersion: 1, id, universeId, trialId: trial.id, runId: run.id, niche: trial.niche,
-      manifestDigest: record.manifestDigest, comparatorDigest: record.comparatorDigest, artifactDigest: snapshot.digest,
-      repo: record.manifest.seed.repo, branch: options.branch, baseCommit: record.manifest.seed.revision, commit, tree, changedFiles,
-      status: 'pending', createdAt: new Date().toISOString(), completedAt: null };
-    assertUniverseExecution(directory, lock);
-    inspectGit(intent, git);
-    if (!existing) persist(directory, intent);
-    // The intent is durable before a branch can become visible. Crash recovery
-    // accepts only this exact commit, never an unrelated existing branch.
-    if (changedFiles.length) {
-      const target = git.ref(options.branch);
-      if (target !== null && target !== commit) throw new Error('Delivery branch conflicts with an existing ref');
-      if (target === null) {
-        assertUniverseExecution(directory, lock);
-        git.assertNotCheckedOut(options.branch);
-        await git.createRef(options.branch, commit);
-      }
-    }
-    const completed: UniverseDeliveryReceipt = { ...intent, status: changedFiles.length ? 'delivered' : 'unchanged', completedAt: new Date().toISOString() };
-    inspectGit(completed, git);
-    assertUniverseExecution(directory, lock);
-    persist(directory, completed);
-    return completed;
-  });
+  }
+  const completed: UniverseDeliveryReceipt = { ...intent, status: changedFiles.length ? 'delivered' : 'unchanged', completedAt: new Date().toISOString() };
+  inspectGit(completed, git);
+  assertUniverseExecution(directory, lock);
+  persist(directory, completed);
+  return completed;
 }
