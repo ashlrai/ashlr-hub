@@ -13,6 +13,7 @@ vi.mock('../src/core/fleet/local-store-lock.js', async (original) => ({
   acquireLocalStoreLockWithOutcome: hooks.acquire, releaseLocalStoreLock: hooks.release,
 }));
 import { recoverControllerRecordLock } from '../src/core/universe/controller-lock-recovery.js';
+import { ControllerRecoveryError, readControllerRecoveryDiagnostic, type ControllerRecoveryErrorCode } from '../src/core/universe/controller-recovery-error.js';
 
 const root = '/private/controller-recovery-fixture';
 const directory = join(root, 'portfolios', 'controller');
@@ -24,6 +25,12 @@ const execution = { path: join(directory, '.execution.lock'), token: 'execution'
 const writer = { path: writerPath, token: 'writer', dev: 1n, ino: 3n } as LocalStoreLock;
 const missing = () => Object.assign(new Error('missing fixture path'), { code: 'ENOENT' });
 const run = () => recoverControllerRecordLock('controller', { root }, execution);
+function expectRecoveryCode(code: ControllerRecoveryErrorCode): void {
+  let failure: unknown;
+  try { run(); } catch (error) { failure = error; }
+  expect(failure).toBeInstanceOf(ControllerRecoveryError);
+  expect(readControllerRecoveryDiagnostic(failure)?.code).toBe(code);
+}
 
 beforeEach(() => {
   for (const hook of Object.values(hooks)) hook.mockReset();
@@ -66,7 +73,7 @@ describe('controller writer-mutex recovery', () => {
 
   it('requires actual controller execution ownership', () => {
     hooks.owns.mockReturnValue(false);
-    expect(run).toThrow('Controller execution ownership unavailable');
+    expectRecoveryCode('controller-execution-ownership-unavailable');
     expect(hooks.stat).not.toHaveBeenCalled();
     expect(hooks.acquire).not.toHaveBeenCalled();
   });
@@ -78,13 +85,13 @@ describe('controller writer-mutex recovery', () => {
 
   it.each(['contended', 'unavailable'])('leaves live or unknown writer ownership untouched: %s', (state) => {
     hooks.acquire.mockReturnValue({ state, lock: null });
-    expect(run).toThrow('Controller record ownership unavailable');
+    expectRecoveryCode(state === 'contended' ? 'controller-record-writer-busy' : 'controller-record-ownership-unavailable');
     expect(hooks.release).not.toHaveBeenCalled();
   });
 
   it('withholds staged publication before any mutex mutation using one bounded entry read', () => {
     hooks.read.mockReturnValue({ name: '.unpublished.stage' });
-    expect(run).toThrow('Controller publication requires explicit recovery');
+    expectRecoveryCode('controller-publication-recovery-required');
     expect(hooks.acquire).not.toHaveBeenCalled();
     expect(hooks.read).toHaveBeenCalledTimes(1);
     expect(hooks.close).toHaveBeenCalledTimes(1);
@@ -102,13 +109,13 @@ describe('controller writer-mutex recovery', () => {
       if (options?.bigint) observations.set(path, (observations.get(path) ?? 0) + 1);
       return { dev: 1n, ino: path === changedPath && (observations.get(path) ?? 0) > 1 ? 2n : 1n };
     });
-    expect(run).toThrow('Controller record storage changed');
+    expectRecoveryCode('controller-record-storage-changed');
     expect(hooks.release).toHaveBeenCalledExactlyOnceWith(writer);
   });
 
   it('does not report success after failed release', () => {
     hooks.release.mockReturnValue(false);
-    expect(run).toThrow('Controller record ownership release failed');
+    expectRecoveryCode('controller-record-release-failed');
   });
 
   it('releases its mutex if outer execution ownership is lost during acquisition', () => {
@@ -122,5 +129,63 @@ describe('controller writer-mutex recovery', () => {
     expect(run).toThrow('read failed');
     expect(hooks.close).toHaveBeenCalledExactlyOnceWith();
     expect(hooks.acquire).not.toHaveBeenCalled();
+  });
+});
+
+describe('allowlisted controller recovery diagnostics', () => {
+  it.each([
+    ['controller-execution-ownership-unavailable', 'Controller execution ownership unavailable for record-lock recovery', 'Do not remove locks manually.'],
+    ['controller-publication-recovery-required', 'Controller publication requires explicit recovery', 'Preserve staged records'],
+    ['controller-record-writer-busy', 'Controller record writer is busy', 'original deadline'],
+    ['controller-record-ownership-unavailable', 'Controller record ownership unavailable', 'Unknown ownership'],
+    ['controller-record-storage-changed', 'Controller record storage changed during ownership recovery', 'Do not recreate or replace ledger directories.'],
+    ['controller-record-release-failed', 'Controller record ownership release failed', 'did not confirm'],
+  ] as const)('maps %s to fixed safe text', (code, message, hint) => {
+    const error = new ControllerRecoveryError(code);
+    expect(error.message).toBe(message);
+    const diagnostic = readControllerRecoveryDiagnostic(error);
+    expect(diagnostic).toEqual({ code, message, nextStep: error.nextStep });
+    expect(diagnostic!.nextStep).toContain(hint);
+  });
+
+  it.each([null, undefined, 'controller-record-writer-busy', new Error('Controller record writer is busy'),
+    { code: 'controller-record-writer-busy', message: 'Controller record writer is busy' },
+    Object.assign(new Error('PRIVATE-CREDENTIAL'), { code: 'controller-record-writer-busy' }),
+  ])('does not classify untyped failure %#', (error) => {
+    expect(readControllerRecoveryDiagnostic(error)).toBeNull();
+  });
+
+  it('does not copy mutable message, cause, or next-step text', () => {
+    const error = new ControllerRecoveryError('controller-record-writer-busy');
+    Object.assign(error, { message: 'PRIVATE-CREDENTIAL', cause: 'PRIVATE-CREDENTIAL', nextStep: 'PRIVATE-CREDENTIAL' });
+    const result = readControllerRecoveryDiagnostic(error);
+    expect(result?.code).toBe('controller-record-writer-busy');
+    expect(JSON.stringify(result)).not.toContain('PRIVATE-CREDENTIAL');
+  });
+
+  it.each(['unknown', '__proto__', 'constructor', null, 42])('rejects a changed nonallowlisted code: %s', (code) => {
+    const error = new ControllerRecoveryError('controller-record-writer-busy');
+    Object.defineProperty(error, 'code', { value: code });
+    expect(readControllerRecoveryDiagnostic(error)).toBeNull();
+  });
+
+  it('does not invoke a code accessor', () => {
+    const error = new ControllerRecoveryError('controller-record-writer-busy');
+    const getter = vi.fn(() => { throw new Error('PRIVATE-CREDENTIAL'); });
+    Object.defineProperty(error, 'code', { get: getter });
+    expect(readControllerRecoveryDiagnostic(error)).toBeNull();
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it('requires an own code rather than an inherited code', () => {
+    const error = Object.create(new ControllerRecoveryError('controller-record-writer-busy')) as unknown;
+    expect(readControllerRecoveryDiagnostic(error)).toBeNull();
+  });
+
+  it('contains inspection failures without revealing their prose', () => {
+    const error = new Proxy(new ControllerRecoveryError('controller-record-writer-busy'), {
+      getOwnPropertyDescriptor: () => { throw new Error('PRIVATE-CREDENTIAL'); },
+    });
+    expect(readControllerRecoveryDiagnostic(error)).toBeNull();
   });
 });

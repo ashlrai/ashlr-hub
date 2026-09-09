@@ -36,6 +36,7 @@ vi.mock('../src/core/universe/delivery.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/delivery.js')>(), readUniverseDeliveries: hooks.deliveries,
 }));
 import { readUniversePortfolioController, runUniversePortfolioController } from '../src/core/universe/portfolio-controller.js';
+import { cmdUniverseController } from '../src/cli/universe-controller.js';
 
 const scratch: string[] = [];
 const HASH = 'a'.repeat(64);
@@ -94,7 +95,9 @@ describe('Controller completed-dispatch recovery', () => {
     const lockBytes = readFileSync(mutex.lock.path);
     try {
       expect(readUniversePortfolioController('controller', f.options).sourceState).toBe('degraded');
-      await expect(runUniversePortfolioController(f.definition, f.options)).rejects.toThrow('publication requires explicit recovery');
+      await expect(runUniversePortfolioController(f.definition, f.options)).rejects.toMatchObject({
+        code: 'controller-publication-recovery-required',
+      });
       expect(readFileSync(stage, 'utf8')).toBe(bytes);
       expect(readFileSync(mutex.lock.path)).toEqual(lockBytes);
       expect(ownsLocalStoreLock(mutex.lock)).toBe(true);
@@ -111,7 +114,9 @@ describe('Controller completed-dispatch recovery', () => {
     const bytes = 'Malformed fixture lock; ownership unknown.\n';
     writeFileSync(writer, bytes, { mode: 0o600, flag: 'wx' });
     expect(readUniversePortfolioController('controller', f.options).sourceState).toBe('degraded');
-    await expect(runUniversePortfolioController(f.definition, f.options)).rejects.toThrow('record ownership unavailable');
+    await expect(runUniversePortfolioController(f.definition, f.options)).rejects.toMatchObject({
+      code: 'controller-record-ownership-unavailable',
+    });
     expect(readFileSync(writer, 'utf8')).toBe(bytes);
     expect(hooks.run).not.toHaveBeenCalled();
   });
@@ -127,6 +132,45 @@ describe('Controller completed-dispatch recovery', () => {
     expect(existsSync(original)).toBe(false);
     expect(readdirSync(retained).sort().map((name) => JSON.parse(readFileSync(join(retained, name), 'utf8')))).toEqual(saved);
     expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['staged', 'controller-publication-recovery-required'],
+    ['live', 'controller-record-writer-busy'],
+    ['malformed', 'controller-record-ownership-unavailable'],
+  ] as const)('reports %s startup evidence through the real CLI without altering it', async (kind, reasonCode) => {
+    const f = fixture(); f.requireRuntime();
+    await runUniversePortfolioController(f.definition, f.options);
+    const ledger = join(f.directory, 'ledger');
+    const saved = f.events();
+    const manifest = join(f.root, 'private-manifest.json');
+    writeFileSync(manifest, JSON.stringify(f.definition), { mode: 0o600, flag: 'wx' });
+    const writerPath = join(ledger, '.records.lock');
+    const stage = join(ledger, 'staging', '.private-fixture.stage.tmp');
+    let mutex;
+    if (kind === 'malformed') writeFileSync(writerPath, 'PRIVATE-EVIDENCE unknown writer', { mode: 0o600, flag: 'wx' });
+    else {
+      const acquired = acquireLocalStoreLockWithOutcome(writerPath, 0, { anchorPath: f.directory, exactPrivateStorage: true });
+      if (acquired.state !== 'acquired') throw new Error('Fixture writer unavailable');
+      mutex = acquired.lock;
+      if (kind === 'staged') writeFileSync(stage, 'PRIVATE-EVIDENCE unpublished', { mode: 0o600, flag: 'wx' });
+    }
+    const writer = readFileSync(writerPath);
+    const output = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      expect(await cmdUniverseController(['run', '--manifest', manifest, '--root', f.root, '--json'])).toBe(1);
+      const text = String(output.mock.calls.at(-1)![0]);
+      expect(JSON.parse(text)).toEqual({ error: expect.any(String), reasonCode, nextStep: expect.any(String) });
+      expect(text).not.toContain(f.root);
+      expect(text).not.toContain('PRIVATE-EVIDENCE');
+      expect(readFileSync(writerPath)).toEqual(writer);
+      if (mutex) expect(ownsLocalStoreLock(mutex)).toBe(true);
+      if (kind === 'staged') expect(readFileSync(stage, 'utf8')).toBe('PRIVATE-EVIDENCE unpublished');
+      expect(readdirSync(join(ledger, 'records')).sort().map((name) =>
+        JSON.parse(readFileSync(join(ledger, 'records', name), 'utf8')))).toEqual(saved);
+      expect(existsSync(join(f.directory, '.execution.lock'))).toBe(false);
+      expect(hooks.run).not.toHaveBeenCalled();
+    } finally { if (mutex) releaseLocalStoreLock(mutex); }
   });
 
   it('persists a UUID before execution and passes that exact identity to the runner', async () => {
