@@ -1,6 +1,6 @@
 import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 
-const USAGE = `usage: ashlr resources profile prepare --provider codex|claude
+const USAGE = `usage: ashlr resources profile prepare --provider codex|claude|grok
   --directory NEW_ABS --executable ABS [--json]
 
 Creates one new private profile under an existing owned mode-0700 parent.
@@ -18,7 +18,8 @@ Node with process.execve support and a supported POSIX platform are required.
 --executable must name a canonical regular executable file, not an install symlink.
 Output includes private local paths, never authentication material.
 Exit codes: 0 prepared (authentication not checked), 1 preparation unavailable,
-2 invalid arguments. Grok profile execution is not supported by this command.
+2 invalid arguments. Grok preparation supports separate native login/metadata;
+it does not enable a Grok task-generation adapter.
 `;
 class UsageError extends Error {}
 
@@ -37,7 +38,7 @@ function parse(args: string[]) {
     values.set(flag, value);
   }
   const provider = values.get('--provider');
-  if (provider !== 'codex' && provider !== 'claude') throw new UsageError('Expected codex or claude provider');
+  if (provider !== 'codex' && provider !== 'claude' && provider !== 'grok') throw new UsageError('Expected codex, claude or grok provider');
   const path = (flag: string) => {
     const value = values.get(flag);
     if (!value || !isAbsolute(value) || resolve(value) !== value || parsePath(value).root === value) {

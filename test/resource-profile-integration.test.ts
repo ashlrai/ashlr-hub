@@ -1,5 +1,5 @@
 /** Installed-style built CLI with temporary private profiles and inert native help. */
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -18,13 +18,14 @@ function invoke(cwd: string, args: string[]): Promise<{ code: number; stdout: st
   return new Promise((done, reject) => execFile(process.execPath, [CLI, ...args], { cwd, encoding: 'utf8', timeout: 15_000, maxBuffer: 1024 * 1024,
     env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR, LC_ALL: 'C',
       OPENAI_API_KEY: 'inert-key-must-not-pass', ANTHROPIC_API_KEY: 'inert-key-must-not-pass',
-      CODEX_HOME: '/fixture/ambient-codex', CLAUDE_CONFIG_DIR: '/fixture/ambient-claude', ANTHROPIC_CONFIG_DIR: '/fixture/ambient-anthropic' } },
+      CODEX_HOME: '/fixture/ambient-codex', CLAUDE_CONFIG_DIR: '/fixture/ambient-claude', ANTHROPIC_CONFIG_DIR: '/fixture/ambient-anthropic',
+      GROK_HOME: '/fixture/ambient-grok', XAI_API_KEY: 'inert-key-must-not-pass' } },
   (error, stdout, stderr) => {
     if (error && (error.killed || error.signal || typeof error.code !== 'number')) { reject(error); return; }
     done({ code: error?.code ?? 0, stdout, stderr });
   }));
 }
-function fixture(provider: 'codex' | 'claude' = 'codex') {
+function fixture(provider: 'codex' | 'claude' | 'grok' = 'codex') {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'resource-profile-cli-'))); roots.push(base);
   const cwd = join(base, 'help-cwd'); mkdirSync(cwd, { mode: 0o700 });
   const executable = join(base, 'inert-native'); const marker = join(base, 'invocations.jsonl');
@@ -90,9 +91,24 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
     expect(readdirSync(first.nativeStatePath)).toEqual([]); expect(readdirSync(second.nativeStatePath)).toEqual([]); expect(f.events()).toEqual([]);
   });
   it('rejects unsupported providers before creating storage or running the executable', async () => {
-    const f = fixture(); const before = tree(f.base); const result = await f.prepare(f.directory, 'grok');
-    expect(result.code).toBe(2); expect(JSON.parse(result.stdout)).toEqual({ error: 'Expected codex or claude provider' });
+    const f = fixture(); const before = tree(f.base); const result = await f.prepare(f.directory, 'unsupported-provider');
+    expect(result.code).toBe(2); expect(JSON.parse(result.stdout)).toEqual({ error: 'Expected codex, claude or grok provider' });
     expect(existsSync(f.directory)).toBe(false); expect(f.events()).toEqual([]); expect(tree(f.base)).toEqual(before);
+  });
+  it('prepares an isolated Grok login locator and forwards help without enabling task execution', async () => {
+    const f = fixture('grok'); const result = await f.prepare();
+    expect(result.code).toBe(0); expect(result.stderr).toBe('');
+    const profile = JSON.parse(result.stdout) as ResourceNativeProfile;
+    expect(profile).toMatchObject({ provider: 'grok', authentication: 'not-checked', anthropicStatePath: null });
+    expect(profile.loginCommand).toEqual([...profile.command, '--no-auto-update', 'login', '--oauth']);
+    expect(f.events()).toEqual([]); expect(readdirSync(profile.nativeStatePath)).toEqual([]);
+    const before = tree(profile.directory);
+    execFileSync(profile.command[0]!, [...profile.command.slice(1), '--help'], { cwd: f.cwd, encoding: 'utf8', timeout: 5000,
+      env: { PATH: process.env.PATH, HOME: process.env.HOME, GROK_HOME: '/fixture/ambient-grok', XAI_API_KEY: 'inert-key-must-not-pass' } });
+    expect(f.events()).toHaveLength(1); expect(f.events()[0].args).toEqual(['--help']);
+    expect(f.events()[0].env.GROK_HOME).toBe(profile.nativeStatePath); expect(f.events()[0].env).not.toHaveProperty('XAI_API_KEY');
+    expect(f.events()[0].env).not.toHaveProperty('CLAUDE_CONFIG_DIR');
+    expect(tree(profile.directory)).toEqual(before);
   });
   it('rejects install symlinks before creating profile storage', async () => {
     const f = fixture(); const link = join(f.base, 'install-link'); symlinkSync(f.executable, link);

@@ -15,7 +15,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('native profile preparation CLI', () => {
-  it.each(['codex', 'claude'])('prepares only the exact %s target and returns unauthenticated metadata', async (provider) => {
+  it.each(['codex', 'claude', 'grok'])('prepares only the exact %s target and returns unauthenticated metadata', async (provider) => {
     const input = [...args]; input[3] = provider;
     expect(await cmdResources([...input, '--json'])).toBe(0);
     expect(backend.prepare).toHaveBeenCalledWith({ provider, directory, executable: '/private/native' });
@@ -30,7 +30,7 @@ describe('native profile preparation CLI', () => {
     expect(await cmdResources(['profile', ...input])).toBe(0); expect(backend.prepare).not.toHaveBeenCalled(); expect(backend.legacy).not.toHaveBeenCalled();
   });
   it.each([
-    [], ['prepare'], ['prepare', '--provider', 'grok'], ['prepare', '--help'], ['--help', '--json'],
+    [], ['prepare'], ['prepare', '--provider', 'unsupported-provider'], ['prepare', '--help'], ['--help', '--json'],
     ['prepare', '--provider', 'codex', '--directory', directory],
     ['prepare', '--provider', 'codex', '--directory', 'relative', '--executable', '/private/native'],
     ['prepare', '--provider', 'codex', '--directory', '/private/../x', '--executable', '/private/native'],

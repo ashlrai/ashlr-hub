@@ -8,9 +8,10 @@ import type { ReadProjectionWorkerHandle } from '../src/core/web/bounded-read-wo
 import { MAX_UNIVERSE_CONSOLE_RESPONSE_BYTES } from '../src/core/web/universe-console-public.js';
 
 // The parent transport must never fall back to computing a raw local overview.
-const forbidden = vi.hoisted(() => ({ overview: vi.fn(), graph: vi.fn(), config: vi.fn(), gc: vi.fn() }));
+const forbidden = vi.hoisted(() => ({ overview: vi.fn(), graph: vi.fn(), readiness: vi.fn(), config: vi.fn(), gc: vi.fn() }));
 vi.mock('../src/core/universe/overview.js', () => ({ readUniverseOverview: forbidden.overview }));
 vi.mock('../src/core/universe/graph-reader.js', () => ({ readUniverseGraph: forbidden.graph }));
+vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampaignReadiness: forbidden.readiness }));
 vi.mock('../src/core/config.js', () => ({ loadConfig: forbidden.config }));
 vi.mock('../src/core/run/streaming.js', () => ({ gcRunStreams: forbidden.gc }));
 
@@ -42,6 +43,29 @@ afterEach(async () => {
 });
 
 describe('scoped console bounded reader', () => {
+  it('coalesces only pending same-campaign reads, separating other campaigns and graph kinds', async () => {
+    const { reader, workers } = harness();
+    const first = reader.campaignReadiness('one'); const duplicate = reader.campaignReadiness('one');
+    const second = reader.campaignReadiness('two'); const graph = reader.graph('one');
+    const worker = workers[0]!;
+    expect(worker.requests).toHaveLength(1);
+    expect(worker.requests[0]).toMatchObject({ kind: 'campaign-readiness', payload: { campaignId: 'one' } });
+    worker.result(0, json); await Promise.all([first, duplicate]);
+    expect(worker.requests[1]).toMatchObject({ kind: 'campaign-readiness', payload: { campaignId: 'two' } });
+    worker.result(1, json); await second;
+    expect(worker.requests[2]).toMatchObject({ kind: 'graph', payload: { universeId: 'one' } });
+    worker.result(2, json); await graph;
+    const reread = reader.campaignReadiness('one');
+    expect(worker.requests).toHaveLength(4); worker.result(3, json); await reread;
+  });
+
+  it('times out readiness in the bounded worker with no inline fallback', async () => {
+    const { reader, workers } = harness(50); const pending = reader.campaignReadiness('one');
+    const failure = expect(pending).rejects.toMatchObject({ code: 'READ_PROJECTION_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(50); await failure;
+    expect(workers[0]!.terminate).toHaveBeenCalledOnce();
+  });
+
   it.each(['relative', '', '/', '/tmp/\nprivate', '/tmp/\u007fprivate', `/tmp/${'x'.repeat(4096)}`])(
     'rejects invalid roots before worker creation %#', (value) => {
       const factory = vi.fn();
@@ -56,6 +80,8 @@ describe('scoped console bounded reader', () => {
   it.each([
     ['overview', { root }], ['graph', { universeId: 'one', root }], ['graph', { universeId: ['one'] }],
     ['graph', { universeId: '../one' }], ['graph', {}], ['execute', undefined],
+    ['campaign-readiness', { campaignId: 'one', root }], ['campaign-readiness', { campaignId: '../one' }],
+    ['campaign-readiness', { campaignId: 'one', universeId: 'one' }], ['campaign-readiness', undefined],
   ])('rejects browser scope and unsupported operation %#', (kind, payload) => {
     expect(() => normalizeUniverseConsoleRead(kind, payload)).toThrow('Invalid Universe console read');
   });

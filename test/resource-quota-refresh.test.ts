@@ -100,6 +100,35 @@ describe('pinned managed quota configuration', () => {
 });
 
 describe('foreground quota refresh lifecycle', () => {
+  it.each(['reject', 'throw', 'missing', 'null', 'unknown', 'accessor'])('treats %s after invocation as terminal cleanup uncertainty', async (kind) => {
+    const f = fixture(); const getter = vi.fn(() => 'failed');
+    const probe = vi.fn((): Promise<CodexResourceProbeResult> => {
+      if (kind === 'throw') throw new Error('PRIVATE native detail');
+      if (kind === 'reject') return Promise.reject(new Error('PRIVATE native detail'));
+      const value = kind === 'null' ? null : kind === 'unknown' ? { status: 'unexpected' } :
+        kind === 'accessor' ? Object.defineProperty({}, 'status', { get: getter }) : {};
+      return Promise.resolve(value as CodexResourceProbeResult);
+    });
+    const handle = start({ ...f.options, _probe: probe }); await firstCycle();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(probe).toHaveBeenCalledTimes(1); expect(getter).not.toHaveBeenCalled();
+    expect(handle.snapshot()).toMatchObject({ state: 'closed', workers: [
+      { workerId: 'codex-a', status: 'uncertain', reason: 'managed-quota-uncertain', nextAttemptAt: null },
+      { workerId: 'codex-b', status: 'closed' }] });
+    expect(handle.unavailableWorkerIds()).toEqual(['codex-a', 'codex-b']);
+    expect(JSON.stringify(handle.snapshot())).not.toContain('PRIVATE');
+    await expect(handle.close()).rejects.toThrow('termination unconfirmed');
+  });
+
+  it('keeps cleanup uncertain when an in-flight probe rejects after close begins', async () => {
+    const f = fixture(); let reject!: (error: Error) => void;
+    const probe = vi.fn(() => new Promise<CodexResourceProbeResult>((_resolve, fail) => { reject = fail; }));
+    const handle = start({ ...f.options, _probe: probe }); await firstCycle();
+    const closing = expect(handle.close()).rejects.toThrow('termination unconfirmed');
+    reject(new Error('PRIVATE late rejection')); await closing;
+    expect(probe).toHaveBeenCalledTimes(1); expect(handle.snapshot().workers[0]!.status).toBe('uncertain');
+  });
+
   it('starts only on explicit creation, withholds missing readings, and reads never trigger probes', async () => {
     const f = fixture(); const probe = vi.fn(async (options: CodexResourceProbeOptions) => success(options));
     validateResourceQuotaRefreshConfig(f.config, f.pool, f.bindings); expect(probe).not.toHaveBeenCalled();

@@ -462,14 +462,14 @@ describe('UniverseView', () => {
     expect(within(campaigns).queryByRole('button', { name: /pause|stop/i })).not.toBeInTheDocument();
   });
 
-  it('stops campaign polling after a terminal update', async () => {
+  it('returns to slower idle discovery after a terminal update', async () => {
     const active = overview({ campaigns: [campaign()] });
     const stopped = overview({ campaigns: [campaign({ state: 'stopped', reason: 'owner-stop' })] });
     const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(active))).mockResolvedValueOnce(new Response(JSON.stringify(stopped)));
     vi.stubGlobal('fetch', fetch);
     let tick: (() => void) | undefined;
-    vi.spyOn(window, 'setInterval').mockImplementation((handler) => {
-      tick = handler as () => void;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, delay) => {
+      if (delay === 3_000 || delay === 15_000) tick = handler as () => void;
       return 47 as unknown as ReturnType<typeof window.setInterval>;
     });
     const clear = vi.spyOn(window, 'clearInterval');
@@ -478,6 +478,79 @@ describe('UniverseView', () => {
     await act(async () => { tick?.(); });
     await screen.findByText('owner-stop');
     expect(clear).toHaveBeenCalledWith(47);
+    expect(vi.mocked(window.setInterval).mock.calls.filter(([, delay]) => delay === 3_000 || delay === 15_000).at(-1)?.[1]).toBe(15_000);
+    expect(screen.getByText('Refreshes every 15 seconds while visible')).toBeInTheDocument();
+  });
+
+  it.each(['empty', 'ready'] as const)('discovers externally started campaigns from an %s view', async (state) => {
+    let tick: (() => void) | undefined;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, delay) => {
+      if (delay === 3_000 || delay === 15_000) tick = handler as () => void;
+      return 48 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const initial = state === 'empty' ? overview({ universes: [] }) :
+      overview({ campaigns: [campaign({ state: 'ready', owner: null, reason: null })] });
+    const fetch = mount(initial);
+    await screen.findByText('Refreshes every 15 seconds while visible');
+    await waitFor(() => expect(screen.queryByLabelText('Loading Universe experiments')).not.toBeInTheDocument());
+    expect(vi.mocked(window.setInterval).mock.calls.filter(([, delay]) => delay === 3_000 || delay === 15_000).at(-1)?.[1]).toBe(15_000);
+    fetch.mockResolvedValueOnce(new Response(JSON.stringify(overview({ campaigns: [campaign()] }))));
+    await act(async () => { tick?.(); });
+    await screen.findByText('Refreshes every 3 seconds while visible');
+    expect(vi.mocked(window.setInterval).mock.calls.filter(([, delay]) => delay === 3_000 || delay === 15_000).at(-1)?.[1]).toBe(3_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([false, true])('skips hidden polling and immediately refreshes on restoration (active=%s)', async (active) => {
+    let visibility: DocumentVisibilityState = 'visible'; let tick: (() => void) | undefined;
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility);
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, delay) => {
+      if (delay === 3_000 || delay === 15_000) tick = handler as () => void;
+      return 49 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const fetch = mount(overview({ campaigns: active ? [campaign()] : [] }));
+    await screen.findByRole('heading', { name: 'Population archive' });
+    visibility = 'hidden';
+    await act(async () => { tick?.(); document.dispatchEvent(new Event('visibilitychange')); });
+    expect(fetch).toHaveBeenCalledOnce();
+    visibility = 'visible';
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
+    await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  });
+
+  it('coalesces an interval tick and visibility restoration while a read is pending', async () => {
+    let tick: (() => void) | undefined;
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, delay) => {
+      if (delay === 3_000 || delay === 15_000) tick = handler as () => void;
+      return 50 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const body = overview(); const fetch = mount(body);
+    await screen.findByRole('heading', { name: 'Population archive' });
+    let finish!: (response: Response) => void;
+    fetch.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    await act(async () => { tick?.(); document.dispatchEvent(new Event('visibilitychange')); tick?.(); });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await act(async () => { finish(new Response(JSON.stringify(body))); });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('cleans up idle timers and visibility listeners without issuing reads after unmount', async () => {
+    let tick: (() => void) | undefined;
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, delay) => {
+      if (delay === 3_000 || delay === 15_000) tick = handler as () => void;
+      return 51 as unknown as ReturnType<typeof window.setInterval>;
+    });
+    const clear = vi.spyOn(window, 'clearInterval');
+    const add = vi.spyOn(document, 'addEventListener'); const remove = vi.spyOn(document, 'removeEventListener');
+    const fetch = vi.fn(async () => new Response(JSON.stringify(overview()))); vi.stubGlobal('fetch', fetch);
+    const { unmount } = render(<MemoryRouter><UniverseView /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Population archive' });
+    const listener = add.mock.calls.find(([event]) => event === 'visibilitychange')![1];
+    unmount();
+    expect(clear).toHaveBeenCalledWith(51); expect(remove).toHaveBeenCalledWith('visibilitychange', listener);
+    await act(async () => { tick?.(); document.dispatchEvent(new Event('visibilitychange')); });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it('keeps incomplete campaign spend separate from the recorded subtotal', async () => {
@@ -490,7 +563,8 @@ describe('UniverseView', () => {
     expect(within(campaigns).getByText('240')).toBeInTheDocument();
     expect(within(campaigns).getByText('Unavailable')).toBeInTheDocument();
     expect(within(campaigns).getByText(/recorded subtotal is not proof of complete spend/)).toBeInTheDocument();
-    expect(within(campaigns).getByText(/ashlr universe campaign run compiler-search/)).toBeInTheDocument();
+    expect(within(campaigns).queryByText(/ashlr universe campaign run compiler-search/)).not.toBeInTheDocument();
+    expect(within(campaigns).getByText(/ashlr universe campaign check compiler-search/)).toBeInTheDocument();
   });
 
   it('marks degraded campaign progress as unavailable rather than verified counters', async () => {
@@ -509,6 +583,56 @@ describe('UniverseView', () => {
     const campaigns = await screen.findByRole('region', { name: 'Campaigns' });
     expect(within(campaigns).getByText('compiler-search')).toBeInTheDocument();
     expect(within(campaigns).queryByText('other-search')).not.toBeInTheDocument();
+  });
+
+  it('checks only the selected campaign on demand and resets the disclosure when selection changes', async () => {
+    const user = userEvent.setup(); const first = campaign(); const second = campaign({ state: 'paused' });
+    second.definition = { ...second.definition, id: 'other-search' };
+    const body = overview({ campaigns: [first, second] });
+    const fetch = vi.fn(async (path: string) => new Response(JSON.stringify(path === '/api/universe' ? body : {
+      schemaVersion: 1, readinessScope: 'recorded-campaign-evidence', campaignId: new URL(path, 'http://localhost').searchParams.get('campaignId'),
+      universeId: 'compiler', observedState: 'running', sourceState: 'healthy', disposition: 'owned', reasonCode: 'owner-active',
+      resourceRuntimeRequired: true, sampledAt: '2026-09-08T12:00:00.000Z',
+    })));
+    vi.stubGlobal('fetch', fetch); render(<MemoryRouter><UniverseView /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Autonomous campaign' });
+    expect(fetch).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole('button', { name: 'Check recorded readiness' }));
+    await screen.findByText('Campaign owner was recorded active');
+    expect(fetch).toHaveBeenLastCalledWith('/api/universe/campaign-readiness?campaignId=compiler-search', expect.any(Object));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Campaign' }), 'other-search');
+    expect(screen.queryByRole('heading', { name: 'Last recorded check' })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    await user.click(screen.getByRole('button', { name: 'Check recorded readiness' }));
+    await screen.findByText('Campaign owner was recorded active');
+    expect(fetch).toHaveBeenLastCalledWith('/api/universe/campaign-readiness?campaignId=other-search', expect.any(Object));
+  });
+
+  it('does not refresh readiness with overview polling or turn a previous result into current advice', async () => {
+    const user = userEvent.setup(); let tick: (() => void) | undefined;
+    const originalInterval = window.setInterval.bind(window);
+    vi.spyOn(window, 'setInterval').mockImplementation((handler, delay, ...args) => {
+      if (delay === 3_000 || delay === 15_000) { tick = handler as () => void; return 52 as unknown as ReturnType<typeof window.setInterval>; }
+      return originalInterval(handler, delay, ...args) as unknown as ReturnType<typeof window.setInterval>;
+    });
+    let current = overview({ campaigns: [campaign({ state: 'ready' })] });
+    const fetch = vi.fn(async (path: string) => new Response(JSON.stringify(path === '/api/universe' ? current : {
+      schemaVersion: 1, readinessScope: 'recorded-campaign-evidence', campaignId: 'compiler-search', universeId: 'compiler',
+      observedState: 'ready', sourceState: 'healthy', disposition: 'startable', reasonCode: 'never-started',
+      resourceRuntimeRequired: false, sampledAt: '2026-09-08T12:00:00.000Z',
+    })));
+    vi.stubGlobal('fetch', fetch); render(<MemoryRouter><UniverseView /></MemoryRouter>);
+    await screen.findByRole('heading', { name: 'Autonomous campaign' });
+    await user.click(screen.getByRole('button', { name: 'Check recorded readiness' }));
+    await screen.findByText('Recorded evidence permitted a run attempt');
+    current = overview({ campaigns: [campaign({ state: 'stopped', reason: 'owner-stop' })] });
+    await act(async () => { tick?.(); });
+    await screen.findByText('owner-stop');
+    expect(fetch.mock.calls.filter(([path]) => path.includes('campaign-readiness'))).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: 'Last recorded check' })).toBeInTheDocument();
+    expect(screen.getByText('Recorded evidence permitted a run attempt')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^run|^start/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/ashlr universe campaign run compiler-search/)).not.toBeInTheDocument();
   });
 
   it('shows evaluator diagnostic codes without rendering messages or private locations, including raw details', async () => {

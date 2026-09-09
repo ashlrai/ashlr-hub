@@ -6,6 +6,23 @@
  */
 @import "./tokens.css";
 
+/* Bundled with the application: the console never contacts a font CDN. */
+@font-face {
+  font-family: "Space Grotesk";
+  src: url("./fonts/SpaceGrotesk.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 300 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "IBM Plex Sans";
+  src: url("./fonts/IBMPlexSans.ttf") format("truetype");
+  font-style: normal;
+  font-weight: 100 700;
+  font-display: swap;
+}
+
 *,
 *::before,
 *::after {
@@ -76,6 +93,13 @@ h5,
 h6,
 p {
   margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  letter-spacing: -0.025em;
 }
 
 /* ---------------------------------------------------------------------------

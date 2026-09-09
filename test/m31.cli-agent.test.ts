@@ -96,6 +96,7 @@ describe('completions', () => {
     for (const cmd of TOP_LEVEL_COMMANDS) expect(script).toContain(`'${cmd}'`);
     expect(script).toContain("fleet) _values 'subcommand'");
     expect(script).toContain("'evidence'");
+    expect(script).toContain("runtime) _values 'subcommand' 'install' 'status' 'rollback' 'run' ;;");
   });
 
   it('bash script emits a complete -F registration', async () => {
@@ -109,6 +110,7 @@ describe('completions', () => {
       process.stdout.write = orig;
     }
     expect(chunks.join('')).toContain('complete -F _ashlr_completions ashlr');
+    expect(chunks.join('')).toContain('runtime) COMPREPLY=( $(compgen -W "install status rollback run" -- "$cur") ) ;;');
   });
 
   it('unknown shell returns exit 2', async () => {
@@ -134,6 +136,7 @@ describe('didYouMean', () => {
     expect(didYouMean('staus')).toBe('status');
     expect(didYouMean('orint')).toBe('orient');
     expect(didYouMean('inbx')).toBe('inbox');
+    expect(didYouMean('runtim')).toBe('runtime');
   });
 
   it('returns null for nothing-like-a-command input', () => {

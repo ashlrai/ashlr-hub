@@ -452,6 +452,7 @@ describe('serveStatic — Content-Type mapping', () => {
     ['app.js', 'console.log(1);', 'javascript'],
     ['styles.css', 'body{}', 'text/css'],
     ['manifest.json', '{}', 'application/json'],
+    ['interface.ttf', 'test-owned-font-bytes', 'font/ttf'],
   ];
 
   for (const [filename, fileContent, expectedType] of cases) {

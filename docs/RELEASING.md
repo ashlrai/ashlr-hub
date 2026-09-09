@@ -26,11 +26,43 @@ its immutable package version, or repeat its promotion effect. Their frozen
 workflow assertions remain valuable fail-closed evidence, but a future release
 requires a separately reviewed successor contract.
 
+## Current 3.4.0 release readiness
+
+Rechecked on 2026-09-08: npm `latest` and `candidate` still resolve to `3.3.2`,
+and GitHub Actions remains repository-disabled. Keep Actions disabled; all
+successor verification runs locally.
+
+Report each delivery layer separately:
+
+| Layer | Required evidence |
+| --- | --- |
+| Source delivery | Reviewed changes committed and pushed to an exact Git revision. This does not publish a package. |
+| Local release verification | A passing M571 receipt and matching tarball, independently verified against their exact source and policy pins. Earlier receipts do not cover later source changes. |
+| npm publication and promotion | A supported successor publisher, verified registry identity, package acceptance, and a separately authorized production promotion. A local receipt alone does not provide these. |
+| Runtime activation | Installation and live acceptance of the intended runtime, with its actual service, provider, and resource-control state verified. Registry availability does not activate a fleet. |
+
+The tracked 3.4.0 policy binds an earlier artifact and merge parent; it is not
+ready to attest the newer Universe changes. Before running the gate, rebind the
+policy to the new reproducible tarball SRI, committed verification-contract
+digest, and exact protected first parent. The tested source must be an exactly
+clean **two-parent merge** whose first parent matches that policy; an ordinary
+feature commit or dirty checkout does not qualify. Keep the candidate release
+tag absent during this verification. See the canonical
+[M570 policy contract](contracts/CONTRACT-M570.md) and
+[M571 local verification contract](contracts/CONTRACT-M571.md).
+
+There is currently no supported local 3.4.0 publisher/provenance lane in this
+repository. That successor path must be reviewed before npm publication; do
+not repurpose the frozen 3.3.2 workflow, disable provenance to make a publish
+succeed, or use a token/OTP fallback that bypasses its release checks. Source
+delivery and local verification can proceed without claiming npm production
+or fleet activation.
+
 ## Local verification for the 3.4.0 successor
 
-GitHub Actions are repository-disabled. The tracked M570 policy for 3.4.0 is
-verified entirely on the local macOS host with the M571 gate; local verification
-does not itself authorize or perform publication or promotion.
+The M571 gate verifies the tracked M570 policy entirely on the local macOS
+host; local verification does not itself authorize or perform publication or
+promotion.
 
 The policy must bind the exact committed `ashlr.verify.json` digest and the
 expected tarball SRI. With exact Node 24+ and npm 11+ versions from that policy

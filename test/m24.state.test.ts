@@ -741,15 +741,17 @@ describe('M24 daemon singleton lock', () => {
       const readyPath = path.join(tmpHome, `reclaim-ready-${index}`);
       const resultPath = path.join(tmpHome, `reclaim-result-${index}.json`);
       const script = `
-        import { existsSync, writeFileSync } from 'node:fs';
+        import { existsSync, renameSync, writeFileSync } from 'node:fs';
         import { acquireDaemonLock, releaseDaemonLock } from ${JSON.stringify(stateModuleUrl)};
         const sleep = new Int32Array(new SharedArrayBuffer(4));
         writeFileSync(${JSON.stringify(readyPath)}, 'ready');
         while (!existsSync(${JSON.stringify(goPath)})) Atomics.wait(sleep, 0, 0, 5);
         const result = acquireDaemonLock({ staleMs: 0 });
-        writeFileSync(${JSON.stringify(resultPath)}, JSON.stringify(result.acquired
+        // Existence is the parent's publication witness, so expose complete JSON only.
+        writeFileSync(${JSON.stringify(`${resultPath}.tmp`)}, JSON.stringify(result.acquired
           ? { acquired: true, token: result.lock.token, replacedStale: result.replacedStale }
           : { acquired: false, reason: result.reason, ownerToken: result.owner?.token ?? null }));
+        renameSync(${JSON.stringify(`${resultPath}.tmp`)}, ${JSON.stringify(resultPath)});
         if (result.acquired) {
           while (!existsSync(${JSON.stringify(releasePath)})) Atomics.wait(sleep, 0, 0, 5);
           releaseDaemonLock(result.lock);

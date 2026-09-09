@@ -34,6 +34,53 @@ function setup() {
 }
 
 describe('resource dispatch desk', () => {
+  it('keeps the desk useful when configured metadata collection was blocked at startup', async () => {
+    const f = setup(); f.scope.quotaRefreshEnabled = true; f.scope.connectionsEnabled = true;
+    f.snapshot.metadataCollector = { state: 'blocked', reasonCode: 'reconciliation-required', sampledAt: f.snapshot.sampledAt };
+    delete f.snapshot.quotaRefresh; delete f.snapshot.connections;
+    render(<ResourcePoolView scope={f.scope} />);
+    expect(await screen.findByText('Collection blocked')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Fleet map' })).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Task activity' })).toBeVisible();
+    expect(screen.getByText(/The retained marker was not removed/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: /retry collector|restart collector/i })).not.toBeInTheDocument();
+    expect(f.request.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+  });
+
+  it('puts the fleet workspace before account and performance detail with real section links', async () => {
+    const f = setup(); render(<ResourcePoolView scope={f.scope} />);
+    const navigation = await screen.findByRole('navigation', { name: 'Resource sections' });
+    const fleet = screen.getByRole('region', { name: 'Fleet workspace' });
+    const accounts = screen.getByRole('region', { name: 'Accounts and quota' });
+    const performance = screen.getByRole('region', { name: 'Performance and usage' });
+    for (const [label, target] of [['Fleet', fleet], ['Accounts', accounts], ['Performance', performance]] as const) {
+      expect(within(navigation).getByRole('link', { name: label })).toHaveAttribute('href', `#${target.id}`);
+      expect(target).toHaveAttribute('tabindex', '-1');
+    }
+    expect(fleet.compareDocumentPosition(accounts) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(accounts.compareDocumentPosition(performance) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(fleet).getByRole('heading', { name: 'Fleet map' })).toBeInTheDocument();
+    expect(within(fleet).getByRole('heading', { name: 'Task activity' })).toBeInTheDocument();
+    expect(within(fleet).getByRole('complementary', { name: 'Resource workspace' })).toBeInTheDocument();
+    expect(within(performance).getByRole('heading', { name: 'Worker performance' })).toBeInTheDocument();
+    expect(within(performance).getByText(/Completed tasks are not verified accepted changes/)).toBeInTheDocument();
+    expect(f.request.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+  });
+
+  it('navigates between sections without submitting work or clearing an unsent task', async () => {
+    const f = setup(); const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await user.type(await screen.findByLabelText('What should this task do?'), 'Keep this draft while comparing accounts.');
+    const navigation = within(screen.getByRole('navigation', { name: 'Resource sections' }));
+    await user.click(navigation.getByRole('link', { name: 'Accounts' }));
+    await waitFor(() => expect(window.location.hash).toBe('#resource-accounts'));
+    await user.click(navigation.getByRole('link', { name: 'Performance' }));
+    await waitFor(() => expect(window.location.hash).toBe('#resource-performance'));
+    await user.click(navigation.getByRole('link', { name: 'Fleet' }));
+    await waitFor(() => expect(window.location.hash).toBe('#resource-fleet'));
+    expect(screen.getByLabelText('What should this task do?')).toHaveValue('Keep this draft while comparing accounts.');
+    expect(f.request.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false);
+  });
+
   it('opens focused inspection from the map and preserves an unsent draft', async () => {
     const f = setup(); const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
     await user.type(await screen.findByLabelText('What should this task do?'), 'Preserve this design investigation.');
@@ -239,16 +286,25 @@ describe('resource dispatch desk', () => {
 
   it.each([false, true])('keeps failed-read gates and historical labels during a pending retry (paused=%s)', async (paused) => {
     const f = setup(); f.snapshot.supervisor!.paused = paused; setMutationToken('d'.repeat(64));
+    f.snapshot.quotaRefresh = { schemaVersion: 1, scope: 'codex-native-metadata', state: 'running', sampledAt: f.snapshot.sampledAt,
+      workers: [{ workerId: 'codex-a', status: 'observed', reason: 'managed-quota-observed', lastAttemptAt: f.snapshot.sampledAt,
+        lastSuccessAt: f.snapshot.sampledAt, nextAttemptAt: f.snapshot.sampledAt }] };
     const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
     await screen.findByRole('heading', { name: 'Routing board' });
+    const quotaPanel = within(screen.getByRole('region', { name: 'Native quota read status' }));
+    expect(quotaPanel.getByText('Observed')).toBeVisible();
     f.request.mockResolvedValueOnce(json({ error: 'unavailable' }, 503));
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('last successful read');
+    expect(quotaPanel.getByText('Last reported: Observed')).toBeVisible();
+    expect(quotaPanel.queryByText(/Foreground collection enabled/)).not.toBeInTheDocument();
     let finishRetry!: (response: Response) => void;
     f.request.mockImplementationOnce(() => new Promise<Response>((resolve) => { finishRetry = resolve; }));
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
     expect(screen.getByRole('button', { name: 'Refresh' })).toBeDisabled();
     expect(screen.getByRole('alert')).toHaveTextContent('last successful read');
+    expect(quotaPanel.getByText('Last reported: Observed')).toBeVisible();
+    expect(quotaPanel.getByRole('columnheader', { name: 'Previously scheduled attempt' })).toBeVisible();
     expect(screen.getByText('Last observed preview:')).toBeInTheDocument();
     expect(screen.queryByText('Next eligible worker:')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Queue task' })).toBeDisabled();
@@ -262,6 +318,9 @@ describe('resource dispatch desk', () => {
     expect(screen.getByRole('button', { name: 'Cancel owned task' })).toBeEnabled();
     await act(async () => { finishRetry(json(f.snapshot)); });
     await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+    expect(quotaPanel.getByText('Observed')).toBeVisible();
+    expect(quotaPanel.queryByText('Last reported: Observed')).not.toBeInTheDocument();
+    expect(quotaPanel.getByRole('columnheader', { name: 'Next attempt' })).toBeVisible();
     if (paused) expect(screen.getByRole('button', { name: 'Resume queue' })).toBeEnabled();
     await user.click(screen.getByRole('button', { name: 'Compose task' }));
     expect(screen.getByRole('button', { name: 'Queue task' })).toBeEnabled();

@@ -1210,6 +1210,24 @@ export async function handleApi(
       return true;
     }
 
+    // Recorded readiness is advisory. Keep filesystem projection in the bounded
+    // worker even when a caller has intentionally disabled the general reader.
+    if (path === '/api/universe/campaign-readiness' && method === 'GET') {
+      const params = new URL(req.url ?? '', 'http://localhost').searchParams;
+      const ids = params.getAll('campaignId');
+      if (ids.length !== 1 || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(ids[0]!) ||
+          [...params.keys()].some((key) => key !== 'campaignId')) {
+        sendJson(res, 400, { error: 'Expected exactly one campaignId and no other query parameters' });
+        return true;
+      }
+      if (!ctx.readProjections) throw new ReadProjectionError('Universe campaign readiness requires the bounded reader');
+      let readiness;
+      try { readiness = await ctx.readProjections.read('universe-campaign-readiness', { campaignId: ids[0]! }); }
+      catch { throw new ReadProjectionError('Universe campaign readiness is unavailable'); }
+      sendJson(res, 200, readiness);
+      return true;
+    }
+
     // The graph reads a single selected universe. It never accepts a filesystem
     // root from browser input, and the server requires read authority first.
     if (path === '/api/universe/graph' && method === 'GET') {

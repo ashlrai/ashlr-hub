@@ -83,6 +83,31 @@ function acceleratedOwnership() {
 }
 
 describe('explicit Codex metadata protocol and identity hints', () => {
+  it.each([false, true])('passes lifecycle ownership by identity without invoking or serializing it (null prototype: %s)', async (nullPrototype) => {
+    const prepare = vi.fn();
+    const lifecycle = Object.assign(Object.create(nullPrototype ? null : Object.prototype), { prepare });
+    const subprocess = vi.spyOn(verify, 'runVerifySubprocessAsync').mockResolvedValue({ stdout: '', stderr: '',
+      exitCode: 1, signal: null, timedOut: false, cancelled: false, processGroupSettlement: 'not-started' });
+    await probeCodexResourceAccount(options({}, { processGroupLifecycle: lifecycle }));
+    expect(subprocess).toHaveBeenCalledTimes(1);
+    const config = subprocess.mock.calls[0]![1];
+    expect(config.processGroupLifecycle).toBe(lifecycle); expect(config.requireProcessGroupExit).toBe(true);
+    expect(JSON.parse(config.input!)).not.toHaveProperty('processGroupLifecycle');
+    expect(config.input).not.toContain('prepare'); expect(prepare).not.toHaveBeenCalled();
+  });
+  it('rejects malformed lifecycle hooks before transport without reading accessors', async () => {
+    const getter = vi.fn(() => vi.fn()); const prepare = vi.fn();
+    const accessor = Object.defineProperty({}, 'prepare', { get: getter, enumerable: true });
+    const subprocess = vi.spyOn(verify, 'runVerifySubprocessAsync');
+    for (const value of [null, [], {}, { prepare: null }, Object.create({ prepare }),
+      { prepare, extra: true }, { prepare, [Symbol('extra')]: true }, accessor]) {
+      await expect(probeCodexResourceAccount(options({}, {
+        processGroupLifecycle: value as verify.VerifyProcessGroupLifecycle,
+      }))).rejects.toThrow('Invalid Codex resource probe configuration');
+    }
+    expect(getter).not.toHaveBeenCalled(); expect(prepare).not.toHaveBeenCalled();
+    expect(subprocess).not.toHaveBeenCalled();
+  });
   it('uses exact no-generation handshake in a private cwd and emits only projected metadata', async () => {
     const request = options({ split: true, notificationsAt: 1, stderr: 'PRIVATE_STDERR fixture@example.invalid' }, { expectedAccountHint: HINT });
     const result = await probeCodexResourceAccount(request);
@@ -302,6 +327,26 @@ describe('bounded Codex protocol and quota failures', () => {
 });
 
 describe('probe preflight, cancellation and output trust boundary', () => {
+  it('keeps scratch creation refusal a no-contact failure', async () => {
+    const request = options();
+    const subprocess = vi.spyOn(verify, 'runVerifySubprocessAsync');
+    vi.stubEnv('TMPDIR', join(fixtureRoot, 'PRIVATE_missing_scratch_root'));
+    const result = await probeCodexResourceAccount(request);
+    expect(result).toMatchObject({ status: 'failed', reason: 'probe-process-failed', observation: null });
+    expect(subprocess).not.toHaveBeenCalled(); expect(JSON.stringify(result)).not.toContain('PRIVATE');
+  });
+  it.each(['sync-throw', 'rejection'] as const)('retains uncertainty after runner %s without settlement', async (failure) => {
+    const subprocess = vi.spyOn(verify, 'runVerifySubprocessAsync').mockImplementation(() => {
+      if (failure === 'sync-throw') throw new Error('PRIVATE_RUNNER');
+      return Promise.reject(new Error('PRIVATE_RUNNER'));
+    });
+    const result = await probeCodexResourceAccount(options());
+    expect(result).toMatchObject({ status: 'uncertain', reason: 'probe-termination-uncertain',
+      accountHint: null, planType: null, observation: null });
+    expect(JSON.stringify(result)).not.toContain('PRIVATE'); expect(subprocess).toHaveBeenCalledTimes(1);
+    const scratch = subprocess.mock.calls[0]![1].cwd;
+    try { expect(existsSync(scratch)).toBe(true); } finally { rmdirSync(scratch); }
+  });
   it.each([
     { cwd: 'relative' }, { cwd: '/' }, { cwd: '/not-present-fixture' }, { workerId: 'unknown' },
     { bucketIds: [] }, { bucketIds: ['codex', 'codex'] }, { bucketIds: new Array(1) },
@@ -337,6 +382,22 @@ describe('probe preflight, cancellation and output trust boundary', () => {
     expect(await running).toMatchObject({ status: 'cancelled', reason: 'probe-cancelled', observation: null });
     expect(() => process.kill(invocation().pid, 0)).toThrow(); expect(existsSync(invocation().cwd)).toBe(false);
   });
+  it.each([undefined, 'unconfirmed'] as const)('requires explicit settlement even for exit0 (%s)', async (processGroupSettlement) => {
+    const spy = vi.spyOn(verify, 'runVerifySubprocessAsync').mockResolvedValue({ stdout: 'PRIVATE_OUTPUT', stderr: '',
+      exitCode: 0, signal: null, timedOut: false, cancelled: false, processGroupSettlement });
+    const report = await probeCodexResourceAccount(options());
+    expect(report).toMatchObject({ status: 'uncertain', reason: 'probe-termination-uncertain',
+      accountHint: null, planType: null, observation: null });
+    expect(JSON.stringify(report)).not.toContain('PRIVATE'); expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0]![1].requireProcessGroupExit).toBe(true);
+    const scratch = spy.mock.calls[0]![1].cwd; expect(existsSync(scratch)).toBe(true); rmdirSync(scratch);
+  });
+  it.each(['not-started', 'group-exit-confirmed'] as const)('keeps settled failure semantics for %s', async (processGroupSettlement) => {
+    const spy = vi.spyOn(verify, 'runVerifySubprocessAsync').mockResolvedValue({ stdout: 'PRIVATE_OUTPUT', stderr: '',
+      exitCode: -1, signal: null, timedOut: false, cancelled: false, error: 'PRIVATE_ERROR', processGroupSettlement });
+    expect(await probeCodexResourceAccount(options())).toMatchObject({ status: 'failed', reason: 'probe-process-failed', observation: null });
+    expect(existsSync(spy.mock.calls[0]![1].cwd)).toBe(false);
+  });
   it('withholds all native output after uncertain teardown', async () => {
     const spy = vi.spyOn(verify, 'runVerifySubprocessAsync').mockResolvedValue({ stdout: 'PRIVATE_STDOUT', stderr: 'PRIVATE_STDERR',
       exitCode: -1, signal: null, timedOut: true, cancelled: false,
@@ -351,7 +412,7 @@ describe('probe preflight, cancellation and output trust boundary', () => {
   it('rejects a helper payload with unexpected fields without leaking them', async () => {
     vi.spyOn(verify, 'runVerifySubprocessAsync').mockResolvedValue({ stdout: JSON.stringify({ schemaVersion: 1,
       status: 'failed', reason: 'probe-provider-error', accountHint: null, planType: null, observation: null, email: EMAIL }),
-    stderr: '', exitCode: 0, signal: null, timedOut: false, cancelled: false });
+    stderr: '', exitCode: 0, signal: null, timedOut: false, cancelled: false, processGroupSettlement: 'group-exit-confirmed' });
     const result = await probeCodexResourceAccount(options());
     expect(result).toMatchObject({ status: 'failed', reason: 'probe-process-output-invalid', observation: null });
     expect(JSON.stringify(result)).not.toContain(EMAIL);
@@ -363,7 +424,7 @@ describe('probe preflight, cancellation and output trust boundary', () => {
     const running = probeCodexResourceAccount(request);
     request.pool.workers[0]!.model = 'mutated-model'; request.bucketIds[0] = 'mutated-bucket';
     (request.bindings[0] as Extract<ResourceBinding, { kind: 'native-cli' }>).command.push('--mutated');
-    finish({ stdout: '', stderr: '', exitCode: 1, signal: null, timedOut: false, cancelled: false });
+    finish({ stdout: '', stderr: '', exitCode: 1, signal: null, timedOut: false, cancelled: false, processGroupSettlement: 'group-exit-confirmed' });
     expect((await running).poolDigest).toBe(expected);
     const sent = JSON.parse(spy.mock.calls[0]![1].input!);
     expect(sent.bucketIds).toEqual(['codex']); expect(sent.command).not.toContain('--mutated');

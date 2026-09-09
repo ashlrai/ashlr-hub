@@ -7,6 +7,7 @@ import { validateUniverseConsoleResponse } from './universe-console-public.js';
 export interface UniverseConsoleReader {
   overview(): Promise<string>;
   graph(universeId: string): Promise<string>;
+  campaignReadiness(campaignId: string): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -17,12 +18,17 @@ export function validateUniverseConsoleRoot(value: unknown): string {
   return resolve(value);
 }
 
-export function normalizeUniverseConsoleRead(kind: unknown, payload: unknown): undefined | { universeId: string } {
+export function normalizeUniverseConsoleRead(kind: unknown, payload: unknown): undefined | { universeId: string } | { campaignId: string } {
   if (kind === 'overview' && payload === undefined) return undefined;
   if (kind === 'graph' && payload && typeof payload === 'object' && !Array.isArray(payload)) {
     const value = payload as Record<string, unknown>;
     if (Object.keys(value).length === 1 && typeof value.universeId === 'string' &&
       /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.universeId)) return { universeId: value.universeId };
+  }
+  if (kind === 'campaign-readiness' && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const value = payload as Record<string, unknown>;
+    if (Object.keys(value).length === 1 && Object.hasOwn(value, 'campaignId') && typeof value.campaignId === 'string' &&
+      /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.campaignId)) return { campaignId: value.campaignId };
   }
   throw new ReadProjectionError('Invalid Universe console read', 'READ_PROJECTION_INVALID_REQUEST');
 }
@@ -44,5 +50,6 @@ export function createUniverseConsoleReader(root: string, options: Pick<BoundedR
     timeoutMs: options.timeoutMs ?? 30_000 });
   return { overview: () => transport.read('overview').then(validateUniverseConsoleResponse),
     graph: (universeId) => transport.read('graph', { universeId }).then(validateUniverseConsoleResponse),
+    campaignReadiness: (campaignId) => transport.read('campaign-readiness', { campaignId }).then(validateUniverseConsoleResponse),
     close: () => transport.close() };
 }

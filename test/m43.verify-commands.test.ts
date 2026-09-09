@@ -1100,8 +1100,6 @@ describe('verifyTaskStructured', () => {
       let verifierPid = 0;
       const script = [
         'const fs = require("node:fs")',
-        `fs.writeFileSync(${JSON.stringify(startedPath)}, 'started')`,
-        `fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid))`,
         'let stopping = false',
         'process.on("SIGINT", () => {',
         '  if (stopping) return',
@@ -1112,6 +1110,9 @@ describe('verifyTaskStructured', () => {
         '  }, 50)',
         '})',
         'setInterval(() => {}, 1000)',
+        `fs.writeFileSync(${JSON.stringify(pidPath)}, String(process.pid))`,
+        // Publish readiness only after cancellation handling and PID evidence exist.
+        `fs.writeFileSync(${JSON.stringify(startedPath)}, 'started')`,
       ].join(';');
 
       writeVerifyContract(dir, ['node', '-e', script]);

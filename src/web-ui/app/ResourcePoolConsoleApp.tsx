@@ -16,9 +16,13 @@ function ScopedResourceWorkspace() {
   return <>
     <SkipToContent />
     <header className={styles.bar}>
-      <div className={styles.identity}><strong>Ashlr <span>Resources</span></strong>
-        {scope.data ? <><span className={styles.scopeBadge}>{scope.data.readOnly ? 'Read-only console' : 'Foreground task console'}</span>
-          <code aria-label="Resource store">{scope.data.root}</code></> : null}</div>
+      <div className={styles.identity}><div className={styles.brand}>
+        <svg className={styles.brandMark} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+          <path d="m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6" />
+        </svg><strong>Ashlr Universe</strong><span className={styles.workspace}>Resources</span></div>
+        {scope.data ? <><span className={styles.scopeBadge}>{scope.data.readOnly
+          ? scope.data.allocationWritable ? 'Fleet policy controls · tasks disabled' : 'Read-only console' : 'Foreground task console'}</span>
+          <details className={styles.store}><summary>Resource store</summary><code aria-label="Resource store">{scope.data.root}</code></details></> : null}</div>
       <div className={styles.actions}>
         <button type="button" onClick={theme.cycle}>Theme: {theme.theme}</button>
         <button type="button" onClick={() => { void clearReadSession(); }}>Disconnect</button>

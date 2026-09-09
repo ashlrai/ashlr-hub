@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { initUniverse, initUniverseCampaign, readUniverseOverview, readUniverseCampaign,
-  requestUniverseCampaignControl, runUniverse, runUniverseCampaign,
+  requestUniverseCampaignControl, runUniverse, runUniverseCampaign, runUniverseCampaignAndDeliver,
   type UniverseCampaignDefinition, type UniverseFeedback, type UniverseManifest } from '../src/core/universe/index.js';
 import { withUniverseExecution } from '../src/core/universe/execution.js';
 import { runUniverseOwned } from '../src/core/universe/runner.js';
@@ -94,6 +94,22 @@ async function fixture(respond: (prompt: Prompt, index: number) => { value: numb
 }
 
 describe.runIf(process.platform === 'darwin')('Universe campaigns through native execution', () => {
+  it('runs from ready through evaluated improvement to a local branch without another model request on replay', async () => {
+    const value = await fixture((_prompt, index) => ({ value: index + 1 }));
+    initUniverseCampaign(value.definition, value);
+    const options = { root: value.root, delivery: { branch: 'codex/verified-output', baseCommit: value.manifest.seed.revision } };
+    const result = await runUniverseCampaignAndDeliver('campaign', options);
+    expect(result.campaign).toMatchObject({ state: 'completed', sourceState: 'healthy', progress: { improvements: 2 } });
+    expect(result.delivery.status).toBe('delivered');
+    if (result.delivery.status !== 'delivered') throw new Error('Expected local delivery');
+    const output = execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', value.manifest.seed.repo,
+      'show', `${result.delivery.receipt.commit}:value.json`], { encoding: 'utf8' });
+    expect(output).toBe('3\n');
+    expect(readFileSync(join(value.manifest.seed.repo, 'value.json'), 'utf8')).toBe('0\n');
+    expect(await runUniverseCampaignAndDeliver('campaign', options)).toEqual(result);
+    expect(value.requests).toHaveLength(3);
+  }, 20_000);
+
   it('continues past a passing artifact, feeding rejection evidence without promoting failed code to parent', async () => {
     const value = await fixture((_prompt, index) => ({ value: [-1, 2, 3][index]! }));
     initUniverseCampaign(value.definition, value);

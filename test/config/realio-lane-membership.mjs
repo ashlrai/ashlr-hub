@@ -43,7 +43,21 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/universe-showcase-cli.test.ts', // private demo source/export custody and CLI subprocesses
+  'test/universe-campaign-delivery.test.ts', // actual campaign evaluation and local Git branch delivery
+  'test/m11.stream-file-sink.test.ts', // thousands of real sink writes and reads across secret boundaries
+  'test/m442.runtime-release-launch-revalidation.test.ts', // large dependency fixtures, permissions and recursive cleanup
+  'test/m444.external-skill-audit.test.ts', // large real audit trees and recursive cleanup
+  'test/m466.host-merge-revocation-protocol.test.ts', // 4097-file store bounds and competing subprocess CAS
   'test/resource-native-profile.test.ts', // exclusive profile preparation and inert native execve
+  'test/resource-claude-account-status.test.ts', // native auth status with inert private process fixtures
+  'test/resource-claude-account-usage.test.ts', // private scratch and bounded native usage mocks
+  'test/resource-grok-account-probe.test.ts', // native metadata protocol with inert ACP fixtures
+  'test/resource-connection-monitor.test.ts', // private metadata monitoring fixtures
+  'test/resource-metadata-coordination.test.ts', // shared collector scheduling over private inert scopes
+  'test/resource-connection-server.test.ts', // loopback account monitoring and durable allocation controls
+  'test/resource-allocation-policy.test.ts', // atomic private allocation state and final admission
+  'test/resource-allocation-refresh.test.ts', // allocation changes across owned quota refresh and admission
   'test/resource-native-profile-review.test.ts', // independent native environment and process identity fixtures
   'test/resource-profile-integration.test.ts', // actual CLI preparation and generated inert native launchers
   'test/universe-resource-runtime-check.test.ts', // explicit private runtime and sterile Git workspace reads
@@ -63,6 +77,16 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-probe-cli.test.ts', // private commissioning reports and signal ownership
   'test/resource-quota-console.test.ts', // actual foreground collector, HTTP and subprocess lifecycle
   'test/resource-quota-refresh-lease.test.ts', // actual collector lease and durable pending marker
+  'test/resource-quota-recovery.test.ts', // exact private marker recovery and real lease identity
+  'test/resource-quota-idle-recovery.test.ts', // durable activity records and same-boot recovery
+  'test/resource-quota-registered-recovery.test.ts', // durable command phases and passive group-absence recovery
+  'test/resource-collector-diagnostics.test.ts', // acquisition-time evidence and private loopback console
+  'test/resource-native-idle-lifecycle.test.ts', // owned child exit and strict process-group receipt
+  'test/resource-quota-shared-evidence.test.ts', // private snapshots and verified process/lease identity
+  'test/resource-shared-admission.test.ts', // current evidence inside atomic durable reservation
+  'test/resource-worker-access.test.ts', // durable worker pauses and alias-aware atomic admission
+  'test/resource-quota-publication.test.ts', // foreground publication lifecycle and failure fencing
+  'test/universe-shared-quota.test.ts', // live collector handoff through private Universe runtime
   'test/resource-quota-once.test.ts', // private one-pass collector lifecycle and storage
   'test/resource-quota-contention.test.ts', // private collector contention, verified ownership and cancellation
   'test/resource-capacity-wait.test.ts', // read-only admission polls over private resource ledgers
@@ -89,6 +113,8 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-campaign-readiness.test.ts', // immutable private campaign and evaluator readback
   'test/universe-supervision-integration.test.ts', // confined multi-campaign supervision and owned cleanup
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint
+  'test/universe-evaluator-diagnostics.test.ts', // immutable fixture stores and evaluator phase feedback replay
+  'test/universe-generation-diagnostics.test.ts', // immutable failure evidence and next-generation feedback
   'test/universe-search-feedback-integration.test.ts', // native metric-directed search after repeated unchanged trials
   'test/universe-search-feedback-replay.test.ts', // independent versioned search-context replay and legacy recovery
   'test/universe-comparison-reader.test.ts', // targeted private-ledger and Git delivery observation

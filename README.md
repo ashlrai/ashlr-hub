@@ -1,6 +1,6 @@
-# ashlr-hub
+# Ashlr Universe
 
-**The local kernel for Ashlr Universe: an agent-native engineering system that builds, evaluates, and learns from competing approaches.**
+**An evidence-first engineering loop: build candidates, test the artifacts, keep useful improvements.**
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -11,46 +11,60 @@
 
 ## What is this?
 
-Ashlr Universe is the [North Star](docs/NORTH-STAR.md): turn an objective and a
-resource budget into useful accepted engineering changes, then use measured
-results to improve the next attempt. Hub provides the local runtime, integrations,
-CLI, and dashboard. Ecosystem projects stay independently useful.
+Ashlr Universe turns a pinned Git seed, an objective and a resource budget into
+competing, evaluated artifacts. **Hub is its local kernel**: the CLI, experiment
+runtime, account-aware resource pools and visual control room. The
+[North Star](docs/NORTH-STAR.md) is useful accepted engineering changes per token
+and hour—not more generated code or busier dashboards.
 
-Start with the [quickstart](docs/QUICKSTART.md) for the supported execution paths,
-or the [documentation map](docs/README.md) to find the right operator or developer
-guide. The target vision, implemented source, installed runtime and provider
-commissioning are separate states; a working dashboard does not establish all four.
+The current local loop is concrete: run isolated variants, freeze their artifacts,
+evaluate against a fixed comparator, retain the best result in each niche, and
+reuse those winners as later-generation parents. Provider-backed generation and
+resource routing are separately configured; ecosystem projects remain independent.
 
-The new **local experiment kernel** runs competing code variants from a pinned
-Git seed, evaluates artifacts with a fixed evaluator, retains winners in different
-niches, and uses that archive in subsequent generations. Run the credential-free
-example from a source checkout:
+### See the loop work
+
+Start with the [executable demo](docs/DEMO.md): two generations, three competing
+variants, seven correctness cases, two retained niches and a deliberately broken
+candidate that must lose. It runs real code without a model account. The candidate
+transformations are scripted, so this demonstrates the mechanism—not AI productivity.
+
+![Two demo generations: compact code shrinks from 274 to 47 bytes and readable code from 317 to 210 bytes; all retained variants pass seven cases and the broken sorting variant is rejected.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/codex/universe-account-connections/docs/images/universe-demo.png)
+
+Recorded deterministic fixture at source `914ebd1f566c0dc4f0a95479d9c4f464289e736e`.
+Arrows show parent reuse; byte reductions are not measured AI engineering yield.
+Read the [demo evidence and reproduction guide](docs/DEMO.md#recorded-example).
+
+From a trusted checkout on **macOS with Node.js 24+ and Git**, install and build
+locally, then create a fresh private experiment store:
 
 ```sh
 npm ci
 npm run build
-node bin/ashlr universe demo
-node bin/ashlr universe status --json
+ASHLR_DEMO_ROOT="$(mktemp -d /private/tmp/ashlr-universe-demo.XXXXXX)"
+node bin/ashlr universe demo --root "$ASHLR_DEMO_ROOT" --json
+node bin/ashlr universe console --root "$ASHLR_DEMO_ROOT"
 ```
 
-The example produces and tests actual code through two generations. It demonstrates
-the local learning loop, not model intelligence or production engineering yield.
-Records remain private under `~/.ashlr/universe`; `--root` selects an isolated store.
-The React console exposes the same results at `/next#/universe`.
-See [Universe usage and architecture](docs/ASHLR-UNIVERSE.md) and its
-[research grounding](docs/UNIVERSE-RESEARCH.md). Verification runs locally; GitHub
-Actions are not required. This source feature is not yet in the published npm release.
+Open the printed loopback URL and enter its private read token to inspect trials,
+parents and the evidence graph. The console observes; it does not launch work.
+Installation/build run trusted repository scripts; the demo creates local files
+and executes bounded sandboxed code. See the [demo guide](docs/DEMO.md) for expected
+results, prerequisites and recovery. No GitHub Actions are needed.
 
-For checkout-independent execution, [install a pinned local runtime](docs/ASHLR-UNIVERSE.md#install-a-pinned-local-runtime).
-`ashlr runtime` installs a trusted offline package, verifies it before foreground
-Universe launches, and retains a verified rollback target without changing your
-global command or starting a service.
+**Source and distribution are different.** This checkout describes the 3.4.0
+development line. On 2026-09-09, npm `latest` and `candidate` both resolve to
+`@ashlr/hub@3.3.2`; installing that package does not install this Universe demo.
+See the [release record](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) before choosing an artifact. Neither
+source availability nor a successful demo commissions an unattended provider fleet.
 
-To inspect an explicit experiment store, run
-`node bin/ashlr universe console --root /absolute/private/experiments` and open
-the printed URL. The [scoped console](docs/ASHLR-UNIVERSE.md#observe-one-universe-store)
-shows campaign, trial and graph evidence without starting experiments or loading
-the general Hub dashboard. It also runs through the pinned local runtime.
+| Build your next step | Guide |
+|---------------------|-------|
+| Understand the demo and its evidence | [Demo walkthrough](docs/DEMO.md) |
+| Configure your own experiments and campaigns | [Universe operator guide](docs/ASHLR-UNIVERSE.md) |
+| Connect native/local workers and budget their usage | [Resource Pools](docs/RESOURCE-POOLS.md) |
+| Run a verified package independently of this checkout | [Pinned local runtime](docs/ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
+| Understand the components or contribute | [Architecture](docs/ARCHITECTURE.md#current-runtime-map) · [Documentation map](docs/README.md) |
 
 ### Existing fleet runtime
 

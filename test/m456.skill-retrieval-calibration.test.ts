@@ -1049,6 +1049,7 @@ describe('M456 candidate-bound shadow-router calibration', () => {
       './package.json',
       './plugin',
       './types',
+      './universe',
     ]);
     expect(JSON.stringify(packageJson.exports)).not.toContain('skill-retrieval-calibration');
     for (const directory of ['bin', 'scripts', 'dist']) {

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { isAbsolute, join, parse, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { runVerifySubprocessAsync } from '../run/verify-commands.js';
+import { isVerifyProcessGroupLifecycle, runVerifySubprocessAsync, type VerifyProcessGroupLifecycle } from '../run/verify-commands.js';
 import { canonical, digest } from '../universe/artifacts.js';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { validateResourceBindings, workerEnvironment, type ResourceBinding } from './worker.js';
@@ -20,6 +20,8 @@ export interface CodexResourceProbeOptions {
   expectedAccountHint?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** In-process ownership evidence only; never forwarded to the native protocol. */
+  processGroupLifecycle?: VerifyProcessGroupLifecycle;
 }
 export interface CodexResourceProbeResult {
   schemaVersion: 1;
@@ -77,7 +79,9 @@ function text(value: unknown, max: number): value is string {
 }
 function configuration(options: CodexResourceProbeOptions) {
   if (!record(options) || !exact(options, ['pool', 'bindings', 'workerId', 'cwd', 'bucketIds'],
-    ['expectedAccountHint', 'timeoutMs', 'signal'])) throw new Error('Invalid Codex resource probe configuration');
+    ['expectedAccountHint', 'timeoutMs', 'signal', 'processGroupLifecycle'])) throw new Error('Invalid Codex resource probe configuration');
+  const lifecycle = options.processGroupLifecycle;
+  if (lifecycle !== undefined && !isVerifyProcessGroupLifecycle(lifecycle)) throw new Error('Invalid Codex resource probe configuration');
   const pool = validateResourcePool(options.pool); const bindings = validateResourceBindings(options.bindings, pool);
   const worker = pool.workers.find((item) => item.id === options.workerId);
   const binding = bindings.find((item) => item.workerId === options.workerId);
@@ -98,7 +102,7 @@ function configuration(options: CodexResourceProbeOptions) {
     throw new Error('Invalid Codex resource probe configuration');
   }
   return { pool, bindings, binding, workerId: worker.id, bucketIds: [...options.bucketIds],
-    expectedAccountHint: options.expectedAccountHint ?? null, timeoutMs, signal: options.signal,
+    expectedAccountHint: options.expectedAccountHint ?? null, timeoutMs, signal: options.signal, processGroupLifecycle: lifecycle,
     poolDigest: digest(canonical({ pool, bindings })) };
 }
 
@@ -155,17 +159,22 @@ export async function probeCodexResourceAccount(options: CodexResourceProbeOptio
   });
   if (pinned.signal?.aborted) return result('cancelled', 'probe-cancelled');
   if (process.platform === 'win32') return result('failed', 'probe-platform-unsupported');
-  let scratch: string | undefined; let cleanupConfirmed = false;
+  let scratch: string | undefined; let cleanupConfirmed = false; let invocationAttempted = false;
   try {
     scratch = mkdtempSync(join(realpathSync(tmpdir()), 'ashlr-codex-metadata-'));
     const remaining = pinned.timeoutMs - (performance.now() - started);
     if (remaining <= 0) { cleanupConfirmed = true; return result('timed-out', 'probe-timed-out'); }
     const input: CodexProbeProcessInput = { schemaVersion: 1, command: [...pinned.binding.command], workerId: pinned.workerId,
       bucketIds: pinned.bucketIds, expectedAccountHint: pinned.expectedAccountHint, startedAt };
-    const executed = await runVerifySubprocessAsync(helperArgv(), { cwd: scratch, env: workerEnvironment(),
-      input: JSON.stringify(input), timeoutMs: Math.max(1, Math.floor(remaining)), maxOutputChars: 32 * 1024, signal: pinned.signal });
-    if (executed.error?.startsWith('termination authority lost:') ||
-      executed.error === 'termination deadline elapsed with process-group exit unconfirmed') {
+    const argv = helperArgv();
+    const executionOptions = { cwd: scratch, env: workerEnvironment(), input: JSON.stringify(input),
+      timeoutMs: Math.max(1, Math.floor(remaining)), maxOutputChars: 32 * 1024, signal: pinned.signal,
+      requireProcessGroupExit: true, processGroupLifecycle: pinned.processGroupLifecycle };
+    // A rejected runner call provides no teardown witness, even if it threw synchronously.
+    invocationAttempted = true;
+    const executed = await runVerifySubprocessAsync(argv, executionOptions);
+    // Exit status and output are not evidence that native descendants have stopped.
+    if (executed.processGroupSettlement !== 'not-started' && executed.processGroupSettlement !== 'group-exit-confirmed') {
       return result('uncertain', 'probe-termination-uncertain');
     }
     cleanupConfirmed = true;
@@ -176,7 +185,8 @@ export async function probeCodexResourceAccount(options: CodexResourceProbeOptio
     }
     const metadata = checkedOutput(executed.stdout, pinned.pool, pinned.workerId, startedAt, pinned.expectedAccountHint);
     return metadata ? result(metadata.status, metadata.reason, metadata) : result('failed', 'probe-process-output-invalid');
-  } catch { return result('failed', 'probe-process-failed'); }
+  } catch { return invocationAttempted && !cleanupConfirmed
+    ? result('uncertain', 'probe-termination-uncertain') : result('failed', 'probe-process-failed'); }
   finally {
     // Never recursively remove native-created data, nor remove the cwd while
     // teardown is unconfirmed. A nonempty/uncertain scratch is left private.

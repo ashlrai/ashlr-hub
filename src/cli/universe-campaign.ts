@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 import {
   initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requestUniverseCampaignControl, runUniverseCampaign,
-  type UniverseCampaignSummary,
+  runUniverseCampaignAndDeliver, validUniverseDeliveryBranch, type UniverseCampaignDeliveryResult, type UniverseCampaignSummary,
 } from '../core/universe/index.js';
 import type { UniverseCampaignReadiness } from '../core/universe/campaign-readiness.js';
 
@@ -36,6 +36,11 @@ before new resource admission; the inventory read does not perform inference.
 Optional capacityWaitMs (0-60000) waits for eligible contention without adding
 generations or extending the campaign deadline; omission/zero preserves no-wait.
 Repeat that explicit runtime option on resume; it is not saved in the campaign.
+Optional paired --deliver-branch codex/<name> --deliver-base <full seed commit>
+materializes the best strict measured improvement after completion as a local
+branch. No merge, push, checkout or production activation occurs. Repeat these
+options on resume/retry; an existing matching receipt is replayed idempotently.
+Initial admissions, unchanged artifacts and non-completed campaigns are withheld.
 maxModelRequests reserves generation transport invocations, not native API calls.
 Native CLI invocations may make zero or multiple provider requests.
 Exit codes: 0 command handled, 1 failed/interrupted/degraded, 2 invalid arguments.
@@ -45,17 +50,32 @@ Check: 0 valid snapshot (including held or terminal), 1 unavailable/degraded,
 
 class UsageError extends Error {}
 
-function parse(args: string[]): { command: string; id?: string; manifest?: string; root?: string; resourceRuntime?: string; json: boolean } {
+function parse(args: string[]): { command: string; id?: string; manifest?: string; root?: string; resourceRuntime?: string;
+  delivery?: { branch: string; baseCommit: string }; json: boolean } {
   const positional: string[] = [];
   let root: string | undefined;
   let suppliedRoot: string | undefined;
   let manifest: string | undefined;
   let resourceRuntime: string | undefined;
+  let deliveryBranch: string | undefined;
+  let deliveryBase: string | undefined;
   let json = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
     if (arg === '--help' || arg === '-h') return { command: 'help', json: false };
     if (arg === '--json') { json = true; continue; }
+    if (arg === '--deliver-branch' || arg === '--deliver-base') {
+      const value = args[++index];
+      if (!value || value.startsWith('--')) throw new UsageError(`${arg} requires a value`);
+      if (arg === '--deliver-branch') {
+        if (deliveryBranch || !validUniverseDeliveryBranch(value)) throw new UsageError('--deliver-branch requires one valid codex/ branch');
+        deliveryBranch = value;
+      } else {
+        if (deliveryBase || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value)) throw new UsageError('--deliver-base requires one full pinned seed commit');
+        deliveryBase = value;
+      }
+      continue;
+    }
     if (arg === '--root' || arg === '--manifest' || arg === '--resource-runtime') {
       const value = args[++index];
       if (!value?.trim() || value.startsWith('--')) throw new UsageError(`${arg} requires a path`);
@@ -85,13 +105,17 @@ function parse(args: string[]): { command: string; id?: string; manifest?: strin
   if (command === 'init' && !manifest) throw new UsageError('init requires --manifest <file.json>');
   if (manifest && command !== 'init') throw new UsageError('--manifest is only valid with init');
   if (resourceRuntime && command !== 'run') throw new UsageError('--resource-runtime is only valid with campaign run/resume');
+  if ((deliveryBranch || deliveryBase) && (command !== 'run' || !deliveryBranch || !deliveryBase)) {
+    throw new UsageError('--deliver-branch and --deliver-base must be paired with campaign run/resume');
+  }
   if (command === 'check' && (!suppliedRoot || !isAbsolute(suppliedRoot) || root !== suppliedRoot ||
       root === parsePath(suppliedRoot).root || Buffer.byteLength(suppliedRoot) > 4096 ||
       [...suppliedRoot].some((character) => character.charCodeAt(0) < 32 ||
         character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159))) {
     throw new UsageError('check requires --root <canonical absolute private directory>');
   }
-  return { command, id, root, manifest, resourceRuntime, json };
+  return { command, id, root, manifest, resourceRuntime, json,
+    ...(deliveryBranch && deliveryBase ? { delivery: { branch: deliveryBranch, baseCommit: deliveryBase } } : {}) };
 }
 
 function rootFlag(root?: string): string {
@@ -180,19 +204,30 @@ export async function cmdUniverseCampaign(args: string[]): Promise<number> {
       return result.sourceState === 'degraded' ? 1 : 0;
     }
     let summary: UniverseCampaignSummary;
+    let delivery: UniverseCampaignDeliveryResult['delivery'] | undefined;
     if (options.command === 'init') {
       const definition = JSON.parse(readFileSync(options.manifest!, 'utf8'));
       summary = initUniverseCampaign(definition, store);
     } else if (options.command === 'run') {
       process.once('SIGINT', abort);
       process.once('SIGTERM', abort);
-      summary = await runUniverseCampaign(options.id!, { ...store, signal: controller.signal,
-        ...(options.resourceRuntime ? { resourceRuntime: options.resourceRuntime } : {}) });
+      const runOptions = { ...store, signal: controller.signal,
+        ...(options.resourceRuntime ? { resourceRuntime: options.resourceRuntime } : {}) };
+      if (options.delivery) {
+        const result = await runUniverseCampaignAndDeliver(options.id!, { ...runOptions, delivery: options.delivery });
+        summary = result.campaign;
+        delivery = result.delivery;
+      } else summary = await runUniverseCampaign(options.id!, runOptions);
     } else if (options.command === 'pause' || options.command === 'stop') {
       summary = requestUniverseCampaignControl(options.id!, options.command, store);
     } else summary = readUniverseCampaign(options.id!, store);
-    console.log(options.json ? JSON.stringify(summary, null, 2) : render(summary, options.root));
+    const deliveryText = delivery ? delivery.status === 'delivered'
+      ? `\nLocal delivery: ${delivery.receipt.branch} · ${delivery.receipt.commit}\nNo merge or push performed.`
+      : `\nLocal delivery withheld: ${delivery.reason}` : '';
+    console.log(options.json ? JSON.stringify(delivery ? { campaign: summary, delivery } : summary, null, 2)
+      : render(summary, options.root) + deliveryText);
     if (summary.sourceState === 'degraded') return 1;
+    if (delivery?.status === 'withheld' && delivery.reason === 'cancelled') return 1;
     return options.command === 'run' && ['failed', 'interrupted'].includes(summary.state) ? 1 : 0;
   } catch (error) {
     const message = checking && !(error instanceof UsageError) ? 'Campaign recorded readiness is unavailable' :

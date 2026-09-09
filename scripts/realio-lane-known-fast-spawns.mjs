@@ -17,9 +17,7 @@
  * move to REAL_IO_TEST_FILES instead.
  */
 export const KNOWN_FAST_SPAWN_FILES = [
-  'test/m466.host-merge-revocation-protocol.test.ts', // 2.9s
   'test/m396.automerge-canary-classifier.test.ts', // 2.8s
-  'test/m444.external-skill-audit.test.ts', // 2.7s
   'test/m49.fleet-status.test.ts', // 2.5s
   'test/m225.sandbox-cwd.test.ts', // 2.5s
   'test/m391.execution-lifecycle-authority.test.ts', // 2.3s

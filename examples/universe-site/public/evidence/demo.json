@@ -1,0 +1,95 @@
+{
+  "schemaVersion": 1,
+  "kind": "universe-offline-demo",
+  "measurementScope": "deterministic-local-experiment",
+  "generatedAt": "2026-09-09T04:22:26.431Z",
+  "sourceRevision": "914ebd1f566c0dc4f0a95479d9c4f464289e736e",
+  "verified": true,
+  "checks": {
+    "twoCompletedGenerations": true,
+    "brokenVariantRejected": true,
+    "bothNichesRetained": true,
+    "priorWinnersReused": true,
+    "measuredImprovement": true
+  },
+  "generations": [
+    {
+      "generation": 1,
+      "status": "completed",
+      "trials": [
+        {
+          "id": "g1-t1",
+          "variant": "compact",
+          "niche": "compact",
+          "status": "passed",
+          "selected": true,
+          "parentTrialId": null,
+          "artifactBytes": 274,
+          "casesPassed": 7,
+          "delta": null
+        },
+        {
+          "id": "g1-t2",
+          "variant": "readable",
+          "niche": "readable",
+          "status": "passed",
+          "selected": true,
+          "parentTrialId": null,
+          "artifactBytes": 317,
+          "casesPassed": 7,
+          "delta": null
+        },
+        {
+          "id": "g1-t3",
+          "variant": "broken",
+          "niche": "compact",
+          "status": "failed",
+          "selected": false,
+          "parentTrialId": null,
+          "artifactBytes": null,
+          "casesPassed": null,
+          "delta": null
+        }
+      ]
+    },
+    {
+      "generation": 2,
+      "status": "completed",
+      "trials": [
+        {
+          "id": "g2-t1",
+          "variant": "compact",
+          "niche": "compact",
+          "status": "passed",
+          "selected": true,
+          "parentTrialId": "g1-t1",
+          "artifactBytes": 47,
+          "casesPassed": 7,
+          "delta": 227
+        },
+        {
+          "id": "g2-t2",
+          "variant": "readable",
+          "niche": "readable",
+          "status": "passed",
+          "selected": true,
+          "parentTrialId": "g1-t2",
+          "artifactBytes": 210,
+          "casesPassed": 7,
+          "delta": 107
+        },
+        {
+          "id": "g2-t3",
+          "variant": "broken",
+          "niche": "compact",
+          "status": "failed",
+          "selected": false,
+          "parentTrialId": "g1-t1",
+          "artifactBytes": null,
+          "casesPassed": null,
+          "delta": null
+        }
+      ]
+    }
+  ]
+}

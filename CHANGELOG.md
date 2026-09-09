@@ -11,6 +11,98 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Release preparation
+
+- Reapplies the current fleet allocation ceiling to cached console plans, so
+  lowering the ceiling cannot leave remote workers displayed as eligible.
+  Shared account aliases are withheld together; local model capacity is unchanged.
+- Updates Hono, js-yaml and Vitest to patched versions, including the separate
+  Raycast dependency graph. Retains script-free dependency installation.
+- Clarifies the local-only successor release path and separates pushed source,
+  verified packages, registry publication and commissioned fleet operation.
+- Restores runtime command discovery in shell completions, including the
+  supported install, status, rollback and run subcommands.
+
+### Autonomous feedback and recovery explanations
+
+- Adds fixed generation-failure feedback for not-started, withheld, unresolved,
+  timed-out and failed attempts. Preserves null measurements, retained elites,
+  cancellation behavior and private error boundaries; no new automatic retries.
+- Explains collector recovery refusals with sampled, browser-safe diagnoses and
+  contextual guidance. Validates reason/version consistency and preserves legacy
+  records without additional read-time process probes.
+- Adds a primary-source autonomy engineering brief covering durable execution,
+  measured engineering yield, resource policy and harness-improvement acceptance.
+
+### Collector recovery and configured status
+
+- Adds durable per-command phases and same-boot passive recovery for tracked
+  collector crashes. Requires exact matching records, an absent owner and absent
+  registered process groups. Unregistered spawn windows and legacy active
+  uncertainty remain blocked; recovery never signals persisted groups.
+- Requires explicit no-start or owned-process-group exit receipts from native
+  metadata calls, including every Claude usage subcommand. Group-absence probes
+  never restore signaling authority after leader exit.
+- Treats unexpected native runner throws and missing collector results as cleanup
+  uncertainty. Stops queued/repeated metadata reads before permit release and
+  retains pending evidence, including one-shot quota captures.
+- Keeps the resource desk available after clean metadata-ownership refusals,
+  showing an explicit blocked reason while preserving configuration and withholding
+  managed workers. No native probe or retry starts in this state.
+- Adds macOS boot-bound metadata fences and receipt-first recovery after a verified
+  reboot on the same machine. Legacy and unregistered same-boot uncertainty remains blocked;
+  recovery never substitutes for fresh quota evidence.
+
+### Universe evaluation feedback and discovery
+
+- Adds on-demand recorded campaign readiness to scoped and general consoles,
+  with bounded reads, fixed recovery reasons, runtime-binding visibility and
+  historical-state handling. Removes unconditional resume suggestions.
+- Adds fixed, privacy-safe evaluator phase diagnostics to subsequent campaign
+  feedback without inventing measurements or promoting failed candidates.
+- Refreshes visible idle experiment views every 15 seconds to discover externally
+  started work; active views retain three-second refreshes. Hidden tabs skip
+  periodic reads and refresh immediately on return.
+
+### Universe control room and shared collector admission
+
+- Adds explicit shared-collector quota evidence for Universe, allowing generation
+  while the foreground account console remains open. Private short-lived owner
+  witnesses are rechecked inside task admission; no fallback probe is launched.
+- Adds durable, revision-checked fleet account pauses, independent of usage
+  allocation. Paused workers and shared-capacity aliases cannot receive new
+  tasks; account visibility and existing reservations are unchanged.
+- Introduces locally bundled Space Grotesk and IBM Plex Sans typography, a
+  navy/ice control-room theme, topology-first resource navigation, persistent
+  wide-screen inspection, and distinct Universe evidence-graph node treatments.
+- Shows saved pauses on fleet nodes and provides explicit account-access controls
+  with draft, conflict, historical-data and token-authority states.
+
+### Account connections and adjustable fleet allocation
+
+- Adds an explicit native account monitor to the resource desk: Codex account
+  quota windows, Claude authentication status, and Grok ACP billing metadata.
+  Unknown usage stays unknown; metadata does not enroll or launch workers.
+- Adds a saved 0–100% fleet usage ceiling with revision-checked controls and
+  atomic admission enforcement, including Universe generation. Outside usage
+  counts toward reported account limits; in-flight requests are not interrupted.
+- Adds isolated Grok profile preparation. Grok task execution remains unsupported;
+  native sign-in and metadata monitoring do not imply model execution readiness.
+- Adds version-gated Claude native `/usage` reporting without inference, with
+  before/after identity checks. Rounded, potentially cached reports remain
+  display-only; they never become fresh quota admission evidence.
+- Improves account quota tracks, saved-ceiling reference markers, readable native
+  window names, responsive layout and actionable missing-data guidance.
+- Shares a two-client metadata budget across connection and admission collectors.
+  Uncertain cleanup cancels both collectors before another queued read can launch.
+- Labels retained native quota statuses and schedules as historical after failed
+  console reads, including pending retries; explains unavailable allocation evidence.
+- Adds an account-level reference summary identifying the most-used quota windows
+  and margin below the saved ceiling. Partial, stale and approximate reports remain
+  unavailable; tiny positive margins do not display as an exhausted allowance.
+- Adds foreground supervisor reinvocation coverage for completed, interrupted and
+  newly enrolled campaigns, preserving prior histories and budgets.
+
 ### Isolated native account preparation
 
 - Adds `resources profile prepare` to create a new private standalone launcher

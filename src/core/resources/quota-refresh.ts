@@ -1,12 +1,14 @@
 /** Explicit foreground metadata collection. Reads never start probes or refresh capture timestamps. */
 import { isAbsolute, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import type { VerifyProcessGroupLifecycle } from '../run/verify-commands.js';
 import { canonical, digest } from '../universe/artifacts.js';
-import { mergeResourceObservations } from './pool-runtime.js';
+import { mergeResourceObservations, readResourcePoolAllocation } from './pool-runtime.js';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
 import { probeCodexResourceAccount, type CodexResourceProbeOptions, type CodexResourceProbeResult } from './codex-account-probe.js';
 import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from './quota-refresh-lease.js';
+import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from './metadata-coordinator.js';
 
 export const RESOURCE_QUOTA_REFRESH_INTERVAL_MS = 30_000;
 export const RESOURCE_QUOTA_REFRESH_TTL_MS = 60_000;
@@ -14,6 +16,13 @@ const MAX_BACKOFF_MS = 300_000;
 const PROBE_TIMEOUT_MS = 10_000;
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
+
+/** Local pre-contact cancellation: no provider sample or successful read is asserted. */
+function cancelledBeforeNativeContact(workerId: string, poolDigest: string, startedAt = new Date().toISOString()): CodexResourceProbeResult {
+  return { schemaVersion: 1, scope: 'codex-native-metadata', workerId, poolDigest,
+    status: 'cancelled', reason: 'probe-cancelled', startedAt, finishedAt: new Date().toISOString(),
+    accountHint: null, planType: null, observation: null };
+}
 
 export interface ResourceQuotaRefreshWorker { workerId: string; accountHint: string; bucketIds: string[] }
 export interface ResourceQuotaRefreshConfig { schemaVersion: 1; poolDigest: string; workers: ResourceQuotaRefreshWorker[] }
@@ -42,6 +51,10 @@ export interface ResourceQuotaRefresherOptions {
   signal?: AbortSignal;
   /** Existing foreground lease, owned by the caller; failure closes this collector. */
   assertOwnership?: () => void;
+  /** Optional shared native-client budget and terminal cancellation across collectors. */
+  coordinator?: NativeMetadataCoordinator;
+  /** Synchronous evidence publication after lifecycle transitions; failure stops collection. */
+  onChange?: () => void;
   /** Test-owned inert transport; production callers use the fixed native metadata probe. */
   _probe?: (options: CodexResourceProbeOptions) => Promise<CodexResourceProbeResult>;
 }
@@ -49,7 +62,7 @@ export interface ResourceQuotaRefresher {
   /** Last actual captured readings only. The caller must also apply unavailableWorkerIds AFTER ledger merge. */
   readObservations(base: ResourceObservation[]): ResourceObservation[];
   /** Ephemeral admission constraint, not a fabricated provider observation or persisted quota measurement. */
-  unavailableWorkerIds(): string[];
+  unavailableWorkerIds(deferAllocationToAdmission?: boolean): string[];
   snapshot(): ResourceQuotaRefreshSnapshot;
   close(): Promise<void>;
 }
@@ -129,9 +142,11 @@ function checkedOptions(options: ResourceQuotaRefresherOptions) {
   if (typeof options.cwd !== 'string' || !isAbsolute(options.cwd) || Buffer.byteLength(options.cwd) > 4096 ||
     [...options.cwd].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127) ||
     options._probe !== undefined && typeof options._probe !== 'function' ||
-    options.assertOwnership !== undefined && typeof options.assertOwnership !== 'function') throw new Error('Invalid resource quota refresh options');
+    options.assertOwnership !== undefined && typeof options.assertOwnership !== 'function' ||
+    options.onChange !== undefined && typeof options.onChange !== 'function') throw new Error('Invalid resource quota refresh options');
   return { pool, bindings, config, cwd: resolve(options.cwd), probe: options._probe ?? probeCodexResourceAccount,
-    signal: options.signal, assertOwnership: options.assertOwnership };
+    signal: options.coordinator ? AbortSignal.any([options.coordinator.signal, ...(options.signal ? [options.signal] : [])]) : options.signal,
+    assertOwnership: options.assertOwnership, coordinator: options.coordinator, onChange: options.onChange };
 }
 
 /**
@@ -145,23 +160,33 @@ export function createResourceQuotaRefresher(options: ResourceQuotaRefresherOpti
 function createRefresher(options: ReturnType<typeof checkedOptions>, once: boolean): {
   refresher: ResourceQuotaRefresher; completed: Promise<void>;
 } {
-  const { pool, bindings, config, cwd, probe, signal, assertOwnership } = options;
+  const { pool, bindings, config, cwd, probe, signal, assertOwnership, coordinator, onChange } = options;
   const controller = new AbortController();
   let closed = false; let timer: ReturnType<typeof setTimeout> | null = null;
   let active: Promise<void> | null = null; let closing: Promise<void> | null = null;
   let terminationUncertain = false;
+  let publicationFailed = false;
   const rows: ManagedWorker[] = config.workers.map((row) => ({ config: row,
     capacityKey: bindings.find((binding) => binding.workerId === row.workerId)!.capacityKey,
     status: 'pending', reason: 'managed-quota-pending', lastAttemptAt: null, lastSuccessAt: null,
     nextAttemptMs: Date.now(), failures: 0, observation: null }));
 
+  function changed(): void {
+    if (publicationFailed) return;
+    try { onChange?.(); }
+    catch {
+      publicationFailed = true;
+      coordinator?.abort(); void close().catch(() => {});
+    }
+  }
+
   function owns(): boolean {
     if (closed) return false;
     try { assertOwnership?.(); return true; }
-    catch { void close().catch(() => {}); return false; }
+    catch { coordinator?.abort(); void close().catch(() => {}); return false; }
   }
 
-  function unavailableReason(row: ManagedWorker, now: number): string | null {
+  function unavailableReason(row: ManagedWorker, now: number, deferAllocationToAdmission = false): string | null {
     if (row.status === 'uncertain') return 'managed-quota-uncertain';
     if (closed) return 'managed-quota-closed';
     if (row.status !== 'observed' && row.status !== 'refreshing') return row.reason;
@@ -174,8 +199,11 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
     if (observation.health !== 'ready') return 'managed-quota-unavailable';
     // A newer external snapshot may win the conservative timestamp merge. It
     // cannot override a currently captured native refusal in this separate gate.
-    const reservePercent = pool.workers.find((worker) => worker.id === row.config.workerId)!.reservePercent;
-    if (observation.windows.some((window) => window.usedPercent !== null && window.usedPercent >= 100 - reservePercent)) {
+    let ceiling: number;
+    try { ceiling = deferAllocationToAdmission ? 100 : readResourcePoolAllocation(cwd, pool, bindings).ceilingPercent ??
+      100 - pool.workers.find((worker) => worker.id === row.config.workerId)!.reservePercent; }
+    catch { return 'managed-allocation-unavailable'; }
+    if (ceiling === 0 || observation.windows.some((window) => window.usedPercent !== null && window.usedPercent >= ceiling)) {
       return 'managed-quota-reserve-reached';
     }
     if (observation.windows.length === 0 || observation.windows.some((window) => window.usedPercent === null ||
@@ -209,12 +237,39 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
   async function refresh(row: ManagedWorker): Promise<void> {
     row.status = 'refreshing'; row.reason = 'managed-quota-refreshing';
     row.lastAttemptAt = new Date().toISOString(); row.nextAttemptMs = null;
+    changed();
     let succeeded = false;
     try {
       if (!owns()) return;
-      const result = await probe({ pool, bindings, workerId: row.config.workerId, cwd,
-        bucketIds: row.config.bucketIds, expectedAccountHint: row.config.accountHint, timeoutMs: PROBE_TIMEOUT_MS,
-        signal: controller.signal });
+      const collect = async (processGroupLifecycle?: VerifyProcessGroupLifecycle) => {
+        // A queued permit does not preserve ownership or permission to launch.
+        if (coordinator && !owns() || controller.signal.aborted) {
+          return cancelledBeforeNativeContact(row.config.workerId, config.poolDigest, row.lastAttemptAt!);
+        }
+        const unsettled = (): void => {
+          terminationUncertain = true; row.status = 'uncertain'; row.reason = 'managed-quota-uncertain';
+          // Missing settlement is not evidence that a native process exited.
+          // Stop peers and this loop before the shared permit can be released.
+          coordinator?.abort();
+          void close().catch(() => {});
+        };
+        try {
+          const result = await probe({ pool, bindings, workerId: row.config.workerId, cwd,
+            bucketIds: row.config.bucketIds, expectedAccountHint: row.config.accountHint, timeoutMs: PROBE_TIMEOUT_MS,
+            signal: controller.signal, ...(processGroupLifecycle ? { processGroupLifecycle } : {}) });
+          const status = object(result) ? Object.getOwnPropertyDescriptor(result, 'status') : undefined;
+          if (!status || !('value' in status) || typeof status.value !== 'string' ||
+            !['observed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(status.value)) {
+            throw new Error('Native quota settlement unavailable');
+          }
+          if (status.value === 'uncertain') unsettled();
+          return result;
+        } catch {
+          unsettled();
+          throw new Error('Native quota settlement unavailable');
+        }
+      };
+      const result = coordinator ? await coordinator.run(collect, (value) => value.status !== 'uncertain') : await collect();
       // Unconfirmed process ownership is terminal, even if cancellation raced
       // the result. Never start another process or claim a clean owner shutdown.
       if (object(result) && result.status === 'uncertain') {
@@ -241,6 +296,7 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
         row.nextAttemptMs = Math.max(Date.now() + delay, row.observation?.retryAfter === null || !row.observation
           ? 0 : Date.parse(row.observation.retryAfter));
       }
+      changed();
     }
   }
 
@@ -256,11 +312,15 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
   function close(): Promise<void> {
     if (closing) return closing;
     closed = true;
-    if (timer !== null) { clearTimeout(timer); timer = null; }
-    signal?.removeEventListener('abort', onAbort); controller.abort();
-    closing = Promise.resolve(active).then(() => {
+    // Install the guard before callbacks or abort listeners can synchronously
+    // re-enter close. Await the active task only after this stack unwinds.
+    closing = Promise.resolve().then(() => active).then(() => {
       if (terminationUncertain) throw new Error('Resource quota refresh termination unconfirmed');
+      if (publicationFailed) throw new Error('Resource quota refresh publication failed');
     });
+    if (timer !== null) { clearTimeout(timer); timer = null; }
+    changed();
+    signal?.removeEventListener('abort', onAbort); controller.abort();
     return closing;
   }
   function onAbort(): void { void close().catch(() => {}); }
@@ -286,9 +346,9 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
       const observations = rows.flatMap((row) => row.observation ? [row.observation] : []);
       return validateResourceObservations(mergeResourceObservations(incoming, observations), pool);
     },
-    unavailableWorkerIds(): string[] {
+    unavailableWorkerIds(deferAllocationToAdmission = false): string[] {
       owns();
-      const now = Date.now(); const unavailable = new Set(rows.filter((row) => unavailableReason(row, now) !== null)
+      const now = Date.now(); const unavailable = new Set(rows.filter((row) => unavailableReason(row, now, deferAllocationToAdmission) !== null)
         .map((row) => row.capacityKey));
       return Object.freeze(rows.filter((row) => unavailable.has(row.capacityKey)).map((row) => row.config.workerId)) as string[];
     },
@@ -314,9 +374,14 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
   observations: ResourceObservation[];
   timeoutMs: number;
   capacityWaitMs?: number;
+  /** The caller retains measured usage and reevaluates the current policy at atomic admission. */
+  deferAllocationToAdmission?: boolean;
 }): Promise<{ observations: ResourceObservation[]; unavailableWorkerIds: string[] }> {
   const started = performance.now();
   const timeoutMs = options.timeoutMs;
+  if (options.deferAllocationToAdmission !== undefined && typeof options.deferAllocationToAdmission !== 'boolean') {
+    throw new Error('Invalid resource quota allocation delegation');
+  }
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 900_000) {
     throw new Error('Invalid resource quota refresh time budget');
   }
@@ -341,6 +406,7 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
   };
   const timer = setTimeout(cancel, Math.max(1, remaining()));
   let lease: ResourceQuotaRefreshLease | undefined;
+  let coordinator: NativeMetadataCoordinator | undefined;
   let refresher: ResourceQuotaRefresher | undefined;
   let preservePending = false;
   let result: { observations: ResourceObservation[]; unavailableWorkerIds: string[] } | undefined;
@@ -349,7 +415,7 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
     const available = remaining();
     if (available < 1 || controller.signal.aborted) throw new Error();
     lease = await acquireResourceQuotaRefreshLease(checked.cwd, {
-      waitMs: Math.min(capacityWaitMs, available), signal: controller.signal,
+      waitMs: Math.min(capacityWaitMs, available), signal: controller.signal, trackNativeActivity: true,
     });
     if (remaining() < 1 || controller.signal.aborted) result = { observations, unavailableWorkerIds: unavailable };
     else {
@@ -359,10 +425,14 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
       };
       assertOwnership();
       lease.markPending();
-      const pass = createRefresher({ ...checked, signal: controller.signal, assertOwnership,
+      coordinator = createNativeMetadataCoordinator({ signal: controller.signal,
+        beginNativeActivity: () => lease!.beginNativeActivity() });
+      const pass = createRefresher({ ...checked, signal: AbortSignal.any([controller.signal, coordinator.signal]), assertOwnership, coordinator,
         probe: (probeOptions) => {
           const available = remaining();
-          if (available < 1 || controller.signal.aborted) throw new Error('Resource quota refresh ended');
+          if (available < 1 || controller.signal.aborted) {
+            return Promise.resolve(cancelledBeforeNativeContact(probeOptions.workerId, checked.config.poolDigest));
+          }
           return checked.probe({ ...probeOptions, timeoutMs: Math.min(PROBE_TIMEOUT_MS, available) });
         } }, true);
       refresher = pass.refresher;
@@ -371,13 +441,14 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
       // Preserve capture-time evidence, not the intentionally closed collector's
       // availability. The caller must recheck freshness after awaited cleanup.
       result = { observations: refresher.readObservations(observations),
-        unavailableWorkerIds: refresher.unavailableWorkerIds() };
+        unavailableWorkerIds: refresher.unavailableWorkerIds(options.deferAllocationToAdmission) };
     }
   } catch {
     failure = new Error('Resource quota refresh could not complete');
   } finally {
     try { await refresher?.close(); }
     catch { preservePending = true; failure = new Error('Resource quota refresh cleanup unconfirmed'); }
+    coordinator?.dispose();
     try { lease?.close(preservePending); }
     catch { failure = new Error('Resource quota refresh lease cleanup unconfirmed'); }
     clearTimeout(timer); checked.signal?.removeEventListener('abort', cancel);

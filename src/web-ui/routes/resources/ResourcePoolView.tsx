@@ -5,12 +5,16 @@ import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.j
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { runQuery } from '../../data/cache.js';
+import { ApiError } from '../../data/client.js';
 import { useMutationHold, useQuery } from '../../data/hooks.js';
-import { cancelResourceTask, resourceConsoleSnapshotQuery, setResourceQueuePaused, submitResourceTask } from '../../data/resource-pool-queries.js';
+import { cancelResourceTask, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceQueuePaused, setResourceWorkerAccessControl, submitResourceTask } from '../../data/resource-pool-queries.js';
 import { CapacityBoard, resourceNumber, resourceTime, WorkerInspector } from './CapacityBoard.js';
 import { TaskComposer } from './TaskComposer.js';
 import { PerformancePanel } from './PerformancePanel.js';
 import { QuotaRefreshPanel } from './QuotaRefreshPanel.js';
+import { AccountConnections } from './AccountConnections.js';
+import { AllocationControl } from './AllocationControl.js';
+import { WorkerAccessControl } from './WorkerAccessControl.js';
 import { TaskInspector, taskOwnership, taskState, taskTone } from './TaskInspector.js';
 import { FleetMap } from './FleetMap.js';
 import { buildResourceFleet } from './fleet-model.js';
@@ -23,6 +27,10 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   const hold = useMutationHold();
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [allocationBusy, setAllocationBusy] = useState(false);
+  const [workerAccessBusy, setWorkerAccessBusy] = useState(false);
+  const [workerAccessError, setWorkerAccessError] = useState<string | null>(null);
+  const [workerAccessNotice, setWorkerAccessNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selection, setSelection] = useState<{ kind: 'worker' | 'task'; id: string } | null>(null);
@@ -48,6 +56,42 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   // evidence of recovery and must not reopen dispatch or hide stale labels.
   const enabled = stopEnabled && !supervisor.error &&
     snapshot?.sourceState !== 'degraded' && !historical && query.status !== 'loading';
+  const allocationEnabled = scope.allocationWritable === true && !!snapshot?.allocation &&
+    snapshot.sourceState !== 'degraded' && !historical && query.status !== 'loading';
+  const workerAccessEnabled = scope.allocationWritable === true && !!snapshot?.workerAccess &&
+    snapshot.sourceState !== 'degraded' && !historical && query.status !== 'loading';
+
+  async function saveWorkerAccess(pausedWorkerIds: string[], expectedRevision: number): Promise<boolean> {
+    if (!workerAccessEnabled || workerAccessBusy) return false;
+    if (!hold.hasHold) { setUnlockOpen(true); return false; }
+    setWorkerAccessBusy(true); setWorkerAccessError(null); setWorkerAccessNotice(null);
+    try {
+      await setResourceWorkerAccessControl(pausedWorkerIds, expectedRevision);
+      setWorkerAccessNotice('Fleet account access saved. Running tasks and your usage ceiling are unchanged.');
+      await refresh();
+      return true;
+    } catch (error) {
+      setWorkerAccessError(error instanceof Error ? error.message : 'Account access could not be saved. Refresh before trying again.');
+      if (error instanceof ApiError && error.status === 409) await refresh();
+      return false;
+    } finally { setWorkerAccessBusy(false); }
+  }
+
+  async function saveAllocation(ceilingPercent: number, expectedRevision: number): Promise<boolean> {
+    if (!allocationEnabled || allocationBusy) return false;
+    if (!hold.hasHold) { setUnlockOpen(true); return false; }
+    setAllocationBusy(true); setActionError(null); setNotice(null);
+    try {
+      await setResourceAllocation(ceilingPercent, expectedRevision);
+      setNotice(`Usage ceiling saved at ${ceilingPercent}%. This changes new admission; it does not stop in-flight tasks.`);
+      await refresh();
+      return true;
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : 'Allocation could not be saved. Refresh before trying again.');
+      if (error instanceof ApiError && error.status === 409) await refresh();
+      return false;
+    } finally { setAllocationBusy(false); }
+  }
 
   function inspectSelection(next = selection) {
     setSelection(next); setTab('inspect'); setInspectionRequest((request) => request + 1);
@@ -100,14 +144,16 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
       <div><h1>Resource dispatch desk</h1><p>Route work across your enrolled accounts and local models.</p></div>
       <div className={styles.headerActions}>
         <button type="button" className={styles.secondaryButton} onClick={() => { void refresh(); }} disabled={query.status === 'loading' || query.status === 'refreshing'}>Refresh</button>
-        {!scope.readOnly ? <button type="button" className={hold.hasHold ? styles.secondaryButton : styles.primaryButton}
+        {!scope.readOnly || scope.allocationWritable ? <button type="button" className={hold.hasHold ? styles.secondaryButton : styles.primaryButton}
           onClick={() => hold.hasHold ? hold.clear() : setUnlockOpen(true)}>{hold.hasHold ? 'Lock controls' : 'Unlock controls'}</button> : null}
       </div>
     </header>
-    <div className={styles.freshness}>
+    <div className={styles.statusBar}><div className={styles.freshness}>
       <strong>{scope.poolId}</strong>{snapshot ? <span>{historical ? 'Last successful read' : 'Observed'} {resourceTime(snapshot.sampledAt)}</span> : null}
       <span>Refreshes every 3 seconds while visible</span>{query.status === 'refreshing' ? <RefreshIndicator /> : null}
-    </div>
+    </div>{snapshot ? <nav className={styles.sectionNav} aria-label="Resource sections">
+      <a href="#resource-fleet">Fleet</a><a href="#resource-accounts">Accounts</a><a href="#resource-performance">Performance</a>
+    </nav> : null}</div>
     {historical ? <div className={styles.notice} role="alert"><strong>Resource records unavailable</strong>
       <p>{query.error?.message} Any records below are from the last successful read. New tasks and queue resume wait for a fresh read; pause and owned-task cancellation remain available.</p></div> : null}
     {snapshot?.sourceState === 'degraded' ? <div className={styles.notice} role="alert"><strong>Resource evidence is incomplete</strong>
@@ -140,14 +186,9 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
             {showAllOwned ? 'Show first 4' : `Show ${ownedRows.length - 4} more owned dispatches`}</button> : null}
         </section> : null}
       </section>
-      <div ref={fleetMapRegion}><FleetMap snapshot={snapshot} stale={historical} selection={selection} onSelect={inspectSelection} /></div>
-      <div className={styles.workspaceGrid}>
+      <section id="resource-fleet" tabIndex={-1} className={styles.workspaceGrid} aria-label="Fleet workspace">
         <div className={styles.mainColumn}>
-          <QuotaRefreshPanel refresh={snapshot.quotaRefresh} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
-            onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
-          <CapacityBoard snapshot={snapshot} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
-            historical={historical} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
-          <PerformancePanel report={snapshot.performance} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
+          <div ref={fleetMapRegion}><FleetMap snapshot={snapshot} stale={historical} selection={selection} onSelect={inspectSelection} /></div>
           <section className={styles.tasks} aria-labelledby="tasks-title">
             <div className={styles.sectionHeading}><div><h2 id="tasks-title">Task activity</h2><p>Queue ownership and durable receipts, not inferred process liveness.</p></div>
               <label className={styles.filter}>Show<select aria-label="Task activity filter" value={filter} onChange={(event) => setFilter(event.target.value as typeof filter)}>
@@ -161,10 +202,6 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
               </button></li>)}</ul> : <div className={styles.empty}><h3>{filter === 'all' ? 'No recorded tasks yet' : 'No matching tasks'}</h3>
                 <p>{filter === 'all' ? 'Inspect a worker’s quota, then queue a concrete task when execution is enabled.' : 'Choose another filter to inspect the recorded task history.'}</p></div>}
             <p className={styles.boardNote}>{resourceNumber(snapshot.counts.total)} durable attempts. {resourceNumber(snapshot.counts.omittedHistory)} older terminal receipts omitted. All occupied reservations are shown.</p>
-          </section>
-          <section className={styles.accounting} aria-label="Reported usage coverage"><h2>Recorded usage</h2>
-            <p>{snapshot.usage.complete ? 'Complete reported total' : 'Reported subtotal, not total consumption'}: <strong>{resourceNumber(snapshot.usage.reportedInputTokens)}</strong> input tokens · <strong>{resourceNumber(snapshot.usage.reportedOutputTokens)}</strong> output tokens.</p>
-            <p className={styles.muted}>{resourceNumber(snapshot.usage.reportedAttempts)} attempts with reported usage; {resourceNumber(snapshot.usage.unknownAttempts)} without complete usage. No conversion into provider quota is inferred. Completed tasks are not verified accepted changes.</p>
           </section>
         </div>
         <aside className={styles.sideColumn} aria-label="Resource workspace">
@@ -186,9 +223,32 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
               ? 'It may have left the retained history or this console session. Select another record or refresh to check again; no outcome is inferred.'
               : 'Inspect quota evidence, ownership, outcomes, and session-local output here.'}</p></section>}</div> : null}
         </aside>
-      </div>
+      </section>
+      <section id="resource-accounts" tabIndex={-1} className={styles.detailSection} aria-labelledby="account-resources-title">
+        <div className={styles.detailHeading}><h2 id="account-resources-title">Accounts and quota</h2>
+          <p>Set your usage reserve and inspect the evidence behind each routing decision.</p></div>
+        <WorkerAccessControl workers={snapshot.pool.workers} policy={snapshot.workerAccess} writable={scope.allocationWritable === true}
+          disabled={!workerAccessEnabled && scope.allocationWritable === true} historical={historical} busy={workerAccessBusy}
+          error={workerAccessError} notice={workerAccessNotice} onSave={saveWorkerAccess} />
+        <AllocationControl allocation={snapshot.allocation} writable={scope.allocationWritable === true}
+          disabled={!allocationEnabled && scope.allocationWritable === true} busy={allocationBusy} onSave={saveAllocation} />
+        <AccountConnections connections={snapshot.connections} historical={historical} ceilingPercent={snapshot.allocation?.ceilingPercent} />
+        <QuotaRefreshPanel refresh={snapshot.quotaRefresh} collector={snapshot.metadataCollector} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
+          historical={historical} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
+        <CapacityBoard snapshot={snapshot} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
+          historical={historical} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
+      </section>
+      <section id="resource-performance" tabIndex={-1} className={styles.detailSection} aria-label="Performance and usage">
+        <PerformancePanel report={snapshot.performance} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
+        <section className={styles.accounting} aria-label="Reported usage coverage"><h2>Recorded usage</h2>
+          <p>{snapshot.usage.complete ? 'Complete reported total' : 'Reported subtotal, not total consumption'}: <strong>{resourceNumber(snapshot.usage.reportedInputTokens)}</strong> input tokens · <strong>{resourceNumber(snapshot.usage.reportedOutputTokens)}</strong> output tokens.</p>
+          <p className={styles.muted}>{resourceNumber(snapshot.usage.reportedAttempts)} attempts with reported usage; {resourceNumber(snapshot.usage.unknownAttempts)} without complete usage. No conversion into provider quota is inferred. Completed tasks are not verified accepted changes.</p>
+        </section>
+      </section>
     </> : null}
     {unlockOpen ? <MutationTokenDialog open onClose={() => setUnlockOpen(false)} tokenLabel="Control token"
-      tokenHelp="the control token this resource console printed" reason="This console’s separate control token enables queue, submit, and owned-task cancellation actions. Read access alone cannot dispatch work." /> : null}
+      tokenHelp="the control token this resource console printed" reason={scope.readOnly
+        ? `This console’s separate control token enables ${snapshot?.workerAccess ? 'allocation and fleet account access' : 'allocation'} changes only. Task execution remains disabled.`
+        : `This console’s separate control token enables configured ${snapshot?.workerAccess ? 'account access, ' : ''}allocation, queue, submit, and owned-task cancellation actions. Read access alone cannot dispatch work.`} /> : null}
   </div>;
 }

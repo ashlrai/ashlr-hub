@@ -12,8 +12,8 @@ import { appendRecord, assertComparatorUnchanged, manifestRecord, newRun, parseE
   projectUniverse, readRecords, universePath, type ManifestRecord, type UniverseRecord } from './store.js';
 import { scheduledVariants, selectWinners } from './store.js';
 import { sanitizePublicJson } from '../util/public-json.js';
-import type { UniverseElite, UniverseFeedback, UniverseManifest, UniverseRun, UniverseRunOptions, UniverseSearchContext, UniverseTrial } from './types.js';
-import { generationResources, newGenerationReceipt } from './generation.js';
+import type { UniverseDiagnostic, UniverseElite, UniverseFeedback, UniverseManifest, UniverseRun, UniverseRunOptions, UniverseSearchContext, UniverseTrial } from './types.js';
+import { generationResources, newGenerationReceipt, validGenerationReceipt } from './generation.js';
 import { generateModelCandidate } from './model-candidate.js';
 import { buildUniverseFeedback, feedbackReceipt } from './feedback.js';
 import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
@@ -61,6 +61,52 @@ function commandResultError(result: VerifySubprocessResult, role: string): strin
   return undefined;
 }
 
+const EVALUATOR_FAILURE_DIAGNOSTICS = {
+  start: { code: 'evaluator-start-failed', message: 'The fixed evaluator could not run successfully; no evaluation score was recorded.' },
+  timeout: { code: 'evaluator-timed-out', message: 'The fixed evaluator exceeded its time budget; no evaluation score was recorded.' },
+  exit: { code: 'evaluator-nonzero', message: 'The fixed evaluator exited unsuccessfully; no evaluation score was recorded.' },
+  result: { code: 'evaluator-invalid-result', message: 'The fixed evaluator did not return a valid bounded evaluation result; no evaluation score was recorded.' },
+} satisfies Record<string, UniverseDiagnostic>;
+
+const GENERATION_FAILURE_DIAGNOSTICS = {
+  withheld: { code: 'generation-resource-withheld', message: 'Resource capacity withheld candidate generation; the fixed evaluator did not run and no score was recorded.' },
+  ambiguous: { code: 'generation-resource-unresolved', message: 'The resource handoff has no recoverable candidate outcome; inspect its recorded evidence before another attempt. No evaluation score was recorded.' },
+  resourceStart: { code: 'generation-resource-not-started', message: 'The resource generation handoff did not start; the fixed evaluator did not run and no score was recorded.' },
+  start: { code: 'generation-not-started', message: 'The candidate model request did not start; the fixed evaluator did not run and no score was recorded.' },
+  timeout: { code: 'generation-timed-out', message: 'Candidate generation exceeded its time budget; the fixed evaluator did not run and no score was recorded.' },
+  failed: { code: 'generation-failed', message: 'Candidate generation did not succeed; the fixed evaluator did not run and no score was recorded. This is not a measured code rejection.' },
+} satisfies Record<string, UniverseDiagnostic>;
+
+// Reserve the largest serialized diagnostic, not just the longest message. No
+// private error is included in this size-only placeholder or shared feedback.
+const PREFLIGHT_FAILURE_DIAGNOSTIC = [...Object.values(EVALUATOR_FAILURE_DIAGNOSTICS),
+  ...Object.values(GENERATION_FAILURE_DIAGNOSTICS)].reduce((largest, item) =>
+  Buffer.byteLength(canonical(item), 'utf8') > Buffer.byteLength(canonical(largest), 'utf8') ? item : largest);
+
+/** Classify receipt facts only; never interpret provider prose as a code defect. */
+function generationFailureDiagnostic(receipt: unknown): UniverseDiagnostic | undefined {
+  if (!validGenerationReceipt(receipt) || receipt.status === 'succeeded' || receipt.status === 'cancelled') return undefined;
+  const resource = receipt.resource;
+  // An unresolved handoff takes precedence over a timeout: it is not evidence
+  // that native execution stopped, and must not invite automatic replay.
+  const diagnostic = resource && (resource.dispatch === 'unavailable' || resource.dispatch === 'replayed' ||
+    resource.taskStatus === 'reserved' || resource.taskStatus === 'uncertain') ? GENERATION_FAILURE_DIAGNOSTICS.ambiguous :
+    resource?.dispatch === 'withheld' ? GENERATION_FAILURE_DIAGNOSTICS.withheld :
+      receipt.status === 'timed-out' ? GENERATION_FAILURE_DIAGNOSTICS.timeout :
+        resource?.dispatch === 'not-started' ? GENERATION_FAILURE_DIAGNOSTICS.resourceStart :
+          !resource && !receipt.requestStarted ? GENERATION_FAILURE_DIAGNOSTICS.start : GENERATION_FAILURE_DIAGNOSTICS.failed;
+  return { ...diagnostic };
+}
+
+/** Share phase facts, never private subprocess output or an inferred code defect. */
+function evaluatorFailureDiagnostic(result: VerifySubprocessResult): UniverseDiagnostic | undefined {
+  if (result.cancelled) return undefined;
+  const diagnostic = result.timedOut ? EVALUATOR_FAILURE_DIAGNOSTICS.timeout :
+    result.error ? EVALUATOR_FAILURE_DIAGNOSTICS.start :
+      result.exitCode !== 0 || result.signal !== null ? EVALUATOR_FAILURE_DIAGNOSTICS.exit : undefined;
+  return diagnostic ? { ...diagnostic } : undefined;
+}
+
 function phaseEnvironment(record: ManifestRecord, generation: number, candidate: string, scratch: string, parent: UniverseElite | undefined): NodeJS.ProcessEnv {
   return { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: scratch, TMPDIR: `${scratch}/`, TMP: scratch, TEMP: scratch,
     LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', NO_COLOR: '1', CI: '1',
@@ -104,7 +150,9 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before worker'; return trial; }
     // Reserve room for the full receipt before spending a model request. Large
     // evaluator measurements are rejected intact below, never silently trimmed.
-    preflightTrialEvidenceBudget(trial, {
+    // Also reserve the longest fixed phase diagnostic before model contact.
+    // This is size-only evidence and is never attached to a successful trial.
+    preflightTrialEvidenceBudget({ ...trial, diagnostics: [{ ...PREFLIGHT_FAILURE_DIAGNOSTIC }] }, {
       artifact: { path: archivePath, digest: 'f'.repeat(64), revision: record.manifest.seed.revision },
       changedFiles: variant.generation?.files ?? [], ...(feedback ? { feedback: feedbackReceipt(feedback) } : {}),
       ...(searchContext ? { search: searchContextReceipt(searchContext) } : {}),
@@ -126,6 +174,8 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       if (trial.generation.status !== 'succeeded') {
         trial.status = trial.generation.status;
         trial.error = trial.generation.error ?? 'Model candidate generation failed';
+        const diagnostic = signal.aborted ? undefined : generationFailureDiagnostic(trial.generation);
+        if (diagnostic) trial.diagnostics = [diagnostic];
         return trial;
       }
     } else {
@@ -169,11 +219,21 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     if (evaluationError) {
       trial.error = evaluationError;
       trial.status = evaluation.cancelled ? 'cancelled' : evaluation.timedOut ? 'timed-out' : 'failed';
+      const diagnostic = evaluatorFailureDiagnostic(evaluation);
+      if (diagnostic) trial.diagnostics = [diagnostic];
       return trial;
     }
     assertComparatorUnchanged(record);
     if (artifactDigest(archivePath) !== snapshotDigest) throw new Error('Scored artifact changed during evaluation');
-    const measurement = parseEvaluation(evaluation.stdout);
+    let measurement: ReturnType<typeof parseEvaluation>;
+    try {
+      measurement = parseEvaluation(evaluation.stdout);
+    } catch (error) {
+      // Comparator integrity and evidence-budget failures are not malformed
+      // evaluator output; keep this classification around parsing only.
+      if (!signal.aborted) trial.diagnostics = [{ ...EVALUATOR_FAILURE_DIAGNOSTICS.result }];
+      throw error;
+    }
     const measuredTrial: UniverseTrial = { ...trial, metrics: measurement.metrics, score: measurement.score,
       status: measurement.passed ? 'passed' : 'failed',
       ...(measurement.diagnostics ? { diagnostics: measurement.diagnostics } : {}),

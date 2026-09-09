@@ -109,6 +109,25 @@ export interface VerifyCommandResult {
   failureCategory?: VerifyFailureCategory;
 }
 
+export interface VerifyProcessGroupLifecycle {
+  /** Synchronous durable reservation, before any subprocess can start. */
+  prepare(): {
+    spawned(pgid: number): void;
+    settled(receipt: 'not-started' | 'group-exit-confirmed'): void;
+  };
+}
+
+function lifecycleShape(value: unknown, keys: string[]): boolean {
+  return value !== null && typeof value === 'object' &&
+    [Object.prototype, null].includes(Object.getPrototypeOf(value)) && Reflect.ownKeys(value).length === keys.length &&
+    keys.every((key) => typeof Object.getOwnPropertyDescriptor(value, key)?.value === 'function');
+}
+
+export function isVerifyProcessGroupLifecycle(value: unknown): value is VerifyProcessGroupLifecycle {
+  try { return lifecycleShape(value, ['prepare']); }
+  catch { return false; }
+}
+
 export interface VerifySubprocessOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
@@ -122,6 +141,10 @@ export interface VerifySubprocessOptions {
   /** Windows package-manager shims only; ignored on POSIX. */
   windowsShell?: boolean;
   signal?: AbortSignal;
+  /** Require an explicit receipt that this invocation's POSIX process group is absent. */
+  requireProcessGroupExit?: boolean;
+  /** Durable per-invocation process registration; requires strict group receipts. */
+  processGroupLifecycle?: VerifyProcessGroupLifecycle;
   /** Hermetic ownership-test seams; production callers leave these unset. */
   _platform?: NodeJS.Platform;
   _spawn?: typeof spawn;
@@ -137,6 +160,8 @@ export interface VerifySubprocessResult {
   signal: NodeJS.Signals | null;
   timedOut: boolean;
   cancelled: boolean;
+  /** Opt-in owned-group receipt only; descendants escaping the group are excluded. */
+  processGroupSettlement?: 'not-started' | 'group-exit-confirmed' | 'unconfirmed';
   /** Present only when either captured output stream exceeded its bound. */
   outputTruncated?: true;
   error?: string;
@@ -561,6 +586,10 @@ export function runVerifyCommand(
  * is no longer a sufficient ownership identity, so delayed probes/escalations
  * fail closed instead of risking a recycled, unrelated group. A signaled Windows
  * invocation also fails closed because Node cannot prove complete tree ownership.
+ * Opt-in settlement receipts retain the original PGID for signal-zero absence
+ * checks only, never for signaling after leader exit. ESRCH proves that group
+ * absent; a present (possibly recycled) group or any other error is unconfirmed.
+ * This is not a complete process-tree receipt: escaped descendants are excluded.
  */
 export async function runVerifySubprocessAsync(
   argv: string[],
@@ -573,9 +602,17 @@ export async function runVerifySubprocessAsync(
     signal: null,
     timedOut: false,
     cancelled: false,
+    ...(opts.requireProcessGroupExit === true ? { processGroupSettlement: 'not-started' as const } : {}),
     ...overrides,
   });
 
+  if (opts.requireProcessGroupExit !== undefined && typeof opts.requireProcessGroupExit !== 'boolean') {
+    return emptyResult({ error: 'invalid process-group receipt option: expected a boolean' });
+  }
+  if (opts.processGroupLifecycle !== undefined && (opts.requireProcessGroupExit !== true ||
+      !isVerifyProcessGroupLifecycle(opts.processGroupLifecycle))) {
+    return emptyResult({ error: 'invalid process-group lifecycle option' });
+  }
   if (argv.length === 0 || argv.some((arg) => typeof arg !== 'string')) {
     return emptyResult({ error: 'invalid argv: expected a non-empty string array' });
   }
@@ -607,6 +644,11 @@ export async function runVerifySubprocessAsync(
   }
 
   const platform = opts._platform ?? process.platform;
+  if (opts.requireProcessGroupExit && platform === 'win32') {
+    return emptyResult({
+      error: 'Process-group settlement receipts are unsupported on Windows because complete process-group ownership cannot be guaranteed',
+    });
+  }
   if (opts.signal && platform === 'win32') {
     return emptyResult({
       error: 'AbortSignal-owned verification is unsupported on Windows because complete process-tree ownership cannot be guaranteed',
@@ -634,6 +676,36 @@ export async function runVerifySubprocessAsync(
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let escalationTimer: ReturnType<typeof setTimeout> | null = null;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
+    let lifecycle: ReturnType<VerifyProcessGroupLifecycle['prepare']> | undefined;
+    let lifecycleRegistered = false;
+    let lifecycleFailed = false;
+    const lifecycleError = 'process-group lifecycle publication failed';
+    // Promises are not durable synchronous publication. Observe a rejected
+    // accidental promise, but never let it satisfy the ownership protocol.
+    function synchronous(value: unknown): void {
+      if (value !== undefined) {
+        if (value && (typeof value === 'object' || typeof value === 'function') &&
+            typeof (value as PromiseLike<unknown>).then === 'function') void Promise.resolve(value).catch(() => {});
+        throw new Error(lifecycleError);
+      }
+    }
+    function settleBeforeSpawn(result: VerifySubprocessResult): void {
+      try { if (lifecycle) synchronous(lifecycle.settled('not-started')); }
+      catch { lifecycleFailed = true; }
+      resolveDone(lifecycleFailed ? { ...result, error: lifecycleError, processGroupSettlement: 'unconfirmed' } : result);
+    }
+    if (opts.processGroupLifecycle) {
+      try {
+        const prepared = opts.processGroupLifecycle.prepare();
+        if (!lifecycleShape(prepared, ['spawned', 'settled'])) {
+          synchronous(prepared); throw new Error(lifecycleError);
+        }
+        lifecycle = prepared;
+      } catch {
+        resolveDone(emptyResult({ error: lifecycleError, processGroupSettlement: 'unconfirmed' })); return;
+      }
+      if (opts.signal?.aborted) { settleBeforeSpawn(emptyResult({ cancelled: true })); return; }
+    }
 
     let child: ReturnType<typeof spawn>;
     try {
@@ -646,15 +718,16 @@ export async function runVerifySubprocessAsync(
         ...(ownsProcessGroup ? { detached: true } : {}),
       });
     } catch (err) {
-      resolveDone(emptyResult({ error: err instanceof Error ? err.message : String(err) }));
+      settleBeforeSpawn(emptyResult({ error: err instanceof Error ? err.message : String(err) }));
       return;
     }
 
     // detached:true makes this invocation's PID its PGID while the leader is
     // alive. Never derive or signal any broader group (including the daemon's).
-    let ownedPgid = ownsProcessGroup && typeof child.pid === 'number' && child.pid > 0
+    const originalPgid = ownsProcessGroup && Number.isSafeInteger(child.pid) && typeof child.pid === 'number' && child.pid > 0
       ? child.pid
       : null;
+    let ownedPgid = originalPgid;
 
     function captured(): Pick<VerifySubprocessResult, 'stdout' | 'stderr' | 'outputTruncated'> {
       return {
@@ -687,13 +760,43 @@ export async function runVerifySubprocessAsync(
       child.unref();
     }
 
-    function settle(result: VerifySubprocessResult): void {
+    function settle(result: VerifySubprocessResult, noProcessStarted = false): void {
       if (settled) return;
       settled = true;
       if (timeoutTimer !== null) clearTimeout(timeoutTimer);
       if (escalationTimer !== null) clearTimeout(escalationTimer);
       if (drainTimer !== null) clearTimeout(drainTimer);
       opts.signal?.removeEventListener('abort', onAbort);
+      if (opts.requireProcessGroupExit) {
+        let receipt: NonNullable<VerifySubprocessResult['processGroupSettlement']> =
+          noProcessStarted ? 'not-started' : 'unconfirmed';
+        if (originalPgid !== null) {
+          // This check cannot kill a recycled group and never restores authority
+          // for a later signal. Only kernel-reported absence grants settlement.
+          try { processKill(-originalPgid, 0); }
+          catch (err) {
+            if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ESRCH') {
+              receipt = 'group-exit-confirmed';
+            }
+          }
+        }
+        if (lifecycle) {
+          // A numeric PID with no spawn event is not a registered invocation,
+          // even if that group happens to be absent by the time close arrives.
+          if (lifecycleFailed || originalPgid !== null && !lifecycleRegistered) receipt = 'unconfirmed';
+          if (receipt !== 'unconfirmed') {
+            try { synchronous(lifecycle.settled(receipt)); }
+            catch { lifecycleFailed = true; receipt = 'unconfirmed'; }
+          }
+        }
+        result = {
+          ...result,
+          processGroupSettlement: receipt,
+          ...(lifecycleFailed ? { error: lifecycleError } : {}),
+          ...(receipt === 'unconfirmed' && !result.error && !lifecycleFailed
+            ? { error: 'required process-group exit receipt unconfirmed' } : {}),
+        };
+      }
       releaseProcessResources();
       resolveDone(inputFailure && !result.error ? { ...result, error: inputFailure } : result);
     }
@@ -853,12 +956,18 @@ export async function runVerifySubprocessAsync(
     child.stderr?.on('data', (chunk) => { stderr.append(chunk); });
 
     child.on('error', (err) => {
+      if (lifecycle && originalPgid === null && !lifecycleRegistered && !lifecycleFailed) {
+        // Node reports a failed spawn asynchronously. Cancellation may already
+        // have requested drain, but with no PID this remains a no-start witness.
+        settle(emptyResult({ ...captured(), error: err.message, cancelled: terminationReason === 'cancelled' }), true);
+        return;
+      }
       if (terminationRequested) {
         if (!authorityFailure) authorityFailure = `subprocess error during termination: ${err.message}`;
         beginTerminationDrain();
         return;
       }
-      settle(emptyResult({ ...captured(), error: err.message }));
+      settle(emptyResult({ ...captured(), error: err.message }), originalPgid === null);
     });
 
     child.on('exit', (code, signal) => {
@@ -905,7 +1014,8 @@ export async function runVerifySubprocessAsync(
       }));
     });
 
-    if (opts.input !== undefined) {
+    function deliverInput(): void {
+      if (settled || terminationRequested || opts.signal?.aborted || lifecycleFailed || opts.input === undefined) return;
       if (!child.stdin) {
         inputFailure = 'subprocess stdin delivery unavailable';
       } else {
@@ -918,6 +1028,19 @@ export async function runVerifySubprocessAsync(
         }
       }
     }
+    if (lifecycle) {
+      child.once('spawn', () => {
+        if (settled) return;
+        try {
+          if (originalPgid === null) throw new Error(lifecycleError);
+          synchronous(lifecycle!.spawned(originalPgid)); lifecycleRegistered = true;
+        } catch {
+          lifecycleFailed = true;
+          requestTermination('cancelled'); return;
+        }
+        deliverInput();
+      });
+    } else deliverInput();
 
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     if (opts.signal?.aborted) onAbort();

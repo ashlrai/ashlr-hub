@@ -10,6 +10,7 @@ import type { ControlSnapshot, FleetActivitySnapshot } from './control.js';
 import type { CachedFleetStatus } from './fleet-status-cache.js';
 import type { listRuns } from '../run/orchestrator.js';
 import type { listSwarms } from '../swarm/store.js';
+import type { UniverseCampaignReadinessView } from './universe-console-types.js';
 
 /** Fixed read operations only: there is no caller-selected module, code, or argv. */
 export interface ReadProjectionResults {
@@ -22,6 +23,7 @@ export interface ReadProjectionResults {
   runs: ReturnType<typeof listRuns>;
   swarms: ReturnType<typeof listSwarms>;
   'daemon-observation': PublicDaemonObservation;
+  'universe-campaign-readiness': UniverseCampaignReadinessView;
 }
 
 export interface ReadProjectionPayloads {
@@ -34,6 +36,7 @@ export interface ReadProjectionPayloads {
   runs: undefined;
   swarms: undefined;
   'daemon-observation': undefined;
+  'universe-campaign-readiness': { campaignId: string };
 }
 
 export type ReadProjectionKind = keyof ReadProjectionResults;
@@ -62,11 +65,20 @@ export interface ReadProjectionRequest {
 
 const KINDS: ReadonlySet<string> = new Set<ReadProjectionKind>([
   'snapshot', 'control', 'fleet', 'pulse', 'fleet-activity', 'proposals', 'runs', 'swarms', 'daemon-observation',
+  'universe-campaign-readiness',
 ]);
 
 /** Shared validation keeps even malformed internal messages inside the read allowlist. */
 export function normalizeReadProjectionPayload(kind: unknown, payload: unknown): ReadProjectionPayloads[ReadProjectionKind] {
   if (typeof kind !== 'string' || !KINDS.has(kind)) throw new ReadProjectionError('Unsupported read projection', 'READ_PROJECTION_INVALID_REQUEST');
+  if (kind === 'universe-campaign-readiness') {
+    if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+      const value = payload as Record<string, unknown>;
+      if (Object.keys(value).length === 1 && Object.hasOwn(value, 'campaignId') && typeof value.campaignId === 'string' &&
+          /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.campaignId)) return { campaignId: value.campaignId };
+    }
+    throw new ReadProjectionError('Invalid Universe campaign readiness options', 'READ_PROJECTION_INVALID_REQUEST');
+  }
   if (kind !== 'pulse') {
     if (payload !== undefined) throw new ReadProjectionError('Read projection does not accept a payload', 'READ_PROJECTION_INVALID_REQUEST');
     return undefined;
