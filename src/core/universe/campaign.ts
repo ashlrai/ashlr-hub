@@ -47,7 +47,8 @@ function settle(id: string, requested: Settlement, reason: string, options: Camp
   if (terminalCampaign(state)) return readUniverseCampaign(id, options);
   const selected = state === 'stop-requested' ? 'stopped' : state === 'pause-requested' ? 'paused' : requested;
   appendCampaignEvent(directory, { kind: 'settled', state: selected,
-    reason: selected !== requested ? (selected === 'stopped' ? 'Stopped by owner' : 'Paused by owner') : reason,
+    reason: state === 'stop-requested' || state === 'pause-requested'
+      ? (selected === 'stopped' ? 'Stopped by owner' : 'Paused by owner') : reason,
     at: new Date().toISOString() }, { expectedRecordsDigest });
   return readUniverseCampaign(id, options);
 }
@@ -212,6 +213,14 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
             (trial.generation.resource.dispatch !== 'settled' ||
              trial.generation.resource.taskStatus !== 'completed'))) {
           return settle(id, 'paused', 'Resource generation requires attention; inspect task evidence before resuming', options);
+        }
+        // No bounded local completion means there is no candidate to learn from.
+        // Keep this generation's reservations, but do not spend the remaining
+        // campaign retrying an unavailable service. Recorded malformed responses
+        // and evaluator rejections still feed ordinary autonomous correction.
+        if (result.trials.some((trial) => trial.generation?.provider === 'local-openai-compatible' &&
+            trial.generation.status !== 'succeeded' && trial.generation.responseDigest === null)) {
+          return settle(id, 'paused', 'Local generation did not receive a completion; inspect the local service before resuming', options);
         }
       }
     } catch (error) {

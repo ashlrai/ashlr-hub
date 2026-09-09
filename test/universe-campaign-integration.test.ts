@@ -11,6 +11,7 @@ import { initUniverse, initUniverseCampaign, readUniverseOverview, readUniverseC
 import { withUniverseExecution } from '../src/core/universe/execution.js';
 import { runUniverseOwned } from '../src/core/universe/runner.js';
 import { artifactDigest } from '../src/core/universe/artifacts.js';
+import { readUniverseCampaignReadiness } from '../src/core/universe/campaign-readiness.js';
 
 const roots: string[] = [];
 const servers: Server[] = [];
@@ -42,8 +43,9 @@ interface Prompt {
   feedback?: UniverseFeedback;
 }
 
-async function fixture(respond: (prompt: Prompt, index: number) => { value: number; usage?: boolean } | undefined,
-  variantCount = 1) {
+async function fixture(respond: (prompt: Prompt, index: number) =>
+  { value: number; usage?: boolean; content?: string } | { httpStatus: number } | undefined,
+  variantCount = 1, trialTimeoutMs = 5_000) {
   const requests: Prompt[] = [];
   let started!: () => void;
   const requestStarted = new Promise<void>((resolve) => { started = resolve; });
@@ -58,9 +60,14 @@ async function fixture(respond: (prompt: Prompt, index: number) => { value: numb
       started();
       const result = respond(prompt, requests.length - 1);
       if (!result) return; // Test-owned pending request, closed during teardown.
+      if ('httpStatus' in result) {
+        response.writeHead(result.httpStatus, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ error: 'Test-owned local service unavailable' }));
+        return;
+      }
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ choices: [{ message: { role: 'assistant',
-        content: JSON.stringify({ edits: [{ path: 'value.json', content: `${result.value}\n` }] }) }, finish_reason: 'stop' }],
+        content: result.content ?? JSON.stringify({ edits: [{ path: 'value.json', content: `${result.value}\n` }] }) }, finish_reason: 'stop' }],
       ...(result.usage === false ? {} : { usage: { prompt_tokens: 20, completion_tokens: 10 } }) }));
     });
   });
@@ -82,7 +89,7 @@ async function fixture(respond: (prompt: Prompt, index: number) => { value: numb
   git(['-c', 'user.name=Universe Test', '-c', 'user.email=universe@example.invalid', 'commit', '-qm', 'campaign fixture']);
   const manifest: UniverseManifest = { schemaVersion: 1, id: 'native-campaign', name: 'Campaign fixture', objective: 'Increase a fixed independently evaluated value',
     seed: { repo, revision: git(['rev-parse', 'HEAD']) }, metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
-    budget: { maxTrials: variantCount, maxDurationMs: 15_000, trialTimeoutMs: 5_000, maxParallel: 1 },
+    budget: { maxTrials: variantCount, maxDurationMs: 15_000, trialTimeoutMs, maxParallel: 1 },
     evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 3_000 },
     variants: Array.from({ length: variantCount }, (_, index) => ({ id: `model-${index}`, niche: 'value', hypothesis: 'Use evaluator feedback to improve the value',
       generation: { kind: 'local-chat', endpoint: `http://127.0.0.1:${address.port}/v1`, model: 'fixture', files: ['value.json'], maxOutputTokens: 256 } })),
@@ -94,6 +101,94 @@ async function fixture(respond: (prompt: Prompt, index: number) => { value: numb
 }
 
 describe.runIf(process.platform === 'darwin')('Universe campaigns through native execution', () => {
+  it('pauses a local outage without consuming the remaining campaign and resumes with its original budgets', async () => {
+    let restored = false;
+    const value = await fixture((_prompt, index) => restored ? { value: index } : { httpStatus: 503 });
+    initUniverseCampaign(value.definition, value);
+    const paused = await runUniverseCampaign('campaign', value);
+    expect(paused.state, JSON.stringify(paused)).toBe('paused');
+    expect(paused.reason).toMatch(/Local generation did not receive a completion/);
+    expect(paused.progress).toMatchObject({ attempts: 1, completedRuns: 1, reservedModelRequests: 1 });
+    expect(value.requests).toHaveLength(1);
+    expect(readUniverseOverview(value).universes[0]!.runs[0]!.trials[0]!.generation)
+      .toMatchObject({ status: 'failed', requestStarted: true, responseDigest: null });
+    expect(readUniverseCampaignReadiness('campaign', value)).toMatchObject({ sourceState: 'healthy',
+      disposition: 'attention-required', reasonCode: 'generation-attention-required', automaticAction: 'none' });
+    restored = true;
+    const resumed = await runUniverseCampaign('campaign', value);
+    expect(resumed.state, JSON.stringify(resumed)).toBe('completed');
+    expect(resumed.startedAt).toBe(paused.startedAt);
+    expect(resumed.deadlineAt).toBe(paused.deadlineAt);
+    expect(resumed.progress).toMatchObject({ attempts: 3, completedRuns: 3, reservedModelRequests: 3,
+      reportedTokens: null, usageComplete: false, recordedTokens: 60 });
+    expect(value.requests).toHaveLength(3);
+  }, 20_000);
+
+  it('pauses after a local completion timeout instead of repeating the timed-out request', async () => {
+    const value = await fixture(() => undefined, 1, 2_000);
+    initUniverseCampaign(value.definition, value);
+    const result = await runUniverseCampaign('campaign', value);
+    expect(result.state, JSON.stringify(result)).toBe('paused');
+    expect(result.reason).toMatch(/Local generation did not receive a completion/);
+    expect(result.progress).toMatchObject({ attempts: 1, reservedModelRequests: 1 });
+    expect(value.requests).toHaveLength(1);
+    expect(readUniverseOverview(value).universes[0]!.runs[0]!.trials[0]!.generation)
+      .toMatchObject({ status: 'timed-out', requestStarted: true, responseDigest: null });
+  }, 15_000);
+
+  it('preserves caller cancellation when local generation also fails', async () => {
+    const controller = new AbortController();
+    const value = await fixture(() => { controller.abort(); return { httpStatus: 503 }; });
+    initUniverseCampaign(value.definition, value);
+    const result = await runUniverseCampaign('campaign', { ...value, signal: controller.signal });
+    expect(result.state, JSON.stringify(result)).toBe('paused');
+    expect(result.reason).toMatch(/caller cancellation/);
+    expect(value.requests).toHaveLength(1);
+  }, 15_000);
+
+  it('continues correcting malformed edits when a local model completion was recorded', async () => {
+    const value = await fixture((_prompt, index) => index === 0
+      ? { value: 0, content: 'not valid JSON edits' } : { value: index });
+    initUniverseCampaign(value.definition, value);
+    const result = await runUniverseCampaign('campaign', value);
+    expect(result.state, JSON.stringify(result)).toBe('completed');
+    expect(result.progress).toMatchObject({ attempts: 3, reservedModelRequests: 3, reportedTokens: 90, usageComplete: true });
+    expect(value.requests).toHaveLength(3);
+    const first = readUniverseOverview(value).universes[0]!.runs[0]!.trials[0]!;
+    expect(first.generation?.status).toBe('failed');
+    expect(first.generation?.responseDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(value.requests[1]!.parentTrialId).toBeNull();
+    expect(value.requests[1]!.feedback?.diagnostics).toContainEqual(expect.objectContaining({ code: 'generation-failed' }));
+  }, 20_000);
+
+  it.each(['pause', 'stop'] as const)('preserves explicit owner %s when local generation also fails', async (action) => {
+    const value = await fixture(() => {
+      requestUniverseCampaignControl('campaign', action, value);
+      return { httpStatus: 503 };
+    });
+    initUniverseCampaign(value.definition, value);
+    const result = await runUniverseCampaign('campaign', value);
+    expect(result.state, JSON.stringify(result)).toBe(action === 'pause' ? 'paused' : 'stopped');
+    expect(result.reason).not.toMatch(/Local generation did not receive a completion/);
+    expect(value.requests).toHaveLength(1);
+  }, 15_000);
+
+  it('does not renew an outage-paused campaign after its original deadline expires', async () => {
+    const value = await fixture(() => ({ httpStatus: 503 }));
+    initUniverseCampaign(value.definition, value);
+    const paused = await runUniverseCampaign('campaign', value);
+    expect(paused.state).toBe('paused');
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.parse(paused.deadlineAt!) + 1);
+    try {
+      const final = await runUniverseCampaign('campaign', value);
+      expect(final.state).toBe('completed');
+      expect(final.reason).toMatch(/duration budget/);
+      expect(final.deadlineAt).toBe(paused.deadlineAt);
+      expect(final.progress.reservedModelRequests).toBe(1);
+      expect(value.requests).toHaveLength(1);
+    } finally { clock.mockRestore(); }
+  }, 15_000);
+
   it('runs from ready through evaluated improvement to a local branch without another model request on replay', async () => {
     const value = await fixture((_prompt, index) => ({ value: index + 1 }));
     initUniverseCampaign(value.definition, value);

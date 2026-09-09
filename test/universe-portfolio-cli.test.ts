@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
@@ -53,7 +53,7 @@ describe('Universe portfolio CLI', () => {
   let errors: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     vi.resetAllMocks();
-    root = mkdtempSync(join(tmpdir(), 'ashlr-portfolio-cli-'));
+    root = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-portfolio-cli-')));
     manifest = join(root, 'portfolio.json');
     writeFileSync(manifest, JSON.stringify(definition()));
     output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -209,6 +209,67 @@ describe('Universe portfolio CLI', () => {
     expect(JSON.parse(printed)).toEqual(result());
     expect(printed).not.toContain(resourceRuntime);
     expect(printed).not.toContain('resourceRuntime');
+  });
+
+  // The shared private resource-file protocol is POSIX-only; Windows retains
+  // argument/manifest coverage without claiming its missing ACL capability.
+  it.skipIf(process.platform === 'win32')('reads and forwards an explicit delivery plan only to execution', async () => {
+    const path = join(root, 'private-delivery.json');
+    const deliveryPlan = { schemaVersion: 1, deliveries: [{ campaignId: 'first', branch: 'codex/first', baseCommit: 'a'.repeat(40) }] };
+    writeFileSync(path, JSON.stringify(deliveryPlan), { mode: 0o600 });
+    expect(await cmdUniversePortfolio(['run', '--manifest', manifest, '--root', root, '--delivery-plan', path, '--json'])).toBe(0);
+    expect(core.runUniversePortfolio).toHaveBeenCalledWith(definition(), { root, signal: expect.any(AbortSignal), deliveryPlan });
+    expect(core.readUniversePortfolioPlan).not.toHaveBeenCalled();
+    expect(output.mock.calls[0]![0]).not.toContain(path);
+  });
+
+  it.each([
+    ['plan', '--delivery-plan', '/private/plan-marker.json'],
+    ['help', '--delivery-plan', '/private/plan-marker.json'],
+    ['run', '--delivery-plan'],
+    ['run', '--delivery-plan', 'relative-plan-marker.json'],
+    ['run', '--delivery-plan', '/private/../plan-marker.json'],
+    ['run', '--delivery-plan', '/'],
+    ['run', '--delivery-plan', '/private/plan-marker.json', '--delivery-plan', '/private/second.json'],
+    ['run', '--delivery-plan', '/private/plan-marker\n.json'],
+    ['run', '--delivery-plan', '/' + 'é'.repeat(2048)],
+    ['run', '--delivery-plan=/private/plan-marker.json'],
+  ])('rejects delivery scope/path before reading any files: %j', async (...args) => {
+    expect(await cmdUniversePortfolio([...args, '--manifest', '/private/missing.json', '--json'])).toBe(2);
+    expect(output.mock.calls[0]![0]).not.toContain('plan-marker');
+    expect(core.readUniversePortfolioPlan).not.toHaveBeenCalled();
+    expect(core.runUniversePortfolio).not.toHaveBeenCalled();
+  });
+
+  it.each(['missing', 'malformed', 'oversized', 'symlink', 'directory', 'unenrolled', 'duplicate', 'invalid-base', 'public-mode'])(
+    'rejects %s delivery plan without dispatch or private error output', async (kind) => {
+      const path = join(root, 'private-plan-marker.json');
+      const row = { campaignId: 'first', branch: 'codex/first', baseCommit: 'a'.repeat(40) };
+      if (kind === 'malformed') writeFileSync(path, '{private-content-marker');
+      else if (kind === 'oversized') writeFileSync(path, Buffer.alloc(64 * 1024 + 1, 32));
+      else if (kind === 'symlink') symlinkSync(manifest, path);
+      else if (kind === 'directory') mkdirSync(path);
+      else if (kind === 'unenrolled') writeFileSync(path, JSON.stringify({ schemaVersion: 1, deliveries: [{ ...row, campaignId: 'other' }] }));
+      else if (kind === 'duplicate') writeFileSync(path, JSON.stringify({ schemaVersion: 1, deliveries: [row, row] }));
+      else if (kind === 'invalid-base') writeFileSync(path, JSON.stringify({ schemaVersion: 1, deliveries: [{ ...row, baseCommit: 'HEAD' }] }));
+      else if (kind === 'public-mode') writeFileSync(path, JSON.stringify({ schemaVersion: 1, deliveries: [row] }));
+      if (!['missing', 'symlink', 'directory', 'public-mode'].includes(kind)) chmodSync(path, 0o600);
+      if (kind === 'public-mode') chmodSync(path, 0o644);
+      expect(await cmdUniversePortfolio(['run', '--manifest', manifest, '--delivery-plan', path, '--json'])).toBe(2);
+      expect(output.mock.calls[0]![0]).toBe(JSON.stringify({ error: 'Invalid or unavailable private campaign delivery plan' }));
+      expect(core.runUniversePortfolio).not.toHaveBeenCalled();
+    });
+
+  it('shows a withheld handoff separately from completed campaign evidence', async () => {
+    const value = result('incomplete');
+    value.outcomes[0] = { ...value.outcomes[0]!, status: 'blocked',
+      campaign: { ...campaign(), state: 'completed' }, delivery: { status: 'withheld', reason: 'no-strict-improvement' } };
+    core.runUniversePortfolio.mockResolvedValue(value);
+    expect(await cmdUniversePortfolio(['run', '--manifest', manifest])).toBe(1);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('Delivery: withheld · no-strict-improvement');
+    expect(text).toContain('Explicit handoffs gate dependencies');
+    expect(text).toContain('not artifact transfer, push, merge, deployment, or production acceptance');
   });
 
   it.each([

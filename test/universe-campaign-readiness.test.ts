@@ -293,6 +293,18 @@ describe('resource withholding and recorded ambiguity', () => {
     runAndPause(f, ['withheld', 'completed'], (run) => { run.trials[1]!.generation!.status = 'failed'; });
     expectReason(f, kind === 'resource' ? 'resource-attention-required' : 'generation-attention-required');
   });
+
+  it.each(['failed', 'timed-out'] as const)('holds paused local %s without a received completion', (status) => {
+    const f = fixture(['local']);
+    runAndPause(f, [], (run) => {
+      const trial = run.trials[0]!;
+      trial.status = status;
+      Object.assign(trial.generation!, { status, responseDigest: null,
+        usage: { state: 'unavailable', inputTokens: null, outputTokens: null } });
+    });
+    expect(expectReason(f, 'generation-attention-required')).toMatchObject({
+      disposition: 'attention-required', automaticAction: 'none', observedState: 'paused' });
+  });
 });
 
 describe('original campaign budgets remain authoritative', () => {
