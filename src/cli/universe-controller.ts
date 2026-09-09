@@ -19,6 +19,9 @@ All paths must be canonical absolute paths. --root defaults to ~/.ashlr/universe
 The first run pins the definition and optional delivery plan. Repeat the exact
 manifest and delivery intent on restart; existing experiments are not rewritten.
 The original persisted deadline includes downtime and is not renewed by restart.
+Never-dispatched campaigns wait for a busy Universe execution lock within that
+same deadline. No dispatch intent or worker request is recorded while waiting.
+Changed evidence, owner pauses and uncertain ownership do not authorize a retry.
 Already settled work is reconciled; uncertain or paused work is not automatically
 retried. An in-flight record is evidence of an attempt, not proof of a live worker.
 Lost controller receipts can be recovered only from an exact dispatch-attributed

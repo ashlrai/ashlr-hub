@@ -2,12 +2,13 @@ import { lstatSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { canonical, defaultUniverseRoot, digest, inspectPrivateDirectory, privateDirectory } from './artifacts.js';
 import { readUniverseCampaign } from './campaign-store.js';
 import { readCompletedUniverseCampaignDispatch } from './campaign-dispatch.js';
 import { readCompletedCampaignDelivery } from './campaign-delivery-recovery.js';
-import { runUniverseCampaign } from './campaign.js';
+import { runUniverseCampaignOwned } from './campaign.js';
+import { acquireUniverseExecution } from './execution.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadiness } from './campaign-readiness.js';
 import { deliverCompletedUniverseCampaign, preflightUniverseCampaignDelivery, validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
 import { readUniverseDeliveries } from './delivery.js';
@@ -23,6 +24,11 @@ function matches(pin: PortfolioControllerPin, report: UniverseCampaignReadiness)
   return report.sourceState === 'healthy' && report.expectedIdentity !== null && report.recordsDigest !== null &&
     report.expectedIdentity.universeId === pin.universeId && report.expectedIdentity.definitionDigest === pin.definitionDigest &&
     report.expectedIdentity.manifestDigest === pin.manifestDigest && report.expectedIdentity.comparatorDigest === pin.comparatorDigest;
+}
+
+/** Only untouched ready work can wait; another campaign session is not adopted. */
+function waitable(report: UniverseCampaignReadiness): boolean {
+  return report.observedState === 'ready' && report.disposition === 'owned';
 }
 
 function empty(id: string, state: 'missing' | 'degraded', at: string): UniversePortfolioControllerReport {
@@ -59,7 +65,8 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
         return { ...row, state: 'held' as const, reasonCode: 'delivery-evidence-changed' };
       }
     }
-    return { ...row };
+    return { ...row, ...(row.state === 'pending' && pin.dispatch === 'campaign' && waitable(readiness)
+      ? { reasonCode: 'waiting-for-universe-owner' } : {}) };
   });
   // Declared order need not be topological. Propagate holds to a fixed point
   // without changing either the stored enrollment or scheduling priority.
@@ -160,7 +167,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
         if (report.sourceState !== 'healthy' || !report.expectedIdentity || !report.recordsDigest ||
             report.expectedIdentity.summaryDigest !== digest(canonical(node.campaign))) throw new Error('Campaign changed during controller enrollment');
         const completed = report.observedState === 'completed';
-        const runnable = report.automaticAction === 'run';
+        const runnable = report.automaticAction === 'run' || waitable(report);
         return { campaignId: node.campaignId, universeId: report.expectedIdentity.universeId,
           definitionDigest: report.expectedIdentity.definitionDigest, manifestDigest: report.expectedIdentity.manifestDigest,
           comparatorDigest: report.expectedIdentity.comparatorDigest, campaignDigest: report.expectedIdentity.summaryDigest,
@@ -226,17 +233,28 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     poll = setInterval(stopping, 250);
     const plan = readUniversePortfolioPlan(definition, { root });
     const targets = new Map(deliveryPlan?.deliveries.map((row) => [row.campaignId, row]));
-    const launch = (campaignId: string, admitted: UniverseCampaignReadiness): void => {
+    const launch = (campaignId: string, admitted: UniverseCampaignReadiness, executionLock?: LocalStoreLock): void => {
       const pin = initial.pins.get(campaignId)!;
-      const dispatchId = pin.dispatch === 'campaign' ? randomUUID() : undefined;
-      append({ kind: 'intent', at: new Date().toISOString(), campaignId, ...(dispatchId ? { dispatchId } : {}) });
+      let dispatchId: string | undefined;
+      try {
+        dispatchId = pin.dispatch === 'campaign' ? randomUUID() : undefined;
+        append({ kind: 'intent', at: new Date().toISOString(), campaignId, ...(dispatchId ? { dispatchId } : {}) });
+      }
+      catch (error) { releaseLocalStoreLock(executionLock); throw error; }
       const work = Promise.resolve().then(async () => {
-        if (stopping()) return;
         try {
-          const result = pin.dispatch === 'campaign' ? await runUniverseCampaign(campaignId, { root, signal: controller.signal,
-            dispatchId,
-            ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
-            expectedIdentity: { ...admitted.expectedIdentity!, recordsDigest: admitted.recordsDigest! } }) : readUniverseCampaign(campaignId, { root });
+          let result;
+          try {
+            if (stopping()) return;
+            result = pin.dispatch === 'campaign' ? await runUniverseCampaignOwned(campaignId, { root, signal: controller.signal,
+              dispatchId,
+              ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
+              expectedIdentity: { ...admitted.expectedIdentity!, recordsDigest: admitted.recordsDigest! } }, executionLock!) : readUniverseCampaign(campaignId, { root });
+          } finally {
+            // Delivery acquires its own execution lease. Never retain the
+            // campaign lease across that separate handoff or any early return.
+            releaseLocalStoreLock(executionLock);
+          }
           let current = readUniverseCampaignReadiness(campaignId, { root });
           if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== digest(canonical(result))) throw new Error('Runner settlement changed');
           const settledRecordsDigest = current.recordsDigest;
@@ -281,6 +299,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
       active.set(campaignId, work);
     };
     while (true) {
+      let waitingForOwner = false;
       if (!stopping()) {
         const report = inspect(definition.id, events, root, new Date().toISOString());
         if (report.sourceState !== 'healthy') halt('unavailable', 'controller-source-evidence-changed');
@@ -294,7 +313,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           if (!matches(pin, admitted) || admitted.expectedIdentity!.summaryDigest !== pin.campaignDigest || admitted.recordsDigest !== pin.recordsDigest) {
             halt('unavailable', 'controller-admission-evidence-changed'); break;
           }
-          if (pin.dispatch === 'campaign' && admitted.automaticAction !== 'run' || pin.dispatch === 'delivery' && admitted.observedState !== 'completed') continue;
+          if (pin.dispatch === 'campaign' && admitted.automaticAction !== 'run' && !waitable(admitted) || pin.dispatch === 'delivery' && admitted.observedState !== 'completed') continue;
           if (pin.dispatch === 'campaign' && admitted.resourceRuntimeRequired && resourceRuntime === undefined) {
             const reason = `${campaignId}:resource-runtime-required`;
             if (!errors.includes(reason)) errors.push(reason);
@@ -305,11 +324,62 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           if (inspect(definition.id, events, root, new Date().toISOString()).sourceState !== 'healthy') {
             halt('unavailable', 'controller-dependency-evidence-changed'); break;
           }
-          if (!stopping()) launch(campaignId, admitted);
+          if (stopping()) break;
+          if (pin.dispatch === 'campaign' && waitable(admitted)) { waitingForOwner = true; continue; }
+          let executionLock: LocalStoreLock | undefined;
+          if (pin.dispatch === 'campaign') {
+            let execution;
+            try { execution = acquireUniverseExecution(pin.universeId, { root }); }
+            catch { halt('unavailable', 'campaign-execution-ownership-unavailable'); break; }
+            if (execution.state === 'contended') { waitingForOwner = true; continue; }
+            if (execution.state !== 'acquired') { halt('unavailable', 'campaign-execution-ownership-unavailable'); break; }
+            executionLock = execution.lock;
+          }
+          try {
+            // The exact campaign CAS is read under the lease passed into the
+            // runner, closing the probe/release/reacquire race before intent.
+            const current = readUniverseCampaignReadiness(campaignId, { root });
+            if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== pin.campaignDigest || current.recordsDigest !== pin.recordsDigest) {
+              halt('unavailable', 'controller-admission-evidence-changed'); break;
+            }
+            if (pin.dispatch === 'campaign' && current.automaticAction !== 'run') {
+              if (waitable(current)) waitingForOwner = true;
+              continue;
+            }
+            if (inspect(definition.id, events, root, new Date().toISOString()).sourceState !== 'healthy') {
+              halt('unavailable', 'controller-dependency-evidence-changed'); break;
+            }
+            if (stopping()) break;
+            const transferred = executionLock;
+            executionLock = undefined;
+            launch(campaignId, current, transferred);
+          } finally { releaseLocalStoreLock(executionLock); }
         }
       }
-      if (!active.size) break;
-      await Promise.race(active.values());
+      if (!active.size && (!waitingForOwner || controller.signal.aborted)) break;
+      if (!waitingForOwner) {
+        // Active workers already inherit cancellation and the deadline timer.
+        // Without contention, their settlement is the only useful queue wakeup.
+        await Promise.race(active.values());
+        continue;
+      }
+      // A bounded disposable wakeup observes lease release even while another
+      // branch runs. Polling does not append records or renew any allowance.
+      let wake: ReturnType<typeof setTimeout> | undefined;
+      let abort: (() => void) | undefined;
+      const delay = new Promise<void>((resolveWait) => {
+        abort = resolveWait;
+        wake = setTimeout(resolveWait, Math.max(1, Math.min(250, deadlineMonotonic - performance.now())));
+        controller.signal.addEventListener('abort', abort, { once: true });
+        if (controller.signal.aborted) resolveWait();
+      });
+      try {
+        if (controller.signal.aborted) await Promise.allSettled(active.values());
+        else await Promise.race([...active.values(), delay]);
+      } finally {
+        clearTimeout(wake);
+        if (abort) controller.signal.removeEventListener('abort', abort);
+      }
     }
     stopping();
     const result = inspect(definition.id, events, root, new Date().toISOString());
