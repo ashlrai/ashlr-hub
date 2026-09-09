@@ -32,6 +32,45 @@ export interface UniversePortfolioPlanNode {
   reason: string | null;
 }
 
+/** A bounded, read-only ordering projection; it neither schedules nor delivers work. */
+export interface UniversePortfolioGraphNode {
+  campaignId: string;
+  state: UniversePortfolioNodeState;
+  /** Direct ordering prerequisites retained in declared order. */
+  dependsOn: string[];
+  /** Direct prerequisites that are not currently completed. */
+  unmetDependencyIds: string[];
+  /** Intrinsic or propagated blocked/unavailable causes, deduplicated. */
+  blockingRootIds: string[];
+  /** Intrinsic busy or propagated waiting causes, deduplicated. */
+  waitingRootIds: string[];
+  /** All transitive dependants, ordered by the caller-stable topology. */
+  structuralDescendantIds: string[];
+  /** Descendants currently carrying this campaign as a blocking or waiting root. */
+  affectedDescendantIds: string[];
+  /** Zero-based longest prerequisite depth. */
+  layer: number;
+}
+
+export interface UniversePortfolioGraphProjection {
+  schemaVersion: 1;
+  scope: 'campaign-ordering-only';
+  authority: 'observation-only';
+  /** Ready under the existing portfolio state model; this is not a dispatch decision. */
+  dependencyReadyCampaignIds: string[];
+  /** Empty whenever the selected campaign source is degraded. */
+  invocationCandidateIds: string[];
+  /** Campaign IDs by structural prerequisite depth. */
+  layers: string[][];
+  counts: {
+    nodes: number;
+    edges: number;
+    states: Record<UniversePortfolioNodeState, number>;
+  };
+  /** Nodes retain definition order. */
+  nodes: UniversePortfolioGraphNode[];
+}
+
 export interface UniversePortfolioPlan {
   schemaVersion: 1;
   definition: UniversePortfolioDefinition;
@@ -44,4 +83,6 @@ export interface UniversePortfolioPlan {
   /** Nodes retain definition order; topologicalOrder provides dependency order. */
   nodes: UniversePortfolioPlanNode[];
   topologicalOrder: string[];
+  /** Ordering observation only; it grants no execution, delivery, or provider authority. */
+  graph: UniversePortfolioGraphProjection;
 }

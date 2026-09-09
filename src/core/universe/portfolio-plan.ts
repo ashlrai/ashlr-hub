@@ -1,5 +1,6 @@
 import { canonical, digest } from './artifacts.js';
 import { readUniverseCampaign, validateUniverseCampaignDefinition } from './campaign-store.js';
+import { buildUniversePortfolioGraph } from './portfolio-frontier.js';
 import type { UniverseCampaignSummary, UniverseStoreOptions } from './types.js';
 import type {
   UniversePortfolioDefinition, UniversePortfolioPlan, UniversePortfolioPlanNode, UniversePortfolioTask,
@@ -131,6 +132,10 @@ export function buildUniversePortfolioPlan(input: unknown,
       reasons.push(`${node.campaignId}: another enrolled campaign uses the same Universe`);
     }
   }
+  // Preserve the self-observed state after duplicate-Universe validation. The
+  // graph frontier uses this snapshot rather than reverse-engineering causes
+  // from mutable display reasons after dependency propagation.
+  const intrinsicStates = new Map(nodes.map((node) => [node.campaignId, node.state]));
   const ordered = topologicalOrder(definition.tasks);
   for (const id of ordered) {
     const node = byId.get(id)!;
@@ -144,9 +149,10 @@ export function buildUniversePortfolioPlan(input: unknown,
       node.state = 'waiting'; node.reason = 'Waiting for campaign dependencies to complete';
     }
   }
+  const sourceState = reasons.length ? 'degraded' : 'healthy';
   return { schemaVersion: 1, definition, definitionDigest: digest(canonical(definition)), sampledAt,
-    measurementScope: 'local-experiment', sourceState: reasons.length ? 'degraded' : 'healthy', reasons, nodes,
-    topologicalOrder: ordered };
+    measurementScope: 'local-experiment', sourceState, reasons, nodes, topologicalOrder: ordered,
+    graph: buildUniversePortfolioGraph(definition, nodes, ordered, sourceState, intrinsicStates) };
 }
 
 /** Targeted, read-only planning: missing storage is never initialized. */

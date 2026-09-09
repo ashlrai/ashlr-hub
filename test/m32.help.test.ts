@@ -67,6 +67,9 @@ describe('HELP_ENTRIES — the command table', () => {
     expect(plan.usage).not.toContain('--resource-runtime');
     expect(plan.safety).toBe('read');
     expect(plan.jsonShape).toBe('UniversePortfolioPlan');
+    expect(plan.description).toContain('ordering frontier');
+    expect(plan.description).toContain('blocker roots');
+    expect(plan.description).toContain('declared priority is unchanged');
   });
 
   it('advertises resource diagnostics without promoting them to execution authority', () => {

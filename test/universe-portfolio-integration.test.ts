@@ -7,6 +7,7 @@ import { initUniverse, initUniverseCampaign, readUniverseCampaign, readUniverseO
   requestUniverseCampaignControl, runUniverseCampaign,
   type UniverseCampaignDefinition, type UniverseManifest } from '../src/core/universe/index.js';
 import { runUniversePortfolio } from '../src/core/universe/portfolio.js';
+import { readUniversePortfolioPlan } from '../src/core/universe/portfolio-plan.js';
 import * as campaignStore from '../src/core/universe/campaign-store.js';
 import type { UniversePortfolioDefinition } from '../src/core/universe/portfolio-types.js';
 
@@ -78,6 +79,14 @@ describe.runIf(process.platform === 'darwin')('Universe portfolio native accepta
   it('overlaps independent campaigns, honors a dependency join, and reruns without duplicate generations', async () => {
     const value = fixture([{ name: 'a', delay: 700 }, { name: 'b', delay: 700 }, { name: 'c' }]);
     const definition = value.portfolio({ 'campaign-c': ['campaign-a', 'campaign-b'] });
+    const before = value.definitions.map((campaign) => readUniverseCampaign(campaign.id, value));
+    const initial = readUniversePortfolioPlan(definition, value);
+    expect(initial.graph).toMatchObject({ scope: 'campaign-ordering-only', authority: 'observation-only',
+      dependencyReadyCampaignIds: ['campaign-a', 'campaign-b'], invocationCandidateIds: ['campaign-a', 'campaign-b'],
+      layers: [['campaign-a', 'campaign-b'], ['campaign-c']] });
+    expect(initial.graph.nodes.find((node) => node.campaignId === 'campaign-c')).toMatchObject({
+      waitingRootIds: ['campaign-a', 'campaign-b'], blockingRootIds: [] });
+    expect(value.definitions.map((campaign) => readUniverseCampaign(campaign.id, value))).toEqual(before);
     const result = await runUniversePortfolio(definition, value);
     expect(result.status, JSON.stringify(result)).toBe('completed');
     expect(result.outcomes.every((outcome) => outcome.status === 'completed' && outcome.attempted)).toBe(true);
@@ -95,6 +104,9 @@ describe.runIf(process.platform === 'darwin')('Universe portfolio native accepta
     const campaigns = value.definitions.map((campaign) => readUniverseCampaign(campaign.id, value));
     const rerun = await runUniversePortfolio(definition, value);
     expect(rerun.status).toBe('completed'); expect(rerun.outcomes.every((outcome) => !outcome.attempted)).toBe(true);
+    expect(rerun.plan.graph.invocationCandidateIds).toEqual([]);
+    expect(rerun.plan.graph.counts.states.completed).toBe(3);
+    expect(rerun.plan.graph.nodes.every((node) => node.blockingRootIds.length === 0 && node.waitingRootIds.length === 0)).toBe(true);
     expect(value.definitions.map((campaign) => readUniverseCampaign(campaign.id, value))).toEqual(campaigns);
     expect(readUniverseOverview(value).universes.map((universe) => universe.runs)).toEqual(overview.universes.map((universe) => universe.runs));
   });
@@ -127,6 +139,9 @@ describe.runIf(process.platform === 'darwin')('Universe portfolio native accepta
     const stopped = requestUniverseCampaignControl('campaign-a', 'stop', value);
     const result = await runUniversePortfolio(value.portfolio({ 'campaign-b': ['campaign-a'] }), value);
     expect(result.status).toBe('incomplete');
+    expect(result.plan.graph.invocationCandidateIds).toEqual(['campaign-c']);
+    expect(result.plan.graph.nodes.find((node) => node.campaignId === 'campaign-b')?.blockingRootIds).toEqual(['campaign-a']);
+    expect(result.plan.graph.nodes.find((node) => node.campaignId === 'campaign-a')?.affectedDescendantIds).toEqual(['campaign-b']);
     expect(result.outcomes.find((outcome) => outcome.campaignId === 'campaign-b')).toMatchObject({ status: 'blocked', attempted: false });
     expect(result.outcomes.find((outcome) => outcome.campaignId === 'campaign-c')).toMatchObject({ status: 'completed', attempted: true });
     expect(readUniverseCampaign('campaign-a', value)).toEqual(stopped);
@@ -139,6 +154,8 @@ describe.runIf(process.platform === 'darwin')('Universe portfolio native accepta
     chmodSync(record, 0o600); writeFileSync(record, '{');
     const result = await runUniversePortfolio(value.portfolio(), value);
     expect(result.status).toBe('failed'); expect(result.plan.sourceState).toBe('degraded');
+    expect(result.plan.graph.dependencyReadyCampaignIds).toContain('campaign-a');
+    expect(result.plan.graph.invocationCandidateIds).toEqual([]);
     expect(result.outcomes.every((outcome) => !outcome.attempted)).toBe(true);
     expect(readUniverseCampaign('campaign-a', value).progress.attempts).toBe(0);
     expect(readUniverseOverview(value).universes.every((universe) => universe.runs.length === 0)).toBe(true);

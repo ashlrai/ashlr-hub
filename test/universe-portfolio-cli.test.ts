@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync, w
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
-import type { UniversePortfolioDefinition, UniversePortfolioPlan } from '../src/core/universe/portfolio-types.js';
+import type { UniversePortfolioDefinition, UniversePortfolioGraphProjection, UniversePortfolioPlan } from '../src/core/universe/portfolio-types.js';
 import type { UniversePortfolioResult } from '../src/core/universe/index.js';
 
 const core = vi.hoisted(() => ({ readUniversePortfolioPlan: vi.fn(), runUniversePortfolio: vi.fn() }));
@@ -34,9 +34,27 @@ function plan(): UniversePortfolioPlan {
   const value = definition();
   return { schemaVersion: 1, definition: value, definitionDigest: 'd'.repeat(64),
     sampledAt: '2026-09-07T01:00:00.000Z', measurementScope: 'local-experiment', sourceState: 'healthy', reasons: [],
-    topologicalOrder: ['first', 'second'], nodes: value.tasks.map((task, index) => ({ ...task,
+    topologicalOrder: ['first', 'second'], graph: graph(), nodes: value.tasks.map((task, index) => ({ ...task,
       universeId: index === 0 ? 'calendar' : 'compiler', campaign: campaign(), definitionDigest: 'a'.repeat(64),
       manifestDigest: 'b'.repeat(64), comparatorDigest: 'c'.repeat(64), state: index === 0 ? 'ready' : 'waiting', reason: null })) };
+}
+
+function graph(): UniversePortfolioGraphProjection {
+  return {
+    schemaVersion: 1,
+    scope: 'campaign-ordering-only',
+    authority: 'observation-only',
+    dependencyReadyCampaignIds: ['first'],
+    invocationCandidateIds: ['first'],
+    layers: [['first'], ['second']],
+    counts: { nodes: 2, edges: 1, states: { ready: 1, waiting: 1, completed: 0, blocked: 0, busy: 0, unavailable: 0 } },
+    nodes: [
+      { campaignId: 'first', state: 'ready', dependsOn: [], unmetDependencyIds: [], blockingRootIds: [], waitingRootIds: [],
+        structuralDescendantIds: ['second'], affectedDescendantIds: ['second'], layer: 0 },
+      { campaignId: 'second', state: 'waiting', dependsOn: ['first'], unmetDependencyIds: ['first'], blockingRootIds: [], waitingRootIds: ['first'],
+        structuralDescendantIds: [], affectedDescendantIds: [], layer: 1 },
+    ],
+  };
 }
 
 function result(status: UniversePortfolioResult['status'] = 'completed'): UniversePortfolioResult {
@@ -179,6 +197,30 @@ describe('Universe portfolio CLI', () => {
     expect(text).toContain('Planning does not validate private resource bindings or worker readiness');
     expect(text).not.toContain('reserved model requests');
     expect(text).toContain('not artifact acceptance or production success');
+  });
+
+  it('renders the ordering graph frontier, layers, root causes, and affected descendants', async () => {
+    expect(await cmdUniversePortfolio(['plan', '--manifest', manifest])).toBe(0);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('Ordering graph: campaign-ordering-only · observation-only');
+    expect(text).toContain('Dependency-ready frontier (ordering only): first');
+    expect(text).toContain('Source-healthy invocation candidates: first');
+    expect(text).toContain('not execution authorization; delivery, provider, and resource-runtime readiness are not inspected');
+    expect(text).toContain('Layer 0: first');
+    expect(text).toContain('Layer 1: second');
+    expect(text).toContain('Root waiting causes: first');
+    expect(text).toContain('Affected descendants: second');
+  });
+
+  it('keeps source-degraded plans from presenting invocation candidates', async () => {
+    const value = plan();
+    value.sourceState = 'degraded';
+    value.graph.invocationCandidateIds = [];
+    core.readUniversePortfolioPlan.mockReturnValue(value);
+    expect(await cmdUniversePortfolio(['plan', '--manifest', manifest])).toBe(1);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('Dependency-ready frontier (ordering only): first');
+    expect(text).toContain('Source-healthy invocation candidates: none');
   });
 
   it('does not render degraded campaign progress as trusted measurements', async () => {

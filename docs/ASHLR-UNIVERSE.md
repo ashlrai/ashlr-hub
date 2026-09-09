@@ -1292,6 +1292,35 @@ with their own evaluators and budgets, each in a different Universe:
    A ready plan does not establish worker readiness: planning does not accept
    `--resource-runtime`, read private runtime files, or refresh quota observations.
 
+   The JSON `graph` is an observation-only, campaign-ordering projection. The
+   human-readable plan renders the same frontier, dependency layers and causes:
+
+   | Field | Interpretation |
+   | --- | --- |
+   | `dependencyReadyCampaignIds` | Campaigns whose observed ordering prerequisites are satisfied, in existing topological priority. |
+   | `invocationCandidateIds` | That frontier only when the whole source plan is healthy; empty on degraded evidence. Not dispatch authorization. |
+   | `layers` | Structural dependency depth, starting with roots. Not execution waves, critical-time estimates or worker parallelism. |
+   | `counts` | Declared node/edge counts and observed campaign states; not accounts, requests or accepted changes. |
+   | `nodes[].unmetDependencyIds` | Direct prerequisites not completed in this ordering snapshot. Completed nodes satisfy historical ordering. |
+   | `nodes[].blockingRootIds`, `waitingRootIds` | Deduplicated causes, distinguishing blocked/unavailable evidence from pending or busy prerequisites. A cause can be the node itself. |
+   | `nodes[].structuralDescendantIds` | All downstream nodes in the declared graph, whether complete or currently affected. |
+   | `nodes[].affectedDescendantIds` | Downstream nodes currently reporting this node as a root cause. Resolving one cause may leave other causes. |
+
+   For a failed `a` followed by dependent `b` and `c`, the cause remains `a`, rather
+   than a generic dependency message. If `b` is already completed, ordinary
+   ordering does not retroactively make `a` block `c`. Explicit delivery gates
+   are different: planned ancestor handoffs still apply across completed
+   intermediates during `run`. This graph does not inspect those invocation-only
+   handoffs, provider readiness, quota or ownership outside the campaign snapshot.
+   Paused/interrupted campaigns can be candidates for an explicit invocation;
+   the graph does not automatically resume them or weaken their admission checks.
+
+   The projection retains deterministic declaration-priority ordering and the
+   existing 64-campaign bound. It uses deduplicated reachability and cause sets,
+   not enumeration of every dependency path. It neither changes scheduling nor
+   adds a persistent graph database. Re-plan after outcomes change; a run result's
+   `plan.graph` is the initial snapshot, not its final execution frontier.
+
 2. Start the explicitly enrolled campaigns in the foreground:
 
    ```sh
