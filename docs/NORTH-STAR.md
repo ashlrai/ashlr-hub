@@ -103,17 +103,21 @@ a guarantee that already-running work cannot cross a usage threshold.
 
 These are planned capabilities, not activation instructions. The current
 [portfolio runtime](ASHLR-UNIVERSE.md#coordinate-campaigns-with-a-dependency-graph)
-orders campaigns and can require local branch delivery, but does not import those
-artifacts into dependent seeds or persist a portfolio controller.
+orders campaigns and can require local branch delivery. Explicit integration
+handoff can now seed a new downstream experiment; the portfolio does not perform
+that handoff automatically or persist a controller across invocations.
 
-The first milestone now has three executable local primitives:
+The first milestone now has four executable local primitives:
 [checked composition planning](ASHLR-UNIVERSE.md#inspect-a-combined-delivery-plan)
 and [fresh combined evaluation](ASHLR-UNIVERSE.md#evaluate-a-pinned-combined-candidate),
-followed by [explicit new-branch delivery](ASHLR-UNIVERSE.md#inspect-and-deliver-an-evaluated-combination).
+followed by [explicit new-branch delivery](ASHLR-UNIVERSE.md#inspect-and-deliver-an-evaluated-combination)
+and [downstream experiment registration](ASHLR-UNIVERSE.md#hand-a-combined-commit-to-a-new-experiment).
 Evaluation retains the combined artifact and fixed-suite measurements without
 rerunning a settled request. Delivery pins that passing outcome and preserves
-existing branches. Automatic branch advancement and handoff to a dependent
-Universe remain unfinished parts of this milestone; existing manifests are not
+existing branches. Handoff records the verified source lineage with a new
+manifest and fresh comparator, without inheriting scores or starting work.
+Automatic branch advancement, portfolio-triggered handoff, and recovery of
+partially initialized seeds remain unfinished; existing manifests are not
 silently rewritten.
 
 **Later: automatic branch advancement.** This is a planned extension, not enabled

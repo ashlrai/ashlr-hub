@@ -33,3 +33,10 @@ export interface UniverseIntegrationDeliveryReceipt {
   createdAt: string;
   completedAt: string | null;
 }
+
+/** Freshly verified completed delivery; inspection never creates or reconciles a branch. */
+export interface UniverseIntegrationDeliveryEvidence {
+  request: UniverseIntegrationDeliveryRequest;
+  receipt: UniverseIntegrationDeliveryReceipt;
+  receiptDigest: string;
+}

@@ -96,6 +96,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-delivery-git-entries.test.ts', // bounded real Git blob loading and read-only inventory verification
   'test/universe-delivery-git-precommit.test.ts', // prepared real Git transaction guards and create-only ref outcomes
   'test/universe-integration-delivery.test.ts', // private delivery evidence and fault-injected local Git publication
+  'test/universe-integration-handoff.test.ts', // immutable downstream registration and source-lineage verification
   'test/universe-integration-evaluate.test.ts', // real private candidate artifacts with injected evaluation and ledger faults
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review
   'test/universe-graph-reader.test.ts', // targeted real Git/private-ledger graph observation

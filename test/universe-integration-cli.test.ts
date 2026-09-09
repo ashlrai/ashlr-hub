@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
   UniverseIntegrationDefinition, UniverseIntegrationDeliveryReceipt, UniverseIntegrationDeliveryRequest,
-  UniverseIntegrationEvaluationRequest, UniverseIntegrationEvaluationResult, UniverseIntegrationPlan,
+  UniverseIntegrationEvaluationRequest, UniverseIntegrationEvaluationResult, UniverseIntegrationPlan, UniverseManifest,
 } from '../src/core/universe/index.js';
 
 const core = vi.hoisted(() => ({
   readUniverseIntegrationPlan: vi.fn(), readUniverseIntegrationEvaluation: vi.fn(),
   evaluateUniverseIntegration: vi.fn(), validateUniverseIntegrationEvaluationRequest: vi.fn(),
   validateUniverseIntegrationDeliveryRequest: vi.fn(), deliverUniverseIntegration: vi.fn(),
+  readUniverseIntegrationDelivery: vi.fn(), validateUniverseIntegrationHandoffRequest: vi.fn(), handoffUniverseIntegration: vi.fn(),
 }));
 const files = vi.hoisted(() => ({ readResourceJson: vi.fn() }));
 vi.mock('../src/core/universe/index.js', async (importOriginal) => ({
@@ -78,6 +79,33 @@ function delivery(overrides: Partial<UniverseIntegrationDeliveryReceipt> = {}): 
   };
 }
 
+function deliveryInspection() {
+  return { request: deliveryRequest(), receipt: delivery(), receiptDigest: '9'.repeat(64) };
+}
+
+function handoffRequest() {
+  const downstream: UniverseManifest = {
+    schemaVersion: 1, id: 'downstream', name: 'New downstream experiment', objective: 'Measure the next useful change',
+    seed: { repo: delivery().repo, revision: delivery().commit },
+    metric: { name: 'next-value', direction: 'maximize', minImprovement: 1 },
+    budget: { maxTrials: 2, maxDurationMs: 10_000, trialTimeoutMs: 2_000, maxParallel: 1 },
+    evaluation: { command: ['/private/bin/node', 'evaluate.mjs'], timeoutMs: 1_000 },
+    variants: [{ id: 'next-change', niche: 'next', hypothesis: 'Improve the combined seed', command: ['/private/bin/node', 'worker.mjs'] }],
+  };
+  return { schemaVersion: 1 as const, delivery: deliveryRequest(), expectedDeliveryDigest: '9'.repeat(64), downstream };
+}
+
+function handoff() {
+  const receipt = delivery();
+  return {
+    schemaVersion: 1 as const, status: 'registered' as const, targetUniverseId: 'downstream',
+    manifestDigest: 'a'.repeat(64), comparatorDigest: 'b'.repeat(64), seedArtifactDigest: receipt.artifactDigest,
+    origin: { schemaVersion: 1 as const, requestDigest: 'c'.repeat(64), deliveryDigest: '9'.repeat(64), deliveryId: receipt.id,
+      acceptanceUniverseId: receipt.universeId, evaluationId: receipt.evaluationId, repo: receipt.repo,
+      commit: receipt.commit, tree: receipt.tree, artifactDigest: receipt.artifactDigest },
+  };
+}
+
 describe('Universe integration CLI', () => {
   let output: ReturnType<typeof vi.spyOn>;
   let errors: ReturnType<typeof vi.spyOn>;
@@ -93,6 +121,9 @@ describe('Universe integration CLI', () => {
     core.evaluateUniverseIntegration.mockResolvedValue(evaluation());
     core.validateUniverseIntegrationDeliveryRequest.mockImplementation((value: unknown) => value as UniverseIntegrationDeliveryRequest);
     core.deliverUniverseIntegration.mockResolvedValue(delivery());
+    core.readUniverseIntegrationDelivery.mockReturnValue(deliveryInspection());
+    core.validateUniverseIntegrationHandoffRequest.mockImplementation((value: unknown) => value);
+    core.handoffUniverseIntegration.mockResolvedValue(handoff());
   });
   afterEach(() => vi.restoreAllMocks());
 
@@ -114,6 +145,123 @@ describe('Universe integration CLI', () => {
     expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
     expect(core.readUniverseIntegrationEvaluation).not.toHaveBeenCalled();
     expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
+    expect(core.readUniverseIntegrationDelivery).not.toHaveBeenCalled();
+    expect(core.handoffUniverseIntegration).not.toHaveBeenCalled();
+  });
+
+  describe.each(['inspect-delivery', 'handoff'] as const)('%s request boundary', (command) => {
+    it.each([
+      [], ['extra'], ['--manifest'], ['--manifest', 'relative.json'], ['--manifest', '/private/one/../two'],
+      ['--manifest', '/private/input.json', '--root', 'relative'],
+      ['--manifest', '/private/input.json', '--root', '/'],
+      ['--manifest', '/private/input.json', '--manifest', '/private/other.json'],
+      ['--manifest', '/private/input.json', '--json', '--json'],
+      ['--manifest', '/private/input.json', '--branch', 'codex/next'],
+      ['--manifest', '/private/input.json', '--run'], ['--manifest', '/private/a\n.json'],
+      ['--manifest', '/private/input.json', '--root=/private/store'],
+    ])('rejects invalid invocation before any file or runtime access %j', async (...args) => {
+      expect(await cmdUniverseIntegration([command, ...args, '--json'])).toBe(2);
+      expect(files.readResourceJson).not.toHaveBeenCalled();
+      expect(core.readUniverseIntegrationDelivery).not.toHaveBeenCalled();
+      expect(core.handoffUniverseIntegration).not.toHaveBeenCalled();
+      expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
+      expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+    });
+
+    it('rejects unavailable or nonprivate manifests without exposing file errors', async () => {
+      files.readResourceJson.mockImplementation(() => { throw new Error(`EACCES ${manifest}`); });
+      expect(await cmdUniverseIntegration([command, '--manifest', manifest, '--json'])).toBe(2);
+      expect(files.readResourceJson).toHaveBeenCalledExactlyOnceWith(manifest, 256 * 1024);
+      expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual({ error: 'Integration manifest is invalid or unavailable' });
+      expect(core.readUniverseIntegrationDelivery).not.toHaveBeenCalled();
+      expect(core.handoffUniverseIntegration).not.toHaveBeenCalled();
+    });
+
+    it('rejects malformed request schema without runtime actions or signal listeners', async () => {
+      const validator = command === 'handoff' ? core.validateUniverseIntegrationHandoffRequest : core.validateUniverseIntegrationDeliveryRequest;
+      validator.mockImplementation(() => { throw new Error('private bad schema'); });
+      const before = process.listenerCount('SIGINT');
+      expect(await cmdUniverseIntegration([command, '--manifest', manifest, '--json'])).toBe(2);
+      expect(process.listenerCount('SIGINT')).toBe(before);
+      expect(core.readUniverseIntegrationDelivery).not.toHaveBeenCalled();
+      expect(core.handoffUniverseIntegration).not.toHaveBeenCalled();
+      expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
+      expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+    });
+
+    it('redacts unavailable source errors without implying completion', async () => {
+      if (command === 'handoff') core.handoffUniverseIntegration.mockRejectedValue(new Error(`EACCES ${manifest}`));
+      else core.readUniverseIntegrationDelivery.mockImplementation(() => { throw new Error(`EACCES ${manifest}`); });
+      expect(await cmdUniverseIntegration([command, '--manifest', manifest, '--json'])).toBe(1);
+      expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual({ error: command === 'handoff' ?
+        'Integration handoff unavailable' : 'Integration delivery evidence unavailable' });
+      expect(output.mock.calls[0]![0]).not.toContain(manifest);
+      expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
+      expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+    });
+  });
+
+  it('inspects exact completed delivery evidence read-only with no signal listeners or settlement', async () => {
+    const request = deliveryRequest();
+    files.readResourceJson.mockReturnValue(request);
+    const signals = ['SIGINT', 'SIGTERM'].map((signal) => process.listenerCount(signal));
+    expect(await cmdUniverseIntegration(['inspect-delivery', '--manifest', manifest, '--root', '/private/store', '--json'])).toBe(0);
+    expect(files.readResourceJson).toHaveBeenCalledExactlyOnceWith(manifest, 256 * 1024);
+    expect(core.validateUniverseIntegrationDeliveryRequest).toHaveBeenCalledExactlyOnceWith(request);
+    expect(core.readUniverseIntegrationDelivery).toHaveBeenCalledExactlyOnceWith(request, { root: '/private/store' });
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(deliveryInspection());
+    expect(['SIGINT', 'SIGTERM'].map((signal) => process.listenerCount(signal))).toEqual(signals);
+    expect(core.handoffUniverseIntegration).not.toHaveBeenCalled();
+    expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
+    expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+  });
+
+  it('renders delivery inspection as verified local evidence without downstream execution', async () => {
+    files.readResourceJson.mockReturnValue(deliveryRequest());
+    expect(await cmdUniverseIntegration(['inspect-delivery', '--manifest', manifest])).toBe(0);
+    expect(output.mock.calls[0]![0]).toContain('Receipt digest:');
+    expect(output.mock.calls[0]![0]).toContain('Read-only completed delivery evidence. No branch creation, pending-work reconciliation');
+    expect(output.mock.calls[0]![0]).toContain('not downstream execution or production acceptance');
+  });
+
+  it('registers only an explicit new experiment and preserves the exact handoff DTO', async () => {
+    const request = handoffRequest();
+    files.readResourceJson.mockReturnValue(request);
+    const signals = ['SIGINT', 'SIGTERM'].map((signal) => process.listenerCount(signal));
+    core.handoffUniverseIntegration.mockImplementation(async () => {
+      expect(['SIGINT', 'SIGTERM'].map((signal) => process.listenerCount(signal))).toEqual(signals);
+      return handoff();
+    });
+    expect(await cmdUniverseIntegration(['handoff', '--manifest', manifest, '--root', '/private/store', '--json'])).toBe(0);
+    expect(files.readResourceJson).toHaveBeenCalledExactlyOnceWith(manifest, 256 * 1024);
+    expect(core.validateUniverseIntegrationHandoffRequest).toHaveBeenCalledExactlyOnceWith(request);
+    expect(core.handoffUniverseIntegration).toHaveBeenCalledExactlyOnceWith(request, { root: '/private/store' });
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(handoff());
+    expect(core.readUniverseIntegrationDelivery).not.toHaveBeenCalled();
+    expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
+    expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+  });
+
+  it('renders the new comparator and origin without claiming inherited scores or execution', async () => {
+    files.readResourceJson.mockReturnValue(handoffRequest());
+    expect(await cmdUniverseIntegration(['handoff', '--manifest', manifest])).toBe(0);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('downstream · integration handoff · registered');
+    expect(text).toContain(`comparator: ${handoff().comparatorDigest}`);
+    expect(text).toContain(`commit ${delivery().commit}`);
+    expect(text).toContain('with its own objective, evaluator, and budget. No source score was inherited.');
+    expect(text).toContain('No experiment, evaluator, provider, or campaign was run.');
+    expect(text).not.toContain('Score:');
+  });
+
+  it('routes delivery inspection and handoff through the Universe dispatcher', async () => {
+    const { cmdUniverse } = await import('../src/cli/universe.js');
+    files.readResourceJson.mockReturnValue(deliveryRequest());
+    expect(await cmdUniverse(['integration', 'inspect-delivery', '--manifest', manifest, '--json'])).toBe(0);
+    files.readResourceJson.mockReturnValue(handoffRequest());
+    expect(await cmdUniverse(['integration', 'handoff', '--manifest', manifest, '--json'])).toBe(0);
+    expect(core.readUniverseIntegrationDelivery).toHaveBeenCalledOnce();
+    expect(core.handoffUniverseIntegration).toHaveBeenCalledOnce();
   });
 
   it('rejects malformed manifests as usage errors without invoking the planner', async () => {
@@ -395,6 +543,9 @@ describe('Universe integration CLI', () => {
     expect(output.mock.calls[0]![0]).toContain('combined-artifact composition plan');
     expect(output.mock.calls[0]![0]).toContain('inspect');
     expect(output.mock.calls[0]![0]).toContain('deliver');
+    expect(output.mock.calls[0]![0]).toContain('inspect-delivery');
+    expect(output.mock.calls[0]![0]).toContain('handoff');
+    expect(output.mock.calls[0]![0]).toContain('it does not run that experiment or inherit the source score');
     expect(files.readResourceJson).not.toHaveBeenCalled();
     expect(core.readUniverseIntegrationPlan).not.toHaveBeenCalled();
   });

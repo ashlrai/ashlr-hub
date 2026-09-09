@@ -9,7 +9,7 @@ import { assertUniverseExecution, withUniverseExecution } from './execution.js';
 import { assertUniverseIntegrationEvaluationsSettled, readUniverseIntegrationEvaluation,
   validateUniverseIntegrationEvaluationRequest } from './integration-evaluate.js';
 import type { UniverseIntegrationEvaluationEvidence, UniverseIntegrationEvaluationRequest } from './integration-evaluation-types.js';
-import type { UniverseIntegrationDeliveryReceipt, UniverseIntegrationDeliveryRequest } from './integration-delivery-types.js';
+import type { UniverseIntegrationDeliveryEvidence, UniverseIntegrationDeliveryReceipt, UniverseIntegrationDeliveryRequest } from './integration-delivery-types.js';
 import { validUniverseDeliveryBranch } from './delivery.js';
 import { assertComparatorUnchanged, manifestRecord, projectUniverse, universePath } from './store.js';
 import type { UniverseStoreOptions } from './types.js';
@@ -185,6 +185,25 @@ function assertReceiptEvidence(receipt: UniverseIntegrationDeliveryReceipt, evid
       receipt.repo !== request.integration.target.repo || receipt.baseCommit !== request.integration.target.baseCommit) {
     throw new Error('Integration delivery receipt evidence no longer matches its evaluation');
   }
+}
+
+/** Read only settled delivery evidence; missing or pending work is never started or reconciled. */
+export function readUniverseIntegrationDelivery(input: unknown,
+  options: UniverseStoreOptions = {}): UniverseIntegrationDeliveryEvidence {
+  const request = validateUniverseIntegrationDeliveryRequest(input);
+  const root = resolve(options.root ?? defaultUniverseRoot());
+  const directory = universePath(root, request.evaluation.acceptance.universeId);
+  const id = receiptId(request.evaluation.acceptance.universeId, request.branch);
+  const entry = readEntries(directory).find((item) => item.kind === 'receipt' && item.receipt.id === id);
+  if (!entry || canonical(entry.request) !== canonical(request)) {
+    throw new Error('Completed integration delivery evidence is unavailable');
+  }
+  const { evidence, snapshot } = revalidate(request, root);
+  assertReceiptEvidence(entry.receipt, evidence, snapshot);
+  const git = deliveryGit(entry.receipt.repo);
+  inspectGit(entry.receipt, git, evidence.result.finishedAt);
+  return JSON.parse(canonical({ request, receipt: entry.receipt,
+    receiptDigest: digest(canonical({ domain: 'universe-integration-delivery-result-v1', receipt: entry.receipt })) })) as UniverseIntegrationDeliveryEvidence;
 }
 
 /** Publish a verified integration artifact once to a new local codex/ branch; never evaluates, selects, or pushes. */

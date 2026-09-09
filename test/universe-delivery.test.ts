@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { deliverUniverseElite, initUniverse, readUniverseDeliveries, validUniverseDeliveryBranch, type UniverseManifest, type UniverseTrial } from '../src/core/universe/index.js';
+import { deliverUniverseElite, initUniverse, readUniverseDeliveries, runUniverse, validUniverseDeliveryBranch, type UniverseManifest, type UniverseTrial } from '../src/core/universe/index.js';
 import { artifactDigest, copyArtifact, freezeArtifact } from '../src/core/universe/artifacts.js';
 import { appendRecord, manifestRecord, newRun, projectUniverse, selectWinners } from '../src/core/universe/store.js';
 import { withUniverseExecution } from '../src/core/universe/execution.js';
@@ -12,7 +12,8 @@ import { deliveryGit } from '../src/core/universe/delivery-git.js';
 import { readUniverseIntegrationPlan } from '../src/core/universe/integration-plan.js';
 import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
 import { evaluateUniverseIntegration, readUniverseIntegrationEvaluation } from '../src/core/universe/integration-evaluate.js';
-import { deliverUniverseIntegration } from '../src/core/universe/integration-delivery.js';
+import { deliverUniverseIntegration, readUniverseIntegrationDelivery } from '../src/core/universe/integration-delivery.js';
+import { handoffUniverseIntegration } from '../src/core/universe/integration-handoff.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -162,6 +163,159 @@ console.log(JSON.stringify({passed:a+b<=3,score:a+b,metrics:{a,b}}));\n`);
     return { ...f, result, delivery: { schemaVersion: 1 as const, evaluation: f.request,
       expectedEvaluationDigest: evidence.resultDigest, branch: 'codex/combined-product', maxDurationMs: 120_000 } };
   }
+
+  function inventory(path: string): unknown {
+    const stat = lstatSync(path);
+    return stat.isDirectory() ? readdirSync(path).sort().map((name) => [name, inventory(join(path, name))])
+      : [stat.mode, readFileSync(path).toString('base64')];
+  }
+
+  async function handoffReady(id = 'combined-successor') {
+    const f = await publishable();
+    const receipt = await deliverUniverseIntegration(f.delivery, { root: f.root });
+    const evidence = readUniverseIntegrationDelivery(f.delivery, { root: f.root });
+    const downstream: UniverseManifest = { ...f.manifest, id, name: 'Explicit combined successor',
+      objective: 'Independently improve the accepted combination', seed: { repo: f.repo, revision: receipt.commit },
+      budget: { maxTrials: 2, maxDurationMs: 6000, trialTimeoutMs: 1200, maxParallel: 1 },
+      variants: [{ id: 'successor', niche: 'quality', hypothesis: 'Improve combined behavior', command: [process.execPath, '-e', ''] }] };
+    const handoff = { schemaVersion: 1 as const, delivery: f.delivery, expectedDeliveryDigest: evidence.receiptDigest, downstream };
+    return { ...f, receipt, evidence, downstream, handoff };
+  }
+
+  it('reads completed integration delivery as detached evidence without changing any stored or Git bytes', async () => {
+    const f = await handoffReady();
+    const before = inventory(f.root);
+    const evidence = readUniverseIntegrationDelivery(f.delivery, { root: f.root });
+    expect(evidence).toMatchObject({ request: f.delivery, receipt: f.receipt, receiptDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(inventory(f.root)).toEqual(before);
+    evidence.request.evaluation.integration.target.allowedPaths.push('detached-only.txt');
+    evidence.receipt.changedFiles.push('detached-only.txt');
+    expect(readUniverseIntegrationDelivery(f.delivery, { root: f.root })).toEqual(f.evidence);
+    expect(inventory(f.root)).toEqual(before);
+    expect(readFileSync(join(f.result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
+  });
+
+  it('does not create or reconcile missing and pending delivery receipts during inspection', async () => {
+    const f = await publishable();
+    let before = inventory(f.root);
+    expect(() => readUniverseIntegrationDelivery(f.delivery, { root: f.root })).toThrow();
+    expect(inventory(f.root)).toEqual(before);
+    const receipt = await deliverUniverseIntegration(f.delivery, { root: f.root });
+    const evidence = readUniverseIntegrationDelivery(f.delivery, { root: f.root });
+    unlinkSync(join(f.directory, 'integration-deliveries', 'records', `${receipt.id}.receipt.json`));
+    before = inventory(f.root);
+    expect(() => readUniverseIntegrationDelivery(f.delivery, { root: f.root })).toThrow();
+    await expect(handoffUniverseIntegration({ schemaVersion: 1, delivery: f.delivery,
+      expectedDeliveryDigest: evidence.receiptDigest, downstream: { ...f.manifest, id: 'pending-successor',
+        seed: { repo: f.repo, revision: receipt.commit } } }, { root: f.root })).rejects.toThrow();
+    expect(inventory(f.root)).toEqual(before);
+    expect(f.git(['rev-parse', f.delivery.branch])).toBe(receipt.commit);
+  });
+
+  it('registers an explicit successor with real combined seed bytes and a fresh comparator, without inheriting execution', async () => {
+    const f = await handoffReady();
+    writeFileSync(join(f.repo, 'value.txt'), 'user staged\n'); f.git(['add', 'value.txt']);
+    writeFileSync(join(f.repo, 'value.txt'), 'user unstaged\n');
+    const index = readFileSync(join(f.repo, '.git', 'index')); const head = f.git(['rev-parse', 'HEAD']);
+    const refs = f.git(['show-ref']); const upstream = projectUniverse(f.directory);
+    const result = await handoffUniverseIntegration(f.handoff, { root: f.root });
+    const directory = join(f.root, 'universes', f.downstream.id);
+    const record = manifestRecord(directory); const overview = projectUniverse(directory);
+    expect(result).toMatchObject({ schemaVersion: 1, status: 'registered', targetUniverseId: f.downstream.id,
+      manifestDigest: record.manifestDigest, comparatorDigest: record.comparatorDigest, seedArtifactDigest: f.receipt.artifactDigest });
+    expect(result.origin).toBeDefined();
+    expect(record.manifest).toEqual(f.downstream);
+    expect(record.comparatorDigest).not.toBe(manifestRecord(f.directory).comparatorDigest);
+    expect(record.seedArtifact.digest).toBe(f.receipt.artifactDigest);
+    expect(readFileSync(join(record.seedArtifact.path, 'a.txt'), 'utf8')).toBe('1');
+    expect(readFileSync(join(record.seedArtifact.path, 'b.txt'), 'utf8')).toBe('2');
+    expect(overview).toMatchObject({ sourceState: 'healthy', runs: [], elites: [], activeRun: null });
+    const beforeReplay = inventory(f.root);
+    expect(await handoffUniverseIntegration(f.handoff, { root: f.root })).toEqual(result);
+    expect(inventory(f.root)).toEqual(beforeReplay);
+    const deliveryPath = join(f.root, 'inspect-delivery.json');
+    const handoffPath = join(f.root, 'handoff.json');
+    writeFileSync(deliveryPath, JSON.stringify(f.delivery), { mode: 0o600 });
+    writeFileSync(handoffPath, JSON.stringify(f.handoff), { mode: 0o600 });
+    const beforeCli = inventory(f.root);
+    const cli = (command: string, path: string): unknown => JSON.parse(execFileSync(process.execPath,
+      ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'integration', command, '--manifest', path, '--root', f.root, '--json'],
+      { cwd: process.cwd(), encoding: 'utf8', timeout: 30_000, env: { PATH: process.env.PATH, HOME: f.root, NO_COLOR: '1' } }));
+    expect(cli('inspect-delivery', deliveryPath)).toEqual(f.evidence);
+    expect(cli('handoff', handoffPath)).toEqual(result);
+    expect(inventory(f.root)).toEqual(beforeCli);
+    await expect(handoffUniverseIntegration({ ...f.handoff, downstream: { ...f.downstream,
+      objective: 'A different objective is not the registered successor' } }, { root: f.root })).rejects.toThrow();
+    expect(inventory(f.root)).toEqual(beforeCli);
+    expect(f.git(['show-ref'])).toBe(refs); expect(f.git(['rev-parse', 'HEAD'])).toBe(head);
+    expect(readFileSync(join(f.repo, '.git', 'index'))).toEqual(index);
+    expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('user unstaged\n');
+    expect(projectUniverse(f.directory)).toEqual(upstream);
+    expect(readFileSync(join(f.result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
+  });
+
+  it('refuses wrong seed, changed delivery pins and upstream ids before registering any successor', async () => {
+    const f = await handoffReady();
+    const before = inventory(f.root);
+    await expect(handoffUniverseIntegration({ ...f.handoff, expectedDeliveryDigest: '0'.repeat(64) }, { root: f.root })).rejects.toThrow();
+    await expect(handoffUniverseIntegration({ ...f.handoff, downstream: { ...f.downstream,
+      seed: { ...f.downstream.seed, revision: f.manifest.seed.revision } } }, { root: f.root })).rejects.toThrow();
+    await expect(handoffUniverseIntegration({ ...f.handoff, downstream: { ...f.downstream, id: 'fixture' } }, { root: f.root })).rejects.toThrow();
+    expect(existsSync(join(f.root, 'universes', f.downstream.id))).toBe(false);
+    expect(inventory(f.root)).toEqual(before);
+  });
+
+  it('runs the registered successor only on a separate explicit invocation with its own measured trial', async () => {
+    const f = await handoffReady('runnable-successor');
+    const downstream: UniverseManifest = { ...f.downstream,
+      budget: { maxTrials: 1, maxDurationMs: 30_000, trialTimeoutMs: 5_000, maxParallel: 1 },
+      evaluation: { ...f.downstream.evaluation, timeoutMs: 5_000 } };
+    const registered = await handoffUniverseIntegration({ ...f.handoff, downstream }, { root: f.root });
+    const directory = join(f.root, 'universes', downstream.id);
+    const upstream = projectUniverse(f.directory); const refs = f.git(['show-ref']);
+    expect(projectUniverse(directory)).toMatchObject({ runs: [], elites: [], activeRun: null });
+    const run = await runUniverse(downstream.id, { root: f.root });
+    expect(run).toMatchObject({ universeId: downstream.id, status: 'completed', comparatorDigest: registered.comparatorDigest,
+      manifestDigest: registered.manifestDigest, generation: 1 });
+    expect(run.trials).toHaveLength(1);
+    expect(run.trials[0]).toMatchObject({ status: 'passed', score: 3, metrics: { a: 1, b: 2 }, parentTrialId: null });
+    expect(run.trials[0]!.artifact!.revision).toBe(f.receipt.commit);
+    expect(projectUniverse(directory).runs).toHaveLength(1);
+    expect(projectUniverse(f.directory)).toEqual(upstream);
+    expect(f.git(['show-ref'])).toBe(refs);
+    expect(readFileSync(join(f.result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
+  });
+
+  it('does not adopt a plain pre-existing target even when its manifest matches exactly', async () => {
+    const f = await handoffReady();
+    initUniverse(f.downstream, { root: f.root });
+    const before = inventory(f.root);
+    await expect(handoffUniverseIntegration(f.handoff, { root: f.root })).rejects.toThrow();
+    expect(inventory(f.root)).toEqual(before);
+  });
+
+  it('does not turn an interrupted seed-only initialization into a completed successor', async () => {
+    const f = await handoffReady();
+    const directory = join(f.root, 'universes', f.downstream.id);
+    mkdirSync(join(directory, 'artifacts'), { recursive: true, mode: 0o700 });
+    mkdirSync(join(directory, 'scratch'), { mode: 0o700 });
+    copyArtifact(f.result.artifactPath!, join(directory, 'seed'));
+    const before = inventory(f.root);
+    await expect(handoffUniverseIntegration(f.handoff, { root: f.root })).rejects.toThrow(/Interrupted initialization/);
+    expect(existsSync(join(directory, 'ledger'))).toBe(false);
+    expect(inventory(f.root)).toEqual(before);
+  });
+
+  it('refuses a drifted source branch for both read-only inspection and successor registration', async () => {
+    const f = await handoffReady();
+    f.git(['update-ref', `refs/heads/${f.delivery.branch}`, f.manifest.seed.revision]);
+    const before = inventory(f.root);
+    expect(() => readUniverseIntegrationDelivery(f.delivery, { root: f.root })).toThrow();
+    await expect(handoffUniverseIntegration(f.handoff, { root: f.root })).rejects.toThrow();
+    expect(inventory(f.root)).toEqual(before);
+    expect(existsSync(join(f.root, 'universes', f.downstream.id))).toBe(false);
+    expect(f.git(['rev-parse', f.delivery.branch])).toBe(f.manifest.seed.revision);
+  });
 
   it('delivers the inspected combined bytes to a new local branch and replays through the real CLI without reevaluation', async () => {
     const f = await publishable();

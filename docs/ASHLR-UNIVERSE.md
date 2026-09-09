@@ -1471,14 +1471,90 @@ requested allowance. The delivery ledger reserves both intent and result space
 before ref creation, up to 128 deliveries and 32 MiB per acceptance Universe.
 No automatic artifact or Git-object cleanup is performed.
 
-Automatic branch advancement is a future milestone. A downstream Universe can
-be separately registered against the delivered commit, but delivery does not
-rewrite existing manifests or automatically import the artifact into a campaign.
+Automatic branch advancement is a future milestone. Use the explicit handoff
+below to register a downstream Universe against the delivered commit. Delivery
+itself does not rewrite existing manifests or import the artifact into a campaign.
 Account reserves, scheduling priority and background activation remain unchanged.
 
 The SDK exposes `readUniverseIntegrationEvaluation(evaluation, { root })`,
 `validateUniverseIntegrationDeliveryRequest(delivery)` and
 `deliverUniverseIntegration(delivery, { root, signal })`.
+
+### Hand a combined commit to a new experiment
+
+A handoff connects the verified combined result to the next experiment's seed.
+It registers a new definition and its source lineage; it does not run that
+experiment or transfer the upstream score. The downstream objective, evaluator,
+variants and resource budget must all be explicitly supplied.
+
+1. Inspect the completed delivery using its original private delivery request:
+
+   ```sh
+   node bin/ashlr universe integration inspect-delivery \
+     --manifest /absolute/private/integration-delivery.json \
+     --root /absolute/private/universe --json
+   ```
+
+   This read-only command returns `request`, `receipt` and `receiptDigest` after
+   checking the retained evaluation, artifact and Git evidence. Missing or
+   pending delivery fails without creating a branch or completing a receipt.
+   Reconcile unfinished delivery separately with its exact `deliver` request.
+
+2. Save an owner-only `0600` handoff manifest with these exact fields:
+
+   - `schemaVersion`: `1`.
+   - `delivery`: the complete original delivery request.
+   - `expectedDeliveryDigest`: the inspected `receiptDigest`.
+   - `downstream`: a complete new `UniverseManifest`, including its objective,
+     evaluator, metric, variants and budget. Its seed repository and revision
+     must exactly match the delivered receipt's `repo` and `commit`.
+
+   Choose an unused downstream ID distinct from the acceptance Universe and
+   all upstream sources. Only a `delivered` result can be handed off; pending
+   or unchanged results do not satisfy this branch-delivery prerequisite.
+
+3. Register the downstream experiment:
+
+   ```sh
+   node bin/ashlr universe integration handoff \
+     --manifest /absolute/private/integration-handoff.json \
+     --root /absolute/private/universe --json
+   ```
+
+   Success returns `status: registered`, the new manifest and comparator
+   digests, the seed artifact digest and `origin` linking the source delivery,
+   evaluation and commit. Source lineage is stored in the same immutable record
+   as the downstream manifest. The frozen seed must match the delivered tree's
+   artifact digest. Existing experiments are never rewritten or adopted merely
+   because their configuration happens to match.
+
+The source execution lease and destination initialization lock protect the
+registration. Source evidence is checked again immediately before the manifest
+record is written. Exact repeated requests verify and return the same registered
+identities; source drift or a changed request is refused.
+
+The downstream comparator is newly pinned from its explicit evaluator and new
+seed. It can differ from the integration acceptance comparator, including when
+the delivered tree changes evaluator files. Registration creates no trials,
+scores or selected elites and does not assert downstream acceptance. Inspect
+the new definition with `universe status`; run it separately using the existing
+execution and resource-admission controls when ready.
+
+If initialization stops after materializing a seed but before recording the
+manifest, that target remains unregistered. The existing initializer refuses
+ambiguous partial initialization; retain it for inspection and use a new ID.
+It is not automatically deleted, repaired or reported as registered. A lost
+response after a successful manifest write can be reconciled by repeating the
+exact handoff. This is not general-purpose restartable campaign supervision.
+
+Both commands return `0` on success, `1` when evidence or registration is
+unavailable, and `2` for malformed arguments or manifests. Handoff writes only
+local experiment storage; it does not run an evaluator, invoke a provider,
+create or advance Git refs, change account reserves, add campaigns, or deploy.
+
+The SDK exposes `readUniverseIntegrationDelivery(delivery, { root })`,
+`validateUniverseIntegrationHandoffRequest(handoff)` and
+`handoffUniverseIntegration(handoff, { root })`.
 
 ## Coordinate campaigns with a dependency graph
 

@@ -34,8 +34,10 @@ export { validateUniverseIntegrationDefinition, readUniverseIntegrationPlan } fr
 export type * from './integration-types.js';
 export { validateUniverseIntegrationEvaluationRequest, evaluateUniverseIntegration, readUniverseIntegrationEvaluation } from './integration-evaluate.js';
 export type * from './integration-evaluation-types.js';
-export { validateUniverseIntegrationDeliveryRequest, deliverUniverseIntegration } from './integration-delivery.js';
+export { validateUniverseIntegrationDeliveryRequest, deliverUniverseIntegration, readUniverseIntegrationDelivery } from './integration-delivery.js';
 export type * from './integration-delivery-types.js';
+export { validateUniverseIntegrationHandoffRequest, handoffUniverseIntegration } from './integration-handoff.js';
+export type * from './integration-handoff-types.js';
 export { buildUniverseCampaignComparison } from './comparison.js';
 export { readUniverseCampaignComparison } from './comparison-reader.js';
 export type * from './comparison-types.js';
