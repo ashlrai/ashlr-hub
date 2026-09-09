@@ -27,7 +27,7 @@ export { readUniverseGraph } from './graph-reader.js';
 export type * from './graph-types.js';
 export { validateUniversePortfolioDefinition, readUniversePortfolioPlan, buildUniversePortfolioPlan } from './portfolio-plan.js';
 export { runUniversePortfolio } from './portfolio.js';
-export type { UniversePortfolioResult, UniversePortfolioOutcome } from './portfolio.js';
+export type { UniversePortfolioResult, UniversePortfolioOutcome, UniversePortfolioRunOptions } from './portfolio.js';
 export type * from './portfolio-types.js';
 export { buildUniverseCampaignComparison } from './comparison.js';
 export { readUniverseCampaignComparison } from './comparison-reader.js';

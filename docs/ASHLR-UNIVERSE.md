@@ -834,8 +834,9 @@ reconcile the recorded branch and outcome.
 
 This behavior belongs to the explicit run/resume invocation, implemented by
 `runUniverseCampaignAndDeliver`. Ordinary campaign execution and portfolio
-orchestration do **not** automatically deliver branches. The supervisor requires
-its own explicit [delivery plan](#deliver-supervised-campaign-results).
+orchestration do **not** deliver branches by default. The supervisor requires
+its own explicit [delivery plan](#deliver-supervised-campaign-results), and a
+portfolio accepts an invocation-only [delivery plan](#deliver-dependency-ordered-campaign-results).
 Their existing behavior is unchanged when these flags are absent.
 
 ### Pause, stop or resume the campaign
@@ -856,6 +857,15 @@ terminal. Resume does not refund attempts or reservations and does not restart
 the original deadline. Ctrl+C interrupts the foreground invocation; inspect its
 recorded state before continuing. These controls do not clear the legacy fleet
 kill switch or reactivate its daemon.
+
+A failed or timed-out direct-local generation with no recorded model completion
+pauses after the current generation. Its request reservations and original
+deadline remain in force; restore the local service, inspect the recorded
+failure, then explicitly resume. A recorded malformed edit response or an
+evaluator rejection can still inform automatic correction in the next generation.
+Unresolved resource-pool handoffs and explicit owner controls retain precedence.
+The pause prevents an unavailable local service from consuming every remaining
+generation; it does not retry, restart the model service, or refund work.
 
 Use `--root <private directory>` consistently on every campaign command when the
 universe is in a custom store. The general Hub console reads the default store;
@@ -1307,6 +1317,78 @@ background restart is installed. The limits are 64 enrolled campaigns, 8 active
 campaign calls, and 24 hours per invocation. `maxParallel` limits this invocation's
 campaign calls, not each campaign's trial workers, host-wide concurrency, account
 quota, or aggregate token spend. Independent invocations retain their own limits.
+
+### Deliver dependency-ordered campaign results
+
+To carry measured improvements through local integration without manually
+interleaving delivery commands, pass an explicit delivery plan to `portfolio run`.
+The portfolio manifest remains unchanged. The plan uses the same closed schema
+as supervision and may name up to 32 of the portfolio's enrolled campaigns:
+
+```json
+{
+  "schemaVersion": 1,
+  "deliveries": [
+    {
+      "campaignId": "parser-search",
+      "branch": "codex/parser-improvement",
+      "baseCommit": "<full-pinned-seed-commit>"
+    }
+  ]
+}
+```
+
+Replace the base placeholder with that campaign's exact seed commit; abbreviated
+commits and symbolic refs are rejected. Choose an unused `codex/` branch, or the
+exact branch already bound to this campaign's delivery receipt. The private plan
+must be an owner-owned regular, non-symlink, single-link UTF-8 JSON file with
+mode `0600`, in a private directory, no larger than 64 KiB. The CLI requires its
+canonical absolute path without symlinked ancestors, matching supervision's
+private-file requirements.
+
+This command authorizes the declared campaign execution and local branch writes:
+
+```sh
+node bin/ashlr universe portfolio run --manifest /absolute/private/portfolio.json \
+  --root /absolute/private/experiments \
+  --delivery-plan /absolute/private/deliveries.json --json
+```
+
+For resource-backed campaigns, also repeat the existing `--resource-runtime`
+option. It still controls the same explicitly enrolled workers and shared
+reserves; a delivery plan does not supply credentials or additional usage.
+
+The runtime validates all targets before dispatch: campaign identity, pinned
+seed base, and duplicate repository/branch assignments. For a planned handoff,
+campaign completion alone is insufficient. The existing delivery helper must
+retain a strict measured improvement and record its local Git branch receipt
+before new downstream work starts. This gate also applies through an
+already-completed intermediate campaign. Historical completion is preserved;
+it does not bypass a pending ancestor delivery. Independent branches may proceed.
+
+Results separate `campaign` evidence from optional `delivery` evidence. An
+admission-only or unchanged artifact is withheld, holding dependent work rather
+than claiming an improvement. Delivery failure leaves the completed campaign
+recorded and makes the portfolio incomplete. A completed campaign can perform
+delivery-only reconciliation on another explicit invocation, without spending a
+new generation. A matching receipt is reused; an unrelated existing branch is
+never overwritten. Inspect `universe deliveries` and the target Git repository
+before retrying uncertain work; do not remove receipts to force a new attempt.
+
+The invocation deadline covers preflight, campaigns and delivery. Cancellation
+drains owned work; synchronous Git operations may finish after the deadline, so
+inspect returned and durable receipts before assuming no branch was created.
+Delivered receipts describe a verified handoff at settlement, not continuous
+attestation that another process has left the branch unchanged.
+
+Repeat `--delivery-plan` on every invocation intended to require delivery.
+Omitting it retains the original campaign-completion ordering and performs no
+delivery. `portfolio plan` remains a read-only campaign snapshot and does not
+accept or preflight this option. SDK callers pass
+`runUniversePortfolio(manifest, { root, deliveryPlan })` using
+`UniversePortfolioRunOptions`. No new durable scheduler, automatic checkout,
+artifact import into dependent seeds, merge, push, deployment or product
+acceptance is implied.
 
 Portfolio concurrency is not a resource-capacity waiting queue. For campaigns
 sharing a single available worker, set `maxParallel` to `1` and keep each

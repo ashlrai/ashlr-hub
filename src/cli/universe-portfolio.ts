@@ -3,11 +3,13 @@ import { isAbsolute, resolve } from 'node:path';
 import {
   readUniversePortfolioPlan, runUniversePortfolio, validateUniversePortfolioDefinition,
   type UniverseCampaignSummary, type UniversePortfolioDefinition, type UniversePortfolioPlan, type UniversePortfolioResult,
+  type UniverseCampaignDeliveryPlan,
 } from '../core/universe/index.js';
 
 const MAX_MANIFEST_BYTES = 256 * 1024;
 const USAGE = `usage: ashlr universe portfolio <plan|run> --manifest <file.json>
        [--root <private directory>] [--resource-runtime <private absolute JSON>] [--json]
+       [--delivery-plan <private canonical absolute JSON>]
 
   plan    Read campaign dependencies, readiness, and progress without changes
   run     Execute the declared campaign dependencies in this foreground process
@@ -24,7 +26,17 @@ invocation, not other processes or subscription accounts. A new invocation gets
 a new portfolio deadline, not new campaign budgets. Independent ready branches
 may proceed while other branches are blocked. SIGINT/SIGTERM requests cancellation
 and waits for started work to settle. No resident service is installed.
-No automatic delivery, push, merge, deployment, or production acceptance.
+Without --delivery-plan, no automatic delivery occurs. No push, merge, deployment,
+or production acceptance occurs in either mode. Only run accepts --delivery-plan:
+an explicit owner-only (0600) regular JSON file in a private directory (at most
+64 KiB), with schemaVersion:1 and deliveries
+containing campaignId, branch (codex/...) and baseCommit (full pinned seed commit).
+Every planned handoff must deliver a strict measured improvement to a local Git
+branch before its dependent campaigns start. Withheld or failed delivery holds
+dependants; independent work may proceed. Completed campaigns can deliver without
+rerunning; matching receipts are reused on retry. No artifact transfer is implied.
+Repeat this option on every intended delivery invocation; it is not saved in the
+portfolio manifest. Omitting it uses campaign-completion ordering only.
 Only run accepts --resource-runtime: one explicit private runtime shared across
 the enrolled campaigns. Each resource variant must match its pinned pool and
 bindings; command and direct-local variants keep their existing execution paths.
@@ -44,7 +56,7 @@ Exit codes: 0 healthy unblocked plan/completed run, 1 incomplete/source failure,
 `;
 
 class UsageError extends Error {}
-interface Options { command: 'plan' | 'run' | 'help'; manifest?: string; root?: string; resourceRuntime?: string; json: boolean }
+interface Options { command: 'plan' | 'run' | 'help'; manifest?: string; root?: string; resourceRuntime?: string; deliveryPlanPath?: string; json: boolean }
 
 function containsControls(value: string): boolean {
   return [...value].some((character) => {
@@ -67,7 +79,7 @@ function parse(args: string[]): Options {
     } else if (arg === '--json') {
       if (json) throw new UsageError('--json may only be specified once');
       json = true;
-    } else if (arg === '--manifest' || arg === '--root' || arg === '--resource-runtime') {
+    } else if (arg === '--manifest' || arg === '--root' || arg === '--resource-runtime' || arg === '--delivery-plan') {
       if (values.has(arg)) throw new UsageError(`${arg} may only be specified once`);
       const value = args[++index];
       if (!value?.trim() || value.startsWith('-') || containsControls(value) || value.length > 4_096) {
@@ -76,9 +88,15 @@ function parse(args: string[]): Options {
       if (arg === '--resource-runtime' && (!isAbsolute(value) || Buffer.byteLength(value, 'utf8') > 4_096)) {
         throw new UsageError('--resource-runtime requires a bounded private absolute JSON path');
       }
+      if (arg === '--delivery-plan' && (!isAbsolute(value) || resolve(value) !== value ||
+          resolve(value, '..') === value || Buffer.byteLength(value, 'utf8') > 4_096)) {
+        throw new UsageError('--delivery-plan requires a bounded private canonical absolute JSON path');
+      }
       values.set(arg, value);
     } else if (arg.startsWith('--resource-runtime=')) {
       throw new UsageError('--resource-runtime requires a separate path argument');
+    } else if (arg.startsWith('--delivery-plan=')) {
+      throw new UsageError('--delivery-plan requires a separate path argument');
     } else if (arg.startsWith('-')) throw new UsageError(`Unknown option: ${arg}`);
     else positional.push(arg);
   }
@@ -87,13 +105,16 @@ function parse(args: string[]): Options {
   if (command !== undefined && !['plan', 'run', 'help'].includes(command)) throw new UsageError('Expected portfolio plan, run, or help');
   const resourceRuntime = values.get('--resource-runtime');
   if (resourceRuntime !== undefined && command !== 'run') throw new UsageError('--resource-runtime is only valid with portfolio run');
+  const deliveryPlanPath = values.get('--delivery-plan');
+  if (deliveryPlanPath !== undefined && command !== 'run') throw new UsageError('--delivery-plan is only valid with portfolio run');
   if (help || command === 'help') return { command: 'help', json: false };
   if (command !== 'plan' && command !== 'run') throw new UsageError('Expected portfolio plan or run');
   const manifest = values.get('--manifest');
   if (!manifest) throw new UsageError(`${command} requires --manifest <file.json>`);
   const root = values.get('--root');
   return { command, manifest: resolve(manifest), root: root === undefined ? undefined : resolve(root),
-    ...(resourceRuntime === undefined ? {} : { resourceRuntime: resolve(resourceRuntime) }), json };
+    ...(resourceRuntime === undefined ? {} : { resourceRuntime: resolve(resourceRuntime) }),
+    ...(deliveryPlanPath === undefined ? {} : { deliveryPlanPath }), json };
 }
 
 function sameFile(before: Stats, after: Stats): boolean {
@@ -163,9 +184,13 @@ function renderResult(result: UniversePortfolioResult): string {
     ...result.plan.nodes.map((node) => `  ${node.campaignId} · ${node.state} · depends on ${node.dependsOn.join(', ') || 'none'}`),
     'Final campaign outcomes:',
     ...result.outcomes.map((outcome) => `  ${outcome.campaignId} · ${outcome.status} · ${outcome.attempted ? 'attempted' : 'not attempted'}` +
-      `${outcome.reason ? ` · ${outcome.reason}` : ''}\n    ${progress(outcome.campaign)}`),
+      `${outcome.reason ? ` · ${outcome.reason}` : ''}\n    ${progress(outcome.campaign)}` +
+      (outcome.delivery ? `\n    Delivery: ${outcome.delivery.status}` + (outcome.delivery.status === 'delivered'
+        ? ` · ${outcome.delivery.receipt.branch} · ${outcome.delivery.receipt.commit}` : ` · ${outcome.delivery.reason}`) : '')),
     ...result.reasons,
-    'Ordering only: no artifact transfer, automatic delivery, push, merge, deployment, or production acceptance.',
+    result.outcomes.some((outcome) => outcome.delivery)
+      ? 'Explicit handoffs gate dependencies. Delivery means a verified local branch, not artifact transfer, push, merge, deployment, or production acceptance.'
+      : 'Ordering only: no artifact transfer, automatic delivery, push, merge, deployment, or production acceptance.',
     'Token figures cover individual campaigns; unavailable usage is not zero and no portfolio cost is estimated.',
     'Resource-pool generation requires the explicit --resource-runtime option on each invocation; no runtime path is saved in the portfolio.',
   ].join('\n');
@@ -184,10 +209,21 @@ export async function cmdUniversePortfolio(args: string[]): Promise<number> {
       console.log(options.json ? JSON.stringify(plan, null, 2) : renderPlan(plan));
       return plan.sourceState === 'healthy' && !plan.nodes.some((node) => ['blocked', 'busy', 'unavailable'].includes(node.state)) ? 0 : 1;
     }
+    let deliveryPlan: UniverseCampaignDeliveryPlan | undefined;
+    if (options.deliveryPlanPath !== undefined) {
+      // Reuse supervision's bounded private-file reader and closed plan schema.
+      // Errors must not echo private paths or file contents into terminal output.
+      const { readResourceJson } = await import('../core/resources/pool-runtime.js');
+      const { validateUniverseCampaignDeliveryPlan } = await import('../core/universe/campaign-delivery.js');
+      try { deliveryPlan = validateUniverseCampaignDeliveryPlan(readResourceJson(options.deliveryPlanPath, 64 * 1024),
+        definition.tasks.map((task) => task.campaignId)); }
+      catch { throw new UsageError('Invalid or unavailable private campaign delivery plan'); }
+    }
     process.once('SIGINT', abort);
     process.once('SIGTERM', abort);
     const result = await runUniversePortfolio(definition, { root: options.root, signal: controller.signal,
-      ...(options.resourceRuntime === undefined ? {} : { resourceRuntime: options.resourceRuntime }) });
+      ...(options.resourceRuntime === undefined ? {} : { resourceRuntime: options.resourceRuntime }),
+      ...(deliveryPlan === undefined ? {} : { deliveryPlan }) });
     console.log(options.json ? JSON.stringify(result, null, 2) : renderResult(result));
     return result.status === 'completed' ? 0 : 1;
   } catch (error) {

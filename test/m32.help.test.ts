@@ -59,6 +59,9 @@ describe('HELP_ENTRIES — the command table', () => {
     const plan = AGENT_COMMANDS.find((entry) => entry.usage.startsWith('ashlr universe portfolio plan '))!;
     expect(run.usage).toContain('--resource-runtime <private-absolute.json>');
     expect(run.description).toContain('shared pool limits and campaign budgets');
+    expect(run.usage).toContain('--delivery-plan <private-absolute.json>');
+    expect(run.description).toContain('explicit local Git delivery prerequisites');
+    expect(plan.usage).not.toContain('--delivery-plan');
     expect(run.safety).toBe('append');
     expect(run.jsonShape).toBe('UniversePortfolioResult');
     expect(plan.usage).not.toContain('--resource-runtime');
