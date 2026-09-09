@@ -1,5 +1,7 @@
 import type { UniverseOverview } from '../universe/types.js';
 import type { UniverseGraph } from '../universe/graph-types.js';
+import type { UniverseCampaignReadiness } from '../universe/campaign-readiness.js';
+import type { UniverseCampaignReadinessView } from './universe-console-types.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 
 export const MAX_UNIVERSE_CONSOLE_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -23,6 +25,18 @@ export function serializeUniverseConsoleOverview(overview: UniverseOverview): st
 }
 
 export function serializeUniverseConsoleGraph(graph: UniverseGraph): string { return serialize(graph); }
+
+/** Explicit fields prevent private CAS witnesses or future authority from reaching browsers. */
+export function projectUniverseConsoleCampaignReadiness(readiness: UniverseCampaignReadiness): UniverseCampaignReadinessView {
+  return { schemaVersion: readiness.schemaVersion, readinessScope: readiness.readinessScope,
+    campaignId: readiness.campaignId, universeId: readiness.universeId, observedState: readiness.observedState,
+    sourceState: readiness.sourceState, disposition: readiness.disposition, reasonCode: readiness.reasonCode,
+    resourceRuntimeRequired: readiness.resourceRuntimeRequired, sampledAt: readiness.sampledAt };
+}
+
+export function serializeUniverseConsoleCampaignReadiness(readiness: UniverseCampaignReadiness): string {
+  return serialize(projectUniverseConsoleCampaignReadiness(readiness));
+}
 
 /** Bound the fixed worker protocol before passing its already-public JSON to HTTP. */
 export function validateUniverseConsoleResponse(value: unknown): string {

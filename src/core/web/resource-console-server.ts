@@ -3,12 +3,16 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
-import { readResourceJson, resourcePoolStatus } from '../resources/pool-runtime.js';
+import { readResourceJson, resourcePoolStatus, readResourcePoolAllocation, setResourcePoolAllocation,
+  readResourceWorkerAccess, setResourceWorkerAccess } from '../resources/pool-runtime.js';
 import { validateResourceBindings } from '../resources/worker.js';
 import { createResourcePoolSupervisor, ResourceSupervisorError } from '../resources/pool-supervisor.js';
 import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, type ResourceQuotaRefresher } from '../resources/quota-refresh.js';
-import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from '../resources/quota-refresh-lease.js';
-import type { ResourceConsoleScope, ResourceConsoleTaskInput } from '../resources/console-types.js';
+import { acquireResourceQuotaRefreshLease, ResourceQuotaRefreshLeaseError, type ResourceQuotaRefreshLease } from '../resources/quota-refresh-lease.js';
+import { publishSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
+import { createResourceConnectionMonitor, validateResourceConnectionConfig, type ResourceConnectionMonitor } from '../resources/connection-monitor.js';
+import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from '../resources/metadata-coordinator.js';
+import type { ResourceConsoleScope, ResourceConsoleTaskInput, ResourceConsoleSnapshot } from '../resources/console-types.js';
 import { createResourceConsoleReader, withholdResourceConsoleWorkers } from './resource-console-reads.js';
 import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
 import { validateUniverseConsoleRoot } from './universe-console-reads.js';
@@ -21,6 +25,8 @@ export interface ResourceConsoleServerOptions {
   observationsFile: string;
   /** Explicit opt-in to no-generation native metadata collection. */
   quotaConfigFile?: string;
+  connectionsConfigFile?: string;
+  allocationControls?: boolean;
   port?: number;
   execute?: boolean;
   workspace?: string;
@@ -104,16 +110,19 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const bindingsFile = validateUniverseConsoleRoot(options.bindingsFile);
   const observationsFile = validateUniverseConsoleRoot(options.observationsFile);
   const quotaConfigFile = options.quotaConfigFile === undefined ? null : validateUniverseConsoleRoot(options.quotaConfigFile);
+  const connectionsConfigFile = options.connectionsConfigFile === undefined ? null : validateUniverseConsoleRoot(options.connectionsConfigFile);
   const requestedPort = options.port ?? 0;
   const maxParallel = options.maxParallel ?? 4;
   if (!Number.isSafeInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535 ||
     !Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 16 ||
     (options.execute !== undefined && typeof options.execute !== 'boolean') ||
+    (options.allocationControls !== undefined && typeof options.allocationControls !== 'boolean') ||
     (options.execute === true ? !options.workspace : options.workspace !== undefined || options.maxParallel !== undefined)) {
     throw new Error('Invalid resource console options');
   }
   const workspace = options.execute ? validateUniverseConsoleRoot(options.workspace) : null;
-  if (workspace && [root, poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? [quotaConfigFile] : [])].some((target) => {
+  if (workspace && [root, poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? [quotaConfigFile] : []),
+    ...(connectionsConfigFile ? [connectionsConfigFile] : [])].some((target) => {
     const nested = relative(workspace, target);
     return nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested);
   })) throw new Error('Resource control files must remain outside the writable workspace');
@@ -121,19 +130,66 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const pool = validateResourcePool(readResourceJson(poolFile));
   const bindings = validateResourceBindings(readResourceJson(bindingsFile), pool);
   const quotaConfig = quotaConfigFile ? validateResourceQuotaRefreshConfig(readResourceJson(quotaConfigFile), pool, bindings) : null;
+  const connectionsConfig = connectionsConfigFile ? validateResourceConnectionConfig(readResourceJson(connectionsConfigFile)) : null;
   if (quotaConfig) validateResourceObservations(readResourceJson(observationsFile), pool);
   const reader = createResourceConsoleReader({ root, pool, bindings, observationsFile,
     ...(quotaConfig ? { managedWorkerIds: quotaConfig.workers.map((row) => row.workerId) } : {}) });
   const sessions = createReadSessionBoundary({ cookieName: `ashlr_resources_${randomBytes(12).toString('hex')}` });
-  const controlToken = options.execute ? randomBytes(32).toString('hex') : null;
+  const controlToken = options.execute || options.allocationControls ? randomBytes(32).toString('hex') : null;
   const scope: ResourceConsoleScope = { schemaVersion: 1, mode: 'resource-pool', root, poolId: pool.id,
     readOnly: !options.execute, workspace, maxParallel: options.execute ? maxParallel : 0, maxQueued: options.execute ? 64 : 0,
-    ...(quotaConfig ? { quotaRefreshEnabled: true } : {}) };
+    ...(quotaConfig ? { quotaRefreshEnabled: true } : {}), ...(connectionsConfig ? { connectionsEnabled: true } : {}),
+    ...(options.allocationControls ? { allocationWritable: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
   let quotaLease: ResourceQuotaRefreshLease | null = null;
+  let connectionMonitor: ResourceConnectionMonitor | null = null;
+  let metadataCoordinator: NativeMetadataCoordinator | null = null;
+  let quotaHeartbeat: ReturnType<typeof setInterval> | null = null;
+  let quotaPublicationFailed = false;
+  let metadataCollector: ResourceConsoleSnapshot['metadataCollector'];
   let origin = ''; let port = 0; let closing: Promise<void> | null = null; let ready = false;
+
+  // Configured-but-blocked collection remains managed. Never fall back to
+  // owner-supplied observations as if they were a current native quota read.
+  function managedQuotaEvidence() {
+    if (!quotaConfig) return undefined;
+    return quotaRefresher ? { observations: quotaRefresher.readObservations([]),
+      unavailableWorkerIds: quotaRefresher.unavailableWorkerIds() } : {
+      observations: [], unavailableWorkerIds: quotaConfig.workers.map((row) => row.workerId),
+    };
+  }
+
+  function collectorLifecycle() {
+    if (metadataCollector?.state === 'running' && (quotaRefresher?.snapshot().state === 'closed' ||
+      connectionMonitor?.snapshot().accounts.some((row) => row.reason === 'connection-monitor-stopped'))) {
+      metadataCollector = { state: 'blocked', reasonCode: 'collector-unavailable', sampledAt: new Date().toISOString() };
+    }
+    return metadataCollector ? { ...metadataCollector,
+      ...(metadataCollector.recovery ? { recovery: { ...metadataCollector.recovery } } : {}) } : undefined;
+  }
+
+  function publishQuotaEvidence(): void {
+    if (!quotaConfig || !quotaLease || !quotaRefresher || quotaPublicationFailed) return;
+    try {
+      publishSharedQuotaEvidence({ root, pool, bindings, config: quotaConfig, lease: quotaLease,
+        state: quotaRefresher.snapshot().state, evidence: {
+          observations: quotaRefresher.readObservations([]),
+          // Allocation may change independently; the consuming admission lock
+          // applies the current ceiling, rather than a cached policy veto.
+          unavailableWorkerIds: quotaRefresher.unavailableWorkerIds(true),
+        } });
+    } catch {
+      // Invalidate the preceding success immediately, even if native teardown
+      // is still pending. The durable marker survives for reconciliation.
+      quotaPublicationFailed = true;
+      metadataCollector = { state: 'blocked', reasonCode: 'collector-unavailable', sampledAt: new Date().toISOString() };
+      if (quotaHeartbeat !== null) { clearInterval(quotaHeartbeat); quotaHeartbeat = null; }
+      metadataCoordinator?.abort();
+      try { quotaLease.close(true); } catch { /* Keep the terminal fence. */ }
+    }
+  }
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -156,6 +212,39 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (sessions.handleSession(req, res, url)) return;
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
       if (method === 'POST') {
+        if (url.pathname === '/api/resources/worker-access') {
+          if (!options.allocationControls || !controlToken) throw new RequestError(403, 'Fleet access controls are disabled');
+          if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
+          const input = await body(req);
+          if (!exact(input, ['pausedWorkerIds', 'expectedRevision']) || !Array.isArray(input.pausedWorkerIds) ||
+            input.pausedWorkerIds.length > pool.workers.length || input.pausedWorkerIds.some((id) =>
+              typeof id !== 'string' || !pool.workers.some((worker) => worker.id === id)) ||
+            new Set(input.pausedWorkerIds).size !== input.pausedWorkerIds.length ||
+            !Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 0) {
+            throw new RequestError(400, 'Expected enrolled workers and a current access revision');
+          }
+          if (closing) throw new RequestError(503, 'Console is closing');
+          try {
+            const workerAccess = setResourceWorkerAccess(root, pool, bindings, input.pausedWorkerIds as string[], Number(input.expectedRevision));
+            sendJson(res, 200, { workerAccess });
+          } catch { throw new RequestError(409, 'Fleet access changed or is unavailable; refresh before saving'); }
+          return;
+        }
+        if (url.pathname === '/api/resources/allocation') {
+          if (!options.allocationControls || !controlToken) throw new RequestError(403, 'Allocation controls are disabled');
+          if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
+          const input = await body(req);
+          if (!exact(input, ['ceilingPercent', 'expectedRevision']) || !Number.isSafeInteger(input.ceilingPercent) ||
+            Number(input.ceilingPercent) < 0 || Number(input.ceilingPercent) > 100 || !Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 0) {
+            throw new RequestError(400, 'Expected a bounded allocation and current revision');
+          }
+          if (closing) throw new RequestError(503, 'Console is closing');
+          try {
+            const allocation = setResourcePoolAllocation(root, pool, bindings, Number(input.ceilingPercent), Number(input.expectedRevision));
+            sendJson(res, 200, { allocation });
+          } catch { throw new RequestError(409, 'Allocation changed or is unavailable; refresh before saving'); }
+          return;
+        }
         if (!supervisor || !controlToken) throw new RequestError(403, 'Execution is disabled for this console');
         if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
         const cancel = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})\/cancel$/.exec(url.pathname);
@@ -186,23 +275,47 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       if (url.pathname === '/api/resources/console') { sendJson(res, 200, scope); return; }
       if (url.pathname === '/api/resources') {
         for (let attempt = 0; attempt < 2; attempt++) {
-          const managed = quotaRefresher ? { observations: quotaRefresher.readObservations([]),
-            unavailableWorkerIds: quotaRefresher.unavailableWorkerIds() } : undefined;
+          const allocation = readResourcePoolAllocation(root, pool, bindings);
+          const workerAccess = readResourceWorkerAccess(root, pool, bindings);
+          const managed = managedQuotaEvidence();
           let evidence = await reader.snapshot(managed);
           if (closing) throw new RequestError(503, 'Console is closing');
-          if (quotaRefresher) {
-            const current = { observations: quotaRefresher.readObservations([]),
-              unavailableWorkerIds: quotaRefresher.unavailableWorkerIds() };
+          if (JSON.stringify(allocation) !== JSON.stringify(readResourcePoolAllocation(root, pool, bindings))) continue;
+          if (JSON.stringify(workerAccess) !== JSON.stringify(readResourceWorkerAccess(root, pool, bindings))) continue;
+          if (quotaConfig) {
+            const current = managedQuotaEvidence()!;
             // Both successful refresh and failure can race the worker read.
             // Retry once, then withhold rather than attach newer collector
             // metadata to an earlier eligibility decision.
             if (JSON.stringify(managed) !== JSON.stringify(current)) continue;
             evidence = withholdResourceConsoleWorkers(evidence, current.unavailableWorkerIds);
           }
+          // A deduplicated worker read can predate this request's policy read.
+          // Reapply current pauses so a cached projection cannot show readiness.
+          evidence = withholdResourceConsoleWorkers(evidence, workerAccess.pausedWorkerIds);
+          const ceiling = allocation.ceilingPercent;
+          if (ceiling !== null && ceiling < 100) {
+            const now = Date.now();
+            // This is a subtractive display gate only: preserve the sampled
+            // plan, but never pair old eligibility with a newly lowered ceiling.
+            // Check every alias; withholding expands to its shared capacity.
+            const unavailable = pool.workers.filter((worker) => {
+              if (worker.provider === 'local') return false;
+              const row = evidence.observations.find((item) => item.workerId === worker.id);
+              return ceiling === 0 || !row || Date.parse(row.observedAt) > now ||
+                row.updatedAt !== undefined && Date.parse(row.updatedAt) > now || Date.parse(row.expiresAt) <= now ||
+                !row.windows.length || row.windows.some((window) => window.usedPercent === null ||
+                  window.usedPercent >= ceiling || window.resetsAt === null || Date.parse(window.resetsAt) <= now);
+            }).map((worker) => worker.id);
+            evidence = withholdResourceConsoleWorkers(evidence, unavailable);
+          }
           sendSnapshot(res, { ...evidence, supervisor: supervisor?.snapshot() ?? null,
-            ...(quotaRefresher ? { quotaRefresh: quotaRefresher.snapshot() } : {}) }); return;
+            ...(metadataCollector ? { metadataCollector: collectorLifecycle() } : {}),
+            ...(quotaRefresher ? { quotaRefresh: quotaRefresher.snapshot() } : {}),
+            ...(connectionMonitor ? { connections: connectionMonitor.snapshot() } : {}),
+            allocation, workerAccess }); return;
         }
-        throw new RequestError(503, 'Resource quota evidence changed during this read');
+        throw new RequestError(503, 'Resource quota or allocation evidence changed during this read');
       }
       const output = /^\/api\/resources\/tasks\/([^/]+)\/output$/.exec(url.pathname);
       if (output && ID.test(output[1]!)) {
@@ -241,12 +354,15 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const close = (): Promise<void> => {
     if (closing) return closing;
     ready = false; sessions.clear(); signal?.removeEventListener('abort', aborted);
+    if (quotaHeartbeat !== null) { clearInterval(quotaHeartbeat); quotaHeartbeat = null; }
+    metadataCoordinator?.dispose();
     closing = (async () => {
       // A reader may be terminated, but task subprocesses must settle through
       // their owning supervisor before the server can declare shutdown complete.
       const results = await Promise.allSettled([
         Promise.resolve().then(() => supervisor?.close()),
         Promise.resolve().then(() => quotaRefresher?.close()),
+        Promise.resolve().then(() => connectionMonitor?.close()),
         reader.close(),
         new Promise<void>((done) => {
           if (!server.listening) { done(); return; }
@@ -256,9 +372,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       // Remove only our own marker and only after confirmed collector cleanup.
       // On uncertainty it stays durable even after this process exits.
       let quotaClosed = true;
-      try { quotaLease?.close(results[1]?.status !== 'fulfilled'); } catch { quotaClosed = false; }
+      try { quotaLease?.close(quotaPublicationFailed || results[1]?.status !== 'fulfilled' || results[2]?.status !== 'fulfilled'); } catch { quotaClosed = false; }
       quotaLease = null;
-      if (!quotaClosed || results.some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
+      if (quotaPublicationFailed || !quotaClosed || results.some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
     })();
     return closing;
   };
@@ -273,10 +389,21 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (!address || typeof address === 'string') throw new Error('Resource console address unavailable');
     port = address.port; origin = `http://127.0.0.1:${port}`;
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
-    if (quotaConfig) {
+    if (quotaConfig || connectionsConfig) {
       // Only explicit quota collection creates this private control root. No
       // provider is contacted before configuration, ownership and bind succeed.
-      quotaLease = await acquireResourceQuotaRefreshLease(root);
+      try {
+        quotaLease = await acquireResourceQuotaRefreshLease(root, { signal, trackNativeActivity: true,
+          scope: connectionsConfig ? 'native-connection-metadata' : 'codex-native-metadata' });
+      } catch (error) {
+        // Only a typed, cleanly released acquisition refusal may degrade into
+        // observation mode. Cancellation and uncertain cleanup still fail startup.
+        if (signal?.aborted || !(error instanceof ResourceQuotaRefreshLeaseError) || !error.safeReadOnlyFallback ||
+          error.code !== 'collector-owned' && error.code !== 'reconciliation-required' && error.code !== 'collector-unavailable') throw error;
+        metadataCollector = { state: 'blocked', reasonCode: error.code,
+          sampledAt: new Date().toISOString(),
+          ...(error.recovery ? { recovery: { reasonCode: error.recovery.reasonCode, markerVersion: error.recovery.markerVersion } } : {}) };
+      }
     }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
       readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
@@ -284,14 +411,26 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       ...(quotaConfig ? { readUnavailableWorkerIds: () => quotaRefresher ? quotaRefresher.unavailableWorkerIds()
         : quotaConfig.workers.map((row) => row.workerId) } : {}), signal });
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
-    if (quotaConfig) {
+    if (quotaConfig || connectionsConfig) {
       // Execution ownership and all startup preflight must succeed before the
       // collector can schedule native metadata. Until then its workers are gated.
       resourcePoolStatus(root, pool, bindings, []);
-      quotaLease!.markPending();
-      quotaRefresher = createResourceQuotaRefresher({ pool, bindings, config: quotaConfig, cwd: root, signal,
-        assertOwnership: quotaLease!.assertOwnership });
+      if (quotaLease) {
+        quotaLease.markPending();
+        metadataCoordinator = createNativeMetadataCoordinator({ signal,
+          beginNativeActivity: () => quotaLease!.beginNativeActivity() });
+        metadataCollector = { state: 'running', reasonCode: 'collector-running', sampledAt: new Date().toISOString() };
+      }
     }
+    if (quotaConfig && quotaLease) {
+      quotaRefresher = createResourceQuotaRefresher({ pool, bindings, config: quotaConfig, cwd: root, signal,
+        assertOwnership: quotaLease!.assertOwnership, coordinator: metadataCoordinator!, onChange: publishQuotaEvidence });
+      publishQuotaEvidence();
+      if (quotaPublicationFailed) throw new Error('Resource quota evidence publication failed');
+      quotaHeartbeat = setInterval(publishQuotaEvidence, 1_000); quotaHeartbeat.unref?.();
+    }
+    if (connectionsConfig && quotaLease) connectionMonitor = createResourceConnectionMonitor({ config: connectionsConfig, cwd: root,
+      signal, assertOwnership: quotaLease!.assertOwnership, coordinator: metadataCoordinator! });
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     signal?.addEventListener('abort', aborted, { once: true }); ready = true;
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,

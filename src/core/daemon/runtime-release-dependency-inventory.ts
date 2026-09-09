@@ -497,6 +497,7 @@ function rootPackageIsPortable(
     'docs/MISSION-OS.md',
     'docs/ASHLR-UNIVERSE.md',
     'docs/UNIVERSE-RESEARCH.md',
+    'docs/UNIVERSE-AUTONOMY-RESEARCH.md',
     'docs/NORTH-STAR.md',
     'docs/RESOURCE-POOLS.md',
     'docs/RUNTIME_ACTIVATION_AUTHORITY.md',

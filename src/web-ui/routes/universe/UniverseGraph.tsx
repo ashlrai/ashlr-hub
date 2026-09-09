@@ -52,7 +52,7 @@ function GraphDiagram({ nodes, edges, selectedId, select }: {
         })}
         {nodes.map((node) => {
           const position = positions.get(node.id)!;
-          return <g key={node.id} transform={`translate(${position.x},${position.y})`} role="button" tabIndex={0} aria-label={`Select ${KIND_LABELS[node.kind].toLowerCase()}: ${node.label}`} aria-pressed={node.id === selectedId}
+          return <g key={node.id} data-kind={node.kind} transform={`translate(${position.x},${position.y})`} role="button" tabIndex={0} aria-label={`Select ${KIND_LABELS[node.kind].toLowerCase()}: ${node.label}`} aria-pressed={node.id === selectedId}
             onClick={() => select(node.id)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); select(node.id); } }}>
             <title>{`${node.label}: ${node.state}. ${evidenceLabel(node)}`}</title>
             <rect width="180" height="54" rx="5" className={node.id === selectedId ? styles.selectedBox : styles.nodeBox} />
@@ -156,7 +156,7 @@ function GraphExplorer({ graph, onInspectTrial }: { graph: GraphReport; onInspec
       {selectedId !== null && !selected ? <p className={styles.notice} role="status">The selected node is no longer present in the current graph. Select another recorded node; no substitute has been chosen.</p> : null}
       {nodes.length ? <><GraphDiagram nodes={nodes} edges={edges.slice(0, DISPLAY_EDGE_LIMIT)} selectedId={selected?.id} select={select} /><div className={styles.legend}><span>Recorded relationship</span><span className={styles.feedbackLegend}>Evaluator feedback (not candidate ancestry)</span></div>{edges.length > DISPLAY_EDGE_LIMIT ? <p className={styles.note}>Diagram shows {DISPLAY_EDGE_LIMIT} of {edges.length} relationships on this page. Select a node to inspect its direct relationships.</p> : null}</> : <p className={styles.notice}>No nodes match these filters. Broaden the entity type, niche or trace direction.</p>}
       <div className={styles.workspace}>
-        <div className={styles.nodeList} role="group" aria-label="Graph nodes">{nodes.map((node) => <button type="button" key={node.id} className={styles.nodeButton} aria-label={`Inspect ${KIND_LABELS[node.kind].toLowerCase()}: ${node.label}`} aria-pressed={node.id === selected?.id} onClick={() => setSelectedId(node.id)}><span>{node.label}</span><small>{KIND_LABELS[node.kind]} · {node.state}{node.generation !== undefined ? ` · generation ${node.generation}` : ''}</small></button>)}</div>
+        <div className={styles.nodeList} role="group" aria-label="Graph nodes">{nodes.map((node) => <button type="button" key={node.id} data-kind={node.kind} className={styles.nodeButton} aria-label={`Inspect ${KIND_LABELS[node.kind].toLowerCase()}: ${node.label}`} aria-pressed={node.id === selected?.id} onClick={() => setSelectedId(node.id)}><span>{node.label}</span><small>{KIND_LABELS[node.kind]} · {node.state}{node.generation !== undefined ? ` · generation ${node.generation}` : ''}</small></button>)}</div>
         {selected ? <NodeInspector node={selected} graph={graph} byId={byId} select={select} onInspectTrial={onInspectTrial} /> : null}
       </div>
     </> : <p>{graph.sourceState === 'missing' ? 'No recorded graph source is available for this universe.' : graph.complete ? 'This observation contains no graph nodes.' : 'Graph nodes could not be established from incomplete evidence.'}</p>}

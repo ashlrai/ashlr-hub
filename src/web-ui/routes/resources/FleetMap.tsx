@@ -69,8 +69,8 @@ function TaskNode({ task, selection, onSelect, connected = false }: {
   </button>;
 }
 
-function WorkerBranch({ worker, selection, onSelect, query }: {
-  worker: ResourceFleetWorker; selection: Selection; onSelect: FleetMapProps['onSelect']; query: string;
+function WorkerBranch({ worker, selection, onSelect, query, pauseLabel }: {
+  worker: ResourceFleetWorker; selection: Selection; onSelect: FleetMapProps['onSelect']; query: string; pauseLabel: string | null;
 }) {
   const [page, setPage] = useState(0);
   const matchingTasks = worker.tasks.filter((task) => matches(query, task.id) || matches(query, worker.id, worker.model, worker.provider, worker.capacityKey));
@@ -85,6 +85,7 @@ function WorkerBranch({ worker, selection, onSelect, query }: {
         tone={worker.eligibility === 'eligible' ? 'info' : worker.eligibility === 'blocked' ? 'warning' : 'unknown'}>
         {worker.eligibility === 'eligible' ? 'Eligible preview' : worker.eligibility === 'blocked' ? 'Not eligible' : 'Unknown eligibility'}
       </StatusBadge></span>
+      {pauseLabel ? <span className={styles.nodeDetail}><StatusBadge status="paused" tone="neutral">{pauseLabel}</StatusBadge></span> : null}
       <span className={styles.nodeDetail}>{worker.provider} / {worker.model}</span>
       <span className={styles.workerReason}>{worker.reasons.map(fleetReason).join('; ') || 'All-enrolled preview; rechecked before dispatch'}</span>
       <span className={styles.provenance}>{activeCount} recorded occupanc{activeCount === 1 ? 'y' : 'ies'}; {worker.tasks.length - activeCount} historical</span>
@@ -101,8 +102,8 @@ function WorkerBranch({ worker, selection, onSelect, query }: {
   </li>;
 }
 
-function CapacityTrunk({ group, selection, onSelect, query, filteredWorkerCount }: {
-  group: ResourceFleetGroup; selection: Selection; onSelect: FleetMapProps['onSelect']; query: string; filteredWorkerCount: number;
+function CapacityTrunk({ group, selection, onSelect, query, filteredWorkerCount, pauseLabel }: {
+  group: ResourceFleetGroup; selection: Selection; onSelect: FleetMapProps['onSelect']; query: string; filteredWorkerCount: number; pauseLabel: string | null;
 }) {
   const highlighted = group.workers.some((worker) => selected(selection, 'worker', worker.id) || worker.tasks.some((task) => selected(selection, 'task', task.id)));
   return <section className={`${styles.capacityTrunk} ${highlighted ? styles.highlightedTrunk : ''}`} aria-label={`Fleet capacity ${group.capacityKey}`}>
@@ -119,7 +120,7 @@ function CapacityTrunk({ group, selection, onSelect, query, filteredWorkerCount 
       <p className={styles.provenance}>Declared sharing, not verified account identity</p>
     </div>
     <ul className={styles.workerBranches} aria-label={`Workers sharing ${group.capacityKey}`}>
-      {group.workers.map((worker) => <WorkerBranch key={worker.id} worker={worker} selection={selection} onSelect={onSelect} query={query} />)}
+      {group.workers.map((worker) => <WorkerBranch key={worker.id} worker={worker} selection={selection} onSelect={onSelect} query={query} pauseLabel={pauseLabel} />)}
     </ul>
   </section>;
 }
@@ -147,6 +148,10 @@ export function FleetMap({ snapshot, stale, selection, onSelect }: FleetMapProps
   const [query, setQuery] = useState('');
   const [page, setPage] = useState(0);
   const fleet = useMemo(() => buildResourceFleet(snapshot, stale), [snapshot, stale]);
+  // Access is a separate operator setting, not a quota measurement. Derive
+  // sharing from all enrolled workers so filtering cannot hide an alias pause.
+  const pausedWorkerIds = new Set(snapshot.workerAccess?.pausedWorkerIds ?? []);
+  const pausedCapacities = new Set(snapshot.pool.workers.filter((worker) => pausedWorkerIds.has(worker.id)).map((worker) => worker.capacityKey));
   const normalizedQuery = query.trim().toLowerCase();
   const workers = fleet.groups.flatMap((group) => group.workers);
   const matchingWorkers = workers.filter((worker) => matches(normalizedQuery, worker.id, worker.provider, worker.model, worker.capacityKey, ...worker.tasks.map((task) => task.id)));
@@ -173,6 +178,7 @@ export function FleetMap({ snapshot, stale, selection, onSelect }: FleetMapProps
     <div className={styles.laneHeadings} aria-hidden="true"><span>Shared capacity</span><span>Enrolled workers</span><span>Recorded assignments</span></div>
     <div className={styles.topology}>
       {visibleGroups.map((group) => <CapacityTrunk key={group.capacityKey} group={group} selection={selection} onSelect={onSelect} query={normalizedQuery}
+        pauseLabel={pausedCapacities.has(group.capacityKey) ? stale || !fleet.evidenceAvailable ? 'Last reported: paused for fleet' : 'Paused for fleet' : null}
         filteredWorkerCount={matchingWorkers.filter((worker) => worker.capacityKey === group.capacityKey).length} />)}
       {!visibleGroups.length ? <p className={styles.empty}>{workers.length ? 'No workers match this search. Waiting and unassigned task matches appear below.' : 'No enrolled workers are present in this snapshot. Configure a resource pool to establish the fleet topology.'}</p> : null}
     </div>

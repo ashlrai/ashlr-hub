@@ -1,10 +1,10 @@
-.fleetMap { --trunk-width: 208px; --branch-gap: 36px; min-width: 0; overflow: hidden; border: 1px solid var(--border-default); border-radius: var(--radius-lg); background: var(--bg-surface); color: var(--text-primary); }
+.fleetMap { --trunk-width: 192px; --branch-gap: 36px; container-type: inline-size; min-width: 0; overflow: hidden; border: 1px solid var(--border-strong); border-radius: var(--radius-lg); background: var(--bg-surface); color: var(--text-primary); }
 .header { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-6); padding: var(--space-6) var(--space-6) var(--space-4); }
-.header h2 { margin: 0 0 var(--space-1); font-size: var(--text-2xl-size); line-height: var(--text-2xl-line); letter-spacing: -.025em; }
+.header h2 { margin: 0 0 var(--space-2); font-family: var(--font-display, var(--font-ui)); font-size: var(--text-2xl-size); line-height: var(--text-2xl-line); letter-spacing: -.035em; }
 .header p, .railHeader p { margin: 0; color: var(--text-secondary); line-height: 1.5; max-width: 75ch; }
 .sample { display: grid; justify-items: end; flex-shrink: 0; gap: var(--space-2); font-size: var(--text-xs-size); color: var(--text-tertiary); }
 .summary { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-6); padding: 0 var(--space-6) var(--space-5); font-size: var(--text-sm-size); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.summary strong { color: var(--text-primary); font-weight: var(--font-weight-semibold); }
+.summary strong { color: var(--text-primary); font-family: var(--font-display, var(--font-ui)); font-size: var(--text-lg-size); font-weight: var(--font-weight-semibold); }
 .evidenceNotice { margin: 0; padding: var(--space-3) var(--space-6); background: var(--status-unknown-bg); color: var(--status-unknown-fg); font-size: var(--text-sm-size); line-height: 1.5; }
 .toolbar { display: flex; align-items: end; justify-content: space-between; flex-wrap: wrap; gap: var(--space-4); padding: var(--space-4) var(--space-6); background: var(--bg-canvas); border-block: 1px solid var(--border-default); }
 .search { display: grid; flex: 1 1 260px; max-width: 440px; min-width: 0; gap: var(--space-2); }
@@ -20,15 +20,13 @@
 .topology { padding: 0 var(--space-6); }
 .capacityTrunk { position: relative; display: grid; grid-template-columns: var(--trunk-width) minmax(0, 1fr); column-gap: var(--branch-gap); padding-block: var(--space-5); }
 .capacityTrunk + .capacityTrunk { border-top: 1px solid var(--border-subtle); }
-.capacityNode { align-self: center; position: relative; padding: var(--space-5) var(--space-4); border: 1px solid var(--border-strong); border-top: 3px solid var(--accent-600); border-radius: var(--radius-md); background: var(--bg-canvas); }
+.capacityNode { align-self: center; position: relative; padding: var(--space-5) var(--space-4); border: 1px solid var(--border-strong); border-inline-start: 3px solid var(--text-link); border-radius: var(--radius-md) var(--radius-xs) var(--radius-xs) var(--radius-md); background: var(--bg-canvas); }
 .capacityNode::after { content: ''; position: absolute; top: 50%; left: 100%; width: calc(var(--branch-gap) / 2); height: 2px; background: var(--border-strong); }
-.capacityNode h3 { margin: var(--space-3) 0; font-size: var(--text-md-size); line-height: 1.3; overflow-wrap: anywhere; }
-.capacityGlyph { display: flex; align-items: end; gap: 4px; height: 24px; }
-.capacityGlyph i { display: block; width: 8px; height: 16px; border: 1px solid var(--accent-600); border-radius: 2px; }
-.capacityGlyph i:nth-child(2) { height: 24px; background: var(--accent-600); }
-.capacityGlyph i:nth-child(3) { height: 20px; }
+.capacityNode h3 { margin: 0 0 var(--space-4); font-family: var(--font-display, var(--font-ui)); font-size: var(--text-md-size); line-height: var(--text-md-line); overflow-wrap: anywhere; }
+/* The actual occupancy meter carries data; omit the former decorative bars. */
+.capacityGlyph { display: none; }
 .capacityCount { display: grid; gap: var(--space-1); margin: 0 0 var(--space-3); font-size: var(--text-xs-size); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.capacityCount strong { color: var(--text-primary); font-size: var(--text-2xl-size); line-height: var(--text-2xl-line); font-weight: var(--font-weight-semibold); }
+.capacityCount strong { color: var(--text-primary); font-family: var(--font-display, var(--font-ui)); font-size: var(--text-3xl-size); line-height: var(--text-3xl-line); letter-spacing: -.045em; font-weight: var(--font-weight-medium); }
 .meter { display: block; width: 100%; height: 8px; margin-bottom: var(--space-3); border: 0; appearance: none; background: var(--border-default); border-radius: var(--radius-full); }
 .meter::-webkit-meter-bar { background: var(--border-default); border: 0; border-radius: var(--radius-full); }
 .meter::-webkit-meter-optimum-value { background: var(--accent-600); border-radius: var(--radius-full); }
@@ -40,17 +38,19 @@
 .workerBranch { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr); gap: var(--branch-gap); align-items: center; min-width: 0; }
 .workerBranch::before { content: ''; position: absolute; right: 100%; top: 50%; width: calc(var(--branch-gap) / 2); height: 2px; background: var(--border-strong); }
 .workerNode, .taskNode { position: relative; display: grid; align-content: start; gap: var(--space-2); width: 100%; box-sizing: border-box; min-width: 0; padding: var(--space-4); text-align: left; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-primary); cursor: pointer; font: inherit; }
-.workerNode { border-inline-start: 3px solid var(--accent-300); }
+.workerNode { border-radius: var(--radius-lg); border-inline-start: 3px solid var(--border-strong); background: var(--bg-surface-raised); }
+.taskNode { border-radius: var(--radius-xs); border-inline-start: 3px solid var(--border-default); background: var(--bg-canvas); }
 .assignedWorker::after { content: ''; position: absolute; top: 50%; left: 100%; width: calc(var(--branch-gap) / 2); border-top: 1px solid var(--border-strong); }
 .workerNode:hover, .taskNode:hover { border-color: var(--accent-500); background: var(--bg-selected); }
 .workerNode[aria-pressed='true'], .taskNode[aria-pressed='true'] { border-color: var(--accent-600); background: var(--bg-selected); box-shadow: inset 0 0 0 1px var(--accent-600); }
 .workerNode:focus-visible, .taskNode:focus-visible, .pager button:focus-visible, .search input:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
 .nodeHeading { display: flex; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; gap: var(--space-2); }
-.nodeHeading strong { flex: 1 1 110px; min-width: 0; font-size: var(--text-sm-size); line-height: 1.45; overflow-wrap: anywhere; }
+.nodeHeading strong { flex: 1 1 110px; min-width: 0; font-family: var(--font-display, var(--font-ui)); font-size: var(--text-md-size); line-height: var(--text-md-line); overflow-wrap: anywhere; }
+.taskNode .nodeHeading strong { font-family: var(--font-ui); font-size: var(--text-sm-size); }
 .nodeDetail, .workerReason, .provenance, .queueReason { display: block; font-size: var(--text-xs-size); line-height: 1.45; overflow-wrap: anywhere; }
 .nodeDetail { color: var(--text-secondary); }
 .workerReason { color: var(--text-primary); }
-.provenance { color: var(--text-tertiary); }
+.provenance { color: var(--text-secondary); }
 p.provenance { margin: var(--space-2) 0 0; }
 .uncertain { margin: var(--space-3) 0; color: var(--status-unknown-fg); font-size: var(--text-xs-size); line-height: 1.5; }
 .assignments { min-width: 0; }
@@ -63,6 +63,7 @@ p.provenance { margin: var(--space-2) 0 0; }
 .highlightedBranch .connectedTask::before, .highlightedBranch .assignedWorker::after { border-top-color: var(--accent-600); }
 .highlightedBranch .taskList::before { border-left-color: var(--accent-600); }
 .highlightedTrunk .capacityNode { border-color: var(--accent-600); }
+.highlightedTrunk .workerBranches::before { background: var(--text-link); }
 .noAssignment { margin: 0; padding: var(--space-4); border-left: 1px dashed var(--border-strong); color: var(--text-secondary); font-size: var(--text-sm-size); line-height: 1.5; }
 .noAssignment span { display: block; margin-top: var(--space-2); font-size: var(--text-xs-size); color: var(--text-tertiary); }
 .assignmentFooter { display: grid; justify-items: start; gap: var(--space-2); margin-top: var(--space-2); color: var(--text-secondary); font-size: var(--text-xs-size); }
@@ -73,7 +74,7 @@ p.provenance { margin: var(--space-2) 0 0; }
 .queueState > span:last-child { color: var(--text-secondary); font-size: var(--text-xs-size); }
 .rail { padding: var(--space-5) var(--space-6); border-top: 1px solid var(--border-default); }
 .railHeader { display: flex; align-items: start; justify-content: space-between; gap: var(--space-4); }
-.railHeader h3 { margin: 0 0 var(--space-2); font-size: var(--text-md-size); line-height: var(--text-md-line); }
+.railHeader h3 { margin: 0 0 var(--space-2); font-family: var(--font-display, var(--font-ui)); font-size: var(--text-md-size); line-height: var(--text-md-line); }
 .railHeader h3 span { display: inline-block; margin-left: var(--space-2); padding: 0 7px; border-radius: var(--radius-xs); background: var(--bg-hover); color: var(--text-secondary); font-size: var(--text-sm-size); font-variant-numeric: tabular-nums; }
 .railHeader p { font-size: var(--text-xs-size); }
 .railTasks { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-3); }
@@ -87,3 +88,29 @@ p.provenance { margin: var(--space-2) 0 0; }
 @media (max-width: 520px) { .header { gap: var(--space-3); padding-top: var(--space-4); } .header h2 { font-size: var(--text-xl-size); line-height: var(--text-xl-line); } .header p { font-size: var(--text-sm-size); } .sample { max-width: 100%; overflow-wrap: anywhere; flex-shrink: 1; } .capacityTrunk { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); } .capacityNode { margin-right: var(--space-5); } .capacityNode::after { left: var(--space-4); top: 100%; height: var(--space-4); width: 2px; } .workerBranches { margin-left: var(--space-4); padding-left: var(--space-4); } .workerBranches::before { left: 0; } .workerBranch::before { width: var(--space-4); } .workerNode, .taskNode { padding: var(--space-3); } .railTasks { grid-template-columns: minmax(0, 1fr); } .railHeader { flex-wrap: wrap; } .summary { gap: var(--space-2) var(--space-4); } }
 @media (prefers-reduced-motion: reduce) { .fleetMap *, .fleetMap *::before, .fleetMap *::after { animation: none; transition: none; scroll-behavior: auto; } }
 .header h2:focus { outline: 2px solid var(--border-focus); outline-offset: 4px; border-radius: var(--radius-xs); scroll-margin-top: var(--space-4); }
+/* Respond to the map's own workspace width, including a desktop inspector. */
+@container (max-width: 780px) {
+  .header { flex-wrap: wrap; gap: var(--space-3); }
+  .sample, .workerPaging { justify-items: start; }
+  .topology { --trunk-width: 150px; --branch-gap: 24px; }
+  .laneHeadings { display: none; }
+  .workerBranch { grid-template-columns: minmax(0, 1fr); gap: var(--space-3); align-items: start; }
+  .workerBranch::before { top: 44px; }
+  .assignments { padding-left: var(--space-4); }
+  .assignedWorker::after { left: 0; top: 100%; height: var(--space-3); width: 0; border-left: 1px solid var(--border-strong); border-top: 0; }
+  .taskList::before { left: calc(var(--space-4) * -1); }
+  .connectedTask::before { width: var(--space-4); }
+  .railTasks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@container (max-width: 520px) {
+  .header, .toolbar, .rail, .footer, .queueState { padding-inline: var(--space-4); }
+  .summary, .selectionPath, .evidenceNotice, .topology { padding-inline: var(--space-4); }
+  .capacityTrunk { grid-template-columns: minmax(0, 1fr); gap: var(--space-4); }
+  .capacityNode { margin-right: var(--space-5); padding: var(--space-4); }
+  .capacityNode::after { left: var(--space-4); top: 100%; height: var(--space-4); width: 2px; }
+  .workerBranches { margin-left: var(--space-4); padding-left: var(--space-4); }
+  .workerBranches::before { left: 0; }
+  .workerBranch::before { width: var(--space-4); }
+  .railTasks { grid-template-columns: minmax(0, 1fr); }
+  .railHeader { flex-wrap: wrap; }
+}

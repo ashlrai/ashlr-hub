@@ -40,9 +40,14 @@ function ScopedWorkspace() {
     <div className={styles.shell}>
       <header className={styles.scopeBar}>
         <div className={styles.scope}>
-          <span className={styles.eyebrow}>Local Universe console</span>
+          <div className={styles.brand}>
+            <svg className={styles.brandMark} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
+              <path d="m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6" />
+            </svg><strong>Ashlr Universe</strong><span className={styles.workspace}>Experiments</span>
+          </div>
           <span className={styles.badge}>Read-only observation</span>
-          {scope.data ? <code aria-label="Universe store" className={styles.root}>{scope.data.root}</code> : null}
+          {scope.data ? <details className={styles.store}><summary>Universe store</summary>
+            <code aria-label="Universe store" className={styles.root}>{scope.data.root}</code></details> : null}
         </div>
         <div className={styles.actions}>
           <button type="button" onClick={theme.cycle}>Theme: {theme.theme}</button>
@@ -55,7 +60,7 @@ function ScopedWorkspace() {
           <p>{scope.error?.message} No project data is shown until the scope can be checked.</p>
           <button type="button" onClick={retry}>Retry scope check</button>
         </section> : scope.data ? <UniverseRootContext.Provider value={scope.data.root}>
-          <p className={styles.explanation}>This console observes the store above. Run campaigns from your terminal; opening this page does not start work.</p>
+          <p className={styles.explanation}>This console observes the selected Universe store. Run campaigns from your terminal; opening this page does not start work.</p>
           <UniverseView />
         </UniverseRootContext.Provider> : <p role="status">Checking the selected Universe store…</p>}
       </main>

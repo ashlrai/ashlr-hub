@@ -2,7 +2,9 @@ import { homedir } from 'node:os';
 import { describe, expect, it } from 'vitest';
 import type { UniverseOverview } from '../src/core/universe/types.js';
 import type { UniverseGraph } from '../src/core/universe/graph-types.js';
+import type { UniverseCampaignReadiness } from '../src/core/universe/campaign-readiness.js';
 import { MAX_UNIVERSE_CONSOLE_RESPONSE_BYTES, serializeUniverseConsoleGraph,
+  projectUniverseConsoleCampaignReadiness, serializeUniverseConsoleCampaignReadiness,
   serializeUniverseConsoleOverview, validateUniverseConsoleResponse } from '../src/core/web/universe-console-public.js';
 
 function overview(): UniverseOverview {
@@ -12,6 +14,24 @@ function overview(): UniverseOverview {
 }
 
 describe('scoped console public worker serialization', () => {
+  it('allowlists readiness observations without exposing private identity or automatic authority', () => {
+    const source = { schemaVersion: 1, readinessScope: 'recorded-campaign-evidence', campaignId: 'one',
+      universeId: 'universe-one', observedState: 'ready', sourceState: 'healthy', disposition: 'startable',
+      reasonCode: 'never-started', resourceRuntimeRequired: false, sampledAt: '2026-09-08T00:00:00Z',
+      automaticAction: 'run', expectedIdentity: { universeId: 'universe-one', definitionDigest: 'private-definition',
+        manifestDigest: 'private-manifest', comparatorDigest: 'private-comparator', summaryDigest: 'private-summary' },
+      recordsDigest: 'private-records', futurePrivateField: 'private-future' } satisfies UniverseCampaignReadiness & { futurePrivateField: string };
+    const before = JSON.stringify(source);
+    const projected = projectUniverseConsoleCampaignReadiness(source);
+    expect(Object.keys(projected).sort()).toEqual(['schemaVersion', 'readinessScope', 'campaignId', 'universeId',
+      'observedState', 'sourceState', 'disposition', 'reasonCode', 'resourceRuntimeRequired', 'sampledAt'].sort());
+    const json = serializeUniverseConsoleCampaignReadiness(source);
+    expect(JSON.parse(json)).toEqual(projected);
+    expect(json).not.toContain('private-'); expect(json).not.toContain('automaticAction');
+    expect(projected).toMatchObject({ disposition: 'startable', sampledAt: source.sampledAt });
+    expect(JSON.stringify(source)).toBe(before);
+  });
+
   it('omits diagnostic messages in both completed and active runs without mutating evidence', () => {
     const source = overview(); const before = JSON.stringify(source);
     const json = serializeUniverseConsoleOverview(source);

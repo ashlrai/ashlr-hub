@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from '../src/core/resources/quota-refresh-lease.js';
 import * as durability from '../src/core/util/durability.js';
+// These fixtures specifically preserve and exercise the legacy marker contract.
+vi.mock('../src/core/resources/native-boot-identity.js', () => ({ readNativeBootIdentity: () => null }));
 
 let base: string; let root: string;
 const leases: ResourceQuotaRefreshLease[] = [];

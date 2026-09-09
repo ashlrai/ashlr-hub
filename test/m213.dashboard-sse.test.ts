@@ -11,7 +11,7 @@
  *   7. Existing events still emitted: runs, swarms, inbox, daemon, fleet-activity-ping
  *   8. drainSseConnections() ends the SSE response
  *   9. POST /api/events returns 404 (not a valid mutation route)
- *  10. server.ts HOST_RE allowlist — loopback-only binding verified
+ *  10. server.ts shared host allowlist — loopback-only binding verified
  *  11. app.js snapshot SSE handler suppresses polling only while snapshots are fresh
  *  12. app.js SSE error handler restores polling fallback
  *  13. app.js stale-snapshot watchdog restores polling and withholds exact learning metrics
@@ -238,6 +238,7 @@ function makeJsonRes() {
 
 import { handleApi, drainSseConnections, drainSseSession } from '../src/core/web/api.js';
 import { buildSnapshot } from '../src/core/dashboard.js';
+import { isAllowedHost } from '../src/core/web/read-session.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -790,11 +791,19 @@ describe('M213 Dashboard SSE — /api/events', () => {
       path.join(path.dirname(fileURLToPath(import.meta.url)), '../src/core/web/server.ts'),
       'utf8',
     );
-    expect(src).toContain('HOST_RE');
+    // The allowlist lives in the shared read-session boundary. Check the
+    // server's use of that boundary and its behavior, not a relocated regex.
+    expect(src).toContain('if (!isAllowedHost(req.headers.host))');
     expect(src).toContain('127.0.0.1');
     expect(src).toContain('localhost');
     // The listen call must specify 127.0.0.1 as the bind address
     expect(src).toContain("server.listen(opts.port, '127.0.0.1'");
+    for (const host of ['localhost', 'localhost:4173', '127.0.0.1', '127.0.0.1:4173', '[::1]', '[::1]:4173']) {
+      expect(isAllowedHost(host), host).toBe(true);
+    }
+    for (const host of [undefined, '', 'example.com', '10.0.0.1', '0.0.0.0', 'localhost.example.com', '127.0.0.1.example.com']) {
+      expect(isAllowedHost(host), String(host)).toBe(false);
+    }
   });
 
   // ── 11. app.js: snapshot SSE handler suppresses polling interval ──────────

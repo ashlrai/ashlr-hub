@@ -9,6 +9,7 @@ that every integration, provider or autonomous effect is active.
 | Your task | Canonical guide |
 |-----------|-----------------|
 | Understand the objective and how progress is measured | [Universe North Star](NORTH-STAR.md) |
+| Connect autonomy research to engineering acceptance | [Autonomy engineering brief](UNIVERSE-AUTONOMY-RESEARCH.md) |
 | Run a first bounded experiment and inspect its results | [Quickstart](QUICKSTART.md) |
 | Understand the current components and their boundaries | [Architecture](ARCHITECTURE.md#current-runtime-map) |
 | Configure experiments, campaigns, portfolios and artifact delivery | [Universe operator guide](ASHLR-UNIVERSE.md) |

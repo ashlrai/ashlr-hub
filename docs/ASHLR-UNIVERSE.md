@@ -159,8 +159,24 @@ The console shows the authenticated store path, experiment measurements,
 campaign progress, retained artifacts, delivery evidence and the on-demand
 evidence graph. Operational command examples include that same shell-quoted
 root. The page observes saved evidence; it has no execution buttons. Use the CLI
-to start or control work, then refresh. Active runs and campaigns refresh their
-overview every three seconds; the graph refreshes only when requested.
+to start or control work. While visible, the overview refreshes every three
+seconds for active runs or campaigns, and every 15 seconds otherwise so it can
+discover work started elsewhere. Hidden tabs skip periodic refreshes; returning
+to the tab refreshes immediately. The graph refreshes only when requested.
+
+For a selected campaign, choose **Check recorded readiness** to inspect its
+saved controls, budget and outcomes. This separate read is on demand; overview
+polling does not repeat it. Use **Refresh check** to request another observation.
+The panel identifies its observation time and retains an older result as
+historical when a reread fails. It does not issue run, resume or recovery actions.
+
+The recorded check distinguishes an initial run opportunity, an existing owner,
+owner controls, resource withholding, recovery or attention requirements,
+exhausted budgets, terminal campaigns and unavailable evidence. It also reports
+whether the campaign requires an explicit resource-runtime binding. It does not
+probe accounts, measure fresh quota, establish worker capacity or acquire an
+execution lease. Internal admission identities and record digests are omitted
+from the browser response. Use the CLI recovery check for its full local report.
 
 The dedicated server does not initialize the default Hub configuration, clean
 streams, discover providers, or start the general dashboard's event channel.
@@ -175,7 +191,8 @@ or failed work returns unavailable rather than a truncated successful graph.
 Use targeted CLI inspection when a store exceeds the console's response budget.
 
 The protected read surface consists of `/api/universe/console` (scope metadata),
-`/api/universe` (overview) and `/api/universe/graph?universeId=ID` (graph).
+`/api/universe` (overview), `/api/universe/graph?universeId=ID` (graph), and
+`/api/universe/campaign-readiness?campaignId=ID` (recorded recovery check).
 Browser-supplied roots, unknown parameters, unrelated Hub APIs and data mutations
 are rejected. Session exchange/logout use `/api/session`. The public `/health`
 route establishes listener liveness only; it does not attest store health.
@@ -461,7 +478,7 @@ including every alias of each managed capacity key. Keep it outside the entire
 Universe store, candidate and generation workspace. Do not place account
 credentials in it.
 
-This opt-in starts one sequential metadata capture per configured Codex alias,
+Unless `quotaEvidenceMode` is set as described below, this opt-in starts one sequential metadata capture per configured Codex alias,
 within the generation's existing deadline. It confirms collector cleanup before
 task admission; the capture itself does not retry failures or run a resident
 collector. The separate `capacityWaitMs` option below can wait before admission.
@@ -479,8 +496,47 @@ and durable pending marker for a pool root. Without a positive `capacityWaitMs`,
 concurrent collection is refused, not attached to or restarted; use portfolio
 `maxParallel: 1` when sharing a collector without waiting. Even generations for
 different workers can contend for its root. A crash or unconfirmed metadata shutdown keeps
-the pending marker and requires operator reconciliation before another capture.
-Never remove that marker just to obtain another attempt.
+the pending marker. Legacy or unregistered same-boot uncertainty requires reconciliation
+before another capture. Tracked v4 markers can recover after a same-boot owner
+crash with an absent owner and exact durable evidence that no command is preparing
+and every registered owned process group is absent. Recovery observes groups;
+it never signals or replays them. v3 requires exactly idle evidence. Boot-bound
+v2/v3/v4 markers can also recover after a verified reboot on the same machine.
+Both paths require the exclusive lock and a durable authorization receipt before
+exact removal. See [collector recovery](RESOURCE-POOLS.md#keep-codex-quota-evidence-fresh-in-the-foreground)
+for constraints; fresh quota is still required. Never remove a marker just to
+obtain another attempt.
+
+Missing native settlement is terminal for a capture: an unexpected invoked probe
+throw or invalid status stops the pass, withholds its workers and retains pending
+cleanup evidence. It is not a retryable completed provider failure, even when
+cancellation arrives at the same time.
+
+### Share the foreground console's quota collector
+
+To keep the account console open during resource-backed generation, add
+`"quotaEvidenceMode": "shared-collector"` alongside `quotaConfigPath` in the private
+runtime. The console must already be running with `--quota-config`, using the
+same root, pool, bindings and quota configuration. Omitting this field retains
+the one-shot capture behavior above; no account credentials belong in the runtime.
+
+The console publishes `.resource-quota-shared-evidence.json` privately at startup,
+on collector transitions and every second. Each witness lasts five seconds and
+is tied to the exact configuration, live process start identity, lease and pending
+marker. Publication never renews the underlying native observation timestamps.
+This is metadata sharing, not a second collector or resident service.
+
+Universe pins that owner for the invocation and reads the witness again inside
+the task-reservation lock. Missing, stale, closed, replaced-owner or failed-capture
+evidence withholds new work. It never falls back to its own native probe. Existing
+file denials, capacity aliases, occupancy and the latest saved allocation remain
+independent gates. A new collector requires a new invocation; an existing exact
+receipt can still replay without a live collector and cannot execute twice.
+
+A publication failure stops metadata collection, invalidates ownership and retains
+the pending fence. Reconcile native shutdown before deliberate recovery; do not
+delete ownership records to force dispatch. The configuration-only runtime check
+does not establish shared collector liveness or authorize execution.
 
 Existing task receipts skip new metadata contact, and terminal campaign/portfolio
 reruns remain no-ops. Claude and local workers still require explicit fresh
@@ -860,6 +916,29 @@ digest, not an additional copy of the feedback file contents. The console also
 shows the search-context version and digest when recorded; it does not display
 an additional copy of prompt content. Receipt validity establishes the supplied
 context, not a measured improvement in model decision quality.
+
+When evaluation cannot produce a measurement, the runner supplies one fixed
+phase diagnostic: `evaluator-start-failed`, `evaluator-timed-out`,
+`evaluator-nonzero`, or `evaluator-invalid-result`. These messages describe the
+evaluation failure, not a proven defect in the candidate. Score remains `null`,
+metrics remain empty, and the attempt is not admitted to the retained archive.
+With feedback enabled, the next same-variant generation receives this recorded
+diagnosis without raw subprocess output or arbitrary local error text. Cancelled
+evaluations do not receive a failure diagnostic. Comparator integrity failures
+and evidence-budget rejection are not classified as malformed evaluator output.
+Existing records are not rewritten to infer missing phase diagnoses.
+
+Failed generation likewise records a fixed diagnostic from validated generation
+receipt fields: `generation-not-started`, `generation-resource-not-started`,
+`generation-resource-withheld`, `generation-resource-unresolved`,
+`generation-timed-out`, or `generation-failed`. An unresolved resource handoff
+takes precedence over timeout; it is not permission to replay work. No evaluator
+ran, so the score stays `null` and existing retained elites are preserved.
+Feedback-enabled later attempts receive the diagnosis without provider errors,
+subprocess output or inferred code defects. Owner cancellation suppresses these
+failure diagnostics. Evidence preflight reserves the largest fixed serialized
+diagnostic before model contact. This adds feedback, not retries, routing changes
+or a new resource allowance.
 
 `maxReportedTokens` is an optional stop threshold based on reported consumption,
 not a preventive spending ceiling. Requests can consume tokens before a result
@@ -1319,3 +1398,8 @@ Custom evaluator authors must keep acceptance logic outside the process executin
 Each stage should demonstrate a better outcome on a real task and preserve a reproducible path back to the evidence. The destination is an engineering system whose experimentation improves the system itself and the products it builds.
 
 See the [research grounding](UNIVERSE-RESEARCH.md) for the methods and their evidence limits, and the [North Star](NORTH-STAR.md) for the broader product objective.
+
+The [autonomy engineering brief](UNIVERSE-AUTONOMY-RESEARCH.md) connects durable
+execution, measured engineering yield and self-improving harness research to a
+staged acceptance roadmap. Proposed architecture is separate from commissioned
+runtime behavior.

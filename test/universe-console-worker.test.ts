@@ -1,21 +1,49 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_UNIVERSE_CONSOLE_RESPONSE_BYTES } from '../src/core/web/universe-console-public.js';
 
-const fixture = vi.hoisted(() => ({ on: vi.fn(), postMessage: vi.fn(), overview: vi.fn(), graph: vi.fn() }));
+const fixture = vi.hoisted(() => ({ on: vi.fn(), postMessage: vi.fn(), overview: vi.fn(), graph: vi.fn(), readiness: vi.fn() }));
 vi.mock('node:worker_threads', async (original) => ({ ...await original<typeof import('node:worker_threads')>(),
   parentPort: { on: fixture.on, postMessage: fixture.postMessage }, workerData: { root: '/private/tmp/console-worker-unit-scope' } }));
 vi.mock('../src/core/universe/overview.js', () => ({ readUniverseOverview: fixture.overview }));
 vi.mock('../src/core/universe/graph-reader.js', () => ({ readUniverseGraph: fixture.graph }));
+vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampaignReadiness: fixture.readiness }));
 let dispatch: (request: unknown) => void;
 beforeAll(async () => {
   await import('../src/core/web/universe-console-worker.js');
   expect(fixture.on.mock.calls[0]![0]).toBe('message'); dispatch = fixture.on.mock.calls[0]![1];
 });
 beforeEach(() => {
-  fixture.postMessage.mockClear(); fixture.overview.mockReset(); fixture.graph.mockReset();
+  fixture.postMessage.mockClear(); fixture.overview.mockReset(); fixture.graph.mockReset(); fixture.readiness.mockReset();
 });
 
 describe('dedicated scoped console worker protocol', () => {
+  it('pins campaign readiness to its worker root and strips private witnesses before posting', () => {
+    fixture.readiness.mockReturnValue({ schemaVersion: 1, campaignId: 'one', universeId: 'u-one',
+      sourceState: 'healthy', disposition: 'startable', automaticAction: 'run',
+      expectedIdentity: { private: 'worker-only' }, recordsDigest: 'worker-only', extra: 'worker-only' });
+    dispatch({ type: 'read', id: 10, kind: 'campaign-readiness', payload: { campaignId: 'one' } });
+    expect(fixture.readiness).toHaveBeenCalledExactlyOnceWith('one', { root: '/private/tmp/console-worker-unit-scope' });
+    const result = fixture.postMessage.mock.calls[0]![0];
+    expect(result).toMatchObject({ type: 'result', id: 10, ok: true });
+    expect(JSON.parse(result.value)).toMatchObject({ campaignId: 'one', universeId: 'u-one' });
+    expect(result.value).not.toContain('worker-only'); expect(result.value).not.toContain('automaticAction');
+    expect(fixture.overview).not.toHaveBeenCalled(); expect(fixture.graph).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, { campaignId: '../one' }, { campaignId: 'one', root: '/other' },
+    { campaignId: 'one', universeId: 'other' }, { campaignId: ['one'] }, { campaignId: 'x'.repeat(65) }])(
+    'rejects malformed readiness selection before evidence access %#', (payload) => {
+      dispatch({ type: 'read', id: 11, kind: 'campaign-readiness', payload });
+      expect(fixture.readiness).not.toHaveBeenCalled();
+      expect(fixture.postMessage).toHaveBeenCalledExactlyOnceWith({ type: 'result', id: 11, ok: false });
+    });
+
+  it('withholds readiness failure details without turning them into a healthy result', () => {
+    fixture.readiness.mockImplementation(() => { throw new Error('/private/readiness-secret'); });
+    dispatch({ type: 'read', id: 12, kind: 'campaign-readiness', payload: { campaignId: 'one' } });
+    expect(fixture.postMessage).toHaveBeenCalledExactlyOnceWith({ type: 'result', id: 12, ok: false });
+  });
+
   it('posts only public serialized overview JSON, never the raw evidence object', () => {
     const raw = { schemaVersion: 1, universes: [{ runs: [{ trials: [{ diagnostics: [
       { code: 'failed', message: 'never leave worker' }],

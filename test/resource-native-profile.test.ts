@@ -18,7 +18,7 @@ beforeEach(() => {
   writeFileSync(binary, `#!${process.execPath}\nconsole.log(JSON.stringify({args:process.argv.slice(2),pid:process.pid,env:process.env}));`, { mode: 0o700 });
 });
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllEnvs(); rmSync(base, { recursive: true, force: true }); });
-const options = (provider: 'codex' | 'claude' = 'codex'): ResourceNativeProfileOptions => ({ provider, directory: join(base, 'new-profile'), executable: binary });
+const options = (provider: 'codex' | 'claude' | 'grok' = 'codex'): ResourceNativeProfileOptions => ({ provider, directory: join(base, 'new-profile'), executable: binary });
 function tree(path: string): unknown {
   const stat = lstatSync(path);
   return stat.isDirectory() ? { mode: stat.mode, entries: readdirSync(path).sort().map((name) => [name, tree(join(path, name))]) }
@@ -26,12 +26,13 @@ function tree(path: string): unknown {
 }
 
 describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'function')('native profile preparation', () => {
-  it.each(['codex', 'claude'] as const)('prepares %s private files and unauthenticated locators without invoking anything', (provider) => {
+  it.each(['codex', 'claude', 'grok'] as const)('prepares %s private files and unauthenticated locators without invoking anything', (provider) => {
     const before = readFileSync(binary); const profile = prepareResourceNativeProfile(options(provider));
     expect(profile).toMatchObject({ schemaVersion: 1, scope: 'native-profile-preparation', status: 'prepared', authentication: 'not-checked', provider });
     expect(JSON.parse(readFileSync(profile.manifestPath, 'utf8'))).toEqual(profile);
     expect(JSON.parse(readFileSync(profile.commandPath, 'utf8'))).toEqual([realpathSync(process.execPath), profile.launcherPath]);
-    expect(profile.loginCommand).toEqual([...profile.command, ...(provider === 'codex' ? ['login'] : ['auth', 'login', '--claudeai'])]);
+    expect(profile.loginCommand).toEqual([...profile.command, ...(provider === 'codex' ? ['login']
+      : provider === 'grok' ? ['--no-auto-update', 'login', '--oauth'] : ['auth', 'login', '--claudeai'])]);
     expect(readdirSync(profile.nativeStatePath)).toEqual([]);
     if (profile.anthropicStatePath) expect(readdirSync(profile.anthropicStatePath)).toEqual([]);
     expect(readdirSync(profile.directory).sort()).toEqual([...(provider === 'claude' ? ['anthropic-state'] : []), 'command.json', 'launcher.mjs', 'native-state', 'profile.json']);
@@ -46,22 +47,32 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
     expect(first.nativeStatePath).not.toBe(second.nativeStatePath); expect(first.authentication).toBe('not-checked');
     expect(second.authentication).toBe('not-checked'); expect(readFileSync(first.launcherPath)).not.toEqual(readFileSync(second.launcherPath));
   });
-  it.each(['codex', 'claude'] as const)('forwards %s help through execve with fixed state and no ambient billing selectors', (provider) => {
+  it.each(['codex', 'claude', 'grok'] as const)('forwards %s help through execve with fixed state and no ambient billing selectors', (provider) => {
     const profile = prepareResourceNativeProfile(options(provider)); const before = tree(profile.directory);
     const result = JSON.parse(execFileSync(profile.command[0]!, [...profile.command.slice(1), '--help'], { encoding: 'utf8', timeout: 5000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, LANG: 'C', OPENAI_API_KEY: 'fixture-not-passed', ANTHROPIC_API_KEY: 'fixture-not-passed',
         CODEX_HOME: '/fixture/ambient-codex', CLAUDE_CONFIG_DIR: '/fixture/ambient-claude', ANTHROPIC_CONFIG_DIR: '/fixture/ambient-anthropic',
-        HTTPS_PROXY: 'fixture-not-passed', EXTRA_SETTING: 'fixture-not-passed' } }));
+        XAI_API_KEY: 'fixture-not-passed', GROK_HOME: '/fixture/ambient-grok', GROK_AUTH_PROVIDER_COMMAND: 'fixture-not-passed',
+        GROK_XAI_API_BASE_URL: 'fixture-not-passed', HTTPS_PROXY: 'fixture-not-passed', EXTRA_SETTING: 'fixture-not-passed' } }));
     expect(result.args).toEqual(provider === 'codex'
       ? ['-c', 'cli_auth_credentials_store="file"', '-c', 'forced_login_method="chatgpt"', '--help'] : ['--help']);
     expect(result.env.HOME).toBe(process.env.HOME); expect(result.env.PATH).toBe(process.env.PATH);
-    for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'HTTPS_PROXY', 'EXTRA_SETTING']) expect(result.env).not.toHaveProperty(key);
+    for (const key of ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'XAI_API_KEY', 'GROK_AUTH_PROVIDER_COMMAND', 'GROK_XAI_API_BASE_URL', 'HTTPS_PROXY', 'EXTRA_SETTING']) expect(result.env).not.toHaveProperty(key);
     if (provider === 'codex') { expect(result.env.CODEX_HOME).toBe(profile.nativeStatePath); expect(result.env).not.toHaveProperty('CLAUDE_CONFIG_DIR'); }
-    else {
+    else if (provider === 'grok') {
+      expect(result.env.GROK_HOME).toBe(profile.nativeStatePath);
+      for (const key of ['CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_CONFIG_DIR', 'DISABLE_UPDATES']) expect(result.env).not.toHaveProperty(key);
+    } else {
       expect(result.env.CLAUDE_CONFIG_DIR).toBe(profile.nativeStatePath); expect(result.env.ANTHROPIC_CONFIG_DIR).toBe(profile.anthropicStatePath);
       expect(result.env.DISABLE_UPDATES).toBe('1'); expect(result.env).not.toHaveProperty('CODEX_HOME');
     }
     expect(tree(profile.directory)).toEqual(before);
+  });
+  it('forwards the Grok collector suffix once through the inert native executable', () => {
+    const profile = prepareResourceNativeProfile(options('grok')); const args = ['--no-auto-update', 'agent', '--no-leader', 'stdio'];
+    const result = JSON.parse(execFileSync(profile.command[0]!, [...profile.command.slice(1), ...args], { encoding: 'utf8', timeout: 5000 }));
+    expect(result.args).toEqual(args); expect(result.env.GROK_HOME).toBe(profile.nativeStatePath);
+    expect(profile.anthropicStatePath).toBeNull(); expect(profile.authentication).toBe('not-checked');
   });
   it.each([
     ['-c', 'cli_auth_credentials_store="keyring"'], ['--config', 'forced_login_method="api"'],
@@ -101,7 +112,7 @@ describe.skipIf(process.platform === 'win32' || typeof process.execve !== 'funct
       : kind === 'noncanonical' ? { ...options(), directory: `${base}/../profile` }
       : kind === 'control' ? { ...options(), directory: `${base}/bad\nname` }
       : kind === 'root' ? { ...options(), directory: '/' }
-      : kind === 'unsupported' ? { ...options(), provider: 'grok' }
+      : kind === 'unsupported' ? { ...options(), provider: 'unsupported-provider' }
       : kind === 'extra' ? { ...options(), credentials: 'must-not-read' }
       : Object.defineProperty({ ...options() }, 'provider', { get() { throw new Error('must not invoke'); } });
     const before = tree(base); expect(() => prepareResourceNativeProfile(config as ResourceNativeProfileOptions)).toThrow('Invalid native profile');

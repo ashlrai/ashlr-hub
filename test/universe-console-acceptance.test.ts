@@ -120,7 +120,8 @@ describe('independent scoped Universe console HTTP acceptance', () => {
     const head = await http(a, '/health', { method: 'HEAD' }); expect(head.status).toBe(200); expect(head.body).toBe('');
   });
 
-  it.each(['/api/universe/console', '/api/universe', `/api/universe/graph?universeId=${UNIVERSE_ID}`])(
+  it.each(['/api/universe/console', '/api/universe', `/api/universe/graph?universeId=${UNIVERSE_ID}`,
+    '/api/universe/campaign-readiness?campaignId=same-console-campaign'])(
     'requires read authority for %s', async (path) => {
       expect((await http(a, path)).status).toBe(401);
       expect((await http(a, path, { headers: { 'x-ashlr-token': 'wrong' } })).status).toBe(401);
@@ -150,6 +151,33 @@ describe('independent scoped Universe console HTTP acceptance', () => {
     '/api/universe/graph', '/api/universe/graph?universeId='])('rejects undeclared or repeated scope selectors: %s', async (path) => {
     const result = await http(a, path, { headers: authorized(a) });
     expect(result.status).toBe(400); expect(result.body).not.toContain(alpha.marker); expect(result.body).not.toContain(beta.marker);
+  });
+
+  it('reads recorded campaign readiness through the real worker with no private witnesses or execution authority', async () => {
+    for (const handle of [a, b]) {
+      const response = await http(handle, '/api/universe/campaign-readiness?campaignId=same-console-campaign', { headers: authorized(handle) });
+      expect(response.status).toBe(200); expect(response.headers['cache-control']).toContain('no-store');
+      const result = JSON.parse(response.body);
+      expect(result).toEqual({ schemaVersion: 1, readinessScope: 'recorded-campaign-evidence',
+        campaignId: 'same-console-campaign', universeId: UNIVERSE_ID, observedState: 'ready',
+        sourceState: 'healthy', disposition: 'startable', reasonCode: 'never-started',
+        resourceRuntimeRequired: false, sampledAt: expect.any(String) });
+      expect(Number.isFinite(Date.parse(result.sampledAt))).toBe(true);
+      for (const withheld of ['automaticAction', 'expectedIdentity', 'recordsDigest', alpha.root, beta.root, alpha.repo, beta.repo]) {
+        expect(response.body).not.toContain(withheld);
+      }
+    }
+    expect(snapshot(alpha.base)).toBe(beforeAlpha); expect(snapshot(beta.base)).toBe(beforeBeta);
+  });
+
+  it('never finds a campaign outside its pinned store or initializes a missing store', async () => {
+    const root = join(temporary(), 'missing-readiness-store'); const handle = await start(root);
+    const response = await http(handle, '/api/universe/campaign-readiness?campaignId=same-console-campaign', { headers: authorized(handle) });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ campaignId: 'same-console-campaign', universeId: null,
+      sourceState: 'missing', disposition: 'unavailable', reasonCode: 'campaign-missing', resourceRuntimeRequired: null });
+    expect(existsSync(root)).toBe(false);
+    await handle.close(); expect(existsSync(root)).toBe(false);
   });
 
   it.each(['/api/snapshot', '/api/config/effective', '/api/control', '/api/events', '/api/models', '/api/inbox',

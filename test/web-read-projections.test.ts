@@ -14,10 +14,11 @@ import {
 
 // If a transport failure ever falls back to inline computation, these spies
 // make that observable without touching a real fleet, provider, or daemon.
-const inline = vi.hoisted(() => ({ snapshot: vi.fn(), control: vi.fn(), fleet: vi.fn() }));
+const inline = vi.hoisted(() => ({ snapshot: vi.fn(), control: vi.fn(), fleet: vi.fn(), readiness: vi.fn() }));
 vi.mock('../src/core/dashboard.js', () => ({ buildSnapshot: inline.snapshot }));
 vi.mock('../src/core/web/control.js', () => ({ buildControlSnapshot: inline.control }));
 vi.mock('../src/core/fleet/status.js', () => ({ buildFleetStatus: inline.fleet }));
+vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampaignReadiness: inline.readiness }));
 
 const cfg = {
   version: 1, roots: [], editor: 'cursor', staleDays: 30, categories: {}, tidyRules: [], keepers: [],
@@ -73,6 +74,41 @@ afterEach(async () => {
 });
 
 describe('bounded read-projection transport', () => {
+  it('keys readiness by selected campaign, separates other kinds, and does not cache settled observations', async () => {
+    const { reader, workers } = harness();
+    const first = reader.read('universe-campaign-readiness', { campaignId: 'one' });
+    expect(reader.read('universe-campaign-readiness', { campaignId: 'one' })).toBe(first);
+    const second = reader.read('universe-campaign-readiness', { campaignId: 'two' });
+    const control = reader.read('control'); const worker = workers[0]!;
+    expect(worker.requests).toHaveLength(1);
+    expect(worker.requests[0]).toMatchObject({ kind: 'universe-campaign-readiness', payload: { campaignId: 'one' } });
+    worker.result(0, { campaignId: 'one' }); await first;
+    expect(worker.requests[1]).toMatchObject({ kind: 'universe-campaign-readiness', payload: { campaignId: 'two' } });
+    worker.result(1, { campaignId: 'two' }); await second;
+    expect(worker.requests[2]).toMatchObject({ kind: 'control' }); worker.result(2, {}); await control;
+    const reread = reader.read('universe-campaign-readiness', { campaignId: 'one' });
+    expect(reread).not.toBe(first); expect(worker.requests).toHaveLength(4);
+    worker.result(3, { campaignId: 'one', sourceState: 'degraded' });
+    await expect(reread).resolves.toMatchObject({ sourceState: 'degraded' });
+  });
+
+  it.each([undefined, {}, { campaignId: '../one' }, { campaignId: ['one'] },
+    { campaignId: 'one', root: '/other' }, { campaignId: 'one', universeId: 'two' },
+    { campaignId: 'x'.repeat(65) }, Object.create({ campaignId: 'one' })])(
+    'rejects invalid readiness payload before starting a worker %#', async (payload) => {
+      const { reader, factory } = harness();
+      await expect(reader.read('universe-campaign-readiness', payload as never)).rejects.toMatchObject({ code: 'READ_PROJECTION_INVALID_REQUEST' });
+      expect(factory).not.toHaveBeenCalled();
+    });
+
+  it('bounds readiness execution and never runs its core reader inline on timeout', async () => {
+    const { reader, workers } = harness({ timeoutMs: 50 });
+    const pending = reader.read('universe-campaign-readiness', { campaignId: 'one' });
+    const failure = expect(pending).rejects.toMatchObject({ code: 'READ_PROJECTION_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(50); await failure;
+    expect(workers[0]!.terminate).toHaveBeenCalledOnce();
+  });
+
   it('starts lazily, coalesces identical reads, and serializes distinct projections', async () => {
     const { reader, workers, factory } = harness();
     expect(factory).not.toHaveBeenCalled();

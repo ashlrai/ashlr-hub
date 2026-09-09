@@ -173,7 +173,7 @@ describe('managed quota server lifecycle and coherent reads', () => {
     });
     const handle = await start(); const response = await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken });
     expect(response.status).toBe(503); expect(f.snapshot).toHaveBeenCalledTimes(2);
-    expect(JSON.parse(response.text)).toEqual({ error: 'Resource quota evidence changed during this read' });
+    expect(JSON.parse(response.text)).toEqual({ error: 'Resource quota or allocation evidence changed during this read' });
   });
 
   it('waits for execution ownership with a placeholder managed gate before creating a collector', async () => {
@@ -224,14 +224,31 @@ describe('managed quota server lifecycle and coherent reads', () => {
     expect(() => f.created.mock.calls[0]![0].assertOwnership?.()).toThrow(/marker changed/);
     await expect(handle.close()).rejects.toThrow(/shutdown uncertain/);
     expect(JSON.parse(readFileSync(f.marker, 'utf8')).state).toBe('changed-fixture');
-    await expect(start()).rejects.toThrow(/operator reconciliation/); expect(f.created).toHaveBeenCalledOnce();
+    const original = readFileSync(f.marker); const blocked = await start();
+    expect(blocked.scope).toMatchObject({ readOnly: true, quotaRefreshEnabled: true });
+    const response = await http(blocked, '/api/resources', 'GET', { 'x-ashlr-token': blocked.readToken });
+    expect(response.status).toBe(200); const value = JSON.parse(response.text);
+    expect(value.metadataCollector).toMatchObject({ state: 'blocked', reasonCode: 'reconciliation-required' });
+    expect(value.quotaRefresh).toBeUndefined(); expect(value.plan.selectedWorkerId).toBeNull();
+    expect(f.created).toHaveBeenCalledOnce();
+    await blocked.close(); await blocked.close();
+    expect(readFileSync(f.marker)).toEqual(original);
+    expect(existsSync(join(options.root, '.resource-quota-refresh.lock'))).toBe(false);
   });
 
-  it('does not clear a preexisting crash marker when startup is refused', async () => {
+  it('preserves a preexisting crash marker while serving a configured blocked console', async () => {
     const f = managedFixture(); mkdirSync(options.root, { mode: 0o700 }); write(f.marker, { state: 'test-owned-crash' });
     const original = readFileSync(f.marker);
-    await expect(start()).rejects.toThrow(/operator reconciliation/);
+    const blocked = await start();
+    expect(blocked.scope).toMatchObject({ readOnly: true, quotaRefreshEnabled: true });
+    const response = await http(blocked, '/api/resources', 'GET', { 'x-ashlr-token': blocked.readToken });
+    expect(response.status).toBe(200); const value = JSON.parse(response.text);
+    expect(value.metadataCollector).toMatchObject({ state: 'blocked', reasonCode: 'reconciliation-required' });
+    expect(value.quotaRefresh).toBeUndefined(); expect(value.plan.selectedWorkerId).toBeNull();
+    expect(f.snapshot).toHaveBeenCalledWith({ observations: [], unavailableWorkerIds: ['codex-a'] });
+    await blocked.close(); await blocked.close();
     expect(f.created).not.toHaveBeenCalled(); expect(readFileSync(f.marker)).toEqual(original);
+    expect(f.close).not.toHaveBeenCalled();
     expect(existsSync(join(options.root, '.resource-quota-refresh.lock'))).toBe(false);
   });
 });

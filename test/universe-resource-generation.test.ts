@@ -592,3 +592,79 @@ describe.skipIf(process.platform === 'win32')('current-file veto against an exis
     expect(readFileSync(f.marker, 'utf8')).toBe('x'); expect(existsSync(join(f.runtime.root, 'pool-state.json'))).toBe(true);
   });
 });
+
+describe.skipIf(process.platform === 'win32')('Universe allocation transitions at real locked admission', () => {
+  it.each(['refresh', 'wait'].flatMap((stage) => ['lower', 'raise', 'native-exhaustion'].map((transition) => ({ stage, transition }))))(
+    '$transition during $stage uses current allocation without discarding native exhaustion', async ({ stage, transition }) => {
+      const f = fixture(true);
+      const actual = await vi.importActual<typeof import('../src/core/resources/pool-runtime.js')>('../src/core/resources/pool-runtime.js');
+      vi.mocked(runResourceTask).mockImplementation(actual.runResourceTask);
+      const used = transition === 'native-exhaustion' ? 100 : 85;
+      const rows = f.observations.map((row) => ({ ...row, windows: row.windows.map((window) => ({ ...window, usedPercent: used })) }));
+      save(f.runtime.observationsPath, rows);
+      actual.setResourcePoolAllocation(f.runtime.root, f.pool, f.bindings, transition === 'lower' ? 100 : 75, 0);
+      const change = () => {
+        actual.setResourcePoolAllocation(f.runtime.root, f.pool, f.bindings, transition === 'lower' ? 75 : 100, 1);
+        if (transition === 'native-exhaustion') save(f.runtime.observationsPath, f.observations.map((row) => ({
+          ...row, observedAt: f.at(0), windows: row.windows.map((window) => ({ ...window, usedPercent: 10 })),
+        })));
+      };
+      if (stage === 'refresh') {
+        const quotaConfigPath = join(base, 'quota-transition.json');
+        save(quotaConfigPath, { schemaVersion: 1, poolDigest: f.config.poolDigest, workers: ['native', 'alias'].map((workerId) => ({
+          workerId, accountHint: 'a'.repeat(64), bucketIds: ['weekly'],
+        })) });
+        save(f.runtimePath, { ...f.runtime, quotaConfigPath });
+        vi.mocked(refreshResourceQuotaOnce).mockImplementation(async (options) => {
+          expect(options.deferAllocationToAdmission).toBe(true); change();
+          const captured = transition === 'native-exhaustion'
+            ? f.observations.map((row) => ({ ...row, observedAt: f.at(0) })) : rows;
+          return { observations: captured, unavailableWorkerIds: [] };
+        });
+      } else {
+        save(f.runtimePath, { ...f.runtime, capacityWaitMs: 1000 });
+        vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
+          const before = options.readEvidence();
+          expect(before.unavailableWorkerIds.includes('native')).toBe(transition !== 'lower');
+          change(); const latest = options.readEvidence();
+          expect(latest.unavailableWorkerIds.includes('native')).toBe(transition !== 'raise');
+          // Deliberately report an eligible capacity hint even on denial: the
+          // actual locked reservation must enforce the current policy itself.
+          return { ...latest, ready: true };
+        });
+      }
+      const result = await f.run();
+      expect(runResourceTask).toHaveBeenCalledOnce();
+      expect(actual.readResourcePoolAllocation(f.runtime.root, f.pool, f.bindings)).toMatchObject({
+        ceilingPercent: transition === 'lower' ? 75 : 100, revision: 2,
+      });
+      if (transition === 'raise') {
+        expect(result).toMatchObject({ status: 'succeeded', resource: { dispatch: 'settled' } });
+        expect(readFileSync(f.marker, 'utf8')).toBe('x');
+      } else {
+        expect(result).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+        expect(existsSync(f.marker)).toBe(false);
+      }
+      expect(JSON.parse(readFileSync(join(f.runtime.root, 'pool-state.json'), 'utf8')).poolDigest).toBe(f.config.poolDigest);
+    });
+
+  it('a policy save after the final evidence snapshot still vetoes actual worker admission', async () => {
+    const f = fixture();
+    const actual = await vi.importActual<typeof import('../src/core/resources/pool-runtime.js')>('../src/core/resources/pool-runtime.js');
+    const rows = f.observations.map((row) => ({ ...row, windows: row.windows.map((window) => ({ ...window, usedPercent: 85 })) }));
+    save(f.runtime.observationsPath, rows);
+    actual.setResourcePoolAllocation(f.runtime.root, f.pool, f.bindings, 100, 0);
+    vi.mocked(runResourceTask).mockImplementation(async (options) => {
+      expect(options.unavailableWorkerIds).toEqual([]);
+      expect(actual.resourcePoolStatus(f.runtime.root, f.pool, f.bindings, options.observations).plan.selectedWorkerId).toBe('native');
+      // Simulate another authorized writer winning after the request/evidence
+      // body was captured but immediately before the reservation lock is taken.
+      actual.setResourcePoolAllocation(f.runtime.root, f.pool, f.bindings, 75, 1);
+      return actual.runResourceTask(options);
+    });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
+    expect(existsSync(f.marker)).toBe(false); expect(runResourceTask).toHaveBeenCalledOnce();
+    const state = JSON.parse(readFileSync(join(f.runtime.root, 'pool-state.json'), 'utf8'));
+    expect(state.attempts).toEqual([]); expect(state.allocation).toMatchObject({ ceilingPercent: 75, revision: 2 });
+  });
+});

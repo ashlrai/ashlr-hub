@@ -4,7 +4,7 @@ import { dirname, isAbsolute, join, parse, resolve } from 'node:path';
 import { inspectPrivateDirectory } from '../universe/artifacts.js';
 import { fsyncDirectory } from '../util/durability.js';
 
-export type ResourceNativeProfileProvider = 'codex' | 'claude';
+export type ResourceNativeProfileProvider = 'codex' | 'claude' | 'grok';
 export interface ResourceNativeProfileOptions { provider: ResourceNativeProfileProvider; directory: string; executable: string }
 export interface ResourceNativeProfile {
   schemaVersion: 1;
@@ -71,6 +71,9 @@ try {
     }
     env.CODEX_HOME=profile.nativeStatePath;
     fixed=['-c','cli_auth_credentials_store="file"','-c','forced_login_method="chatgpt"'];
+  }else if(profile.provider==='grok'){
+    // The caller supplies --no-auto-update for login/metadata; do not duplicate it.
+    env.GROK_HOME=profile.nativeStatePath;
   }else{
     env.CLAUDE_CONFIG_DIR=profile.nativeStatePath;env.ANTHROPIC_CONFIG_DIR=profile.anthropicStatePath;env.DISABLE_UPDATES='1';
   }
@@ -93,7 +96,7 @@ export function prepareResourceNativeProfile(options: ResourceNativeProfileOptio
     if (options === null || typeof options !== 'object' || Array.isArray(options) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(options)) || Reflect.ownKeys(options).length !== 3 ||
       !['provider', 'directory', 'executable'].every((key) => Object.hasOwn(options, key) &&
-        'value' in Object.getOwnPropertyDescriptor(options, key)!) || !['codex', 'claude'].includes(options.provider) ||
+        'value' in Object.getOwnPropertyDescriptor(options, key)!) || !['codex', 'claude', 'grok'].includes(options.provider) ||
       !path(options.directory) || !path(options.executable) || typeof process.execve !== 'function' ||
       process.platform === 'win32' || process.platform === 'aix') throw new Error();
     parent = dirname(options.directory); inspectPrivateDirectory(parent); parentStat = lstatSync(parent, { bigint: true });
@@ -105,7 +108,8 @@ export function prepareResourceNativeProfile(options: ResourceNativeProfileOptio
     nativeStatePath: join(options.directory, 'native-state'), anthropicStatePath: options.provider === 'claude' ? join(options.directory, 'anthropic-state') : null,
     manifestPath: join(options.directory, 'profile.json'), command: [], loginCommand: [] };
   profile.command = [nodeExecutable, profile.launcherPath];
-  profile.loginCommand = [...profile.command, ...(profile.provider === 'codex' ? ['login'] : ['auth', 'login', '--claudeai'])];
+  profile.loginCommand = [...profile.command, ...(profile.provider === 'codex' ? ['login']
+    : profile.provider === 'grok' ? ['--no-auto-update', 'login', '--oauth'] : ['auth', 'login', '--claudeai'])];
   try {
     inspectPrivateDirectory(parent);
     if (!same(parentStat, lstatSync(parent, { bigint: true }))) throw new Error();

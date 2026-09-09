@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { refreshResourceQuotaOnce, type ResourceQuotaRefreshConfig } from '../src/core/resources/quota-refresh.js';
 import { acquireResourceQuotaRefreshLease } from '../src/core/resources/quota-refresh-lease.js';
+import * as quotaLease from '../src/core/resources/quota-refresh-lease.js';
 import type { ResourceObservation, ResourcePool } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 import type { CodexResourceProbeOptions, CodexResourceProbeResult } from '../src/core/resources/codex-account-probe.js';
@@ -77,6 +78,10 @@ describe('one explicit quota capture pass', () => {
     const result = await refreshResourceQuotaOnce({ ...f.options, _probe: async (options) => {
       active++; maximum = Math.max(maximum, active); calls.push(options.workerId);
       expect(existsSync(f.marker)).toBe(true); expect(existsSync(f.lock)).toBe(true);
+      // The bounded one-shot wrapper must retain the per-operation hook.
+      expect(options.processGroupLifecycle).toBeDefined();
+      const command = options.processGroupLifecycle!.prepare();
+      command.settled('not-started'); // This injected probe never spawns a process.
       await Promise.resolve(); active--; return success(options);
     } });
     expect(calls).toEqual(['codex-a', 'codex-b']); expect(maximum).toBe(1);
@@ -125,13 +130,18 @@ describe('one explicit quota capture pass', () => {
     expect(Date.parse(result.observations.find((row) => row.workerId === 'codex-a')!.expiresAt)).toBeLessThan(Date.now());
   });
 
-  it('sanitizes a thrown probe and attempts each remaining alias only once', async () => {
+  it.each(['reject', 'throw', 'missing', 'null', 'unknown'])('retains the pending fence after %s loses settlement, without attempting another alias', async (kind) => {
     const f = fixture(); const calls: string[] = [];
-    const result = await refreshResourceQuotaOnce({ ...f.options, _probe: async (options) => {
-      calls.push(options.workerId); if (calls.length === 1) throw new Error('/PRIVATE/account-auth'); return success(options);
+    let pendingContents: string | undefined;
+    const running = refreshResourceQuotaOnce({ ...f.options, _probe: (options) => {
+      calls.push(options.workerId); pendingContents = readFileSync(f.marker, 'utf8');
+      if (kind === 'throw') throw new Error('/PRIVATE/account-auth');
+      if (kind === 'reject') return Promise.reject(new Error('/PRIVATE/account-auth'));
+      return Promise.resolve((kind === 'null' ? null : kind === 'unknown' ? { status: 'unexpected' } : {}) as CodexResourceProbeResult);
     } });
-    expect(calls).toEqual(['codex-a', 'codex-b']); expect(result.unavailableWorkerIds).toEqual(['codex-a']);
-    expect(JSON.stringify(result)).not.toContain('PRIVATE'); expect(existsSync(f.marker)).toBe(false);
+    await expect(running).rejects.toThrow('Resource quota refresh cleanup unconfirmed');
+    expect(calls).toEqual(['codex-a']); expect(readFileSync(f.marker, 'utf8')).toBe(pendingContents);
+    await expect(acquireResourceQuotaRefreshLease(f.cwd)).rejects.toThrow(/pending|unconfirmed/);
   });
 
   it('awaits a cancelled active probe, never contacting the next alias', async () => {
@@ -188,12 +198,28 @@ describe('one explicit quota capture pass', () => {
 
   it('aborts the active probe when its overall time budget expires', async () => {
     const f = fixture(); const probe = vi.fn((options: CodexResourceProbeOptions) => new Promise<CodexResourceProbeResult>((done) => {
-      expect(options.timeoutMs).toBeLessThanOrEqual(100);
+      expect(options.timeoutMs).toBeLessThanOrEqual(2000);
       options.signal!.addEventListener('abort', () => done(success(options, { status: 'cancelled', observation: null })), { once: true });
     }));
-    const result = await refreshResourceQuotaOnce({ ...f.options, timeoutMs: 100, _probe: probe });
+    const result = await refreshResourceQuotaOnce({ ...f.options, timeoutMs: 2000, _probe: probe });
     expect(probe).toHaveBeenCalledOnce(); expect(result.unavailableWorkerIds).toEqual(['codex-a', 'codex-b']);
     expect(existsSync(f.marker)).toBe(false);
+  });
+
+  it('settles a reservation when the budget expires before any native call starts', async () => {
+    const f = fixture(); let elapsed = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
+    const acquire = quotaLease.acquireResourceQuotaRefreshLease;
+    vi.spyOn(quotaLease, 'acquireResourceQuotaRefreshLease').mockImplementation(async (...args) => {
+      const lease = await acquire(...args);
+      return { ...lease, beginNativeActivity() {
+        const activity = lease.beginNativeActivity(); elapsed = 5001; return activity;
+      } };
+    });
+    const probe = vi.fn(async (options: CodexResourceProbeOptions) => success(options));
+    const result = await refreshResourceQuotaOnce({ ...f.options, _probe: probe });
+    expect(probe).not.toHaveBeenCalled(); expect(result.unavailableWorkerIds).toEqual(['codex-a', 'codex-b']);
+    expect(existsSync(f.marker)).toBe(false); expect(existsSync(f.lock)).toBe(false);
   });
 
   it('preserves uncertain cleanup even when cancellation preceded the result', async () => {

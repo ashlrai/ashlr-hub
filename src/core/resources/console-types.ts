@@ -3,6 +3,7 @@ import type { ResourceAssignmentPlan, ResourceObservation, ResourceWorker } from
 import type { ResourceTaskReceipt } from './pool-runtime.js';
 import type { ResourcePerformanceReport } from './performance.js';
 import type { ResourceQuotaRefreshSnapshot } from './quota-refresh.js';
+import type { ResourceConnectionsSnapshot } from './connection-types.js';
 
 export interface ResourceConsoleScope {
   schemaVersion: 1;
@@ -15,6 +16,8 @@ export interface ResourceConsoleScope {
   maxQueued: number;
   /** Explicit no-generation metadata collection; independent of task-write capability. */
   quotaRefreshEnabled?: boolean;
+  connectionsEnabled?: boolean;
+  allocationWritable?: boolean;
 }
 
 export interface ResourceConsoleGroup {
@@ -87,9 +90,46 @@ export interface ResourceSupervisorSnapshot {
   jobs: ResourceSupervisorJob[];
 }
 
+/** Fixed acquisition-time diagnosis only; never process identities or recovery authority. */
+export const RESOURCE_COLLECTOR_RECOVERY_REASONS = [
+  'legacy-owner-evidence-missing', 'boot-identity-unavailable', 'machine-identity-mismatch',
+  'same-boot-owner-evidence-missing', 'owner-not-confirmed-absent', 'activity-evidence-unavailable',
+  'legacy-active-work-unverifiable', 'command-registration-incomplete', 'process-group-not-confirmed-absent',
+  'pending-evidence-unavailable', 'recovery-confirmation-failed',
+] as const;
+export interface ResourceCollectorRecoveryDiagnosis {
+  reasonCode: typeof RESOURCE_COLLECTOR_RECOVERY_REASONS[number];
+  markerVersion: 1 | 2 | 3 | 4 | null;
+}
+/** Versions supported by each diagnosis; prevents contradictory recovery advice. */
+export const RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS = {
+  'legacy-owner-evidence-missing': [1],
+  'boot-identity-unavailable': [2, 3, 4],
+  'machine-identity-mismatch': [2, 3, 4],
+  'same-boot-owner-evidence-missing': [2],
+  'owner-not-confirmed-absent': [3, 4],
+  'activity-evidence-unavailable': [3, 4],
+  'legacy-active-work-unverifiable': [3],
+  'command-registration-incomplete': [4],
+  'process-group-not-confirmed-absent': [4],
+  // A wait budget may expire after parsing but before a more specific refusal.
+  'pending-evidence-unavailable': [null, 2, 3, 4],
+  'recovery-confirmation-failed': [2, 3, 4],
+} satisfies Record<ResourceCollectorRecoveryDiagnosis['reasonCode'], readonly ResourceCollectorRecoveryDiagnosis['markerVersion'][]>;
+
 export interface ResourceConsoleSnapshot extends ResourceConsoleEvidence {
   supervisor: ResourceSupervisorSnapshot | null;
+  /** Local collector lifecycle, not a provider health or quota observation. */
+  metadataCollector?: {
+    state: 'running' | 'blocked';
+    reasonCode: 'collector-running' | 'collector-owned' | 'reconciliation-required' | 'collector-unavailable';
+    sampledAt: string;
+    recovery?: ResourceCollectorRecoveryDiagnosis;
+  };
   quotaRefresh?: ResourceQuotaRefreshSnapshot | null;
+  connections?: ResourceConnectionsSnapshot | null;
+  allocation?: { ceilingPercent: number | null; revision: number; updatedAt: string | null };
+  workerAccess?: { pausedWorkerIds: string[]; revision: number; updatedAt: string | null };
 }
 
 export interface ResourceConsoleOutput {

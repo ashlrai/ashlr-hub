@@ -141,9 +141,11 @@ describe('explicit foreground quota collection through the scoped console', () =
     expect(f.events().filter((event) => event.kind === 'start')).toHaveLength(1);
   });
 
-  it('a second same-root collector is refused before probe and clean close releases ownership', async () => {
+  it('a second same-root console remains observable without collecting and clean close releases ownership', async () => {
     const f = fixture(); const first = await f.start({ quotaConfigFile: f.quotaConfigFile }); await collected(first, 'observed');
-    await expect(f.start({ quotaConfigFile: f.quotaConfigFile })).rejects.toThrow(/already owned|unavailable/);
+    const blocked = await f.start({ quotaConfigFile: f.quotaConfigFile });
+    expect((await snapshot(blocked)).metadataCollector).toMatchObject({ state: 'blocked', reasonCode: 'collector-owned' });
+    expect((await snapshot(blocked)).plan?.selectedWorkerId).toBeNull(); await blocked.close();
     expect(f.events().filter((event) => event.kind === 'start')).toHaveLength(1);
     await first.close();
     const second = await f.start({ quotaConfigFile: f.quotaConfigFile }); await collected(second, 'observed');
@@ -199,7 +201,10 @@ describe('explicit foreground quota collection through the scoped console', () =
     expect(existsSync(fence)).toBe(true);
     const contents = readFileSync(fence, 'utf8');
     expect(contents).not.toContain(HINT); expect(contents).not.toContain(EMAIL); expect(contents).not.toContain(f.script);
-    await expect(f.start({ quotaConfigFile: f.quotaConfigFile })).rejects.toThrow(/uncertain|unavailable|owned|unconfirmed|fenced/);
+    const blocked = await f.start({ quotaConfigFile: f.quotaConfigFile });
+    expect((await snapshot(blocked)).metadataCollector).toMatchObject({ state: 'blocked', reasonCode: 'reconciliation-required' });
+    expect((await snapshot(blocked)).plan?.selectedWorkerId).toBeNull(); await blocked.close();
+    expect(readFileSync(fence, 'utf8')).toBe(contents);
     expect(probe).toHaveBeenCalledTimes(1); expect(f.events()).toEqual([]);
   });
 });

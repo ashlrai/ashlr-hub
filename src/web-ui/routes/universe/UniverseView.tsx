@@ -10,6 +10,7 @@ import styles from './UniverseView.module.css';
 import { UniverseDeliveries } from './UniverseDeliveries.js';
 import { UniverseGraph } from './UniverseGraph.js';
 import { UniverseRootContext, useUniverseCommand } from './UniverseScope.js';
+import { CampaignReadiness } from './CampaignReadiness.js';
 
 type Campaign = NonNullable<UniverseOverview['campaigns']>[number];
 const ACTIVE_CAMPAIGN_STATES = new Set(['running', 'pause-requested', 'stop-requested']);
@@ -198,7 +199,6 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
   if (summary.activeRun) availableRuns.add(summary.activeRun.id);
   const controls = [`ashlr universe campaign status ${definition.id} --json`];
   controls.push(`ashlr universe campaign check ${definition.id} --json${root === null ? " --root '/absolute/private/experiments'" : ''}`);
-  if (['ready', 'paused', 'interrupted'].includes(campaign.state)) controls.push(`ashlr universe campaign run ${definition.id}`);
   if (ACTIVE_CAMPAIGN_STATES.has(campaign.state)) controls.push(`ashlr universe campaign pause ${definition.id}`);
   if (!['completed', 'stopped', 'failed'].includes(campaign.state)) controls.push(`ashlr universe campaign stop ${definition.id}`);
   return (
@@ -212,6 +212,7 @@ function Campaigns({ campaigns, summary, onInspectRun }: {
         {verified ? null : <div className={styles.notice} role="status"><strong>Campaign history is incomplete.</strong><p>{campaign.reasons.join('; ') || 'Recorded progress could not be verified.'}</p></div>}
         <p className={styles.reason}><strong>Reason: </strong>{campaign.reason ?? (campaign.state === 'ready' ? 'Registered; execution readiness has not been checked.' : 'No stop reason recorded.')}</p>
         <p>Use the recovery check before resuming. It reads recorded controls and outcomes, not current worker readiness.{root === null ? ' Replace the example root with your exact Universe store.' : ''}</p>
+        <CampaignReadiness key={`${summary.manifest.id}:${definition.id}`} campaignId={definition.id} universeId={summary.manifest.id} />
         {campaign.state === 'pause-requested' || campaign.state === 'stop-requested' ? <p role="status">Control requested. The owner has not yet acknowledged that work has stopped.</p> : null}
         <dl className={styles.campaignFacts}>
           <div><dt>Generation attempts</dt><dd>{value(progress.attempts)} / {definition.budget.maxGenerations}</dd></div>
@@ -380,9 +381,18 @@ export function UniverseView() {
   const isRunning = (overview?.universes.some((item) => item.activeRun !== null) ?? false) ||
     (overview?.campaigns?.some((item) => ACTIVE_CAMPAIGN_STATES.has(item.state)) ?? false);
   useEffect(() => {
-    if (!isRunning) return;
-    const timer = window.setInterval(refresh, 3_000);
-    return () => window.clearInterval(timer);
+    let disposed = false;
+    const poll = () => { if (!disposed && document.visibilityState !== 'hidden') refresh(); };
+    // Idle discovery notices work started elsewhere without requiring a manual
+    // refresh. The existing cache coalesces overlapping reads and owns their
+    // lifetime; hiding/unmounting stops new polling, not a shared in-flight read.
+    const timer = window.setInterval(poll, isRunning ? 3_000 : 15_000);
+    document.addEventListener('visibilitychange', poll);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', poll);
+    };
   }, [isRunning, refresh]);
   return (
     <div ref={containerRef} className={styles.view}>
@@ -399,6 +409,7 @@ export function UniverseView() {
         {query.status === 'refreshing' ? <RefreshIndicator /> : null}
         {overview ? <span>Observed {timestamp(overview.sampledAt)}{query.status === 'error' ? ' · Last successful read' : ''}</span> : null}
         {overview ? <span>Local experiments</span> : null}
+        <span>Refreshes every {isRunning ? '3' : '15'} seconds while visible</span>
       </div>
       {query.status === 'loading' ? <section className={styles.empty} aria-label="Loading Universe experiments"><SkeletonLine width="60%" /><SkeletonLine width="90%" /><SkeletonLine width="80%" /></section> : null}
       {query.status === 'error' ? <div className={styles.notice} role="alert"><h2>Universe records unavailable</h2><p>{query.error?.message ?? 'The experiment store could not be read.'}</p><p>Refresh to retry. Any records below are from the last successful read.</p></div> : null}

@@ -27,6 +27,27 @@ function largeFixture() {
 }
 
 describe('resource fleet topology', () => {
+  it('shows the saved fleet pause separately from quota eligibility on a worker node', () => {
+    const snapshot = resourceFixture().snapshot;
+    snapshot.workerAccess = { pausedWorkerIds: ['codex-a'], revision: 1, updatedAt: snapshot.sampledAt };
+    const plan = structuredClone(snapshot.plan); mount(snapshot);
+    const worker = within(screen.getByRole('button', { name: 'Inspect map worker codex-a' }));
+    expect(worker.getByText('Paused for fleet')).toBeVisible(); expect(worker.getByText('Not eligible')).toBeVisible();
+    expect(within(screen.getByRole('button', { name: 'Inspect map worker local-a' })).queryByText('Paused for fleet')).not.toBeInTheDocument();
+    expect(snapshot.plan).toEqual(plan);
+  });
+
+  it('shows a shared-capacity alias pause and marks it historical after a failed read', () => {
+    const snapshot = resourceFixture().snapshot;
+    snapshot.workerAccess = { pausedWorkerIds: ['codex-alias'], revision: 1, updatedAt: snapshot.sampledAt };
+    const { rerender } = mount(snapshot);
+    expect(within(screen.getByRole('button', { name: 'Inspect map worker codex-a' })).getByText('Paused for fleet')).toBeVisible();
+    expect(within(screen.getByRole('button', { name: 'Inspect map worker codex-alias' })).getByText('Paused for fleet')).toBeVisible();
+    rerender(<FleetMap snapshot={snapshot} stale selection={null} onSelect={vi.fn()} />);
+    expect(within(screen.getByRole('button', { name: 'Inspect map worker codex-a' })).getByText('Last reported: paused for fleet')).toBeVisible();
+    expect(screen.queryByText('Paused for fleet')).not.toBeInTheDocument();
+  });
+
   it('shows shared capacity once and connects only recorded assignments', () => {
     mount();
     const codex = screen.getByRole('region', { name: 'Fleet capacity codex-account' });

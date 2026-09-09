@@ -124,7 +124,8 @@ ashlr resources profile prepare --provider codex \
 ```
 
 Repeat with a **different new directory** for `codex-b`. For an isolated Claude
-login, use `--provider claude` and its canonical native executable. This writes
+login, use `--provider claude` and its canonical native executable; Grok uses
+`--provider grok` with a separate private `GROK_HOME`. This writes
 `launcher.mjs`, `command.json` and a preparation-only `profile.json` as mode
 `0600`, plus empty private state directories. Existing targets are never reused,
 repaired or overwritten. A partial failure retains its leaf for inspection;
@@ -153,7 +154,8 @@ run manual commands from a trusted shell. Hub dispatch already strips loader
 overrides before starting the wrapper.
 
 The returned `loginCommand` is the **separate interactive native sign-in** to run
-when ready. Codex uses `login`; Claude uses `auth login --claudeai`. Finish the
+when ready. Codex uses `login`; Claude uses `auth login --claudeai`; Grok uses
+`--no-auto-update login --oauth`. Finish the
 vendor's browser flow with the intended account, then verify account/billing and
 quota before enrollment. `authentication:not-checked` in the preparation manifest
 never changes into a live login-status claim. Use its `command.json` with
@@ -414,8 +416,9 @@ ashlr resources pool console --root /absolute/private/ledger \
 
 Open the printed `/resources/` URL and enter the printed read token. The server
 binds only to `127.0.0.1`, uses an instance-specific read session, and never places
-tokens in URLs. Without `--quota-config`, read-only mode does not create a missing
-ledger or launch workers.
+tokens in URLs. Without either metadata option, read-only mode does not create a
+missing ledger at startup or launch workers. Saving an allocation can create its
+private ledger state even when task execution is disabled.
 The pool and bindings are fixed at startup; only the selected observations file
 is reread. Reloading the dashboard does not refresh the age of quota evidence.
 
@@ -486,7 +489,8 @@ limit.
 Append `--quota-config /absolute/private/quota-config.json` to the console command
 to opt in. This works in read-only or execution mode. It creates the selected
 private root if absent and owns an exclusive collector lock. No native probe
-runs without this flag, and browser requests never trigger probes. Keep this
+runs in this collector without this flag; the separate account monitor described
+below requires its own explicit option. Browser requests never trigger probes. Keep this
 fourth control file outside the writable workspace as well.
 
 One collector sequentially probes configured Codex workers, normally every 30
@@ -502,13 +506,89 @@ evidence still participates in the existing conservative timestamp/window merge.
 
 The **Native quota reads** panel shows collector state, fixed failure reasons,
 last successful capture and next attempt. Observed metadata is separate from
-quota completeness and dispatch eligibility. Raw account hints are excluded from
+quota completeness and dispatch eligibility. After a failed console read, the
+panel labels retained statuses as **Last reported**, uses neutral unknown styling,
+and identifies scheduled times as historical throughout retries. Original capture
+timestamps remain unchanged; only a successful console read clears this state.
+An unreadable saved allocation explicitly withholds admission rather than
+presenting observed metadata as usable capacity. Raw account hints are excluded from
 the browser. Closing the console aborts and awaits its collector. Uncertain native
 cleanup or a crash retains `.resource-quota-refresh-pending.json`, which blocks a
-replacement collector even after its old process lease expires. Reconcile the
-owned native processes before deliberately removing that marker; do not delete
-control records simply to retry. The collector is not a
-resident service and cannot recover an ambiguously running native process.
+replacement collector even after its old process lease expires. Do not delete
+control records simply to retry. The collector is not a resident service and
+cannot recover an ambiguously running native process.
+
+When collector ownership is cleanly refused, the console stays available with
+its original configuration and a **Native metadata collection** blocked status.
+Configured flags do not mean native reads are running. Managed quota workers
+remain withheld; the console starts no metadata coordinator, probes or heartbeat.
+The panel distinguishes another owner, reconciliation-required, and unavailable
+ownership. It offers no automatic retry or force-clear action. Cancellation or
+unconfirmed cleanup still fails startup rather than presenting a usable fallback.
+
+When acquisition can identify the cause, the collector snapshot includes an
+optional `recovery` diagnosis containing only a fixed `reasonCode` and
+`markerVersion`. The desk explains missing legacy evidence, incomplete command
+registration, unconfirmed owner/group absence, identity mismatch and invalid
+records. These are sampled startup findings, not current process observations.
+Repeated dashboard reads do not acquire a lease or run new identity probes.
+Historical views label the diagnosis as historical. Unknown or contradictory
+reason/version pairs are rejected by the client rather than rendered as advice.
+Legacy v1 records lack owner, boot and group evidence; neither a console restart
+nor a computer reboot alone makes those records automatically recoverable.
+The diagnostic does not authorize clearing, replaying or replacing evidence.
+
+The console and one-shot quota captures use schema v4 markers when bounded macOS
+OS reads verify a machine fingerprint and boot-session UUID; only a digest of the
+machine UUID is persisted. Untracked internal lease callers retain v2. Under the
+existing exclusive lock, a matching machine and a different verified boot allow
+exact-marker recovery. A private, bounded latest authorization receipt is durably
+written to `.resource-quota-refresh-recovery.json` before removal. It records
+permission to unlink, not proof of unlink completion or a successful quota read.
+Fresh quota evidence is still required afterward. Sleep/wake is not a reboot.
+Legacy v1, same-boot v2, malformed, changed, different-machine or unverifiable markers
+stay blocked. Unsupported platforms write conservative v1 markers. This does not
+relax PID-reuse lock checks or reconcile task execution receipts.
+
+For v4, a private bounded schema-2 `.resource-quota-refresh-activity.json` sidecar
+records up to two reservations, tied to the immutable marker and owner token.
+Each command transitions from `ready` to durable `preparing` before spawn, then
+to `registered` with its owned process-group ID, and back to `ready` only after
+verified settlement. Registration precedes delivery of helper input. A publication
+failure with a spawned child requests bounded owned-process teardown and returns
+uncertainty; it cannot invent a clean receipt. The coordinator settles the reservation only
+after the adapter confirms that no process started or its owned POSIX group is
+absent. All four metadata adapters request these explicit runner receipts,
+including each Claude auth/version/usage stage. Exit code alone is insufficient.
+Read-only group-absence checks never restore signaling authority over an exited
+or recycled process. A budget expiring before native contact settles its local
+reservation without inventing a provider sample.
+
+A later acquisition may recover v4 on the same boot when the machine and boot
+match, the former owner PID is proven absent with `ESRCH`, no reservation is
+`preparing`, and every `registered` group is also proven absent with `ESRCH`.
+Only signal-zero observations are used: recovery never kills a persisted group.
+It writes the authorization receipt, then rechecks the owner, groups, boot, lock,
+marker and sidecar before removal. This covers a crash after group exit but before
+durable settlement. Present groups, permission errors, unknown records and the
+spawn-before-registration crash window remain blocked. Legacy v3 records can
+recover on the same boot only with an exactly idle schema-1 sidecar; their active
+reservations lack process-group evidence and remain blocked.
+The sidecar stays as a bounded historical record after close and is replaced by
+the next owner; its old identity cannot authorize a new marker. This assumes
+trusted private ledger storage and does not protect against malicious same-user
+file restoration or processes that escape their owned group. No task replay,
+resident restart service or quota freshness is implied by passive recovery.
+
+An unexpected runner throw after invocation is attempted is not an ordinary
+completed failure. Codex, Grok and Claude status adapters return cleanup uncertainty
+and retain their scratch directory when that invocation has no settlement result.
+The collectors also stop on thrown, missing or invalid-status probe results.
+They abort queued/repeated reads before releasing the shared permit, await active
+peers, and refuse clean closure so the pending marker survives. This includes
+one-shot quota captures. Pre-contact adapter refusals and explicit settled failures
+keep their existing behavior. These checks do not certify the absence of detached
+or daemonized descendants; an idle counter alone cannot authorize same-boot recovery.
 
 Universe resource generation can reuse this pinned configuration through its
 optional private [`quotaConfigPath`](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool).
@@ -522,9 +602,16 @@ the lease and for an otherwise eligible reserved worker slot to settle. It share
 one pre-admission allowance within the generation deadline; capture is not repeated
 on capacity polls. Unknown ownership, retained fences, quota denials and uncertain
 task occupancy still refuse. Without positive waiting, contention remains immediate.
-The console's in-memory readings are not automatically supplied to a separate
-Universe process. Existing file-level denials remain vetoes in Universe even
-after fresh metadata is captured.
+To consume the running console's readings without waiting for its lease to close,
+Universe can explicitly select
+[`quotaEvidenceMode: "shared-collector"`](ASHLR-UNIVERSE.md#share-the-foreground-consoles-quota-collector)
+alongside `quotaConfigPath`. The console writes a private five-second witness on
+collector transitions and a one-second heartbeat. Readers verify the exact
+configuration and live owner before reserving work; no duplicate collector or
+fallback probe is started. Native timestamps and failures remain authoritative;
+existing file-level denials and the current allocation still gate admission.
+Without this opt-in, console readings are not supplied to a separate Universe
+process.
 
 For existing local Ollama bindings, Universe's private `localModelConfigPath`
 option pins exact model digests and renews short-lived evidence via inventory-only
@@ -533,11 +620,132 @@ perform inference during inventory checks. See the [Universe local refresh
 guide](ASHLR-UNIVERSE.md#renew-explicitly-pinned-local-model-evidence) for enrollment,
 deadline, denial and scope rules.
 
-Claude continues to use supplied/native execution events: its documented status
+Claude admission continues to use supplied/native execution events: its documented status
 line quotas are populated after a session API response, not a standalone complete
 quota polling API. Local workers continue to require fresh explicit health.
 No synthetic Claude prompt, undocumented quota scraping, API-key fallback,
 account switching, or Grok subscription entitlement is introduced.
+
+### Connect accounts without starting tasks
+
+Append `--connections-config /absolute/private/connections.json` to monitor
+explicit native profiles. Keep this file private (`0600`) outside any writable
+worker workspace. For example:
+
+```json
+{
+  "schemaVersion": 1,
+  "intervalMs": 30000,
+  "accounts": [
+    {
+      "id": "codex-personal",
+      "label": "Personal Codex",
+      "provider": "codex",
+      "command": ["/absolute/node", "/absolute/profile/launcher.mjs"]
+    }
+  ]
+}
+```
+
+One to eight accounts are supported, with providers `codex`, `claude`, or `grok`
+and an interval from 30 seconds to one hour. Use the exact command emitted by
+`resources profile prepare`; complete each native login separately. An optional
+`expectedAccountHint` pins a previously verified native identity privately.
+Labels are operator descriptions, not evidence of identity or separate capacity.
+Do not enroll two profiles of the same account as independent subscriptions.
+
+The monitor checks at most two native clients concurrently, without overlapping
+cycles. When both metadata options are enabled, the account monitor and admission
+collector share one FIFO, two-client budget as well as the existing collector
+lease. Queued reads recheck ownership before launch. An uncertain cleanup in
+either collector cancels both before another queued read can start; the pending
+reconciliation marker remains until cleanup is confirmed. Active clients retain
+their permits until their process owners settle. This coordinates concurrency,
+not deduplication: separately configured collectors can still read the same
+account for their distinct display/admission contracts.
+Closing the console aborts and awaits owned metadata clients. No credentials are
+copied, browser sessions imported, model prompts submitted, or workers enrolled.
+Native clients can maintain authentication/cache state and contact ancillary
+services while starting. Monitoring is foreground-only, not a resident service.
+
+The connection ledger deliberately separates authentication, metadata health,
+quota windows and execution support:
+
+- Codex uses native account and rate-limit metadata. Unknown or expired windows
+  never become zero usage. Monitoring alone does not supply admission observations.
+- Claude uses native `auth status --json` and, for the verified native version
+  2.1.257 only, its built-in noninteractive `/usage` command. Customizations,
+  tools and MCP are disabled; conversation persistence is disabled. This local
+  command reports session, all-model weekly and recognized model-scoped windows
+  without model inference. Unknown versions receive no slash command and remain
+  auth-only. Identity is compared before/after the read and pinned across monitor
+  cycles; raw identities and activity diagnostics never reach the browser.
+  **Native usage is display-only:** Claude floors percentages and can silently
+  fall back to cached usage. Hub therefore labels them approximate, leaves exact
+  reset timestamps null, preserves validated native reset text, and makes no
+  quota-freshness or network-health claim. A newly collected report is not proof
+  of freshly measured usage. Unsupported/incomplete output stays unknown.
+- Grok uses native ACP auth/billing metadata, with identity checked before and
+  after billing. Cached authentication alone cannot establish live health. Missing
+  billing configuration remains unknown. Grok has no Hub task execution adapter;
+  an observed plan or on-demand setting never authorizes paid overage.
+
+### Reserve subscription usage for other work
+
+Append `--allocation-controls` to enable the **Fleet usage allocation** slider.
+Unlock it with the separate printed control token, choose 0–100%, and save. This
+does not require `--execute` and does not enable task submission. The saved ceiling
+applies to new subscription work using this exact pool ledger, including Universe
+generation. It is not a global restriction on other apps or other ledger roots.
+
+The same capability exposes **Fleet account access**. Uncheck a worker and save
+to reserve it for your own work. Paused workers and every alias sharing their
+capacity key are excluded from subsequent task admission in this ledger, even
+if a task allowlist includes them. The pause does not log you out, hide usage,
+change enrollment, cancel work already reserved, or affect your desktop Codex
+session. For example, pause Personal Codex while leaving CMP allowed for fleet
+work. CMP still needs fresh quota and must pass the saved usage ceiling.
+
+Account access and usage allocation have independent revisions. Saving a pause
+does not alter the percentage ceiling. Both changes use the reservation lock and
+reject stale revisions; refresh before deliberately replacing another edit.
+An allowed worker is not necessarily ready or running. The pause is durable
+across restart but applies only to this pool's ledger, not arbitrary other apps.
+
+- **75%** stops admitting new subscription tasks once any required reported quota
+  window reaches 75% used, targeting 25% headroom for other work.
+- **100%** allows admission up to native limits; provider refusals, task caps,
+  occupancy and other checks still apply. It does not enable overage or reset limits.
+- **0%** withholds all new subscription work. Local workers are unaffected.
+
+Account usage reported by the provider includes outside activity, not merely Hub
+work. Each window is evaluated separately; percentages are never summed across
+accounts or windows. Unknown or stale quota blocks subscription admission below
+100%, even if the pool previously allowed unknown quota. This currently means
+Claude's display-only native report cannot guarantee a reserved quota allowance.
+
+The account view draws the saved ceiling as a reference on current, timestamped
+quota windows, with per-window percentage-point comparisons. It is not an account
+dispatch decision or a sum across subscriptions. Historical, unknown, reset-expired
+and native cached reports have no ceiling comparison. Claude's `/usage` reports
+are marked approximate and may be cached even when sign-in was just checked.
+
+The **Account reference summary** identifies the most-used window (including
+ties) and the smallest percentage-point margin below the saved ceiling. It uses
+the maximum reported usage, never a sum. Every reported window must have verified
+usage and a future reset, and the account observation must be current, signed in
+and reachable; otherwise the account-level comparison is unavailable. A positive
+margin that rounds to zero is labeled less than 0.01 percentage point. This is a
+reference comparison, not remaining tokens, promised capacity or an execution
+decision. The pure helper uses the snapshot timestamp, not the browser clock.
+
+An explicit saved ceiling replaces static worker reserve percentages. With no
+saved setting, existing reserve policy remains unchanged; the UI's initial 75%
+draft is not active until saved. Edits use a revision check: another operator's
+change must be reloaded before saving. Admission rereads the policy under the same
+lock as reservation, so lowering the ceiling invalidates an earlier eligible
+preview. In-flight tasks are not cancelled and can cross the threshold; this is
+an admission cutoff, not a guaranteed hard spending cap.
 
 ### Enable and control task execution
 

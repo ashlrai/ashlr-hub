@@ -69,8 +69,8 @@ describe.skipIf(process.platform === 'win32')('bounded verified quota collector 
     const immediate = vi.spyOn(locks, 'acquireLocalStoreLock');
     const polling = vi.spyOn(locks, 'acquireLocalStoreLockWithOutcome');
     await expect(acquire({ waitMs })).rejects.toThrow(unavailable);
-    expect(immediate).toHaveBeenCalledExactlyOnceWith(lockPath(), 500, { anchorPath: root, exactPrivateStorage: true });
-    expect(polling).not.toHaveBeenCalled(); owner.assertOwnership();
+    expect(polling).toHaveBeenCalledExactlyOnceWith(lockPath(), 500, { anchorPath: root, exactPrivateStorage: true });
+    expect(immediate).not.toHaveBeenCalled(); owner.assertOwnership();
     expect(readFileSync(lockPath())).toEqual(lockBytes); expect(readFileSync(pendingPath())).toEqual(markerBytes);
   });
 

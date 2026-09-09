@@ -10,6 +10,9 @@ import { readPublicDaemonObservation } from '../daemon/public-observation.js';
 import { buildControlSnapshot, buildFleetActivity } from './control.js';
 import { getCachedFleetStatus } from './fleet-status-cache.js';
 import { normalizeReadProjectionPayload, type ReadProjectionKind, type ReadProjectionPayloads, type ReadProjectionRequest } from './read-projections.js';
+import { defaultUniverseRoot } from '../universe/artifacts.js';
+import { readUniverseCampaignReadiness } from '../universe/campaign-readiness.js';
+import { projectUniverseConsoleCampaignReadiness } from './universe-console-public.js';
 
 const port = parentPort;
 const cfg = (workerData as { cfg?: AshlrConfig } | undefined)?.cfg;
@@ -25,6 +28,10 @@ async function project(kind: ReadProjectionKind, payload: ReadProjectionPayloads
     case 'proposals': return listProposals();
     case 'runs': return listRuns({ limit: 200 });
     case 'swarms': return listSwarms({ limit: 200 });
+    case 'universe-campaign-readiness': {
+      const options = payload as ReadProjectionPayloads['universe-campaign-readiness'];
+      return projectUniverseConsoleCampaignReadiness(readUniverseCampaignReadiness(options.campaignId, { root: defaultUniverseRoot() }));
+    }
     case 'pulse': {
       const options = payload as ReadProjectionPayloads['pulse'];
       return buildRollup(options.window, cfg!, options.project === undefined ? undefined : { project: options.project });

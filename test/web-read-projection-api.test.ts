@@ -16,7 +16,7 @@ function reader(read = vi.fn()): ReadProjectionReader {
   return { read: read as ReadProjectionReader['read'], invalidate: vi.fn(async () => {}), close: vi.fn(async () => {}) };
 }
 
-async function call(path: string, projections: ReadProjectionReader) {
+async function call(path: string, projections?: ReadProjectionReader) {
   const req = new EventEmitter() as IncomingMessage;
   req.method = 'GET'; req.url = path; req.headers = {};
   const output = { status: 0, body: '' };
@@ -29,6 +29,34 @@ async function call(path: string, projections: ReadProjectionReader) {
 }
 
 describe('web background read integration', () => {
+  it('dispatches selected readiness through the bounded operation without invalidating or mutating', async () => {
+    const value = { schemaVersion: 1, campaignId: 'one', universeId: 'u-one', sourceState: 'healthy' };
+    const read = vi.fn(async () => value); const projections = reader(read);
+    expect(await call('/api/universe/campaign-readiness?campaignId=one', projections)).toEqual({ status: 200, body: value });
+    expect(read).toHaveBeenCalledExactlyOnceWith('universe-campaign-readiness', { campaignId: 'one' });
+    expect(projections.invalidate).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '?campaignId=', '?campaignId=../one', '?campaignId=one&campaignId=two',
+    '?campaignId=one&root=/other', '?campaignId=one&universeId=two', '?campaignId=one&extra=',
+    `?campaignId=${'a'.repeat(65)}`])('rejects unsupported readiness query before bounded dispatch %#', async (query) => {
+    const read = vi.fn();
+    expect((await call(`/api/universe/campaign-readiness${query}`, reader(read))).status).toBe(400);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when no bounded reader is configured', async () => {
+    expect(await call('/api/universe/campaign-readiness?campaignId=one')).toEqual({ status: 503,
+      body: { code: 'READ_PROJECTION_UNAVAILABLE', error: 'read projection temporarily unavailable' } });
+  });
+
+  it.each([new Error('/private/readiness-secret'), new ReadProjectionError('/private/readiness-secret', 'READ_PROJECTION_TIMEOUT')])(
+    'withholds all readiness reader error details %#', async (error) => {
+      const projections = reader(vi.fn(async () => { throw error; }));
+      expect(await call('/api/universe/campaign-readiness?campaignId=one', projections)).toEqual({ status: 503,
+        body: { code: 'READ_PROJECTION_UNAVAILABLE', error: 'read projection temporarily unavailable' } });
+    });
+
   it.each([
     ['/api/control', 'control'], ['/api/fleet-activity', 'fleet-activity'],
     ['/api/runs', 'runs'], ['/api/swarms', 'swarms'],

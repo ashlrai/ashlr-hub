@@ -3,6 +3,8 @@ import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindings ABS --observations ABS [--port N] [--json]
        add --execute --workspace ABS [--max-parallel N] to enable foreground queued tasks
        add --quota-config ABS to refresh explicitly pinned Codex account metadata
+       add --connections-config ABS to monitor explicit Codex/Claude/Grok accounts
+       add --allocation-controls to adjust this pool's usage ceiling and worker access
 
 The dedicated resource desk runs on 127.0.0.1, with an explicit pool and store.
 Read-only by default; startup never discovers accounts, logs in, or installs a service.
@@ -11,19 +13,23 @@ read-only mode. It creates a private control root/collector lock, checks reporte
 account hints, and refreshes selected quotas while this process runs. Native
 clients may maintain their own auth/cache state. Unavailable managed workers are
 blocked even if unknown quota is otherwise allowed. No account independence is
-inferred. Omit this option to keep the original provider-free observation mode.
+inferred. Omit both metadata options to keep provider-free observation mode.
 Execution is an explicit capability for the fixed workspace. It can consume native
 provider allowances and edit that workspace when a queued task requests workspace-write.
 Queued intents and pause state are durable; previously dispatching work is never
 silently replayed after restart. Output is bounded and retained for this session only.
 --port accepts 0..65535, default 0. --max-parallel accepts 1..16, default 4.
+Connections are informational native metadata only, separate from worker admission.
+Policy controls persist revision-checked usage ceilings and worker pauses for new tasks;
+they do not enable execution, reset quota, stop in-flight tasks or authorize overage.
 Private read and control tokens are printed once, never placed in URLs.
 SIGINT/SIGTERM abort and await owned work before closing. No resident fleet activation.
 Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid arguments.
 `;
 class UsageError extends Error {}
 type Options = { help: true } | { help: false; root: string; poolFile: string; bindingsFile: string;
-  observationsFile: string; quotaConfigFile?: string; port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
+  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; allocationControls?: boolean;
+  port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
 
 function path(value: string): string {
   if (!isAbsolute(value) || resolve(value) === parsePath(value).root || Buffer.byteLength(value) > 4_096) {
@@ -32,16 +38,17 @@ function path(value: string): string {
   return resolve(value);
 }
 function parse(args: string[]): Options {
-  if (args.length > 26 || args.some((arg) => typeof arg !== 'string' || arg.length > 4_096 ||
+  if (args.length > 30 || args.some((arg) => typeof arg !== 'string' || arg.length > 4_096 ||
       [...arg].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159)) ||
     Buffer.byteLength(args.join('\0')) > 32 * 1024) throw new UsageError('Arguments exceed the bounded text contract');
   if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) return { help: true };
-  const values = new Map<string, string>(); let execute = false; let json = false;
+  const values = new Map<string, string>(); let execute = false; let json = false; let allocationControls = false;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
     if (flag === '--execute') { if (execute) throw new UsageError('Duplicate console option'); execute = true; continue; }
     if (flag === '--json') { if (json) throw new UsageError('Duplicate console option'); json = true; continue; }
-    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config'].includes(flag) || values.has(flag)) {
+    if (flag === '--allocation-controls') { if (allocationControls) throw new UsageError('Duplicate console option'); allocationControls = true; continue; }
+    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config'].includes(flag) || values.has(flag)) {
       throw new UsageError('Unknown or duplicate console option');
     }
     const value = args[++index];
@@ -59,6 +66,8 @@ function parse(args: string[]): Options {
   return { help: false, root: path(values.get('--root')!), poolFile: path(values.get('--pool')!),
     bindingsFile: path(values.get('--bindings')!), observationsFile: path(values.get('--observations')!),
     ...(values.has('--quota-config') ? { quotaConfigFile: path(values.get('--quota-config')!) } : {}),
+    ...(values.has('--connections-config') ? { connectionsConfigFile: path(values.get('--connections-config')!) } : {}),
+    ...(allocationControls ? { allocationControls: true } : {}),
     port: Number(portText), execute, ...(execute ? { workspace: path(values.get('--workspace')!), maxParallel: Number(parallelText) } : {}), json };
 }
 
@@ -88,9 +97,12 @@ export async function cmdResourceConsole(args: string[]): Promise<number> {
         console.log(json ? JSON.stringify(startup) : [
           `Resource desk: ${server.consoleUrl}`, `Pool: ${server.scope.poolId}`, `Store: ${server.scope.root}`,
           `Private read token: ${server.readToken}`,
-          ...(server.scope.quotaRefreshEnabled ? ['Native Codex metadata refresh is enabled; this is separate from task execution.'] : []),
-          ...(server.controlToken ? [`Private control token: ${server.controlToken}`, `Execution workspace: ${server.scope.workspace}`,
-            'Durable queued tasks may execute while this foreground console is running.'] : ['Read-only. Task execution is disabled.']),
+          ...(server.scope.quotaRefreshEnabled ? ['Native Codex metadata refresh is configured; inspect collector status in the console. Task execution is separate.'] : []),
+          ...(server.scope.connectionsEnabled ? ['Native account metadata monitoring is configured; inspect collector status in the console.'] : []),
+          ...(server.controlToken ? [`Private control token: ${server.controlToken}`] : []),
+          ...(server.scope.allocationWritable ? ['Usage allocation and worker access controls are enabled; in-flight tasks are unaffected.'] : []),
+          ...(!server.scope.readOnly ? [`Execution workspace: ${server.scope.workspace}`,
+            'Durable queued tasks may execute while this foreground console is running.'] : ['Task execution is disabled.']),
           'Paste tokens into the console; they are never included in URLs.',
           'Press Ctrl-C to abort owned work and close. No resident service is installed.',
         ].join('\n')); announced = true;
