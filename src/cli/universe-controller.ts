@@ -1,4 +1,5 @@
 import { isAbsolute, parse as parsePath, resolve } from 'node:path';
+import { readControllerRecoveryDiagnostic } from '../core/universe/controller-recovery-error.js';
 import {
   readUniversePortfolioController, runUniversePortfolioController, validateUniversePortfolioDefinition,
   type UniverseCampaignDeliveryPlan,
@@ -30,6 +31,8 @@ recreated by recovery. Legacy or mismatched intents remain unresolved.
 Run may reclaim a proven-dead controller record-writer lock when no record is
 staged. It never discards staged records or repairs unknown lock ownership.
 Status does not clear locks; leftover writer locks can make evidence unavailable.
+Known recovery failures include a bounded reasonCode and nextStep in JSON output.
+These diagnostics do not authorize deletion, publication repair, or worker retry.
 The optional delivery plan is private JSON at most 64 KiB. Planned local branch
 handoffs gate downstream work; no push, merge, deployment or acceptance is implied.
 Repeat --resource-runtime for every intended resource-pool invocation; its private
@@ -162,9 +165,17 @@ export async function cmdUniverseController(args: string[]): Promise<number> {
         report = await runUniversePortfolioController(definition, { root: options.root, signal: controller.signal,
           ...(options.resourceRuntime === undefined ? {} : { resourceRuntime: options.resourceRuntime }),
           ...(deliveryPlan === undefined ? {} : { deliveryPlan }) });
-      } catch {
-        throw controller.signal.aborted ? new CancellationError('Portfolio controller cancelled; inspect persisted evidence before retrying') :
-          new Error('Portfolio controller execution unavailable');
+      } catch (error) {
+        if (controller.signal.aborted) throw new CancellationError('Portfolio controller cancelled; inspect persisted evidence before retrying');
+        // Only this run boundary recognizes internal recovery diagnostics. Read
+        // canonical fields from the classifier, never a mutable error message.
+        const diagnostic = readControllerRecoveryDiagnostic(error);
+        if (diagnostic) {
+          if (options.json) console.log(JSON.stringify({ error: diagnostic.message, reasonCode: diagnostic.code, nextStep: diagnostic.nextStep }));
+          else console.error(`universe controller: [${diagnostic.code}] ${diagnostic.message}\nNext step: ${diagnostic.nextStep}`);
+          return 1;
+        }
+        throw new Error('Portfolio controller execution unavailable');
       }
       console.log(options.json ? JSON.stringify(report, null, 2) : render(report));
       return report.status === 'completed' ? 0 : report.status === 'cancelled' ? 130 : 1;

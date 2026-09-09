@@ -1815,6 +1815,30 @@ controller record-writer lock under its execution lease before reading history.
 It does not clean campaign writer locks, repair malformed lock metadata, remove
 staged records, or resume uncertain attempts. Status can remain unavailable
 because of a leftover writer lock until an explicit run performs this cleanup.
+
+Known `controller run` record-lock recovery failures return exit code `1` with
+an allowlisted `reasonCode` and fixed `nextStep` guidance. The JSON error shape is
+`{"error":"…","reasonCode":"…","nextStep":"…"}`; text output shows the same
+diagnosis. These fields describe a refused recovery, not a successful cleanup
+or permission to retry automatically.
+
+| Run failure code | Meaning and next step |
+| --- | --- |
+| `controller-execution-ownership-unavailable` | Recovery could not verify the controller execution lease. Inspect ownership; do not remove locks manually. |
+| `controller-publication-recovery-required` | Staging is nonempty. Preserve the staged records and inspect the incomplete publication; restart will not discard them. |
+| `controller-record-writer-busy` | The lock mechanism reports writer contention. Wait for the writer to finish before an explicitly intended retry of the same manifest within its original deadline. |
+| `controller-record-ownership-unavailable` | Writer ownership could not be established. Inspect ownership and private storage; unknown ownership is not proof of a dead process. |
+| `controller-record-storage-changed` | A storage directory identity changed during recovery. Preserve the ledger and investigate; do not recreate its directories. |
+| `controller-record-release-failed` | Recovery could not confirm release of its writer lock. Inspect writer ownership and private storage before another run. |
+
+These are narrowly typed startup diagnostics. Unknown errors, including raw
+filesystem failures, retain a generic sanitized error with no inferred code.
+`status` remains read-only and does not diagnose liveness or reclaim locks;
+its unavailable-evidence response remains conservative. Cancellation still
+takes precedence over a rejected run and returns `130`. A supervisor must handle
+unknown failures without assuming that they are retryable. Neither error text
+nor these codes change the pinned deadline, account reserves or dispatch rules.
+
 These durable-boundary rules do not establish machine-reboot or power-loss
 recovery. An interruption inside record publication can leave an unpublished
 staging file; incomplete evidence remains unavailable rather than being silently

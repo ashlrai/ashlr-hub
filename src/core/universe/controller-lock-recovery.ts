@@ -3,6 +3,7 @@ import { join } from 'node:path';
 import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { inspectPrivateDirectory } from './artifacts.js';
 import { portfolioControllerDirectory } from './portfolio-controller-store.js';
+import { ControllerRecoveryError } from './controller-recovery-error.js';
 
 function emptyStaging(path: string): boolean {
   const directory = opendirSync(path);
@@ -17,7 +18,7 @@ export function recoverControllerRecordLock(id: string, options: { root: string 
   const directory = portfolioControllerDirectory(id, options);
   const assertOwned = (): void => {
     if (execution.path !== join(directory, '.execution.lock') || !ownsLocalStoreLock(execution)) {
-      throw new Error('Controller execution ownership unavailable for record-lock recovery');
+      throw new ControllerRecoveryError('controller-execution-ownership-unavailable');
     }
   };
   assertOwned();
@@ -34,10 +35,11 @@ export function recoverControllerRecordLock(id: string, options: { root: string 
   try { lstatSync(lockPath); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
   // Inspect a single entry rather than loading an unbounded staging directory.
-  if (!emptyStaging(paths[2]!)) throw new Error('Controller publication requires explicit recovery');
+  if (!emptyStaging(paths[2]!)) throw new ControllerRecoveryError('controller-publication-recovery-required');
   assertOwned();
   const acquired = acquireLocalStoreLockWithOutcome(lockPath, 0, { anchorPath: directory, exactPrivateStorage: true });
-  if (acquired.state !== 'acquired') throw new Error('Controller record ownership unavailable');
+  if (acquired.state !== 'acquired') throw new ControllerRecoveryError(acquired.state === 'contended'
+    ? 'controller-record-writer-busy' : 'controller-record-ownership-unavailable');
   let released = false;
   try {
     assertOwned();
@@ -45,13 +47,13 @@ export function recoverControllerRecordLock(id: string, options: { root: string 
       inspectPrivateDirectory(path);
       const current = lstatSync(path, { bigint: true });
       if (current.dev !== identities[index]!.dev || current.ino !== identities[index]!.ino) {
-        throw new Error('Controller record storage changed during ownership recovery');
+        throw new ControllerRecoveryError('controller-record-storage-changed');
       }
     }
-    if (!emptyStaging(paths[2]!)) throw new Error('Controller publication requires explicit recovery');
+    if (!emptyStaging(paths[2]!)) throw new ControllerRecoveryError('controller-publication-recovery-required');
   } finally {
     // Strict readers reject any writer mutex, including our own; release first.
     released = releaseLocalStoreLock(acquired.lock);
   }
-  if (!released) throw new Error('Controller record ownership release failed');
+  if (!released) throw new ControllerRecoveryError('controller-record-release-failed');
 }
