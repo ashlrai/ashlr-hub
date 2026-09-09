@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
+import { performance } from 'node:perf_hooks';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import type { UniverseCampaignReadiness } from '../src/core/universe/campaign-readiness.js';
 import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
@@ -106,6 +108,50 @@ describe('bounded explicit enrollment', () => {
     const result = await superviseUniverseCampaigns(['a'], options());
     expect(result.status).toBe('completed'); expect(result.outcomes[0]!.attempted).toBe(false);
     expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it.each(['runner', 'evidence', 'observer'] as const)('reconciles a final synchronous %s overrun without losing completed evidence', async (phase) => {
+    vi.useFakeTimers();
+    const f = fixture(['a']); const controller = new AbortController(); let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    hooks.run.mockImplementation(async (id: string) => {
+      if (phase === 'runner') now = 5_001;
+      return f.finish(id);
+    });
+    hooks.read.mockImplementation((id: string) => {
+      const report = structuredClone(f.reports.get(id)!);
+      if (phase === 'evidence' && report.observedState === 'completed') now = 5_001;
+      return report;
+    });
+    const result = await superviseUniverseCampaigns(['a'], { ...options(), signal: controller.signal,
+      onTransition(event) { if (phase === 'observer' && event.status === 'completed') now = 5_001; } });
+    expect(result.status).toBe('timed-out');
+    expect(result.outcomes).toEqual([{ campaignId: 'a', status: 'completed', attempted: true,
+      reasonCode: 'campaign-completed', observedState: 'completed' }]);
+    expect(result.transitions.at(-1)).toMatchObject({ status: 'completed', reasonCode: 'campaign-completed' });
+    expect(hooks.run).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it.each(['cancelled', 'failed', 'timed-out'] as const)('preserves %s precedence over a final synchronous overrun', async (status) => {
+    vi.useFakeTimers();
+    const f = fixture(['a']); const controller = new AbortController(); let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    hooks.run.mockImplementation(async (id: string) => f.finish(id));
+    const result = await superviseUniverseCampaigns(['a'], { ...options(), signal: controller.signal,
+      onTransition(event) {
+        if (event.status !== 'completed') return;
+        now = 5_001;
+        if (status === 'cancelled') controller.abort();
+        else if (status === 'timed-out') { vi.advanceTimersByTime(5_000); controller.abort(); }
+        else throw new Error('Fixture observer failure');
+      } });
+    expect(result.status).toBe(status);
+    expect(result.outcomes[0]).toMatchObject({ status: 'completed', attempted: true, observedState: 'completed' });
+    expect(hooks.run).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 
   it('requires a runtime before dispatching a resource campaign', async () => {

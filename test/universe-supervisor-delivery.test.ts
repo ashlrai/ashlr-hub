@@ -202,6 +202,18 @@ describe('supervised terminal delivery handoff', () => {
     expect(hooks.run).not.toHaveBeenCalled();
   });
 
+  it('retains the final delivered receipt when its completion observer exhausts the invocation', async () => {
+    const f = fixture(); f.finish('first'); let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    const result = await superviseUniverseCampaigns(['first'], { ...options(), deliveryPlan: plan(),
+      onTransition(event) { if (event.reasonCode === 'delivery-completed') now = 5_001; } });
+    expect(result).toMatchObject({ status: 'timed-out', outcomes: [{ campaignId: 'first', attempted: false,
+      status: 'completed', reasonCode: 'delivery-completed', delivery: { status: 'delivered',
+        receipt: { branch: 'codex/first', commit: 'd'.repeat(40) } } }] });
+    expect(hooks.run).not.toHaveBeenCalled();
+    expect(hooks.deliver).toHaveBeenCalledOnce();
+  });
+
   it('awaits owned delivery cancellation cleanup before returning', async () => {
     const f = fixture(); f.finish('first'); const controller = new AbortController(); let cleaned = false;
     hooks.deliver.mockImplementation(async (_id, config) => {

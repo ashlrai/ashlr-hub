@@ -188,6 +188,11 @@ export async function runUniversePortfolio(input: unknown, options: UniverseRunO
     // Do not return while an owned worker can still spend its reserved budget.
     // Existing campaign cancellation is cooperative and has its own timeouts.
     await Promise.allSettled(active.values());
+    // Final synchronous settlement can outlast the deadline without letting its
+    // timer fire. Preserve recorded outcomes, but report the invocation bound;
+    // an existing cancellation/failure keeps its original precedence.
+    if (callerSignal?.aborted) cancel();
+    if (Date.now() >= deadlineMs) expire();
     clearTimeout(timer);
     callerSignal?.removeEventListener('abort', cancel);
   }

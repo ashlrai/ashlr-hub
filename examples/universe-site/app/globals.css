@@ -275,6 +275,132 @@ p {
   background: #0a1420;
   overflow: hidden;
 }
+.archive-art {
+  margin: 2.2rem 0 0;
+  max-width: 38rem;
+}
+.archive-art img {
+  width: 100%;
+  height: auto;
+  display: block;
+  border-radius: 0.55rem;
+}
+.archive-art figcaption {
+  color: #385468;
+  font-size: 0.875rem;
+  margin-top: 0.75rem;
+}
+.replay-deck {
+  background: #102233;
+  padding: 1.5rem 1.6rem;
+  border-bottom: 1px solid #36516a;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1.1rem 2rem;
+}
+.replay-heading {
+  display: grid;
+  gap: 0.2rem;
+}
+.replay-heading strong {
+  font:
+    500 1.4rem Universe,
+    sans-serif;
+}
+.replay-heading span,
+.replay-status {
+  font-size: 0.875rem;
+  color: #bad0df;
+}
+.replay-controls {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  flex-wrap: wrap;
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.replay-controls button {
+  min-height: 44px;
+  padding: 0.5rem 0.8rem;
+  border: 1px solid #68869b;
+  border-radius: 0.35rem;
+  color: #e7f0f4;
+  background: #1a3349;
+  font-size: 0.875rem;
+}
+.replay-controls .replay-primary {
+  background: #f2d5ae;
+  border-color: #f2d5ae;
+  color: #102233;
+  font-weight: 600;
+}
+.replay-controls button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.replay-status {
+  grid-column: 1 / -1;
+  min-height: 1.6em;
+}
+.replay-track {
+  list-style: none;
+  padding: 0;
+  margin: 0.15rem 0 0;
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 0.6rem;
+}
+.replay-track li {
+  min-width: 0;
+}
+.replay-track button {
+  display: grid;
+  gap: 0.65rem;
+  text-align: left;
+  width: 100%;
+  min-height: 56px;
+  border: 0;
+  background: transparent;
+  color: #acc5d5;
+  font-size: 0.875rem;
+  padding: 0.5rem 0;
+}
+.replay-dot {
+  display: block;
+  width: 100%;
+  height: 3px;
+  background: #45657e;
+  border-radius: 2px;
+}
+.replay-track button[aria-current='step'] {
+  color: #ffe0b8;
+}
+.replay-track button[aria-current='step'] .replay-dot {
+  background: #f2d5ae;
+  box-shadow: 0 0 12px #f2d5ae45;
+}
+@media (max-width: 900px) {
+  .replay-deck {
+    grid-template-columns: 1fr;
+  }
+  .replay-track {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .replay-dot {
+    transition:
+      background 0.25s ease,
+      box-shadow 0.25s ease;
+  }
+  .bar {
+    transition: width 0.35s ease;
+  }
+}
 .experiment-toolbar {
   display: flex;
   align-items: center;

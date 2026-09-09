@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { LineageGraph } from './lineage-graph';
 
@@ -24,6 +24,17 @@ export type Evidence = {
 };
 
 export function Experiment({ evidence }: { evidence: Evidence }) {
+  const surface = useRef<HTMLDivElement>(null);
+  const [playback, setPlayback] = useState<
+    'idle' | 'playing' | 'paused' | 'complete'
+  >('idle');
+  const timeline = useMemo(
+    () =>
+      evidence.generations.flatMap((g) =>
+        g.trials.map((trial) => ({ ...trial, generation: g.generation })),
+      ),
+    [evidence],
+  );
   const [generation, setGeneration] = useState(2);
   const [selectedId, setSelectedId] = useState<string | undefined>(
     evidence.generations[1]?.trials[0]?.id,
@@ -32,16 +43,67 @@ export function Experiment({ evidence }: { evidence: Evidence }) {
   const chosen = all.find((t) => t.id === selectedId);
   const parent = all.find((t) => t.id === chosen?.parentTrialId);
   const maxBytes = Math.max(1, ...all.map((t) => t.artifactBytes ?? 0));
+  const step = timeline.findIndex((trial) => trial.id === selectedId);
+  const pauseForSelection = () =>
+    setPlayback((state) => (state === 'idle' ? 'idle' : 'paused'));
+  const selectStep = (index: number) => {
+    const trial = timeline[index];
+    if (!trial) return;
+    setGeneration(trial.generation);
+    setSelectedId(trial.id);
+  };
+  const play = () => {
+    if (timeline.length === 0) return;
+    if (playback !== 'paused' || step < 0 || step === timeline.length - 1)
+      selectStep(0);
+    setPlayback(timeline.length === 1 ? 'complete' : 'playing');
+  };
+  useEffect(() => {
+    if (playback !== 'playing') return;
+    // Playback only walks immutable recorded results. It never dispatches a
+    // worker, fetches evidence or synthesizes intermediate measurements.
+    const timer = window.setTimeout(() => {
+      const next = timeline[step + 1];
+      if (!next) {
+        setPlayback('complete');
+        return;
+      }
+      setGeneration(next.generation);
+      setSelectedId(next.id);
+      if (step + 1 === timeline.length - 1) setPlayback('complete');
+    }, 4000);
+    return () => window.clearTimeout(timer);
+  }, [playback, step, timeline]);
+  useEffect(() => {
+    const pause = () =>
+      setPlayback((state) => (state === 'playing' ? 'paused' : state));
+    const onVisibility = () => {
+      if (document.hidden) pause();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    const observer =
+      typeof IntersectionObserver === 'undefined'
+        ? undefined
+        : new IntersectionObserver((entries) => {
+            if (entries.some((entry) => !entry.isIntersecting)) pause();
+          });
+    if (surface.current) observer?.observe(surface.current);
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      observer?.disconnect();
+    };
+  }, []);
   const selectGeneration = (value: unknown) => {
     const next = Number(value);
     if (next !== 1 && next !== 2) return;
+    pauseForSelection();
     setGeneration(next);
     setSelectedId(
       evidence.generations.find((g) => g.generation === next)?.trials[0]?.id,
     );
   };
   return (
-    <div className="experiment-surface">
+    <div className="experiment-surface" ref={surface}>
       <div className="experiment-toolbar">
         <div>
           <strong>Stable deduplication</strong>
@@ -51,10 +113,85 @@ export function Experiment({ evidence }: { evidence: Evidence }) {
           Download evidence
         </a>
       </div>
+      <div className="replay-deck">
+        <div className="replay-heading">
+          <strong>Follow the search</strong>
+          <span>Recorded data. No live agents.</span>
+        </div>
+        <fieldset
+          className="replay-controls"
+          aria-label="Recorded search playback"
+        >
+          <button
+            type="button"
+            className="replay-primary"
+            disabled={timeline.length === 0}
+            onClick={
+              playback === 'playing' ? () => setPlayback('paused') : play
+            }
+          >
+            {playback === 'playing'
+              ? 'Pause replay'
+              : playback === 'paused' && step < timeline.length - 1
+                ? 'Resume replay'
+                : playback === 'complete'
+                  ? 'Replay again'
+                  : 'Play recorded search'}
+          </button>
+          <button
+            type="button"
+            aria-label="Previous recorded trial"
+            disabled={step <= 0}
+            onClick={() => {
+              setPlayback('paused');
+              selectStep(step - 1);
+            }}
+          >
+            Previous
+          </button>
+          <button
+            type="button"
+            aria-label="Next recorded trial"
+            disabled={step < 0 || step >= timeline.length - 1}
+            onClick={() => {
+              setPlayback('paused');
+              selectStep(step + 1);
+            }}
+          >
+            Next
+          </button>
+        </fieldset>
+        <output className="replay-status" aria-live="polite">
+          {timeline[step]
+            ? `Step ${step + 1} of ${timeline.length}: generation ${timeline[step].generation}, ${timeline[step].variant}. ${playback === 'complete' ? 'Replay complete.' : playback === 'paused' ? 'Paused.' : playback === 'playing' ? 'Playing.' : 'Ready to replay.'}`
+            : 'No recorded trials available.'}
+        </output>
+        <ol className="replay-track" aria-label="Recorded trial sequence">
+          {timeline.map((trial, index) => (
+            <li key={trial.id}>
+              <button
+                type="button"
+                aria-current={step === index ? 'step' : undefined}
+                aria-label={`Go to recorded step ${index + 1}: generation ${trial.generation}, ${trial.variant}`}
+                onClick={() => {
+                  setPlayback('paused');
+                  selectStep(index);
+                }}
+              >
+                <span className="replay-dot" aria-hidden="true" />
+                <span>
+                  G{trial.generation} / {trial.variant}
+                </span>
+              </button>
+            </li>
+          ))}
+        </ol>
+      </div>
       <LineageGraph
         evidence={evidence}
         selectedId={selectedId}
         onSelect={(id, nextGeneration) => {
+          pauseForSelection();
           setGeneration(nextGeneration);
           setSelectedId(id);
         }}
@@ -81,7 +218,10 @@ export function Experiment({ evidence }: { evidence: Evidence }) {
                     aria-label={`Inspect ${t.variant}, generation ${g.generation}`}
                     aria-pressed={selectedId === t.id}
                     className={`trial ${t.selected ? '' : 'failed'}`}
-                    onClick={() => setSelectedId(t.id)}
+                    onClick={() => {
+                      pauseForSelection();
+                      setSelectedId(t.id);
+                    }}
                   >
                     <span className="trial-top">
                       <strong>{t.variant}</strong>
@@ -110,13 +250,18 @@ export function Experiment({ evidence }: { evidence: Evidence }) {
                   </button>
                 ))}
               </fieldset>
-              <aside className="trial-inspector" aria-live="polite">
+              <aside
+                className="trial-inspector"
+                aria-live={playback === 'playing' ? 'off' : 'polite'}
+              >
                 <p className="release-note">Trial inspector</p>
                 <h3>{chosen?.variant ?? 'Select a trial'}</h3>
                 <p>
-                  {chosen?.selected
-                    ? 'This candidate passed the fixed evaluator and was retained in its niche.'
-                    : 'The evaluator rejected this candidate. A smaller file cannot compensate for incorrect output.'}
+                  {!chosen
+                    ? 'Choose a recorded trial to inspect its evidence.'
+                    : chosen.selected
+                      ? 'This candidate passed the fixed evaluator and was retained in its niche.'
+                      : 'The evaluator rejected this candidate. A smaller file cannot compensate for incorrect output.'}
                 </p>
                 <dl>
                   <div>

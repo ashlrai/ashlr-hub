@@ -22,6 +22,13 @@ access. Motion is limited to one entrance and selection transitions; reduced
 motion renders the same final states without movement. The graph's bounded
 scroll region is keyboard-focusable and keeps labels readable at narrow widths.
 
+The recorded-search player starts only when requested and advances through the
+six actual trials at four-second intervals. It stops at the final trial. Pause,
+resume, previous/next and direct step selection stay synchronized with the graph
+and inspector. Manual selection, a hidden tab or scrolling the experiment out of
+view pauses playback; returning does not restart it. Timers and observers are
+released on unmount. This is a replay, never a live provider or fleet connection.
+
 ## Update the evidence
 
 The source repository's `scripts/generate-universe-showcase.mjs` produces the
