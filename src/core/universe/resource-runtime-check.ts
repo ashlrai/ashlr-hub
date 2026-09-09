@@ -15,6 +15,12 @@ export type ResourceGenerationCheckStage = 'runtime' | 'boundaries' | 'workspace
 export type ResourceGenerationCheckWarning = 'execution-and-account-identity-unverified' | 'campaign-boundaries-unchecked' |
   'duplicate-native-command-across-capacities' | 'quota-refresh-not-configured' | 'local-model-refresh-not-configured' |
   'unknown-quota-opt-in' | 'resource-store-missing';
+export type ResourceGenerationPolicyHold = 'owner-paused' | 'subscription-allocation-disabled';
+/** Suggested inspection only: never authority to change reserves, resume or dispatch. */
+export type ResourceGenerationNextCheck = 'review-owner-pause' | 'review-subscription-allocation' |
+  'refresh-quota-evidence' | 'refresh-local-evidence' | 'recheck-after-hint' | 'inspect-capacity-ownership' |
+  'wait-for-active-work' | 'review-task-window' | 'review-reserve-evidence' | 'review-worker-availability' |
+  'review-worker-scope';
 export interface ResourceGenerationRuntimeWorkerCheck {
   workerId: string;
   provider: ResourceWorker['provider'];
@@ -25,6 +31,10 @@ export interface ResourceGenerationRuntimeWorkerCheck {
   /** Existing local-evidence preview only; dispatch must repeat all admission checks. */
   eligibility: 'eligible' | 'excluded';
   exclusionReasons: ResourceExclusionReason[];
+  /** Earliest known recheck, not promised capacity or automatic recovery. */
+  nextEligibleAt: string | null;
+  policyHolds: ResourceGenerationPolicyHold[];
+  nextChecks: ResourceGenerationNextCheck[];
   warnings: ResourceGenerationCheckWarning[];
 }
 export interface ResourceGenerationRuntimeCheck {
@@ -36,6 +46,11 @@ export interface ResourceGenerationRuntimeCheck {
   poolDigest: string | null;
   sourceState: 'healthy' | 'missing' | null;
   sampledAt: string | null;
+  counts: { workers: number; eligibleWorkers: number; excludedWorkers: number; capacities: number; eligibleCapacities: number } | null;
+  /** Null on invalid reports; on valid reports null preserves configured worker reserves. */
+  allocationCeilingPercent: number | null;
+  /** Exact planner hint; passing this time does not establish readiness. */
+  nextEligibleAt: string | null;
   checks: Array<{ code: ResourceGenerationCheckStage; status: 'passed' | 'failed' | 'not-configured' | 'not-checked' }>;
   workers: ResourceGenerationRuntimeWorkerCheck[];
   warnings: ResourceGenerationCheckWarning[];
@@ -48,6 +63,27 @@ function contains(parent: string, child: string): boolean {
   return difference === '' || difference !== '..' && !difference.startsWith(`..${sep}`) && !isAbsolute(difference);
 }
 
+function nextChecksFor(worker: ResourceWorker, reasons: ResourceExclusionReason[], holds: ResourceGenerationPolicyHold[],
+  nextEligibleAt: string | null, ownership: 'uncertain' | 'reserved' | null): ResourceGenerationNextCheck[] {
+  const checks = new Set<ResourceGenerationNextCheck>();
+  if (holds.includes('owner-paused')) checks.add('review-owner-pause');
+  if (holds.includes('subscription-allocation-disabled')) checks.add('review-subscription-allocation');
+  for (const reason of reasons) {
+    switch (reason) {
+      case 'worker-not-allowed': checks.add('review-worker-scope'); break;
+      case 'worker-unavailable': if (!holds.length) checks.add('review-worker-availability'); break;
+      case 'provider-retry-after': break; // The planner's timestamp supplies the recheck below.
+      case 'concurrency-exhausted':
+        checks.add(ownership === 'reserved' ? 'wait-for-active-work' : 'inspect-capacity-ownership'); break;
+      case 'operator-task-cap-reached': checks.add('review-task-window'); break;
+      case 'quota-reserve-reached': checks.add('review-reserve-evidence'); break;
+      default: checks.add(worker.provider === 'local' ? 'refresh-local-evidence' : 'refresh-quota-evidence');
+    }
+  }
+  if (nextEligibleAt !== null) checks.add('recheck-after-hint');
+  return [...checks];
+}
+
 /**
  * Reads only the named private runtime and its explicit files. The three bounded Git
  * queries inspect the same sterile workspace used by generation; no launcher,
@@ -58,6 +94,7 @@ function contains(parent: string, child: string): boolean {
 export function checkResourceGenerationRuntime(options: { resourceRuntime: string }): ResourceGenerationRuntimeCheck {
   const result: ResourceGenerationRuntimeCheck = { schemaVersion: 1, status: 'invalid', evidenceScope: 'local-configuration-only',
     providerContacted: false, poolId: null, poolDigest: null, sourceState: null, sampledAt: null,
+    counts: null, allocationCeilingPercent: null, nextEligibleAt: null,
     checks: STAGES.map((code) => ({ code, status: 'not-checked' })), workers: [],
     warnings: ['execution-and-account-identity-unverified', 'campaign-boundaries-unchecked'] };
   let current: ResourceGenerationCheckStage = 'runtime';
@@ -96,6 +133,9 @@ export function checkResourceGenerationRuntime(options: { resourceRuntime: strin
       validateResourceLocalModelConfig(readResourceJson(runtime.localModelConfigPath!), pool, bindings)) : null;
     if (!local) result.checks.find((row) => row.code === 'local-model-refresh')!.status = 'not-configured';
     const snapshot = check('ledger', () => resourcePoolStatus(runtime.root, pool, bindings, observations));
+    const pausedCapacities = new Set(bindings.filter((binding) => snapshot.workerAccess.pausedWorkerIds.includes(binding.workerId))
+      .map((binding) => binding.capacityKey));
+    const eligibleIds = new Set(snapshot.plan.candidates.map((row) => row.workerId));
     const workers: ResourceGenerationRuntimeWorkerCheck[] = pool.workers.map((worker) => {
       const binding = bindings.find((row) => row.workerId === worker.id)!;
       const quotaRefreshConfigured = quota?.workers.some((row) => row.workerId === worker.id) ?? false;
@@ -108,13 +148,29 @@ export function checkResourceGenerationRuntime(options: { resourceRuntime: strin
         other.capacityKey !== binding.capacityKey && canonical(other.command) === canonical(binding.command))) {
         warnings.push('duplicate-native-command-across-capacities');
       }
+      const exclusion = snapshot.plan.exclusions.find((row) => row.workerId === worker.id);
+      const exclusionReasons = exclusion?.reasons ?? [];
+      const nextEligibleAt = exclusion?.nextEligibleAt ?? null;
+      const policyHolds: ResourceGenerationPolicyHold[] = [];
+      // Pauses apply to capacity aliases, not just the named model. These labels
+      // explain explicit controls only; the planner remains admission authority.
+      if (pausedCapacities.has(binding.capacityKey)) policyHolds.push('owner-paused');
+      if (worker.provider !== 'local' && snapshot.allocation.ceilingPercent === 0) policyHolds.push('subscription-allocation-disabled');
+      const attempts = snapshot.attempts.filter((row) => row.capacityKey === binding.capacityKey);
+      const ownership = attempts.some((row) => row.status === 'uncertain') ? 'uncertain'
+        : attempts.some((row) => row.status === 'reserved') ? 'reserved' : null;
       return { workerId: worker.id, provider: worker.provider, capacityKey: binding.capacityKey, transport: binding.kind,
         quotaRefreshConfigured, localModelRefreshConfigured,
-        eligibility: snapshot.plan.candidates.some((row) => row.workerId === worker.id) ? 'eligible' : 'excluded',
-        exclusionReasons: snapshot.plan.exclusions.find((row) => row.workerId === worker.id)?.reasons ?? [], warnings };
+        eligibility: eligibleIds.has(worker.id) ? 'eligible' : 'excluded', exclusionReasons, nextEligibleAt, policyHolds,
+        nextChecks: nextChecksFor(worker, exclusionReasons, policyHolds, nextEligibleAt, ownership), warnings };
     });
     result.status = 'valid'; result.poolId = pool.id; result.poolDigest = digest(canonical({ pool, bindings }));
     result.sourceState = snapshot.sourceState; result.sampledAt = snapshot.plan.sampledAt; result.workers = workers;
+    result.counts = { workers: workers.length, eligibleWorkers: eligibleIds.size, excludedWorkers: workers.length - eligibleIds.size,
+      capacities: new Set(bindings.map((row) => row.capacityKey)).size,
+      eligibleCapacities: new Set(bindings.filter((row) => eligibleIds.has(row.workerId)).map((row) => row.capacityKey)).size };
+    result.allocationCeilingPercent = snapshot.allocation.ceilingPercent;
+    result.nextEligibleAt = snapshot.plan.nextEligibleAt;
     if (snapshot.sourceState === 'missing') result.warnings.push('resource-store-missing');
   } catch {
     // Raw parser, filesystem, Git and ledger errors can contain private paths or

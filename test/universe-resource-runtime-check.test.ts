@@ -12,6 +12,7 @@ import * as worker from '../src/core/resources/worker.js';
 import * as quota from '../src/core/resources/quota-refresh.js';
 import * as local from '../src/core/resources/local-model-refresh.js';
 import * as probe from '../src/core/resources/codex-account-probe.js';
+import * as poolRuntime from '../src/core/resources/pool-runtime.js';
 
 let base: string;
 const save = (file: string, value: unknown): void => writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
@@ -67,7 +68,7 @@ function inventory(root: string): unknown {
 }
 function failed(result: ReturnType<typeof checkResourceGenerationRuntime>, stage: ResourceGenerationCheckStage): void {
   expect(result).toMatchObject({ status: 'invalid', providerContacted: false, poolId: null, poolDigest: null,
-    sourceState: null, sampledAt: null, workers: [] });
+    sourceState: null, sampledAt: null, workers: [], counts: null, allocationCeilingPercent: null, nextEligibleAt: null });
   expect(result.checks.filter((row) => row.status === 'failed')).toEqual([{ code: stage, status: 'failed' }]);
   expect(JSON.stringify(result)).not.toContain(base);
 }
@@ -77,6 +78,9 @@ describe.skipIf(process.platform === 'win32')('read-only resource runtime config
     const f = fixture(); const before = inventory(base); const result = f.check();
     expect(result).toMatchObject({ schemaVersion: 1, status: 'valid', evidenceScope: 'local-configuration-only', providerContacted: false,
       poolId: f.pool.id, poolDigest: f.poolDigest, sourceState: 'missing' });
+    expect(result).toMatchObject({ counts: { workers: 4, eligibleWorkers: 4, excludedWorkers: 0, capacities: 4, eligibleCapacities: 4 },
+      allocationCeilingPercent: null, nextEligibleAt: null });
+    expect(result.workers.every((row) => row.nextEligibleAt === null && !row.policyHolds.length && !row.nextChecks.length)).toBe(true);
     expect(result.checks.every((row) => row.status === 'passed')).toBe(true);
     expect(result.sampledAt).toMatch(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
     expect(result.workers.map((row) => [row.workerId, row.provider, row.quotaRefreshConfigured, row.localModelRefreshConfigured,
@@ -122,6 +126,80 @@ describe.skipIf(process.platform === 'win32')('read-only resource runtime config
     bindings[1].command = bindings[0].command; bindings[1].capacityKey = bindings[0].capacityKey;
     save(f.runtime.bindingsPath, bindings); const result = f.check(); expect(result.status).toBe('valid');
     expect(result.workers.every((row) => !row.warnings.includes('duplicate-native-command-across-capacities'))).toBe(true);
+    expect(result.counts).toEqual({ workers: 4, eligibleWorkers: 4, excludedWorkers: 0, capacities: 3, eligibleCapacities: 3 });
+  });
+  it('explains an owner pause for every shared-capacity alias from one unchanged snapshot', () => {
+    const f = fixture(false); const bindings = f.bindings.map((row) => row.workerId === 'codex-b' ? { ...row, capacityKey: 'codex-a' } : row);
+    save(f.runtime.bindingsPath, bindings); mkdirSync(f.runtime.root, { mode: 0o700 });
+    save(join(f.runtime.root, 'pool-state.json'), { schemaVersion: 1, poolDigest: digest(canonical({ pool: f.pool, bindings })),
+      observations: [], attempts: [], workerAccess: { pausedWorkerIds: ['codex-a'], revision: 1, updatedAt: f.at(-1000) } });
+    const status = vi.spyOn(poolRuntime, 'resourcePoolStatus'); const before = inventory(base); const result = f.check();
+    expect(status).toHaveBeenCalledTimes(1);
+    expect(result.counts).toEqual({ workers: 4, eligibleWorkers: 2, excludedWorkers: 2, capacities: 3, eligibleCapacities: 2 });
+    for (const row of result.workers.slice(0, 2)) expect(row).toMatchObject({ eligibility: 'excluded',
+      policyHolds: ['owner-paused'], nextChecks: ['review-owner-pause'], exclusionReasons: ['worker-unavailable'] });
+    expect(result.workers.slice(2).every((row) => row.eligibility === 'eligible' && !row.policyHolds.length)).toBe(true);
+    expect(inventory(base)).toEqual(before);
+  });
+  it('explains a zero subscription allocation without mislabeling local models or altering reserves', () => {
+    const f = fixture(); mkdirSync(f.runtime.root, { mode: 0o700 });
+    save(join(f.runtime.root, 'pool-state.json'), { schemaVersion: 1, poolDigest: f.poolDigest, observations: [], attempts: [],
+      allocation: { ceilingPercent: 0, revision: 1, updatedAt: f.at(-1000) } });
+    const before = inventory(base); const result = f.check();
+    expect(result).toMatchObject({ status: 'valid', allocationCeilingPercent: 0,
+      counts: { workers: 4, eligibleWorkers: 1, excludedWorkers: 3, capacities: 4, eligibleCapacities: 1 } });
+    for (const row of result.workers.slice(0, 3)) expect(row).toMatchObject({ eligibility: 'excluded',
+      policyHolds: ['subscription-allocation-disabled'], nextChecks: ['review-subscription-allocation'] });
+    expect(result.workers[3]).toMatchObject({ eligibility: 'eligible', policyHolds: [], nextChecks: [] });
+    expect(inventory(base)).toEqual(before);
+  });
+  it('preserves each planner retry hint and the earliest pool hint without predicting quota reset recovery', () => {
+    const f = fixture(); Object.assign(f.observations[0]!, { retryAfter: f.at(50_000) });
+    Object.assign(f.observations[1]!, { retryAfter: f.at(40_000) });
+    f.observations[2]!.windows[0]!.usedPercent = 95;
+    save(f.runtime.observationsPath, f.observations); const result = f.check();
+    expect(result.nextEligibleAt).toBe(f.at(40_000));
+    expect(result.workers[0]).toMatchObject({ nextEligibleAt: f.at(50_000), nextChecks: ['recheck-after-hint'] });
+    expect(result.workers[1]).toMatchObject({ nextEligibleAt: f.at(40_000), nextChecks: ['recheck-after-hint'] });
+    expect(result.workers[2]).toMatchObject({ nextEligibleAt: null, policyHolds: [] });
+    expect(result.workers[2]!.nextChecks).toContain('review-reserve-evidence');
+  });
+  it('reports all-excluded valid configuration and unavailable as inspection rather than a diagnosed provider outage', () => {
+    const f = fixture(); save(f.runtime.observationsPath, f.observations.map((row) => ({ ...row, health: 'unavailable' })));
+    const result = f.check(); expect(result).toMatchObject({ status: 'valid',
+      counts: { workers: 4, eligibleWorkers: 0, excludedWorkers: 4, capacities: 4, eligibleCapacities: 0 } });
+    for (const row of result.workers) expect(row).toMatchObject({ policyHolds: [], nextChecks: ['review-worker-availability'] });
+  });
+  it('keeps missing alias evidence as a planner exclusion without inventing an owner hold', () => {
+    const f = fixture(false); const bindings = f.bindings.map((row) => row.workerId === 'codex-b' ? { ...row, capacityKey: 'codex-a' } : row);
+    save(f.runtime.bindingsPath, bindings); save(f.runtime.observationsPath, f.observations.filter((row) => row.workerId !== 'codex-b'));
+    mkdirSync(f.runtime.root, { mode: 0o700 });
+    save(join(f.runtime.root, 'pool-state.json'), { schemaVersion: 1, poolDigest: digest(canonical({ pool: f.pool, bindings })),
+      observations: [], attempts: [], allocation: { ceilingPercent: 75, revision: 1, updatedAt: f.at(-1000) } });
+    const before = inventory(base); const result = f.check();
+    expect(result.workers[0]).toMatchObject({ eligibility: 'excluded', policyHolds: [], exclusionReasons: ['worker-unavailable'],
+      nextChecks: ['review-worker-availability'] });
+    expect(result.workers[1]!.nextChecks).toContain('refresh-quota-evidence');
+    expect(result.counts).toMatchObject({ eligibleWorkers: 2, excludedWorkers: 2, capacities: 3, eligibleCapacities: 2 });
+    expect(inventory(base)).toEqual(before);
+  });
+  it('suggests local evidence refresh without equating configuration to a running local server', () => {
+    const f = fixture(); save(f.runtime.observationsPath, f.observations.filter((row) => row.workerId !== 'local-a'));
+    expect(f.check().workers[3]).toMatchObject({ eligibility: 'excluded', exclusionReasons: ['observation-missing'],
+      policyHolds: [], nextChecks: ['refresh-local-evidence'], nextEligibleAt: null });
+  });
+  it.each(['missing', 'stale', 'unknown'] as const)('suggests evidence refresh for %s observations without weakening allocation', (kind) => {
+    const f = fixture(); mkdirSync(f.runtime.root, { mode: 0o700 });
+    save(join(f.runtime.root, 'pool-state.json'), { schemaVersion: 1, poolDigest: f.poolDigest, observations: [], attempts: [],
+      allocation: { ceilingPercent: 75, revision: 1, updatedAt: f.at(-1000) } });
+    if (kind === 'missing') f.observations.splice(0, 1);
+    if (kind === 'stale') Object.assign(f.observations[0]!, { observedAt: f.at(-120_000), expiresAt: f.at(-60_000) });
+    if (kind === 'unknown') f.observations[0]!.windows = [];
+    save(f.runtime.observationsPath, f.observations); const before = inventory(base); const result = f.check();
+    expect(result.allocationCeilingPercent).toBe(75);
+    expect(result.workers[0]).toMatchObject({ eligibility: 'excluded', policyHolds: [] });
+    expect(result.workers[0]!.nextChecks).toContain('refresh-quota-evidence');
+    expect(inventory(base)).toEqual(before);
   });
   it('reports explicit unknown quota bootstrap separately from healthy evidence', () => {
     const f = fixture(false); const pool = JSON.parse(JSON.stringify(f.pool)); pool.workers[0].allowUnknownQuota = true;
@@ -201,6 +279,7 @@ describe.skipIf(process.platform === 'win32')('read-only resource runtime config
     }] });
     const before = inventory(base); const result = f.check(); expect(result.status).toBe('valid');
     expect(result.workers[0]).toMatchObject({ eligibility: 'excluded', exclusionReasons: ['concurrency-exhausted'] });
+    expect(result.workers[0]!.nextChecks).toEqual([status === 'reserved' ? 'wait-for-active-work' : 'inspect-capacity-ownership']);
     expect(result.workers[1]!.eligibility).toBe('eligible'); expect(inventory(base)).toEqual(before);
   });
   it.each(['relative.json', '/', '/tmp/../tmp/runtime.json', '/tmp/runtime\n.json'])('refuses invalid explicit path %j', (resourceRuntime) => {

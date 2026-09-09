@@ -112,7 +112,7 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
   },
   {
     usage: 'ashlr universe resources check --resource-runtime <private-absolute.json> --json',
-    description: 'Validate explicit local resource configuration and report worker snapshot eligibility, exclusions and warnings without provider contact or quota refresh. evidenceScope is local-configuration-only and providerContacted is false. Exit 0 means valid configuration even when all workers are excluded; 1 invalid/unavailable, 2 invalid arguments. Does not prove authentication, current quota or campaign admission.',
+    description: 'Validate explicit local resource configuration; report worker/capacity counts, policy holds, planner recheck hints and diagnostic nextChecks without changing reserves, contacting providers or refreshing quota. evidenceScope is local-configuration-only and providerContacted is false. Exit 0 means valid configuration even when all workers are excluded; 1 invalid/unavailable, 2 invalid arguments. Does not prove authentication, current quota or campaign admission.',
     safety: 'read',
     jsonShape: 'ResourceGenerationRuntimeCheck',
   },
