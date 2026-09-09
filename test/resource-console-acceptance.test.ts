@@ -223,8 +223,12 @@ describe.skipIf(process.platform === 'win32')('independent resource console HTTP
     const fresh = f.observations().map((item) => item.workerId === 'native' ? { ...item, observedAt: new Date().toISOString(),
       windows: item.windows.map((window) => ({ ...window, usedPercent: 0 })) } : item);
     save(f.observationsFile, fresh);
-    const done = await until(handle, (value) => expect(value.supervisor?.jobs[0]?.outcome).toBe('completed'));
-    expect(readFileSync(f.nativeMarker, 'utf8')).toBe('one'); expect(done.usage).toMatchObject({ totalInputTokens: 5, totalOutputTokens: 2, complete: true });
+    // Supervisor state and ledger usage are sampled independently; wait for both.
+    await until(handle, (value) => {
+      expect(value.supervisor?.jobs[0]?.outcome).toBe('completed');
+      expect(value.usage).toMatchObject({ totalInputTokens: 5, totalOutputTokens: 2, complete: true });
+    });
+    expect(readFileSync(f.nativeMarker, 'utf8')).toBe('one');
     expect((await submit(handle, input)).status).toBe(202); expect((await snapshot(handle)).counts.total).toBe(1);
     expect(f.requests).toHaveLength(0);
   });
