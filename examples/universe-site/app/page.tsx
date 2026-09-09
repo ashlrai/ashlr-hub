@@ -2,6 +2,9 @@ import { Experiment } from './experiment';
 import Image from 'next/image';
 import { ProductSections } from './product-sections';
 import evidence from './data/demo.json';
+import { SiteHeader } from './site-header';
+import { projectSchema } from './seo';
+import Link from 'next/link';
 
 const source = 'https://github.com/ashlrai/ashlr-hub';
 export default function Home() {
@@ -10,18 +13,13 @@ export default function Home() {
       <a className="skip-link" href="#experiment">
         Skip to the experiment
       </a>
-      <header className="masthead">
-        <a className="wordmark" href="#top" aria-label="Ashlrverse home">
-          ashlrverse<span aria-hidden="true">✳</span>
-        </a>
-        <nav aria-label="Main">
-          <a href="#experiment">Observatory</a>
-          <a href="#mission">Mission</a>
-          <a className="nav-source" href={source}>
-            Open source <span aria-hidden="true">↗</span>
-          </a>
-        </nav>
-      </header>
+      <script
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{
+          __html: JSON.stringify(projectSchema).replace(/</g, '\\u003c'),
+        }}
+      />
+      <SiteHeader />
       <section className="hero" aria-labelledby="hero-title">
         <Image
           className="hero-art"
@@ -33,23 +31,24 @@ export default function Home() {
           unoptimized
         />
         <div className="hero-copy">
-          <p className="release-note">An open frontier for builders</p>
+          <p className="release-note">Open-source AI engineering</p>
           <h1 id="hero-title">
-            Ideas deserve
-            <br />a universe.
+            Your next idea.
+            <br />
+            An entire fleet.
           </h1>
           <p className="lead">
-            An open-source engineering fleet that explores possibilities, tests
-            its work, and builds on what it learns. Your ambition. Many minds.
-            One evolving mission.
+            Turn a repository objective into competing approaches, tested
+            artifacts, and a record of what worked. Built for a future where
+            your engineering fleet keeps improving alongside its models.
           </p>
           <div className="actions">
             <a className="primary-link" href="#experiment">
               Enter the observatory <span aria-hidden="true">↗</span>
             </a>
-            <a className="text-link" href="#run">
-              Build your fleet
-            </a>
+            <Link className="text-link" href="/docs/">
+              Start with the field guide
+            </Link>
           </div>
           <p className="scope-note">
             Local-first runtime. Open models and native workers.
@@ -81,6 +80,40 @@ export default function Home() {
         <Experiment evidence={evidence} />
       </section>
       <ProductSections />
+      <section
+        className="section agent-entry"
+        aria-labelledby="agent-entry-title"
+      >
+        <div>
+          <p className="release-note">A shared starting point</p>
+          <h2 id="agent-entry-title">
+            Built for you.
+            <br />
+            Readable by your agent.
+          </h2>
+          <p>
+            One task map, in human-readable HTML, Markdown and JSON. Find the
+            right command, understand its effects, and follow the same evidence.
+          </p>
+          <Link className="primary-link" href="/docs/">
+            Open the field guide
+          </Link>
+        </div>
+        <div className="agent-files">
+          <a href="/agent-guide.md" download>
+            <span>agent-guide.md</span>
+            <small>Plain-text context and operating boundaries</small>
+          </a>
+          <a href="/agent-map.json" download>
+            <span>agent-map.json</span>
+            <small>Versioned task index and canonical guide links</small>
+          </a>
+          <a href="/llms.txt" download>
+            <span>llms.txt</span>
+            <small>Compact documentation directory</small>
+          </a>
+        </div>
+      </section>
       <footer>
         <a className="wordmark" href="#top">
           ashlrverse<span aria-hidden="true">✳</span>

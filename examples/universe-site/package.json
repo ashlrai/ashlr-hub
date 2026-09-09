@@ -7,10 +7,11 @@
   },
   "scripts": {
     "dev": "vinext dev",
-    "build": "vinext build",
+    "build": "node scripts/generate-discovery.mjs && vinext build && node scripts/verify-static.mjs",
     "start": "wrangler dev --config dist/server/wrangler.json",
     "lint": "oxlint app test vite.config.ts vitest.config.ts next.config.ts",
-    "test": "vitest run",
+    "test": "node scripts/generate-discovery.mjs --check && vitest run",
+    "generate:discovery": "node scripts/generate-discovery.mjs",
     "typecheck": "tsc --noEmit",
     "format": "oxfmt"
   },

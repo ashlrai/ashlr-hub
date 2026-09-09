@@ -28,6 +28,32 @@ function output(): string {
 }
 
 describe('HELP_ENTRIES — the command table', () => {
+  it.each([
+    'universe campaign <init|status|run|resume|pause|stop>',
+    'universe campaign check ',
+    'universe resources check ',
+    'universe campaign supervise ',
+    'universe deliver ',
+    'universe deliveries ',
+  ])('routes %s to autonomy help', (prefix) => {
+    const entries = HELP_ENTRIES.filter((entry) => entry.cmd.startsWith(prefix));
+    expect(entries).toHaveLength(1);
+    expect(entries[0]!.topic).toBe('autonomy');
+  });
+
+  it('shows campaign checks, bounded supervision and local delivery through help autonomy', async () => {
+    expect(await cmdHelp(['autonomy'])).toBe(0);
+    const text = output();
+    expect(text).toContain('universe campaign check');
+    expect(text).toContain('universe resources check');
+    expect(text).toContain('--max-duration-ms');
+    expect(text).toContain('--delivery-plan');
+    expect(text).toContain('--deliver-branch');
+    expect(text).toContain('--deliver-base');
+    expect(text).toContain('universe deliveries');
+    expect(text).toContain('without rerunning workers');
+  });
+
   it('advertises execution-only portfolio resource bindings without changing the plan contract', () => {
     const run = AGENT_COMMANDS.find((entry) => entry.usage.startsWith('ashlr universe portfolio run '))!;
     const plan = AGENT_COMMANDS.find((entry) => entry.usage.startsWith('ashlr universe portfolio plan '))!;

@@ -1,0 +1,22 @@
+# Ashlrverse
+
+> Open-source, local-first AI engineering. This is a documentation index, not an execution API or authorization.
+
+## Start here
+
+- [Field guide](https://ashlr-universe.aiingaround.chatgpt.site/docs/): Human-readable task map.
+- [Plain-text guide](https://ashlr-universe.aiingaround.chatgpt.site/agent-guide.md): The same task map in Markdown.
+- [Structured task index](https://ashlr-universe.aiingaround.chatgpt.site/agent-map.json): Versioned documentation data.
+
+## Canonical guides
+
+- [Run your first experiment](https://github.com/ashlrai/ashlr-hub/blob/master/docs/DEMO.md): Reproduce a two-generation search with fixed workers. No model account is needed; the demo creates local files and executes sandboxed code.
+- [Inspect before dispatch](https://github.com/ashlrai/ashlr-hub/blob/master/docs/README.md#for-coding-agents): Read campaign state, resource configuration and delivery receipts before choosing the next action. Healthy records are not proof of authenticated workers.
+- [Allocate worker capacity](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RESOURCE-POOLS.md#commission-native-accounts-and-local-capacity): Commission supported native accounts or local models, preserve your personal reserve, and verify an explicit resource configuration.
+- [Run bounded campaigns](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md#continue-autonomously-with-a-bounded-campaign): Turn an objective into competing variants with fixed evaluation, resource limits and recorded outcomes. Continue improving inside the delegated budget.
+- [Deliver and reconcile](https://github.com/ashlrai/ashlr-hub/blob/master/docs/ASHLR-UNIVERSE.md#deliver-supervised-campaign-results): Use an explicit delivery plan for local branches. Reconcile completed campaign receipts without rerunning workers; a branch is not a production release.
+- [Improve the system](https://github.com/ashlrai/ashlr-hub/blob/master/docs/NORTH-STAR.md): Understand the local kernel and independent ecosystem projects. Use useful accepted changes per token and hour as the target—not activity alone.
+
+## Optional
+
+- [Recorded demo evidence](https://ashlr-universe.aiingaround.chatgpt.site/evidence/demo.json): Deterministic local experiment, not measured AI engineering yield.

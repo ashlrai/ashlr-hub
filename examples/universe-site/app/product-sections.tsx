@@ -1,4 +1,5 @@
 import { CopyCommand } from './copy-command';
+import { ProviderEcosystem } from './provider-ecosystem';
 
 const docs = 'https://github.com/ashlrai/ashlr-hub/blob/master/docs/';
 const command =
@@ -49,17 +50,7 @@ export function ProductSections() {
             objectives, and control in your hands.
           </p>
         </div>
-        <ul className="engine-list" aria-label="Supported worker types">
-          <li>
-            Codex <span>Native workers</span>
-          </li>
-          <li>
-            Claude Code <span>Native workers</span>
-          </li>
-          <li>
-            Local models <span>Your own compute</span>
-          </li>
-        </ul>
+        <ProviderEcosystem />
         <div className="system-grid">
           <article>
             <span className="feature-symbol" aria-hidden="true">
