@@ -39,7 +39,7 @@ it('switches generations and preserves a valid inspector selection', async () =>
   await user.click(screen.getByRole('tab', { name: 'Generation 1' }));
   expect(screen.getByText('274 bytes')).toBeTruthy();
   expect(screen.getByText('317 bytes')).toBeTruthy();
-  expect(screen.getByText('Pinned seed')).toBeTruthy();
+  expect(screen.getByText('Pinned seed', { selector: 'dd' })).toBeTruthy();
   await user.click(screen.getByRole('tab', { name: 'Generation 2' }));
   expect(screen.getByText('227 bytes')).toBeTruthy();
 });
@@ -53,4 +53,45 @@ it('provides public evidence, not a connection to private operational APIs', () 
   expect(JSON.stringify(evidence)).not.toMatch(
     /\/Users\/|readToken|controlToken|accountHint|seedRepo/,
   );
+});
+it('selects lineage nodes across generations and keeps measurements synchronized', async () => {
+  const user = userEvent.setup();
+  render(<Experiment evidence={evidence} />);
+  const first = screen.getByRole('button', {
+    name: 'Select readable lineage, generation 1',
+  });
+  await user.click(first);
+  expect(first.getAttribute('aria-pressed')).toBe('true');
+  expect(
+    screen
+      .getByRole('tab', { name: 'Generation 1' })
+      .getAttribute('aria-selected'),
+  ).toBe('true');
+  expect(screen.getByText('317 bytes')).toBeTruthy();
+  expect(screen.getByText('Pinned seed', { selector: 'dd' })).toBeTruthy();
+  await user.click(
+    screen.getByRole('button', {
+      name: 'Select compact lineage, generation 2',
+    }),
+  );
+  expect(screen.getByText('227 bytes')).toBeTruthy();
+  expect(
+    screen
+      .getByRole('tab', { name: 'Generation 2' })
+      .getAttribute('aria-selected'),
+  ).toBe('true');
+});
+it('keeps rejected lineage outcomes explicit and operable from the keyboard', async () => {
+  const user = userEvent.setup();
+  render(<Experiment evidence={evidence} />);
+  const rejected = screen.getByRole('button', {
+    name: 'Select broken lineage, generation 2',
+  });
+  rejected.focus();
+  await user.keyboard('{Enter}');
+  expect(rejected.getAttribute('aria-pressed')).toBe('true');
+  expect(
+    screen.getByText(/The evaluator rejected this candidate/),
+  ).toBeTruthy();
+  expect(screen.getByText('No passing score')).toBeTruthy();
 });

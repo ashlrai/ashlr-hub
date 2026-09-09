@@ -43,7 +43,7 @@ function ScopedWorkspace() {
           <div className={styles.brand}>
             <svg className={styles.brandMark} viewBox="0 0 32 32" aria-hidden="true" focusable="false">
               <path d="m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6" />
-            </svg><strong>Ashlr Universe</strong><span className={styles.workspace}>Experiments</span>
+            </svg><strong>Ashlrverse</strong><span className={styles.workspace}>Experiments</span>
           </div>
           <span className={styles.badge}>Read-only observation</span>
           {scope.data ? <details className={styles.store}><summary>Universe store</summary>
@@ -82,7 +82,7 @@ export function UniverseConsoleApp() {
 
   if (phase === 'checking') return <p className={styles.checking} role="status">Checking for an existing console session…</p>;
   if (phase === 'unauthenticated') return <SessionGate
-    heading="Connect to Ashlr Universe"
+    heading="Connect to Ashlrverse"
     command="ashlr universe console --root /absolute/universe-store"
   />;
   return <ScopedWorkspace />;

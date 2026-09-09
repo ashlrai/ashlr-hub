@@ -1,18 +1,21 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { performance } from 'node:perf_hooks';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { initUniverse, initUniverseCampaign, readUniverseCampaign, runUniverseCampaignAndDeliver,
+import { initUniverse, initUniverseCampaign, readUniverseCampaign, readUniverseDeliveries, runUniverseCampaignAndDeliver, deliverCompletedUniverseCampaign,
   type UniverseManifest, type UniverseTrial } from '../src/core/universe/index.js';
 import { artifactDigest, copyArtifact, freezeArtifact } from '../src/core/universe/artifacts.js';
 import { appendCampaignEvent, campaignDirectory } from '../src/core/universe/campaign-store.js';
 import { appendRecord, manifestRecord, newRun, projectUniverse, selectWinners } from '../src/core/universe/store.js';
 import { withUniverseExecution } from '../src/core/universe/execution.js';
+import * as deliveryGitModule from '../src/core/universe/delivery-git.js';
 
 const roots: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   function writable(path: string): void {
     const stat = lstatSync(path);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return;
@@ -80,6 +83,66 @@ function fixture(direction: 'maximize' | 'minimize' = 'maximize') {
 }
 
 describe('opt-in campaign local delivery', () => {
+  it('rechecks expiry after the final checkout inspection and leaves a recoverable intent without publishing a ref', async () => {
+    const f = fixture(); f.register('search'); f.accept('search', 1); f.accept('search', 2); f.finish('search');
+    const now = performance.now.bind(performance); const deadline = now() + 60_000;
+    let expired = false; let inspections = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => expired ? deadline + 1 : now());
+    const original = deliveryGitModule.deliveryGit;
+    vi.spyOn(deliveryGitModule, 'deliveryGit').mockImplementation((repo, gitDeadline) => {
+      const git = original(repo, gitDeadline);
+      return { ...git, assertNotCheckedOut: (branch) => {
+        git.assertNotCheckedOut(branch); if (++inspections === 2) expired = true;
+      } };
+    });
+    await expect(deliverCompletedUniverseCampaign('search', { ...f.options, deadlineMonotonicMs: deadline })).rejects.toThrow(/deadline exhausted/);
+    expect(inspections).toBe(2); expect(f.git(['branch', '--list', f.options.delivery.branch])).toBe('');
+    vi.restoreAllMocks();
+    const pending = readUniverseDeliveries('fixture', { root: f.root }).deliveries[0]!;
+    expect(pending.status).toBe('pending');
+    const replay = await deliverCompletedUniverseCampaign('search', f.options);
+    expect(replay.delivery).toMatchObject({ status: 'delivered', receipt: { commit: pending.commit, createdAt: pending.createdAt } });
+    expect(f.git(['rev-parse', `refs/heads/${pending.branch}`])).toBe(pending.commit);
+  });
+
+  it('withholds a branch when synchronous Git preparation crosses the supervisor deadline and releases its lease', async () => {
+    const f = fixture(); f.register('search'); f.accept('search', 1); f.accept('search', 2); f.finish('search');
+    const now = performance.now.bind(performance); const deadline = now() + 60_000;
+    let expired = false;
+    vi.spyOn(performance, 'now').mockImplementation(() => expired ? deadline + 1 : now());
+    const original = deliveryGitModule.deliveryGit;
+    vi.spyOn(deliveryGitModule, 'deliveryGit').mockImplementation((repo, gitDeadline) => {
+      const git = original(repo, gitDeadline);
+      return { ...git, writeTree: (entries) => { const tree = git.writeTree(entries); expired = true; return tree; } };
+    });
+    await expect(deliverCompletedUniverseCampaign('search', { ...f.options, deadlineMonotonicMs: deadline })).rejects.toThrow(/deadline exhausted/);
+    expect(expired).toBe(true);
+    expect(f.git(['branch', '--list', f.options.delivery.branch])).toBe('');
+    await expect(withUniverseExecution('fixture', { root: f.root }, async () => true)).resolves.toBe(true);
+  });
+
+  it('delivery-only reconciliation never starts an unfinished campaign or changes its budget', async () => {
+    const f = fixture(); f.register('search');
+    const before = readUniverseCampaign('search', { root: f.root });
+    expect(await deliverCompletedUniverseCampaign('search', f.options)).toMatchObject({
+      delivery: { status: 'withheld', reason: 'campaign-not-completed' }, campaign: before,
+    });
+    expect(readUniverseCampaign('search', { root: f.root })).toEqual(before);
+    expect(projectUniverse(f.directory).runs).toHaveLength(0);
+  });
+
+  it('rejects changed supervisor result pins before any branch mutation and releases ownership', async () => {
+    const f = fixture(); f.register('search'); f.accept('search', 1); f.accept('search', 2); f.finish('search');
+    const summary = readUniverseCampaign('search', { root: f.root });
+    const identity = { universeId: 'fixture', definitionDigest: summary.definitionDigest,
+      manifestDigest: summary.manifestDigest, comparatorDigest: summary.comparatorDigest };
+    for (const changed of [{ summaryDigest: '0'.repeat(64) }, { recordsDigest: '0'.repeat(64) }]) {
+      await expect(deliverCompletedUniverseCampaign('search', { ...f.options, expectedIdentity: { ...identity, ...changed } })).rejects.toThrow(/evidence changed/);
+    }
+    expect(f.git(['branch', '--list', f.options.delivery.branch])).toBe('');
+    await expect(withUniverseExecution('fixture', { root: f.root }, async () => true)).resolves.toBe(true);
+  });
+
   it.each(['maximize', 'minimize'] as const)('delivers a strict %s improvement and preserves checkout/index with idempotent replay', async (direction) => {
     const f = fixture(direction); f.register('search'); f.accept('search', 10);
     const trial = f.accept('search', direction === 'maximize' ? 20 : 5); f.finish('search');

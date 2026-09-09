@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const core = vi.hoisted(() => ({ superviseUniverseCampaigns: vi.fn() }));
+const files = vi.hoisted(() => ({ readResourceJson: vi.fn() }));
 vi.mock('../src/core/universe/campaign-supervisor.js', () => core);
+vi.mock('../src/core/resources/pool-runtime.js', async (original) => ({
+  ...await original<typeof import('../src/core/resources/pool-runtime.js')>(), readResourceJson: files.readResourceJson,
+}));
 import { cmdUniverseSupervise } from '../src/cli/universe-supervise.js';
 
 function report(status = 'completed') {
@@ -24,6 +28,8 @@ describe('Universe supervision CLI', () => {
     [...valid, 'first'], [...valid, '--unknown'], [...valid, '--json', '--json'],
     [...valid, '--max-duration-ms', '60000'], [...valid, '--resource-runtime', 'relative'],
     [...valid, '--resource-runtime', '/private/a/../runtime'], [...valid, '--resource-runtime', '/private/secret\nunsafe'],
+    [...valid, '--delivery-plan', 'relative'], [...valid, '--delivery-plan'],
+    [...valid, '--delivery-plan', '/private/a', '--delivery-plan', '/private/b'],
     [...valid, '--max-concurrent', '0'], [...valid, '--max-concurrent', '5'],
     [...valid, '--max-concurrent', '1.5'], [...valid, '--max-concurrent', '1e0'],
     [...valid, '--poll-interval-ms', '49'], [...valid, '--poll-interval-ms', '60001'],
@@ -50,6 +56,31 @@ describe('Universe supervision CLI', () => {
     });
     expect(console.log).toHaveBeenCalledExactlyOnceWith(JSON.stringify(report(), null, 2));
     expect(console.error).not.toHaveBeenCalled();
+  });
+
+  it('reads only the explicit bounded private delivery plan and forwards its validated contents', async () => {
+    const deliveryPlan = { schemaVersion: 1, deliveries: [{ campaignId: 'first', branch: 'codex/result', baseCommit: 'a'.repeat(40) }] };
+    files.readResourceJson.mockReturnValue(deliveryPlan);
+    expect(await cmdUniverseSupervise([...valid, '--delivery-plan', '/private/delivery.json', '--json'])).toBe(0);
+    expect(files.readResourceJson).toHaveBeenCalledExactlyOnceWith('/private/delivery.json', 64 * 1024);
+    expect(core.superviseUniverseCampaigns.mock.calls[0]![1].deliveryPlan).toEqual(deliveryPlan);
+    expect(core.superviseUniverseCampaigns.mock.calls[0]![1].deliveryPlan).not.toBe(deliveryPlan);
+  });
+
+  it.each([{}, { schemaVersion: 1, deliveries: [] }, { schemaVersion: 1, deliveries: [{ campaignId: 'not-enrolled', branch: 'codex/result', baseCommit: 'a'.repeat(40) }] }])(
+    'rejects invalid plan JSON before supervision %#', async (deliveryPlan) => {
+      files.readResourceJson.mockReturnValue(deliveryPlan);
+      expect(await cmdUniverseSupervise([...valid, '--delivery-plan', '/private/delivery.json', '--json'])).toBe(2);
+      expect(core.superviseUniverseCampaigns).not.toHaveBeenCalled();
+    });
+
+  it('redacts private plan read errors before registering execution listeners', async () => {
+    const before = process.listenerCount('SIGINT');
+    files.readResourceJson.mockImplementation(() => { throw new Error('EACCES /private/owner-secret'); });
+    expect(await cmdUniverseSupervise([...valid, '--delivery-plan', '/private/delivery.json', '--json'])).toBe(2);
+    expect(console.log).toHaveBeenCalledWith(JSON.stringify({ error: 'Invalid or unavailable private campaign delivery plan' }));
+    expect(process.listenerCount('SIGINT')).toBe(before);
+    expect(core.superviseUniverseCampaigns).not.toHaveBeenCalled();
   });
 
   it('uses documented defaults and exposes transitions in text mode', async () => {

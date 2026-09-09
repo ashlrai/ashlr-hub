@@ -1,7 +1,7 @@
 /** Actual private campaign ledgers and macOS-confined fixtures; no model/provider calls. */
 import { afterEach, describe, expect, it } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { initUniverse, initUniverseCampaign, readUniverseCampaign, readUniverseOverview, requestUniverseCampaignControl, runUniverseCampaign,
@@ -105,6 +105,45 @@ function verifySettled(value: Fixture, pids: number[] = []): void {
 }
 
 describe.runIf(process.platform === 'darwin')('Universe foreground supervision with real campaign execution', () => {
+  it('delivers two bounded command campaigns and reconciles a pending handoff without rerunning either worker', async () => {
+    const value = fixture([{ name: 'left', generations: 2 }, { name: 'right', generations: 2 }]);
+    const initial = readUniverseOverview(value);
+    const deliveries = value.ids.map((campaignId) => {
+      const universe = initial.universes.find((item) => item.manifest.id === campaignId.replace('campaign-', 'universe-'))!;
+      return { campaignId, branch: `codex/${campaignId}`, baseCommit: universe.manifest.seed.revision };
+    });
+    const options = { root: value.root, maxDurationMs: 60_000, maxConcurrent: 2, pollIntervalMs: 50,
+      deliveryPlan: { schemaVersion: 1 as const, deliveries } };
+    const first = await superviseUniverseCampaigns(value.ids, options);
+    expect(first.status, JSON.stringify(first)).toBe('completed');
+    const after = readUniverseOverview(value);
+    for (const outcome of first.outcomes) {
+      expect(outcome).toMatchObject({ attempted: true, observedState: 'completed', delivery: { status: 'delivered' } });
+      if (outcome.delivery?.status !== 'delivered') throw new Error('Expected local branch');
+      const receipt = outcome.delivery.receipt;
+      const git = (...args: string[]) => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', receipt.repo, ...args], { encoding: 'utf8' }).trim();
+      expect(git('show', `${receipt.commit}:value.json`)).toBe('2');
+      expect(git('rev-parse', 'HEAD')).toBe(receipt.baseCommit);
+      expect(readFileSync(join(receipt.repo, 'value.json'), 'utf8')).toBe('0\n');
+    }
+    const firstDelivery = first.outcomes[0]!.delivery!;
+    if (firstDelivery.status !== 'delivered') throw new Error('Expected local branch');
+    const receipt = firstDelivery.receipt;
+    unlinkSync(join(value.root, 'universes', receipt.universeId, 'deliveries', 'records', `${receipt.id}.receipt.json`));
+    const replay = await superviseUniverseCampaigns(value.ids, options);
+    expect(replay.status).toBe('completed');
+    expect(replay.outcomes.every((outcome) => !outcome.attempted && outcome.delivery?.status === 'delivered')).toBe(true);
+    expect(replay.outcomes[0]!.delivery).toMatchObject({ receipt: { commit: receipt.commit, createdAt: receipt.createdAt } });
+    expect(readUniverseOverview(value).universes.map((universe) => universe.runs)).toEqual(after.universes.map((universe) => universe.runs));
+    execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', receipt.repo, 'update-ref', `refs/heads/${receipt.branch}`, receipt.baseCommit]);
+    const drifted = await superviseUniverseCampaigns(value.ids, options);
+    expect(drifted).toMatchObject({ status: 'incomplete', outcomes: [
+      { attempted: false, observedState: 'completed', status: 'failed', delivery: { status: 'failed' } },
+      { attempted: false, observedState: 'completed', status: 'completed', delivery: { status: 'delivered' } },
+    ] });
+    for (const campaignId of value.ids) expect(readUniverseCampaign(campaignId, value).state).toBe('completed');
+  }, 30_000);
+
   it.each(['pause', 'stop'] as const)('preserves %s inserted by the running observer before actual admission', async (action) => {
     const value = fixture([{ name: 'a' }]);
     let controlled: unknown;

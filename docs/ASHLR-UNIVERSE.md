@@ -1,8 +1,21 @@
-# Ashlr Universe
+<a id="ashlr-universe"></a>
 
-Ashlr Universe is the long-term product direction for Hub: an open runtime that turns an engineering objective and a resource budget into a continuing search for better products, tools, and ways of working. Hub supplies execution, integration, and observation. A universe supplies the objective, candidate population, experiments, and accumulated evidence.
+# Ashlrverse operator guide
+
+Ashlrverse is the public product vision for a self-improving engineering fleet:
+turn an objective and a resource budget into a continuing search for better
+products, tools, and ways of working. Hub supplies execution, integration, and
+observation. A universe supplies the objective, candidate population, experiments,
+and accumulated evidence. The [North Star](NORTH-STAR.md) describes the ambition;
+this guide documents the implemented interfaces and their operational boundaries.
 
 The useful unit of progress is an improvement demonstrated in a working environment. A universe should be able to propose alternatives, build them, evaluate their effects, retain useful variants, and use the result to choose its next experiment. As models improve, the same loop can explore more ambitious work.
+
+The rebrand does not change compatibility identifiers. The repository remains
+`ashlr-hub`, the npm package is `@ashlr/hub`, commands use `ashlr universe`, and
+the SDK export remains `@ashlr/hub/universe`. Existing `Universe` types, schemas,
+manifest fields, store paths and this guide's filename are unchanged. No account
+enrollment, store migration or runtime activation follows from the name change.
 
 ## Start with the local experiment kernel
 
@@ -820,8 +833,9 @@ receipts to force a retry. Read `universe deliveries` against the same root to
 reconcile the recorded branch and outcome.
 
 This behavior belongs to the explicit run/resume invocation, implemented by
-`runUniverseCampaignAndDeliver`. Ordinary campaign execution, the campaign
-supervisor and portfolio orchestration do **not** automatically deliver branches.
+`runUniverseCampaignAndDeliver`. Ordinary campaign execution and portfolio
+orchestration do **not** automatically deliver branches. The supervisor requires
+its own explicit [delivery plan](#deliver-supervised-campaign-results).
 Their existing behavior is unchanged when these flags are absent.
 
 ### Pause, stop or resume the campaign
@@ -933,6 +947,79 @@ The same operation is exported as `superviseUniverseCampaigns(ids, options)` fro
 optional `maxConcurrent`, `pollIntervalMs`, `resourceRuntime`, `signal` and a
 synchronous `onTransition` callback. Transition callbacks observe execution; they
 must not mutate admission inputs or throw. A callback failure cancels owned work.
+
+#### Deliver supervised campaign results
+
+To have the queue materialize verified improvements as local branches, supply
+`--delivery-plan /absolute/private/delivery-plan.json`. This is opt-in local Git
+mutation: it never merges, pushes, checks out a branch, activates services or
+enrolls accounts. Without a plan, supervision behaves exactly as described above.
+
+The plan is a mode-`0600` regular JSON file, at most 64 KiB, beneath a private
+owner-controlled directory. Its schema is:
+
+```json
+{
+  "schemaVersion": 1,
+  "deliveries": [
+    {
+      "campaignId": "parser-search",
+      "branch": "codex/parser-search-result",
+      "baseCommit": "FULL_PINNED_SEED_COMMIT"
+    }
+  ]
+}
+```
+
+Replace the base placeholder with that experiment's complete pinned seed commit
+from its manifest. Plan entries must name a nonempty subset of the explicit
+queue, with no duplicate campaign or repository/branch destination. All declared
+bases and plan fields are validated before any campaign dispatch or observer
+callback. A plan cannot change the frozen experiment or campaign definitions.
+
+From a built checkout, after selecting the exact store, campaigns and branches:
+
+```sh
+node bin/ashlr universe campaign supervise parser-search docs-search \
+  --root /absolute/private/experiments --max-duration-ms 3600000 \
+  --max-concurrent 2 --delivery-plan /absolute/private/delivery-plan.json --json
+```
+
+New resource-pool work still requires `--resource-runtime` and obeys current
+account exclusions, usage allocations, quota evidence, ownership and campaign
+budgets. A planned completed campaign instead receives **delivery-only
+reconciliation**: no worker, evaluator or provider request runs, and no budget
+is reset. This path needs no resource runtime. Paused, failed, stopped,
+interrupted and uncertain work is not resumed by adding a delivery plan.
+
+The supervisor retains a Universe's concurrency slot through its delivery step.
+Only a passing, retained artifact with strictly positive measured improvement
+and changed bytes is eligible for a new branch. Each configured outcome adds a
+`delivery` field: `delivered` includes the evidence-bound receipt; `withheld`
+explains cancellation, incomplete work, an unattempted handoff or no strict improvement; `failed`
+requires inspection. An initial admission or unchanged passing trial is not a
+delivered improvement. `attempted` continues to mean campaign execution, so a
+successful delivery-only replay reports `attempted: false`.
+
+Repeat the same queue and plan after an interrupted handoff. Existing immutable
+intents and receipts reconcile the same branch/commit, including a campaign that
+completed before the supervisor stopped. A missing or changed branch, wrong
+campaign/base, degraded evidence or contended execution lease is a failed
+handoff, not permission to overwrite a ref. Inspect `universe deliveries` and
+the repository before retrying; do not delete receipts to force progress.
+Delivery failure leaves the campaign terminal and makes the queue incomplete.
+The invocation deadline includes plan preflight; cancellation and expiry are
+checked between targets and again before publishing a branch. Synchronous
+filesystem/Git work cannot be preempted, so cleanup can outlast the deadline.
+Cancellation awaits owned cleanup; a ref update already underway may settle, so
+inspect the returned delivery evidence before assuming no branch was created.
+
+SDK callers pass `deliveryPlan: { schemaVersion: 1, deliveries: [...] }` to
+`superviseUniverseCampaigns`. The plan is copied and validated on entry and is
+not persisted into the frozen campaign; repeat it on intentional reinvocation.
+`deliverCompletedUniverseCampaign` exposes the same delivery-only path for an
+explicitly selected completed campaign. This is bounded foreground orchestration,
+not resident recovery or automatic acceptance into a production branch.
 
 ### Interpret campaign limits and evidence
 

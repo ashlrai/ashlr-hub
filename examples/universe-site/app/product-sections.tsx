@@ -1,121 +1,195 @@
-const docs =
-  'https://github.com/ashlrai/ashlr-hub/blob/codex/universe-account-connections/docs/';
+import { CopyCommand } from './copy-command';
+
+const docs = 'https://github.com/ashlrai/ashlr-hub/blob/master/docs/';
+const command =
+  'npm ci\nnpm run build\n\n# Choose a fresh private directory\nnode bin/ashlr universe demo \\\n  --root /absolute/private/experiments --json\n\n# Inspect the same store\nnode bin/ashlr universe console \\\n  --root /absolute/private/experiments';
+
 export function ProductSections() {
   return (
     <>
+      <section className="section mission" id="mission">
+        <div className="mission-statement">
+          <p className="release-note">The mission</p>
+          <h2>
+            Build the system
+            <br />
+            that keeps
+            <br />
+            getting better.
+          </h2>
+        </div>
+        <div className="mission-body">
+          <p className="mission-lead">
+            A better model should make your whole engineering fleet better.
+          </p>
+          <p>
+            Ashlrverse is the open-source infrastructure between ambition and
+            execution: persistent objectives, competing approaches, independent
+            evaluation, and a memory of what actually worked.
+          </p>
+          <p>
+            The goal is more than generating code. It is a fleet that discovers
+            useful work, learns from outcomes, and steadily improves the
+            product—and its own way of building it.
+          </p>
+          <a className="text-link" href={docs + 'NORTH-STAR.md'}>
+            Read the North Star
+          </a>
+        </div>
+      </section>
       <section className="section system">
         <div className="section-heading">
           <h2>
-            One loop.
+            Many engines.
             <br />
-            Your choice of engines.
+            One mission.
           </h2>
           <p>
-            The engine supplies candidates. The runtime preserves the objective,
-            evaluates artifacts, and records what actually happened.
+            Keep the intelligence interchangeable. Keep the evidence,
+            objectives, and control in your hands.
           </p>
         </div>
+        <ul className="engine-list" aria-label="Supported worker types">
+          <li>
+            Codex <span>Native workers</span>
+          </li>
+          <li>
+            Claude Code <span>Native workers</span>
+          </li>
+          <li>
+            Local models <span>Your own compute</span>
+          </li>
+        </ul>
         <div className="system-grid">
           <article>
-            <h3>Resources with a reserve</h3>
+            <span className="feature-symbol" aria-hidden="true">
+              ◷
+            </span>
+            <h3>Spend with intention</h3>
             <p>
-              Enroll native Codex and Claude Code workers or a local model.
-              Apply shared-capacity limits, inspect quota windows, and keep an
-              account available for your own work.
+              Pool enrolled workers, respect shared quota windows, and reserve
+              capacity for your own work. More tokens are useful only when they
+              produce better outcomes.
             </p>
-            <a className="text-link" href={`${docs}RESOURCE-POOLS.md`}>
-              Commission workers
+            <a className="text-link" href={docs + 'RESOURCE-POOLS.md'}>
+              Configure resources
             </a>
           </article>
           <article>
-            <h3>Evidence before confidence</h3>
+            <span className="feature-symbol" aria-hidden="true">
+              ⌘
+            </span>
+            <h3>Explore, then prove</h3>
             <p>
-              Freeze the evaluator, isolate trials, retain different useful
-              approaches, and feed measured results into the next generation.
-              Passing unchanged work is not new value.
+              Run different approaches against a fixed evaluator. Preserve
+              useful differences, reject broken artifacts, and feed measured
+              feedback into the next attempt.
             </p>
-            <a className="text-link" href={`${docs}ASHLR-UNIVERSE.md`}>
-              Understand the runtime
+            <a className="text-link" href={docs + 'ASHLR-UNIVERSE.md'}>
+              Explore the runtime
             </a>
           </article>
           <article>
-            <h3>Stay in command</h3>
+            <span className="feature-symbol" aria-hidden="true">
+              ⊹
+            </span>
+            <h3>Autonomy you can inspect</h3>
             <p>
-              Inspect recorded lineage and resource use. Give campaigns explicit
-              scope and budgets; pause or cancel owned work without confusing
-              historical receipts with live agents.
+              Give the fleet a mission and budget. Follow lineage, inspect
+              results, and pause owned work. Deliver improvements to declared
+              branches with evidence-bound receipts.
             </p>
-            <a className="text-link" href={`${docs}ARCHITECTURE.md`}>
-              Explore the architecture
+            <a className="text-link" href={docs + 'ASHLR-UNIVERSE.md'}>
+              Operate the fleet
             </a>
           </article>
         </div>
       </section>
       <section className="section get-started" id="run">
         <div>
-          <p className="release-note">Run the real experiment</p>
+          <p className="release-note">Your first expedition</p>
           <h2>
-            Start with evidence.
+            Make the loop
             <br />
-            Then add intelligence.
+            your own.
           </h2>
           <p>
-            Use the current source checkout. The experiment needs Git, Node.js
-            22.15+, and macOS sandbox-exec. No model subscription is needed.
+            Start with a reproducible experiment. Then connect your models and
+            turn a repository objective into a bounded engineering campaign.
           </p>
           <p>
-            The npm release and this source preview are separate. Follow the
-            release guide before assuming a global installation includes these
-            commands.
+            The demo needs a trusted source checkout, Git, Node.js 24+, and
+            macOS sandbox-exec. No model account is needed for this first run.
           </p>
-          <a className="text-link" href={`${docs}DEMO.md`}>
-            Complete demo guide
+          <a className="text-link" href={docs + 'DEMO.md'}>
+            Open the complete setup guide
           </a>
         </div>
         <div className="terminal">
-          <div className="terminal-title">From a trusted source checkout</div>
+          <div className="terminal-title">
+            <span className="terminal-dots" aria-hidden="true">
+              ● ● ●
+            </span>
+            <span>Local launch sequence</span>
+          </div>
+          <CopyCommand command={command} />
           <pre>
-            <code>
-              {
-                'npm ci\nnpm run build\n\n# Choose a fresh private directory\nnode bin/ashlr universe demo \\\n  --root /absolute/private/experiments --json\n\n# Inspect the same store\nnode bin/ashlr universe console \\\n  --root /absolute/private/experiments'
-              }
-            </code>
+            <code>{command}</code>
           </pre>
           <p>
-            Creates local files and executes bounded code. The console stays on
-            loopback; never publish its token or private store.
+            Creates local files and runs bounded code. The console stays on
+            loopback. Keep its token and private store off the public internet.
           </p>
         </div>
       </section>
       <section className="section limits">
-        <h2>Built to be useful. Clear about what’s real.</h2>
+        <div className="section-heading">
+          <h2>
+            Ambition without
+            <br />
+            make-believe.
+          </h2>
+          <p>The frontier is open. The evidence stays specific.</p>
+        </div>
         <div className="system-grid">
           <article>
-            <h3>Working source</h3>
+            <h3>Working today</h3>
             <p>
-              Local experiments, retained archives, resource admission,
-              foreground supervision, and scoped observability.
+              Local experiments, multi-generation campaigns, retained archives,
+              resource admission, foreground supervision, and opt-in verified
+              branch delivery.
             </p>
           </article>
           <article>
-            <h3>Separate commissioning</h3>
+            <h3>Your fleet, commissioned</h3>
             <p>
-              Real accounts need native authentication, fresh quota evidence,
-              and explicit bindings. Subscription access is not API credit.
+              Real accounts need native authentication, current quota evidence,
+              and explicit worker bindings. A subscription is not
+              interchangeable with API credit.
             </p>
           </article>
           <article>
-            <h3>Not a universal autopilot</h3>
+            <h3>The frontier ahead</h3>
             <p>
-              This page does not start work. Unattended provider operations,
-              production publication, and accepted engineering yield require
-              their own verified setup.
+              Continuous product discovery, stronger evaluators, and measured
+              accepted-change yield. These are the mission—not capabilities
+              proved by this recorded demo.
             </p>
           </article>
         </div>
-        <a className="text-link" href={`${docs}NORTH-STAR.md`}>
-          Read the North Star
-        </a>
+        <div className="closing-call">
+          <p>
+            What will you build
+            <br />
+            when you can build more?
+          </p>
+          <a
+            className="primary-link"
+            href="https://github.com/ashlrai/ashlr-hub"
+          >
+            Build with us <span aria-hidden="true">↗</span>
+          </a>
+        </div>
       </section>
     </>
   );

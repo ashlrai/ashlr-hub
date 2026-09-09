@@ -1,6 +1,8 @@
-# Ashlr Universe
+<a id="ashlr-universe"></a>
 
-**An evidence-first engineering loop: build candidates, test the artifacts, keep useful improvements.**
+# Ashlrverse
+
+**Build the self-improving engineering fleet. Give it direction, resources, and evidence—not an endless queue of prompts.**
 
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
@@ -11,16 +13,25 @@
 
 ## What is this?
 
-Ashlr Universe turns a pinned Git seed, an objective and a resource budget into
-competing, evaluated artifacts. **Hub is its local kernel**: the CLI, experiment
-runtime, account-aware resource pools and visual control room. The
+Ashlrverse is building an open, agent-native operating system for engineers and
+builders: a fleet that can discover worthwhile work, build competing approaches,
+evaluate real outcomes, and improve how it works. Its
 [North Star](docs/NORTH-STAR.md) is useful accepted engineering changes per token
 and hour—not more generated code or busier dashboards.
+
+**Hub is its local kernel**: the CLI, experiment runtime, account-aware resource
+pools and visual control room. Today it turns a pinned Git seed, an objective
+and a resource budget into competing, evaluated artifacts.
 
 The current local loop is concrete: run isolated variants, freeze their artifacts,
 evaluate against a fixed comparator, retain the best result in each niche, and
 reuse those winners as later-generation parents. Provider-backed generation and
 resource routing are separately configured; ecosystem projects remain independent.
+
+Ashlrverse is the public product name. Compatibility names stay unchanged:
+the repository is `ashlr-hub`, the package is `@ashlr/hub`, and experiment commands
+remain `ashlr universe` with the `@ashlr/hub/universe` SDK. Existing manifests,
+schemas and stores do not need a naming migration.
 
 ### See the loop work
 
@@ -29,11 +40,17 @@ variants, seven correctness cases, two retained niches and a deliberately broken
 candidate that must lose. It runs real code without a model account. The candidate
 transformations are scripted, so this demonstrates the mechanism—not AI productivity.
 
-![Two demo generations: compact code shrinks from 274 to 47 bytes and readable code from 317 to 210 bytes; all retained variants pass seven cases and the broken sorting variant is rejected.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/codex/universe-account-connections/docs/images/universe-demo.png)
+![Two demo generations: compact code shrinks from 274 to 47 bytes and readable code from 317 to 210 bytes; all retained variants pass seven cases and the broken sorting variant is rejected.](https://raw.githubusercontent.com/ashlrai/ashlr-hub/master/docs/images/universe-demo.png)
 
 Recorded deterministic fixture at source `914ebd1f566c0dc4f0a95479d9c4f464289e736e`.
 Arrows show parent reuse; byte reductions are not measured AI engineering yield.
 Read the [demo evidence and reproduction guide](docs/DEMO.md#recorded-example).
+
+The [Ashlrverse observatory source](https://github.com/ashlrai/ashlr-hub/blob/master/examples/universe-site/README.md)
+adds a space-themed landing page and interactive lineage replay of that recorded
+experiment. It is credential-free presentation code, not a live fleet dashboard;
+its [original artwork and provenance](https://github.com/ashlrai/ashlr-hub/blob/master/examples/universe-site/ASSETS.md)
+are included so contributors can reproduce the experience.
 
 From a trusted checkout on **macOS with Node.js 24+ and Git**, install and build
 locally, then create a fresh private experiment store:
@@ -61,7 +78,7 @@ source availability nor a successful demo commissions an unattended provider fle
 | Build your next step | Guide |
 |---------------------|-------|
 | Understand the demo and its evidence | [Demo walkthrough](docs/DEMO.md) |
-| Configure your own experiments and campaigns | [Universe operator guide](docs/ASHLR-UNIVERSE.md) |
+| Configure your own experiments and campaigns | [Ashlrverse operator guide](docs/ASHLR-UNIVERSE.md) |
 | Connect native/local workers and budget their usage | [Resource Pools](docs/RESOURCE-POOLS.md) |
 | Run a verified package independently of this checkout | [Pinned local runtime](docs/ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
 | Understand the components or contribute | [Architecture](docs/ARCHITECTURE.md#current-runtime-map) · [Documentation map](docs/README.md) |

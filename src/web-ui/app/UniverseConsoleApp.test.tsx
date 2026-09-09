@@ -39,19 +39,20 @@ describe('scoped Universe console composition', () => {
     vi.stubGlobal('fetch', request);
     const user = userEvent.setup();
     render(<UniverseConsoleApp />);
-    await screen.findByRole('heading', { name: 'Connect to Ashlr Universe' });
+    await screen.findByRole('heading', { name: 'Connect to Ashlrverse' });
     expect(request.mock.calls.map(([path]) => path)).toEqual(['/api/universe/console']);
     expect(screen.queryByText(root)).not.toBeInTheDocument();
     await user.type(screen.getByLabelText('Read token'), 'a'.repeat(64));
     await user.click(screen.getByRole('button', { name: 'Connect' }));
     await screen.findByRole('heading', { name: 'Start your first universe' });
+    expect(screen.getByRole('heading', { name: 'Ashlrverse' })).toBeInTheDocument();
     expect(screen.getByLabelText('Universe store')).toHaveTextContent(root);
     expect(screen.getByText('Read-only observation')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(request.mock.calls.filter(([path]) => path === '/api/universe')).toHaveLength(2));
     expect(EventSource).not.toHaveBeenCalled();
     await user.click(screen.getByRole('button', { name: 'Disconnect' }));
-    await screen.findByRole('heading', { name: 'Connect to Ashlr Universe' });
+    await screen.findByRole('heading', { name: 'Connect to Ashlrverse' });
     expect(screen.queryByText(root)).not.toBeInTheDocument();
     expect(request.mock.calls.every(([path]) => ['/api/session', '/api/universe/console', '/api/universe'].includes(path))).toBe(true);
     expect(request.mock.calls.filter(([path]) => path !== '/api/session').every(([, init]) => init?.method === 'GET')).toBe(true);
@@ -66,7 +67,7 @@ describe('scoped Universe console composition', () => {
       vi.stubGlobal('fetch', request);
       render(<UniverseConsoleApp />);
       expect(await screen.findByRole('alert')).toHaveTextContent('Console scope unavailable');
-      expect(screen.queryByRole('heading', { name: 'Ashlr Universe' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('heading', { name: 'Ashlrverse' })).not.toBeInTheDocument();
       expect(request.mock.calls).toHaveLength(1);
       expect(EventSource).not.toHaveBeenCalled();
     },
@@ -91,7 +92,7 @@ describe('scoped Universe console composition', () => {
     await screen.findByRole('heading', { name: 'Start your first universe' });
     expired = true;
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
-    await screen.findByRole('heading', { name: 'Connect to Ashlr Universe' });
+    await screen.findByRole('heading', { name: 'Connect to Ashlrverse' });
     expect(screen.queryByText(root)).not.toBeInTheDocument();
     expect(EventSource).not.toHaveBeenCalled();
   });

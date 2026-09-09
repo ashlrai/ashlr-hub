@@ -106,6 +106,7 @@ describe('UniverseView', () => {
     current.elites = [];
     const fetch = mount(overview({ universes: [current] }));
     await screen.findByRole('heading', { name: 'This universe is registered' });
+    expect(screen.getByRole('heading', { name: 'Ashlrverse' })).toBeInTheDocument();
     expect(screen.getByText(/Verify the evaluator and required runtime before starting/)).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledOnce();
   });

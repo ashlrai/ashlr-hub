@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { LineageGraph } from './lineage-graph';
 
 export type Trial = {
   id: string;
@@ -50,6 +51,14 @@ export function Experiment({ evidence }: { evidence: Evidence }) {
           Download evidence
         </a>
       </div>
+      <LineageGraph
+        evidence={evidence}
+        selectedId={selectedId}
+        onSelect={(id, nextGeneration) => {
+          setGeneration(nextGeneration);
+          setSelectedId(id);
+        }}
+      />
       <Tabs value={generation} onValueChange={selectGeneration}>
         <TabsList className="generation-tabs" aria-label="Recorded generation">
           <TabsTrigger value={1}>Generation 1</TabsTrigger>

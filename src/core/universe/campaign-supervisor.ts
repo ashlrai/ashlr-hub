@@ -2,19 +2,24 @@ import { isAbsolute, parse, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { canonical, digest } from './artifacts.js';
 import { runUniverseCampaign } from './campaign.js';
+import { deliverCompletedUniverseCampaign, preflightUniverseCampaignDelivery, validateUniverseCampaignDeliveryPlan,
+  type UniverseCampaignDeliveryPlan, type UniverseCampaignDeliveryResult } from './campaign-delivery.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadiness, type UniverseCampaignReadinessReason } from './campaign-readiness.js';
 import type { UniverseCampaignSummary } from './types.js';
 
-export type UniverseCampaignSupervisorStatus = 'queued' | 'waiting' | 'running' | 'completed' | 'held' | 'failed' | 'cancelled' | 'unavailable';
+export type UniverseCampaignSupervisorStatus = 'queued' | 'waiting' | 'running' | 'delivering' | 'completed' | 'held' | 'failed' | 'cancelled' | 'unavailable';
 export type UniverseCampaignSupervisorReason = UniverseCampaignReadinessReason | 'queued' | 'waiting-for-universe-owner' |
   'dispatched' | 'evidence-changed' | 'runner-failed' | 'caller-cancelled' | 'invocation-duration-exhausted' |
-  'transition-callback-failed' | 'resource-runtime-required';
+  'transition-callback-failed' | 'resource-runtime-required' | 'delivery-requested' | 'delivery-completed' | 'delivery-withheld' | 'delivery-failed';
 export interface UniverseCampaignSupervisorOutcome {
   campaignId: string;
   status: UniverseCampaignSupervisorStatus;
   attempted: boolean;
   reasonCode: UniverseCampaignSupervisorReason;
   observedState: UniverseCampaignSummary['state'] | null;
+  /** Present only for an explicitly planned handoff; campaign completion is separate. */
+  delivery?: UniverseCampaignDeliveryResult['delivery'] | { status: 'failed'; reason: 'delivery-failed' } |
+    { status: 'withheld'; reason: 'not-attempted' };
 }
 export interface UniverseCampaignSupervisorTransition {
   sequence: number;
@@ -29,6 +34,7 @@ export interface UniverseCampaignSupervisorOptions {
   maxConcurrent?: number;
   pollIntervalMs?: number;
   resourceRuntime?: string;
+  deliveryPlan?: UniverseCampaignDeliveryPlan;
   signal?: AbortSignal;
   /** Synchronous observer; throwing or returning a promise cancels and drains owned calls. */
   onTransition?: (event: UniverseCampaignSupervisorTransition) => void;
@@ -53,7 +59,7 @@ function integer(value: unknown, min: number, max: number): value is number {
   return Number.isSafeInteger(value) && Number(value) >= min && Number(value) <= max;
 }
 function snapshot(input: string[], options: UniverseCampaignSupervisorOptions) {
-  const keys = ['root', 'maxDurationMs', 'maxConcurrent', 'pollIntervalMs', 'resourceRuntime', 'signal', 'onTransition'];
+  const keys = ['root', 'maxDurationMs', 'maxConcurrent', 'pollIntervalMs', 'resourceRuntime', 'deliveryPlan', 'signal', 'onTransition'];
   if (!options || ![Object.prototype, null].includes(Object.getPrototypeOf(options)) ||
     Reflect.ownKeys(options).some((key) => typeof key !== 'string' || !keys.includes(key) ||
       !Object.hasOwn(Object.getOwnPropertyDescriptor(options, key)!, 'value')) ||
@@ -61,13 +67,14 @@ function snapshot(input: string[], options: UniverseCampaignSupervisorOptions) {
     Reflect.ownKeys(input).length !== input.length + 1 ||
     Array.from({ length: input.length }, (_, index) => Object.getOwnPropertyDescriptor(input, String(index)))
       .some((property) => !property || !Object.hasOwn(property, 'value'))) throw new Error('Invalid Universe supervisor options');
-  const { root, maxDurationMs, maxConcurrent = 1, pollIntervalMs = 500, resourceRuntime, signal, onTransition } = options;
+  const { root, maxDurationMs, maxConcurrent = 1, pollIntervalMs = 500, resourceRuntime, deliveryPlan, signal, onTransition } = options;
   const ids = [...input];
   if (ids.some((id) => typeof id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) || new Set(ids).size !== ids.length ||
     !path(root) || !integer(maxDurationMs, 1, 86_400_000) || !integer(maxConcurrent, 1, 4) || !integer(pollIntervalMs, 50, 60_000) ||
     resourceRuntime !== undefined && !path(resourceRuntime) || signal !== undefined && !(signal instanceof AbortSignal) ||
     onTransition !== undefined && typeof onTransition !== 'function') throw new Error('Invalid Universe supervisor options');
-  return { ids, root, maxDurationMs, maxConcurrent, pollIntervalMs, resourceRuntime, signal, onTransition };
+  return { ids, root, maxDurationMs, maxConcurrent, pollIntervalMs, resourceRuntime, signal, onTransition,
+    deliveryPlan: deliveryPlan === undefined ? undefined : validateUniverseCampaignDeliveryPlan(deliveryPlan, ids) };
 }
 
 function eligible(report: UniverseCampaignReadiness): boolean {
@@ -93,6 +100,31 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
   const startedAt = new Date().toISOString();
   const deadlineAt = new Date(Date.parse(startedAt) + config.maxDurationMs).toISOString();
   const deadline = performance.now() + config.maxDurationMs;
+  const deliveryTargets = new Map(config.deliveryPlan?.deliveries.map((row) => [row.campaignId, row]));
+  const deliveryPins = new Map<string, UniverseCampaignSummary>();
+  const targetRefs = new Set<string>();
+  // Resolve every declared base before any observer callback, model request or
+  // campaign dispatch. No plan means no extra reads and unchanged queue behavior.
+  for (const [id, delivery] of deliveryTargets) {
+    if (config.signal?.aborted || performance.now() >= deadline) break;
+    const preflight = preflightUniverseCampaignDelivery(id, { root: config.root, delivery });
+    const target = canonical([preflight.repo, delivery.branch]);
+    if (targetRefs.has(target)) throw new Error('Campaign delivery plan repeats a repository branch');
+    targetRefs.add(target); deliveryPins.set(id, preflight.campaign);
+    // Let pending SIGINT/abort notifications run between synchronous source reads.
+    await new Promise<void>((resolveYield) => setImmediate(resolveYield));
+  }
+  if (config.deliveryPlan && (config.signal?.aborted || performance.now() >= deadline)) {
+    const cancelled = config.signal?.aborted ?? false;
+    return { schemaVersion: 1, executionScope: 'foreground-explicit-queue', status: cancelled ? 'cancelled' : 'timed-out',
+      startedAt, deadlineAt, finishedAt: new Date().toISOString(), transitions: [],
+      outcomes: config.ids.map((campaignId) => ({ campaignId, status: 'cancelled', attempted: false, observedState: null,
+        reasonCode: cancelled ? 'caller-cancelled' : 'invocation-duration-exhausted',
+        ...(deliveryTargets.has(campaignId) ? { delivery: { status: 'withheld' as const, reason: 'cancelled' as const } } : {}) })) };
+  }
+  const deliveryOnly = (id: string, report: UniverseCampaignReadiness): boolean => deliveryTargets.has(id) &&
+    report.sourceState === 'healthy' && report.expectedIdentity !== null && report.recordsDigest !== null && report.observedState === 'completed';
+  const eligibleForQueue = (id: string, report: UniverseCampaignReadiness): boolean => eligible(report) || deliveryOnly(id, report);
   const controller = new AbortController();
   let stop: 'cancelled' | 'timed-out' | 'failed' | null = null;
   let callbackFailed = false;
@@ -115,7 +147,8 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
   const mark = (id: string, status: UniverseCampaignSupervisorStatus, reasonCode: UniverseCampaignSupervisorReason,
     report?: UniverseCampaignReadiness, attempted = outcomes.get(id)?.attempted ?? false): void => {
     const previous = outcomes.get(id);
-    outcomes.set(id, { campaignId: id, status, reasonCode, attempted, observedState: report?.observedState ?? previous?.observedState ?? null });
+    outcomes.set(id, { campaignId: id, status, reasonCode, attempted, observedState: report?.observedState ?? previous?.observedState ?? null,
+      ...(previous?.delivery ? { delivery: previous.delivery } : {}) });
     if (previous?.status === status && previous.reasonCode === reasonCode) return;
     const event: UniverseCampaignSupervisorTransition = { sequence: transitions.length + 1, at: new Date().toISOString(), campaignId: id, status, reasonCode };
     transitions.push(event);
@@ -136,12 +169,32 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
     try { return readUniverseCampaignReadiness(id, { root: config.root }); } catch { return null; }
   };
   config.signal?.addEventListener('abort', cancel, { once: true });
-  const timer = setTimeout(expire, config.maxDurationMs);
+  const timer = setTimeout(expire, Math.max(0, deadline - performance.now()));
+  const deliver = async (id: string, report: UniverseCampaignReadiness): Promise<void> => {
+    if (stopping()) { mark(id, 'cancelled', stopReason(), report); return; }
+    mark(id, 'delivering', 'delivery-requested', report);
+    if (stopping()) { mark(id, 'cancelled', stopReason(), report); return; }
+    try {
+      const result = await deliverCompletedUniverseCampaign(id, { root: config.root, signal: controller.signal,
+        delivery: deliveryTargets.get(id)!, deadlineMonotonicMs: deadline,
+        expectedIdentity: { ...report.expectedIdentity!, recordsDigest: report.recordsDigest! } });
+      stopping(); // A synchronous receipt verification may outlast the timer without yielding.
+      outcomes.get(id)!.delivery = result.delivery;
+      if (result.delivery.status === 'delivered') mark(id, 'completed', 'delivery-completed', report);
+      else if (result.delivery.reason === 'cancelled') mark(id, 'cancelled', stopReason(), report);
+      else mark(id, result.delivery.reason === 'no-strict-improvement' ? 'completed' : 'held', 'delivery-withheld', report);
+    } catch {
+      if (stopping()) { mark(id, 'cancelled', stopReason(), report); return; }
+      outcomes.get(id)!.delivery = { status: 'failed', reason: 'delivery-failed' };
+      mark(id, 'failed', 'delivery-failed', report);
+    }
+  };
   const launch = (id: string, admitted: UniverseCampaignReadiness): void => {
     pending.delete(id);
     activeUniverses.add(admitted.universeId!);
     const work = Promise.resolve().then(async () => {
       if (stopping()) { mark(id, 'cancelled', stopReason()); return; }
+      if (deliveryOnly(id, admitted)) { await deliver(id, admitted); return; }
       mark(id, 'running', 'dispatched', admitted);
       if (stopping()) { mark(id, 'cancelled', stopReason()); return; }
       outcomes.get(id)!.attempted = true;
@@ -159,7 +212,8 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
           report.expectedIdentity.summaryDigest !== digest(canonical(result))) {
           mark(id, 'unavailable', 'evidence-changed', report); return;
         }
-        mark(id, recorded(report), report.reasonCode, report);
+        if (deliveryTargets.has(id) && report.observedState === 'completed') await deliver(id, report);
+        else mark(id, recorded(report), report.reasonCode, report);
       } catch {
         const report = observe(id);
         mark(id, 'failed', 'runner-failed', report ?? undefined);
@@ -172,14 +226,17 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
     // campaign. Subsequent queue polls can reject, but never renew, these pins.
     for (const id of config.ids) {
       const report = observe(id);
-      if (report) initial.set(id, report);
+      const pin = deliveryPins.get(id);
+      if (report && (!pin || report.expectedIdentity?.universeId === pin.definition.universeId &&
+          report.expectedIdentity.definitionDigest === pin.definitionDigest && report.expectedIdentity.manifestDigest === pin.manifestDigest &&
+          report.expectedIdentity.comparatorDigest === pin.comparatorDigest)) initial.set(id, report);
     }
     for (const id of config.ids) {
       const report = initial.get(id);
       if (stopping()) mark(id, 'cancelled', stopReason(), report);
       else if (!report) mark(id, 'unavailable', 'evidence-degraded');
-      else if (!eligible(report)) mark(id, recorded(report), report.reasonCode, report);
-      else if (report.resourceRuntimeRequired && config.resourceRuntime === undefined) mark(id, 'held', 'resource-runtime-required', report);
+      else if (!eligibleForQueue(id, report)) mark(id, recorded(report), report.reasonCode, report);
+      else if (!deliveryOnly(id, report) && report.resourceRuntimeRequired && config.resourceRuntime === undefined) mark(id, 'held', 'resource-runtime-required', report);
       else {
         pending.add(id);
         mark(id, report.disposition === 'owned' ? 'waiting' : 'queued',
@@ -198,7 +255,7 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
           if (!unchanged(initial.get(id)!, report)) {
             pending.delete(id); mark(id, 'held', 'evidence-changed', report); continue;
           }
-          if (!eligible(report)) { pending.delete(id); mark(id, recorded(report), report.reasonCode, report); continue; }
+          if (!eligibleForQueue(id, report)) { pending.delete(id); mark(id, recorded(report), report.reasonCode, report); continue; }
           if (report.disposition === 'owned' || activeUniverses.has(report.universeId!)) {
             mark(id, 'waiting', 'waiting-for-universe-owner', report); continue;
           }
@@ -236,5 +293,10 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
   return { schemaVersion: 1, executionScope: 'foreground-explicit-queue', status: stop ??
     (config.ids.every((id) => outcomes.get(id)?.status === 'completed') ? 'completed' : 'incomplete'),
     startedAt, deadlineAt, finishedAt: new Date().toISOString(),
-    outcomes: config.ids.map((id) => outcomes.get(id)!), transitions };
+    outcomes: config.ids.map((id) => {
+      const outcome = outcomes.get(id)!;
+      return deliveryTargets.has(id) && !outcome.delivery ? { ...outcome, delivery: { status: 'withheld' as const,
+        reason: outcome.status === 'cancelled' ? 'cancelled' as const :
+          outcome.observedState === null || outcome.observedState === 'completed' ? 'not-attempted' as const : 'campaign-not-completed' as const } } : outcome;
+    }), transitions };
 }
