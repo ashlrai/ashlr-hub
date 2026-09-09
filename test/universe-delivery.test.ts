@@ -9,6 +9,8 @@ import { artifactDigest, copyArtifact, freezeArtifact } from '../src/core/univer
 import { appendRecord, manifestRecord, newRun, projectUniverse, selectWinners } from '../src/core/universe/store.js';
 import { withUniverseExecution } from '../src/core/universe/execution.js';
 import { deliveryGit } from '../src/core/universe/delivery-git.js';
+import { readUniverseIntegrationPlan } from '../src/core/universe/integration-plan.js';
+import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -40,7 +42,7 @@ function fixture() {
     variants: [{ id: 'repair', niche: 'quality', hypothesis: 'Improve the source', command: [process.execPath, '-e', ''] }] };
   initUniverse(manifest, { root });
   const directory = join(root, 'universes', manifest.id);
-  function accept(score = 1, change = true): UniverseTrial {
+  function accept(score = 1, change = true, edit?: (path: string) => void): UniverseTrial {
     const overview = projectUniverse(directory);
     const record = manifestRecord(directory);
     const run = newRun(record, overview.runs.length + 1);
@@ -56,6 +58,7 @@ function fixture() {
       writeFileSync(join(path, 'nested', 'script.sh'), '#!/bin/sh\nexit 0\n', { mode: 0o700 });
       writeFileSync(join(path, 'binary.bin'), Buffer.from([0, 255, 128, 10]));
     }
+    edit?.(path);
     const trial: UniverseTrial = { id: trialId, variantId: 'repair', niche: 'quality', parentTrialId: overview.elites[0]?.trialId ?? null,
       status: 'passed', score, metrics: {}, artifact: { path, digest: artifactDigest(path), revision: manifest.seed.revision },
       durationMs: 1, delta: null, selected: false };
@@ -70,6 +73,50 @@ function fixture() {
 }
 
 describe('Universe local branch delivery', () => {
+  it('plans exact disjoint delivered trees without writing objects, refs, records, index or checkout', async () => {
+    const f = fixture();
+    const a = f.accept(1, false, (path) => writeFileSync(join(path, 'a.txt'), 'first change\n'));
+    const first = await deliverUniverseElite('fixture', { root: f.root, trialId: a.id, branch: 'codex/input-a' });
+    const b = f.accept(2, false, (path) => writeFileSync(join(path, 'b.txt'), 'second change\n'));
+    const second = await deliverUniverseElite('fixture', { root: f.root, trialId: b.id, branch: 'codex/input-b' });
+    const source = (receipt: UniverseDeliveryReceipt) => ({ universeId: receipt.universeId, deliveryId: receipt.id,
+      commit: receipt.commit, tree: receipt.tree });
+    const definition = { schemaVersion: 1, id: 'combined', target: { repo: f.repo,
+      baseCommit: f.manifest.seed.revision, allowedPaths: ['a.txt', 'b.txt'] }, sources: [source(first), source(second)] };
+    writeFileSync(join(f.repo, 'value.txt'), 'user staged\n'); f.git(['add', 'value.txt']);
+    writeFileSync(join(f.repo, 'value.txt'), 'user unstaged\n');
+    const inventory = (path: string): unknown => {
+      const stat = lstatSync(path);
+      return stat.isDirectory() ? readdirSync(path).sort().map((name) => [name, inventory(join(path, name))])
+        : [stat.mode, readFileSync(path).toString('base64')];
+    };
+    const before = inventory(f.root);
+    const plan = readUniverseIntegrationPlan(definition, { root: f.root });
+    expect(plan).toMatchObject({ sourceState: 'healthy', compositionReady: true, authority: 'observation-only', conflicts: [] });
+    expect(plan.entries.map((entry) => entry.path)).toEqual(['a.txt', 'b.txt']);
+    expect(plan.compositionDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(readUniverseIntegrationPlan(definition, { root: f.root })).toEqual(plan);
+    expect(inventory(f.root)).toEqual(before);
+    f.git(['update-ref', `refs/heads/${second.branch}`, f.manifest.seed.revision]);
+    expect(readUniverseIntegrationPlan(definition, { root: f.root })).toMatchObject({ compositionReady: false, sourceState: 'degraded', compositionDigest: null });
+  });
+
+  it('holds divergent same-file deliveries and out-of-scope changes without combining either', async () => {
+    const f = fixture();
+    const a = f.accept(1, false, (path) => writeFileSync(join(path, 'value.txt'), 'first\n'));
+    const first = await deliverUniverseElite('fixture', { root: f.root, trialId: a.id, branch: 'codex/first' });
+    const b = f.accept(2, false, (path) => writeFileSync(join(path, 'value.txt'), 'second\n'));
+    const second = await deliverUniverseElite('fixture', { root: f.root, trialId: b.id, branch: 'codex/second' });
+    const definition = { schemaVersion: 1, id: 'conflicted', target: { repo: f.repo,
+      baseCommit: f.manifest.seed.revision, allowedPaths: ['value.txt'] }, sources: [first, second].map((receipt) => ({
+        universeId: receipt.universeId, deliveryId: receipt.id, commit: receipt.commit, tree: receipt.tree })) };
+    const plan = readUniverseIntegrationPlan(definition, { root: f.root });
+    expect(plan.sourceState).toBe('healthy'); expect(plan.compositionReady).toBe(false);
+    expect(plan.conflicts.length).toBeGreaterThan(0); expect(plan.compositionDigest).toBeNull();
+    const scoped = readUniverseIntegrationPlan({ ...definition, target: { ...definition.target, allowedPaths: ['unrelated.txt'] } }, { root: f.root });
+    expect(scoped.compositionReady).toBe(false); expect(scoped.compositionDigest).toBeNull();
+  });
+
   it('delivers exact bytes, executable modes, additions and deletions while preserving dirty checkout and index', async () => {
     const f = fixture(); const trial = f.accept();
     writeFileSync(join(f.repo, 'value.txt'), 'staged user work\n'); f.git(['add', 'value.txt']);
