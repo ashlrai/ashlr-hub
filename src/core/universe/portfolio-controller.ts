@@ -1,9 +1,12 @@
 import { lstatSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { canonical, defaultUniverseRoot, digest, inspectPrivateDirectory, privateDirectory } from './artifacts.js';
 import { readUniverseCampaign } from './campaign-store.js';
+import { readCompletedUniverseCampaignDispatch } from './campaign-dispatch.js';
+import { readCompletedCampaignDelivery } from './campaign-delivery-recovery.js';
 import { runUniverseCampaign } from './campaign.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadiness } from './campaign-readiness.js';
 import { deliverCompletedUniverseCampaign, preflightUniverseCampaignDelivery, validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
@@ -93,8 +96,8 @@ export function readUniversePortfolioController(id: string, options: UniverseSto
 
 /**
  * Checkpointed explicit DAG, not a resident daemon. An unresolved dispatch consumes
- * its concurrency slot and can never be reissued by this controller, even when a
- * later campaign snapshot says completed. Source state cannot establish ownership.
+ * its concurrency slot and can never be reissued by this controller. New dispatch
+ * identities permit receipt-only recovery; an arbitrary later completion does not.
  */
 export async function runUniversePortfolioController(input: unknown, options: UniversePortfolioRunOptions = {}): Promise<UniversePortfolioControllerReport> {
   const startedAt = new Date().toISOString();
@@ -188,19 +191,50 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     deadlineMonotonic = startedMonotonic + Math.max(0, Date.parse(enrollment.deadlineAt) - Date.parse(startedAt));
     const initialReport = inspect(definition.id, events, root, new Date().toISOString());
     if (initialReport.sourceState !== 'healthy' || initialReport.status === 'completed') return initialReport;
-    if (stopping()) return { ...initialReport, status: stopped! };
+    // Recovery observes already completed effects, including after the original
+    // deadline. It cannot launch workers, deliver branches, or renew admission.
+    for (const [campaignId, intent] of initial.intentEvents) {
+      if (initial.states.get(campaignId)?.state !== 'in-flight' || !intent.dispatchId) continue;
+      const pin = initial.pins.get(campaignId)!;
+      if (pin.dispatch !== 'campaign') continue;
+      if (signal?.aborted) { cancel(); break; }
+      owned();
+      const proof = readCompletedUniverseCampaignDispatch(campaignId, { dispatchId: intent.dispatchId, intentAt: intent.at,
+        universeId: pin.universeId, definitionDigest: pin.definitionDigest, manifestDigest: pin.manifestDigest,
+        comparatorDigest: pin.comparatorDigest, recordsDigest: pin.recordsDigest }, { root });
+      if (!proof) continue;
+      const target = deliveryPlan?.deliveries.find((row) => row.campaignId === campaignId);
+      const delivery = target ? readCompletedCampaignDelivery(proof.campaign, target, { root }) : null;
+      if (target && !delivery) { errors.push(`${campaignId}:reconciliation-delivery-unavailable`); continue; }
+      const current = readUniverseCampaignReadiness(campaignId, { root });
+      if (!matches(pin, current) || current.recordsDigest !== proof.recordsDigest ||
+          current.expectedIdentity!.summaryDigest !== digest(canonical(proof.campaign))) continue;
+      if (signal?.aborted) { cancel(); break; }
+      try {
+        append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: proof.recordsDigest,
+          outcome: { campaignId, state: 'completed', attempted: true, reasonCode: 'completed-dispatch-reconciled',
+            campaignDigest: current.expectedIdentity!.summaryDigest, deliveryDigest: delivery ? digest(canonical(delivery)) : null } });
+      } catch { halt('unavailable', 'controller-reconciliation-persistence-failed'); break; }
+    }
+    const recoveredReport = inspect(definition.id, events, root, new Date().toISOString());
+    if (stopped || recoveredReport.sourceState !== 'healthy' || recoveredReport.status === 'completed') {
+      return { ...recoveredReport, ...(stopped ? { status: stopped } : {}), reasons: [...recoveredReport.reasons, ...errors] };
+    }
+    if (stopping()) return { ...recoveredReport, status: stopped!, reasons: [...recoveredReport.reasons, ...errors] };
     append({ kind: 'observed', at: new Date().toISOString() });
     timer = setTimeout(() => halt('timed-out'), Math.max(1, deadlineMonotonic - performance.now()));
     poll = setInterval(stopping, 250);
     const plan = readUniversePortfolioPlan(definition, { root });
     const targets = new Map(deliveryPlan?.deliveries.map((row) => [row.campaignId, row]));
     const launch = (campaignId: string, admitted: UniverseCampaignReadiness): void => {
-      append({ kind: 'intent', at: new Date().toISOString(), campaignId });
       const pin = initial.pins.get(campaignId)!;
+      const dispatchId = pin.dispatch === 'campaign' ? randomUUID() : undefined;
+      append({ kind: 'intent', at: new Date().toISOString(), campaignId, ...(dispatchId ? { dispatchId } : {}) });
       const work = Promise.resolve().then(async () => {
         if (stopping()) return;
         try {
           const result = pin.dispatch === 'campaign' ? await runUniverseCampaign(campaignId, { root, signal: controller.signal,
+            dispatchId,
             ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
             expectedIdentity: { ...admitted.expectedIdentity!, recordsDigest: admitted.recordsDigest! } }) : readUniverseCampaign(campaignId, { root });
           let current = readUniverseCampaignReadiness(campaignId, { root });
@@ -239,7 +273,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           } catch { halt('unavailable', 'controller-settlement-persistence-failed'); }
         } catch {
           // A thrown runner/delivery may have made progress. Leave the durable
-          // intent unresolved; later completion is never adopted as our receipt.
+          // intent unresolved. Only an exact dispatch-linked completed receipt
+          // may close it during a later invocation; workers are never replayed.
           errors.push(`${campaignId}:dispatch-unsettled`);
         }
       }).finally(() => { active.delete(campaignId); });

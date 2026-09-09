@@ -11,6 +11,7 @@ import type { UniverseStoreOptions } from './types.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
+const DISPATCH_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const MAX_EVENTS = 512;
 const MAX_BYTES = 4 * 1024 * 1024;
 const EVENT_BYTES = 4_096;
@@ -69,7 +70,9 @@ function parse(value: unknown): PortfolioControllerEvent | null {
   } else if (value.kind === 'observed') {
     if (!exact(value, shared)) return null;
   } else if (value.kind === 'intent') {
-    if (!exact(value, [...shared, 'campaignId']) || !id(value.campaignId)) return null;
+    const hasDispatch = Object.hasOwn(value, 'dispatchId');
+    if (!exact(value, [...shared, 'campaignId', ...(hasDispatch ? ['dispatchId'] : [])]) || !id(value.campaignId) ||
+        hasDispatch && (typeof value.dispatchId !== 'string' || !DISPATCH_ID.test(value.dispatchId))) return null;
   } else if (value.kind === 'settled') {
     if (!exact(value, [...shared, 'outcome', 'recordsDigest']) || !outcome(value.outcome) || !hash(value.recordsDigest)) return null;
   } else return null;
@@ -117,6 +120,8 @@ export function foldPortfolioController(records: PortfolioControllerEvent[]) {
   const states = new Map<string, UniversePortfolioControllerOutcome>();
   const pins = new Map(first.enrollment.pins.map((item) => [item.campaignId, item]));
   const intents = new Set<string>();
+  const dispatchIds = new Set<string>();
+  const intentEvents = new Map<string, Extract<PortfolioControllerEvent, { kind: 'intent' }>>();
   const settlements = new Map<string, Extract<PortfolioControllerEvent, { kind: 'settled' }>>();
   for (const item of pins.values()) states.set(item.campaignId, { campaignId: item.campaignId, state: item.initialState,
     attempted: false, reasonCode: item.reasonCode, campaignDigest: item.campaignDigest, deliveryDigest: null });
@@ -133,11 +138,14 @@ export function foldPortfolioController(records: PortfolioControllerEvent[]) {
     if (!current || !pinned) throw new Error('Controller event names an unenrolled campaign');
     if (event.kind === 'intent') {
       if (current.state !== 'pending' || intents.has(campaignId) || event.at >= first.enrollment.deadlineAt ||
+          event.dispatchId !== undefined && (pinned.dispatch !== 'campaign' || dispatchIds.has(event.dispatchId)) ||
           [...states.values()].filter((item) => item.state === 'in-flight').length >= first.enrollment.definition.maxParallel ||
           portfolioControllerPrerequisites(first.enrollment, campaignId).some((dependency) => states.get(dependency)?.state !== 'completed')) {
         throw new Error('Controller dispatch intent is not admissible');
       }
       intents.add(campaignId);
+      intentEvents.set(campaignId, event);
+      if (event.dispatchId !== undefined) dispatchIds.add(event.dispatchId);
       states.set(campaignId, { ...current, state: 'in-flight', attempted: pinned.dispatch === 'campaign', reasonCode: 'reconciliation-required' });
     } else {
       if (current.state !== 'in-flight' || settlements.has(campaignId) || event.outcome.attempted !== current.attempted ||
@@ -148,7 +156,7 @@ export function foldPortfolioController(records: PortfolioControllerEvent[]) {
       settlements.set(campaignId, event); states.set(campaignId, event.outcome);
     }
   }
-  return { first, highWaterAt, pins, intents, settlements, states };
+  return { first, highWaterAt, pins, intents, intentEvents, settlements, states };
 }
 
 export function readPortfolioControllerEvents(directory: string): PortfolioControllerEvent[] {

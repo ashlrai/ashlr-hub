@@ -1736,13 +1736,31 @@ Each dispatch has durable intent before the campaign or delivery call. A result
 is recorded only after checking the actual settled campaign evidence and any
 required delivery. On restart, verified recorded completions remain usable and
 never-dispatched independent work can continue within the remaining allowance.
-An intent without a matching settlement remains unresolved and is not dispatched
-again, even if an external observer later sees campaign completion. The campaign
-start record does not yet bind a controller dispatch nonce, so that observation
-cannot establish which call completed. Dependants remain held; independent
-untouched branches may still progress if concurrency capacity remains. An
-unresolved intent retains its `maxParallel` slot rather than assuming its worker
-has stopped.
+New campaign dispatches carry a unique identity in both the controller intent
+and the campaign's start and settlement records. If the campaign completed but
+the controller lost its response or settlement write, repeating `controller run`
+can record that proven completion without running the worker again. Recovery
+requires the original campaign history as an exact prefix, one matching start,
+only the attributed session's steps, and its matching completed settlement.
+An external resume, owner control, changed history, or merely completed-looking
+summary is not sufficient.
+
+If local delivery was planned, its existing receipt must also belong to this
+campaign's measured trial and still match the pinned branch and base. Recovery
+never creates a missing branch or reruns an evaluator. A recovered completion
+can release dependent work only within the original deadline. After expiry, the
+controller can still record proven completion, but cannot start downstream work
+or renew the allowance.
+
+Legacy intents without a dispatch identity, delivery-only intents, incomplete
+sessions and mismatched evidence remain unresolved and are not dispatched again.
+Their dependants remain waiting; independent untouched branches may progress if
+concurrency capacity remains. An unresolved intent retains its `maxParallel`
+slot rather than assuming its worker has stopped. Reconciliation does not refund
+campaign requests, tokens, elapsed time or reservations.
+The new reader accepts legacy records; older builds do not understand the added
+dispatch fields. Keep attributed ledgers intact when changing versions rather
+than deleting identity fields to make an older reader accept them.
 
 Inspect without running or repairing anything:
 
@@ -1764,8 +1782,8 @@ under `<root>/portfolios/<id>/`. Only one invocation owns that controller at a
 time. History is limited to 512 records and 4 MiB, with a 128 KiB canonical
 enrollment limit. Dispatch reserves space for settlement; repeated run
 observations consume history capacity. Exhaustion refuses new work rather than
-discarding checkpoints. SIGINT/SIGTERM and deadline expiry cancel and await owned calls; cleanup
-can extend elapsed time beyond the allowance. No daemon or background restart is
+discarding checkpoints. SIGINT/SIGTERM and deadline expiry cancel and await owned
+calls; cleanup can extend elapsed time beyond the allowance. No daemon or background restart is
 installed. Existing campaign pause and stop controls remain authoritative.
 
 Run exits `0` for completion, `130` for cancellation, `1` for incomplete or

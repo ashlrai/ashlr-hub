@@ -19,10 +19,10 @@ export type CampaignOwner = { pid: number; startRef: string };
 type SettledState = 'paused' | 'stopped' | 'completed' | 'interrupted' | 'failed';
 export type CampaignEventInput =
   { kind: 'created'; definition: UniverseCampaignDefinition; definitionDigest: string; manifestDigest: string; comparatorDigest: string; at: string } |
-  { kind: 'started'; at: string; deadlineAt: string; owner: CampaignOwner } |
+  { kind: 'started'; at: string; deadlineAt: string; owner: CampaignOwner; dispatchId?: string } |
   { kind: 'step'; at: string; ordinal: number; runId: string; generation: number; variantIds: string[]; reservedModelRequests: number } |
   { kind: 'control'; at: string; action: 'pause' | 'stop' } |
-  { kind: 'settled'; at: string; state: SettledState; reason: string };
+  { kind: 'settled'; at: string; state: SettledState; reason: string; dispatchId?: string };
 export type CampaignEvent = CampaignEventInput & { id: string; sequence: number };
 type CreatedEvent = Extract<CampaignEvent, { kind: 'created' }>;
 type StepEvent = Extract<CampaignEvent, { kind: 'step' }>;
@@ -44,6 +44,7 @@ function iso(value: unknown): value is string {
 }
 function identifier(value: unknown): value is string { return typeof value === 'string' && ID.test(value); }
 function hash(value: unknown): value is string { return typeof value === 'string' && HASH.test(value); }
+export function validCampaignDispatchId(value: unknown): value is string { return typeof value === 'string' && UUID.test(value); }
 
 export function validateUniverseCampaignDefinition(value: unknown): UniverseCampaignDefinition {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'universeId', 'budget', 'feedback']) ||
@@ -67,7 +68,8 @@ function parseEvent(value: unknown): CampaignEvent | null {
           value.definitionDigest !== digest(canonical(definition)) || !hash(value.manifestDigest) || !hash(value.comparatorDigest)) return null;
     } catch { return null; }
   } else if (value.kind === 'started') {
-    if (!exact(value, [...shared, 'deadlineAt', 'owner']) || !iso(value.deadlineAt) || !object(value.owner) ||
+    if (!exact(value, [...shared, 'deadlineAt', 'owner', ...(Object.hasOwn(value, 'dispatchId') ? ['dispatchId'] : [])]) ||
+        Object.hasOwn(value, 'dispatchId') && !validCampaignDispatchId(value.dispatchId) || !iso(value.deadlineAt) || !object(value.owner) ||
         !exact(value.owner, ['pid', 'startRef']) || !integer(value.owner.pid, 1, 2 ** 31 - 1) ||
         typeof value.owner.startRef !== 'string' || value.owner.startRef.length < 1 || value.owner.startRef.length > 64) return null;
   } else if (value.kind === 'step') {
@@ -79,7 +81,9 @@ function parseEvent(value: unknown): CampaignEvent | null {
   } else if (value.kind === 'control') {
     if (!exact(value, [...shared, 'action']) || !['pause', 'stop'].includes(String(value.action))) return null;
   } else if (value.kind === 'settled') {
-    if (!exact(value, [...shared, 'state', 'reason']) || !['paused', 'stopped', 'completed', 'interrupted', 'failed'].includes(String(value.state)) ||
+    if (!exact(value, [...shared, 'state', 'reason', ...(Object.hasOwn(value, 'dispatchId') ? ['dispatchId'] : [])]) ||
+        Object.hasOwn(value, 'dispatchId') && !validCampaignDispatchId(value.dispatchId) ||
+        !['paused', 'stopped', 'completed', 'interrupted', 'failed'].includes(String(value.state)) ||
         typeof value.reason !== 'string' || !value.reason.trim() || value.reason.length > 1_024 || value.reason.includes('\0')) return null;
   } else return null;
   return value as unknown as CampaignEvent;
@@ -135,10 +139,15 @@ export function foldCampaignEvents(records: CampaignEvent[]): {
   let finishedAt: string | null = null;
   const steps: StepEvent[] = [];
   let reserved = 0;
+  let activeDispatchId: string | undefined;
+  const dispatches = new Set<string>();
   for (const event of records.slice(1)) {
     if (terminalCampaign(state)) throw new Error('Campaign terminal history cannot be extended');
     if (event.kind === 'started') {
       if (!['ready', 'paused', 'interrupted'].includes(state)) throw new Error('Campaign session started from an invalid state');
+      if (event.dispatchId !== undefined && dispatches.has(event.dispatchId)) throw new Error('Campaign dispatch identity cannot be reused');
+      activeDispatchId = event.dispatchId;
+      if (activeDispatchId !== undefined) dispatches.add(activeDispatchId);
       if (startedAt === null) {
         startedAt = event.at;
         deadlineAt = new Date(Date.parse(event.at) + created.definition.budget.maxDurationMs).toISOString();
@@ -155,9 +164,11 @@ export function foldCampaignEvents(records: CampaignEvent[]): {
       state = event.action === 'stop' ? 'stop-requested' : 'pause-requested';
       reason = event.action === 'stop' ? 'Stop requested by owner' : 'Pause requested by owner';
     } else if (event.kind === 'settled') {
+      if (event.dispatchId !== undefined && event.dispatchId !== activeDispatchId) throw new Error('Campaign settlement dispatch identity does not match its session');
       if ((state === 'stop-requested' && event.state !== 'stopped') ||
           (state === 'pause-requested' && event.state !== 'paused' && event.state !== 'stopped')) throw new Error('Campaign settlement ignored a durable control request');
       state = event.state; reason = event.reason; owner = null; finishedAt = event.at;
+      activeDispatchId = undefined;
     } else throw new Error('Campaign definition cannot be replaced');
   }
   return { created, state, reason, owner, startedAt, deadlineAt, finishedAt, steps };
