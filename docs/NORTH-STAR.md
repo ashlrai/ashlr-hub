@@ -106,6 +106,13 @@ These are planned capabilities, not activation instructions. The current
 orders campaigns and can require local branch delivery, but does not import those
 artifacts into dependent seeds or persist a portfolio controller.
 
+The first milestone now has two executable local primitives:
+[checked composition planning](ASHLR-UNIVERSE.md#inspect-a-combined-delivery-plan)
+and [fresh combined evaluation](ASHLR-UNIVERSE.md#evaluate-a-pinned-combined-candidate).
+Evaluation retains the combined artifact and fixed-suite measurements without
+rerunning a settled request. Publishing that result as a candidate branch and
+handing it to a dependent Universe are still unfinished parts of this milestone.
+
 1. **Accept the combined product.** Define a one-repository integration contract
    with pinned upstream delivery commits/trees, base revision, permitted paths,
    fixed acceptance suite and target candidate branch. One integration owner

@@ -93,6 +93,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-local-model-refresh.test.ts', // test-owned loopback inventory, refusal and cancellation
   'test/universe-core.test.ts', // real Git snapshots and confined experiment subprocesses
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
+  'test/universe-delivery-git-entries.test.ts', // bounded real Git blob loading and read-only inventory verification
+  'test/universe-integration-evaluate.test.ts', // real private candidate artifacts with injected evaluation and ledger faults
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review
   'test/universe-graph-reader.test.ts', // targeted real Git/private-ledger graph observation
   'test/local-pack-universe-smoke.test.ts', // installed SDK/CLI contract with real Git fixtures

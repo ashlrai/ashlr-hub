@@ -1,13 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { buildSandboxLauncher, escapeSbplPath } from '../sandbox/confine.js';
 import { runVerifySubprocessAsync, type VerifySubprocessResult } from '../run/verify-commands.js';
 import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, verifiedProcessStartRef } from '../fleet/local-store-lock.js';
 import type { LocalStoreLock } from '../fleet/local-store-lock.js';
-import { artifactDigest, canonical, copyArtifact, digest, ensureUniverseRoot, executable, freezeArtifact, privateDirectory } from './artifacts.js';
+import { artifactDigest, canonical, copyArtifact, ensureUniverseRoot, executable, freezeArtifact, privateDirectory } from './artifacts.js';
 import { appendRecord, assertComparatorUnchanged, manifestRecord, newRun, parseEvaluation,
   projectUniverse, readRecords, universePath, type ManifestRecord, type UniverseRecord } from './store.js';
 import { scheduledVariants, selectWinners } from './store.js';
@@ -22,35 +20,10 @@ import { buildUniverseFileOperationsContext, fileOperationsContextDigest,
 import type { UniverseFileOperationsContext } from './file-operations-types.js';
 import { assertUniverseExecution, withUniverseExecution } from './execution.js';
 import { assertRunEvidenceBudget, assertTrialEvidenceBudget, preflightTrialEvidenceBudget } from './evidence-size.js';
+import { confinedUniverseArgv, runFixedUniverseEvaluator } from './fixed-evaluator.js';
 
 function shortError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 1_024) || 'Experiment failed';
-}
-
-/** Add narrow write permissions to the existing OS confinement primitive. */
-function confinedArgv(command: string[], writable: string, scratch: string, readable: string[], root: string): string[] {
-  if (process.platform !== 'darwin') throw new Error('Universe local execution currently requires macOS sandbox-exec; other platforms have no verified Universe confinement profile');
-  const env = { HOME: scratch, TMPDIR: scratch };
-  const launcher = buildSandboxLauncher({ mode: 'os', networkEgress: false, onUnsupported: 'fail',
-    readAllowed: [...readable, dirname(command[0]!)] }, { worktree: writable, home: homedir(), env });
-  if (!launcher) throw new Error('Universe experiments require OS confinement');
-  if (process.platform === 'darwin') {
-    const subpath = (path: string): string => `(subpath "${escapeSbplPath(resolve(path))}")`;
-    const ancestors = new Set<string>();
-    for (const path of [writable, scratch, ...readable, command[0]!]) {
-      for (let parent = dirname(path); ; parent = dirname(parent)) {
-        ancestors.add(parent);
-        if (dirname(parent) === parent) break;
-      }
-    }
-    const profile = `${launcher.prefixArgs[1]}\n` +
-      `(deny file-read* ${subpath(homedir())} ${subpath(root)})\n` +
-      `(allow file-read* ${[writable, scratch, ...readable, dirname(command[0]!)].map(subpath).join(' ')})\n` +
-      `(allow file-read-metadata ${[...ancestors].map((path) => `(literal "${escapeSbplPath(path)}")`).join(' ')})\n` +
-      `(deny file-write*)\n(allow file-write* ${subpath(writable)} ${subpath(scratch)} (literal "/dev/null"))\n`;
-    return ['/usr/bin/sandbox-exec', '-p', profile, ...command];
-  }
-  throw new Error('Universe experiments require macOS sandbox-exec');
 }
 
 function commandResultError(result: VerifySubprocessResult, role: string): string | undefined {
@@ -180,7 +153,7 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       }
     } else {
       const worker = executable(variant.command, candidate);
-      const result = await runVerifySubprocessAsync(confinedArgv(worker, candidate, workerScratch, [], root), {
+      const result = await runVerifySubprocessAsync(confinedUniverseArgv(worker, candidate, workerScratch, [], root), {
         cwd: candidate, env: phaseEnvironment(record, run.generation, candidate, workerScratch, parent),
         timeoutMs: remaining(), signal,
       });
@@ -207,14 +180,9 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     trial.artifact = artifact;
     assertComparatorUnchanged(record);
     if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before evaluator'; return trial; }
-    const evaluator = record.evaluationCommand;
-    if (digest(readFileSync(evaluator[0]!)) !== record.evaluationExecutableDigest) throw new Error('Evaluator executable changed');
-    const evaluation = await runVerifySubprocessAsync(
-      confinedArgv(evaluator, evaluatorScratch, evaluatorScratch, [record.seedArtifact.path, archivePath], root), {
-        cwd: record.seedArtifact.path,
-        env: phaseEnvironment(record, run.generation, archivePath, evaluatorScratch, parent),
-        timeoutMs: Math.max(1, Math.min(record.manifest.evaluation.timeoutMs, remaining())), signal,
-      });
+    const evaluation = await runFixedUniverseEvaluator(record, root, archivePath, snapshotDigest, evaluatorScratch,
+      Math.max(1, Math.min(record.manifest.evaluation.timeoutMs, remaining())), signal,
+      phaseEnvironment(record, run.generation, archivePath, evaluatorScratch, parent));
     const evaluationError = commandResultError(evaluation, 'Evaluator');
     if (evaluationError) {
       trial.error = evaluationError;
@@ -223,8 +191,6 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       if (diagnostic) trial.diagnostics = [diagnostic];
       return trial;
     }
-    assertComparatorUnchanged(record);
-    if (artifactDigest(archivePath) !== snapshotDigest) throw new Error('Scored artifact changed during evaluation');
     let measurement: ReturnType<typeof parseEvaluation>;
     try {
       measurement = parseEvaluation(evaluation.stdout);

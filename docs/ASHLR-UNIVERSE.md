@@ -1327,8 +1327,80 @@ invalid arguments or manifest.
 
 The SDK exposes `validateUniverseIntegrationDefinition(input)` for strict pure
 schema validation and `readUniverseIntegrationPlan(input, { root })` for checked
-local inspection. Combined materialization, fresh fixed-suite evaluation and
-durable candidate publication remain a separate implementation milestone.
+local inspection. Combined materialization and fresh fixed-suite evaluation use
+the separate operation below. Candidate branch publication remains a later milestone.
+
+### Evaluate a pinned combined candidate
+
+`integration evaluate` performs local writes and executes the selected Universe's
+fixed evaluator. It does **not** execute generation variants, contact models,
+change campaign budgets, select an elite, publish Git objects/refs, or deploy.
+Like existing Universe evaluation, it requires macOS with `sandbox-exec`.
+
+The evaluation request is separate from the read-only integration definition:
+
+- `schemaVersion`: `1`.
+- `id`: an explicit bounded request identifier.
+- `integration`: the complete integration definition described above.
+- `expectedCompositionDigest`: the non-null digest from a verified plan.
+- `acceptance`: the selected `universeId`, `manifestDigest` and `comparatorDigest`.
+- `maxDurationMs`: an allowance for source checks, materialization and one
+  evaluator attempt, up to 120,000 ms. The evaluator's own pinned timeout also applies.
+
+Use a healthy, idle acceptance Universe registered against the same repository
+and base as the integration. Its frozen seed and evaluator identities are
+independent of edits in the combined candidate. Replacing those identities or
+changing a source receipt requires a new inspected request, not silent rebinding.
+Read `manifestDigest` and `comparatorDigest` from that Universe's summary in
+`universe status <id> --root /absolute/private/universe --json`; use the
+`compositionDigest` returned by `integration plan` for the exact integration.
+
+Save the complete request in a private `0600` JSON file, then explicitly run:
+
+```sh
+node bin/ashlr universe integration evaluate \
+  --manifest /absolute/private/integration-evaluation.json \
+  --root /absolute/private/universe --json
+```
+
+The operation holds the acceptance Universe's execution lease, records intent
+before candidate/evaluator work, loads pinned Git blobs without checkout hooks
+or filters, retains a frozen artifact, and invokes the shared confined evaluator.
+The candidate and fixed seed are read-only to the evaluator; only its own scratch
+is writable and network access is denied. Source composition, comparator and
+artifact identity are checked around evaluation. Existing campaign/trial history
+does not gain synthetic runs or selection results.
+
+Results distinguish `passed`, `rejected`, `failed`, `timed-out` and `cancelled`.
+Measured passes and rejections bind the request, acceptance and composition
+identities to the retained artifact digest, timestamps and bounded measurements.
+Failures, timeouts and cancellations have no score or accepted artifact field.
+Raw evaluator output is
+not forwarded. A `passed` result means this fixed local suite passed on the
+combined bytes; it is not proof of strict improvement, customer acceptance or
+publication. A rejected combined candidate remains useful evidence even when
+its upstream deliveries individually passed their own suites.
+
+An identical settled request replays only after its retained artifact and pins
+are verified; it does not rerun the evaluator. Reusing an ID for a different
+request is rejected. An unfinished intent or unconfirmed evaluator settlement
+holds further evaluation in that acceptance Universe, including new IDs. Do not
+delete receipts or change IDs to bypass uncertain ownership. Recovery of those
+unfinished attempts is not automated by this operation. Cancellation awaits
+owned-process settlement; cleanup can exceed the requested deadline. This is
+not a guarantee about processes that escape their original process group.
+
+Each acceptance Universe admits at most 128 evaluation attempts in this bounded
+ledger, with a 32 MiB evidence limit. Space for both intent and the maximum
+result is checked before execution. These limits apply to evidence records,
+not the separate artifact and evaluator-scratch directories; this operation does
+not perform automatic retention cleanup. CLI exit codes are `0` for a passing
+result, `1` for rejection/failure/timeout/unavailable evidence, `130` for a settled
+cancellation, and `2` for invalid arguments or a malformed private manifest.
+
+The SDK exports `validateUniverseIntegrationEvaluationRequest(request)` and
+`evaluateUniverseIntegration(request, { root, signal })`. Account reserves,
+resource allocation and background fleet activation are unchanged.
 
 ## Coordinate campaigns with a dependency graph
 

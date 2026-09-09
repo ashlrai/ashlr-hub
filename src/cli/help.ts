@@ -87,6 +87,12 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniverseIntegrationPlan',
   },
   {
+    usage: 'ashlr universe integration evaluate --manifest <private-absolute.json> [--root <absolute>] --json',
+    description: 'Materialize an explicitly pinned composition and run one fixed local evaluator under the acceptance Universe execution lease. Retains private intent, artifact and result; no models, elite selection, Git publication or deployment.',
+    safety: 'append',
+    jsonShape: 'UniverseIntegrationEvaluationResult',
+  },
+  {
     usage: 'ashlr universe portfolio run --manifest <file.json> [--root <path>] [--resource-runtime <private-absolute.json>] [--delivery-plan <private-absolute.json>] --json',
     description: 'Run declared campaign dependencies with optional resource workers and explicit local Git delivery prerequisites; preserve shared pool limits and campaign budgets. Foreground only; no daemon, artifact transfer, merge, or deployment.',
     safety: 'append',
@@ -472,6 +478,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'universe compare <baseline> <challenger>', desc: 'Compare explicit campaign outcomes and resource coverage; read-only local evidence, not production acceptance.', topic: 'autonomy' },
   { cmd: 'universe portfolio <plan|run> --manifest <file.json>', desc: 'Plan or run explicit campaign dependencies with foreground invocation bounds; completed campaigns are not accepted artifacts.', topic: 'autonomy' },
   { cmd: 'universe integration plan --manifest <private-absolute.json>', desc: 'Read-only composition of pinned local deliveries: inspect exact-path overlays and conflicts, without writing Git or claiming combined acceptance.', topic: 'autonomy' },
+  { cmd: 'universe integration evaluate --manifest <private-absolute.json>', desc: 'Evaluate one pinned combined candidate locally; durable private evidence and confirmed-settlement replay, no model generation or Git publication.', topic: 'autonomy' },
   { cmd: 'universe campaign <init|status|run|resume|pause|stop>', desc: 'Register, inspect, execute or request control of bounded campaigns; run/resume can pair --deliver-branch with --deliver-base for local-only delivery.', topic: 'autonomy' },
   { cmd: 'universe campaign check <id> --root <absolute> [--json]', desc: 'Read recorded recovery evidence only; exit 0 can include held or terminal snapshots and never grants permission to resume.', topic: 'autonomy' },
   { cmd: 'universe resources check --resource-runtime <private-absolute.json> [--json]', desc: 'Check explicit local resource configuration without provider contact; validity is not authentication, quota or campaign admission.', topic: 'autonomy' },

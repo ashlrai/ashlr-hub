@@ -11,6 +11,7 @@ import { withUniverseExecution } from '../src/core/universe/execution.js';
 import { deliveryGit } from '../src/core/universe/delivery-git.js';
 import { readUniverseIntegrationPlan } from '../src/core/universe/integration-plan.js';
 import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
+import { evaluateUniverseIntegration } from '../src/core/universe/integration-evaluate.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -22,7 +23,7 @@ afterEach(() => {
   }
   for (const root of roots.splice(0)) { writable(root); rmSync(root, { recursive: true, force: true }); }
 });
-function fixture() {
+function fixture(evaluationScript = 'console.log(JSON.stringify({passed:true,score:1}))\n') {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'universe-delivery-')));
   roots.push(root);
   const repo = join(root, 'repo');
@@ -31,7 +32,7 @@ function fixture() {
     { encoding: 'utf8', env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', LC_ALL: 'C' } }).trim();
   writeFileSync(join(repo, 'value.txt'), 'seed\n');
   writeFileSync(join(repo, 'removed.txt'), 'remove me\n');
-  writeFileSync(join(repo, 'eval.mjs'), 'console.log(JSON.stringify({passed:true,score:1}))\n');
+  writeFileSync(join(repo, 'eval.mjs'), evaluationScript);
   writeFileSync(join(repo, '.gitattributes'), '*.txt filter=delivery-hostile\n');
   git(['init', '-q']); git(['add', '.']);
   git(['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'seed']);
@@ -71,6 +72,87 @@ function fixture() {
   }
   return { root, repo, git, manifest, directory, accept };
 }
+
+describe.runIf(process.platform === 'darwin')('Universe combined fixed evaluation', () => {
+  async function combined(a: number, b: number) {
+    const f = fixture(`import {appendFileSync,readFileSync} from 'node:fs'; import {join} from 'node:path';
+appendFileSync(join(process.env.HOME,'invocations'),'evaluated\\n');
+const root=process.env.ASHLR_UNIVERSE_CANDIDATE;
+const a=Number(readFileSync(join(root,'a.txt'),'utf8'));
+const b=Number(readFileSync(join(root,'b.txt'),'utf8'));
+console.log(JSON.stringify({passed:a+b<=3,score:a+b,metrics:{a,b}}));\n`);
+    const firstTrial = f.accept(1, false, (path) => writeFileSync(join(path, 'a.txt'), String(a)));
+    const first = await deliverUniverseElite('fixture', { root: f.root, trialId: firstTrial.id, branch: 'codex/evaluate-a' });
+    const secondTrial = f.accept(2, false, (path) => writeFileSync(join(path, 'b.txt'), String(b)));
+    const second = await deliverUniverseElite('fixture', { root: f.root, trialId: secondTrial.id, branch: 'codex/evaluate-b' });
+    const integration = { schemaVersion: 1 as const, id: 'combined-evaluation', target: { repo: f.repo,
+      baseCommit: f.manifest.seed.revision, allowedPaths: ['a.txt', 'b.txt'] }, sources: [first, second].map((receipt) => ({
+        universeId: receipt.universeId, deliveryId: receipt.id, commit: receipt.commit, tree: receipt.tree })) };
+    const plan = readUniverseIntegrationPlan(integration, { root: f.root });
+    const record = manifestRecord(f.directory);
+    const request = { schemaVersion: 1 as const, id: 'accept-combination', integration,
+      expectedCompositionDigest: plan.compositionDigest!, acceptance: { universeId: 'fixture',
+        manifestDigest: record.manifestDigest, comparatorDigest: record.comparatorDigest }, maxDurationMs: 30_000 };
+    return { ...f, request };
+  }
+
+  it('freshly evaluates both upstream files and replays exact settled evidence without changing Git or trial history', async () => {
+    const f = await combined(1, 2);
+    writeFileSync(join(f.repo, 'value.txt'), 'user staged\n'); f.git(['add', 'value.txt']);
+    writeFileSync(join(f.repo, 'value.txt'), 'user unstaged\n');
+    const refs = f.git(['show-ref']); const index = readFileSync(join(f.repo, '.git', 'index'));
+    const before = projectUniverse(f.directory);
+    const result = await evaluateUniverseIntegration(f.request, { root: f.root });
+    expect(result).toMatchObject({ status: 'passed', score: 3, metrics: { a: 1, b: 2 } });
+    expect(result.artifactPath).not.toBeNull();
+    expect(readFileSync(join(result.artifactPath!, 'a.txt'), 'utf8')).toBe('1');
+    expect(readFileSync(join(result.artifactPath!, 'b.txt'), 'utf8')).toBe('2');
+    expect(artifactDigest(result.artifactPath!)).toBe(result.artifactDigest);
+    expect(await evaluateUniverseIntegration(f.request, { root: f.root })).toEqual(result);
+    const requestPath = join(f.root, 'evaluation.json');
+    writeFileSync(requestPath, JSON.stringify(f.request), { mode: 0o600 });
+    const replay = execFileSync(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'integration',
+      'evaluate', '--manifest', requestPath, '--root', f.root, '--json'], {
+      cwd: process.cwd(), encoding: 'utf8', timeout: 20_000,
+      env: { PATH: process.env.PATH, HOME: f.root, NO_COLOR: '1' },
+    });
+    expect(JSON.parse(replay)).toEqual(result);
+    expect(readFileSync(join(result.artifactPath!, '..', 'evaluator', 'invocations'), 'utf8')).toBe('evaluated\n');
+    expect(f.git(['show-ref'])).toBe(refs); expect(readFileSync(join(f.repo, '.git', 'index'))).toEqual(index);
+    expect(readFileSync(join(f.repo, 'value.txt'), 'utf8')).toBe('user unstaged\n');
+    expect(projectUniverse(f.directory)).toEqual(before);
+  });
+
+  it('retains a jointly rejected candidate without promoting a branch or elite', async () => {
+    const f = await combined(2, 2); const refs = f.git(['show-ref']); const before = projectUniverse(f.directory);
+    const result = await evaluateUniverseIntegration(f.request, { root: f.root });
+    expect(result).toMatchObject({ status: 'rejected', score: 4, metrics: { a: 2, b: 2 } });
+    expect(result.artifactPath).not.toBeNull(); expect(artifactDigest(result.artifactPath!)).toBe(result.artifactDigest);
+    expect(f.git(['show-ref'])).toBe(refs); expect(projectUniverse(f.directory)).toEqual(before);
+  });
+
+  it('refuses stale acceptance/composition pins and conflicting reuse of a settled request id', async () => {
+    const f = await combined(1, 2);
+    await expect(evaluateUniverseIntegration({ ...f.request, expectedCompositionDigest: '0'.repeat(64) }, { root: f.root })).rejects.toThrow();
+    await expect(evaluateUniverseIntegration({ ...f.request, acceptance: { ...f.request.acceptance,
+      comparatorDigest: '0'.repeat(64) } }, { root: f.root })).rejects.toThrow();
+    await evaluateUniverseIntegration(f.request, { root: f.root });
+    await expect(evaluateUniverseIntegration({ ...f.request, maxDurationMs: 29_000 }, { root: f.root })).rejects.toThrow();
+  });
+
+  it('does not replay success after retained artifact drift', async () => {
+    const f = await combined(1, 2); const result = await evaluateUniverseIntegration(f.request, { root: f.root });
+    const path = join(result.artifactPath!, 'a.txt'); chmodSync(path, 0o600); writeFileSync(path, 'tampered');
+    await expect(evaluateUniverseIntegration(f.request, { root: f.root })).rejects.toThrow();
+  });
+
+  it('does not adopt an existing acceptance Universe execution owner', async () => {
+    const f = await combined(1, 2);
+    await withUniverseExecution('fixture', { root: f.root }, async () => {
+      await expect(evaluateUniverseIntegration(f.request, { root: f.root })).rejects.toThrow(/owner|ownership/);
+    });
+  });
+});
 
 describe('Universe local branch delivery', () => {
   it('plans exact disjoint delivered trees without writing objects, refs, records, index or checkout', async () => {
