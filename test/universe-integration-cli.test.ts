@@ -1,12 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
-  UniverseIntegrationDefinition, UniverseIntegrationEvaluationRequest, UniverseIntegrationEvaluationResult,
-  UniverseIntegrationPlan,
+  UniverseIntegrationDefinition, UniverseIntegrationDeliveryReceipt, UniverseIntegrationDeliveryRequest,
+  UniverseIntegrationEvaluationRequest, UniverseIntegrationEvaluationResult, UniverseIntegrationPlan,
 } from '../src/core/universe/index.js';
 
 const core = vi.hoisted(() => ({
-  readUniverseIntegrationPlan: vi.fn(), evaluateUniverseIntegration: vi.fn(),
-  validateUniverseIntegrationEvaluationRequest: vi.fn(),
+  readUniverseIntegrationPlan: vi.fn(), readUniverseIntegrationEvaluation: vi.fn(),
+  evaluateUniverseIntegration: vi.fn(), validateUniverseIntegrationEvaluationRequest: vi.fn(),
+  validateUniverseIntegrationDeliveryRequest: vi.fn(), deliverUniverseIntegration: vi.fn(),
 }));
 const files = vi.hoisted(() => ({ readResourceJson: vi.fn() }));
 vi.mock('../src/core/universe/index.js', async (importOriginal) => ({
@@ -57,6 +58,26 @@ function evaluation(overrides: Partial<UniverseIntegrationEvaluationResult> = {}
   };
 }
 
+function inspection(): { request: UniverseIntegrationEvaluationRequest; result: UniverseIntegrationEvaluationResult; resultDigest: string } {
+  return { request: evaluationRequest(), result: evaluation(), resultDigest: 'e'.repeat(64) };
+}
+
+function deliveryRequest(): UniverseIntegrationDeliveryRequest {
+  return { schemaVersion: 1, evaluation: evaluationRequest(), expectedEvaluationDigest: 'f'.repeat(64),
+    branch: 'codex/combined-result', maxDurationMs: 10_000 };
+}
+
+function delivery(overrides: Partial<UniverseIntegrationDeliveryReceipt> = {}): UniverseIntegrationDeliveryReceipt {
+  return {
+    schemaVersion: 1, id: '1'.repeat(64), requestDigest: '2'.repeat(64), evaluationRequestDigest: '3'.repeat(64),
+    evaluationResultDigest: '4'.repeat(64), universeId: 'target', evaluationId: 'evaluation', manifestDigest: '5'.repeat(64),
+    comparatorDigest: '6'.repeat(64), compositionDigest: '7'.repeat(64), artifactDigest: '8'.repeat(64),
+    repo: '/private/source-repo', branch: 'codex/combined-result', baseCommit: 'a'.repeat(40), commit: 'b'.repeat(40),
+    tree: 'c'.repeat(40), changedFiles: ['src/one.ts'], status: 'delivered',
+    createdAt: '2026-09-09T00:00:00.000Z', completedAt: '2026-09-09T00:00:00.012Z', ...overrides,
+  };
+}
+
 describe('Universe integration CLI', () => {
   let output: ReturnType<typeof vi.spyOn>;
   let errors: ReturnType<typeof vi.spyOn>;
@@ -67,17 +88,23 @@ describe('Universe integration CLI', () => {
     errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     files.readResourceJson.mockReturnValue(definition());
     core.readUniverseIntegrationPlan.mockReturnValue(plan());
+    core.readUniverseIntegrationEvaluation.mockReturnValue(inspection());
     core.validateUniverseIntegrationEvaluationRequest.mockImplementation((value: unknown) => value as UniverseIntegrationEvaluationRequest);
     core.evaluateUniverseIntegration.mockResolvedValue(evaluation());
+    core.validateUniverseIntegrationDeliveryRequest.mockImplementation((value: unknown) => value as UniverseIntegrationDeliveryRequest);
+    core.deliverUniverseIntegration.mockResolvedValue(delivery());
   });
   afterEach(() => vi.restoreAllMocks());
 
   it.each([
-    [], ['unknown'], ['plan'], ['evaluate'], ['plan', 'extra'], ['evaluate', 'extra'], ['plan', '--manifest'], ['evaluate', '--manifest'], ['plan', '--manifest', 'relative.json'],
+    [], ['unknown'], ['plan'], ['evaluate'], ['inspect'], ['deliver'], ['plan', 'extra'], ['evaluate', 'extra'], ['inspect', 'extra'], ['deliver', 'extra'],
+    ['plan', '--manifest'], ['evaluate', '--manifest'], ['inspect', '--manifest'], ['deliver', '--manifest'], ['plan', '--manifest', 'relative.json'],
     ['plan', '--manifest', '/'], ['plan', '--manifest', '/private/one/../two'], ['plan', '--manifest=private.json'],
     ['plan', '--manifest', manifest, '--manifest', '/private/other.json'], ['plan', '--manifest', manifest, '--json', '--json'],
     ['plan', '--manifest', manifest, '--root'], ['plan', '--manifest', manifest, '--root', 'relative'],
     ['plan', '--manifest', manifest, '--root', '/private/store/'], ['plan', '--manifest', manifest, '--root', '/', '--json'],
+    ['plan', '--manifest', manifest, '--branch', 'codex/fix'], ['evaluate', '--manifest', manifest, '--branch', 'codex/fix'],
+    ['inspect', '--manifest', manifest, '--branch', 'codex/fix'], ['deliver', '--manifest', manifest, '--branch', 'main'],
     ['plan', '--manifest', manifest, '--unknown'], ['plan', '--manifest', '/private/a\n.json'], ['plan', '--manifest', '/private/a\u0085.json'],
   ])('rejects invalid invocation before reading or planning %j', async (...args) => {
     expect(await cmdUniverseIntegration([...args, '--json'])).toBe(2);
@@ -85,6 +112,8 @@ describe('Universe integration CLI', () => {
     expect(files.readResourceJson).not.toHaveBeenCalled();
     expect(core.readUniverseIntegrationPlan).not.toHaveBeenCalled();
     expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+    expect(core.readUniverseIntegrationEvaluation).not.toHaveBeenCalled();
+    expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
   });
 
   it('rejects malformed manifests as usage errors without invoking the planner', async () => {
@@ -93,6 +122,8 @@ describe('Universe integration CLI', () => {
     expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual({ error: 'Integration manifest is invalid or unavailable' });
     expect(core.readUniverseIntegrationPlan).not.toHaveBeenCalled();
     expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+    expect(core.readUniverseIntegrationEvaluation).not.toHaveBeenCalled();
+    expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
   });
 
   it('reads exactly one bounded private manifest and forwards the selected root', async () => {
@@ -102,6 +133,8 @@ describe('Universe integration CLI', () => {
     expect(files.readResourceJson).toHaveBeenCalledExactlyOnceWith(manifest, 256 * 1024);
     expect(core.readUniverseIntegrationPlan).toHaveBeenCalledExactlyOnceWith(value, { root: '/private/store' });
     expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+    expect(core.readUniverseIntegrationEvaluation).not.toHaveBeenCalled();
+    expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
     expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(plan());
   });
 
@@ -134,6 +167,121 @@ describe('Universe integration CLI', () => {
       root: '/private/store', signal: expect.any(AbortSignal),
     });
     expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(result);
+  });
+
+  it('inspects a prior evaluation as exact read-only evidence and never evaluates', async () => {
+    const request = evaluationRequest();
+    const result = inspection();
+    files.readResourceJson.mockReturnValue(request);
+    core.readUniverseIntegrationEvaluation.mockReturnValue(result);
+    expect(await cmdUniverseIntegration(['inspect', '--manifest', manifest, '--root', '/private/store', '--json'])).toBe(0);
+    expect(files.readResourceJson).toHaveBeenCalledExactlyOnceWith(manifest, 256 * 1024);
+    expect(core.readUniverseIntegrationEvaluation).toHaveBeenCalledExactlyOnceWith(request, { root: '/private/store' });
+    expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+    expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(result);
+  });
+
+  it('renders inspect as prior fixed-evaluator evidence without execution authorization', async () => {
+    files.readResourceJson.mockReturnValue(evaluationRequest());
+    core.readUniverseIntegrationEvaluation.mockReturnValue(inspection());
+    expect(await cmdUniverseIntegration(['inspect', '--manifest', manifest])).toBe(0);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('integration evaluation inspection · passed');
+    expect(text).toContain('Result digest:');
+    expect(text).toContain('Read-only prior fixed-evaluator evidence');
+    expect(text).toContain('not acceptance or production authorization');
+    expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+  });
+
+  it('returns unavailable for missing inspection evidence without evaluating', async () => {
+    core.readUniverseIntegrationEvaluation.mockImplementation(() => { throw new Error('private missing evidence'); });
+    expect(await cmdUniverseIntegration(['inspect', '--manifest', manifest, '--json'])).toBe(1);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual({ error: 'Integration evaluation evidence unavailable' });
+    expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+  });
+
+  it('validates and forwards delivery requests with the selected branch and root', async () => {
+    const request = deliveryRequest();
+    const receipt = delivery();
+    files.readResourceJson.mockReturnValue(request);
+    core.validateUniverseIntegrationDeliveryRequest.mockReturnValue(request);
+    core.deliverUniverseIntegration.mockResolvedValue(receipt);
+    expect(await cmdUniverseIntegration(['deliver', '--manifest', manifest, '--root', '/private/store', '--json'])).toBe(0);
+    expect(files.readResourceJson).toHaveBeenCalledExactlyOnceWith(manifest, 256 * 1024);
+    expect(core.validateUniverseIntegrationDeliveryRequest).toHaveBeenCalledExactlyOnceWith(request);
+    expect(core.deliverUniverseIntegration).toHaveBeenCalledExactlyOnceWith(request, {
+      root: '/private/store', signal: expect.any(AbortSignal),
+    });
+    expect(core.evaluateUniverseIntegration).not.toHaveBeenCalled();
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(receipt);
+  });
+
+  it.each([
+    ['delivered', 0], ['unchanged', 0], ['pending', 1],
+  ] as const)('maps %s delivery receipts to exit status %i', async (status, exitCode) => {
+    const request = deliveryRequest();
+    files.readResourceJson.mockReturnValue(request);
+    core.validateUniverseIntegrationDeliveryRequest.mockReturnValue(request);
+    core.deliverUniverseIntegration.mockResolvedValue(delivery({ status, ...(status === 'pending' ? { completedAt: null } : {}) }));
+    expect(await cmdUniverseIntegration(['deliver', '--manifest', manifest, '--json'])).toBe(exitCode);
+  });
+
+  it('labels local delivery and warns that interruption does not establish branch absence', async () => {
+    const request = deliveryRequest();
+    files.readResourceJson.mockReturnValue(request);
+    core.validateUniverseIntegrationDeliveryRequest.mockReturnValue(request);
+    core.deliverUniverseIntegration.mockResolvedValue(delivery());
+    expect(await cmdUniverseIntegration(['deliver', '--manifest', manifest])).toBe(0);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('Local branch delivered. Checkout, index, and HEAD were not changed.');
+    expect(text).toContain('No evaluator or provider rerun occurred');
+    expect(text).toContain('interruption does not prove that a branch was not published');
+    expect(text).not.toContain('accepted as a production change');
+  });
+
+  it('awaits interrupted delivery settlement and cleans up signal handlers', async () => {
+    const request = deliveryRequest();
+    files.readResourceJson.mockReturnValue(request);
+    core.validateUniverseIntegrationDeliveryRequest.mockReturnValue(request);
+    const before = process.listenerCount('SIGINT');
+    let settle!: (receipt: UniverseIntegrationDeliveryReceipt) => void;
+    let observedAbort = false;
+    let listenersDuringDelivery = 0;
+    core.deliverUniverseIntegration.mockImplementation(async (_request: UniverseIntegrationDeliveryRequest, options: { signal: AbortSignal }) => {
+      const pending = new Promise<UniverseIntegrationDeliveryReceipt>((resolve) => { settle = resolve; });
+      listenersDuringDelivery = process.listenerCount('SIGINT');
+      process.emit('SIGINT');
+      observedAbort = options.signal.aborted;
+      return pending;
+    });
+    const pending = cmdUniverseIntegration(['deliver', '--manifest', manifest, '--json']);
+    await vi.waitFor(() => expect(observedAbort).toBe(true));
+    expect(listenersDuringDelivery).toBe(before + 1);
+    settle(delivery({ status: 'pending', completedAt: null }));
+    expect(await pending).toBe(1);
+    expect(process.listenerCount('SIGINT')).toBe(before);
+  });
+
+  it('returns cancellation separately when delivery does not settle', async () => {
+    const request = deliveryRequest();
+    files.readResourceJson.mockReturnValue(request);
+    core.validateUniverseIntegrationDeliveryRequest.mockReturnValue(request);
+    core.deliverUniverseIntegration.mockImplementation(async () => {
+      process.emit('SIGINT');
+      throw new Error('private cancellation after ref publication');
+    });
+    expect(await cmdUniverseIntegration(['deliver', '--manifest', manifest, '--json'])).toBe(130);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual({ error: 'Integration delivery cancelled; inspect the receipt and Git ref' });
+  });
+
+  it('rejects malformed delivery requests before installing signal handlers', async () => {
+    files.readResourceJson.mockReturnValue({ schemaVersion: 1, id: 'bad' });
+    core.validateUniverseIntegrationDeliveryRequest.mockImplementation(() => { throw new Error('invalid'); });
+    const before = process.listenerCount('SIGINT');
+    expect(await cmdUniverseIntegration(['deliver', '--manifest', manifest, '--json'])).toBe(2);
+    expect(process.listenerCount('SIGINT')).toBe(before);
+    expect(core.deliverUniverseIntegration).not.toHaveBeenCalled();
   });
 
   it('renders evaluator status and explicit private-evidence boundaries without raw evaluator output', async () => {
@@ -229,9 +377,24 @@ describe('Universe integration CLI', () => {
     expect(core.readUniverseIntegrationPlan).toHaveBeenCalledOnce();
   });
 
+  it('routes inspection and delivery through the Universe dispatcher', async () => {
+    const { cmdUniverse } = await import('../src/cli/universe.js');
+    files.readResourceJson.mockReturnValue(evaluationRequest());
+    core.readUniverseIntegrationEvaluation.mockReturnValue(inspection());
+    expect(await cmdUniverse(['integration', 'inspect', '--manifest', manifest, '--json'])).toBe(0);
+    const request = deliveryRequest();
+    files.readResourceJson.mockReturnValue(request);
+    core.validateUniverseIntegrationDeliveryRequest.mockReturnValue(request);
+    expect(await cmdUniverse(['integration', 'deliver', '--manifest', manifest, '--json'])).toBe(0);
+    expect(core.readUniverseIntegrationEvaluation).toHaveBeenCalledOnce();
+    expect(core.deliverUniverseIntegration).toHaveBeenCalledOnce();
+  });
+
   it('prints help without reading the manifest', async () => {
     expect(await cmdUniverseIntegration(['--help'])).toBe(0);
     expect(output.mock.calls[0]![0]).toContain('combined-artifact composition plan');
+    expect(output.mock.calls[0]![0]).toContain('inspect');
+    expect(output.mock.calls[0]![0]).toContain('deliver');
     expect(files.readResourceJson).not.toHaveBeenCalled();
     expect(core.readUniverseIntegrationPlan).not.toHaveBeenCalled();
   });

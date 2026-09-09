@@ -32,8 +32,10 @@ export type { UniversePortfolioResult, UniversePortfolioOutcome, UniversePortfol
 export type * from './portfolio-types.js';
 export { validateUniverseIntegrationDefinition, readUniverseIntegrationPlan } from './integration-plan.js';
 export type * from './integration-types.js';
-export { validateUniverseIntegrationEvaluationRequest, evaluateUniverseIntegration } from './integration-evaluate.js';
+export { validateUniverseIntegrationEvaluationRequest, evaluateUniverseIntegration, readUniverseIntegrationEvaluation } from './integration-evaluate.js';
 export type * from './integration-evaluation-types.js';
+export { validateUniverseIntegrationDeliveryRequest, deliverUniverseIntegration } from './integration-delivery.js';
+export type * from './integration-delivery-types.js';
 export { buildUniverseCampaignComparison } from './comparison.js';
 export { readUniverseCampaignComparison } from './comparison-reader.js';
 export type * from './comparison-types.js';

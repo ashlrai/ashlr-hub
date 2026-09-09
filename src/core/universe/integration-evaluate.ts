@@ -9,7 +9,8 @@ import { deliveryGit, type GitTreeEntry } from './delivery-git.js';
 import { assertUniverseExecution, withUniverseExecution } from './execution.js';
 import { runFixedUniverseEvaluator } from './fixed-evaluator.js';
 import { readUniverseIntegrationPlan, validateUniverseIntegrationDefinition } from './integration-plan.js';
-import type { UniverseIntegrationEvaluationRequest, UniverseIntegrationEvaluationResult } from './integration-evaluation-types.js';
+import type { UniverseIntegrationEvaluationEvidence, UniverseIntegrationEvaluationRequest,
+  UniverseIntegrationEvaluationResult } from './integration-evaluation-types.js';
 import { assertComparatorUnchanged, manifestRecord, parseEvaluation, projectUniverse, universePath } from './store.js';
 import type { UniverseStoreOptions } from './types.js';
 
@@ -42,6 +43,9 @@ function validMetrics(value: unknown): value is Record<string, number> {
 }
 function requestDigest(request: UniverseIntegrationEvaluationRequest): string {
   return digest(canonical({ domain: 'universe-integration-evaluation-v1', request }));
+}
+function resultDigest(result: UniverseIntegrationEvaluationResult): string {
+  return digest(canonical({ domain: 'universe-integration-evaluation-result-v1', result }));
 }
 
 /** Validate a closed, portable request before reading any acceptance or delivery evidence. */
@@ -138,6 +142,45 @@ function readAttempts(directory: string): AttemptRecord[] {
     if (measured && item.result.artifactPath !== expectedPath) throw new Error('Integration evaluation evidence has an unexpected artifact path');
   }
   return result.records;
+}
+function assertNoUnresolvedAttempts(attempts: AttemptRecord[]): void {
+  const settled = new Set(attempts.filter((item): item is Extract<AttemptRecord, { kind: 'receipt' }> => item.kind === 'receipt')
+    .map((item) => item.requestDigest));
+  if (attempts.some((item) => item.kind === 'intent' && !settled.has(item.requestDigest))) {
+    throw new Error('Integration evaluation has an unresolved attempt; delivery is withheld pending reconciliation');
+  }
+}
+
+/** Verify that no potentially live integration evaluator remains for this acceptance Universe. */
+export function assertUniverseIntegrationEvaluationsSettled(universeId: string, options: UniverseStoreOptions = {}): void {
+  if (!ID.test(universeId)) throw new Error('Invalid Universe integration evaluation acceptance id');
+  const root = resolve(options.root ?? defaultUniverseRoot());
+  assertNoUnresolvedAttempts(readAttempts(universePath(root, universeId)));
+}
+
+/** Read one settled integration evaluation without executing an evaluator or changing durable state. */
+export function readUniverseIntegrationEvaluation(input: unknown,
+  options: UniverseStoreOptions = {}): UniverseIntegrationEvaluationEvidence {
+  const request = validateUniverseIntegrationEvaluationRequest(input);
+  const root = resolve(options.root ?? defaultUniverseRoot());
+  const directory = universePath(root, request.acceptance.universeId);
+  const requestDigestValue = requestDigest(request);
+  const attempt = readAttempts(directory).find((item) => item.kind === 'receipt' && item.requestDigest === requestDigestValue);
+  if (!attempt || attempt.kind !== 'receipt') throw new Error('Integration evaluation receipt is unavailable');
+  const plan = readUniverseIntegrationPlan(request.integration, { root });
+  if (!plan.compositionReady || plan.compositionDigest !== request.expectedCompositionDigest) {
+    throw new Error('Integration evaluation composition evidence changed');
+  }
+  const record = manifestRecord(directory);
+  if (record.manifestDigest !== request.acceptance.manifestDigest || record.comparatorDigest !== request.acceptance.comparatorDigest) {
+    throw new Error('Integration evaluation acceptance evidence changed');
+  }
+  assertComparatorUnchanged(record);
+  if (attempt.result.artifactPath !== null && (attempt.result.artifactDigest === null ||
+      artifactDigest(attempt.result.artifactPath) !== attempt.result.artifactDigest)) {
+    throw new Error('Integration evaluation artifact changed');
+  }
+  return JSON.parse(canonical({ request, result: attempt.result, resultDigest: resultDigest(attempt.result) })) as UniverseIntegrationEvaluationEvidence;
 }
 function persist(directory: string, value: AttemptRecord): void {
   const disposition = writeImmutablePrivateRecord(config(directory), value);
