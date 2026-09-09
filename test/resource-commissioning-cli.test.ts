@@ -15,9 +15,12 @@ beforeEach(() => {
   vi.resetAllMocks(); output = vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
   backend.check.mockReturnValue({ schemaVersion: 1, status: 'valid', evidenceScope: 'local-configuration-only',
+    counts: { workers: 1, eligibleWorkers: 0, excludedWorkers: 1, capacities: 1, eligibleCapacities: 0 },
+    allocationCeilingPercent: null, nextEligibleAt: null,
     providerContacted: false, checks: [{ code: 'runtime', status: 'passed' }], workers: [{ workerId: 'codex-a', provider: 'codex',
       capacityKey: 'account-a', eligibility: 'excluded', exclusionReasons: ['unknown-quota'], quotaRefreshConfigured: false,
-      localModelRefreshConfigured: false, warnings: ['quota-refresh-not-configured'] }], warnings: ['execution-and-account-identity-unverified'] });
+      localModelRefreshConfigured: false, warnings: ['quota-refresh-not-configured'], nextEligibleAt: null,
+      policyHolds: [], nextChecks: ['refresh-quota-evidence'] }], warnings: ['execution-and-account-identity-unverified'] });
   backend.read.mockReturnValue(['/private/fixture/launcher']);
   backend.launcher.mockResolvedValue({ schemaVersion: 1, provider: 'codex', status: 'supported', reason: 'launcher-help-compatible',
     version: '0.136.0', missingFlags: [], hubTransport: 'native-cli' });
@@ -36,7 +39,72 @@ describe('explicit resource commissioning CLI', () => {
     expect(await cmdUniverse(['resources', 'check', '--resource-runtime', runtime])).toBe(0);
     expect(output.mock.calls[0]![0]).toContain('codex-a · codex · capacity=account-a · excluded');
     expect(output.mock.calls[0]![0]).toContain('not authenticated fleet readiness');
+    expect(output.mock.calls[0]![0]).toContain('Snapshot workers: 0/1 eligible · 1 excluded');
+    expect(output.mock.calls[0]![0]).toContain('distinct capacity groups: 0/1 eligible');
+    expect(output.mock.calls[0]![0]).toContain('No corrective action was executed');
   });
+
+  it('preserves typed timing, counts, allocation and hold fields in JSON without taking actions', async () => {
+    const report = backend.check.getMockImplementation()!();
+    Object.assign(report, { allocationCeilingPercent: 75, nextEligibleAt: '2026-09-09T12:00:00.000Z' });
+    Object.assign(report.workers[0], { policyHolds: ['owner-paused'], nextChecks: ['review-owner-pause'],
+      nextEligibleAt: report.nextEligibleAt });
+    backend.check.mockReturnValue(report);
+    expect(await cmdUniverse(['resources', 'check', '--resource-runtime', runtime, '--json'])).toBe(0);
+    expect(JSON.parse(output.mock.calls[0]![0])).toEqual(report);
+    expect(backend.check).toHaveBeenCalledOnce(); expect(backend.read).not.toHaveBeenCalled();
+    expect(backend.launcher).not.toHaveBeenCalled(); expect(backend.legacy).not.toHaveBeenCalled();
+  });
+
+  it('explains intentional holds without recommending an unpause or treating the ceiling as remaining usage', async () => {
+    const report = backend.check.getMockImplementation()!();
+    report.allocationCeilingPercent = 0;
+    Object.assign(report.workers[0], { policyHolds: ['owner-paused', 'subscription-allocation-disabled'],
+      nextChecks: ['review-owner-pause', 'review-subscription-allocation'] });
+    backend.check.mockReturnValue(report);
+    expect(await cmdUniverse(['resources', 'check', '--resource-runtime', runtime])).toBe(0);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('Subscription allocation ceiling: 0% (policy, not remaining quota)');
+    expect(text).toContain('Policy holds: owner-paused, subscription-allocation-disabled');
+    expect(text).toContain('Preserve the owner policy');
+    expect(text).toContain('Preserve the allocation policy');
+    expect(text).not.toContain('undefined');
+  });
+
+  it('labels recheck timing as a hint and preserves reserve and uncertain ownership guidance', async () => {
+    const report = backend.check.getMockImplementation()!();
+    report.nextEligibleAt = '2026-09-09T12:00:00.000Z';
+    Object.assign(report.workers[0], { nextEligibleAt: report.nextEligibleAt,
+      nextChecks: ['recheck-after-hint', 'review-reserve-evidence', 'inspect-capacity-ownership'] });
+    backend.check.mockReturnValue(report);
+    expect(await cmdUniverse(['resources', 'check', '--resource-runtime', runtime])).toBe(0);
+    const text = output.mock.calls[0]![0] as string;
+    expect(text).toContain('2026-09-09T12:00:00.000Z (not promised availability)');
+    expect(text).toContain('Time passage alone does not establish capacity');
+    expect(text).toContain('Preserve the configured reserve');
+    expect(text).toContain('do not delete receipts or start a competing worker');
+  });
+
+  it.each(['runtime', 'boundaries', 'workspace', 'pool', 'bindings', 'observations', 'quota-refresh', 'local-model-refresh', 'ledger'])(
+    'gives fixed guidance for failed %s without fabricating zero counts', async (code) => {
+      backend.check.mockReturnValue({ status: 'invalid', counts: null, nextEligibleAt: null, allocationCeilingPercent: null,
+        checks: [{ code, status: 'failed' }], workers: [], warnings: [] });
+      expect(await cmdUniverse(['resources', 'check', '--resource-runtime', runtime])).toBe(1);
+      const text = output.mock.calls[0]![0] as string;
+      expect(text).toContain('Worker and capacity counts: unavailable');
+      expect(text).toContain('Subscription allocation ceiling: unchecked');
+      expect(text).toContain(`${code} · failed\n  Next check:`);
+      expect(text).not.toContain('0/0'); expect(text).not.toContain('undefined'); expect(text).not.toContain(runtime);
+    });
+
+  it.each(['refresh-local-evidence', 'wait-for-active-work', 'review-task-window', 'review-worker-availability', 'review-worker-scope'])(
+    'renders %s guidance without executing it', async (next) => {
+      const report = backend.check.getMockImplementation()!(); report.workers[0].nextChecks = [next];
+      backend.check.mockReturnValue(report);
+      expect(await cmdUniverse(['resources', 'check', '--resource-runtime', runtime])).toBe(0);
+      expect(output.mock.calls[0]![0]).toContain(`Next check [${next}]:`);
+      expect(output.mock.calls[0]![0]).not.toContain('undefined'); expect(backend.launcher).not.toHaveBeenCalled();
+    });
   it('returns 1 for a structured invalid runtime report', async () => {
     backend.check.mockReturnValue({ status: 'invalid', checks: [], workers: [], warnings: [] });
     expect(await cmdUniverse(['resources', 'check', '--resource-runtime', runtime, '--json'])).toBe(1);

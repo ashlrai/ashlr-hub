@@ -472,6 +472,44 @@ identical native commands assigned to separate capacity keys. Different command
 paths are not proof of different accounts. No launcher, refresh, model or provider
 is contacted; missing storage remains missing and existing ownership is untouched.
 
+The report also explains the current policy and next inspection steps without
+taking them. `counts` separates eligible/excluded workers from distinct capacity
+groups, so two model aliases are not counted as two independent resources.
+Capacity keys are enrollment declarations, not proof of distinct authenticated
+accounts. `allocationCeilingPercent` reports the saved subscription ceiling,
+not remaining usage; on a valid report `null` preserves each worker's configured
+reserve. Invalid reports leave counts, ceiling and timing unavailable rather than
+reporting zero resources.
+
+Each worker's `policyHolds` labels explicit `owner-paused` or
+`subscription-allocation-disabled` controls. Owner pauses apply across aliases
+sharing a capacity key. These holds explain policy, not broken account health;
+other exclusions still apply. Reserve exhaustion is reported from the existing
+planner, never recomputed by this diagnostic. Missing or stale shared evidence
+is not relabeled as an intentional pause or a provider outage.
+
+Top-level and per-worker `nextEligibleAt` values are copied from the planner.
+Treat them as recheck hints, **not** promises that capacity becomes usable then.
+A quota reset timestamp is not fabricated into a recovery time. Recheck fresh
+evidence and every remaining exclusion before dispatch; elapsed time alone cannot
+resolve uncertain ownership or authorize relaxing a reserve.
+
+`nextChecks` is fixed diagnostic guidance for callers, not an execution plan:
+
+| Next check | Intended response |
+| --- | --- |
+| `review-owner-pause`, `review-subscription-allocation` | Preserve the declared hold; use other eligible capacity unless the owner explicitly changes policy. |
+| `refresh-quota-evidence`, `refresh-local-evidence` | Review or explicitly refresh the relevant evidence when authorized. The check itself performs no refresh. |
+| `recheck-after-hint`, `review-task-window` | Inspect the timing hint or recorded task window, retaining all reservations and other admission checks. |
+| `wait-for-active-work` | Allow owned work to settle and recheck within the existing time budget. |
+| `inspect-capacity-ownership` | Inspect unresolved ownership; do not delete receipts or start competing work. |
+| `review-reserve-evidence` | Preserve the reserve and obtain current evidence before considering admission. |
+| `review-worker-availability`, `review-worker-scope` | Inspect recorded availability/shared evidence or explicit enrollment without assuming outage or silently enrolling workers. |
+
+The human-readable command also provides fixed guidance for a failing setup
+stage. Neither text nor JSON unpauses an account, changes allocation/reserves,
+launches a model, clears ownership, or starts a campaign.
+
 Exit zero means locally valid configuration, **not** authenticated fleet readiness
 or permission to dispatch. Workers may all remain excluded by stale, unknown,
 denied or occupied capacity. `sampledAt` dates the local plan, not a new provider

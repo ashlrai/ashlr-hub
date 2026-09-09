@@ -109,7 +109,8 @@ describe.skipIf(process.platform === 'win32')('built resource commissioning comm
     expect(result.code).toBe(0); expect(result.stderr).toBe(''); redacted(result.stdout, f.base);
     const report = JSON.parse(result.stdout) as ResourceGenerationRuntimeCheck;
     expect(report).toMatchObject({ status: 'valid', evidenceScope: 'local-configuration-only', providerContacted: false,
-      poolDigest: f.poolDigest, sourceState: 'missing' });
+      poolDigest: f.poolDigest, sourceState: 'missing', allocationCeilingPercent: null, nextEligibleAt: null,
+      counts: { workers: 4, eligibleWorkers: 4, excludedWorkers: 0, capacities: 4, eligibleCapacities: 4 } });
     expect(report.workers.map((worker) => [worker.workerId, worker.provider, worker.eligibility])).toEqual([
       ['codex-a', 'codex', 'eligible'], ['codex-b', 'codex', 'eligible'], ['claude-a', 'claude', 'eligible'], ['local-a', 'local', 'eligible']]);
     expect(report.workers.slice(0, 2).every((row) => row.quotaRefreshConfigured &&
@@ -127,13 +128,37 @@ describe.skipIf(process.platform === 'win32')('built resource commissioning comm
     const before = tree(f.base); const result = await f.check(); expect(result.code).toBe(0); redacted(result.stdout, f.base);
     const report = JSON.parse(result.stdout) as ResourceGenerationRuntimeCheck;
     expect(report).toMatchObject({ status: 'valid', sourceState: 'healthy' });
-    expect(report.workers[0]).toMatchObject({ eligibility: 'excluded', exclusionReasons: ['concurrency-exhausted'] });
+    expect(report.workers[0]).toMatchObject({ eligibility: 'excluded', exclusionReasons: ['concurrency-exhausted'],
+      policyHolds: [], nextEligibleAt: null, nextChecks: ['wait-for-active-work'] });
     expect(report.workers[1]!.eligibility).toBe('eligible'); expect(f.events()).toEqual([]); expect(tree(f.base)).toEqual(before);
+  });
+  it.each([0, 75])('reports a %s%% allocation policy without changing pauses, reserves or files', async (ceilingPercent) => {
+    const f = await fixture(); mkdirSync(f.runtime.root, { mode: 0o700 });
+    save(join(f.runtime.root, 'pool-state.json'), { schemaVersion: 1, poolDigest: f.poolDigest, observations: [], attempts: [],
+      allocation: { ceilingPercent, revision: 1, updatedAt: f.at(-1000) },
+      workerAccess: { pausedWorkerIds: ['codex-a'], revision: 1, updatedAt: f.at(-1000) } });
+    const before = tree(f.base); const result = await f.check(); expect(result.code).toBe(0); redacted(result.stdout, f.base);
+    const report = JSON.parse(result.stdout) as ResourceGenerationRuntimeCheck;
+    expect(report).toMatchObject({ status: 'valid', allocationCeilingPercent: ceilingPercent,
+      counts: { workers: 4, eligibleWorkers: ceilingPercent === 0 ? 1 : 3, excludedWorkers: ceilingPercent === 0 ? 3 : 1,
+        capacities: 4, eligibleCapacities: ceilingPercent === 0 ? 1 : 3 } });
+    expect(report.workers[0]!.policyHolds).toContain('owner-paused');
+    expect(report.workers[0]!.nextChecks).toContain('review-owner-pause');
+    expect(report.workers[1]).toMatchObject(ceilingPercent === 0
+      ? { eligibility: 'excluded', policyHolds: ['subscription-allocation-disabled'], nextChecks: ['review-subscription-allocation'] }
+      : { eligibility: 'eligible', policyHolds: [], nextChecks: [] });
+    expect(report.workers[3]).toMatchObject({ eligibility: 'eligible', policyHolds: [] });
+    const text = await cli(f.base, ['universe', 'resources', 'check', '--resource-runtime', f.runtimePath]);
+    expect(text.code).toBe(0); expect(text.stdout).toContain('Preserve the owner policy');
+    expect(text.stdout).toContain(`${ceilingPercent}% (policy, not remaining quota)`);
+    expect(text.stdout).toContain('No corrective action was executed');
+    expect(f.events()).toEqual([]); expect(f.contacts).toEqual([]); expect(tree(f.base)).toEqual(before);
   });
   it('returns fixed invalid-runtime and invalid-argument statuses without provider startup or private errors', async () => {
     const f = await fixture(); writeFileSync(f.runtime.localModelConfigPath, `${f.base} MALFORMED_PRIVATE_CONFIG`);
     const before = tree(f.base); const invalid = await f.check(); expect(invalid.code).toBe(1); redacted(invalid.stdout, f.base);
-    expect(JSON.parse(invalid.stdout)).toMatchObject({ status: 'invalid', workers: [], poolId: null, providerContacted: false });
+    expect(JSON.parse(invalid.stdout)).toMatchObject({ status: 'invalid', workers: [], poolId: null, providerContacted: false,
+      counts: null, allocationCeilingPercent: null, nextEligibleAt: null });
     expect(JSON.parse(invalid.stdout).checks).toContainEqual({ code: 'local-model-refresh', status: 'failed' });
     const syntax = await cli(f.base, ['universe', 'resources', 'check', '--resource-runtime', 'relative.json', '--json']);
     expect(syntax.code).toBe(2); expect(JSON.parse(syntax.stdout).error).toEqual(expect.any(String));

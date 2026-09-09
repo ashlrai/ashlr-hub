@@ -69,6 +69,15 @@ describe('HELP_ENTRIES — the command table', () => {
     expect(plan.jsonShape).toBe('UniversePortfolioPlan');
   });
 
+  it('advertises resource diagnostics without promoting them to execution authority', () => {
+    const check = AGENT_COMMANDS.find((entry) => entry.usage.startsWith('ashlr universe resources check '))!;
+    expect(check.safety).toBe('read');
+    expect(check.jsonShape).toBe('ResourceGenerationRuntimeCheck');
+    expect(check.description).toContain('policy holds, planner recheck hints and diagnostic nextChecks');
+    expect(check.description).toContain('without changing reserves');
+    expect(check.description).toContain('providerContacted is false');
+  });
+
   it('every entry has a command, description, and known topic', () => {
     expect(HELP_ENTRIES.length).toBeGreaterThanOrEqual(80);
     for (const e of HELP_ENTRIES) {
