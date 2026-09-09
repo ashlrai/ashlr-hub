@@ -1,7 +1,9 @@
 import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { canonical, digest, MAX_ARTIFACT_BYTES, type UniverseArtifactEntry } from './artifacts.js';
+import { fileOperationsPathKey, validFileOperationsPath } from './generation.js';
 
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const MAX_ENTRIES = 8_192;
@@ -59,16 +61,16 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
       return { path: match[3]!, oid: match[2]!, executable: match[1] === '100755' };
     });
   }
-  function treeDigest(tree: string): string {
-    const list = entries(tree);
-    if (!list.length) return digest(canonical([]));
+  /** Shared bounded parser; repeated object IDs still consume bytes for each path. */
+  function readBlobs<T>(list: GitTreeEntry[], consume: (entry: GitTreeEntry, data: Buffer) => T): T[] {
+    if (!list.length) return [];
     const bytes = invoke(['cat-file', '--batch'], list.map((entry) => entry.oid).join('\n') + '\n')!;
     let offset = 0;
     let total = 0;
-    const summaries = list.map((entry) => {
+    const results = list.map((entry) => {
       const end = bytes.indexOf(10, offset);
       if (end < 0) throw new Error('Delivery object batch is incomplete');
-      const header = bytes.subarray(offset, end).toString('ascii');
+      const header = bytes.subarray(offset, end).toString('utf8');
       const match = /^([a-f0-9]{40}|[a-f0-9]{64}) blob (0|[1-9][0-9]*)$/.exec(header);
       if (!match || match[1] !== entry.oid) throw new Error('Delivery object batch identity changed');
       const size = Number(match[2]);
@@ -77,11 +79,60 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
         throw new Error('Delivery object batch exceeds its byte envelope');
       }
       const data = bytes.subarray(end + 1, end + 1 + size);
+      const actualOid = createHash(entry.oid.length === 40 ? 'sha1' : 'sha256')
+        .update(`blob ${size}\0`).update(data).digest('hex');
+      if (actualOid !== entry.oid) throw new Error('Delivery object content does not match its identity');
       offset = end + size + 2;
-      return { path: entry.path, executable: entry.executable, size, digest: digest(data) };
+      return consume(entry, data);
     });
     if (offset !== bytes.length) throw new Error('Delivery object batch contains trailing bytes');
+    return results;
+  }
+  function treeDigest(tree: string): string {
+    const summaries = readBlobs(entries(tree), (entry, data) => ({ path: entry.path, executable: entry.executable,
+      size: data.length, digest: digest(data) }));
     return digest(canonical(summaries.sort((a, b) => a.path.localeCompare(b.path))));
+  }
+  /** Read portable, collision-free blob bytes without materializing files or writing Git objects. */
+  function readEntries(input: GitTreeEntry[]): UniverseArtifactEntry[] {
+    if (!Array.isArray(input) || input.length > MAX_ENTRIES || Reflect.ownKeys(input).length !== input.length + 1) {
+      throw new Error('Delivery entries must be a bounded dense array');
+    }
+    const list: GitTreeEntry[] = [];
+    const files = new Set<string>();
+    const spellings = new Map<string, string>();
+    for (let index = 0; index < input.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(input, index);
+      const entry: unknown = descriptor && 'value' in descriptor ? descriptor.value : null;
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) ||
+          ![Object.prototype, null].includes(Object.getPrototypeOf(entry))) throw new Error('Invalid delivery entry');
+      const keys = Reflect.ownKeys(entry);
+      if (keys.length !== 3 || !keys.every((key) => typeof key === 'string' && ['path', 'oid', 'executable'].includes(key) &&
+          'value' in Object.getOwnPropertyDescriptor(entry, key)!)) throw new Error('Invalid delivery entry fields');
+      const value = entry as GitTreeEntry;
+      if (!validFileOperationsPath(value.path) || [...value.path].some((character) => {
+        const code = character.charCodeAt(0); return code >= 127 && code <= 159;
+      }) || typeof value.oid !== 'string' || !OID.test(value.oid) || typeof value.executable !== 'boolean' || files.has(value.path)) {
+        throw new Error('Delivery entry path, mode or object identity is invalid');
+      }
+      files.add(value.path);
+      const parts = value.path.split('/');
+      for (let depth = 1; depth <= parts.length; depth++) {
+        const path = parts.slice(0, depth).join('/');
+        const key = fileOperationsPathKey(path);
+        const previous = spellings.get(key);
+        if (previous !== undefined && previous !== path) throw new Error('Delivery entry paths have case or Unicode aliases');
+        spellings.set(key, path);
+      }
+      list.push({ path: value.path, oid: value.oid, executable: value.executable });
+    }
+    for (const entry of list) {
+      const parts = entry.path.split('/');
+      for (let depth = 1; depth < parts.length; depth++) {
+        if (files.has(parts.slice(0, depth).join('/'))) throw new Error('Delivery entry paths have a file-directory collision');
+      }
+    }
+    return readBlobs(list, (entry, data) => ({ path: entry.path, executable: entry.executable, data: Buffer.from(data) }));
   }
   function writeTree(snapshot: UniverseArtifactEntry[]): string {
     interface Directory { files: Array<{ name: string; mode: string; oid: string }>; children: Map<string, Directory> }
@@ -161,5 +212,5 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
       child.stdin.write(`start\noption no-deref\ncreate refs/heads/${branch} ${commit}\nprepare\n`);
     });
   }
-  return { invoke, text, oid, ref, entries, treeDigest, writeTree, assertNotCheckedOut, createRef };
+  return { invoke, text, oid, ref, entries, readEntries, treeDigest, writeTree, assertNotCheckedOut, createRef };
 }

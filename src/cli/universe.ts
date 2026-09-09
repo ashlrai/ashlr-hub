@@ -18,6 +18,7 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
                                Check local resource configuration before execution
   campaign <command>           Run or inspect a bounded multi-generation campaign
   portfolio <plan|run>         Coordinate explicitly declared campaign dependencies
+  integration <plan|evaluate> Read or explicitly evaluate a combined artifact
   deliver <id> --trial <id> --branch codex/<new-branch>
                                Create a local branch from the exact current elite
   deliveries <id>              Read delivery receipts without changing the repository
