@@ -43,6 +43,10 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/m11.stream-file-sink.test.ts', // thousands of real sink writes and reads across secret boundaries
+  'test/m442.runtime-release-launch-revalidation.test.ts', // large dependency fixtures, permissions and recursive cleanup
+  'test/m444.external-skill-audit.test.ts', // large real audit trees and recursive cleanup
+  'test/m466.host-merge-revocation-protocol.test.ts', // 4097-file store bounds and competing subprocess CAS
   'test/resource-native-profile.test.ts', // exclusive profile preparation and inert native execve
   'test/resource-claude-account-status.test.ts', // native auth status with inert private process fixtures
   'test/resource-claude-account-usage.test.ts', // private scratch and bounded native usage mocks

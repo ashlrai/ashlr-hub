@@ -26,14 +26,18 @@ function fixture() {
   const bindings: ResourceBinding[] = [{ workerId: 'codex', capacityKey: 'account', kind: 'native-cli', command: ['/inert-never-run'] }];
   const config: quotas.ResourceQuotaRefreshConfig = { schemaVersion: 1, poolDigest: digest(canonical({ pool, bindings })),
     workers: [{ workerId: 'codex', accountHint: 'a'.repeat(64), bucketIds: ['codex'] }] };
-  const observation: ResourceObservation = { workerId: 'codex', observedAt: new Date().toISOString(),
-    expiresAt: new Date(Date.now() + 60_000).toISOString(), health: 'ready', retryAfter: null,
-    windows: [{ id: 'primary', usedPercent: 80, resetsAt: new Date(Date.now() + 3600_000).toISOString() }] };
+  // One capture binds the exact allowed TTL; separate clock reads can make a
+  // nominal 60s fixture exceed the native freshness limit by a millisecond.
+  const capturedAt = Date.now();
+  const observation: ResourceObservation = { workerId: 'codex', observedAt: new Date(capturedAt).toISOString(),
+    expiresAt: new Date(capturedAt + quotas.RESOURCE_QUOTA_REFRESH_TTL_MS).toISOString(), health: 'ready', retryAfter: null,
+    windows: [{ id: 'primary', usedPercent: 80, resetsAt: new Date(capturedAt + 3600_000).toISOString() }] };
   const probe = vi.fn(async (options: CodexResourceProbeOptions): Promise<CodexResourceProbeResult> => {
-    const now = new Date().toISOString();
+    const probedAt = Date.now(); const now = new Date(probedAt).toISOString();
     return { schemaVersion: 1, scope: 'codex-native-metadata', workerId: options.workerId, poolDigest: config.poolDigest,
       status: 'observed', reason: 'probe-observed', startedAt: now, finishedAt: now,
-      accountHint: config.workers[0]!.accountHint, planType: 'pro', observation: { ...observation, observedAt: now } };
+      accountHint: config.workers[0]!.accountHint, planType: 'pro', observation: { ...observation, observedAt: now,
+        expiresAt: new Date(probedAt + quotas.RESOURCE_QUOTA_REFRESH_TTL_MS).toISOString() } };
   });
   return { pool, bindings, config, observation, probe };
 }
@@ -113,6 +117,8 @@ describe('console-owned shared quota publication', () => {
 
   it('publication failure invalidates prior success immediately and preserves the pending fence', async () => {
     const value = await startStubbedCollector(); value.change([value.f.observation], []);
+    expect(Date.parse(value.f.observation.expiresAt) - Date.parse(value.f.observation.observedAt))
+      .toBe(quotas.RESOURCE_QUOTA_REFRESH_TTL_MS);
     expect(value.read().unavailableWorkerIds).toEqual([]);
     chmodSync(join(value.options.root, RESOURCE_SHARED_QUOTA_EVIDENCE_FILENAME), 0o644);
     value.change([value.f.observation], []);
