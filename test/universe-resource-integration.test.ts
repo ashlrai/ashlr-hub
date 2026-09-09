@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { initUniverse, initUniverseCampaign, readUniverseOverview, runUniverse, runUniverseCampaign,
+import { initUniverse, initUniverseCampaign, readUniverseCampaign, readUniverseOverview, runUniverse, runUniverseCampaign,
   type UniverseCampaignDefinition, type UniverseManifest } from '../src/core/universe/index.js';
 import { artifactDigest, canonical, digest } from '../src/core/universe/artifacts.js';
 import { projectUniverse, readRecords } from '../src/core/universe/store.js';
@@ -23,6 +23,7 @@ const EVALUATOR = [
 ].join('\n');
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   const writable = (path: string): void => {
     const stat = lstatSync(path);
@@ -101,7 +102,7 @@ function fixture(options: { exhausted?: boolean; usage?: boolean; malformed?: bo
   const definition: UniverseCampaignDefinition = { schemaVersion: 1, id: 'resource-campaign', universeId: manifest.id, feedback: true,
     budget: { maxGenerations: 3, maxDurationMs: 30_000, maxModelRequests: 3, maxStagnantGenerations: 3, maxReportedTokens: null } };
   return { root, repo, manifest, resourceRuntime, definition, ledgerRoot, pool, bindings, observations,
-    directory: join(root, 'universes', manifest.id), workspace,
+    directory: join(root, 'universes', manifest.id), workspace, workerFile,
     status: () => resourcePoolStatus(ledgerRoot, pool, bindings, observations) };
 }
 
@@ -226,10 +227,28 @@ describe.runIf(process.platform === 'darwin')('resource-backed Universe end-to-e
   });
 
   it('reports deadline completion rather than resource-attention pause when a campaign exhausts its time budget', async () => {
-    const f = fixture({ workerDelayMs: 1500 });
-    f.definition.budget.maxDurationMs = 700;
+    const f = fixture({ workerDelayMs: 60_000 });
     initUniverseCampaign(f.definition, f);
+    const original = verification.runVerifySubprocessAsync;
+    let nativeTimedOut = false;
+    vi.spyOn(verification, 'runVerifySubprocessAsync').mockImplementation(async (command, options) => {
+      if (command[1] !== f.workerFile) return original(command, options);
+      // Campaign reservation precedes native resource admission. A short wall
+      // budget could expire in between under suite load, never reaching a worker.
+      // Establish the real durable reservation first, then time out the actual
+      // subprocess and advance only the wall clock past the persisted deadline.
+      expect(f.status().attempts).toHaveLength(1);
+      const deadlineAt = readUniverseCampaign(f.definition.id, f).deadlineAt;
+      expect(deadlineAt).not.toBeNull();
+      const result = await original(command, { ...options, timeoutMs: 50 });
+      expect(result.timedOut).toBe(true);
+      nativeTimedOut = true;
+      vi.useFakeTimers({ toFake: ['Date'] });
+      vi.setSystemTime(new Date(Date.parse(deadlineAt!) + 1));
+      return result;
+    });
     const final = await runUniverseCampaign(f.definition.id, f);
+    expect(nativeTimedOut).toBe(true);
     expect(final.sourceState, JSON.stringify(final)).toBe('healthy');
     expect(final.state, JSON.stringify(final)).toBe('completed');
     expect(final.reason).toMatch(/duration budget exhausted/);

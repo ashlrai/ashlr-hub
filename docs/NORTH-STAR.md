@@ -149,10 +149,13 @@ remote push or deployment authority.
    with a restartable foreground command before commissioning a resident service.
    The checkpointed campaign DAG is the first implemented slice: recorded
    completions can release dependants, untouched branches can continue on
-   restart, and unsettled dispatch intents remain held without redispatch.
-   Stronger reconciliation needs a dispatch identity bound into campaign start
-   evidence. Automatic integration/handoff nodes and resident supervision remain
-   separate work; this is not yet an end-to-end always-on controller.
+   restart, and completed calls with a lost controller receipt can be reconciled
+   using their unique campaign start/settlement identity and exact history.
+   Planned delivery must already be verified; recovery neither repeats workers
+   nor creates missing branches. Legacy, incomplete and mismatched dispatches
+   remain held. Automatic interrupted-session resumption, integration/handoff
+   nodes and resident supervision remain separate work; this is not yet an
+   end-to-end always-on controller.
 3. **Learn the division of labor.** Compare baseline and role-based policies on
    the same enrolled tasks using accepted improvements, rework, elapsed time and
    reported usage with coverage. Keep each repair loop finite and retain consumed

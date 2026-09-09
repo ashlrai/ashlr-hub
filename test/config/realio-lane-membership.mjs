@@ -99,6 +99,8 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-integration-handoff.test.ts', // immutable downstream registration and source-lineage verification
   'test/universe-portfolio-controller.test.ts', // durable controller records and injected dispatch/restart faults
   'test/universe-portfolio-controller-integration.test.ts', // native checkpointed DAG execution and replay
+  'test/universe-dispatch-recovery-integration.test.ts', // native dispatch-attributed controller recovery without worker replay
+  'test/universe-controller-reconciliation.test.ts', // private controller recovery ledger with injected attribution faults
   'test/universe-integration-evaluate.test.ts', // real private candidate artifacts with injected evaluation and ledger faults
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review
   'test/universe-graph-reader.test.ts', // targeted real Git/private-ledger graph observation

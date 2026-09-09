@@ -51,6 +51,6 @@ export interface PortfolioControllerEnrollment {
 export type PortfolioControllerEvent = { id: string; sequence: number; at: string } & (
   { kind: 'created'; enrollment: PortfolioControllerEnrollment } |
   { kind: 'observed' } |
-  { kind: 'intent'; campaignId: string } |
+  { kind: 'intent'; campaignId: string; /** Absent for legacy and delivery-only intents. */ dispatchId?: string } |
   { kind: 'settled'; outcome: UniversePortfolioControllerOutcome; recordsDigest: string }
 );

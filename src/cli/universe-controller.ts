@@ -21,6 +21,9 @@ manifest and delivery intent on restart; existing experiments are not rewritten.
 The original persisted deadline includes downtime and is not renewed by restart.
 Already settled work is reconciled; uncertain or paused work is not automatically
 retried. An in-flight record is evidence of an attempt, not proof of a live worker.
+Lost controller receipts can be recovered only from an exact dispatch-attributed
+completed campaign and any required existing delivery. No worker or branch is
+recreated by recovery. Legacy or mismatched intents remain unresolved.
 The optional delivery plan is private JSON at most 64 KiB. Planned local branch
 handoffs gate downstream work; no push, merge, deployment or acceptance is implied.
 Repeat --resource-runtime for every intended resource-pool invocation; its private

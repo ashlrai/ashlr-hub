@@ -191,7 +191,7 @@ describe.runIf(process.platform === 'darwin')('Universe portfolio controller nat
     expect(readUniversePortfolioController('fixture-controller', { root: value.root }).sourceState).toBe('missing');
   });
 
-  it('holds a lost controller settlement without replaying an already-completed native campaign', async () => {
+  it('reconciles a proven lost settlement on run while status stays read-only and native work is not replayed', async () => {
     const value = fixture([{ name: 'a' }]);
     const definition = value.portfolio();
     const first = await runUniversePortfolioController(definition, { root: value.root });
@@ -205,10 +205,13 @@ describe.runIf(process.platform === 'darwin')('Universe portfolio controller nat
     // Remove only this private test ledger's final settlement suffix, simulating
     // loss after actual worker settlement but before controller receipt durability.
     for (const name of names.slice(settled)) rmSync(join(records, name));
+    const beforeRead = files(value.root);
     const observed = readUniversePortfolioController(definition.id, { root: value.root });
     expect(observed.outcomes[0]).toMatchObject({ state: 'in-flight', attempted: true, reasonCode: 'reconciliation-required' });
+    expect(files(value.root)).toEqual(beforeRead);
     const repeated = await runUniversePortfolioController(definition, { root: value.root });
-    expect(repeated.status).not.toBe('completed');
+    expect(repeated.status, JSON.stringify(repeated)).toBe('completed');
+    expect(repeated.outcomes[0]).toMatchObject({ state: 'completed', attempted: true });
     expect(repeated.deadlineAt).toBe(first.deadlineAt);
     expect(readUniverseCampaign('campaign-a', value)).toEqual(campaign);
     expect(value.evaluation).toHaveBeenCalledTimes(measured);

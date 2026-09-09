@@ -124,7 +124,7 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
   },
   {
     usage: 'ashlr universe controller run --manifest <private-absolute.json> [--root <absolute>] [--resource-runtime <private-absolute.json>] [--delivery-plan <private-absolute.json>] --json',
-    description: 'Run a checkpointed campaign DAG with one persisted deadline and dispatch history across restarts. Preserve declared priority and account admission; uncertain dispatches are not retried. No resident service or implicit campaign discovery.',
+    description: 'Run a checkpointed campaign DAG with one persisted deadline. Recover proven dispatch-attributed completed calls and existing delivery receipts without replaying workers. Preserve declared priority and account admission; uncertain dispatches are not retried. No resident service or implicit campaign discovery.',
     safety: 'append',
     jsonShape: 'UniversePortfolioControllerReport',
   },

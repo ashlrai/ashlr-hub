@@ -6,7 +6,7 @@ import { scheduledVariants } from './store.js';
 import { canonical, digest } from './artifacts.js';
 import {
   appendCampaignEvent, CampaignControlConflictError, campaignDirectory, campaignUniverse, foldCampaignEvents,
-  projectCampaign, readCampaignEvents, readUniverseCampaign, terminalCampaign,
+  projectCampaign, readCampaignEvents, readUniverseCampaign, terminalCampaign, validCampaignDispatchId,
 } from './campaign-store.js';
 import type { UniverseCampaignSummary, UniverseRunOptions } from './types.js';
 
@@ -20,7 +20,11 @@ export interface UniverseCampaignExpectation {
   /** Optional exact raw control history, including events omitted by the summary projection. */
   recordsDigest?: string;
 }
-type CampaignOptions = UniverseRunOptions & { expectedIdentity?: UniverseCampaignExpectation };
+type CampaignOptions = UniverseRunOptions & {
+  expectedIdentity?: UniverseCampaignExpectation;
+  /** Optional caller-generated UUIDv4 attribution; never permission to replay a session. */
+  dispatchId?: string;
+};
 type Settlement = 'paused' | 'stopped' | 'completed' | 'interrupted' | 'failed';
 
 class CampaignExpectationError extends Error {}
@@ -41,7 +45,7 @@ function assertExpectation(summary: UniverseCampaignSummary, expected: UniverseC
 }
 
 function settle(id: string, requested: Settlement, reason: string, options: CampaignOptions,
-  expectedRecordsDigest?: string): UniverseCampaignSummary {
+  expectedRecordsDigest?: string, dispatchId?: string): UniverseCampaignSummary {
   const directory = campaignDirectory(id, options);
   const state = foldCampaignEvents(readCampaignEvents(directory)).state;
   if (terminalCampaign(state)) return readUniverseCampaign(id, options);
@@ -49,7 +53,7 @@ function settle(id: string, requested: Settlement, reason: string, options: Camp
   appendCampaignEvent(directory, { kind: 'settled', state: selected,
     reason: state === 'stop-requested' || state === 'pause-requested'
       ? (selected === 'stopped' ? 'Stopped by owner' : 'Paused by owner') : reason,
-    at: new Date().toISOString() }, { expectedRecordsDigest });
+    at: new Date().toISOString(), ...(dispatchId === undefined ? {} : { dispatchId }) }, { expectedRecordsDigest });
   return readUniverseCampaign(id, options);
 }
 
@@ -73,6 +77,10 @@ export function campaignBudgetLimit(summary: UniverseCampaignSummary, nowMs = Da
 
 /** Explicit foreground ownership; resumption never installs or activates a resident daemon. */
 export async function runUniverseCampaign(id: string, options: CampaignOptions = {}): Promise<UniverseCampaignSummary> {
+  // Capture the caller value before any ownership or durable writes. Never infer
+  // attribution from a previous runner's started record or generic owner controls.
+  const dispatchId = options.dispatchId;
+  if (dispatchId !== undefined && !validCampaignDispatchId(dispatchId)) throw new Error('Invalid campaign dispatch identity');
   const initial = readUniverseCampaign(id, options);
   assertExpectation(initial, options.expectedIdentity, true);
   if (options.expectedIdentity?.recordsDigest !== undefined) {
@@ -87,10 +95,16 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
     // when starting; a pause cannot slip between a snapshot check and admission.
     let admissionEvents = readCampaignEvents(directory);
     assertRecordsExpectation(admissionEvents, options.expectedIdentity);
+    if (dispatchId !== undefined && admissionEvents.some((event) => event.kind === 'started' && event.dispatchId === dispatchId)) {
+      throw new CampaignExpectationError('Campaign dispatch identity cannot be reused');
+    }
     const admission = projectCampaign(admissionEvents,
       campaignUniverse(foldCampaignEvents(admissionEvents).created, options));
     assertExpectation(admission, options.expectedIdentity, true);
     let admissionDigest = options.expectedIdentity ? digest(canonical(admissionEvents)) : undefined;
+    let ownedDispatchId: string | undefined;
+    const finish = (state: Settlement, reason: string, checkpoint?: string): UniverseCampaignSummary =>
+      settle(id, state, reason, options, checkpoint, ownedDispatchId);
     const controller = new AbortController();
     const cancel = (): void => controller.abort();
     options.signal?.addEventListener('abort', cancel, { once: true });
@@ -106,9 +120,9 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
       if (terminalCampaign(summary.state)) return summary;
       const folded = foldCampaignEvents(admissionEvents);
       if (folded.state === 'stop-requested' || folded.state === 'pause-requested') {
-        return settle(id, folded.state === 'stop-requested' ? 'stopped' : 'paused', 'Acknowledged pending owner control', options, admissionDigest);
+        return finish(folded.state === 'stop-requested' ? 'stopped' : 'paused', 'Acknowledged pending owner control', admissionDigest);
       }
-      if (controller.signal.aborted) return settle(id, 'paused', 'Campaign paused by caller cancellation', options, admissionDigest);
+      if (controller.signal.aborted) return finish('paused', 'Campaign paused by caller cancellation', admissionDigest);
 
       // The common Universe lease excludes other runs while abandoned starts
       // are reconciled. Existing run IDs finalize interruption; they never replay.
@@ -133,13 +147,15 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
       assertExpectation(summary, options.expectedIdentity, false);
       if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
       const before = campaignBudgetLimit(summary);
-      if (before) return settle(id, before.state, before.reason, options, admissionDigest);
+      if (before) return finish(before.state, before.reason, admissionDigest);
       const startRef = verifiedProcessStartRef(process.pid);
       if (!startRef) throw new Error('Cannot establish campaign process ownership');
       const at = new Date().toISOString();
       const deadlineAt = summary.deadlineAt ?? new Date(Date.parse(at) + summary.definition.budget.maxDurationMs).toISOString();
-      appendCampaignEvent(directory, { kind: 'started', at, deadlineAt, owner: { pid: process.pid, startRef } },
+      appendCampaignEvent(directory, { kind: 'started', at, deadlineAt, owner: { pid: process.pid, startRef },
+        ...(dispatchId === undefined ? {} : { dispatchId }) },
         { expectedRecordsDigest: admissionDigest });
+      ownedDispatchId = dispatchId;
       admissionDigest = undefined;
       deadlineTimer = setTimeout(() => { deadlineExpired = true; cancel(); }, Math.max(1, Date.parse(deadlineAt) - Date.now()));
       poll = setInterval(() => {
@@ -160,14 +176,14 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
         assertExpectation(summary, options.expectedIdentity, false);
         if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
         if (summary.state === 'pause-requested' || summary.state === 'stop-requested') {
-          return settle(id, summary.state === 'stop-requested' ? 'stopped' : 'paused', 'Acknowledged owner control', options);
+          return finish(summary.state === 'stop-requested' ? 'stopped' : 'paused', 'Acknowledged owner control');
         }
         if (controlError) throw new Error(controlError);
-        if (options.signal?.aborted) return settle(id, 'paused', 'Campaign paused by caller cancellation', options);
-        if (deadlineExpired) return settle(id, 'completed', 'Campaign duration budget exhausted', options);
+        if (options.signal?.aborted) return finish('paused', 'Campaign paused by caller cancellation');
+        if (deadlineExpired) return finish('completed', 'Campaign duration budget exhausted');
         const exhausted = campaignBudgetLimit(summary);
-        if (exhausted) return settle(id, exhausted.state, exhausted.reason, options);
-        if (controller.signal.aborted) return settle(id, 'paused', 'Campaign paused by caller cancellation', options);
+        if (exhausted) return finish(exhausted.state, exhausted.reason);
+        if (controller.signal.aborted) return finish('paused', 'Campaign paused by caller cancellation');
 
         const current = campaignUniverse(summary, options);
         if (current.sourceState !== 'healthy') throw new Error('Universe evidence is degraded');
@@ -176,7 +192,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
         if (previous) {
           const previousRun = current.runs.find((run) => run.id === previous.runId);
           if (generation !== previous.generation + (previousRun ? 1 : 0)) {
-            return settle(id, 'failed', 'Unexpected Universe generation interleaving; campaign reservation scope changed', options);
+            return finish('failed', 'Unexpected Universe generation interleaving; campaign reservation scope changed');
           }
         }
         const availableRequests = summary.definition.budget.maxModelRequests - summary.progress.reservedModelRequests;
@@ -187,7 +203,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
           if (reservedModelRequests + required > availableRequests) break;
           variants.push(variant); reservedModelRequests += required;
         }
-        if (!variants.length) return settle(id, 'completed', 'Campaign model-request reservation budget exhausted', options);
+        if (!variants.length) return finish('completed', 'Campaign model-request reservation budget exhausted');
         const runId = randomUUID();
         const ordinal = summary.progress.attempts + 1;
         // Reserve the complete scheduled request envelope before any worker or
@@ -199,9 +215,9 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
           deadlineMs: Date.parse(deadlineAt), trialLimit: variants.length,
           ...(summary.definition.feedback ? { feedback: true as const } : {}),
         }, lock);
-        if (result.status === 'failed') return settle(id, 'failed', 'Universe generation failed; inspect its durable evidence', options);
+        if (result.status === 'failed') return finish('failed', 'Universe generation failed; inspect its durable evidence');
         if (result.status === 'interrupted' && !controller.signal.aborted) {
-          return settle(id, 'interrupted', 'Universe generation interrupted before campaign completion', options);
+          return finish('interrupted', 'Universe generation interrupted before campaign completion');
         }
         // Existing owner controls and terminal time budgets take precedence over
         // an operational pause. The top of the loop reconciles their exact state.
@@ -212,7 +228,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
         if (result.trials.some((trial) => trial.generation?.resource &&
             (trial.generation.resource.dispatch !== 'settled' ||
              trial.generation.resource.taskStatus !== 'completed'))) {
-          return settle(id, 'paused', 'Resource generation requires attention; inspect task evidence before resuming', options);
+          return finish('paused', 'Resource generation requires attention; inspect task evidence before resuming');
         }
         // No bounded local completion means there is no candidate to learn from.
         // Keep this generation's reservations, but do not spend the remaining
@@ -220,7 +236,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
         // and evaluator rejections still feed ordinary autonomous correction.
         if (result.trials.some((trial) => trial.generation?.provider === 'local-openai-compatible' &&
             trial.generation.status !== 'succeeded' && trial.generation.responseDigest === null)) {
-          return settle(id, 'paused', 'Local generation did not receive a completion; inspect the local service before resuming', options);
+          return finish('paused', 'Local generation did not receive a completion; inspect the local service before resuming');
         }
       }
     } catch (error) {
@@ -229,7 +245,7 @@ export async function runUniverseCampaign(id: string, options: CampaignOptions =
       if (!ownsLocalStoreLock(lock)) throw error;
       const summary = readUniverseCampaign(id, options);
       if (summary.sourceState !== 'healthy') return summary;
-      return settle(id, 'failed', error instanceof Error ? error.message.slice(0, 1_024) : 'Campaign execution failed', options, admissionDigest);
+      return finish('failed', error instanceof Error ? error.message.slice(0, 1_024) : 'Campaign execution failed', admissionDigest);
     } finally {
       if (poll) clearInterval(poll);
       if (deadlineTimer) clearTimeout(deadlineTimer);
