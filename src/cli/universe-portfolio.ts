@@ -3,7 +3,7 @@ import { isAbsolute, resolve } from 'node:path';
 import {
   readUniversePortfolioPlan, runUniversePortfolio, validateUniversePortfolioDefinition,
   type UniverseCampaignSummary, type UniversePortfolioDefinition, type UniversePortfolioPlan, type UniversePortfolioResult,
-  type UniverseCampaignDeliveryPlan,
+  type UniverseCampaignDeliveryPlan, type UniversePortfolioGraphProjection,
 } from '../core/universe/index.js';
 
 const MAX_MANIFEST_BYTES = 256 * 1024;
@@ -161,11 +161,39 @@ function progress(campaign: UniverseCampaignSummary | null): string {
     ` · recorded subtotal: ${value.recordedTokens} · campaign deadline: ${campaign.deadlineAt ?? 'not started'}`;
 }
 
+function graphList(values: readonly string[]): string {
+  return values.join(', ') || 'none';
+}
+
+function renderGraph(graph: UniversePortfolioGraphProjection): string[] {
+  const states = Object.entries(graph.counts.states).map(([state, count]) => `${state}=${count}`).join(', ');
+  return [
+    `Ordering graph: ${graph.scope} · ${graph.authority}`,
+    `Dependency-ready frontier (ordering only): ${graphList(graph.dependencyReadyCampaignIds)}`,
+    `Source-healthy invocation candidates: ${graphList(graph.invocationCandidateIds)}`,
+    'Ordering only: candidates are source observations, not execution authorization; delivery, provider, and resource-runtime readiness are not inspected.',
+    'Structural layers:',
+    ...graph.layers.map((campaignIds, layer) => `  Layer ${layer}: ${graphList(campaignIds)}`),
+    `Graph counts: ${graph.counts.nodes} nodes · ${graph.counts.edges} edges · states ${states || 'none'}`,
+    'Graph diagnostics:',
+    ...graph.nodes.map((node) => [
+      `  ${node.campaignId} · ${node.state} · layer ${node.layer}`,
+      `    Depends on: ${graphList(node.dependsOn)}`,
+      `    Unmet dependencies: ${graphList(node.unmetDependencyIds)}`,
+      `    Root blockers: ${graphList(node.blockingRootIds)}`,
+      `    Root waiting causes: ${graphList(node.waitingRootIds)}`,
+      `    Structural descendants: ${graphList(node.structuralDescendantIds)}`,
+      `    Affected descendants: ${graphList(node.affectedDescendantIds)}`,
+    ].join('\n')),
+  ];
+}
+
 function renderPlan(plan: UniversePortfolioPlan): string {
   return [
     `${plan.definition.id} · portfolio plan · source ${plan.sourceState}`,
     `Invocation limits: ${plan.definition.maxParallel} concurrent campaigns · ${plan.definition.maxDurationMs} ms`,
     `Topological order (dependencies first): ${plan.topologicalOrder.join(' → ')}`,
+    ...renderGraph(plan.graph),
     ...plan.nodes.map((node) => `  ${node.campaignId} · ${node.state} · universe ${node.universeId ?? 'unavailable'}` +
       `\n    Depends on: ${node.dependsOn.join(', ') || 'none'}${node.reason ? ` · ${node.reason}` : ''}` +
       `\n    ${progress(node.campaign)}`),
@@ -181,6 +209,7 @@ function renderResult(result: UniversePortfolioResult): string {
     `Started: ${result.startedAt} · invocation deadline: ${result.deadlineAt} · finished: ${result.finishedAt}`,
     `Invocation concurrency: ${result.plan.definition.maxParallel}; existing campaign budgets and deadlines remain unchanged.`,
     'Initial dependency plan:',
+    ...renderGraph(result.plan.graph),
     ...result.plan.nodes.map((node) => `  ${node.campaignId} · ${node.state} · depends on ${node.dependsOn.join(', ') || 'none'}`),
     'Final campaign outcomes:',
     ...result.outcomes.map((outcome) => `  ${outcome.campaignId} · ${outcome.status} · ${outcome.attempted ? 'attempted' : 'not attempted'}` +

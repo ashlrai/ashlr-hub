@@ -76,7 +76,7 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
   },
   {
     usage: 'ashlr universe portfolio plan --manifest <file.json> [--root <path>] --json',
-    description: 'Read explicit campaign dependencies, readiness, and progress without executing or changing any campaign.',
+    description: 'Read explicit campaign dependencies, ordering frontier, blocker roots, structural layers and downstream impact without execution. Observation only; not worker or delivery readiness, and declared priority is unchanged.',
     safety: 'read',
     jsonShape: 'UniversePortfolioPlan',
   },

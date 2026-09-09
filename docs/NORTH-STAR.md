@@ -75,6 +75,66 @@ confidence as independent proof of success.
 - Allocate frontier and local model work using observed quality and resource use.
 - Learn from accepted and rejected changes, operational behavior, and user feedback.
 
+## From parallel agents to an integrated engineering loop
+
+The target is an objective-to-candidate loop, not a larger collection of agents:
+an approved objective, explicitly enrolled repositories and a resource envelope
+produce independently verified improvements on retained local candidate branches.
+The engineer can delegate routine decomposition, implementation, testing and
+effectiveness assessment within that envelope. New product direction and new
+external authority remain explicit decisions.
+
+Model roles are configurable starting hypotheses, not account identities or
+guarantees of capability:
+
+| Role | Initial model assignment | Evidence required from the role |
+| --- | --- | --- |
+| Design and challenge | Astra | Alternatives, a dependency graph, scoped interfaces, acceptance criteria and reasons to reject the plan. |
+| Integrate and implement | Terra | Composable changes and a freshly tested combined candidate, not only independently passing branches. |
+| Bounded implementation and test repair | Luna | Narrow changes, reproducible checks and a finite retry budget before escalation. |
+
+Route these roles through enrolled workers; preserve account exclusions, shared
+capacity and operator reserves before considering model preference. An account
+used by the engineer can remain unavailable to the unattended fleet, including
+all aliases of that capacity. Percentage allocation is an admission policy, not
+a guarantee that already-running work cannot cross a usage threshold.
+
+### Three implementation milestones
+
+These are planned capabilities, not activation instructions. The current
+[portfolio runtime](ASHLR-UNIVERSE.md#coordinate-campaigns-with-a-dependency-graph)
+orders campaigns and can require local branch delivery, but does not import those
+artifacts into dependent seeds or persist a portfolio controller.
+
+1. **Accept the combined product.** Define a one-repository integration contract
+   with pinned upstream delivery commits/trees, base revision, permitted paths,
+   fixed acceptance suite and target candidate branch. One integration owner
+   composes changes in an isolated worktree and tests the combined tree. A new
+   dependent manifest pins the accepted result; existing manifests stay immutable.
+   Acceptance: both upstream changes are present, jointly failing or conflicting
+   changes never advance the candidate ref, changed input evidence is rejected,
+   and replay of settled integration does not duplicate work.
+2. **Continue reliably across interruption.** Persist invocation identity,
+   pending transitions, fenced ownership, next observation time and remaining
+   aggregate allowance above existing campaign and resource ledgers. Retry clean
+   capacity withholding within the authorized budget; retain uncertain work and
+   owner pauses. Acceptance: crash injection before dispatch, after reservation,
+   after settlement and during delivery causes no duplicate dispatch or ref
+   advancement. Restart preserves budgets; cancellation drains owned work. Start
+   with a restartable foreground command before commissioning a resident service.
+3. **Learn the division of labor.** Compare baseline and role-based policies on
+   the same enrolled tasks using accepted improvements, rework, elapsed time and
+   reported usage with coverage. Keep each repair loop finite and retain consumed
+   allowance on escalation. Hold acceptance evidence fixed while evaluating a
+   candidate, including a proposed harness change. Unknown usage stays unknown.
+
+Dependency layers and blocker impact are observations, not new scheduling
+authority. Keep declared task priority while collecting evidence for later
+ranking experiments. Structural descendant counts are neither predicted time
+savings nor proof of product value. Reserve enough capacity to finish integration
+and independent review of work already started, rather than spending the entire
+allowance generating more disconnected changes.
+
 ## Wiring
 
 `docs/NORTH-STAR.md` and `docs/ECOSYSTEM-MAP.md` ground strategy and invention.
