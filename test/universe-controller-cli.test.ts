@@ -71,6 +71,8 @@ describe('Universe persisted controller CLI', () => {
     expect(text).toContain('original persisted deadline');
     expect(text).toContain('wait for a busy Universe execution lock');
     expect(text).toContain('No dispatch intent or worker request is recorded while waiting');
+    expect(text).toContain('reclaim a proven-dead controller record-writer lock');
+    expect(text).toContain('Status does not clear locks');
     expect(text).toContain('not a resident daemon');
     expect(text).toContain('uncertain or paused work');
     expect(files.readResourceJson).not.toHaveBeenCalled();

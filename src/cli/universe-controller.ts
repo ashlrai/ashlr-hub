@@ -27,6 +27,9 @@ retried. An in-flight record is evidence of an attempt, not proof of a live work
 Lost controller receipts can be recovered only from an exact dispatch-attributed
 completed campaign and any required existing delivery. No worker or branch is
 recreated by recovery. Legacy or mismatched intents remain unresolved.
+Run may reclaim a proven-dead controller record-writer lock when no record is
+staged. It never discards staged records or repairs unknown lock ownership.
+Status does not clear locks; leftover writer locks can make evidence unavailable.
 The optional delivery plan is private JSON at most 64 KiB. Planned local branch
 handoffs gate downstream work; no push, merge, deployment or acceptance is implied.
 Repeat --resource-runtime for every intended resource-pool invocation; its private

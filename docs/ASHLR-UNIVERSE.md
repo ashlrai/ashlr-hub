@@ -1796,6 +1796,41 @@ not acquire or probe execution locks: a lock-only conflict is detected by `run`,
 and `pending` alone does not establish that capacity is available.
 Read-only status never creates missing stores or reconciles uncertain work.
 
+Recovery depends on which records are durably present, not just whether the old
+process exited:
+
+| Last durable boundary before process death | Expected successor behavior |
+| --- | --- |
+| Enrollment exists, but no campaign dispatch intent | Reclaim a proven-dead owner's lease and admit unchanged pristine work within the original deadline. |
+| Dispatch intent exists, but the campaign has not started | Retain the unresolved attempt and its concurrency slot; do not retry or release dependants. |
+| Attributed campaign completion exists, but controller settlement does not | Reconcile the exact completed dispatch without rerunning its worker or evaluator. |
+| Attributed completion and required delivery both exist | Verify the existing receipt and current branch before releasing dependants; never recreate the delivery. |
+| Required delivery is missing or its branch has changed | Keep dependent work blocked; recovery does not repair or replace the branch. |
+
+An old PID or a changed process-start identity alone is not proof that ownership
+is free. A successor must establish that the owner died before reclaiming its
+lock. Read-only status leaves stale locks and recorded history untouched.
+When no controller record is staged, `controller run` can reclaim a proven-dead
+controller record-writer lock under its execution lease before reading history.
+It does not clean campaign writer locks, repair malformed lock metadata, remove
+staged records, or resume uncertain attempts. Status can remain unavailable
+because of a leftover writer lock until an explicit run performs this cleanup.
+These durable-boundary rules do not establish machine-reboot or power-loss
+recovery. An interruption inside record publication can leave an unpublished
+staging file; incomplete evidence remains unavailable rather than being silently
+discarded or interpreted as permission to run again.
+
+The macOS process-crash acceptance suite starts real child controllers, pauses
+one before a specific record is staged, kills it with `SIGKILL`, and starts an
+uninstrumented successor. It checks original deadlines, unchanged upstream
+artifacts, exclusive live ownership, retained unresolved intents and existing
+delivery refs. It uses private test repositories and inert workers, not provider
+accounts. From a development checkout with dependencies installed, run:
+
+```sh
+npx vitest run test/universe-controller-crash-integration.test.ts
+```
+
 The controller has a separate local execution lock and bounded immutable history
 under `<root>/portfolios/<id>/`. Only one invocation owns that controller at a
 time. History is limited to 512 records and 4 MiB, with a 128 KiB canonical
