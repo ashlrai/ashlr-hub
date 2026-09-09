@@ -36,6 +36,28 @@ Constraints: No Earth globe, no cartoon rockets, no weapons or warfare. No text,
 letters, logos, UI, diagrams, badges, watermark, border, or collage. Generate
 exactly one original asset.
 
+## Orbital archive artwork
+
+`public/ashlrverse-archive.png` is a second original concept illustration created
+with the built-in image-generation tool on 2026-09-09, inspected and copied
+unchanged at 1536 by 1024 pixels. It is lazy-loaded mission-section artwork,
+not a visualization of real stored work or running infrastructure.
+
+Exact generation prompt:
+
+```text
+Use case: stylized-concept
+Asset type: single original decorative conceptual raster illustration for the mission section of an open-source engineering fleet landing page; not evidence of real system operation.
+Primary request: Ashlrverse orbital archive, a sophisticated science-fiction engineering habitat detail conveying accumulated work and reusable knowledge.
+Scene/backdrop: deep dark navy space.
+Subject: brushed titanium nested storage modules and delicate illuminated channels suspended in space, composed as a coherent and beautifully engineered orbital archive detail.
+Style/medium: quiet cinematic realism, refined original science-fiction concept art, physically convincing materials.
+Composition/framing: landscape 3:2 composition, carefully layered spatial depth, visually legible at website section scale.
+Lighting/mood: ice-blue highlights and warm solar rim lighting, restrained luminous channels, quiet contemplative atmosphere.
+Color palette: dark navy #05090f, brushed steel, ice blue #aadbf5, warm solar light #f2d5ae.
+Constraints: generate exactly one image. No words, lettering, logos, watermarks, people, weapons, charts, fake UI, or recognizable third-party intellectual property.
+```
+
 ## Interaction references
 
 The data diagram uses native SVG and ordinary labeled HTML buttons. Selection

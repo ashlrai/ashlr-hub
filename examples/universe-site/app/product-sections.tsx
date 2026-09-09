@@ -1,5 +1,6 @@
 import { CopyCommand } from './copy-command';
 import { ProviderEcosystem } from './provider-ecosystem';
+import Image from 'next/image';
 
 const docs = 'https://github.com/ashlrai/ashlr-hub/blob/master/docs/';
 const command =
@@ -18,6 +19,17 @@ export function ProductSections() {
             <br />
             getting better.
           </h2>
+          <figure className="archive-art">
+            <Image
+              src="/ashlrverse-archive.png"
+              width={1536}
+              height={1024}
+              alt="Concept artwork of a modular orbital archive in brushed titanium, lit by a distant sunrise."
+              loading="lazy"
+              unoptimized
+            />
+            <figcaption>Keep the work. Improve the next attempt.</figcaption>
+          </figure>
         </div>
         <div className="mission-body">
           <p className="mission-lead">

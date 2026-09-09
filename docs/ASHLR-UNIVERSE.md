@@ -1011,6 +1011,9 @@ Delivery failure leaves the campaign terminal and makes the queue incomplete.
 The invocation deadline includes plan preflight; cancellation and expiry are
 checked between targets and again before publishing a branch. Synchronous
 filesystem/Git work cannot be preempted, so cleanup can outlast the deadline.
+The deadline is checked again after owned work settles: an overrun reports an
+aggregate timeout while retaining completed campaign outcomes and delivery
+receipts. An already recorded cancellation or failure keeps its precedence.
 Cancellation awaits owned cleanup; a ref update already underway may settle, so
 inspect the returned delivery evidence before assuming no branch was created.
 
@@ -1284,6 +1287,9 @@ Ctrl+C or the portfolio duration limit cancels and awaits owned campaign calls
 before returning. Cancellation is cooperative and cleanup may exceed that time
 limit. Use the existing campaign pause/stop commands for individual controls;
 a pause arriving between planning and execution is not silently resumed.
+After the final owned call settles, the invocation reconciles its deadline even
+if synchronous work prevented the timer from firing. Completed task evidence is
+preserved inside a timed-out invocation; this does not schedule another attempt.
 
 To continue after inspecting the result, run the same portfolio file again.
 This explicit invocation may resume campaigns already paused or interrupted at

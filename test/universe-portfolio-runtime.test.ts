@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
 import { resolve } from 'node:path';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import type { UniverseCampaignDefinition, UniverseCampaignSummary } from '../src/core/universe/types.js';
@@ -121,6 +122,48 @@ describe('portfolio invocation envelope', () => {
     expect(hooks.run.mock.calls.map(([id]) => id)).toEqual(['a']);
     expect(result.outcomes[1]).toMatchObject({ campaignId: 'b', status: 'cancelled', attempted: false });
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['runner', 'evidence'] as const)('reconciles a final synchronous %s overrun without losing completed evidence', async (phase) => {
+    vi.useFakeTimers(); vi.setSystemTime('2026-09-07T00:00:00Z');
+    const f = fixture(); f.definition.tasks = [{ campaignId: 'a', dependsOn: [] }];
+    const controller = new AbortController();
+    hooks.run.mockImplementation(async (id: string) => {
+      if (phase === 'runner') vi.setSystemTime('2026-09-07T00:00:11Z');
+      return f.complete(id);
+    });
+    hooks.read.mockImplementation((id: string) => {
+      const campaign = structuredClone(f.values.get(id)!);
+      if (phase === 'evidence' && campaign.state === 'completed') vi.setSystemTime('2026-09-07T00:00:11Z');
+      return campaign;
+    });
+    const result = await runUniversePortfolio(f.definition, { root: '/unused', signal: controller.signal });
+    expect(result.status).toBe('timed-out');
+    expect(result.outcomes).toMatchObject([{ campaignId: 'a', status: 'completed', attempted: true,
+      campaign: { state: 'completed' } }]);
+    expect(result.reasons).toContain('Portfolio invocation duration expired; original campaign budgets are unchanged');
+    expect(hooks.run).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it.each(['cancelled', 'timed-out'] as const)('preserves first %s stop reason after final settlement', async (status) => {
+    vi.useFakeTimers(); vi.setSystemTime('2026-09-07T00:00:00Z');
+    const f = fixture(); f.definition.tasks = [{ campaignId: 'a', dependsOn: [] }];
+    const controller = new AbortController();
+    hooks.run.mockImplementation(async (id: string) => {
+      if (status === 'timed-out') vi.advanceTimersByTime(10_000);
+      vi.setSystemTime('2026-09-07T00:00:11Z'); controller.abort();
+      return f.complete(id);
+    });
+    const result = await runUniversePortfolio(f.definition, { root: '/unused', signal: controller.signal });
+    expect(result.status).toBe(status);
+    expect(result.outcomes[0]).toMatchObject({ status: 'completed', attempted: true, campaign: { state: 'completed' } });
+    expect(result.reasons).toContain(status === 'cancelled' ? 'Caller cancelled the foreground portfolio invocation'
+      : 'Portfolio invocation duration expired; original campaign budgets are unchanged');
+    expect(hooks.run).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
   });
 
   it('does not resume an acknowledged pause that occurred while queued', async () => {

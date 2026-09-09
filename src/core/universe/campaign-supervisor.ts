@@ -287,6 +287,10 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
     pending.clear();
   } finally {
     await Promise.allSettled(active.values());
+    // The final synchronous evidence read or observer can exhaust the budget
+    // before the timer gets a turn. Reconcile the invocation after draining,
+    // without rewriting completed campaign outcomes or delivered receipts.
+    stopping();
     clearTimeout(timer);
     config.signal?.removeEventListener('abort', cancel);
   }
