@@ -18,6 +18,28 @@ export interface ResourceConsoleEngineeringLaunch {
   expectedEnrollmentDigest: string;
 }
 
+export type ResourceConsoleEngineeringReadinessReason =
+  | 'already-running' | 'already-completed' | 'graph-terminal'
+  | 'owner-unavailable' | 'owner-capacity' | 'queue-paused' | 'project-unavailable'
+  | 'global-kill-active' | 'global-kill-unavailable' | 'graph-kill-active' | 'graph-kill-unavailable'
+  | 'graph-ownership-unavailable'
+  | 'provenance-unavailable' | 'runtime-pin-changed' | 'enrollment-pin-changed'
+  | 'graph-evidence-unavailable' | 'launch-cancelled' | 'launch-unresolved' | 'deadline-exhausted'
+  | 'controller-already-enrolled' | 'campaign-not-startable';
+
+export interface ResourceConsoleEngineeringReadiness {
+  schemaVersion: 1;
+  enrollmentId: string;
+  enrollmentDigest: string;
+  sampledAt: string;
+  status: 'ready' | 'blocked' | 'not-applicable';
+  action: 'launch' | 'reconcile' | 'none';
+  reasons: ResourceConsoleEngineeringReadinessReason[];
+  scope: 'local-admission-check-only';
+  effectsExecuted: false;
+  providerContacted: false;
+}
+
 export interface ResourceConsoleEngineeringJob {
   enrollmentId: string;
   projectId: string;

@@ -1,6 +1,79 @@
 # Verified local handoff
 
-## Current continuation: project-bound workspace engineering
+## Current continuation: observable engineering admission
+
+Baseline: `2b4064a32769362b11a32664af459e29bdfb8ca8`; isolated `auto/p00`
+at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents explored
+and implemented core admission, HTTP protocol and independent real-I/O acceptance;
+parent integrated the UI, documentation and final gates. The containing commit is
+the source delivery, not an installed service or production deployment.
+
+- New `owner.readiness(id)` and authenticated
+  `GET /api/resources/engineering/:id/readiness` expose exact enrollment-bound,
+  timestamped local observation with closed reasons and no new dispatch.
+  Existing job status and start/cancel authority remain unchanged.
+- Known KILL, project/queue, signing-key, runtime/enrollment drift, campaign,
+  controller and fresh graph-ownership holds are checked before launch ownership,
+  under it and at first immutable publication. Temporary quota occupancy retains
+  existing bounded waits. The check never creates keys, removes locks, clears
+  stops, contacts providers or resets accounting. Fresh graph-lock presence is
+  not proof of a live owner; exact accepted-work reconciliation keeps existing
+  proven-dead lock recovery.
+- The workspace adds a local admission strip with sampled state, specific causes
+  and operator guidance. Job and readiness reads are independent; failure of a
+  readiness read cannot hide the owned Stop control. Closed response validation
+  binds ID/digest and rejects action/status contradictions. Refresh never retries
+  a mutation. Existing control-room type, semantic colors and responsive layout
+  were retained under the frontend-design and React review guidance.
+- Seven real pre-launch blocker cases leave graph/launch/controller/worker effects
+  absent and subsequently dispatch through the same ID/digest after restoration.
+  Post-publication KILL fixtures still hold missing/pending intent across restart;
+  accepted uncertainty is not converted into permission to replay.
+
+Focused verification: 40 core tests, 14 actual HTTP/Git acceptance tests, 67
+route/server tests and 50 UI/query tests passed (overlap broader runs; do not add
+them again as unique totals). Source/web typecheck, build, full lint and docs
+checks passed. Lint retains 107 existing warnings and zero errors. Real-I/O
+classification remains 274 files plus 659 unit files. Compiled `verify-safety`
+passes all five checks. Frozen full web suite: **1,224 passed / 75 files**.
+Frozen safety suite: **449 passed, five existing skips / 41 files** (197.76 s).
+Frozen resource/selected-graph sweep: **2,610 passed / 82 files** (422.53 s).
+These three disjoint suites total **4,283 passes and five existing skips**.
+No source/test changes occurred during the broad sweep. Final contract review
+clarified that admission's no-dispatch flags do not suppress the supervisor's
+existing fail-closed cancellation if observation discovers lost ownership.
+
+Actual headless Chrome, in a temporary HOME/Git/loopback fixture: desktop 1440
+and mobile 390 show the known graph stop with zero worker requests or launch
+records. Clearing only that fixture stop permits one explicit browser launch,
+three settled loopback generations, fixed evaluation and local branch value `3`.
+Original checkout stays clean at value `0`. Five light-theme viewport/state
+checks show zero overflow/off-viewport elements and no JavaScript errors; dark
+desktop/mobile observation also passes with zero mutations. Parent inspected
+screenshots in both themes. Fixture stopped cleanly and its generated temporary
+tree was removed; scripts and screenshots remain for review:
+
+- `/tmp/ashlr-readiness-browser-2ugGiD/held-report.json`
+- `/tmp/ashlr-readiness-browser-2ugGiD/run-report.json`
+- `/tmp/ashlr-readiness-browser-2ugGiD/desktop-held.png`
+- `/tmp/ashlr-readiness-browser-2ugGiD/mobile-held.png`
+- `/tmp/ashlr-readiness-browser-2ugGiD/desktop-dark-completed.png`
+
+Current host KILL was freshly observed active/healthy and was not modified.
+Original checkout remains `a01fc08663baab3039c4f1c084538de732a4fd0e` on
+`codex/v333-iteration`, with its existing unrelated untracked workplans preserved.
+Entire is enabled/manual-commit on `auto/p00`; resume found no checkpoint.
+No GitHub Actions, remote push, npm publication, actual provider generation,
+account-policy migration or resident service activation occurred.
+
+North Star remains unfinished. Next is whole-enrollment commissioning without
+startup effects, a meaningful pinned Hub evaluator/campaign, history-preserving
+account/Spark policy migration, real provider acceptance and resident scheduling
+through the existing activation path. Unfinished-work recovery, native PTY/browser
+tools, measured self-improvement and production commissioning are not inferred
+from these local tests. See the updated canonical autonomy-gap milestones.
+
+## Previous continuation: project-bound workspace engineering
 
 Baseline: `a0f820058d32dc86b5c2eabbc52f7c390ec4ba6e`; isolated `auto/p00`
 at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. The commit containing

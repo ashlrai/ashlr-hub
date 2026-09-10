@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job } from '../../../core/resources/console-engineering-types.js';
 import { clearMutationToken, setMutationToken } from '../../data/auth-store.js';
 import { WorkspaceEngineering } from './WorkspaceEngineering.js';
+import { engineeringReadiness } from './engineering-fixture.test-support.js';
 
 const token = 'a'.repeat(64);
 const enrollment: Enrollment = { id: 'fix', projectId: 'default', graphId: 'graph', enrollmentDigest: 'b'.repeat(64),
@@ -25,6 +26,7 @@ function transport(status: Job = job()) {
   const fetcher = vi.fn(async (path: string, init?: RequestInit) => {
     if (init?.method === 'POST') return pending.promise;
     if (path === '/api/resources/engineering') return json([enrollment]);
+    if (path === '/api/resources/engineering/fix/readiness') return json(engineeringReadiness(enrollment));
     if (path === '/api/resources/engineering/fix') return json(status);
     throw new Error(`Unexpected fixture route ${path}`);
   });

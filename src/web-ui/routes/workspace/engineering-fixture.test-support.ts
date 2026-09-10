@@ -1,4 +1,4 @@
-import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob } from '../../../core/resources/console-engineering-types.js';
+import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob, ResourceConsoleEngineeringReadiness } from '../../../core/resources/console-engineering-types.js';
 
 export const engineeringEnrollment = (projectId = 'default'): ResourceConsoleEngineeringEnrollment => ({
   id: `${projectId}-build`, projectId, graphId: 'verified-graph', enrollmentDigest: 'a'.repeat(64), objective: 'Improve the integer evaluator',
@@ -11,4 +11,8 @@ export const engineeringJob = (row = engineeringEnrollment(), patch: Partial<Res
   enrollmentId: row.id, projectId: row.projectId, graphId: row.graphId, enrollmentDigest: row.enrollmentDigest,
   state: 'ready', sourceState: 'missing', cancellable: false, launched: false, cancelled: false,
   definitionDigest: null, deadlineAt: null, nodes: [], reasons: [], acceptanceScope: row.acceptanceScope, ...patch,
+});
+export const engineeringReadiness = (row = engineeringEnrollment(), patch: Partial<ResourceConsoleEngineeringReadiness> = {}): ResourceConsoleEngineeringReadiness => ({
+  schemaVersion: 1, enrollmentId: row.id, enrollmentDigest: row.enrollmentDigest, sampledAt: '2026-09-10T09:00:00.000Z',
+  status: 'ready', action: 'launch', reasons: [], scope: 'local-admission-check-only', effectsExecuted: false, providerContacted: false, ...patch,
 });

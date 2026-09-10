@@ -1,10 +1,13 @@
 /** Real signed graph storage; all handlers are inert fixture callbacks. */
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const projections = vi.hoisted(() => ({ factory: vi.fn(), campaign: vi.fn(), universe: vi.fn() }));
+const projections = vi.hoisted(() => ({ factory: vi.fn(), campaign: vi.fn(), universe: vi.fn(), readiness: vi.fn() }));
+vi.mock('../src/core/universe/campaign-readiness.js', async (original) => ({
+  ...await original<typeof import('../src/core/universe/campaign-readiness.js')>(), readUniverseCampaignReadiness: projections.readiness,
+}));
 vi.mock('../src/core/universe/firm-engineering-control-handler.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/firm-engineering-control-handler.js')>(), createFirmEngineeringControlHandler: projections.factory,
 }));
@@ -20,6 +23,9 @@ import { validateResourceBindings } from '../src/core/resources/worker.js';
 import * as workerTransport from '../src/core/resources/worker.js';
 import { runResourceTask, resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
+import * as provenance from '../src/core/foundry/provenance.js';
+import * as policy from '../src/core/sandbox/policy.js';
+import { acquireLocalStoreLockWithOutcome, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { readControlGraph, runControlGraph, validateControlGraph, type ControlGraphDefinition } from '../src/core/universe/control-graph.js';
 
@@ -123,6 +129,7 @@ async function ownerFixture() {
     observationsPath: control.observationsFile, workspace: transport };
   const runtimeFile = join(root, 'runtime.json'); save(runtimeFile, runtime);
   const campaignBudget = { maxGenerations: 3, maxDurationMs: 60_000, maxModelRequests: 3, maxStagnantGenerations: 2, maxReportedTokens: null };
+  projections.readiness.mockReturnValue({ sourceState: 'healthy', automaticAction: 'run', observedState: 'ready', disposition: 'startable' });
   projections.campaign.mockReturnValue({ definition: { budget: campaignBudget } });
   projections.universe.mockReturnValue({ manifest: { seed: { repo: project }, objective: 'Fixed fixture objective',
     budget: { maxTrials: 1, maxDurationMs: 1000, trialTimeoutMs: 500, maxParallel: 1 } } });
@@ -273,5 +280,94 @@ describe('owned console engineering evidence', () => {
       expect(called).toBe(false); expect(projections.factory).not.toHaveBeenCalled();
       expect(readdirSync(f.graphRoot)).toEqual([]);
     } finally { await f.supervisor.close(); }
+  });
+});
+
+describe('nonexecuting engineering admission readiness', () => {
+  it('holds fresh graph ownership without probing, acquiring or deleting the existing execution lock', async () => {
+    const f = await ownerFixture(); const owner = f.create();
+    const lockPath = join(f.graphRoot, '.control-execution.lock');
+    const acquired = acquireLocalStoreLockWithOutcome(lockPath, 0, { anchorPath: f.graphRoot, exactPrivateStorage: true });
+    if (acquired.state !== 'acquired') throw new Error('Fixture lock unavailable');
+    const before = readFileSync(lockPath);
+    try {
+      expect(owner.readiness('engineering').reasons).toContain('graph-ownership-unavailable');
+      expect(() => owner.launch({ enrollmentId: 'engineering', expectedEnrollmentDigest: owner.catalog()[0]!.enrollmentDigest })).toThrow('graph-ownership-unavailable');
+      expect(readFileSync(lockPath)).toEqual(before); expect(readdirSync(f.graphRoot)).toEqual(['.control-execution.lock']);
+      expect(releaseLocalStoreLock(acquired.lock)).toBe(true);
+      expect(owner.readiness('engineering')).toMatchObject({ status: 'ready', action: 'launch' });
+    } finally { releaseLocalStoreLock(acquired.lock); await owner.close(); await f.supervisor.close(); }
+  });
+  it('blocks a preexisting graph stop without consuming the fixed launch, then admits the same digest', async () => {
+    const f = await ownerFixture(); const owner = f.create(); const stop = join(f.graphRoot, 'KILL');
+    const input = { enrollmentId: 'engineering', expectedEnrollmentDigest: owner.catalog()[0]!.enrollmentDigest };
+    try {
+      writeFileSync(stop, 'fixture stop\n', { mode: 0o600 });
+      const before = readdirSync(f.graphRoot);
+      expect(owner.readiness('engineering')).toMatchObject({ status: 'blocked', action: 'none', reasons: ['graph-kill-active'],
+        scope: 'local-admission-check-only', providerContacted: false, effectsExecuted: false });
+      expect(() => owner.launch(input)).toThrow('graph-kill-active'); expect(readdirSync(f.graphRoot)).toEqual(before);
+      expect(owner.snapshot('engineering').launched).toBe(false);
+      unlinkSync(stop); expect(owner.readiness('engineering')).toMatchObject({ status: 'ready', action: 'launch', reasons: [] });
+      expect(owner.launch(input).state).toBe('running'); owner.cancel('engineering');
+      expect(f.run).not.toHaveBeenCalled();
+    } finally { await owner.close(); await f.supervisor.close(); }
+  });
+  it.each(['active', 'unknown'] as const)('fails closed on a %s global stop observation without writes', async (state) => {
+    const f = await ownerFixture(); const owner = f.create();
+    vi.spyOn(policy, 'readKillSwitch').mockReturnValue(state === 'active'
+      ? { state, sourceState: 'healthy', reason: 'present', path: '/fixture-private-stop' }
+      : { state, sourceState: 'degraded', reason: 'uninspectable', path: '/fixture-private-stop', errorCode: 'EACCES' });
+    try {
+      const readiness = owner.readiness('engineering');
+      expect(readiness.reasons).toContain(state === 'active' ? 'global-kill-active' : 'global-kill-unavailable');
+      expect(JSON.stringify(readiness)).not.toContain('/fixture-private-stop');
+      expect(() => owner.launch({ enrollmentId: 'engineering', expectedEnrollmentDigest: owner.catalog()[0]!.enrollmentDigest })).toThrow('global-kill');
+      expect(readdirSync(f.graphRoot)).toEqual([]);
+    } finally { await owner.close(); await f.supervisor.close(); }
+  });
+  it('blocks missing provenance without creating or repairing a key', async () => {
+    const f = await ownerFixture(); const owner = f.create();
+    vi.spyOn(provenance, 'loadExistingProvenanceKeyReadOnly').mockReturnValue(null);
+    try {
+      expect(owner.readiness('engineering').reasons).toContain('provenance-unavailable');
+      expect(() => owner.launch({ enrollmentId: 'engineering', expectedEnrollmentDigest: owner.catalog()[0]!.enrollmentDigest })).toThrow('provenance-unavailable');
+      expect(readdirSync(f.graphRoot)).toEqual([]);
+    } finally { await owner.close(); await f.supervisor.close(); }
+  });
+  it('detects runtime and captured factory pin drift before launch and permits restored input', async () => {
+    const f = await ownerFixture(); const owner = f.create(); const file = f.options.catalog.enrollments[0]!.host.resourceRuntime;
+    const saved = readFileSync(file); const originalBinding = projections.factory.mock.results[0]!.value;
+    try {
+      writeFileSync(file, '{}\n'); expect(owner.readiness('engineering').reasons).toContain('runtime-pin-changed');
+      expect(() => owner.launch({ enrollmentId: 'engineering', expectedEnrollmentDigest: owner.catalog()[0]!.enrollmentDigest })).toThrow('runtime-pin-changed');
+      writeFileSync(file, saved);
+      projections.factory.mockReturnValue({ ...originalBinding, nodeInput: { ...originalBinding.nodeInput, bindingDigest: 'd'.repeat(64) } });
+      expect(owner.readiness('engineering').reasons).toContain('enrollment-pin-changed');
+      expect(readdirSync(f.graphRoot)).toEqual([]);
+      projections.factory.mockReturnValue(originalBinding);
+      expect(owner.readiness('engineering')).toMatchObject({ status: 'ready', action: 'launch' });
+    } finally { await owner.close(); await f.supervisor.close(); }
+  });
+  it('reports queue pause and recorded campaign hard holds without gating transient ready ownership', async () => {
+    const f = await ownerFixture(); const owner = f.create();
+    try {
+      f.supervisor.setPaused(true); expect(owner.readiness('engineering').reasons).toContain('queue-paused');
+      f.supervisor.setPaused(false);
+      projections.readiness.mockReturnValue({ sourceState: 'healthy', automaticAction: 'none', observedState: 'paused', disposition: 'owner-held' });
+      expect(owner.readiness('engineering').reasons).toContain('campaign-not-startable');
+      projections.readiness.mockReturnValue({ sourceState: 'healthy', automaticAction: 'none', observedState: 'ready', disposition: 'owned' });
+      expect(owner.readiness('engineering').status).toBe('ready'); expect(readdirSync(f.graphRoot)).toEqual([]);
+    } finally { await owner.close(); await f.supervisor.close(); }
+  });
+  it('rechecks known stops under ownership before publishing the launch binding', async () => {
+    const f = await ownerFixture(); const owner = f.create(); let reads = 0;
+    const read = policy.readKillSwitch;
+    vi.spyOn(policy, 'readKillSwitch').mockImplementation(() => ++reads === 1 ? read()
+      : { state: 'active', sourceState: 'healthy', reason: 'present', path: '/fixture-private-stop' });
+    try {
+      expect(() => owner.launch({ enrollmentId: 'engineering', expectedEnrollmentDigest: owner.catalog()[0]!.enrollmentDigest })).toThrow('global-kill-active');
+      expect(owner.snapshot('engineering').launched).toBe(false); expect(readdirSync(f.graphRoot)).toEqual([]);
+    } finally { await owner.close(); await f.supervisor.close(); }
   });
 });

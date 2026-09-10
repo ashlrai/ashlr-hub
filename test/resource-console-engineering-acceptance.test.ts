@@ -5,13 +5,16 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, request, type ServerResponse } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
+import { acquireLocalStoreLockWithOutcome, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
-import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob } from '../src/core/resources/console-engineering-types.js';
+import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob, ResourceConsoleEngineeringReadiness } from '../src/core/resources/console-engineering-types.js';
+import { killSwitchPath } from '../src/core/sandbox/policy.js';
+import * as privateRecords from '../src/core/util/immutable-private-record-store.js';
 import { startResourceConsoleServer, type ResourceConsoleServerHandle, type ResourceConsoleServerOptions } from '../src/core/web/resource-console-server.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { readControlGraph, runControlGraph } from '../src/core/universe/control-graph.js';
@@ -20,7 +23,10 @@ import { createFirmEngineeringControlHandler, type FirmEngineeringControlHost } 
 import { initUniverse, initUniverseCampaign, readUniverseDeliveries, readUniverseOverview, type UniverseManifest } from '../src/core/universe/index.js';
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
+afterEach(async () => {
+  try { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); }
+  finally { vi.restoreAllMocks(); }
+});
 const save = (path: string, value: unknown) => writeFileSync(path, `${canonical(value)}\n`, { mode: 0o600 });
 function git(repo: string, ...args: string[]) {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
@@ -50,6 +56,18 @@ async function enrollments(handle: ResourceConsoleServerHandle) {
 async function status(handle: ResourceConsoleServerHandle, id = 'engineering-default') {
   const response = await http(handle, `${engineeringPath}/${id}`); expect(response.status, response.text).toBe(200);
   expect(response.noStore).toBe(true); return JSON.parse(response.text) as ResourceConsoleEngineeringJob;
+}
+async function readiness(handle: ResourceConsoleServerHandle, row: ResourceConsoleEngineeringEnrollment) {
+  const response = await http(handle, `${engineeringPath}/${row.id}/readiness`);
+  expect(response.status, response.text).toBe(200); expect(response.noStore).toBe(true);
+  const value = JSON.parse(response.text) as ResourceConsoleEngineeringReadiness;
+  expect(Object.keys(value).sort()).toEqual(['schemaVersion', 'enrollmentId', 'enrollmentDigest', 'sampledAt', 'status', 'action',
+    'reasons', 'scope', 'effectsExecuted', 'providerContacted'].sort());
+  expect(value).toMatchObject({ schemaVersion: 1, enrollmentId: row.id, enrollmentDigest: row.enrollmentDigest,
+    scope: 'local-admission-check-only', effectsExecuted: false, providerContacted: false });
+  expect(new Date(value.sampledAt).toISOString()).toBe(value.sampledAt);
+  expect(value.reasons.length).toBeLessThanOrEqual(24);
+  return value;
 }
 const launchInput = (row: ResourceConsoleEngineeringEnrollment) => ({ enrollmentId: row.id, expectedEnrollmentDigest: row.enrollmentDigest });
 async function fixture(options: { holdEngineering?: boolean; maxConcurrent?: number } = {}) {
@@ -142,6 +160,9 @@ describe.runIf(process.platform === 'darwin')('independent Workspace engineering
     const f = await fixture(); const handle = await f.start(); expect(handle.scope.engineeringSupported).toBe(true);
     const rows = await enrollments(handle); expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({ id: 'engineering-default', projectId: 'default', acceptanceScope: 'fixed-evaluator-and-local-branch-only' });
+    expect(await readiness(handle, rows[0]!)).toMatchObject({ status: 'ready', action: 'launch', reasons: [] });
+    expect((await http(handle, `${engineeringPath}/${rows[0]!.id}/readiness`, undefined, {})).status).toBe(401);
+    expect((await http(handle, `${engineeringPath}/${rows[0]!.id}/readiness?ignored=true`)).status).toBe(400);
     expect(await status(handle)).toMatchObject({ state: 'ready', launched: false, cancelled: false });
     const input = launchInput(rows[0]!);
     for (const headers of [{}, { 'x-ashlr-token': handle.readToken, origin: handle.url }, { 'x-ashlr-token': handle.controlToken! }]) {
@@ -154,6 +175,62 @@ describe.runIf(process.platform === 'darwin')('independent Workspace engineering
     expect(JSON.stringify(rows)).not.toContain(f.base); expect(JSON.stringify(rows)).not.toContain('PRIVATE_ENGINEERING_CONTENT');
     expect(readdirSync(f.graphRoot)).toEqual([]); expect(f.requests).toEqual([]); expect(f.ledger()).toEqual([]);
     expect(existsSync(join(f.universeRoot, 'portfolios', f.host.definition.id))).toBe(false);
+  });
+
+  it.each([
+    ['graph KILL', 'graph-kill-active'], ['isolated global KILL', 'global-kill-active'], ['queue pause', 'queue-paused'],
+    ['graph ownership', 'graph-ownership-unavailable'],
+    ['runtime drift', 'runtime-pin-changed'], ['pool drift', 'enrollment-pin-changed'], ['bindings drift', 'enrollment-pin-changed'],
+  ] as const)('does not consume an enrollment under %s and admits the same identity after the condition clears', async (condition, reason) => {
+    const f = await fixture({ holdEngineering: true }); const handle = await f.start(); const row = (await enrollments(handle))[0]!;
+    const input = launchInput(row); let restore: () => Promise<void>;
+    if (condition === 'graph KILL' || condition === 'isolated global KILL') {
+      const sentinel = condition === 'graph KILL' ? join(f.graphRoot, 'KILL') : killSwitchPath();
+      if (condition === 'isolated global KILL') {
+        // This test never calls setKill or touches the developer's authority tree.
+        expect(homedir()).not.toBe(process.env.ASHLR_VITEST_REAL_HOME);
+        expect(sentinel).toBe(join(homedir(), '.ashlr', 'KILL'));
+      }
+      expect(existsSync(sentinel)).toBe(false); mkdirSync(dirname(sentinel), { recursive: true, mode: 0o700 });
+      writeFileSync(sentinel, 'isolated admission fixture\n', { mode: 0o600 });
+      restore = async () => { rmSync(sentinel, { force: true }); };
+    } else if (condition === 'graph ownership') {
+      const acquired = acquireLocalStoreLockWithOutcome(join(f.graphRoot, '.control-execution.lock'), 0,
+        { anchorPath: f.graphRoot, exactPrivateStorage: true });
+      expect(acquired.state).toBe('acquired'); if (acquired.state !== 'acquired') throw new Error('Fixture graph lock was not acquired');
+      restore = async () => { expect(releaseLocalStoreLock(acquired.lock)).toBe(true); };
+    } else if (condition === 'queue pause') {
+      expect((await http(handle, '/api/resources/queue', { paused: true })).status).toBe(200);
+      restore = async () => { expect((await http(handle, '/api/resources/queue', { paused: false })).status).toBe(200); };
+    } else {
+      const file = condition === 'runtime drift' ? f.host.resourceRuntime
+        : condition === 'pool drift' ? f.serverOptions.poolFile : f.serverOptions.bindingsFile;
+      const original = readFileSync(file); const changed = JSON.parse(original.toString('utf8'));
+      if (condition === 'runtime drift') changed.capacityWaitMs = 14_000;
+      else if (condition === 'pool drift') changed.workers[0].priority += 1;
+      else changed[0].capacityKey = 'changed-fixture-account';
+      save(file, changed); restore = async () => { writeFileSync(file, original); };
+    }
+    const writes = vi.spyOn(privateRecords, 'writeImmutablePrivateRecord');
+    try {
+      const rootNames = readdirSync(f.graphRoot);
+      for (let check = 0; check < 2; check++) {
+        expect(await readiness(handle, row)).toMatchObject({ status: 'blocked', action: 'none', reasons: expect.arrayContaining([reason]) });
+        expect((await http(handle, `${engineeringPath}/start`, input)).status).toBe(503);
+      }
+      expect(readdirSync(f.graphRoot)).toEqual(rootNames); expect(readControlGraph(f.graphRoot).sourceState).toBe('missing');
+      expect((await status(handle)).launched).toBe(false); expect(f.requests).toEqual([]); expect(f.ledger()).toEqual([]);
+      expect(existsSync(join(f.universeRoot, 'portfolios', f.host.definition.id))).toBe(false);
+      expect(writes.mock.calls.filter(([configuration]) => configuration.anchorPath === f.graphRoot)).toEqual([]);
+    } finally { writes.mockRestore(); await restore(); }
+    expect(await readiness(handle, row)).toMatchObject({ status: 'ready', action: 'launch', reasons: [] });
+    expect((await http(handle, `${engineeringPath}/start`, input)).status).toBe(202);
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 15_000 });
+    expect((await status(handle)).enrollmentDigest).toBe(row.enrollmentDigest);
+    expect((await http(handle, `${engineeringPath}/${row.id}/cancel`, {})).status).toBe(200);
+    await vi.waitFor(() => expect(f.ledger()[0]?.status).toBe('cancelled'), { timeout: 10_000 });
+    expect(f.requests[0]).toMatchObject({ kind: 'engineering', generation: 1 });
+    expect(readFileSync(join(f.repo, 'value.json'), 'utf8')).toBe('0\n'); expect(git(f.repo, 'branch', '--list', f.branch)).toBe('');
   });
 
   it('shares an occupied account with ordinary project tasks, then evaluates correction and delivers only the enrolled branch', async () => {
@@ -239,8 +316,20 @@ describe.runIf(process.platform === 'darwin')('independent Workspace engineering
 
   it.each(['missing', 'pending'] as const)('holds a prior launch with %s graph rather than beginning execution on retry', async (state) => {
     const f = await fixture(); const first = await f.start(); const enrollment = (await enrollments(first))[0]!;
-    const kill = join(f.graphRoot, 'KILL'); writeFileSync(kill, 'stop before first graph intent\n', { mode: 0o600 });
+    const kill = join(f.graphRoot, 'KILL'); const write = privateRecords.writeImmutablePrivateRecord;
+    // Preserve the production write, then introduce the stop in the genuine
+    // accepted-binding / first-graph-intent race window. Pre-existing KILL must
+    // now be rejected before acceptance and must not create this held state.
+    let injected = false;
+    const publication = vi.spyOn(privateRecords, 'writeImmutablePrivateRecord').mockImplementation((config, record, options) => {
+      const result = write(config, record, options);
+      if (config.rootPath === join(f.graphRoot, 'console-engineering') && (record as { kind?: string }).kind === 'launch' && result === 'recorded') {
+        writeFileSync(kill, 'stop after accepted launch publication\n', { mode: 0o600 }); injected = true;
+      }
+      return result;
+    });
     expect((await http(first, `${engineeringPath}/start`, launchInput(enrollment))).status).toBe(202);
+    publication.mockRestore(); expect(injected).toBe(true);
     await vi.waitFor(async () => { const current = await status(first); expect(current.launched).toBe(true); expect(current.state).not.toBe('running'); });
     expect(readControlGraph(f.graphRoot).sourceState).toBe('missing'); rmSync(kill);
     if (state === 'pending') {
@@ -254,9 +343,11 @@ describe.runIf(process.platform === 'darwin')('independent Workspace engineering
     }
     const graph = readControlGraph(f.graphRoot);
     const launchRecord = join(f.graphRoot, 'console-engineering', 'records', 'launch.json'); const accepted = readFileSync(launchRecord, 'utf8');
+    expect(await readiness(first, enrollment)).toMatchObject({ status: 'blocked', action: 'none', reasons: expect.arrayContaining(['launch-unresolved']) });
     expect((await http(first, `${engineeringPath}/start`, launchInput(enrollment))).status).toBe(409);
     await first.close(); const restarted = await f.start();
     expect((await status(restarted)).launched).toBe(true);
+    expect(await readiness(restarted, enrollment)).toMatchObject({ status: 'blocked', action: 'none', reasons: expect.arrayContaining(['launch-unresolved']) });
     expect((await http(restarted, `${engineeringPath}/start`, launchInput(enrollment))).status).toBe(409);
     expect(readControlGraph(f.graphRoot)).toEqual(graph); expect(readFileSync(launchRecord, 'utf8')).toBe(accepted);
     expect(f.requests).toEqual([]); expect(f.ledger()).toEqual([]);

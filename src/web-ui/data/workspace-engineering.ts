@@ -1,4 +1,5 @@
-import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job } from '../../core/resources/console-engineering-types.js';
+import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job,
+  ResourceConsoleEngineeringReadiness as Readiness, ResourceConsoleEngineeringReadinessReason as ReadinessReason } from '../../core/resources/console-engineering-types.js';
 import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-store.js';
 import { ApiError, apiGet, apiPost } from './client.js';
 
@@ -11,6 +12,30 @@ const text = (v: unknown, max: number): v is string => typeof v === 'string' && 
   ![...v].some((c) => c.charCodeAt(0) < 32 && ![9, 10, 13].includes(c.charCodeAt(0)) || c.charCodeAt(0) >= 127 && c.charCodeAt(0) <= 159);
 const scope = 'fixed-evaluator-and-local-branch-only';
 const invalid = () => new Error('Engineering evidence could not be verified. Refresh the enrolled plan before acting.');
+
+export const engineeringReadinessReasons: Record<ReadinessReason, string> = {
+  'already-running': 'This plan is already running. Follow its execution evidence or record a stop.',
+  'already-completed': 'Delivery is already recorded. This plan will not run again.',
+  'graph-terminal': 'The graph has settled. Review its execution evidence before enrolling new work.',
+  'owner-unavailable': 'The console owner is unavailable or shutting down. Check the host and reconnect.',
+  'owner-capacity': 'The console has reached its engineering concurrency limit. Refresh after a run drains.',
+  'queue-paused': 'New work is paused. Resume the task queue when you intend to allow launches.',
+  'project-unavailable': 'The registered project is disabled, missing or changed. Restore its registered binding before launching.',
+  'global-kill-active': 'The host stop switch is active. Keep it in place until you intend to resume host execution.',
+  'global-kill-unavailable': 'The host stop switch could not be verified. Inspect its local state before launching.',
+  'graph-kill-active': 'This graph’s stop switch is active. Clear it only when you intend to resume this graph.',
+  'graph-kill-unavailable': 'This graph’s stop switch could not be verified. Inspect its local state before launching.',
+  'provenance-unavailable': 'The existing signing identity is unavailable. Restore the enrolled host identity; this check never creates one.',
+  'runtime-pin-changed': 'The resource runtime no longer matches enrollment. Review the configuration and restore the pinned runtime.',
+  'enrollment-pin-changed': 'Campaign or accounting configuration no longer matches enrollment. Review the drift; do not reset accounting history.',
+  'graph-evidence-unavailable': 'Graph or ownership evidence is unavailable. Inspect the local history before taking further action.',
+  'graph-ownership-unavailable': 'An existing graph execution lock prevents a new launch. Wait for its owner to release it, or inspect stale ownership; this check never removes locks.',
+  'launch-cancelled': 'A durable stop is recorded for this plan. It cannot be relaunched.',
+  'launch-unresolved': 'An accepted launch has no recoverable completed-work proof. It remains held; refreshing never repeats it.',
+  'deadline-exhausted': 'The original execution deadline has expired. Restarting does not renew it.',
+  'controller-already-enrolled': 'The controller already has an enrollment. Inspect its history; this plan cannot replace it.',
+  'campaign-not-startable': 'A campaign has a recorded hold, exhausted budget or recovery requirement. Inspect its campaign evidence before launching.',
+};
 
 /** Validate response identity before a displayed digest can become launch input. */
 function enrollment(v: unknown): v is Enrollment {
@@ -73,6 +98,23 @@ export async function readWorkspaceEngineering(selected: Enrollment, signal?: Ab
   const value = await apiGet<unknown>(`/api/resources/engineering/${selected.id}`, signal);
   if (signal?.aborted) throw new Error('Engineering read was cancelled.');
   return job(value, selected);
+}
+
+/** Advisory local evidence, never a capability or promise of worker capacity. */
+export async function readWorkspaceEngineeringReadiness(selected: Enrollment, signal?: AbortSignal): Promise<Readiness> {
+  if (!enrollment(selected)) throw invalid();
+  const value = await apiGet<unknown>(`/api/resources/engineering/${selected.id}/readiness`, signal);
+  if (signal?.aborted) throw new Error('Engineering read was cancelled.');
+  if (!object(value) || !exact(value, ['schemaVersion', 'enrollmentId', 'enrollmentDigest', 'sampledAt', 'status', 'action', 'reasons', 'scope', 'effectsExecuted', 'providerContacted']) ||
+    value.schemaVersion !== 1 || value.enrollmentId !== selected.id || value.enrollmentDigest !== selected.enrollmentDigest ||
+    value.scope !== 'local-admission-check-only' || value.effectsExecuted !== false || value.providerContacted !== false ||
+    typeof value.sampledAt !== 'string' || !Number.isFinite(Date.parse(value.sampledAt)) || new Date(value.sampledAt).toISOString() !== value.sampledAt ||
+    !['ready', 'blocked', 'not-applicable'].includes(String(value.status)) || !['launch', 'reconcile', 'none'].includes(String(value.action)) ||
+    !Array.isArray(value.reasons) || value.reasons.length > Object.keys(engineeringReadinessReasons).length ||
+    !value.reasons.every((reason) => typeof reason === 'string' && Object.hasOwn(engineeringReadinessReasons, reason)) ||
+    new Set(value.reasons).size !== value.reasons.length ||
+    (value.status === 'ready' ? value.action === 'none' || value.reasons.length !== 0 : value.action !== 'none' || value.reasons.length === 0)) throw invalid();
+  return value as unknown as Readiness;
 }
 
 /** Only explicit UI events reach this function. A lost response never triggers a retry. */

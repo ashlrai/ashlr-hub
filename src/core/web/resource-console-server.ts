@@ -353,6 +353,11 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
       if (method !== 'GET') throw new RequestError(405, 'Method not allowed');
       if (url.pathname === '/api/resources/console') { sendJson(res, 200, scope); return; }
+      const engineeringReadiness = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/readiness$/.exec(url.pathname);
+      if (engineeringReadiness) {
+        if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');
+        sendSnapshot(res, engineering.readiness(engineeringReadiness[1]!)); return;
+      }
       const engineeringStatus = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})$/.exec(url.pathname);
       if (url.pathname === '/api/resources/engineering' || engineeringStatus) {
         if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');

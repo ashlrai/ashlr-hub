@@ -50,20 +50,30 @@ stubs are review aids, not signed runtime evidence.
 
 ## Next executable milestones
 
-1. Exercise the signed graph demo, its lying-builder rejection and conflict query.
-2. Extend the enrolled resource-generation graph adapter into confined change and
-   independent acceptance, with cumulative hypothesis accounting. Its current
-   receipt-scoped dispatch reuses resource reservations and current policy;
-   real account commissioning and provider acceptance remain unverified. Personal
-   Spark enrollment must preserve general-account reservation and prior ledger
-   history; a fresh empty ledger is not an acceptable migration shortcut.
-3. Wire existing integration/evaluation/delivery APIs into graph nodes, then add
-   independently tested expected-old-commit branch advancement.
-4. Add durable tick production, overlap suppression and exact attempt receipts
+The local workspace now connects signed engineering graphs to resource-accounted
+confined changes, fixed evaluation, explicit branch delivery and exact completed
+receipt recovery. Its [local admission view](RESOURCE-POOLS.md#evaluated-engineering-runs)
+exposes known stop/configuration/ownership holds before accepting a new launch.
+These are implemented local paths, not proof of an operating company.
+
+1. Add a standalone, nonexecuting whole-enrollment commissioning check. The
+   current readiness endpoint observes an already started console; startup may
+   initialize its supervisor. Existing runtime and campaign checks remain scoped.
+2. Prepare a meaningful pinned Hub evaluator and campaign, with explicit mutable
+   files, allowed workers, budgets and local delivery targets. Commission the real
+   accounts separately: personal Spark must preserve General reservation, shared
+   account capacity, existing account-wide pauses and prior ledger history. A
+   fresh empty ledger is not an acceptable migration shortcut.
+3. Add durable tick production, overlap suppression and exact attempt receipts
    behind the existing activation consumer. Test real process death and restart.
-5. Commission one Hub feature end to end: idea, competing plans, confined change,
+4. Commission one Hub feature end to end: idea, competing plans, confined change,
    independent checks, integrated artifact and measured accepted-work yield.
-6. Expand to a sister product only after the Hub loop has acceptance evidence.
+5. Extend integration into independently tested expected-old-commit branch
+   advancement and recovery of unfinished work, without weakening existing
+   identity, deadline, ownership or delivery checks.
+6. Expand to a sister product only after the Hub loop has acceptance evidence;
+   resident ideation, measured routing improvement and harness evolution remain
+   separate work, not capabilities inferred from a successful code trial.
 
 ## Evidence and limitations
 

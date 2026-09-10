@@ -1,11 +1,14 @@
 /** Explicit console ownership of fixed engineering graphs; no discovery or extra scheduler. */
 import { lstatSync } from 'node:fs';
 import { isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
-import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
+import { canonicalEvidencePackJsonV3, loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
+import { readKillSwitch } from '../sandbox/policy.js';
 import { acquireLocalStoreLockWithOutcome, releaseLocalStoreLock, ownsLocalStoreLock } from '../fleet/local-store-lock.js';
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
 import { campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
+import { readUniverseCampaignReadiness } from '../universe/campaign-readiness.js';
+import { portfolioControllerDirectory } from '../universe/portfolio-controller-store.js';
 import { createFirmEngineeringControlHandler, type FirmEngineeringControlHost } from '../universe/firm-engineering-control-handler.js';
 import { readControlGraph, runControlGraph, validateControlGraph, type ControlGraphDefinition } from '../universe/control-graph.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
@@ -13,7 +16,8 @@ import { readResourceJson, resourcePoolStatus } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { ResourceSupervisorError, type ResourcePoolSupervisor } from './pool-supervisor.js';
-import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob, ResourceConsoleEngineeringLaunch } from './console-engineering-types.js';
+import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob, ResourceConsoleEngineeringLaunch,
+  ResourceConsoleEngineeringReadiness, ResourceConsoleEngineeringReadinessReason } from './console-engineering-types.js';
 
 export interface ResourceConsoleEngineeringCatalog {
   schemaVersion: 1;
@@ -34,6 +38,7 @@ export interface ResourceConsoleEngineeringOwnerOptions {
 export interface ResourceConsoleEngineeringOwner {
   catalog(): ResourceConsoleEngineeringEnrollment[];
   snapshot(id: string): ResourceConsoleEngineeringJob;
+  readiness(id: string): ResourceConsoleEngineeringReadiness;
   launch(input: ResourceConsoleEngineeringLaunch): ResourceConsoleEngineeringJob;
   cancel(id: string): ResourceConsoleEngineeringJob;
   close(): Promise<void>;
@@ -201,14 +206,97 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
       fail('CONFLICT', 'Engineering resource runtime changed');
     }
   };
-  const append = (value: Entry, kind: 'launch' | 'cancel', at: string) => {
+  // These are hard, currently observable blockers only. No provider refresh,
+  // eligible-worker-count gate, mutex acquisition or permission repair occurs.
+  const hardBlockers = (value: Entry, fresh: boolean): ResourceConsoleEngineeringReadinessReason[] => {
+    const reasons: ResourceConsoleEngineeringReadinessReason[] = [];
+    if (closing || signal?.aborted || faults.has(value.row.id)) reasons.push('owner-unavailable');
+    if (supervisor.snapshot().paused) reasons.push('queue-paused');
+    try {
+      const project = supervisor.projectFileBinding(value.row.projectId);
+      if (canonical({ id: project.id, workspace: project.workspace, dev: project.dev, ino: project.ino }) !== canonical(value.projectIdentity)) throw new Error();
+    } catch { reasons.push('project-unavailable'); }
+    try {
+      const kill = readKillSwitch();
+      if (kill.state === 'active') reasons.push('global-kill-active');
+      else if (kill.state !== 'inactive' || kill.sourceState !== 'healthy') reasons.push('global-kill-unavailable');
+    } catch { reasons.push('global-kill-unavailable'); }
+    try { lstatSync(join(value.row.graphRoot, 'KILL')); reasons.push('graph-kill-active'); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') reasons.push('graph-kill-unavailable'); }
+    try { if (!loadExistingProvenanceKeyReadOnly()) reasons.push('provenance-unavailable'); }
+    catch { reasons.push('provenance-unavailable'); }
+    try {
+      if (digest(canonical(validateResourceGenerationRuntime(readResourceJson(value.row.host.resourceRuntime)))) !== value.row.host.expectedRuntimeDigest) throw new Error();
+    } catch { reasons.push('runtime-pin-changed'); }
+    try {
+      const current = createFirmEngineeringControlHandler(value.row.host);
+      if (canonical(current.nodeInput) !== canonical(value.binding.nodeInput)) throw new Error();
+    } catch { reasons.push('enrollment-pin-changed'); }
+    if (fresh) {
+      // Presence is not proof of a live or unsafe owner. Fresh launches wait
+      // for release/inspection; linked receipt recovery keeps existing proven-
+      // dead lease reclamation and is deliberately not gated by this hint.
+      if (present(join(value.row.graphRoot, '.control-execution.lock'))) reasons.push('graph-ownership-unavailable');
+      if (present(portfolioControllerDirectory(value.row.host.definition.id, { root: value.row.host.root }))) reasons.push('controller-already-enrolled');
+      for (const task of value.row.host.definition.tasks) {
+        try {
+          const campaign = readUniverseCampaignReadiness(task.campaignId, { root: value.row.host.root });
+          // Match the controller's existing fresh-enrollment acceptance. A
+          // transient owner of untouched ready work may still be waited on.
+          if (campaign.sourceState !== 'healthy' || !(campaign.automaticAction === 'run' ||
+            campaign.observedState === 'completed' || campaign.observedState === 'ready' && campaign.disposition === 'owned')) {
+            reasons.push('campaign-not-startable'); break;
+          }
+        } catch { reasons.push('campaign-not-startable'); break; }
+      }
+    }
+    return [...new Set(reasons)];
+  };
+  const readiness = (value: Entry): ResourceConsoleEngineeringReadiness => {
+    const result: ResourceConsoleEngineeringReadiness = { schemaVersion: 1, enrollmentId: value.row.id,
+      enrollmentDigest: value.summary.enrollmentDigest, sampledAt: new Date().toISOString(), status: 'blocked', action: 'none',
+      reasons: [], scope: 'local-admission-check-only', effectsExecuted: false, providerContacted: false };
+    if (active.has(value.row.id)) return { ...result, status: 'not-applicable', reasons: ['already-running'] };
+    try {
+      const owned = ownership(value); const graph = readControlGraph(value.row.graphRoot);
+      if (!owned.launch && (graph.sourceState !== 'missing' || present(join(value.row.graphRoot, 'control-graph'))) ||
+        graph.sourceState !== 'missing' && graph.definitionDigest !== value.definitionDigest || graph.sourceState === 'degraded') {
+        return { ...result, reasons: ['graph-evidence-unavailable'] };
+      }
+      if (owned.cancel) return { ...result, reasons: ['launch-cancelled'] };
+      if (graph.status === 'completed') return { ...result, status: 'not-applicable', reasons: ['already-completed'] };
+      if (owned.launch && (graph.sourceState === 'missing' || graph.nodes.some((node) => node.state === 'pending'))) {
+        return { ...result, reasons: ['launch-unresolved'] };
+      }
+      if (owned.launch && Date.now() >= Date.parse(owned.launch.at) + value.row.host.definition.maxDurationMs ||
+        graph.deadlineAt !== null && Date.now() >= Date.parse(graph.deadlineAt)) return { ...result, reasons: ['deadline-exhausted'] };
+      if (owned.launch && graph.nodes.every((node) => node.state !== 'unresolved')) {
+        return { ...result, status: 'not-applicable', reasons: ['graph-terminal'] };
+      }
+      const reasons = hardBlockers(value, !owned.launch);
+      if (active.size >= MAX_ACTIVE) reasons.push('owner-capacity');
+      return reasons.length ? { ...result, reasons } : { ...result, status: 'ready', action: owned.launch ? 'reconcile' : 'launch' };
+    } catch { return { ...result, reasons: ['graph-evidence-unavailable'] }; }
+  };
+  const requireReady = (value: Entry) => {
+    const state = readiness(value);
+    if (state.status === 'blocked') {
+      const conflict = state.reasons.some((reason) => ['launch-cancelled', 'launch-unresolved', 'deadline-exhausted',
+        'controller-already-enrolled', 'graph-evidence-unavailable'].includes(reason));
+      fail(conflict ? 'CONFLICT' : state.reasons.includes('owner-capacity') ? 'CAPACITY' : 'UNAVAILABLE',
+        `Engineering readiness blocked: ${state.reasons.join(', ')}`);
+    }
+    return state;
+  };
+  const append = (value: Entry, kind: 'launch' | 'cancel', at: string, prepublish?: () => boolean) => {
     const record: OwnershipRecord = { schemaVersion: 1, kind, enrollmentDigest: value.summary.enrollmentDigest,
       definitionDigest: value.definitionDigest, at };
-    const written = writeImmutablePrivateRecord(records(value.row.graphRoot), record);
+    const written = writeImmutablePrivateRecord(records(value.row.graphRoot), record, prepublish ? { prepublish } : {});
     if (!['recorded', 'replayed'].includes(written)) fail('UNAVAILABLE', 'Engineering ownership publication unavailable');
   };
   const owner: ResourceConsoleEngineeringOwner = {
     catalog: () => snapshot([...enrolled.values()].map((value) => value.summary)),
+    readiness: (id) => readiness(entry(id)),
     snapshot(id) {
       const value = entry(id);
       const base = { enrollmentId: id, projectId: value.row.projectId, graphId: value.row.graphId,
@@ -238,6 +326,8 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
       const value = entry(request.enrollmentId);
       if (request.expectedEnrollmentDigest !== value.summary.enrollmentDigest) fail('CONFLICT', 'Engineering enrollment changed');
       if (active.has(value.row.id)) return owner.snapshot(value.row.id);
+      const ready = requireReady(value);
+      if (ready.status === 'not-applicable') return owner.snapshot(value.row.id);
       admit(value);
       if (active.size >= MAX_ACTIVE) fail('CAPACITY', 'Engineering owner capacity reached');
       const acquired = acquireLocalStoreLockWithOutcome(join(value.row.graphRoot, '.console-engineering.lock'), 0,
@@ -245,6 +335,7 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
       if (acquired.state !== 'acquired') fail('UNAVAILABLE', 'Engineering graph is owned elsewhere');
       let handedOff = false;
       try {
+        requireReady(value);
         const owned = ownership(value);
         if (owned.cancel) fail('CONFLICT', 'Engineering launch was cancelled');
         const graph = readControlGraph(value.row.graphRoot);
@@ -258,7 +349,9 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
         if (owned.launch && Date.now() >= Date.parse(owned.launch.at) + value.row.host.definition.maxDurationMs) {
           fail('CONFLICT', 'Engineering launch deadline is exhausted');
         }
-        if (!owned.launch) append(value, 'launch', new Date().toISOString());
+        if (!owned.launch) append(value, 'launch', new Date().toISOString(), () => {
+          return ownsLocalStoreLock(acquired.lock) && hardBlockers(value, true).length === 0;
+        });
         const abort = new AbortController();
         const promise = Promise.resolve().then(async () => {
           if (abort.signal.aborted || closing) return;

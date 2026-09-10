@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMutationToken, setMutationToken } from '../../data/auth-store.js';
 import { resourceFixture } from '../resources/fixtures.test-support.js';
 import { WorkspaceView, type WorkspaceViewProps } from './WorkspaceView.js';
-import { engineeringEnrollment, engineeringJob } from './engineering-fixture.test-support.js';
+import { engineeringEnrollment, engineeringJob, engineeringReadiness } from './engineering-fixture.test-support.js';
 const token = 'b'.repeat(64);
 const json = (value: unknown) => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
 function props(): WorkspaceViewProps {
@@ -19,6 +19,7 @@ function transport() {
   const row = engineeringEnrollment(); let launched = false;
   const request = vi.fn(async (url: string, options?: RequestInit) => {
     if (url === '/api/resources/engineering' && options?.method === 'GET') return json([row]);
+    if (url === '/api/resources/engineering/default-build/readiness') return json(engineeringReadiness(row, launched ? { status: 'not-applicable', action: 'none', reasons: ['already-completed'] } : {}));
     if (url === '/api/resources/engineering/start') {
       expect(options?.headers).toMatchObject({ 'x-ashlr-token': token });
       expect(JSON.parse(String(options?.body))).toEqual({ enrollmentId: row.id, expectedEnrollmentDigest: row.enrollmentDigest }); launched = true;

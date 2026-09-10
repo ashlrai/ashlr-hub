@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job } from '../../../core/resources/console-engineering-types.js';
+import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job,
+  ResourceConsoleEngineeringReadiness as Readiness } from '../../../core/resources/console-engineering-types.js';
 import { StatusBadge, type Tone } from '../../components/primitives/StatusBadge.js';
-import { controlWorkspaceEngineering, listWorkspaceEngineering, readWorkspaceEngineering } from '../../data/workspace-engineering.js';
+import { controlWorkspaceEngineering, engineeringReadinessReasons, listWorkspaceEngineering, readWorkspaceEngineering,
+  readWorkspaceEngineeringReadiness } from '../../data/workspace-engineering.js';
 import { resourceReason, resourceTime } from '../resources/CapacityBoard.js';
 import styles from './WorkspaceEngineering.module.css';
 
@@ -17,6 +19,8 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
   const [catalog, setCatalog] = useState<Enrollment[] | null>(null);
   const [selection, setSelection] = useState('');
   const [job, setJob] = useState<Job | null>(null);
+  const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [readinessError, setReadinessError] = useState<string | null>(null);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [readError, setReadError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -42,7 +46,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
   }, [projectId, available, catalogRevision]);
 
   useEffect(() => {
-    setJob(null); setReadError(null); setActionError(null); setNotice(null);
+    setJob(null); setReadiness(null); setReadinessError(null); setReadError(null); setActionError(null); setNotice(null);
     return () => { reading.current?.abort(); mutation.current?.abort(); };
   }, [identity]);
 
@@ -53,15 +57,29 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
     async function poll() {
       if (abort.signal.aborted) return;
       if (mutating.current) { timer = setTimeout(() => { void poll(); }, 3000); return; }
-      setLoading(true);
+      setLoading(true); setReadiness(null); setReadinessError(null);
+      let running = false;
       try {
-        const value = await readWorkspaceEngineering(selected!, abort.signal);
-        if (abort.signal.aborted) return;
-        setJob(value); setReadError(null);
-        // Never retry execution. A running owner is the only automatic polling case.
-        if (value.state === 'running') timer = setTimeout(() => { void poll(); }, 3000);
-      } catch (cause) { if (!abort.signal.aborted) setReadError(errorText(cause)); }
-      finally { if (!abort.signal.aborted) setLoading(false); }
+        // Independent reads: a failed admission sample must never hide a recorded
+        // run or withhold its stop control. Both are observations, not launch CAS.
+        await Promise.all([
+          readWorkspaceEngineering(selected!, abort.signal).then((value) => {
+            if (abort.signal.aborted) return;
+            setJob(value); setReadError(null);
+            // Never retry execution. A running owner is the only polling case.
+            running = value.state === 'running';
+          }).catch((cause: unknown) => { if (!abort.signal.aborted) setReadError(errorText(cause)); }),
+          readWorkspaceEngineeringReadiness(selected!, abort.signal).then((value) => {
+            if (!abort.signal.aborted) setReadiness(value);
+          }).catch((cause: unknown) => { if (!abort.signal.aborted) setReadinessError(errorText(cause)); }),
+        ]);
+      }
+      finally {
+        if (!abort.signal.aborted) {
+          setLoading(false);
+          if (running) timer = setTimeout(() => { void poll(); }, 3000);
+        }
+      }
     }
     void poll();
     return () => { abort.abort(); clearTimeout(timer); };
@@ -76,8 +94,10 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
   }, [unlocked, available]);
 
   const currentJob = job?.enrollmentId === selected?.id && job?.enrollmentDigest === selected?.enrollmentDigest ? job : null;
+  const currentReadiness = readiness?.enrollmentId === selected?.id && readiness?.enrollmentDigest === selected?.enrollmentDigest ? readiness : null;
   const reconcile = currentJob?.state === 'incomplete';
-  const launchable = available && canStart && !catalogError && !readError && !actionError && !busy && !loading &&
+  const launchable = available && canStart && !catalogError && !readError && !readinessError && !actionError && !busy && !loading &&
+    currentReadiness?.status === 'ready' && currentReadiness.action === (reconcile ? 'reconcile' : 'launch') &&
     currentJob && !currentJob.cancelled && (currentJob.state === 'ready' || reconcile && currentJob.nodes.some((n) => n.state === 'unresolved') && currentJob.nodes.every((n) => n.state !== 'pending'));
 
   async function act(action: 'start' | 'cancel') {
@@ -116,6 +136,18 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
         onChange={(event) => setSelection(event.target.value)}>{catalog!.map((row) => <option key={row.id} value={row.id}>{row.id}</option>)}</select></label>
         <div aria-live="polite">{currentJob ? <StatusBadge status={label(currentJob.state)} tone={tone(currentJob.state)} /> : <StatusBadge status="Awaiting evidence" tone="unknown" />}</div>
       </div>
+      <section className={styles.admission} aria-label="Local launch checks">
+        <div className={styles.admissionHeading}><h3>Before this plan runs</h3>
+          <StatusBadge status={!available ? 'Connection unavailable' : readinessError ? 'Check unavailable' : !currentReadiness ? 'Checking local admission' :
+            currentReadiness.status === 'ready' ? currentReadiness.action === 'reconcile' ? 'Reconciliation checks passed' : 'Local checks passed' :
+              currentReadiness.status === 'blocked' ? 'Launch held' : 'No new launch'}
+          tone={!available || readinessError || !currentReadiness ? 'unknown' : currentReadiness.status === 'ready' ? 'success' : currentReadiness.status === 'blocked' ? 'warning' : 'neutral'} />
+        </div>
+        {readinessError ? <p role="alert">{readinessError} Refresh evidence to check again. Recorded runs can still be stopped.</p> : null}
+        {currentReadiness?.reasons.length ? <ul className={styles.admissionReasons}>{currentReadiness.reasons.map((reason) => <li key={reason}>{engineeringReadinessReasons[reason]}</li>)}</ul> : null}
+        <p>Local observation only. No worker contacted and no quota reserved. Launch rechecks the current state; a change after acceptance may still hold the run.</p>
+        {currentReadiness ? <p className={styles.sample}>Sampled <time dateTime={currentReadiness.sampledAt}>{resourceTime(currentReadiness.sampledAt)}</time>. Refresh after resolving a hold; this view never starts or retries work automatically.</p> : null}
+      </section>
       <div className={styles.mission}><div className={styles.objective}><span className={styles.eyebrow}>OBJECTIVE SUMMARY</span><h3>{selected.objective}</h3>
         <p>The declared dependency order is preserved. Downstream campaigns require the planned delivery, not just a passing model response.</p></div>
         <dl className={styles.metrics}><div><dt>Campaigns</dt><dd>{selected.campaigns.length}</dd></div><div><dt>Parallel ceiling</dt><dd>{selected.budget.maxParallel}</dd></div>

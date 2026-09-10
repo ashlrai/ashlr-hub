@@ -36,6 +36,11 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Wire private startup enrollment, authenticated HTTP and engineering workspace controls.
 - [x] Verify real HTTP evaluation/delivery, shared capacity, cancellation/restart and browser interaction.
 - [x] Review integration, update canonical documentation and record exact local delivery state.
+- [x] Explore engineering admission, commissioning and post-publication recovery with three agents.
+- [x] Add observational readiness and refuse known launch blockers before ownership publication.
+- [x] Surface actionable readiness in the workspace without hiding cancellation or claiming capacity.
+- [x] Verify pre-launch no-effect holds, post-launch races, API identity and responsive interaction.
+- [x] Record frozen-source validation and remaining commissioning requirements.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -48,6 +53,13 @@ existing activation, provenance, evaluation and resource invariants.
   digest-bearing edges. Never invent terminal states to satisfy a count.
 
 ## Errors
+Readiness continuation: an initial DOM test queried the asynchronous admission
+panel before the catalog loaded; corrected it to await rendered evidence. A
+transient web typecheck ran before the agreed graph-lock reason reached the
+shared core type. Both were rerun after integration. Read-only searches also
+included two guessed nonexistent paths (`.ashlr` and `src/core/kill-switch.ts`);
+correct source is `src/core/sandbox/policy.ts`. No files changed by those searches.
+
 Workspace verification: the first broad sweep overlapped a final peer-drain
 patch, loading old runtime with new tests. Its three failures and unhandled
 rejection are recorded as a failed mixed-source run; the frozen-source rerun is
@@ -67,7 +79,26 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
-Current continuation from `a0f820058d32dc86b5c2eabbc52f7c390ec4ba6e`:
+Current continuation from `2b4064a32769362b11a32664af459e29bdfb8ca8`:
+read-only engineering admission. Exploration confirmed pre-existing KILL can
+publish an accepted launch before the graph checks its stop gate, leaving the
+enrollment permanently held without work. Core agent owns observational checks
+and publication guards; protocol agent owns the read endpoint; acceptance agent
+owns actual isolated HTTP/Git race tests. Parent owns UI, documentation and final
+integration. Preserve final effect-time checks and temporary quota capacity waits.
+No actual KILL, account pause, ledger migration or provider activation changes.
+
+UI design: retain the technical control room, Space Grotesk headings and IBM Plex
+Sans data text. Reuse navy canvas #0e1730, surface #111e3a, ice text #edf3ff,
+blue accent #8babff and amber held state #f5a259 through existing semantic tokens
+(including light theme). Add one left-aligned admission strip between selection
+and objective: observed state, sampled time and specific causes with recovery
+guidance. This is not another row of decorative metrics. Status/cancel must remain
+available even if readiness fails; observation never retries a launch. Stack on
+mobile, preserve focus and reduced motion. Existing launch rechecks remain the
+authority; no status claims provider access or reserved capacity.
+
+Previous completed continuation from `a0f820058d32dc86b5c2eabbc52f7c390ec4ba6e`:
 project-bound workspace engineering. Three agents own core enrollment/runtime,
 HTTP/CLI integration and independent real-I/O acceptance. Parent owns UI/query,
 documentation and final integration. Existing graph/controller/resource ledgers

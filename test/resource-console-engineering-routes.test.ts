@@ -4,17 +4,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const owner = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), catalog: vi.fn(), snapshot: vi.fn(),
-  launch: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
+  readiness: vi.fn(), launch: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
 vi.mock('../src/core/resources/console-engineering.js', () => ({
   validateResourceConsoleEngineeringCatalog: owner.validate, createResourceConsoleEngineeringOwner: owner.create,
 }));
 import { startResourceConsoleServer, type ResourceConsoleServerHandle, type ResourceConsoleServerOptions } from '../src/core/web/resource-console-server.js';
 import { ResourceSupervisorError } from '../src/core/resources/pool-supervisor.js';
+import type { ResourceConsoleEngineeringReadiness } from '../src/core/resources/console-engineering-types.js';
 
 let directory: string; let options: ResourceConsoleServerOptions;
 const handles: ResourceConsoleServerHandle[] = [];
 const enrollment = { id: 'fix', projectId: 'default', enrollmentDigest: 'a'.repeat(64) };
 const job = { enrollmentId: 'fix', projectId: 'default', state: 'ready' };
+const readiness: ResourceConsoleEngineeringReadiness = { schemaVersion: 1, enrollmentId: 'fix', enrollmentDigest: 'a'.repeat(64), sampledAt: '2026-09-10T00:00:00.000Z',
+  status: 'blocked', action: 'none', reasons: ['global-kill-active'], scope: 'local-admission-check-only', effectsExecuted: false, providerContacted: false };
 const input = { enrollmentId: 'fix', expectedEnrollmentDigest: 'a'.repeat(64) };
 const save = (path: string, value: unknown) => writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
 beforeEach(() => {
@@ -29,8 +32,54 @@ beforeEach(() => {
   save(options.observationsFile, []); save(options.projectsFile!, { schemaVersion: 1, projects: [] });
   save(options.engineeringFile!, { schemaVersion: 1, enrollments: [] });
   owner.validate.mockImplementation((value) => value); owner.catalog.mockReturnValue([enrollment]); owner.snapshot.mockReturnValue(job);
+  owner.readiness.mockReturnValue(readiness);
   owner.launch.mockReturnValue({ ...job, state: 'running' }); owner.cancel.mockReturnValue({ ...job, state: 'stopped' });
   owner.close.mockResolvedValue(undefined); owner.create.mockReturnValue(owner);
+});
+
+describe('engineering readiness read protocol', () => {
+  const route = '/api/resources/engineering/fix/readiness';
+  it('accepts a bound read session without a control token and never launches', async () => {
+    const handle = await start(); const proof = 'd'.repeat(64);
+    const session = await fetch(`${handle.url}/api/session`, { method: 'POST', headers: {
+      'x-ashlr-token': handle.readToken, 'x-ashlr-read-client': proof, origin: handle.url } });
+    expect(session.status).toBe(204);
+    const cookie = session.headers.get('set-cookie')!.split(';')[0]!;
+    const result = await fetch(`${handle.url}${route}`, { headers: { cookie, 'x-ashlr-read-client': proof } });
+    expect(result.status).toBe(200); expect(result.headers.get('cache-control')).toBe('no-store');
+    expect(result.headers.get('x-content-type-options')).toBe('nosniff'); expect(await result.json()).toEqual(readiness);
+    expect(owner.readiness).toHaveBeenCalledExactlyOnceWith('fix');
+    expect(owner.launch).not.toHaveBeenCalled(); expect(owner.cancel).not.toHaveBeenCalled();
+  });
+  it('rejects unauthenticated, cross-origin and query-bearing reads before collection', async () => {
+    const handle = await start(); const headers = { 'x-ashlr-token': handle.readToken };
+    expect((await fetch(`${handle.url}${route}`)).status).toBe(401);
+    expect((await fetch(`${handle.url}${route}`, { headers: { ...headers, origin: 'http://other.invalid' } })).status).toBe(403);
+    expect((await fetch(`${handle.url}${route}?refresh=true`, { headers })).status).toBe(400);
+    expect(owner.readiness).not.toHaveBeenCalled(); expect(owner.launch).not.toHaveBeenCalled();
+  });
+  it('preserves the job schema and does not add a readiness mutation route', async () => {
+    const handle = await start(); const headers = { 'x-ashlr-token': handle.readToken };
+    expect(await (await fetch(`${handle.url}/api/resources/engineering/fix`, { headers })).json()).toEqual(job);
+    expect((await post(handle, route, {})).status).toBe(404);
+    expect(owner.readiness).not.toHaveBeenCalled(); expect(owner.launch).not.toHaveBeenCalled(); expect(owner.cancel).not.toHaveBeenCalled();
+  });
+  it('refuses unconfigured capability without inspecting readiness', async () => {
+    const handle = await start({ engineeringFile: undefined });
+    expect((await fetch(`${handle.url}${route}`, { headers: { 'x-ashlr-token': handle.readToken } })).status).toBe(403);
+    expect(owner.readiness).not.toHaveBeenCalled();
+  });
+  it.each([['NOT_FOUND', 404], ['UNAVAILABLE', 503]] as const)('sanitizes %s readiness errors', async (code, status) => {
+    const handle = await start(); owner.readiness.mockImplementation(() => { throw new ResourceSupervisorError(code, '/private/sensitive-fixture'); });
+    const result = await fetch(`${handle.url}${route}`, { headers: { 'x-ashlr-token': handle.readToken } });
+    expect(result.status).toBe(status); expect(await result.text()).not.toContain('/private/sensitive-fixture');
+    expect(result.headers.get('cache-control')).toBe('no-store'); expect(owner.launch).not.toHaveBeenCalled();
+  });
+  it('applies the existing bounded response limit', async () => {
+    const handle = await start(); owner.readiness.mockReturnValue({ ...readiness, reasons: ['x'.repeat(8 * 1024 * 1024)] });
+    const result = await fetch(`${handle.url}${route}`, { headers: { 'x-ashlr-token': handle.readToken } });
+    expect(result.status).toBe(503); expect(await result.text()).toContain('response limit'); expect(owner.launch).not.toHaveBeenCalled();
+  });
 });
 afterEach(async () => { for (const handle of handles.splice(0)) await handle.close(); rmSync(directory, { recursive: true, force: true }); });
 async function start(patch: Partial<ResourceConsoleServerOptions> = {}) {

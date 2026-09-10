@@ -94,7 +94,10 @@ For a source-built local console:
    Inspect the declared dependency order, campaign and experiment limits,
    delivery branches and enrollment digest. These limits are ceilings, not an
    estimate of current account balance. The standard resource ledger still
-   decides admission across ordinary tasks and engineering generations.
+   decides admission across ordinary tasks and engineering generations. Review
+   **Before this plan runs** for local admission checks. A held plan lists fixed
+   reason codes with operator guidance; after resolving the condition, select
+   **Refresh evidence**. Refreshing never launches or retries work.
 5. Unlock controls and select **Run enrolled plan**. The browser sends only the
    enrollment ID and displayed digest, never a command, path or revised budget.
    Launch creates durable ownership evidence; status reads show signed graph
@@ -107,6 +110,27 @@ engineering launches but does not terminate an already active engineering run.
 At most four enrolled graphs are active in one console owner; resource limits
 can impose a lower concurrency. There is no second engineering queue or quota
 ledger.
+
+Readiness is a sampled local observation, not a worker connection test, capacity
+reservation or permission to execute. It checks known stop switches, owner and
+project availability, signing-identity presence, runtime/campaign/accounting pins,
+and recorded campaign, graph and launch state. For a fresh launch, an existing
+graph execution lock or controller enrollment also withholds admission. Lock
+presence alone does not establish whether its owner is alive; the check does not
+repair or remove it. Existing accepted-work reconciliation retains its ordinary
+proven-dead lock recovery. Temporary resource occupancy remains subject to the
+existing bounded capacity wait, not a new hard readiness denial.
+
+Known blockers are checked before acquiring launch ownership, again under that
+ownership, and immediately before publishing the first accepted launch. A hold
+detected before ownership acquisition leaves the graph and launch store
+untouched, so resolving it does not require inventing a new enrollment. The final
+publication check can still leave staging/store directories if a condition races
+in during publication; no provider dispatch follows a refused publication.
+Post-acceptance races retain the existing uncertain-work holds below. A passing
+sample is never a guarantee that execution will start or succeed. If readiness
+cannot be read, the workspace still exposes recorded run evidence and its stop
+control. New launch remains withheld.
 
 Restart never automatically launches an enrollment, creates a new graph identity
 or renews its allowance. **Reconcile completed work** uses only the existing
@@ -124,8 +148,21 @@ control authority and an exact Origin. All responses are bounded and no-store:
 | --- | --- |
 | `GET /api/resources/engineering` | Enrolled summaries, including project identity and digest |
 | `GET /api/resources/engineering/:id` | Recorded graph/ownership projection |
+| `GET /api/resources/engineering/:id/readiness` | Non-dispatching local admission sample; `ready`, `blocked` or `not-applicable` |
 | `POST /api/resources/engineering/start` | `{enrollmentId, expectedEnrollmentDigest}` → owned job, HTTP 202 |
 | `POST /api/resources/engineering/:id/cancel` | Empty object → durable stop projection |
+
+The readiness response binds `enrollmentId` and `enrollmentDigest`, with
+`schemaVersion: 1`, `sampledAt`, `status`, `action` (`launch`, `reconcile` or
+`none`), fixed `reasons`, `scope: "local-admission-check-only"`,
+`effectsExecuted: false` and `providerContacted: false`. A blocked response has
+no action. Those flags describe admission itself: it does not launch graph work,
+probe a provider or reserve a worker. Existing supervisor ownership checks remain
+fail-closed; discovering a lost lease can stop already owned ordinary tasks.
+Readiness does not suppress that cancellation behavior or claim the surrounding
+service is inert. This endpoint checks an already started console; it is not a standalone
+read-only commissioning command, because console startup can initialize the
+ordinary supervisor. No private paths or raw storage errors are returned.
 
 Startup may initialize the ordinary supervisor; it does not write graph records
 or invoke a worker. Explicit console close aborts and awaits owned engineering

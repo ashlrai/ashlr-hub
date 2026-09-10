@@ -1,13 +1,36 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { apiGet, apiPost, ApiError } from './client.js';
 import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-store.js';
-import { controlWorkspaceEngineering, listWorkspaceEngineering, readWorkspaceEngineering } from './workspace-engineering.js';
-import { engineeringEnrollment, engineeringJob } from '../routes/workspace/engineering-fixture.test-support.js';
+import { controlWorkspaceEngineering, listWorkspaceEngineering, readWorkspaceEngineering, readWorkspaceEngineeringReadiness } from './workspace-engineering.js';
+import { engineeringEnrollment, engineeringJob, engineeringReadiness } from '../routes/workspace/engineering-fixture.test-support.js';
 vi.mock('./client.js', async (original) => ({ ...await original<typeof import('./client.js')>(), apiGet: vi.fn(), apiPost: vi.fn() }));
 vi.mock('./auth-store.js', () => ({ getMutationToken: vi.fn(), clearMutationToken: vi.fn(), touchMutationHold: vi.fn() }));
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(getMutationToken).mockReturnValue('control-fixture'); });
 
 describe('workspace engineering evidence boundary', () => {
+  it('reads bounded admission without mutation authority, including blocked and reconciliation states', async () => {
+    const row = engineeringEnrollment(); const abort = new AbortController();
+    for (const value of [engineeringReadiness(row), engineeringReadiness(row, { action: 'reconcile' }),
+      engineeringReadiness(row, { status: 'blocked', action: 'none', reasons: ['global-kill-active'] }),
+      engineeringReadiness(row, { status: 'not-applicable', action: 'none', reasons: ['already-running'] })]) {
+      vi.mocked(apiGet).mockResolvedValue(value);
+      await expect(readWorkspaceEngineeringReadiness(row, abort.signal)).resolves.toEqual(value);
+    }
+    expect(apiGet).toHaveBeenLastCalledWith('/api/resources/engineering/default-build/readiness', abort.signal);
+    expect(apiPost).not.toHaveBeenCalled(); expect(getMutationToken).not.toHaveBeenCalled();
+    abort.abort(); await expect(readWorkspaceEngineeringReadiness(row, abort.signal)).rejects.toThrow('cancelled');
+  });
+  it.each([{ enrollmentId: 'other' }, { enrollmentDigest: 'b'.repeat(64) }, { schemaVersion: 2 }, { extra: true },
+    { scope: 'provider-ready' }, { effectsExecuted: true }, { providerContacted: true }, { sampledAt: 'tomorrow' },
+    { action: 'none' }, { reasons: ['global-kill-active'] }, { status: 'blocked' },
+    { status: 'blocked', action: 'none', reasons: [] },
+    { status: 'blocked', action: 'none', reasons: ['private error /secret'] },
+    { status: 'blocked', action: 'none', reasons: ['global-kill-active', 'global-kill-active'] },
+    { status: 'not-applicable', action: 'none', reasons: [] },
+  ])('rejects malformed, mismatched or overclaimed readiness %j', async (patch) => {
+    vi.mocked(apiGet).mockResolvedValue({ ...engineeringReadiness(), ...patch });
+    await expect(readWorkspaceEngineeringReadiness(engineeringEnrollment())).rejects.toThrow('could not be verified');
+  });
   it('reads metadata and exact status without mutation authority', async () => {
     const selected = engineeringEnrollment(); const status = engineeringJob(selected); const abort = new AbortController();
     vi.mocked(apiGet).mockResolvedValueOnce([selected]).mockResolvedValueOnce(status);

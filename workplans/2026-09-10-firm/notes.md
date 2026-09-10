@@ -1,5 +1,34 @@
 # Firm build notes
 
+## September 10: local engineering admission continuation
+
+- Baseline 2b4064a3, clean isolated auto/p00; Entire resume again found no checkpoint.
+  Three Explore agents independently mapped admission, commissioning and real
+  acceptance before editing. Missing standalone commissioning/service/account
+  migration remains distinct from this existing-console readiness observation.
+- Confirmed pre-existing KILL could publish launch ownership before graph stop
+  admission. Readiness now exposes fixed bounded causes and gates initial launch
+  before the wrapper mutex, under it, and at immutable-record publication.
+- Reused existing campaign readiness, project binding, host-only factory pins,
+  read-only provenance key inspection and signed graph evidence. No eligible
+  worker-count gate or new quota scheduler. Occupied capacity still waits under
+  the existing resource runtime policy. Active read polling avoids expensive
+  factory reconstruction through the already-running return.
+- Cold review caught another known-before-launch condition: an existing graph
+  execution lock. Presence holds fresh launches only, without assuming a live
+  owner or reclaiming a lock. Accepted linked reconciliation retains the ordinary
+  proven-dead lock recovery; it is not blanket-blocked by lock presence.
+- Updated real missing/pending recovery regressions to introduce KILL only after
+  actual immutable launch publication. Pre-existing stop and post-acceptance race
+  must not be conflated. Seven reversible blocker cases restore the exact condition
+  and prove the same enrollment can subsequently dispatch.
+- UI reads job and readiness independently in parallel, validates exact identity,
+  closed schema/reasons and action consistency, and preserves Stop when readiness
+  fails. No automatic launch, retry, account enrollment or local stop repair.
+- Source and tests were frozen before broad verification. Real browser acceptance
+  uses a separate temporary HOME/Git/loopback fixture and installed ephemeral
+  headless Chrome. The host KILL and actual account configuration are untouched.
+
 ## September 10: workspace engineering continuation
 
 - Baseline a0f82005, clean isolated auto/p00. Three Explore agents mapped core
