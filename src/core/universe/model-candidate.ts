@@ -56,6 +56,8 @@ export interface ModelCandidateContext {
   signal: AbortSignal;
   /** Invocation-only private locator and durable task identity; never put in a model prompt. */
   resourceRuntime?: string;
+  expectedResourceRuntimeDigest?: string;
+  isExecutionStopped?: () => boolean;
   resourceUniverseRoot?: string;
   resourceIdentity?: { universeId: string; runId: string; variantId: string };
 }
@@ -186,6 +188,9 @@ export async function generateModelCandidate(
     if (controller.signal.aborted) throw new Error('Model generation cancelled before request');
     timer = setTimeout(() => { timedOut = true; controller.abort(); }, context.timeoutMs);
     const remainingTime = (): number => {
+      try {
+        if (controller.signal.aborted || context.isExecutionStopped?.()) throw new Error('Parent execution stopped');
+      } catch { controller.abort(); throw new Error('Model generation parent execution unavailable'); }
       const remaining = Math.floor(context.timeoutMs - (performance.now() - started));
       if (remaining < 1) { timedOut = true; controller.abort(); throw new Error('Model generation stopped at its time budget'); }
       return remaining;
@@ -272,6 +277,8 @@ export async function generateModelCandidate(
     if (validated.kind === 'resource-pool') {
       const completion = await generateResourceCompletion(validated, { messages, candidatePath: context.candidatePath,
         timeoutMs: remainingTime(), signal: controller.signal, resourceRuntime: context.resourceRuntime,
+        expectedRuntimeDigest: context.expectedResourceRuntimeDigest,
+        isExecutionStopped: context.isExecutionStopped,
         resourceUniverseRoot: context.resourceUniverseRoot, resourceIdentity: context.resourceIdentity });
       receipt.resource = completion.resource;
       receipt.usage = completion.usage;

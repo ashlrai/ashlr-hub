@@ -40,6 +40,8 @@ export interface ResourceGenerationContext {
   resourceRuntime?: string;
   /** Optional host pin, checked against the runtime actually consumed here. */
   expectedRuntimeDigest?: string;
+  /** Synchronous enclosing graph ownership/KILL check, including final worker admission. */
+  isExecutionStopped?: () => boolean;
   /** Optional absolute host deadline; never renewed by setup, waiting or retry. */
   deadlineAt?: string;
   resourceUniverseRoot?: string;
@@ -115,6 +117,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
   if (context.signal.aborted) cancel();
   const remaining = (): number => {
     if (context.signal.aborted) throw new Error();
+    if (context.isExecutionStopped?.()) { controller.abort(); throw new Error('Parent execution stopped'); }
     const available = Math.floor(Math.min(context.timeoutMs - (performance.now() - started),
       absoluteDeadline === null ? Infinity : absoluteDeadline - Date.now()));
     if (available < 1) { timedOut = true; controller.abort(); throw new Error(); }
@@ -345,7 +348,8 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       }
       evidence.taskId = taskId; evidence.dispatch = 'unavailable';
       handoff = await runResourceTask({ root: runtime.root, pool, bindings, ...current, task, signal: controller.signal,
-        ...(sharedCollector || absoluteDeadline !== null ? { readAdmissionEvidence: () => {
+        ...(context.isExecutionStopped ? { beforeWorkerDispatch: () => { remaining(); return true; } } : {}),
+        ...(sharedCollector || absoluteDeadline !== null || context.isExecutionStopped ? { readAdmissionEvidence: () => {
           // Recheck under the ledger lock: synchronous setup/lock waits cannot
           // renew the host's absolute allocation window before reservation.
           remaining(); return readEvidence();

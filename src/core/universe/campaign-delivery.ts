@@ -80,10 +80,13 @@ export async function runUniverseCampaignAndDeliver(id: string,
   const delivery = { ...options.delivery };
   const initial = preflightUniverseCampaignDelivery(id, { ...store, delivery }).campaign;
   const campaign = await runUniverseCampaign(id, { ...store, signal: options.signal,
-    resourceRuntime: options.resourceRuntime, expectedIdentity: identity(initial) });
+    resourceRuntime: options.resourceRuntime, expectedResourceRuntimeDigest: options.expectedResourceRuntimeDigest,
+    isExecutionStopped: options.isExecutionStopped,
+    expectedIdentity: identity(initial) });
   if (options.signal?.aborted) return { campaign, delivery: { status: 'withheld', reason: 'cancelled' } };
   if (campaign.state !== 'completed') return { campaign, delivery: { status: 'withheld', reason: 'campaign-not-completed' } };
   return deliverCompletedUniverseCampaign(id, { ...store, delivery, signal: options.signal,
+    isExecutionStopped: options.isExecutionStopped,
     expectedIdentity: { ...identity(initial), summaryDigest: digest(canonical(campaign)) } });
 }
 
@@ -132,7 +135,7 @@ export async function deliverCompletedUniverseCampaign(id: string,
       .sort((a, b) => direction * (a.score! - b.score!) || a.id.localeCompare(b.id))[0];
     if (!selected) return { campaign: current, delivery: { status: 'withheld', reason: 'no-strict-improvement' } };
     const receipt = await deliverUniverseEliteOwned(universeId, { ...store, trialId: selected.id, branch, signal: options.signal,
-      deadlineMonotonicMs: options.deadlineMonotonicMs }, lock);
+      isExecutionStopped: options.isExecutionStopped, deadlineMonotonicMs: options.deadlineMonotonicMs }, lock);
     if (receipt.status !== 'delivered') throw new Error('Campaign delivery did not produce a changed local branch');
     return { campaign: current, delivery: { status: 'delivered', receipt } };
   });

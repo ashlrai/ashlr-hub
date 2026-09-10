@@ -1,6 +1,79 @@
 # Verified local handoff
 
-## Current continuation: real project file tools
+## Current continuation: evaluated engineering graph
+
+Baseline: `c2b598dad9e65c82582d75e001c3b73430326d9f`; isolated `auto/p00`
+worktree at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.
+The commit containing this report is the delivered local source. Parent integrated
+three bounded agents: core graph/adapter, real integration acceptance, and cold
+review with final-effect regressions. No parallel agent count is presented as
+evidence of product capability.
+
+- New `universe firm engineer` command and `createFirmEngineeringControlHandler`
+  join the signed graph to the existing portfolio controller, shared resource
+  ledger, confined declared file operations, fixed evaluator and strict measured
+  improvement delivery. Every enrolled campaign has an explicit local `codex/`
+  branch target. The project checkout is not replaced or checked out.
+- The private host enrollment, runtime/pool identity and campaign/comparator
+  identities are captured. Model/graph input contains digests, not commands or
+  filesystem selectors. `--check` is read-only; execution requires the reviewed
+  canonical enrollment digest. No credentials, quota settings or keys are created.
+- Concrete factory branding and the delivery node kind are both required for
+  engineering effects. Merely copying an effect descriptor or attaching it to
+  an ordinary explore callback cannot create an engineering intent/completion.
+- New controller enrollment cannot adopt a preexisting controller, including one
+  under a held lock. Completion joins exact controller records, campaign,
+  generation receipt, frozen artifact, evaluator evidence and local delivery.
+  Graph-level spend remains unknown rather than misattributing historical totals.
+- Runtime digest checks reach every generation. Parent ownership/KILL/deadline
+  checks reach locked resource admission, final worker launch, confined file
+  preflight/application, evaluator admission and Git's prepared ref transaction.
+  Stops retain charged reservations and pending delivery evidence; no unsafe
+  replay or invented refund. The outer graph deadline can only shorten execution.
+
+Verification:
+
+- **16 real engineering integration tests passed**, including a separate CLI
+  process using test-owned existing provenance. The actual path produces a bad
+  candidate, passing baseline and strict improvement, then the exact local branch.
+  It proves initial no-effect check, account-ledger use, original dirty checkout
+  preservation, immutable graph replay, drift refusal, controller attribution,
+  KILL and bounded cancellation. Real local transports are fixtures, not providers.
+- **65 tests passed** in the final engineering/file-operation rerun; the 16 above
+  are included. **28 CLI boundary tests passed**. Builder/reviewer subtotals overlap
+  broader runs and are not additive product throughput.
+- **484 tests passed / 15 affected suites** in a fresh frozen-runtime run,
+  including controller, campaign delivery, resource generation, real drain/crash
+  processes and all 16 engineering integration scenarios. **51 tests passed / two
+  CLI suites** after the help update. These overlap the focused counts above.
+- The initial 120-file Universe sweep reported **3,089 passes and four failures**.
+  Two were older CLI fixtures missing private HOME isolation; fixed fixtures
+  passed all six drain/crash tests. Two were new assertions loaded after the
+  running sweep had cached pre-fix graph code; both pass in the fresh affected
+  run. This is not represented as a clean rerun of all 120 files. No known
+  unresolved failure remained in the verified affected path.
+- **449 safety/invariant tests passed, five existing skips / 41 files**.
+  All five compiled structural safety checks passed. Full core/web typecheck,
+  build, lint (no errors; existing repository warnings), docs checks and real-I/O
+  classification passed. Protected safety/policy source and tests were unchanged.
+
+The host global KILL was rechecked active and left active. Original checkout
+remains `a01fc08663baab3039c4f1c084538de732a4fd0e` with its preexisting untracked
+workplans preserved. No real provider requests, account changes, GitHub Actions,
+remote push, npm publication, resident process or production activation occurred.
+Entire remains enabled in manual-commit mode; resume found no checkpoint.
+
+Remaining work is real: connect a host-enrolled engineering action to the human
+workspace, reconcile only proven child outcomes after interrupted graph intents,
+add the remaining desktop PTY/browser ownership layer, and commission an explicit
+Hub campaign before claiming always-on operation. Automatic ideation/value
+allocation and a resident engineering company are not supplied by this foreground
+integration. Acceptance here means fixed checks and a local branch, not general
+correctness, live acceptance or deployed business value. The updated runbook
+separates these states as required by the documentation skill; planning and
+agent-building skills kept this on the existing runtime.
+
+## Previous continuation: real project file tools
 
 Baseline: `1d1febaf031cb9fe2eeef8d19987427313371c89`; isolated `auto/p00`
 worktree at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.

@@ -91,7 +91,7 @@ function nextChecksFor(worker: ResourceWorker, reasons: ResourceExclusionReason[
  * A campaign and candidate are deliberately absent, so their boundary/digest
  * checks remain execution-time requirements, not implied by this report.
  */
-export function checkResourceGenerationRuntime(options: { resourceRuntime: string }): ResourceGenerationRuntimeCheck {
+export function checkResourceGenerationRuntime(options: { resourceRuntime: string; expectedRuntimeDigest?: string }): ResourceGenerationRuntimeCheck {
   const result: ResourceGenerationRuntimeCheck = { schemaVersion: 1, status: 'invalid', evidenceScope: 'local-configuration-only',
     providerContacted: false, poolId: null, poolDigest: null, sourceState: null, sampledAt: null,
     counts: null, allocationCeilingPercent: null, nextEligibleAt: null,
@@ -105,7 +105,15 @@ export function checkResourceGenerationRuntime(options: { resourceRuntime: strin
     return value;
   };
   try {
-    const runtime = check('runtime', () => validateResourceGenerationRuntime(readResourceJson(options.resourceRuntime)));
+    const runtime = check('runtime', () => {
+      const value = validateResourceGenerationRuntime(readResourceJson(options.resourceRuntime));
+      if (options.expectedRuntimeDigest !== undefined &&
+          (typeof options.expectedRuntimeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(options.expectedRuntimeDigest) ||
+            digest(canonical(value)) !== options.expectedRuntimeDigest)) {
+        throw new Error('Resource runtime pin changed');
+      }
+      return value;
+    });
     check('boundaries', () => {
       if (contains(runtime.workspace, runtime.root) || contains(runtime.root, runtime.workspace) ||
         realpathSync(dirname(runtime.root)) !== dirname(runtime.root)) throw new Error();

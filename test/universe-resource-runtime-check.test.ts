@@ -74,6 +74,13 @@ function failed(result: ReturnType<typeof checkResourceGenerationRuntime>, stage
 }
 
 describe.skipIf(process.platform === 'win32')('read-only resource runtime configuration check', () => {
+  it('checks the exact optional runtime pin without creating a resource ledger', () => {
+    const f = fixture();
+    expect(checkResourceGenerationRuntime({ resourceRuntime: f.runtimePath,
+      expectedRuntimeDigest: digest(canonical(f.runtime)) }).status).toBe('valid');
+    failed(checkResourceGenerationRuntime({ resourceRuntime: f.runtimePath, expectedRuntimeDigest: '0'.repeat(64) }), 'runtime');
+    expect(existsSync(f.runtime.root)).toBe(false);
+  });
   it('reports two Codex identities, Claude and local coverage without claiming authentication or mutating any input', () => {
     const f = fixture(); const before = inventory(base); const result = f.check();
     expect(result).toMatchObject({ schemaVersion: 1, status: 'valid', evidenceScope: 'local-configuration-only', providerContacted: false,

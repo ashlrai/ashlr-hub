@@ -256,6 +256,10 @@ export interface UniverseRunOptions extends UniverseStoreOptions {
   signal?: AbortSignal;
   /** Explicit private operator configuration path; never part of a portable manifest. */
   resourceRuntime?: string;
+  /** Optional host-enrollment pin, checked before every resource generation dispatch. */
+  expectedResourceRuntimeDigest?: string;
+  /** Synchronous enclosing execution ownership check. True or a throw vetoes effects. */
+  isExecutionStopped?: () => boolean;
 }
 
 export interface UniverseCampaignDefinition {

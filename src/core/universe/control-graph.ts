@@ -7,22 +7,26 @@ import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStore
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
 import { signDecisionTraceV1, verifyDecisionTraceV1, type DecisionTraceV1, type DecisionTraceKeyOptions } from './decision-trace.js';
+import { isFirmEngineeringControlHandler } from './firm-engineering-control-handler.js';
 
 export const CONTROL_NODE_KINDS = ['plan', 'explore', 'implement', 'verify', 'critic', 'integrate', 'weigh', 'mutate-harness', 'sweep', 'invent', 'talk', 'deliver'] as const;
 export type ControlNodeKind = typeof CONTROL_NODE_KINDS[number];
 export interface ControlGraphNode { id: string; kind: ControlNodeKind; requires: string[]; input: unknown }
 export interface ControlGraphDefinition { schemaVersion: 1; id: string; nodes: ControlGraphNode[]; maxConcurrent: number; maxDurationMs: number }
 export interface ControlArtifact { nodeId: string; digest: string; value: unknown }
-export interface ControlHandlerContext { node: ControlGraphNode; artifacts: ControlArtifact[]; signal: AbortSignal }
+export interface ControlHandlerContext { node: ControlGraphNode; artifacts: ControlArtifact[]; signal: AbortSignal;
+  /** Trusted synchronous stop/ownership check, including the original graph deadline. */
+  isExecutionStopped?: () => boolean;
+  /** Invocation-only monotonic cap; never changes the durable graph definition. */
+  deadlineMonotonicMs?: number }
 export interface ControlHandlerResult {
   artifact: unknown; verifier?: DecisionTraceV1['verifier']; conflicts?: DecisionTraceV1['conflicts'];
   outcome?: 'completed' | 'rejected'; spend?: DecisionTraceV1['spend'];
 }
 export type ControlGraphHandler = (context: ControlHandlerContext) => Promise<ControlHandlerResult>;
 /** Trusted host declaration, not an effect permit or model-authored authority. */
-export interface ControlHandlerExecution {
-  effectClass: 'resource-completion'; constitutionVersion: string; policyEpoch: number; bindingDigest: string;
-}
+export type ControlHandlerExecution = { constitutionVersion: string; policyEpoch: number; bindingDigest: string } &
+  ({ effectClass: 'resource-completion' } | { effectClass: 'engineering-portfolio-local-delivery' });
 export type ControlGraphHandlerRegistration = ControlGraphHandler | (ControlHandlerExecution & { run: ControlGraphHandler });
 export interface ControlGraphOptions {
   root: string;
@@ -50,20 +54,22 @@ const GUARDED = new Set<ControlNodeKind>(['integrate', 'deliver', 'mutate-harnes
 
 function executionMetadata(value: unknown): ControlHandlerExecution {
   const row = snapshot<ControlHandlerExecution>(value, 1024);
-  if (!exact(row, ['effectClass', 'constitutionVersion', 'policyEpoch', 'bindingDigest']) || row.effectClass !== 'resource-completion' ||
+  if (!exact(row, ['effectClass', 'constitutionVersion', 'policyEpoch', 'bindingDigest']) ||
+    !['resource-completion', 'engineering-portfolio-local-delivery'].includes(row.effectClass) ||
     typeof row.constitutionVersion !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.constitutionVersion) ||
     !Number.isSafeInteger(row.policyEpoch) || row.policyEpoch < 0 || typeof row.bindingDigest !== 'string' || !HASH.test(row.bindingDigest)) {
     throw new Error('Invalid graph execution declaration');
   }
   return row;
 }
-function registration(value: ControlGraphHandlerRegistration): { run: ControlGraphHandler; execution?: ControlHandlerExecution } {
+function registration(value: ControlGraphHandlerRegistration): { run: ControlGraphHandler; execution?: ControlHandlerExecution; engineeringDelivery?: true } {
   if (typeof value === 'function') return { run: value };
   if (!exact(value, ['run', 'effectClass', 'constitutionVersion', 'policyEpoch', 'bindingDigest']) ||
     Object.keys(value).some((key) => !Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value')) ||
     typeof value.run !== 'function') throw new Error('Invalid graph handler registration');
   const { run, ...metadata } = value;
-  return { run, execution: executionMetadata(metadata) };
+  return { run, execution: executionMetadata(metadata),
+    ...(isFirmEngineeringControlHandler(value) ? { engineeringDelivery: true as const } : {}) };
 }
 function assertExecutionTrace(trace: DecisionTraceV1, execution?: ControlHandlerExecution): void {
   if (trace.authority.effectClass !== (execution?.effectClass ?? 'simulate') ||
@@ -158,6 +164,9 @@ function load(root: string, keys?: DecisionTraceKeyOptions) {
           !(exact(row.data, ['inputDigests']) || exact(row.data, ['inputDigests', 'execution'])) ||
           canonical(row.data.inputDigests) !== canonical(inputs.map((item) => ({ nodeId: item!.nodeId, digest: item!.digest })))) throw new Error('Invalid graph intent');
       const execution = Object.hasOwn(row.data, 'execution') ? executionMetadata(row.data.execution) : undefined;
+      if (execution?.effectClass === 'engineering-portfolio-local-delivery' && node.kind !== 'deliver') {
+        throw new Error('Engineering execution requires a deliver node');
+      }
       assertExecutionTrace(row.trace, execution);
       for (const item of inputs) edges.push({ from: item!.nodeId, to: node.id, artifactDigest: item!.digest });
       states.set(node.id, { state: 'unresolved', ...(execution ? { execution } : {}) });
@@ -167,7 +176,7 @@ function load(root: string, keys?: DecisionTraceKeyOptions) {
           row.data.artifactDigest !== digest(canonical(row.data.artifact)) || row.trace.artifactDigest !== row.data.artifactDigest) throw new Error('Invalid graph settlement');
       if (prior.execution && canonical(executionMetadata(row.data.execution)) !== canonical(prior.execution)) throw new Error('Graph execution binding changed');
       assertExecutionTrace(row.trace, prior.execution);
-      if (['verify', 'critic', 'weigh'].includes(node.kind) && row.data.state === 'completed' &&
+      if ((['verify', 'critic', 'weigh'].includes(node.kind) || prior.execution?.effectClass === 'engineering-portfolio-local-delivery') && row.data.state === 'completed' &&
           (row.trace.verifier.verdict !== 'pass' || !row.trace.verifier.independent)) throw new Error('Missing independent graph verdict');
       states.set(node.id, { state: row.data.state as 'completed' | 'rejected', ...(row.data.state === 'completed' ? {
         artifact: { nodeId: node.id, digest: row.data.artifactDigest as string, value: row.data.artifact } } : {}) });
@@ -196,8 +205,8 @@ function presentOrUncertain(path: string): boolean {
 /**
  * Durable bounded graph kernel for trusted host-owned, confined adapters. No
  * command/provider dispatch or activation authority is created here. Integrate,
- * deliver, sweep and live harness mutation remain withheld until their existing
- * effect gates are wired. The CLI supplies only inert fixture handlers.
+ * sweep and live harness mutation remain withheld. Deliver admits only the
+ * concrete factory-branded engineering adapter through its existing effect gates.
  * A persisted intent without settlement is never retried automatically.
  */
 export async function runControlGraph(input: unknown, options: ControlGraphOptions): Promise<ControlGraphReport> {
@@ -265,8 +274,16 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
         if (stop() || !own()) break;
         if (active.size >= definition.maxConcurrent) break;
         if (state.states.get(node.id)?.state !== 'pending' || !node.requires.every((id) => state.states.get(id)?.state === 'completed')) continue;
-        if (GUARDED.has(node.kind)) { reasons.add(`${node.id}:existing-effect-gate-required`); continue; }
         const handler = handlers.get(node.kind);
+        // This effect class is reserved for the concrete adapter, even on node
+        // kinds whose ordinary trusted callbacks do not require an effect gate.
+        if (handler?.execution?.effectClass === 'engineering-portfolio-local-delivery' &&
+          (node.kind !== 'deliver' || !handler.engineeringDelivery)) {
+          reasons.add(`${node.id}:existing-effect-gate-required`); continue;
+        }
+        if (GUARDED.has(node.kind) && !(node.kind === 'deliver' && handler?.engineeringDelivery)) {
+          reasons.add(`${node.id}:existing-effect-gate-required`); continue;
+        }
         if (!handler) { reasons.add(`${node.id}:handler-unavailable`); continue; }
         const artifacts = node.requires.map((id) => state.states.get(id)!.artifact!);
         const execution = handler.execution;
@@ -277,14 +294,18 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
           // Queued cancellation after intent cannot authorize a worker call.
           if (controller.signal.aborted || stop() || !own()) return;
           // A fan-in may contain many individually bounded artifacts.
-          const output = await handler.run({ node: snapshot(node), artifacts: artifacts.map((artifact) => snapshot<ControlArtifact>(artifact)), signal: controller.signal });
+          const output = await handler.run({ node: snapshot(node), artifacts: artifacts.map((artifact) => snapshot<ControlArtifact>(artifact)), signal: controller.signal,
+            isExecutionStopped: () => stop() || !own(),
+            deadlineMonotonicMs: Math.min(started + definition.maxDurationMs,
+              performance.now() + Math.max(0, Date.parse(deadlineAt!) - Date.now())) });
           const result = snapshot<ControlHandlerResult>(output, 64 * 1024);
           if (!result || typeof result !== 'object' || !Object.hasOwn(result, 'artifact') ||
             Object.keys(result).some((key) => !['artifact', 'verifier', 'conflicts', 'outcome', 'spend'].includes(key)) ||
             (execution || Object.hasOwn(result, 'outcome')) && !['completed', 'rejected'].includes(result.outcome!)) throw new Error('Invalid handler result');
           const verifier = result.verifier ?? { id: 'not-evaluated', verdict: 'unavailable' as const, independent: false };
           const accepted = result.outcome !== 'rejected' && !(execution && (stop() || controller.signal.aborted)) &&
-            (!['verify', 'critic', 'weigh'].includes(node.kind) || verifier.verdict === 'pass' && verifier.independent);
+            (!['verify', 'critic', 'weigh'].includes(node.kind) && execution?.effectClass !== 'engineering-portfolio-local-delivery' ||
+              verifier.verdict === 'pass' && verifier.independent);
           append('settled', node.id, { state: accepted ? 'completed' : 'rejected', artifact: result.artifact,
             artifactDigest: digest(canonical(result.artifact)), ...(execution ? { execution } : {}) },
           verifier, result.conflicts ?? [], execution, result.spend ?? { unknown: true });

@@ -10,14 +10,17 @@ const STAGES: readonly ResourceGenerationCheckStage[] = ['runtime', 'boundaries'
  * resource admission. A valid report grants no execution authority or capacity:
  * worker admission still repeats its configuration, identity and quota checks.
  */
-export function resourceAdmissionPreflight(resourceRuntime: string): () => ResourceAdmissionPreflightReason | null {
+export function resourceAdmissionPreflight(resourceRuntime: string, expectedRuntimeDigest?: string): () => ResourceAdmissionPreflightReason | null {
   let checked = false;
   let reason: ResourceAdmissionPreflightReason | null = null;
   return () => {
-    if (checked) return reason;
+    // Pinned hosts recheck at admission; an earlier valid file is not evidence
+    // that the configured ledger and transport still match this enrollment.
+    if (checked && expectedRuntimeDigest === undefined) return reason;
     checked = true;
     try {
-      const report = checkResourceGenerationRuntime({ resourceRuntime });
+      const report = checkResourceGenerationRuntime({ resourceRuntime,
+        ...(expectedRuntimeDigest === undefined ? {} : { expectedRuntimeDigest }) });
       if (report.status === 'valid') return null;
       const stage = report.checks.find((check) => check.status === 'failed' && STAGES.includes(check.code))?.code;
       reason = stage ? `resource-runtime-invalid:${stage}` : 'resource-runtime-check-failed';

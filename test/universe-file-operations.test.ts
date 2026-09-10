@@ -39,6 +39,47 @@ function modelResponse(value: unknown): Response {
 }
 
 describe.skipIf(process.platform !== 'darwin')('declared file operations', () => {
+  it.each([
+    { stage: 'preflight', refusal: 'stopped' }, { stage: 'preflight', refusal: 'throw' },
+    { stage: 'apply', refusal: 'stopped' }, { stage: 'apply', refusal: 'throw' },
+  ] as const)('honors synchronous parent $refusal immediately before $stage child launch', async ({ stage, refusal }) => {
+    const { root, config, context } = fixture(); const before = artifactDigest(root);
+    let veto = false; let refusedChecks = 0;
+    // Raise the veto only after real synchronous preparation, not by aborting
+    // the caller signal or relying on an event-loop timer before the effect.
+    const readSnapshot = fileOperations.readFileOperationsSnapshot;
+    vi.spyOn(fileOperations, 'readFileOperationsSnapshot').mockImplementation((...args) => {
+      const snapshot = readSnapshot(...args); if (stage === 'preflight') veto = true; return snapshot;
+    });
+    const parse = fileOperations.parseFileOperations;
+    const parsed = vi.spyOn(fileOperations, 'parseFileOperations').mockImplementation((...args) => {
+      const operations = parse(...args); if (stage === 'apply') veto = true; return operations;
+    });
+    const subprocess = vi.spyOn(verifyCommands, 'runVerifySubprocessAsync');
+    const preflight = vi.spyOn(fileOperations, 'preflightFileOperations');
+    const apply = vi.spyOn(fileOperations, 'applyFileOperations');
+    const fetch = vi.fn(async () => modelResponse({ operations: [{ op: 'replace', path: 'main.ts', content: 'changed' }] }));
+    vi.stubGlobal('fetch', fetch);
+    const receipt = await generateModelCandidate(config, { ...context, timeoutMs: 30_000, isExecutionStopped: () => {
+      if (!veto) return false;
+      refusedChecks++;
+      if (refusal === 'throw') throw new Error('Fixture parent ownership unavailable');
+      return true;
+    } });
+    expect(context.signal.aborted).toBe(false); expect(refusedChecks).toBe(1);
+    expect(receipt).toMatchObject({ status: 'failed', changedFiles: [], fileOperations: { operations: [] } });
+    expect(validGenerationReceipt(receipt)).toBe(true); expect(artifactDigest(root)).toBe(before);
+    expect(apply).not.toHaveBeenCalled();
+    expect(preflight).toHaveBeenCalledTimes(stage === 'preflight' ? 0 : 1);
+    expect(subprocess).toHaveBeenCalledTimes(stage === 'preflight' ? 0 : 1);
+    expect(fetch).toHaveBeenCalledTimes(stage === 'preflight' ? 0 : 1);
+    expect(parsed).toHaveBeenCalledTimes(stage === 'preflight' ? 0 : 1);
+    if (stage === 'apply') {
+      expect(receipt.usage).toEqual({ state: 'reported', inputTokens: 17, outputTokens: 11 });
+      expect(subprocess.mock.calls[0]![1].signal?.aborted).toBe(true);
+    }
+  }, 30_000);
+
   it('confined preflight is nonmutating; complete batch creates nested modules, replaces and deletes', async () => {
     const { root, config } = fixture(); chmodSync(join(root, 'main.ts'), 0o755);
     const snapshot = readFileOperationsSnapshot(root, config);

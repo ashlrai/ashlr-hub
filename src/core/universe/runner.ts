@@ -98,7 +98,8 @@ function recordFinishedRun(directory: string, run: UniverseRun, lock: LocalStore
 async function runTrial(record: ManifestRecord, run: UniverseRun, variant: UniverseManifest['variants'][number],
   parent: UniverseElite | undefined, directory: string, root: string, signal: AbortSignal, deadline: number,
   feedback?: UniverseFeedback, searchContext?: UniverseSearchContext,
-  fileOperationsContext?: UniverseFileOperationsContext, resourceRuntime?: string): Promise<UniverseTrial> {
+  fileOperationsContext?: UniverseFileOperationsContext, resourceRuntime?: string,
+  expectedResourceRuntimeDigest?: string, isExecutionStopped?: () => boolean): Promise<UniverseTrial> {
   const started = performance.now();
   const trialId = randomUUID();
   const scratch = join(directory, 'scratch', run.id, trialId);
@@ -112,7 +113,7 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     durationMs: 0, delta: null, selected: false,
     ...(variant.generation ? { generation: newGenerationReceipt(variant.generation) } : {}) };
   try {
-    if (signal.aborted) { trial.status = 'cancelled'; trial.error = 'Run cancelled before trial'; return trial; }
+    if (signal.aborted || isExecutionStopped?.()) { trial.status = 'cancelled'; trial.error = 'Run cancelled before trial'; return trial; }
     const source = parent?.artifact ?? record.seedArtifact;
     if (parent && parent.comparatorDigest !== record.comparatorDigest) throw new Error('Parent comparator scope differs');
     if (artifactDigest(source.path) !== source.digest) throw new Error('Parent artifact changed; cannot reproduce lineage');
@@ -138,7 +139,7 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       trial.generation = await generateModelCandidate(variant.generation, {
         candidatePath: candidate, objective: record.manifest.objective, hypothesis: variant.hypothesis,
         generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(remaining())), signal,
-        ...(variant.generation.kind === 'resource-pool' ? { resourceRuntime, resourceUniverseRoot: root,
+        ...(variant.generation.kind === 'resource-pool' ? { resourceRuntime, expectedResourceRuntimeDigest, isExecutionStopped, resourceUniverseRoot: root,
           resourceIdentity: { universeId: record.manifest.id, runId: run.id, variantId: variant.id } } : {}),
         ...(feedback ? { feedback } : {}),
         ...(searchContext ? { searchContext, variantId: variant.id, niche: variant.niche } : {}),
@@ -179,6 +180,7 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     }
     trial.artifact = artifact;
     assertComparatorUnchanged(record);
+    if (isExecutionStopped?.()) { trial.status = 'cancelled'; trial.error = 'Run cancelled before evaluator'; return trial; }
     if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before evaluator'; return trial; }
     const evaluation = await runFixedUniverseEvaluator(record, root, archivePath, snapshotDigest, evaluatorScratch,
       Math.max(1, Math.min(record.manifest.evaluation.timeoutMs, remaining())), signal,
@@ -326,7 +328,8 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
           run!.feedbackEnabled && variant.generation ? buildUniverseFeedback(overview, variant, directory) : undefined,
           run!.feedbackVersion === 2 && variant.generation ? buildUniverseSearchContext(overview, variant) : undefined,
           variant.generation?.fileOperations ? buildUniverseFileOperationsContext(overview, variant, directory,
-            record.seedArtifact, run!.feedbackEnabled ? { feedback: true } : undefined) : undefined, options.resourceRuntime);
+            record.seedArtifact, run!.feedbackEnabled ? { feedback: true } : undefined) : undefined, options.resourceRuntime,
+          options.expectedResourceRuntimeDigest, options.isExecutionStopped);
         assertUniverseExecution(directory, execution);
         if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost before evidence write');
         appendRecord(directory, { id: `${run!.id}.trial.${trial.id}`, kind: 'trial', runId: run!.id, trial });

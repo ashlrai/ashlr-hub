@@ -1,8 +1,10 @@
-# Run the signed firm graph fixture
+# Run and inspect signed firm graphs
 
 This source-build demo exercises the new graph kernel without contacting a model,
 running candidate code, switching accounts, changing HOME or activating a daemon.
 It is a deterministic fixture, not an autonomous engineering deployment.
+For real, explicitly enrolled engineering campaigns, use the
+[engineering execution path](#execute-an-enrolled-engineering-portfolio) below.
 
 ## Prerequisites
 
@@ -138,12 +140,104 @@ artifact. Guarded integration/delivery/harness mutation kinds still require thei
 existing effect gates. This API is not resident-firm activation, automatic account
 commissioning, or cumulative cross-receipt budget accounting.
 
+### Execute an enrolled engineering portfolio
+
+The source-build `universe firm engineer` command connects a signed `deliver`
+node to the existing restartable portfolio controller. It does not introduce a
+second scheduler or resource ledger. The controller runs existing campaigns,
+applies declared file operations in confined candidates, uses the pinned fixed
+evaluator, and delivers strict measured improvements to explicit local branches.
+All tasks in this enrollment must have delivery targets; dependency ordering
+waits for their planned handoffs.
+
+Prerequisites: macOS with the existing verified evaluator confinement, initialized
+Universe experiments and campaigns, fixed evaluator wrappers using the documented
+JSON measurement protocol, a private resource runtime, and an existing host
+provenance key. All variants must use `resource-pool` generation with explicit
+`fileOperations`; native and local-chat workers participate through that shared
+pool. The generation workspace remains a separate sterile Git directory, not the
+project checkout. See [Universe configuration](ASHLR-UNIVERSE.md) and
+[resource pools](RESOURCE-POOLS.md). Enrollment does not connect accounts or change
+their existing reserves, owner pauses, allocation ceilings or model permissions.
+
+An owner-controlled `0600` JSON file in a private directory contains exactly
+`schemaVersion: 1`, `graphId`, and `host`. The host contract is
+[`FirmEngineeringControlHost`](../src/core/universe/firm-engineering-control-handler.ts):
+
+| Field | Meaning |
+| --- | --- |
+| `nodeId` | Enrolled graph delivery node ID |
+| `root` | Existing private Universe store; not the graph directory |
+| `constitutionVersion`, `policyEpoch` | Host policy metadata, not an activation permit |
+| `definition` | Existing portfolio definition with explicit campaign IDs, dependencies, concurrency and duration |
+| `deliveryPlan` | Existing `schemaVersion: 1` plan: one campaign ID, new `codex/` branch and exact seed `baseCommit` per task |
+| `resourceRuntime` | Explicit private canonical runtime file |
+| `expectedRuntimeDigest` | SHA-256 of the canonical validated runtime JSON; not a hash of raw file formatting |
+
+Do not derive this host enrollment from model output. The factory captures the
+configuration, campaign/manifest/comparator identities, and pool/binding digest.
+Graph input contains only binding and request digests. The graph accepts this
+delivery registration only from the concrete factory: copying its metadata or
+supplying an arbitrary callback does not unlock delivery or other guarded kinds.
+
+1. Inspect the chosen enrollment without running workers, evaluators or delivery:
+
+   ```sh
+   node bin/ashlr universe firm engineer --root /absolute/private/engineering-graph \
+     --enrollment /absolute/private/engineering.json --check --json
+   ```
+
+   `validated-enrollment` returns `enrollmentDigest`. This is a configuration
+   check, not proof of credentials, capacity, execution permission or acceptance.
+   The command creates neither a graph nor a controller.
+
+2. After reviewing the exact campaigns, budgets and branch targets, explicitly
+   run that enrollment using the returned digest:
+
+   ```sh
+   node bin/ashlr universe firm engineer --root /absolute/private/engineering-graph \
+     --enrollment /absolute/private/engineering.json \
+     --expected-enrollment-digest <digest-from-check> --json
+   ```
+
+   This step can consume the selected workers' usage and publish local Git
+   branches. It does not merge, check out, push or deploy them. Existing KILL
+   controls remain effective; SIGINT/SIGTERM requests cancellation and waits for
+   owned work to settle. Runtime pins are enforced at each resource-generation
+   handoff. Parent stop/ownership checks also reach final worker launch and Git's
+   prepared branch-ref transaction.
+
+3. Inspect recorded results with `universe firm graph` and `universe firm traces`
+   against the same graph root. A completed engineering artifact joins the
+   controller record digest, campaign and comparator identities, generation
+   receipt, fixed-evaluation evidence, frozen artifact, and verified local commit.
+   `verifiedAccepted: true` means **fixed-evaluator and local-branch acceptance
+   only**, not general correctness, human acceptance or production deployment.
+
+A passing first candidate establishes a baseline but has no measured improvement
+delta. An unchanged or merely passing candidate cannot satisfy strict-improvement
+delivery. A later changed, passing improvement over an accepted parent is needed.
+Keep this distinction when setting campaign budgets. Graph-level spend remains
+unknown because campaign totals can include prior work; underlying resource
+receipts retain reported usage where available.
+
+Use a new controller ID for the first graph execution. The adapter refuses an
+already existing controller instead of attributing someone else's completion to
+this node. Repeating an intact completed graph within its original deadline does
+not dispatch again. After expiry, use read-only inspection. An unresolved graph
+intent remains held even if child work finished: inspect exact controller,
+campaign and delivery evidence before recovery; changing IDs is not a safe retry.
+The existing child controller's restart support does not imply automatic recovery
+of its enclosing graph. The graph and campaign allowances are never renewed by
+re-entry. No resident service or always-on loop is installed by this command.
+
 ### What signatures establish
 
 The trace uses the existing provenance HMAC. This is integrity under a host-local
 key, not process isolation, independent model judgment, anti-rollback protection,
 resource capacity or an activation permit. Distinct checker IDs are caller-enrolled
-metadata. A real cold model transport and confined execution still need wiring.
+metadata. The engineering path uses the existing confined fixed evaluator; a
+separately commissioned cold-model reviewer remains a different integration.
 
 Memory, harness archive and payment broker tests exercise separate components;
 this demo does not claim it already composes them into the resident company loop.

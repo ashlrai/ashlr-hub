@@ -242,6 +242,8 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
       appendCampaignEvent(directory, { kind: 'step', at: new Date().toISOString(), ordinal, runId, generation,
         variantIds: variants.map((variant) => variant.id), reservedModelRequests });
       const result = await runUniverseOwned(summary.definition.universeId, { root: options.root, resourceRuntime: options.resourceRuntime,
+        expectedResourceRuntimeDigest: options.expectedResourceRuntimeDigest,
+        isExecutionStopped: options.isExecutionStopped,
         signal: controller.signal, runId, campaign: { id, ordinal, definitionDigest: summary.definitionDigest },
         deadlineMs: Date.parse(deadlineAt), trialLimit: variants.length,
         ...(summary.definition.feedback ? { feedback: true as const } : {}),

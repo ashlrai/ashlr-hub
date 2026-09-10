@@ -26,6 +26,8 @@ export type { FirmResourceEnrollmentV1, FirmResourceExecutionHost, FirmResourceE
   FirmResourceExecutionResult } from './firm-resource-execution.js';
 export { createFirmResourceControlHandler } from './firm-resource-control-handler.js';
 export type { FirmResourceControlBinding } from './firm-resource-control-handler.js';
+export { createFirmEngineeringControlHandler } from './firm-engineering-control-handler.js';
+export type { FirmEngineeringControlHost, FirmEngineeringControlBinding } from './firm-engineering-control-handler.js';
 export type * from './file-operations-types.js';
 export { defaultUniverseRoot, ensureUniverseRoot } from './artifacts.js';
 export { initUniverse, validateUniverseManifest } from './store.js';
@@ -58,6 +60,7 @@ export { runUniversePortfolio } from './portfolio.js';
 export type { UniversePortfolioResult, UniversePortfolioOutcome, UniversePortfolioRunOptions } from './portfolio.js';
 export type * from './portfolio-types.js';
 export { runUniversePortfolioController, readUniversePortfolioController } from './portfolio-controller.js';
+export type { UniversePortfolioControllerRunOptions } from './portfolio-controller.js';
 export { requestUniversePortfolioControllerControl } from './portfolio-controller-store.js';
 export type { UniversePortfolioControllerOutcome, UniversePortfolioControllerReport,
   UniversePortfolioControllerControl, UniversePortfolioControllerControlReceipt } from './portfolio-controller-types.js';

@@ -9,7 +9,7 @@ import { runUniverseDemo } from './universe-demo.js';
 const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--json]
 
   demo                         Build and evaluate two local demo generations
-  firm <command>               Signed fixture demo/status/query; general graph/traces inspection
+  firm <command>               Signed engineering delivery, fixtures and graph inspection
   init --manifest <file.json>   Register a pinned experiment definition
   run <id>                     Execute one budgeted generation
   status [id]                  Read objectives, runs, and measurements

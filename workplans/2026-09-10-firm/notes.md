@@ -1,5 +1,42 @@
 # Firm build notes
 
+## September 10: evaluated engineering graph continuation
+
+- Resumed clean `c2b598da` on `auto/p00`; Entire resume found no checkpoint.
+  Three agents mapped existing evaluation/delivery, desktop ownership and
+  autonomy gaps before implementation. Reused the portfolio controller rather
+  than creating another campaign scheduler or quota ledger.
+- Chosen complete local slice: concrete host-enrolled signed delivery graph
+  adapter, digest-checked foreground CLI, actual resource-backed file operations,
+  fixed evaluation and strict-improvement branch delivery. PTY/desktop wrapper,
+  resident planning and live account commissioning remain separate milestones.
+- Cold review found runtime-digest propagation missing above the generation
+  broker, outer deadline reassignment dropping its parent cap, and final worker
+  and prepared Git-ref checks not carrying synchronous parent ownership. All
+  are now connected; confined file-operation preflight/apply and evaluator
+  admission also check parent stop.
+- A prior completed controller under a held execution lock could otherwise be
+  misattributed to a new graph. New-enrollment refusal is checked under the
+  controller transaction; lock refusal cannot return a successful new-enrollment
+  result. Adapter additionally rejects report reasons and verifies exact receipts.
+- Reserved engineering metadata now requires the concrete factory registration
+  and delivery node kind. A copied descriptor on an ordinary explore node cannot
+  manufacture an engineering completion.
+- Test corrections: initial new real-I/O suite used the default five-second lane
+  timeout before registration. A deadline test wrongly compared the persisted
+  inner deadline with the outer effective execution cap. A new controller test
+  expected a report where the API intentionally throws on forbidden adoption.
+  Corrected these expectations; no production allowances were weakened.
+- Broad regression also exposed two older CLI subprocess fixtures which dropped
+  their temporary HOME and reached the real host's active KILL at Git delivery.
+  Diagnosis confirmed the existing production stop gate correctly withheld the
+  operation. Drain/crash fixtures now pass explicit private HOME/USERPROFILE/
+  ASHLR_HOME; no host kill state or production stop semantics were changed.
+- Discovery guesses for portfolio-runtime/portfolio-run and dedicated generation
+  test files did not exist; resolved through actual rg inventories. CLI lint
+  rejected control-byte regex syntax; replaced it with character-code validation.
+  See report.md for final integrated gates, not overlapping agent subtotal counts.
+
 ## September 10: file-tool continuation
 
 - Resumed clean `1d1febaf` worktree; Entire found no checkpoint. Three parallel

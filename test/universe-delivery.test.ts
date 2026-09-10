@@ -10,7 +10,7 @@ import { appendRecord, manifestRecord, newRun, projectUniverse, selectWinners } 
 import { withUniverseExecution } from '../src/core/universe/execution.js';
 import { deliveryGit } from '../src/core/universe/delivery-git.js';
 import { readUniverseIntegrationPlan } from '../src/core/universe/integration-plan.js';
-import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
+import { deliverUniverseEliteOwned, type UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
 import { evaluateUniverseIntegration, readUniverseIntegrationEvaluation } from '../src/core/universe/integration-evaluate.js';
 import { deliverUniverseIntegration, readUniverseIntegrationDelivery } from '../src/core/universe/integration-delivery.js';
 import { handoffUniverseIntegration } from '../src/core/universe/integration-handoff.js';
@@ -392,6 +392,29 @@ console.log(JSON.stringify({passed:a+b<=3,score:a+b,metrics:{a,b}}));\n`);
 });
 
 describe('Universe local branch delivery', () => {
+  it.each(['stopped', 'throw'] as const)('checks the enclosing %s guard under the real prepared ref lock', async (kind) => {
+    // Existing fixture acceptance isolates publication mechanics; no evaluator
+    // or provider invocation is claimed by this final-effect guard regression.
+    const f = fixture(); const trial = f.accept(); const branch = 'codex/parent-guard';
+    const refLock = join(f.repo, '.git', 'refs', 'heads', `${branch}.lock`); let preparedChecks = 0;
+    const index = readFileSync(join(f.repo, '.git', 'index')); const checkout = f.git(['status', '--porcelain=v1']);
+    const isExecutionStopped = () => {
+      if (!existsSync(refLock)) return false;
+      preparedChecks++;
+      if (kind === 'throw') throw new Error('Fixture parent ownership unavailable');
+      return true;
+    };
+    await expect(withUniverseExecution('fixture', { root: f.root }, (lock) =>
+      deliverUniverseEliteOwned('fixture', { root: f.root, trialId: trial.id, branch, isExecutionStopped }, lock)))
+      .rejects.toThrow(kind === 'throw' ? 'Fixture parent ownership unavailable' : 'parent execution stopped');
+    expect(preparedChecks).toBe(1); expect(existsSync(refLock)).toBe(false);
+    expect(f.git(['branch', '--list', branch])).toBe('');
+    const evidence = readUniverseDeliveries('fixture', { root: f.root });
+    expect(evidence.sourceState).toBe('healthy'); expect(evidence.deliveries).toHaveLength(1);
+    expect(evidence.deliveries[0]).toMatchObject({ status: 'pending', branch, completedAt: null });
+    expect(readFileSync(join(f.repo, '.git', 'index'))).toEqual(index); expect(f.git(['status', '--porcelain=v1'])).toBe(checkout);
+  });
+
   it('plans exact disjoint delivered trees without writing objects, refs, records, index or checkout', async () => {
     const f = fixture();
     const a = f.accept(1, false, (path) => writeFileSync(join(path, 'a.txt'), 'first change\n'));

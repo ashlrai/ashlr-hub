@@ -48,6 +48,8 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-control-execution.test.ts', // private signed effect and interrupted settlement records
   'test/universe-firm-resource-control-handler.test.ts', // enrolled graph dispatch to real inert transports
   'test/universe-firm-cli-integration.test.ts', // real CLI processes with test-owned provenance
+  'test/universe-firm-engineering-control.test.ts', // real confined candidates, resource ledger and local delivery
+  'test/universe-firm-engineering-cli.test.ts', // private enrollment files and CLI dispatch boundary
   'test/universe-firm-graph-query.test.ts', // verified history and immutable read-only inspection
   'test/universe-firm-resource-execution.test.ts', // enrolled receipt to real inert resource transport
   'test/universe-value-allocation-store.test.ts', // private signed storage and concurrent final-slot admission

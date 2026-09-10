@@ -101,6 +101,34 @@ function fixture(ids = ['a'], maxParallel = 1) {
 }
 
 describe('Portfolio controller private-ledger fault acceptance', () => {
+  it('refuses a preexisting controller when a host requires new enrollment', async () => {
+    const f = fixture();
+    expect((await runUniversePortfolioController(f.definition, f.options)).status).toBe('completed');
+    const before = JSON.stringify(f.events());
+    hooks.run.mockClear();
+    await expect(runUniversePortfolioController(f.definition, { ...f.options, requireNewEnrollment: true }))
+      .rejects.toThrow('Host graph requires a new controller enrollment');
+    expect(hooks.run).not.toHaveBeenCalled();
+    expect(JSON.stringify(f.events())).toBe(before);
+  });
+
+  it('does not lose an outer deadline after reading the persisted enrollment', async () => {
+    const f = fixture();
+    vi.spyOn(performance, 'now').mockReturnValue(100);
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, deadlineMonotonicMs: 99 });
+    expect(result.status).toBe('timed-out');
+    expect(hooks.run).not.toHaveBeenCalled();
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false);
+  });
+
+  it.each(['stopped', 'unknown'])('withholds dispatch when parent ownership is %s', async (condition) => {
+    const f = fixture();
+    const result = await runUniversePortfolioController(f.definition, { ...f.options,
+      isExecutionStopped: () => { if (condition === 'unknown') throw new Error('Unknown parent'); return true; } });
+    expect(result.status).toBe(condition === 'stopped' ? 'cancelled' : 'unavailable');
+    expect(hooks.run).not.toHaveBeenCalled();
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false);
+  });
   it('projects topology from its persisted enrollment in declared order without aliasing caller arrays', async () => {
     const f = fixture(['c', 'a', 'b']);
     f.definition.tasks[0]!.dependsOn = ['b']; f.definition.tasks[2]!.dependsOn = ['a'];

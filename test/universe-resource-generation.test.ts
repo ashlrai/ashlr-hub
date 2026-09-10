@@ -608,6 +608,34 @@ describe.skipIf(process.platform === 'win32')('resource candidate transport boun
 });
 
 describe.skipIf(process.platform === 'win32')('current-file veto against an existing real resource ledger', () => {
+  it.each(['stopped', 'throw'] as const)('retains the charged reservation when enclosing execution is %s at final worker dispatch', async (kind) => {
+    const f = fixture(); const actual = await vi.importActual<typeof import('../src/core/resources/pool-runtime.js')>('../src/core/resources/pool-runtime.js');
+    vi.mocked(runResourceTask).mockImplementation(actual.runResourceTask);
+    const ledgerPath = join(f.runtime.root, 'pool-state.json'); let reservedChecks = 0;
+    const isExecutionStopped = () => {
+      if (!existsSync(ledgerPath)) return false;
+      const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as { attempts: ResourceTaskReceipt[] };
+      if (!ledger.attempts.some((attempt) => attempt.status === 'reserved')) return false;
+      reservedChecks++;
+      if (kind === 'throw') throw new Error('Fixture parent ownership unavailable');
+      return true;
+    };
+    const result = await f.run({ isExecutionStopped });
+    expect(result).toMatchObject({ status: 'failed', content: null, resource: { dispatch: 'settled', taskStatus: 'failed' } });
+    expect(reservedChecks).toBe(1); expect(existsSync(f.marker)).toBe(false);
+    expect(runResourceTask).toHaveBeenCalledOnce();
+    const options = vi.mocked(runResourceTask).mock.calls[0]![0];
+    expect(options.readAdmissionEvidence).toBeTypeOf('function'); expect(options.beforeWorkerDispatch).toBeTypeOf('function');
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as { attempts: ResourceTaskReceipt[] };
+    expect(ledger.attempts).toHaveLength(1);
+    expect(ledger.attempts[0]).toMatchObject({ id: resourceGenerationTaskId(identity), status: 'failed',
+      reason: 'worker-dispatch-precondition-failed', inputTokens: null, outputTokens: null, outputDigest: null, verifiedAccepted: false });
+    expect(ledger.attempts[0]).not.toHaveProperty('execution'); expect(ledger.attempts[0]).not.toHaveProperty('nativeProcess');
+    expect(await f.run({ isExecutionStopped })).toMatchObject({ status: 'failed', content: null, resource: { dispatch: 'replayed' } });
+    expect(JSON.parse(readFileSync(ledgerPath, 'utf8')).attempts).toEqual(ledger.attempts);
+    expect(existsSync(f.marker)).toBe(false);
+  });
+
   it.each(['missing', 'reserve', 'retry', 'alias-reserve', 'alias-retry'])('does not recontact after current %s evidence despite newer durable readiness', async (kind) => {
     const f = fixture(true); const original = await vi.importActual<typeof import('../src/core/resources/pool-runtime.js')>('../src/core/resources/pool-runtime.js');
     vi.mocked(runResourceTask).mockImplementation(original.runResourceTask);

@@ -25,6 +25,8 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Map existing desktop file/tool primitives and choose the next complete integration.
 - [x] Implement registered-project file browsing and explicit task-context attachment.
 - [x] Verify file access, context isolation and browser interaction end-to-end.
+- [x] Trace and connect the next missing unattended execution/evaluation/delivery seam.
+- [x] Independently verify real outcomes and update the authoritative handoff.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -43,6 +45,17 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Implemented locally from `c2b598da`: a host-enrolled signed graph adapter over the
+existing restartable portfolio controller, resource-backed campaigns, fixed
+evaluation and explicit local branch delivery. Core agent owns the concrete
+adapter and guarded-node registration; independent test agent owns real Git and
+loopback-resource acceptance; cold reviewer audits attribution and effect gates.
+Parent owns runtime digest propagation, CLI entry point, documentation and
+integration. No new scheduler or ledger, no host activation or public release.
+Fresh affected verification passed 484 tests across 15 suites; 449 invariant
+passes and five existing skips were retained. The initial broad-sweep findings,
+fixture-isolation corrections and final reruns are explicit in report.md.
+
 Implemented locally from `1d1febaf`: three agents mapped and built scoped file
 access, HTTP integration and independent acceptance. Parent integrated the Files
 inspector, snapshot provenance, responsive clearing and documentation. Real files

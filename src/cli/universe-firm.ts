@@ -1,14 +1,18 @@
 import { runFirmDemo, readFirmDemo, queryFirmDemo } from '../core/universe/firm-demo.js';
 import { readFirmGraph, queryFirmGraph } from '../core/universe/firm-graph.js';
 import { queryDecisionTracesV1, type DecisionTraceQueryV1 } from '../core/universe/decision-trace.js';
+import { cmdUniverseFirmEngineering } from './universe-firm-engineering.js';
 
 const COMMANDS = ['demo', 'status', 'query', 'graph', 'traces'];
 const HELP = `Usage: ashlr universe firm <demo|status|query|graph|traces> --root <existing-private-dir> [--json]
+       ashlr universe firm engineer --help
        ashlr universe firm query --root <existing-private-dir> [--entity <id>] [--limit <1..256>] [--json]
        ashlr universe firm traces --root <existing-private-dir> [--entity <id>] [--action <action>]
            [--since <UTC-ISO-time>] [--until <UTC-ISO-time>] [--limit <1..256>] [--json]
 
 graph and traces inspect any persisted signed control graph, read-only.
+engineer explicitly enrolls existing campaigns for bounded evaluated local delivery.
+Use engineer --check to inspect enrollment before execution; see its dedicated help.
 traces defaults to 100 results in history order; time bounds are inclusive UTC ISO timestamps.
 Healthy incomplete graphs remain inspectable; missing/unverifiable history exits 1 with no traces.
 Invalid options exit 2. Inspection never executes a graph or acquires execution ownership.
@@ -22,6 +26,7 @@ status and query are read-only. Repeating demo preserves prior durable graph his
 Signatures prove integrity, not authority. Use a dedicated root for this fixed graph.`;
 
 export async function cmdUniverseFirm(args: string[]): Promise<number> {
+  if (args[0] === 'engineer') return cmdUniverseFirmEngineering(args.slice(1));
   if (!args.length || args.length === 1 && ['help', '--help', '-h'].includes(args[0]!) ||
       args.length === 2 && COMMANDS.includes(args[0]!) && ['--help', '-h'].includes(args[1]!)) {
     console.log(HELP); return 0;

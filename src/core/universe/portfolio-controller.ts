@@ -117,7 +117,16 @@ export function readUniversePortfolioController(id: string, options: UniverseSto
  * its concurrency slot and can never be reissued by this controller. New dispatch
  * identities permit receipt-only recovery; an arbitrary later completion does not.
  */
-export async function runUniversePortfolioController(input: unknown, options: UniversePortfolioRunOptions = {}): Promise<UniversePortfolioControllerReport> {
+export interface UniversePortfolioControllerRunOptions extends UniversePortfolioRunOptions {
+  /** Host graph enrollment must not adopt another invocation's existing controller. */
+  requireNewEnrollment?: boolean;
+  /** In-process parent ownership/KILL check; never supplied by a portable manifest. */
+  isExecutionStopped?: () => boolean;
+  /** Optional outer monotonic deadline, which may only shorten the persisted allowance. */
+  deadlineMonotonicMs?: number;
+}
+
+export async function runUniversePortfolioController(input: unknown, options: UniversePortfolioControllerRunOptions = {}): Promise<UniversePortfolioControllerReport> {
   const startedAt = new Date().toISOString();
   const startedMonotonic = performance.now();
   const definition = validateUniversePortfolioDefinition(input);
@@ -125,8 +134,15 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     definition.tasks.map((task) => task.campaignId));
   const root = resolve(options.root ?? defaultUniverseRoot());
   const resourceRuntime = options.resourceRuntime;
-  const checkRuntime = resourceRuntime === undefined ? null : resourceAdmissionPreflight(resourceRuntime);
+  const expectedResourceRuntimeDigest = options.expectedResourceRuntimeDigest;
+  const checkRuntime = resourceRuntime === undefined ? null : resourceAdmissionPreflight(resourceRuntime, expectedResourceRuntimeDigest);
   const signal = options.signal;
+  const isExecutionStopped = options.isExecutionStopped;
+  const requireNewEnrollment = options.requireNewEnrollment === true;
+  const outerDeadline = options.deadlineMonotonicMs ?? Infinity;
+  if (options.deadlineMonotonicMs !== undefined && (!Number.isFinite(outerDeadline) || outerDeadline < 0)) {
+    throw new Error('Invalid outer controller deadline');
+  }
   const directory = portfolioControllerDirectory(definition.id, { root });
   if (signal?.aborted) return { ...readUniversePortfolioController(definition.id, { root }), status: 'cancelled' };
   inspectPrivateDirectory(root);
@@ -137,7 +153,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   const acquired = acquireLocalStoreLockWithOutcome(join(directory, '.execution.lock'), 0, { anchorPath: directory, exactPrivateStorage: true });
   if (acquired.state !== 'acquired') {
     const report = readUniversePortfolioController(definition.id, { root });
-    return { ...report, reasons: [...report.reasons, acquired.state === 'contended' ? 'controller-owned' : 'controller-ownership-unavailable'] };
+    return { ...report, ...(requireNewEnrollment ? { status: 'unavailable' as const } : {}),
+      reasons: [...report.reasons, acquired.state === 'contended' ? 'controller-owned' : 'controller-ownership-unavailable'] };
   }
   const controller = new AbortController();
   const active = new Map<string, Promise<void>>();
@@ -148,7 +165,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   let events: PortfolioControllerEvent[] = [];
   // Until the existing registration can be read, waiting is bounded by this
   // invocation's supplied duration. No work can dispatch before the real pin.
-  let deadlineMonotonic = startedMonotonic + definition.maxDurationMs;
+  let deadlineMonotonic = Math.min(startedMonotonic + definition.maxDurationMs, outerDeadline);
   let drainSequence: number | null = null;
   const halt = (status: NonNullable<typeof stopped>, reason?: string): void => {
     stopped ??= status; if (reason && !errors.includes(reason)) errors.push(reason); controller.abort();
@@ -157,6 +174,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   const owned = (): void => { if (!ownsLocalStoreLock(acquired.lock)) throw new Error('Controller execution ownership lost'); };
   const stopping = (): boolean => {
     if (signal?.aborted) cancel();
+    try { if (isExecutionStopped?.()) halt('cancelled', 'parent-execution-stopped'); }
+    catch { halt('unavailable', 'parent-execution-unavailable'); }
     const now = new Date().toISOString();
     const folded = events.length ? foldPortfolioController(events) : null;
     if (folded && now < folded.highWaterAt) halt('unavailable', 'controller-clock-rollback');
@@ -233,6 +252,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
       recoverControllerRecordLock(definition.id, { root }, acquired.lock);
       try { lstatSync(join(directory, 'ledger')); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+      if (requireNewEnrollment) throw new Error('Host graph requires a new controller enrollment');
       capture(readPortfolioControllerEvents(directory));
       return true;
     }));
@@ -274,7 +294,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     if (canonical(enrollment.definition) !== canonical(definition) || canonical(enrollment.deliveryPlan) !== canonical(deliveryPlan)) {
       throw new Error('Controller definition or delivery plan differs from its fixed enrollment');
     }
-    deadlineMonotonic = startedMonotonic + Math.max(0, Date.parse(enrollment.deadlineAt) - Date.parse(startedAt));
+    deadlineMonotonic = Math.min(outerDeadline,
+      startedMonotonic + Math.max(0, Date.parse(enrollment.deadlineAt) - Date.parse(startedAt)));
     const initialObservation = observe();
     const initialReport = initialObservation instanceof Promise ? await initialObservation : initialObservation;
     if (initialReport.sourceState !== 'healthy') return initialReport;
@@ -393,6 +414,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
             result = pin.dispatch === 'campaign' ? await runUniverseCampaignOwned(campaignId, { root, signal: controller.signal,
               dispatchId,
               ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
+              ...(expectedResourceRuntimeDigest === undefined ? {} : { expectedResourceRuntimeDigest }),
+              isExecutionStopped: stopping,
               expectedIdentity: { ...latestAdmission.expectedIdentity!, recordsDigest: latestAdmission.recordsDigest! } }, executionLock!) : readUniverseCampaign(campaignId, { root });
           } finally {
             // Delivery acquires its own execution lease. Never retain the
@@ -412,7 +435,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
             if (stopping()) { completed = false; reasonCode = 'delivery-not-attempted'; }
             else {
               const delivered = await deliverCompletedUniverseCampaign(campaignId, { root, delivery: target, signal: controller.signal,
-                deadlineMonotonicMs: deadlineMonotonic, expectedIdentity: { ...current.expectedIdentity!, recordsDigest: current.recordsDigest! } });
+                isExecutionStopped: stopping, deadlineMonotonicMs: deadlineMonotonic,
+                expectedIdentity: { ...current.expectedIdentity!, recordsDigest: current.recordsDigest! } });
               if (digest(canonical(delivered.campaign)) !== current.expectedIdentity!.summaryDigest) throw new Error('Delivery campaign evidence changed');
               completed = delivered.delivery.status === 'delivered';
               reasonCode = completed ? 'campaign-and-delivery-completed' : 'delivery-withheld';

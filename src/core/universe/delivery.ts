@@ -189,11 +189,13 @@ export async function deliverUniverseElite(universeId: string,
 
 /** Internal composition point: selection and delivery share the same execution lease. */
 export async function deliverUniverseEliteOwned(universeId: string,
-  options: UniverseStoreOptions & { trialId: string; branch: string; signal?: AbortSignal; deadlineMonotonicMs?: number },
+  options: UniverseStoreOptions & { trialId: string; branch: string; signal?: AbortSignal; deadlineMonotonicMs?: number;
+    isExecutionStopped?: () => boolean },
   lock: LocalStoreLock): Promise<UniverseDeliveryReceipt> {
   if (!ID.test(universeId) || !TRIAL_ID.test(options.trialId) || !validUniverseDeliveryBranch(options.branch)) throw new Error('Invalid Universe delivery identity or codex/ branch');
   const checkBudget = (): void => {
     options.signal?.throwIfAborted();
+    if (options.isExecutionStopped?.()) throw new Error('Universe delivery parent execution stopped');
     if (options.deadlineMonotonicMs !== undefined && (!Number.isFinite(options.deadlineMonotonicMs) ||
       performance.now() >= options.deadlineMonotonicMs)) throw new Error('Universe delivery deadline exhausted');
   };
@@ -255,7 +257,10 @@ export async function deliverUniverseEliteOwned(universeId: string,
       checkBudget();
       git.assertNotCheckedOut(options.branch);
       checkBudget();
-      await git.createRef(options.branch, commit);
+      await git.createRef(options.branch, commit, () => {
+        assertUniverseExecution(directory, lock);
+        checkBudget();
+      });
     }
   }
   const completed: UniverseDeliveryReceipt = { ...intent, status: changedFiles.length ? 'delivered' : 'unchanged', completedAt: new Date().toISOString() };
