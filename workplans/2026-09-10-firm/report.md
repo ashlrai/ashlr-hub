@@ -1,6 +1,64 @@
 # Verified local handoff
 
-## Current continuation: graph-owned pending work
+## Current continuation: console-owned unattended engineering
+
+Baseline `074312449218ae5d89a137c63b493bf6859bc58a`, isolated `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents
+built the automatic caller, independent storage/ownership tests and actual
+process-restart acceptance. Parent integrated CLI/server/UI, reviewed source,
+verified browser behavior and updated operator guidance.
+
+`--engineering-supervision` now accepts a private digest-pinned finite queue.
+Only explicitly enrolled plans can launch or reconcile through the existing
+engineering graph owner and shared resource ledger. The caller starts after
+console readiness; the constructor and status API never dispatch. Original
+deadline, pause revision and consumed invocation evidence survive restart.
+No heartbeat writes or unchanged unresolved-work retry loop is introduced.
+Unknown outcomes remain held. Closing the console aborts/drains owned work;
+pausing prevents new automatic launches without cancelling active work.
+
+The operating workspace displays console-wide state, original deadline, pinned
+plans, hold reasons and graph invocation counts separately from token usage.
+Pause/resume requires explicit control access and a verified current revision.
+Expired queues cannot be resumed from the UI. Desktop and 390 px narrow-screen
+fixture checks passed, with no horizontal document overflow; pause/resume
+updated the visible state and revision. The fixture had no backend/accounts.
+The frontend-design guidance kept the existing Space Grotesk/IBM Plex hierarchy
+and semantic theme tokens; React review informed stale-read/cancellation handling.
+
+Frozen actual acceptance: **5/5 passed**, no skips, 109.37 s. Real local HTTP
+workers, private Git and confined evaluator fixtures prove shared-slot execution,
+durable pause/KILL/restart, actual CLI SIGKILL after A followed by automatic B
+exactly once, uncertain worker no-replay and original-deadline expiry.
+Independent private-store/owner boundaries: **35/35 passed**, no skips, 3.92 s.
+Final combined owner-seam and boundary rerun: **45/45 / 2 files**, no skips,
+3.76 s. The owner compatibility run also passed **54/54 / 2 files** (14.14 s).
+The review found and fixed three concrete lifecycle gaps: unknown/mismatched
+owner-state dispatch, skipped drain after a partially accepted thrown launch,
+and draining unrelated manual work when stopped before invocation.
+
+Final full web: **1,294 tests / 77 files**. Existing engineering and seed
+regression group: **185 / 8 files**. Groups overlap other reported focused runs
+and do not represent a full core test run. Source/web and edited core-test strict
+typechecks pass. Scoped lint has zero warnings; full lint has zero errors and
+107 existing warnings. Documentation and real-I/O registration checks pass.
+The production build and five compiled structural safety checks pass; final
+commit-bound identity is written to `dist/build-identity.json` after clean rebuild.
+
+The user's seed-context choice remains implemented across eligible generations
+alongside the current-parent/latest feedback, with scheduling and acceptance
+unchanged. Documentation now distinguishes this finite console caller from
+unimplemented dynamic ideation, OS service installation and live commissioning.
+
+This is tested local implementation, not an activated 24/7 company. No live
+provider calls, credential/account changes, reserve changes, KILL removal,
+GitHub Actions, remote push, public deployment or npm publication occurred.
+The next operational step is commissioning an explicit Hub queue against the
+intended existing account ledger; broader self-improvement remains unfinished.
+Entire remains enabled in manual-commit mode; resuming `auto/p00` found no
+checkpoint. The original checkout and regular global KILL file remain unchanged.
+
+## Previous continuation: graph-owned pending work
 
 Baseline `a2f9931ec5da1132c5d8cf030b5f6f5a5dcc4f7d`, isolated `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents

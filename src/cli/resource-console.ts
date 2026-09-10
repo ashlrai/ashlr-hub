@@ -4,6 +4,7 @@ const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindi
        add --execute --workspace ABS [--max-parallel N] to enable foreground queued tasks
        add --projects ABS to pin additional projects while keeping --workspace as default
        add --engineering ABS to expose explicitly enrolled evaluated engineering actions
+       add --engineering-supervision ABS to run a digest-confirmed engineering queue automatically
        add --quota-config ABS to refresh explicitly pinned Codex account metadata
        add --connections-config ABS to monitor explicit Codex/Claude/Grok accounts
        add --allocation-controls to adjust this pool's usage ceiling and worker access
@@ -27,10 +28,18 @@ Browsing reads local source without invoking a worker; attaching and sending are
 Project selection binds task context and working directory, not a filesystem sandbox.
 --engineering requires --execute and --projects. Its private JSON file contains
 {schemaVersion:1,enrollments:[{id,projectId,graphId,graphRoot,host}]}.
-Startup validates enrollment without running a graph. An explicit control-unlocked
+Without --engineering-supervision, startup validates enrollment without running a graph. An explicit control-unlocked
 start selects an enrollment ID and digest, never browser-supplied paths or commands.
 Engineering shares this pool's ledger and limits; acceptance means fixed checks
 and delivery to an enrolled local branch, not merge, push or deployment.
+--engineering-supervision requires --engineering. Its private JSON pins a queue:
+{schemaVersion:1,id,maxDurationMs,pollIntervalMs,maxConcurrent,maxAttemptsPerEnrollment,
+enrollments:[{enrollmentId,expectedEnrollmentDigest}]}.
+It can launch or recover those plans without a browser click while this console
+runs. Original supervision and graph deadlines survive restart. Uncertain work
+is not replayed; unchanged unresolved evidence cannot cause repeated attempts.
+Pause new launches through the console; pausing does not cancel active work.
+Omit the flag to disable the automatic caller. No OS service is installed.
 Queued intents and pause state are durable; previously dispatching work is never
 silently replayed after restart. Ordinary output is bounded and session-only;
 opt-in transcripts persist locally until deleted. Accepted follow-ups freeze copied
@@ -45,7 +54,7 @@ Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid argumen
 `;
 class UsageError extends Error {}
 type Options = { help: true } | { help: false; root: string; poolFile: string; bindingsFile: string;
-  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; engineeringFile?: string; allocationControls?: boolean;
+  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; engineeringFile?: string; engineeringSupervisionFile?: string; allocationControls?: boolean;
   port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
 
 function path(value: string): string {
@@ -65,7 +74,7 @@ function parse(args: string[]): Options {
     if (flag === '--execute') { if (execute) throw new UsageError('Duplicate console option'); execute = true; continue; }
     if (flag === '--json') { if (json) throw new UsageError('Duplicate console option'); json = true; continue; }
     if (flag === '--allocation-controls') { if (allocationControls) throw new UsageError('Duplicate console option'); allocationControls = true; continue; }
-    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects', '--engineering'].includes(flag) || values.has(flag)) {
+    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects', '--engineering', '--engineering-supervision'].includes(flag) || values.has(flag)) {
       throw new UsageError('Unknown or duplicate console option');
     }
     const value = args[++index];
@@ -80,6 +89,9 @@ function parse(args: string[]): Options {
   if (values.has('--engineering') && (!execute || !values.has('--projects'))) {
     throw new UsageError('Engineering requires --execute and an explicit --projects catalog');
   }
+  if (values.has('--engineering-supervision') && !values.has('--engineering')) {
+    throw new UsageError('Engineering supervision requires an explicit --engineering catalog');
+  }
   const portText = values.get('--port') ?? '0'; const parallelText = values.get('--max-parallel') ?? '4';
   if (!/^(0|[1-9]\d{0,4})$/.test(portText) || Number(portText) > 65_535 ||
     !/^[1-9]\d?$/.test(parallelText) || Number(parallelText) > 16) throw new UsageError('Invalid port or parallel limit');
@@ -89,6 +101,7 @@ function parse(args: string[]): Options {
     ...(values.has('--connections-config') ? { connectionsConfigFile: path(values.get('--connections-config')!) } : {}),
     ...(values.has('--projects') ? { projectsFile: path(values.get('--projects')!) } : {}),
     ...(values.has('--engineering') ? { engineeringFile: path(values.get('--engineering')!) } : {}),
+    ...(values.has('--engineering-supervision') ? { engineeringSupervisionFile: path(values.get('--engineering-supervision')!) } : {}),
     ...(allocationControls ? { allocationControls: true } : {}),
     port: Number(portText), execute, ...(execute ? { workspace: path(values.get('--workspace')!), maxParallel: Number(parallelText) } : {}), json };
 }
@@ -124,6 +137,7 @@ export async function cmdResourceConsole(args: string[]): Promise<number> {
           ...(server.controlToken ? [`Private control token: ${server.controlToken}`] : []),
           ...(server.scope.allocationWritable ? ['Usage allocation and worker access controls are enabled; in-flight tasks are unaffected.'] : []),
           ...(server.scope.engineeringSupported ? ['Enrolled evaluated engineering actions are available for explicit control-unlocked start.'] : []),
+          ...(server.scope.engineeringSupervisionSupported ? ['Digest-confirmed engineering supervision is configured and may launch automatically; inspect its live status and original deadline.'] : []),
           ...(!server.scope.readOnly ? [`Execution workspace: ${server.scope.workspace}`,
             'Durable queued tasks may execute while this foreground console is running.'] : ['Task execution is disabled.']),
           'Paste tokens into the console; they are never included in URLs.',

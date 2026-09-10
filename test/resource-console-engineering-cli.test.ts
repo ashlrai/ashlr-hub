@@ -17,6 +17,8 @@ describe('explicit engineering console CLI capability', () => {
     [...base, '--execute', '--workspace', '/private/fixture/workspace', '--engineering', '/private/fixture/engineering.json'],
     ...['relative', '/', '/private/\u0085'].map((path) => [...base, ...execution, '--engineering', path]),
     [...base, ...execution, '--engineering', '/private/fixture/a.json', '--engineering', '/private/fixture/b.json'],
+    [...base, ...execution, '--engineering-supervision', '/private/fixture/supervision.json'],
+    ...['relative', '/'].map(path => [...base, ...execution, '--engineering', '/private/fixture/engineering.json', '--engineering-supervision', path]),
   ])('refuses invalid enrollment authority before startup: %j', async (...args) => {
     expect(await cmdResourceConsole(args)).toBe(2); expect(backend.start).not.toHaveBeenCalled();
   });
@@ -28,11 +30,12 @@ describe('explicit engineering console CLI capability', () => {
       port: 41234, readToken: 'a'.repeat(64), controlToken: 'b'.repeat(64),
       scope: { schemaVersion: 1, mode: 'resource-pool', readOnly: false, engineeringSupported: true }, close });
     const before = process.listeners('SIGTERM');
-    const pending = cmdResourceConsole([...base, ...execution, '--engineering', '/private/fixture/engineering.json', '--json']);
+    const pending = cmdResourceConsole([...base, ...execution, '--engineering', '/private/fixture/engineering.json',
+      '--engineering-supervision', '/private/fixture/supervision.json', '--json']);
     try {
       await vi.waitFor(() => expect(output).toHaveBeenCalledOnce());
       expect(backend.start.mock.calls[0]![0]).toMatchObject({ engineeringFile: '/private/fixture/engineering.json',
-        projectsFile: '/private/fixture/projects.json', execute: true });
+        engineeringSupervisionFile: '/private/fixture/supervision.json', projectsFile: '/private/fixture/projects.json', execute: true });
       const scope = JSON.parse(output.mock.calls[0]![0] as string);
       expect(scope.engineeringSupported).toBe(true); expect(scope.engineeringFile).toBeUndefined();
       (process.listeners('SIGTERM').find((listener) => !before.includes(listener))! as () => void)();

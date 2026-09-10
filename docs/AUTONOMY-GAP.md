@@ -35,8 +35,8 @@ stubs are review aids, not signed runtime evidence.
 | Agent-first queries and MCP | UNWIRED | `firm graph` / `firm traces` and optional gateway resources inspect signed history with bounded filters and retained conflicts. MCP requires an explicit private `firm.graphRoot`; real CLI processes are tested. Live ownership, operator controls and resident projections remain separate. |
 | Integration and handoff | UNWIRED | Existing integration/evaluation/delivery/handoff commands are local primitives. Git publication now rechecks global KILL under its prepared ref lock; exact already-published intents can still settle receipts under KILL. New integrate/deliver graph kinds remain withheld until these gates are explicitly connected. |
 | Automatic branch advancement | MISSING | Existing delivery creates a new branch. Expected-old-commit CAS advancement must preserve unexpected human commits and exact evaluation evidence. |
-| Restart recovery | UNWIRED | The engineering graph acknowledges proven completed dispatches only under its exact signed parent link and freshly verified delivery receipts. Default recovery is receipt-only. New enrollments can pin `allowPendingContinuation: true` to continue declared never-started campaigns through the existing controller and shared resource ledger, under original deadlines, KILL and ownership. Uncertain or held work stays unresolved. The command and console expose this policy; a resident restart caller remains unwired. See [recovery and continuation](FIRM-DEMO.md#continue-declared-pending-campaigns-after-recovery). |
-| Resident company ticks | MISSING | Active-goal `runConductor()` is one bounded pass. No resident caller of the Universe portfolio controller was found. A watch flag does not close this gap. |
+| Restart recovery | UNWIRED | The engineering graph acknowledges proven completed dispatches only under its exact signed parent link and freshly verified delivery receipts. Default recovery is receipt-only. New enrollments can pin `allowPendingContinuation: true` to continue declared never-started campaigns under original deadlines, KILL and shared ownership. Explicit console-owned supervision now invokes this recovery after process restart, preserving its own deadline, pause and attempt state. Uncertain or held work stays unresolved. Actual-account commissioning remains unverified. See [recovery and continuation](FIRM-DEMO.md#continue-declared-pending-campaigns-after-recovery). |
+| Resident company ticks | UNWIRED | The resource console now has an explicit finite engineering-supervision queue calling the existing graph owner, with durable deadline/pause/attempt state and evidence-driven retry suppression. Real CLI crash/restart and local evaluator acceptance are tested. Dynamic ideation/enrollment, an OS resident service and actual-account commissioning remain unwired; this is not an activated company. |
 | Enrollment of the ecosystem | UNWIRED | Existing enrollment machinery must be reused. Thirteen trusted product roots were not independently enumerated or enrolled in this run. |
 | Daily and consolidated memory | UNWIRED | `firm-memory.ts` stores immutable daily entries and CAS-linked master versions under an explicit private root. It does not modify real user memory or provide the full Markdown/wiki/genome projection yet. |
 | Harness archive and frozen evaluation | UNWIRED | `harness-archive.ts` stores baseline/evaluator bytes and successes/failures with strict mutable-path admission. No proposer or promotion effect is connected; supplied verifier linkage is not authenticated outcome evidence. |
@@ -60,6 +60,11 @@ initializing stores or changing account history. It reports local configuration
 and known holds, not authenticated capacity or permission to launch.
 These are implemented local paths, not proof of an operating company.
 
+The optional automatic-engineering panel now exposes console-wide supervision,
+durable pause/resume, original deadlines and per-enrollment invocation/hold
+evidence. Its status reads have no dispatch effect. Terminal/browser panels,
+conversation compaction and native desktop bootstrap remain separate gaps.
+
 1. Apply the standalone check to the intended Hub enrollment and resolve its
    actual configuration/ownership findings without resetting shared accounting.
 2. Prepare a meaningful pinned Hub evaluator and campaign, with explicit mutable
@@ -67,8 +72,10 @@ These are implemented local paths, not proof of an operating company.
    accounts separately: personal Spark must preserve General reservation, shared
    account capacity, existing account-wide pauses and prior ledger history. A
    fresh empty ledger is not an acceptable migration shortcut.
-3. Add durable tick production, overlap suppression and exact attempt receipts
-   behind the existing activation consumer. Test real process death and restart.
+3. Commission the [finite console-owned supervision queue](RESOURCE-POOLS.md#automatic-engineering-supervision)
+   with explicit enrollment digests and its own fixed deadline. Durable pause,
+   overlap suppression and actual process-restart acceptance are implemented;
+   an installed service and dynamic tick production remain separate milestones.
 4. Commission one Hub feature end to end: idea, competing plans, confined change,
    independent checks, integrated artifact and measured accepted-work yield.
 5. Extend integration into independently tested expected-old-commit branch

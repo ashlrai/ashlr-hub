@@ -14,6 +14,8 @@ import { expandResourceQuotaDenials } from '../resources/quota-scope.js';
 import { validateResourceConsoleProjects } from '../resources/console-projects.js';
 import { createResourceConsoleEngineeringOwner, validateResourceConsoleEngineeringCatalog,
   type ResourceConsoleEngineeringOwner } from '../resources/console-engineering.js';
+import { createResourceConsoleEngineeringSupervisor, validateResourceConsoleEngineeringSupervisionConfig,
+  type ResourceConsoleEngineeringSupervisor } from '../resources/console-engineering-supervisor.js';
 import { listResourceConsoleFiles, readResourceConsoleFile, ResourceConsoleFileError } from '../resources/console-files.js';
 import { createResourceConnectionMonitor, validateResourceConnectionConfig, type ResourceConnectionMonitor } from '../resources/connection-monitor.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from '../resources/metadata-coordinator.js';
@@ -35,6 +37,8 @@ export interface ResourceConsoleServerOptions {
   projectsFile?: string;
   /** Explicit private evaluated-engineering enrollment; never browser configuration. */
   engineeringFile?: string;
+  /** Explicit digest-pinned automatic engineering queue; absent means no auto-launch. */
+  engineeringSupervisionFile?: string;
   allocationControls?: boolean;
   port?: number;
   execute?: boolean;
@@ -122,6 +126,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const connectionsConfigFile = options.connectionsConfigFile === undefined ? null : validateUniverseConsoleRoot(options.connectionsConfigFile);
   const projectsFile = options.projectsFile === undefined ? null : validateUniverseConsoleRoot(options.projectsFile);
   const engineeringFile = options.engineeringFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringFile);
+  const engineeringSupervisionFile = options.engineeringSupervisionFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringSupervisionFile);
   const requestedPort = options.port ?? 0;
   const maxParallel = options.maxParallel ?? 4;
   if (!Number.isSafeInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535 ||
@@ -129,7 +134,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     (options.execute !== undefined && typeof options.execute !== 'boolean') ||
     (options.allocationControls !== undefined && typeof options.allocationControls !== 'boolean') ||
     (options.execute === true ? !options.workspace : options.workspace !== undefined || options.maxParallel !== undefined || projectsFile !== null) ||
-    engineeringFile !== null && (options.execute !== true || projectsFile === null)) {
+    engineeringFile !== null && (options.execute !== true || projectsFile === null) ||
+    engineeringSupervisionFile !== null && engineeringFile === null) {
     throw new Error('Invalid resource console options');
   }
   const workspace = options.execute ? validateUniverseConsoleRoot(options.workspace) : null;
@@ -142,6 +148,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const projects = projectsFile ? validateResourceConsoleProjects((catalog as { projects: unknown }).projects) : undefined;
   if (projects) { projects.forEach((project) => Object.freeze(project)); Object.freeze(projects); }
   const engineeringCatalog = engineeringFile ? validateResourceConsoleEngineeringCatalog(readResourceJson(engineeringFile, 1024 * 1024)) : null;
+  const engineeringSupervisionConfig = engineeringSupervisionFile ?
+    validateResourceConsoleEngineeringSupervisionConfig(readResourceJson(engineeringSupervisionFile, 128 * 1024)) : null;
   const configuredWorkspaces = workspace ? [workspace, ...(projects?.map((project) => project.workspace) ?? [])] : [];
   const contains = (parent: string, target: string) => {
     const nested = relative(parent, target);
@@ -149,7 +157,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   };
   const controlFiles = [poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? [quotaConfigFile] : []),
     ...(connectionsConfigFile ? [connectionsConfigFile] : []), ...(projectsFile ? [projectsFile] : []),
-    ...(engineeringFile ? [engineeringFile] : [])];
+    ...(engineeringFile ? [engineeringFile] : []), ...(engineeringSupervisionFile ? [engineeringSupervisionFile] : [])];
   for (const selectedWorkspace of configuredWorkspaces) {
     // Legacy scopes allowed a workspace below the store; catalog adoption is stricter.
     if (contains(selectedWorkspace, root) || projects !== undefined && contains(root, selectedWorkspace) ||
@@ -176,6 +184,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let engineering: ResourceConsoleEngineeringOwner | null = null;
+  let engineeringSupervision: ResourceConsoleEngineeringSupervisor | null = null;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
   let quotaLease: ResourceQuotaRefreshLease | null = null;
   let connectionMonitor: ResourceConnectionMonitor | null = null;
@@ -282,6 +291,17 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         }
         if (!supervisor || !controlToken) throw new RequestError(403, 'Execution is disabled for this console');
         if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
+        if (url.pathname === '/api/resources/engineering-supervision') {
+          if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
+          if (!engineeringSupervision) throw new RequestError(403, 'Engineering supervision is not configured');
+          const input = await body(req);
+          if (!exact(input, ['paused', 'expectedRevision']) || typeof input.paused !== 'boolean' ||
+            !Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 0) {
+            throw new RequestError(400, 'Expected a pause mode and current supervision revision');
+          }
+          if (closing) throw new RequestError(503, 'Console is closing');
+          sendSnapshot(res, engineeringSupervision.setPaused(input.paused, Number(input.expectedRevision))); return;
+        }
         const engineeringCancel = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/cancel$/.exec(url.pathname);
         if (url.pathname === '/api/resources/engineering/start' || engineeringCancel) {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
@@ -353,6 +373,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
       if (method !== 'GET') throw new RequestError(405, 'Method not allowed');
       if (url.pathname === '/api/resources/console') { sendJson(res, 200, scope); return; }
+      if (url.pathname === '/api/resources/engineering-supervision') {
+        if (!engineeringSupervision) throw new RequestError(403, 'Engineering supervision is not configured');
+        sendSnapshot(res, engineeringSupervision.snapshot()); return;
+      }
       const engineeringReadiness = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/readiness$/.exec(url.pathname);
       if (engineeringReadiness) {
         if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');
@@ -460,6 +484,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       // Keep the paired collector alive while owned execution settles. Closing
       // invalidates requests immediately, not the evidence required by teardown.
       const executionResults = await Promise.allSettled([
+        Promise.resolve().then(() => engineeringSupervision?.close()),
         Promise.resolve().then(() => engineering?.close()),
         Promise.resolve().then(() => supervisor?.close()),
       ]);
@@ -527,6 +552,11 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? { quotaConfigFile } : {}), signal,
         waitForResourceDrain: () => supervisor!.close() });
       scope.engineeringSupported = true;
+      if (engineeringSupervisionConfig) {
+        engineeringSupervision = createResourceConsoleEngineeringSupervisor({ owner: engineering, root,
+          config: engineeringSupervisionConfig, signal });
+        scope.engineeringSupervisionSupported = true;
+      }
     }
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     if (quotaConfig || connectionsConfig) {
@@ -551,6 +581,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       signal, assertOwnership: quotaLease!.assertOwnership, coordinator: metadataCoordinator! });
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     signal?.addEventListener('abort', aborted, { once: true }); ready = true;
+    engineeringSupervision?.start();
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
       scope: { ...scope }, close };
   } catch (error) { await close(); throw error; }

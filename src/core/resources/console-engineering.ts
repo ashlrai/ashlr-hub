@@ -8,7 +8,8 @@ import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type Immutabl
 import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
 import { campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
 import { readUniverseCampaignReadiness } from '../universe/campaign-readiness.js';
-import { portfolioControllerDirectory } from '../universe/portfolio-controller-store.js';
+import { portfolioControllerDirectory, readPortfolioControllerEvents } from '../universe/portfolio-controller-store.js';
+import { readCompletedCampaignDelivery } from '../universe/campaign-delivery-recovery.js';
 import { createFirmEngineeringControlHandler, type FirmEngineeringControlHost } from '../universe/firm-engineering-control-handler.js';
 import { readControlGraph, runControlGraph, validateControlGraph, type ControlGraphDefinition } from '../universe/control-graph.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
@@ -41,9 +42,18 @@ export interface ResourceConsoleEngineeringOwner {
   catalog(): ResourceConsoleEngineeringEnrollment[];
   snapshot(id: string): ResourceConsoleEngineeringJob;
   readiness(id: string): ResourceConsoleEngineeringReadiness;
-  launch(input: ResourceConsoleEngineeringLaunch): ResourceConsoleEngineeringJob;
+  /** Host-only observational key. Null means incomplete/unstable evidence, never retry permission. */
+  evidenceFingerprint(id: string): string | null;
+  /** Await this owner's current invocation, including its existing cleanup. */
+  awaitSettlement(id: string): Promise<void>;
+  launch(input: ResourceConsoleEngineeringLaunch, controls?: ResourceConsoleEngineeringLaunchControls): ResourceConsoleEngineeringJob;
   cancel(id: string): ResourceConsoleEngineeringJob;
   close(): Promise<void>;
+}
+export interface ResourceConsoleEngineeringLaunchControls {
+  signal?: AbortSignal;
+  /** Must be writer-safe: no graph/controller/campaign ledger reads. */
+  isExecutionStopped?: () => boolean;
 }
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const GRAPH_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -345,6 +355,32 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
   const owner: ResourceConsoleEngineeringOwner = {
     catalog: () => snapshot([...enrolled.values()].map((value) => value.summary)),
     readiness: (id) => readiness(entry(id)),
+    evidenceFingerprint(id) {
+      const value = entry(id);
+      try {
+        const collect = () => {
+          const owned = ownership(value); const graph = readControlGraph(value.row.graphRoot);
+          if (graph.sourceState === 'degraded') throw new Error();
+          const directory = portfolioControllerDirectory(value.row.host.definition.id, { root: value.row.host.root });
+          const controller = present(directory) ? readPortfolioControllerEvents(directory) : null;
+          const campaigns = value.row.host.definition.tasks.map(({ campaignId }) => {
+            const readiness = readUniverseCampaignReadiness(campaignId, { root: value.row.host.root });
+            if (readiness.sourceState !== 'healthy') throw new Error();
+            const target = value.row.host.deliveryPlan.deliveries.find(row => row.campaignId === campaignId)!;
+            const delivery = readiness.observedState === 'completed'
+              ? readCompletedCampaignDelivery(readUniverseCampaign(campaignId, { root: value.row.host.root }), target, { root: value.row.host.root }) : null;
+            return { campaignId, identity: readiness.expectedIdentity, recordsDigest: readiness.recordsDigest, delivery };
+          });
+          return digest(canonical({ owned, graph, controller, campaigns }));
+        };
+        // No sampled timestamps or live owner-map state enters this identity.
+        const before = collect(); return before === collect() ? before : null;
+      } catch { return null; }
+    },
+    async awaitSettlement(id) {
+      entry(id); await active.get(id)?.promise;
+      if (faults.has(id)) fail('UNAVAILABLE', 'Engineering invocation settlement unavailable');
+    },
     snapshot(id) {
       const value = entry(id);
       const base = { enrollmentId: id, projectId: value.row.projectId, graphId: value.row.graphId,
@@ -367,7 +403,17 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
           definitionDigest: null, deadlineAt: null, nodes: [], reasons: ['engineering-evidence-unavailable'] };
       }
     },
-    launch(input) {
+    launch(input, controls) {
+      if (controls !== undefined && (!controls || ![Object.prototype, null].includes(Object.getPrototypeOf(controls)) ||
+          Reflect.ownKeys(controls).some(key => typeof key !== 'string' || !['signal', 'isExecutionStopped'].includes(key) ||
+            !Object.hasOwn(Object.getOwnPropertyDescriptor(controls, key)!, 'value')) ||
+          controls.signal !== undefined && !(controls.signal instanceof AbortSignal) ||
+          controls.isExecutionStopped !== undefined && typeof controls.isExecutionStopped !== 'function')) {
+        fail('INVALID_INPUT', 'Invalid engineering launch controls');
+      }
+      const launchSignal = controls?.signal; const launchGuard = controls?.isExecutionStopped;
+      const stopped = () => { try { return launchSignal?.aborted === true || !!launchGuard?.(); } catch { return true; } };
+      if (stopped()) fail('UNAVAILABLE', 'Engineering enclosing execution stopped');
       const request = snapshot<ResourceConsoleEngineeringLaunch>(input, 1024);
       if (!exact(request, ['enrollmentId', 'expectedEnrollmentDigest']) || typeof request.expectedEnrollmentDigest !== 'string' ||
         !HASH.test(request.expectedEnrollmentDigest)) fail('INVALID_INPUT', 'Invalid engineering launch');
@@ -383,6 +429,7 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
       if (acquired.state !== 'acquired') fail('UNAVAILABLE', 'Engineering graph is owned elsewhere');
       let handedOff = false;
       try {
+        if (stopped()) fail('UNAVAILABLE', 'Engineering enclosing execution stopped');
         requireReady(value);
         const owned = ownership(value);
         if (owned.cancel) fail('CONFLICT', 'Engineering launch was cancelled');
@@ -398,9 +445,12 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
           fail('CONFLICT', 'Engineering launch deadline is exhausted');
         }
         if (!owned.launch) append(value, 'launch', new Date().toISOString(), () => {
-          return ownsLocalStoreLock(acquired.lock) && hardBlockers(value, true).length === 0;
+          return ownsLocalStoreLock(acquired.lock) && hardBlockers(value, true).length === 0 && !stopped();
         });
         const abort = new AbortController();
+        const stopLaunch = () => abort.abort();
+        launchSignal?.addEventListener('abort', stopLaunch, { once: true });
+        if (stopped()) abort.abort();
         const promise = Promise.resolve().then(async () => {
           if (abort.signal.aborted || closing) return;
           ranGraph = true;
@@ -409,10 +459,11 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
             isExecutionStopped: () => {
               admit(value, true);
               const current = ownership(value);
-              return !ownsLocalStoreLock(acquired.lock) || !!current.cancel || !current.launch ||
+              return stopped() || !ownsLocalStoreLock(acquired.lock) || !!current.cancel || !current.launch ||
                 Date.now() >= Date.parse(current.launch.at) + value.row.host.definition.maxDurationMs;
             } });
         }).catch(() => { faults.add(value.row.id); }).finally(() => {
+          launchSignal?.removeEventListener('abort', stopLaunch);
           if (!releaseLocalStoreLock(acquired.lock)) faults.add(value.row.id);
           active.delete(value.row.id);
         });

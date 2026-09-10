@@ -5,6 +5,10 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const owner = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), catalog: vi.fn(), snapshot: vi.fn(),
   readiness: vi.fn(), launch: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
+const automatic = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), start: vi.fn(), snapshot: vi.fn(), setPaused: vi.fn(), close: vi.fn() }));
+vi.mock('../src/core/resources/console-engineering-supervisor.js', () => ({
+  validateResourceConsoleEngineeringSupervisionConfig: automatic.validate, createResourceConsoleEngineeringSupervisor: automatic.create,
+}));
 vi.mock('../src/core/resources/console-engineering.js', () => ({
   validateResourceConsoleEngineeringCatalog: owner.validate, createResourceConsoleEngineeringOwner: owner.create,
 }));
@@ -35,6 +39,59 @@ beforeEach(() => {
   owner.readiness.mockReturnValue(readiness);
   owner.launch.mockReturnValue({ ...job, state: 'running' }); owner.cancel.mockReturnValue({ ...job, state: 'stopped' });
   owner.close.mockResolvedValue(undefined); owner.create.mockReturnValue(owner);
+  automatic.validate.mockImplementation(value => value); automatic.create.mockReturnValue(automatic); automatic.close.mockResolvedValue(undefined);
+  automatic.snapshot.mockReturnValue({ schemaVersion: 1, configId: 'automatic-fixture', paused: false, revision: 0 });
+  automatic.setPaused.mockImplementation(paused => ({ schemaVersion: 1, configId: 'automatic-fixture', paused, revision: 1 }));
+});
+
+describe('explicit engineering supervision HTTP boundary', () => {
+  const route = '/api/resources/engineering-supervision';
+  async function supervised() {
+    const file = join(directory, 'supervision.json'); save(file, { schemaVersion: 1, id: 'automatic-fixture' });
+    return start({ engineeringSupervisionFile: file });
+  }
+  it('starts only the explicitly configured caller and makes status reads nonexecuting', async () => {
+    const handle = await supervised(); expect(handle.scope.engineeringSupervisionSupported).toBe(true);
+    expect(automatic.start).toHaveBeenCalledOnce();
+    expect((await fetch(`${handle.url}${route}`)).status).toBe(401);
+    const response = await fetch(`${handle.url}${route}`, { headers: { 'x-ashlr-token': handle.readToken } });
+    expect(response.status).toBe(200); expect(await response.json()).toMatchObject({ configId: 'automatic-fixture', revision: 0 });
+    expect(automatic.start).toHaveBeenCalledOnce(); expect(automatic.setPaused).not.toHaveBeenCalled(); expect(owner.launch).not.toHaveBeenCalled();
+    // A preexisting enrollment literally named supervision retains its old route.
+    expect((await fetch(`${handle.url}/api/resources/engineering/supervision`, { headers: { 'x-ashlr-token': handle.readToken } })).status).toBe(200);
+    expect(owner.snapshot).toHaveBeenLastCalledWith('supervision');
+  });
+  it('requires exact origin, mutation authority and a closed revision-checked pause request', async () => {
+    const handle = await supervised();
+    expect((await post(handle, route, { paused: true, expectedRevision: 0 }, { 'x-ashlr-token': handle.readToken, origin: handle.url })).status).toBe(401);
+    expect((await post(handle, route, { paused: true, expectedRevision: 0 }, { 'x-ashlr-token': handle.controlToken! })).status).toBe(403);
+    for (const input of [{ paused: true }, { paused: 'true', expectedRevision: 0 }, { paused: true, expectedRevision: -1 },
+      { paused: true, expectedRevision: 0, force: true }]) expect((await post(handle, route, input)).status).toBe(400);
+    expect(automatic.setPaused).not.toHaveBeenCalled();
+    const response = await post(handle, route, { paused: true, expectedRevision: 0 });
+    expect(response.status).toBe(200); expect(automatic.setPaused).toHaveBeenCalledExactlyOnceWith(true, 0);
+    automatic.setPaused.mockImplementation(() => { throw new ResourceSupervisorError('CONFLICT', '/private/state'); });
+    const conflict = await post(handle, route, { paused: false, expectedRevision: 0 });
+    expect(conflict.status).toBe(409); expect(await conflict.text()).not.toContain('/private/state');
+  });
+  it('does not create or start a supervisor without the separate startup flag', async () => {
+    const handle = await start(); expect(handle.scope.engineeringSupervisionSupported).toBeUndefined();
+    expect((await fetch(`${handle.url}${route}`, { headers: { 'x-ashlr-token': handle.readToken } })).status).toBe(403);
+    expect(automatic.create).not.toHaveBeenCalled(); expect(automatic.start).not.toHaveBeenCalled();
+  });
+  it('rejects supervision without enrollment before owner construction', async () => {
+    await expect(start({ engineeringFile: undefined, engineeringSupervisionFile: join(directory, 'missing.json') })).rejects.toThrow();
+    expect(owner.create).not.toHaveBeenCalled(); expect(automatic.create).not.toHaveBeenCalled();
+  });
+  it('awaits automatic work drain on shutdown', async () => {
+    const handle = await supervised(); let finish!: () => void;
+    automatic.close.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));
+    const closing = handle.close(); let closed = false; void closing.then(() => { closed = true; });
+    try {
+      await vi.waitFor(() => expect(automatic.close).toHaveBeenCalledOnce());
+      expect(closed).toBe(false); expect((await post(handle, route, { paused: true, expectedRevision: 0 })).status).toBe(503);
+    } finally { finish(); await closing; }
+  });
 });
 
 describe('engineering readiness read protocol', () => {

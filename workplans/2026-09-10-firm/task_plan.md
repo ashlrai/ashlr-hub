@@ -74,6 +74,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Wire CLI and console disclosure without changing historical receipt-only enrollment behavior.
 - [x] Verify actual upstream acknowledgement to one downstream request, repeated interruption and stop/drift/capacity refusal.
 - [x] Update docs and run frozen local gates for pending continuation.
+- [x] Explore resident engineering supervision, durable controls and actual process acceptance with three agents.
+- [x] Implement the next complete unattended execution path using existing enrollment, graph and resource ownership.
+- [x] Expose durable supervision intent and truthful live state through the operating workspace.
+- [x] Verify shutdown/restart, admission holds, unchanged deadlines and no duplicate effects; update canonical operator guidance.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 

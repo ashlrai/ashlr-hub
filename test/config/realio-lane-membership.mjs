@@ -151,6 +151,9 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-engineering-pending-continuation.test.ts', // real recovered delivery and bounded pending campaign continuation
   'test/universe-controller-pending-continuation.test.ts', // owned controller history and continuation refusal cases
   'test/universe-control-continuation-authority.test.ts', // signed graph intent and live continuation capability lifetime
+  'test/resource-engineering-supervisor.test.ts', // private persisted supervision and owned execution lifecycle
+  'test/resource-engineering-supervisor-boundaries.test.ts', // independent supervisor ownership and restart boundary checks
+  'test/resource-engineering-supervisor-acceptance.test.ts', // actual unattended console queue and local evaluated delivery
   'test/universe-graph-controller-reconciliation.test.ts', // immutable settlement guards and terminal graph preservation
   'test/universe-campaign-dispatch.test.ts', // exact dispatch recovery with actual private measured-seed records
   'test/universe-controller-contention-integration.test.ts', // native execution-lock contention, bounded waiting and cancellation

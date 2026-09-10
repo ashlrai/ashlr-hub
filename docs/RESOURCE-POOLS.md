@@ -111,8 +111,8 @@ For a source-built local console:
 does not undo a branch already delivered. **Pause task queue** prevents new
 engineering launches but does not terminate an already active engineering run.
 At most four enrolled graphs are active in one console owner; resource limits
-can impose a lower concurrency. There is no second engineering queue or quota
-ledger.
+can impose a lower concurrency. Automatic supervision below reuses this same
+owner and quota ledger; it does not create additional worker capacity.
 
 Readiness is a sampled local observation, not a worker connection test, capacity
 reservation or permission to execute. It checks known stop switches, owner and
@@ -135,8 +135,8 @@ sample is never a guarantee that execution will start or succeed. If readiness
 cannot be read, the workspace still exposes recorded run evidence and its stop
 control. New launch remains withheld.
 
-Restart never automatically launches an enrollment, creates a new graph identity
-or renews its allowance. **Reconcile completed work** uses only the existing
+Without explicit automatic supervision, restart never launches an enrollment,
+creates a new graph identity or renews its allowance. **Reconcile completed work** uses only the existing
 exact completed-child receipt recovery within the original deadline. A previous
 accepted launch with no graph intent stays held, as do unfinished or mismatched
 children. Do not rename the graph/controller to retry uncertain work. A cancelled
@@ -156,7 +156,7 @@ control authority and an exact Origin. All responses are bounded and no-store:
 | `POST /api/resources/engineering/:id/cancel` | Empty object → durable stop projection |
 
 The readiness response binds `enrollmentId` and `enrollmentDigest`, with
-`schemaVersion: 1`, `sampledAt`, `status`, `action` (`launch`, `reconcile` or
+`schemaVersion: 1`, `sampledAt`, `status`, `action` (`launch`, `reconcile`, `continue` or
 `none`), fixed `reasons`, `scope: "local-admission-check-only"`,
 `effectsExecuted: false` and `providerContacted: false`. A blocked response has
 no action. Those flags describe admission itself: it does not launch graph work,
@@ -169,7 +169,8 @@ ordinary supervisor. Use the standalone check below before startup. No private
 paths or raw storage errors are returned.
 
 Startup may initialize the ordinary supervisor and resume queued ordinary tasks,
-including worker dispatch. It does not itself launch engineering graph work.
+including worker dispatch. Engineering graph work starts automatically only when
+the explicit supervision configuration below is supplied.
 Explicit console close aborts and awaits owned engineering
 and ordinary work before collector teardown. An external stop signal can stop
 collectors concurrently. Neither path bypasses existing uncertainty holds.
@@ -177,6 +178,78 @@ After graph execution, a clean close also requires a readable shared resource
 ledger with no reserved or uncertain attempts, checked after ordinary task drain.
 An unrelated unresolved attempt can conservatively withhold clean shutdown; the
 diagnosis does not claim that engineering created it.
+
+### Automatic engineering supervision
+
+The optional `--engineering-supervision /absolute/private/supervision.json`
+flag adds a finite unattended queue to the existing execution console. It requires
+`--engineering`, `--execute` and `--projects`. Starting this configured console
+can consume enrolled provider allowance and deliver local branches **without a
+browser click**. Keep this file private (`0600`), outside every writable project.
+It contains exact enrollment digests obtained from the engineering catalog API;
+the placeholder below must be replaced with the displayed 64-character digest.
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "hub-night-shift",
+  "maxDurationMs": 14400000,
+  "pollIntervalMs": 3000,
+  "maxConcurrent": 1,
+  "maxAttemptsPerEnrollment": 4,
+  "enrollments": [
+    {
+      "enrollmentId": "hub-improvements",
+      "expectedEnrollmentDigest": "REPLACE_WITH_VERIFIED_ENROLLMENT_DIGEST"
+    }
+  ]
+}
+```
+
+The accepted limits are 1–86,400,000 ms duration, 100–60,000 ms polling,
+1–4 concurrent graph invocations, 1–16 invocations per enrollment, and 1–32
+unique enrollments. Invocations are **not** model requests or account usage;
+the original campaign/resource ceilings still apply. Declaration order is
+preserved. No model can add plans, change evaluators or enlarge these settings.
+
+Construction persists the original deadline, configuration digest, pause revision
+and per-plan invocation evidence under the shared resource root's
+`engineering-supervision/<id>/` directory. It does not dispatch. The console
+starts the caller after its listener and configured collectors are ready.
+Private exclusive ownership and compare-and-swap persistence prevent overlapping
+callers and unnoticed state replacement. Polling does not write heartbeat records.
+
+Restarting with the same configuration retains the original deadline, including
+downtime, pause state and consumed invocation allowance. Changed settings under
+the same ID are refused. Do not delete state or invent a new ID to replay uncertain
+work. Proven completed work may reconcile; continuing declared never-started
+campaigns additionally requires the enrollment's existing
+`allowPendingContinuation: true` policy. Unchanged unresolved evidence cannot
+trigger another invocation each poll. Missing evidence, unknown execution,
+durable cancellation, original deadlines and KILL remain authoritative.
+
+The Workspace **Engineering runs** pane displays **Automatic engineering** only
+when this feature is configured. Its scope is console-wide, not the currently
+selected project. It shows the original deadline, each pinned plan's state,
+fixed hold reasons and invocation count. **Pause automatic launches** persists
+a revision-checked pause across restarts; **Resume automatic launches** does not
+renew any deadline. Pausing does not cancel active work; use that plan's Stop
+control. Closing the browser does not stop supervision. Closing the console
+aborts and drains its automatic invocations before releasing their ownership.
+
+| Route | Result |
+| --- | --- |
+| `GET /api/resources/engineering-supervision` | Bounded observation only; never launches or writes state |
+| `POST /api/resources/engineering-supervision` | Exact `{paused, expectedRevision}` control; stale revisions return conflict |
+
+Reads require the existing read session. Writes require the control token and
+exact Origin; responses are no-store. The hyphenated route deliberately preserves
+`/engineering/supervision` as a possible existing enrollment-detail route.
+
+This implements console-owned unattended execution, **not** an installed OS
+service, autonomous idea generation, dynamic enrollment, real-account
+commissioning or public deployment. It does not make same-user storage
+tamper-proof or guarantee monotonic wall time across process restarts.
 
 ### Check engineering configuration without starting the fleet
 

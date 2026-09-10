@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { EngineeringSupervision } from './EngineeringSupervision.js';
 import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job,
   ResourceConsoleEngineeringReadiness as Readiness } from '../../../core/resources/console-engineering-types.js';
 import { StatusBadge, type Tone } from '../../components/primitives/StatusBadge.js';
@@ -13,8 +14,9 @@ const label = (state: Job['state']) => state === 'completed' ? 'Recorded deliver
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Engineering evidence is unavailable.';
 
 /** Observation can poll; launch/cancel only come from explicit user events. */
-export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason }: {
+export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported }: {
   projectId: string; projectName: string; available: boolean; canStart: boolean; canStop: boolean; unlocked: boolean; onUnlock(): void; startBlockedReason?: string;
+  supervisionSupported?: boolean;
 }) {
   const [catalog, setCatalog] = useState<Enrollment[] | null>(null);
   const [selection, setSelection] = useState('');
@@ -125,6 +127,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
     <header className={styles.header}><div><p className={styles.eyebrow}>ASHLRVERSE / ENGINEERING</p><h2>From objective to evidence.</h2>
       <p>{projectName} · Evaluated changes, explicit local delivery.</p></div>
       <button type="button" className={styles.button} disabled={!available || busy || loading} onClick={refresh}>Refresh evidence</button></header>
+    {supervisionSupported ? <EngineeringSupervision available={available} unlocked={unlocked} /> : null}
     {!available ? <p className={styles.warning}>Connection evidence is unavailable. New engineering launches are withheld. Previously recorded status may be stale.</p> : null}
     {startBlockedReason ? <p className={styles.warning}>{startBlockedReason}</p> : null}
     {catalogError ? <p role="alert" className={styles.error}>{catalogError}</p> : null}

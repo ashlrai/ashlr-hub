@@ -1,5 +1,58 @@
 # Firm build notes
 
+## September 10: unattended engineering supervision exploration
+
+- Final implementation: explicit console-owned finite queue, no new transport or
+  quota ledger. Cold review caught unknown/mismatched owner state, partial launch
+  acceptance skipping drain, and cancellation before invocation waiting on an
+  unrelated manual call. All three were fixed with exact regression tests.
+- Actual frozen-source acceptance: 5 passed, no skips (109.37 s). Independent
+  persistence/ownership suite: 35 passed, no skips (3.92 s). Existing engineering
+  and seed-context regressions: 185 passed across 8 files (39.99 s). Final full
+  web: 1,294 passed across 77 files (10.73 s); these groups are not a full core run.
+- Initial UI tests exposed an epoch increment discarding the first locked-mode
+  read, fixed and rerun. New scope tests initially lacked required project
+  metadata; corrected fixtures pass. Closed enum checks reject string-coercible
+  arrays, and changed pause responses must advance the revision exactly once.
+- Isolated real-browser fixture verified pause/resume and desktop/narrow layout.
+  At 390 px document width equals viewport width. The first temporary middleware
+  fixture wrongly intercepted its own Vite HTML proxy; using a temporary source
+  fixture resolved it. That exact fixture was removed and our Vite session
+  stopped; the temporary tab and viewport override were cleaned up. No backend
+  or provider was connected to the visual fixture.
+- Source/web typecheck, strict edited core tests, scoped lint (zero warnings),
+  full lint (zero errors, 107 existing warnings), docs/lane checks, production
+  build and five compiled structural safety checks passed. No public release,
+  account changes, host KILL removal or resident-service activation occurred.
+
+- Chosen slice: explicit private startup supervision configuration with a finite
+  digest-pinned queue, original persisted deadline and bounded attempts. Missing
+  flag means no automatic caller. Existing console ownership and launch engine
+  perform effects; pause/revision controls do not create new work or new budgets.
+- UI plan (reviewed against technical-control-room direction): retain white
+  #ffffff, ice #f5f7fc, slate #475467, navy #172746 and indigo #3c59d9 tokens;
+  Space Grotesk headings and IBM Plex body. Add one left-aligned console-wide
+  supervision band above the selected project plan: state/deadline, supervised
+  rows, explicit pause/resume. No decorative assets or motion; statuses include
+  text, and graph invocations are explicitly not labeled model usage.
+- Use `/api/resources/engineering-supervision` to avoid shadowing the already
+  valid enrollment ID `supervision` under the existing engineering status route.
+
+- Previous turn was verified progress: clean local commit/build
+  `074312449218ae5d89a137c63b493bf6859bc58a`; no blocked audit applies.
+  Fresh worktree status is clean; Entire resume has no checkpoint.
+- Existing console owner already provides project-pinned catalog, advisory
+  readiness, durable launch/cancel, shared-account execution and owned drain.
+  Explore durable per-plan supervision on that path rather than another worker
+  or scheduler. Pending continuation is now available under original graph
+  authority; resident planning and dynamic work enrollment remain distinct gaps.
+- Three agents map runtime reuse, actual process acceptance, and cold activation
+  semantics before implementation. An async direction question asks whether the
+  existing console should own the first always-on mode. No host activation,
+  provider calls, KILL removal, account changes or service installation inferred.
+- Discovery corrected guessed console filenames to `src/cli/resource-console.ts`
+  and `src/core/web/resource-console-server.ts`; no state changed on failed reads.
+
 ## September 10: graph-owned pending campaign continuation
 
 - Latest user answer retains measured seed context throughout the campaign.

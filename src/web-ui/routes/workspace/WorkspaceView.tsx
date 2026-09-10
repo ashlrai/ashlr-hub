@@ -260,6 +260,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     {engineering && scope.engineeringSupported ? <div className={styles.engineeringPane} data-mobile-visible={mobilePane === 'task'}>
       {active && mobilePane !== 'tasks' ? <WorkspaceEngineering key={`${session}:${project?.id ?? 'default'}`} projectId={project?.id ?? 'default'}
         projectName={projectName} available={!historical && snapshot.sourceState === 'healthy'}
+        supervisionSupported={scope.engineeringSupervisionSupported === true}
         canStart={canSend && !busy && snapshot.supervisor?.paused !== true} canStop={stopEnabled} unlocked={unlocked} onUnlock={onUnlock}
         startBlockedReason={project?.enabled === false ? 'This project is disabled. Recorded engineering evidence remains available.'
           : snapshot.supervisor?.paused ? 'The task queue is paused. New engineering launches are withheld; active engineering runs are not stopped.' : undefined} /> : null}

@@ -27,6 +27,8 @@ export interface ResourceConsoleScope {
   workspaceFilesSupported?: true;
   /** Explicit host-enrolled evaluated engineering; separate from ordinary task completion. */
   engineeringSupported?: true;
+  /** Explicit automatic queue in this console lifetime; not an OS service. */
+  engineeringSupervisionSupported?: true;
 }
 
 export interface ResourceConsoleProjectInput { id: string; label: string; workspace: string }
