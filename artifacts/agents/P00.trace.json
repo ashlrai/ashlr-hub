@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P00",
+  "status": "unsigned-package-stub",
+  "action": "implement-control-graph-kernel",
+  "artifact": "src/core/universe/control-graph.ts",
+  "verification": "21 local tests; independent source review",
+  "authority": "no activation or provider authority",
+  "provenanceSig": null
+}
