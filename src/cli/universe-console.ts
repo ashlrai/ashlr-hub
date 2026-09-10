@@ -8,6 +8,8 @@ An explicit absolute private root is required; no default root is substituted.
 --json emits one startup record with the bound URLs and private read token.
 The token is never placed in a URL. Keep it private and paste it into the console.
 No browser is opened, provider contacted, experiment executed, or service installed.
+The page can inspect a named controller's recorded status and drain acknowledgement;
+it does not discover controllers, change admission, or prove worker liveness.
 SIGINT/SIGTERM close this console and are awaited. This does not activate the
 general Hub dashboard or qualify a local candidate for production.
 Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid arguments.

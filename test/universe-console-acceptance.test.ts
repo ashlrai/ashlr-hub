@@ -6,7 +6,9 @@ import { createServer as createTcpServer, type Server as TcpServer } from 'node:
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { initUniverse, initUniverseCampaign } from '../src/core/universe/index.js';
+import { initUniverse, initUniverseCampaign, requestUniverseCampaignControl,
+  requestUniversePortfolioControllerControl, runUniversePortfolioController,
+  readUniverseCampaign, readUniverseOverview } from '../src/core/universe/index.js';
 import { startUniverseConsoleServer } from '../src/core/web/universe-console-server.js';
 
 type Handle = Awaited<ReturnType<typeof startUniverseConsoleServer>>;
@@ -109,6 +111,64 @@ afterAll(async () => {
 });
 
 describe('independent scoped Universe console HTTP acceptance', () => {
+  it('reads requested and acknowledged controller drain through the real worker without touching persisted evidence', async () => {
+    const value = fixture('INERT_CONTROLLER_INSPECTOR'); const options = { root: value.root };
+    const campaignId = 'same-console-campaign'; const controllerId = 'same-console-controller';
+    expect(requestUniverseCampaignControl(campaignId, 'pause', options).state).toBe('paused');
+    const definition = { schemaVersion: 1 as const, id: controllerId, maxParallel: 1, maxDurationMs: 60_000,
+      tasks: [{ campaignId, dependsOn: [] }] };
+    const initial = await runUniversePortfolioController(definition, options);
+    expect(initial.status).toBe('incomplete'); expect(initial.outcomes[0]).toMatchObject({ state: 'held', attempted: false });
+    const receipt = requestUniversePortfolioControllerControl(controllerId, 'drain', options);
+    const handle = await start(value.root); const path = `/api/universe/controller-status?controllerId=${controllerId}`;
+    const requestedBytes = snapshot(value.base);
+    const requested = await http(handle, path, { headers: authorized(handle) });
+    expect(requested.status).toBe(200); expect(requested.headers['cache-control']).toContain('no-store');
+    expect(JSON.parse(requested.body)).toMatchObject({ controllerId, sourceState: 'healthy', status: 'draining',
+      createdAt: initial.createdAt, deadlineAt: initial.deadlineAt,
+      control: { mode: 'drain', sequence: receipt.sequence, requestedAt: receipt.requestedAt, acknowledgedAt: null } });
+    expect(snapshot(value.base)).toBe(requestedBytes);
+
+    // Setup acknowledgement explicitly; subsequent HTTP reads have no mutation authority.
+    const drained = await runUniversePortfolioController(definition, options);
+    expect(drained.status).toBe('drained'); const acknowledgedBytes = snapshot(value.base);
+    for (let refresh = 0; refresh < 2; refresh++) {
+      const response = await http(handle, path, { headers: authorized(handle) });
+      expect(response.status).toBe(200); const result = JSON.parse(response.body);
+      expect(result).toMatchObject({ schemaVersion: 1, controllerId, sourceState: 'healthy', status: 'drained',
+        createdAt: initial.createdAt, deadlineAt: initial.deadlineAt, control: drained.control,
+        outcomes: [{ campaignId, state: 'held', attempted: false, reasonCode: initial.outcomes[0]!.reasonCode }] });
+      expect(Number.isFinite(Date.parse(result.observedAt))).toBe(true);
+      for (const withheld of ['definitionDigest', 'campaignDigest', 'deliveryDigest', value.root, value.repo]) {
+        expect(response.body).not.toContain(withheld);
+      }
+    }
+    expect(readUniverseCampaign(campaignId, options)).toMatchObject({ state: 'paused', owner: null });
+    expect(readUniverseOverview(options).universes[0]!.runs).toEqual([]);
+    expect(snapshot(value.base)).toBe(acknowledgedBytes);
+    await handle.close(); expect(snapshot(value.base)).toBe(acknowledgedBytes);
+  });
+
+  it('does not discover another root or initialize missing controller evidence', async () => {
+    const root = join(temporary(), 'missing-controller-store'); const handle = await start(root);
+    const response = await http(handle, '/api/universe/controller-status?controllerId=same-console-controller', { headers: authorized(handle) });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ controllerId: 'same-console-controller', sourceState: 'missing',
+      status: 'unavailable', createdAt: null, deadlineAt: null, outcomes: [] });
+    expect(JSON.parse(response.body)).not.toHaveProperty('control');
+    await handle.close(); expect(existsSync(root)).toBe(false);
+  });
+
+  it('reports degraded controller scope without repairing it or claiming active work', async () => {
+    const root = join(temporary(), 'invalid-controller-store'); const bytes = Buffer.from('Inert invalid controller scope');
+    writeFileSync(root, bytes, { mode: 0o600, flag: 'wx' }); const handle = await start(root);
+    const response = await http(handle, '/api/universe/controller-status?controllerId=one', { headers: authorized(handle) });
+    expect(response.status).toBe(200);
+    expect(JSON.parse(response.body)).toMatchObject({ controllerId: 'one', sourceState: 'degraded', status: 'unavailable', outcomes: [] });
+    expect(JSON.parse(response.body)).not.toHaveProperty('control');
+    await handle.close(); expect(readFileSync(root)).toEqual(bytes);
+  });
+
   it('advertises a loopback-only ephemeral URL with no token and exposes content-free public health', async () => {
     expect(a.url).toBe(`http://127.0.0.1:${a.port}`); expect(a.port).toBeGreaterThan(0);
     expect(a.consoleUrl).toBe(`${a.url}/universe/`); expect(a.consoleUrl).not.toContain(a.readToken);
@@ -121,6 +181,7 @@ describe('independent scoped Universe console HTTP acceptance', () => {
   });
 
   it.each(['/api/universe/console', '/api/universe', `/api/universe/graph?universeId=${UNIVERSE_ID}`,
+    '/api/universe/controller-status?controllerId=same-console-controller',
     '/api/universe/campaign-readiness?campaignId=same-console-campaign'])(
     'requires read authority for %s', async (path) => {
       expect((await http(a, path)).status).toBe(401);

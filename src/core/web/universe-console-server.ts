@@ -80,6 +80,14 @@ export async function startUniverseConsoleServer(options: UniverseConsoleServerO
         }
         sendProjection(res, await reader.campaignReadiness(ids[0]!)); return;
       }
+      if (url.pathname === '/api/universe/controller-status') {
+        const ids = url.searchParams.getAll('controllerId');
+        if (ids.length !== 1 || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(ids[0]!) ||
+          [...url.searchParams.keys()].some((key) => key !== 'controllerId')) {
+          sendJson(res, 400, { error: 'Expected exactly one controllerId and no other parameters' }); return;
+        }
+        sendProjection(res, await reader.controllerStatus(ids[0]!)); return;
+      }
       sendJson(res, 404, { error: 'Route unavailable in this scoped console' }); return;
     }
     if (method !== 'GET' && method !== 'HEAD') { sendJson(res, 405, { error: 'Method not allowed' }); return; }

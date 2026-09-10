@@ -1,0 +1,35 @@
+.inspector { margin-bottom: var(--space-8); padding: var(--space-5); border: 1px solid var(--border-strong); border-radius: var(--radius-md); background: var(--bg-surface); color: var(--text-primary); }
+.header { display: flex; justify-content: space-between; align-items: flex-start; gap: var(--space-4); margin-bottom: var(--space-5); }
+.header h2 { font-family: var(--font-display); font-size: var(--text-xl-size); letter-spacing: -.025em; }
+.header p, .note, .empty, .field p, .control p { max-width: 78ch; color: var(--text-secondary); font-size: var(--text-sm-size); line-height: 1.6; }
+.readOnly { padding: var(--space-1) var(--space-2); border: 1px solid var(--border-default); border-radius: var(--radius-xs); white-space: nowrap; font-size: var(--text-xs-size); }
+.form { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-3); }
+.field { flex: 1 1 300px; max-width: 560px; }
+.field label { display: block; margin-bottom: var(--space-2); font-size: var(--text-sm-size); font-weight: var(--font-weight-semibold); }
+.field input { width: 100%; min-height: 42px; padding: var(--space-2) var(--space-3); background: var(--bg-canvas); color: var(--text-primary); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); font-family: var(--font-ui); }
+.field p { margin-top: var(--space-2); }
+.form button { margin-top: 28px; min-height: 42px; padding: var(--space-2) var(--space-4); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-surface); color: var(--text-primary); font-weight: var(--font-weight-medium); }
+.form button[type="submit"] { background: var(--accent-600); border-color: var(--accent-600); color: var(--accent-contrast); }
+.form button:disabled { opacity: .6; cursor: wait; }
+.inspector :is(button, input, summary, [tabindex]):focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
+.identity { margin-top: var(--space-5); font-size: var(--text-lg-size); overflow-wrap: anywhere; }
+.identity code { font-family: var(--font-ui); font-weight: var(--font-weight-semibold); }
+.note, .empty { margin-top: var(--space-3); }
+.warning { margin-top: var(--space-3); padding: var(--space-3); border-left: 3px solid var(--status-warning-solid); background: var(--status-warning-bg); color: var(--status-warning-fg); font-size: var(--text-sm-size); }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 205px), 1fr)); gap: var(--space-4); margin: var(--space-5) 0; }
+.facts dt { color: var(--text-secondary); font-size: var(--text-xs-size); margin-bottom: var(--space-1); }
+.facts dd { margin: 0; font-size: var(--text-sm-size); overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.control { padding: var(--space-4); border-left: 3px solid var(--accent-500); background: var(--bg-canvas); margin-bottom: var(--space-5); }
+.control h4 { font-family: var(--font-display); font-size: var(--text-lg-size); }
+.sequence { list-style: none; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: var(--space-5); margin: var(--space-4) 0; }
+.sequence li { display: flex; flex-direction: column; gap: var(--space-1); border-top: 2px solid var(--border-strong); padding-top: var(--space-3); font-size: var(--text-sm-size); overflow-wrap: anywhere; }
+.sequence span, .sequence time { color: var(--text-secondary); }
+.tableWrap { overflow-x: auto; max-width: 100%; }
+.tableWrap table { width: 100%; border-collapse: collapse; font-size: var(--text-sm-size); text-align: left; }
+.tableWrap caption { text-align: left; font-weight: var(--font-weight-semibold); padding: var(--space-3) 0; }
+.tableWrap th, .tableWrap td { border-bottom: 1px solid var(--border-default); padding: var(--space-3); vertical-align: top; overflow-wrap: anywhere; min-width: 115px; }
+.tableWrap thead { color: var(--text-secondary); background: var(--bg-canvas); }
+.reasons { margin-top: var(--space-4); font-size: var(--text-sm-size); overflow-wrap: anywhere; }
+.reasons summary { cursor: pointer; padding: var(--space-2) 0; }
+.reasons ul { padding-left: var(--space-5); }
+@media (max-width: 650px) { .inspector { padding: var(--space-4); } .form button { margin-top: 0; } .field { max-width: none; flex-basis: 100%; } .sequence { grid-template-columns: 1fr; } }

@@ -11,6 +11,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Scoped controller inspector
+
+- Adds on-demand controller observation to the authenticated, root-scoped
+  Universe console: recorded outcomes, original deadline and separate drain
+  request/acknowledgement evidence.
+- Keeps controller reads independent of experiment overview polling, labels
+  historical results after failed refresh, and omits private receipt digests.
+  No controller discovery, browser mutation or worker-liveness claim is added.
+
 ### Durable controller drain and resume
 
 - Adds persisted controller-wide drain requests, ordered atomically against

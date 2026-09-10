@@ -2,8 +2,9 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { readUniverseOverview } from '../universe/overview.js';
 import { readUniverseGraph } from '../universe/graph-reader.js';
 import { readUniverseCampaignReadiness } from '../universe/campaign-readiness.js';
+import { readUniversePortfolioController } from '../universe/portfolio-controller.js';
 import { normalizeUniverseConsoleRead, validateUniverseConsoleRoot } from './universe-console-reads.js';
-import { serializeUniverseConsoleCampaignReadiness, serializeUniverseConsoleGraph, serializeUniverseConsoleOverview } from './universe-console-public.js';
+import { serializeUniverseConsoleCampaignReadiness, serializeUniverseConsoleControllerStatus, serializeUniverseConsoleGraph, serializeUniverseConsoleOverview } from './universe-console-public.js';
 
 const port = parentPort;
 const root = validateUniverseConsoleRoot((workerData as { root?: unknown } | undefined)?.root);
@@ -18,11 +19,13 @@ port.on('message', (message: unknown) => {
   running = true;
   try {
     const payload = normalizeUniverseConsoleRead(request.kind, request.payload);
-    const value = payload && 'campaignId' in payload
-      ? serializeUniverseConsoleCampaignReadiness(readUniverseCampaignReadiness(payload.campaignId, { root }))
-      : payload && 'universeId' in payload
-        ? serializeUniverseConsoleGraph(readUniverseGraph(payload.universeId, { root }))
-        : serializeUniverseConsoleOverview(readUniverseOverview({ root }));
+    const value = payload && 'controllerId' in payload
+      ? serializeUniverseConsoleControllerStatus(readUniversePortfolioController(payload.controllerId, { root }))
+      : payload && 'campaignId' in payload
+        ? serializeUniverseConsoleCampaignReadiness(readUniverseCampaignReadiness(payload.campaignId, { root }))
+        : payload && 'universeId' in payload
+          ? serializeUniverseConsoleGraph(readUniverseGraph(payload.universeId, { root }))
+          : serializeUniverseConsoleOverview(readUniverseOverview({ root }));
     port.postMessage({ type: 'result', id: request.id, ok: true, value });
   } catch { reject(); }
   finally { running = false; }
