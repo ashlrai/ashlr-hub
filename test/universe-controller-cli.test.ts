@@ -82,6 +82,10 @@ describe('Universe persisted controller CLI', () => {
     expect(text).toContain('do not authorize deletion, publication repair, or worker retry');
     expect(text).toContain('not a resident daemon');
     expect(text).toContain('uncertain or paused work');
+    expect(text).toContain('Campaign pause/stop targets only that campaign');
+    expect(text).toContain('a successful request is not worker exit');
+    expect(text).toContain('independent ready work may continue');
+    expect(text).toContain('There is no controller-wide durable drain/resume command');
     expect(files.readResourceJson).not.toHaveBeenCalled();
     expect(core.runUniversePortfolioController).not.toHaveBeenCalled();
   });

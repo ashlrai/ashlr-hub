@@ -11,6 +11,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Controller owner intervention
+
+- Preserves verified campaign readiness reasons in non-completed controller
+  settlements, distinguishing owner controls from resource holds without
+  changing delivery gates, budgets or retry decisions.
+- Adds native subprocess acceptance for campaign pause/stop and controller
+  SIGINT/SIGTERM, including worker cleanup, dependency holds and restart without
+  replay. Documents the distinction between campaign control and whole-controller
+  cancellation; durable controller-wide drain/resume is not yet implemented.
+
 ### Release preparation
 
 - Reapplies the current fleet allocation ceiling to cached console plans, so

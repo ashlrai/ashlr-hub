@@ -261,7 +261,9 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== digest(canonical(result))) throw new Error('Runner settlement changed');
           const settledRecordsDigest = current.recordsDigest;
           let deliveryDigest: string | null = null;
-          let reasonCode = result.state === 'completed' ? 'campaign-completed' : 'campaign-held';
+          // Retain the verified campaign diagnosis without changing its held
+          // disposition or granting a retry; delivery still has its own outcome.
+          let reasonCode: string = result.state === 'completed' ? 'campaign-completed' : current.reasonCode;
           let completed = result.state === 'completed';
           const target = targets.get(campaignId);
           if (target && completed) {
