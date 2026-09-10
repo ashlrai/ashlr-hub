@@ -1,5 +1,46 @@
 # Firm build notes
 
+## September 10: graph-owned pending campaign continuation
+
+- Latest user answer retains measured seed context throughout the campaign.
+  Already implemented: independent review verified per-generation seed context
+  alongside changing parent/latest feedback; the two selected seed suites passed
+  16/16 locally. No scheduler or acceptance changes are needed for that answer.
+- UI plan: retain existing semantic surface/ice/navy/indigo theme tokens and
+  Space Grotesk display/IBM Plex reading hierarchy; left-aligned dependency plan
+  beside persistent inspector, with explicit action at the bottom. This is a
+  policy disclosure change, not a palette/layout redesign. No new motion/assets.
+- Actual continuation acceptance caught a reentrant read: the parent stop guard
+  read a campaign while its own immutable writer lock was held, blocking B.
+  Keep live authority/runtime checks writer-safe; full campaign proof remains
+  before continuation, at existing controller admission, and after completion.
+
+- Fresh baseline a2f9931ec5da1132c5d8cf030b5f6f5a5dcc4f7d is clean.
+  Previous turn was verified progress (2,051 selected passing tests and a clean
+  local build), not a blocked turn. Entire resume found no checkpoint.
+- Three independent explorations confirmed the existing controller scheduler
+  already has pending/no-intent, prerequisite delivery, original budget and
+  shared quota admission. Reuse it rather than build another scheduler.
+- Design: host `allowPendingContinuation: true` is included in immutable binding;
+  absent flag remains byte-compatible receipt-only. A separate async registered
+  callback receives a kernel-issued, non-copyable, live capability for this
+  signed unresolved graph intent. Standalone linked-controller resume stays
+  refused. No provider/account/global-KILL/service activation is part of tests.
+- Controller lease must span receipt acknowledgement and scheduling. Reconcile
+  proven prior effects, refuse any remaining held/uncertain attempt, then admit
+  only untouched pending campaign rows. Never change seeds or renew deadlines.
+  Declared dependencies gate execution; they do not silently provide A's artifact
+  as B's source. Explicit dataflow is a separate existing/new-experiment contract.
+- Kernel runs continuation at most once per graph invocation under existing
+  ownership/KILL/original deadline; capability is revoked in finally. CLI/check
+  and console readiness must disclose effectful continuation instead of calling
+  it read-only reconciliation. Existing enrollments gain no new effects.
+- Acceptance: distinct Universes, upfront two-task shared pool, actual A delivery
+  confirmation fault, then exactly one B request; totals two requests, four
+  evaluations, two refs with unchanged A and original graph intent. Include
+  copied capability, default-off, uncertain B, drift, drain/KILL/deadline and
+  ownership refusal, keeping all existing safety/account policy code unchanged.
+
 ## September 10: evaluator-only seed measurement
 
 - `measureSeed: true` is an immutable opt-in; absence preserves legacy serialized

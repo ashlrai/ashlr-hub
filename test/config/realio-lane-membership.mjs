@@ -148,6 +148,9 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-controller-diagnostics.test.ts', // private diagnostic history and failure publication invariants
   'test/universe-controller-handoff-diagnostics.test.ts', // real evaluated delivery and receipt-only acknowledgement recovery
   'test/universe-engineering-handoff-recovery.test.ts', // graph-linked delivery acknowledgement without repeating effects
+  'test/universe-engineering-pending-continuation.test.ts', // real recovered delivery and bounded pending campaign continuation
+  'test/universe-controller-pending-continuation.test.ts', // owned controller history and continuation refusal cases
+  'test/universe-control-continuation-authority.test.ts', // signed graph intent and live continuation capability lifetime
   'test/universe-graph-controller-reconciliation.test.ts', // immutable settlement guards and terminal graph preservation
   'test/universe-campaign-dispatch.test.ts', // exact dispatch recovery with actual private measured-seed records
   'test/universe-controller-contention-integration.test.ts', // native execution-lock contention, bounded waiting and cancellation

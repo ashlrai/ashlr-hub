@@ -12,6 +12,8 @@ import { runUniverseCampaignOwned } from './campaign.js';
 import { acquireUniverseExecution } from './execution.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadiness } from './campaign-readiness.js';
 import { resourceAdmissionPreflight } from './resource-admission-preflight.js';
+import { readGraphContinuationAuthority, type GraphContinuationAuthority } from './control-graph.js';
+import { reconcileGraphControllerDispatchOwned } from './graph-controller-reconciliation.js';
 import { deliverCompletedUniverseCampaign, preflightUniverseCampaignDelivery, validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
 import { readUniverseDeliveries } from './delivery.js';
 import { readUniversePortfolioPlan, validateUniversePortfolioDefinition } from './portfolio-plan.js';
@@ -131,17 +133,35 @@ export interface UniversePortfolioControllerRunOptions extends UniversePortfolio
 }
 
 export async function runUniversePortfolioController(input: unknown, options: UniversePortfolioControllerRunOptions = {}): Promise<UniversePortfolioControllerReport> {
+  return runPortfolioController(input, options);
+}
+
+/** Internal graph entry; portable linkage and copied callback contexts grant no authority. */
+export async function continueGraphOwnedPortfolioController(input: unknown, options: UniversePortfolioControllerRunOptions,
+  context: unknown, bindingDigest: string): Promise<UniversePortfolioControllerReport> {
+  const authority = readGraphContinuationAuthority(context, bindingDigest);
+  if (!authority) throw new Error('Live graph continuation authority required');
+  return runPortfolioController(input, options, authority);
+}
+
+async function runPortfolioController(input: unknown, options: UniversePortfolioControllerRunOptions,
+  continuation?: GraphContinuationAuthority): Promise<UniversePortfolioControllerReport> {
   // Capture linkage before any storage or trusted callbacks. Never execute an
   // accessor while deciding which graph's durable dispatch is being associated.
   const graphProperty = Object.getOwnPropertyDescriptor(options, 'graphDispatch');
   if (graphProperty && (!graphProperty.enumerable || !Object.hasOwn(graphProperty, 'value')) ||
     !graphProperty && 'graphDispatch' in options) throw new Error('Invalid controller graph dispatch option');
-  const graphDispatch = graphProperty ? validatePortfolioControllerGraphDispatch(graphProperty.value) : undefined;
+  const suppliedGraphDispatch = graphProperty ? validatePortfolioControllerGraphDispatch(graphProperty.value) : undefined;
+  const graphDispatch = continuation?.graphDispatch ?? suppliedGraphDispatch;
+  if (continuation && suppliedGraphDispatch && canonical(suppliedGraphDispatch) !== canonical(graphDispatch)) {
+    throw new Error('Graph continuation linkage differs');
+  }
   const newProperty = Object.getOwnPropertyDescriptor(options, 'requireNewEnrollment');
   if (newProperty && (!Object.hasOwn(newProperty, 'value') || newProperty.value !== undefined && typeof newProperty.value !== 'boolean') ||
     !newProperty && 'requireNewEnrollment' in options) throw new Error('Invalid controller new enrollment option');
   const requireNewEnrollment = newProperty?.value === true;
-  if (graphDispatch && !requireNewEnrollment) {
+  if (continuation && requireNewEnrollment) throw new Error('Graph continuation requires an existing enrollment');
+  if (!continuation && graphDispatch && !requireNewEnrollment) {
     throw new Error('Graph-linked controllers require explicit fresh enrollment; use receipt-only reconciliation');
   }
   const startedAt = new Date().toISOString();
@@ -153,16 +173,24 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   const resourceRuntime = options.resourceRuntime;
   const expectedResourceRuntimeDigest = options.expectedResourceRuntimeDigest;
   const checkRuntime = resourceRuntime === undefined ? null : resourceAdmissionPreflight(resourceRuntime, expectedResourceRuntimeDigest);
-  const signal = options.signal;
-  const isExecutionStopped = options.isExecutionStopped;
-  const outerDeadline = options.deadlineMonotonicMs ?? Infinity;
-  if (options.deadlineMonotonicMs !== undefined && (!Number.isFinite(outerDeadline) || outerDeadline < 0)) {
+  const callerSignal = options.signal;
+  const signal = continuation?.signal ?? callerSignal;
+  const callerStopped = options.isExecutionStopped;
+  const isExecutionStopped = continuation ? () => continuation.isExecutionStopped() ||
+    signal?.aborted === true || callerSignal?.aborted === true || !!callerStopped?.() : callerStopped;
+  const requestedDeadline = options.deadlineMonotonicMs ?? Infinity;
+  if (options.deadlineMonotonicMs !== undefined && (!Number.isFinite(requestedDeadline) || requestedDeadline < 0)) {
     throw new Error('Invalid outer controller deadline');
   }
+  const outerDeadline = Math.min(requestedDeadline, continuation?.deadlineMonotonicMs ?? Infinity);
   const directory = portfolioControllerDirectory(definition.id, { root });
   if (signal?.aborted) return { ...readUniversePortfolioController(definition.id, { root }), status: 'cancelled' };
+  if (continuation && (isExecutionStopped?.() || performance.now() >= outerDeadline)) {
+    throw new Error('Graph continuation stopped');
+  }
   inspectPrivateDirectory(root);
   for (const path of [join(root, 'portfolios'), directory]) {
+    if (continuation) { inspectPrivateDirectory(path); continue; }
     try { privateDirectory(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; inspectPrivateDirectory(path); }
   }
@@ -267,13 +295,35 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   try {
     const existing = transaction(() => withPortfolioControllerTransaction(directory, () => {
       try { lstatSync(join(directory, 'ledger')); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !continuation) return false;
+        throw error;
+      }
       if (requireNewEnrollment) throw new Error('Host graph requires a new controller enrollment');
+      let linkedSnapshot: PortfolioControllerEvent[] | undefined;
+      if (continuation) {
+        // Unlike ordinary legacy recovery, continuation cannot repair storage
+        // until a strict snapshot proves which existing enrollment it belongs to.
+        // An unreadable writer mutex is not enough evidence to claim that owner.
+        linkedSnapshot = readPortfolioControllerEvents(directory);
+        const enrolled = foldPortfolioController(linkedSnapshot).first.enrollment;
+        if (!enrolled.graphDispatch || canonical(enrolled.graphDispatch) !== canonical(graphDispatch) ||
+            canonical(enrolled.definition) !== canonical(definition) || canonical(enrolled.deliveryPlan) !== canonical(deliveryPlan)) {
+          throw new Error('Graph continuation enrollment differs');
+        }
+        if (isExecutionStopped?.() || performance.now() >= outerDeadline) throw new Error('Graph continuation stopped');
+        owned();
+      }
       // The strict reader refuses every writer mutex. Reclaiming a proven-dead
       // mutex is storage cleanup, not permission to resume graph-linked execution.
       recoverControllerRecordLock(definition.id, { root }, acquired.lock);
       capture(readPortfolioControllerEvents(directory));
-      if (foldPortfolioController(events).first.enrollment.graphDispatch) {
+      if (linkedSnapshot && canonical(events) !== canonical(linkedSnapshot)) throw new Error('Graph continuation enrollment changed');
+      const enrolledLink = foldPortfolioController(events).first.enrollment.graphDispatch;
+      if (continuation && (!enrolledLink || canonical(enrolledLink) !== canonical(graphDispatch))) {
+        throw new Error('Graph continuation enrollment differs');
+      }
+      if (!continuation && enrolledLink) {
         throw new Error('Graph-linked controller execution cannot resume; use receipt-only reconciliation');
       }
       return true;
@@ -322,9 +372,42 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     const initialObservation = observe();
     const initialReport = initialObservation instanceof Promise ? await initialObservation : initialObservation;
     if (initialReport.sourceState !== 'healthy') return initialReport;
+    if (continuation) {
+      if (!deliveryPlan) throw new Error('Graph continuation delivery enrollment required');
+      const assertPending = (): void => {
+        owned();
+        const folded = foldPortfolioController(events);
+        for (const [campaignId, row] of folded.states) {
+          if (row.state === 'completed' || row.state === 'in-flight') continue;
+          const pin = folded.pins.get(campaignId)!;
+          const current = readUniverseCampaignReadiness(campaignId, { root });
+          if (row.state !== 'pending' || pin.initialState !== 'pending' || pin.dispatch !== 'campaign' ||
+              folded.intentEvents.has(campaignId) || !matches(pin, current) ||
+              current.recordsDigest !== pin.recordsDigest || current.expectedIdentity!.summaryDigest !== pin.campaignDigest ||
+              current.automaticAction !== 'run' && !waitable(current)) {
+            throw new Error('Graph continuation requires untouched pending campaigns');
+          }
+        }
+        if (isExecutionStopped?.() || performance.now() >= outerDeadline) throw new Error('Graph continuation stopped');
+        owned();
+      };
+      assertPending();
+      // Receipt acknowledgment may follow an expired child allowance, but only
+      // under the live original graph. The scheduler below still enforces both.
+      capture(reconcileGraphControllerDispatchOwned({ root, definition, deliveryPlan, graphDispatch: graphDispatch!,
+        pins: enrollment.pins.map(({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest }) =>
+          ({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest })),
+        checkEnrollment: () => { if (isExecutionStopped?.()) throw new Error('Graph continuation stopped'); },
+        isExecutionStopped: () => isExecutionStopped?.() === true,
+        deadlineMonotonicMs: outerDeadline }, events, owned, true));
+      assertPending();
+      if ([...foldPortfolioController(events).states.values()].some(row => row.state === 'in-flight')) {
+        throw new Error('Graph continuation dispatch remains unresolved');
+      }
+    }
     // Recovery observes already completed effects, including after the original
     // deadline. It cannot launch workers, deliver branches, or renew admission.
-    for (const [campaignId, intent] of initial.intentEvents) {
+    for (const [campaignId, intent] of continuation ? [] : initial.intentEvents) {
       if (initial.states.get(campaignId)?.state !== 'in-flight' || !intent.dispatchId) continue;
       const pin = initial.pins.get(campaignId)!;
       if (pin.dispatch !== 'campaign') continue;

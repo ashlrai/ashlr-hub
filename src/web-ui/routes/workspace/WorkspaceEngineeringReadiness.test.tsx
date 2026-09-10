@@ -8,10 +8,10 @@ const row = engineeringEnrollment();
 const props = { projectId: 'default', projectName: 'Hub', available: true, canStart: true, canStop: true, unlocked: true, onUnlock: vi.fn() };
 const json = (v: unknown, status = 200) => new Response(JSON.stringify(v), { status, headers: { 'content-type': 'application/json' } });
 const panel = () => within(screen.getByRole('region', { name: 'Local launch checks' }));
-function transport(initial = engineeringReadiness(), initialJob = engineeringJob()) {
+function transport(initial = engineeringReadiness(), initialJob = engineeringJob(), selected = row) {
   let readiness: unknown = initial; let job = initialJob; let failure = false;
   const fetcher = vi.fn(async (url: string, options?: RequestInit) => {
-    if (url === '/api/resources/engineering') return json([row]);
+    if (url === '/api/resources/engineering') return json([selected]);
     if (url.endsWith('/readiness')) return failure ? json({ error: 'unavailable' }, 503) : json(readiness);
     if (options?.method === 'POST') return json(job);
     if (url === `/api/resources/engineering/${row.id}`) return json(job);
@@ -25,6 +25,23 @@ beforeEach(() => { setMutationToken('b'.repeat(64)); });
 afterEach(() => { act(() => clearMutationToken()); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('engineering local admission UX', () => {
+  it('discloses effectful continuation and requires its exact readiness action and an explicit click', async () => {
+    const selected = { ...row, allowPendingContinuation: true as const };
+    const f = transport(engineeringReadiness(selected), engineeringJob(selected, { state: 'incomplete', launched: true,
+      nodes: [{ id: 'deliver', kind: 'deliver', state: 'unresolved', artifactDigest: null }] }), selected);
+    render(<WorkspaceEngineering {...props} />); await screen.findByText('Local checks passed');
+    const button = screen.getByRole('button', { name: 'Continue pending work' });
+    expect(button).toBeDisabled();
+    expect(screen.getByText(/May execute declared pending campaigns/)).toBeInTheDocument();
+    expect(screen.getByText(/May start never-started campaigns using enrolled workers/)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reconcile completed work' })).not.toBeInTheDocument();
+    f.setReadiness(engineeringReadiness(selected, { action: 'continue' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh evidence' }));
+    await screen.findByText('Continuation checks passed'); await vi.waitFor(() => expect(button).toBeEnabled());
+    expect(f.posts()).toHaveLength(0); fireEvent.click(button);
+    await vi.waitFor(() => expect(f.posts()).toHaveLength(1));
+  });
+
   it('explains a stop hold, then requires explicit refresh and explicit launch after it clears', async () => {
     const f = transport(engineeringReadiness(row, { status: 'blocked', action: 'none', reasons: ['global-kill-active'] }));
     render(<WorkspaceEngineering {...props} />);

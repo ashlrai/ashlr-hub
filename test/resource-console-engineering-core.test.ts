@@ -27,6 +27,7 @@ import * as provenance from '../src/core/foundry/provenance.js';
 import * as policy from '../src/core/sandbox/policy.js';
 import { acquireLocalStoreLockWithOutcome, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
+import { signDecisionTraceV1 } from '../src/core/universe/decision-trace.js';
 import { readControlGraph, runControlGraph, validateControlGraph, type ControlGraphDefinition } from '../src/core/universe/control-graph.js';
 
 let root: string;
@@ -146,7 +147,67 @@ async function ownerFixture() {
   const options = { catalog, supervisor, ...control };
   return { options, supervisor, graphRoot, run, pool, bindings, project, create: () => createResourceConsoleEngineeringOwner(options) };
 }
+// The inert unbranded fixture cannot execute delivery. This signed intent models
+// an already accepted unresolved graph for console policy reads, not effect proof.
+function recordUnresolvedConsoleFixture(graphRoot: string): void {
+  const directory = join(graphRoot, 'control-graph', 'records');
+  const created = JSON.parse(readFileSync(join(directory, '00000000.json'), 'utf8'));
+  const execution = { effectClass: 'resource-completion', constitutionVersion: 'fixture', policyEpoch: 0, bindingDigest: 'b'.repeat(64) };
+  const body = { sequence: 1, previousDigest: digest(canonical(created)), kind: 'intent', nodeId: 'deliver',
+    definitionDigest: created.definitionDigest, data: { inputDigests: [], execution } };
+  const trace = signDecisionTraceV1({ id: 'fixture:1', ts: new Date().toISOString(), entities: ['graph:fixture', 'node:deliver'],
+    action: 'graph-intent', constitutionVersion: 'fixture', policyEpoch: 0, inputsDigest: digest(canonical(body)),
+    verifier: { id: 'pending', verdict: 'unavailable', independent: false },
+    authority: { effectClass: 'resource-completion' }, spend: { unknown: true }, conflicts: [] });
+  expect(trace).not.toBeNull();
+  writeFileSync(join(directory, '00000001.json'), canonical({ ...body, trace }) + '\n', { mode: 0o600, flag: 'wx' });
+}
 describe('owned console engineering evidence', () => {
+  it.each([false, true])('projects continuation policy %s and observes its owned unresolved action without dispatch', async enabled => {
+    const f = await ownerFixture();
+    if (enabled) f.options.catalog.enrollments[0]!.host.allowPendingContinuation = true;
+    const transport = vi.spyOn(workerTransport, 'executeResourceWorker');
+    const owner = f.create();
+    try {
+      const selected = owner.catalog()[0]!;
+      if (enabled) expect(selected.allowPendingContinuation).toBe(true);
+      else expect(selected).not.toHaveProperty('allowPendingContinuation');
+      expect(owner.readiness(selected.id)).toMatchObject({ status: 'ready', action: 'launch', effectsExecuted: false, providerContacted: false });
+      owner.launch({ enrollmentId: selected.id, expectedEnrollmentDigest: selected.enrollmentDigest });
+      const deadline = Date.now() + 5_000;
+      while (owner.snapshot(selected.id).state === 'running' && Date.now() < deadline) await new Promise<void>(resolve => setImmediate(resolve));
+      expect(owner.snapshot(selected.id).nodes[0]?.state).toBe('pending'); recordUnresolvedConsoleFixture(f.graphRoot);
+      expect(owner.snapshot(selected.id)).toMatchObject({ state: 'incomplete', launched: true, nodes: [{ state: 'unresolved' }] });
+      const saved = canonical(readControlGraph(f.graphRoot)); const files = readdirSync(f.graphRoot);
+      for (let read = 0; read < 3; read++) expect(owner.readiness(selected.id)).toMatchObject({
+        status: 'ready', action: enabled ? 'continue' : 'reconcile', effectsExecuted: false, providerContacted: false, reasons: [],
+      });
+      expect(canonical(readControlGraph(f.graphRoot))).toBe(saved); expect(readdirSync(f.graphRoot)).toEqual(files);
+      expect(f.run).not.toHaveBeenCalled(); expect(transport).not.toHaveBeenCalled();
+    } finally { await owner.close(); await f.supervisor.close(); }
+  });
+
+  it('cannot upgrade an accepted legacy binding to continuation by changing the startup catalog', async () => {
+    const f = await ownerFixture();
+    const owner = f.create(); let upgraded: ReturnType<typeof f.create> | undefined;
+    try {
+      const original = owner.catalog()[0]!;
+      owner.launch({ enrollmentId: original.id, expectedEnrollmentDigest: original.enrollmentDigest });
+      const deadline = Date.now() + 5_000;
+      while (owner.snapshot(original.id).state === 'running' && Date.now() < deadline) await new Promise<void>(resolve => setImmediate(resolve));
+      expect(owner.snapshot(original.id).nodes[0]?.state).toBe('pending'); recordUnresolvedConsoleFixture(f.graphRoot);
+      expect(owner.snapshot(original.id).nodes[0]?.state).toBe('unresolved');
+      await owner.close(); const saved = canonical(readControlGraph(f.graphRoot));
+      f.options.catalog.enrollments[0]!.host.allowPendingContinuation = true;
+      upgraded = f.create(); const next = upgraded.catalog()[0]!;
+      expect(next.allowPendingContinuation).toBe(true); expect(next.enrollmentDigest).not.toBe(original.enrollmentDigest);
+      expect(upgraded.readiness(next.id)).toMatchObject({ status: 'blocked', action: 'none', reasons: ['graph-evidence-unavailable'] });
+      expect(() => upgraded!.launch({ enrollmentId: next.id, expectedEnrollmentDigest: original.enrollmentDigest })).toThrow('enrollment changed');
+      expect(() => upgraded!.launch({ enrollmentId: next.id, expectedEnrollmentDigest: next.enrollmentDigest })).toThrow('graph-evidence-unavailable');
+      expect(canonical(readControlGraph(f.graphRoot))).toBe(saved); expect(f.run).not.toHaveBeenCalled();
+    } finally { await upgraded?.close(); await owner.close(); await f.supervisor.close(); }
+  });
+
   it('shares the exact prepared enrollment identity with startup without publishing graph records', async () => {
     const f = await ownerFixture(); const owner = f.create();
     try {

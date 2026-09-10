@@ -42,6 +42,18 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); rmSync(base, { recursive: true, force: true }); });
 
 describe('firm engineering CLI boundary', () => {
+  it('discloses opted-in continuation during check without executing it or adding policy to legacy output', async () => {
+    expect(await cmdUniverseFirmEngineering(args('--check', '--json'))).toBe(0);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).not.toHaveProperty('allowPendingContinuation');
+    output.mockClear();
+    (enrollment.host as Record<string, unknown>).allowPendingContinuation = true; save();
+    expect(await cmdUniverseFirmEngineering(args('--check', '--json'))).toBe(0);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({ allowPendingContinuation: true,
+      enrollmentDigest: digest(canonical(enrollment)), effectsExecuted: false, providerContacted: false });
+    expect(core.run).not.toHaveBeenCalled(); expect(readdirSync(root)).toEqual([]);
+    output.mockClear(); expect(await cmdUniverseFirmEngineering(args('--check'))).toBe(0);
+    expect(output.mock.calls[0]![0]).toContain('may execute declared pending campaigns');
+  });
   it('checks real private JSON without executing graph/evaluator/provider work or creating state', async () => {
     const signals = [process.listenerCount('SIGINT'), process.listenerCount('SIGTERM')];
     const before = readdirSync(base); expect(await cmdUniverseFirmEngineering(args('--check', '--json'))).toBe(0);

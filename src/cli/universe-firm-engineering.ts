@@ -23,13 +23,18 @@ host fields: nodeId, root (Universe store, NOT the graph directory),
 constitutionVersion, policyEpoch, definition (existing campaign portfolio),
 deliveryPlan, resourceRuntime (private file), expectedRuntimeDigest (canonical
 validated runtime SHA-256). File must be owner-only 0600 in a private directory.
+Optional host.allowPendingContinuation: true pins effectful continuation into a
+NEW enrollment. Omit it to retain receipt-only recovery; existing enrollments
+cannot be upgraded by changing this field.
 The expected digest pins configuration, not authority or correctness.
 
 SIGINT/SIGTERM and existing KILL controls stop new effects and await settlement.
 Repeating a completed graph reads its signed result without another dispatch.
-Unresolved graph intents remain held unless exact completed child evidence can be
-reconciled read-only within the original graph deadline and stop controls. Recovery
-does not rerun a controller or provider. Do not use a new ID to replay uncertain work.
+By default, recovery only acknowledges exact completed child evidence within the
+original deadlines and stop controls; it does not rerun a provider. An enrollment
+with allowPendingContinuation: true can also run its declared, never-started
+campaigns after proven recovery, using the existing shared resource ledger.
+Uncertain or previously started work remains held. Do not use a new ID to replay it.
 The first execution requires a NEW controller ID; preexisting controllers cannot
 be adopted. Existing graph/controller/campaign deadlines are not renewed.
 No merge, checkout, remote push, deployment, account-policy change, resident
@@ -91,9 +96,11 @@ export async function cmdUniverseFirmEngineering(args: string[]): Promise<number
       const result = { schemaVersion: 1, status: 'validated-enrollment', enrollmentDigest,
         graphId: definition.id, bindingDigest: binding.nodeInput.bindingDigest,
         campaigns: enrollment.host.definition.tasks.map((task) => task.campaignId),
+        ...(enrollment.host.allowPendingContinuation === true ? { allowPendingContinuation: true } : {}),
         effectsExecuted: false, providerContacted: false,
         scope: 'Enrollment only; not authentication, capacity, authority, evaluation or delivery acceptance.' };
-      console.log(json ? JSON.stringify(result, null, 2) : `Engineering enrollment validated\nDigest: ${enrollmentDigest}\n${result.scope}`);
+      console.log(json ? JSON.stringify(result, null, 2) : `Engineering enrollment validated\nDigest: ${enrollmentDigest}\n` +
+        `Recovery: ${enrollment.host.allowPendingContinuation ? 'may execute declared pending campaigns' : 'completed evidence only'}\n${result.scope}`);
       return 0;
     }
     const report = await runControlGraph(definition, { root, signal: controller.signal, handlers: { deliver: binding.handler } });

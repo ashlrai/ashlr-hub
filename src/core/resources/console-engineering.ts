@@ -189,6 +189,7 @@ export function prepareResourceConsoleEngineeringEnrollments(options: {
     const summary: ResourceConsoleEngineeringEnrollment = { id: row.id, projectId: row.projectId, graphId: row.graphId,
       enrollmentDigest, objective: campaigns.map((campaign) => campaign.objective).join('\n').slice(0, 1024), campaigns,
       budget: { maxParallel: row.host.definition.maxParallel, maxDurationMs: row.host.definition.maxDurationMs },
+      ...(row.host.allowPendingContinuation === true ? { allowPendingContinuation: true as const } : {}),
       acceptanceScope: 'fixed-evaluator-and-local-branch-only' };
     return { row, binding, definition, definitionDigest, summary, projectIdentity, accountingPoolDigest: poolDigest };
   });
@@ -321,7 +322,8 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
       }
       const reasons = hardBlockers(value, !owned.launch);
       if (active.size >= MAX_ACTIVE) reasons.push('owner-capacity');
-      return reasons.length ? { ...result, reasons } : { ...result, status: 'ready', action: owned.launch ? 'reconcile' : 'launch' };
+      return reasons.length ? { ...result, reasons } : { ...result, status: 'ready',
+        action: owned.launch ? value.summary.allowPendingContinuation ? 'continue' : 'reconcile' : 'launch' };
     } catch { return { ...result, reasons: ['graph-evidence-unavailable'] }; }
   };
   const requireReady = (value: Entry) => {

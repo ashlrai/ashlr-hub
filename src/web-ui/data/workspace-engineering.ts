@@ -39,7 +39,9 @@ export const engineeringReadinessReasons: Record<ReadinessReason, string> = {
 
 /** Validate response identity before a displayed digest can become launch input. */
 function enrollment(v: unknown): v is Enrollment {
-  if (!object(v) || !exact(v, ['id', 'projectId', 'graphId', 'enrollmentDigest', 'objective', 'campaigns', 'budget', 'acceptanceScope']) ||
+  if (!object(v) || !exact(v, ['id', 'projectId', 'graphId', 'enrollmentDigest', 'objective', 'campaigns', 'budget', 'acceptanceScope',
+    ...(Object.hasOwn(v, 'allowPendingContinuation') ? ['allowPendingContinuation'] : [])]) ||
+    Object.hasOwn(v, 'allowPendingContinuation') && v.allowPendingContinuation !== true ||
     !id(v.id) || v.id !== v.id.toLowerCase() || !id(v.projectId) || v.projectId !== v.projectId.toLowerCase() || !id(v.graphId) || !hash(v.enrollmentDigest) || !text(v.objective, 8192) || v.acceptanceScope !== scope ||
     !object(v.budget) || !exact(v.budget, ['maxParallel', 'maxDurationMs']) || !integer(v.budget.maxParallel, 8) || !integer(v.budget.maxDurationMs, 86_400_000) ||
     !Array.isArray(v.campaigns) || v.campaigns.length < 1 || v.campaigns.length > 64) return false;
@@ -109,7 +111,9 @@ export async function readWorkspaceEngineeringReadiness(selected: Enrollment, si
     value.schemaVersion !== 1 || value.enrollmentId !== selected.id || value.enrollmentDigest !== selected.enrollmentDigest ||
     value.scope !== 'local-admission-check-only' || value.effectsExecuted !== false || value.providerContacted !== false ||
     typeof value.sampledAt !== 'string' || !Number.isFinite(Date.parse(value.sampledAt)) || new Date(value.sampledAt).toISOString() !== value.sampledAt ||
-    !['ready', 'blocked', 'not-applicable'].includes(String(value.status)) || !['launch', 'reconcile', 'none'].includes(String(value.action)) ||
+    !['ready', 'blocked', 'not-applicable'].includes(String(value.status)) || !['launch', 'reconcile', 'continue', 'none'].includes(String(value.action)) ||
+    value.action === 'continue' && selected.allowPendingContinuation !== true ||
+    value.action === 'reconcile' && selected.allowPendingContinuation === true ||
     !Array.isArray(value.reasons) || value.reasons.length > Object.keys(engineeringReadinessReasons).length ||
     !value.reasons.every((reason) => typeof reason === 'string' && Object.hasOwn(engineeringReadinessReasons, reason)) ||
     new Set(value.reasons).size !== value.reasons.length ||

@@ -8,8 +8,9 @@ import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
 import { campaignUniverse, readUniverseCampaign } from './campaign-store.js';
 import { readCompletedCampaignDelivery } from './campaign-delivery-recovery.js';
 import { validateUniverseCampaignDeliveryPlan, type UniverseCampaignDeliveryPlan } from './campaign-delivery.js';
-import type { ControlGraphHandlerRegistration, ControlHandlerContext, ControlHandlerResult, ControlGraphRecoveryHandler } from './control-graph.js';
-import { readUniversePortfolioController, runUniversePortfolioController } from './portfolio-controller.js';
+import type { ControlGraphHandlerRegistration, ControlHandlerContext, ControlHandlerResult, ControlGraphRecoveryHandler, ControlGraphContinuationHandler } from './control-graph.js';
+import { readGraphContinuationAuthority } from './control-graph.js';
+import { readUniversePortfolioController, runUniversePortfolioController, continueGraphOwnedPortfolioController } from './portfolio-controller.js';
 import { foldPortfolioController, portfolioControllerDirectory, readPortfolioControllerEvents,
   validatePortfolioControllerGraphDispatch } from './portfolio-controller-store.js';
 import type { UniversePortfolioControllerReport, PortfolioControllerGraphDispatch } from './portfolio-controller-types.js';
@@ -27,6 +28,8 @@ export interface FirmEngineeringControlHost {
   deliveryPlan: UniverseCampaignDeliveryPlan;
   resourceRuntime: string;
   expectedRuntimeDigest: string;
+  /** Included in the host binding; absent enrollments remain receipt-only. */
+  allowPendingContinuation?: true;
 }
 export interface FirmEngineeringControlBinding {
   handler: Readonly<Extract<ControlGraphHandlerRegistration, { effectClass: 'engineering-portfolio-local-delivery' }>>;
@@ -34,6 +37,7 @@ export interface FirmEngineeringControlBinding {
 }
 const branded = new WeakSet<object>();
 const recoveries = new WeakMap<object, ControlGraphRecoveryHandler>();
+const continuations = new WeakMap<object, ControlGraphContinuationHandler>();
 /** Recognition only; no exported operation can brand a caller-supplied callback. */
 export function isFirmEngineeringControlHandler(value: unknown): boolean {
   return value !== null && typeof value === 'object' && branded.has(value);
@@ -41,6 +45,10 @@ export function isFirmEngineeringControlHandler(value: unknown): boolean {
 /** Internal registry lookup: a copied declaration never inherits recovery code. */
 export function firmEngineeringControlRecovery(value: object): ControlGraphRecoveryHandler | undefined {
   return recoveries.get(value);
+}
+/** Available only on explicitly enrolled factory instances, never copied declarations. */
+export function firmEngineeringControlContinuation(value: object): ControlGraphContinuationHandler | undefined {
+  return continuations.get(value);
 }
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
@@ -91,7 +99,9 @@ function campaignPins(host: FirmEngineeringControlHost, pool: { poolId: string; 
  */
 export function createFirmEngineeringControlHandler(input: FirmEngineeringControlHost): FirmEngineeringControlBinding {
   const host = snapshot<FirmEngineeringControlHost>(input);
-  if (!exact(host, ['nodeId', 'root', 'constitutionVersion', 'policyEpoch', 'definition', 'deliveryPlan', 'resourceRuntime', 'expectedRuntimeDigest']) ||
+  if (!exact(host, ['nodeId', 'root', 'constitutionVersion', 'policyEpoch', 'definition', 'deliveryPlan', 'resourceRuntime', 'expectedRuntimeDigest',
+    ...(Object.hasOwn(host, 'allowPendingContinuation') ? ['allowPendingContinuation'] : [])]) ||
+    Object.hasOwn(host, 'allowPendingContinuation') && host.allowPendingContinuation !== true ||
     typeof host.nodeId !== 'string' || !ID.test(host.nodeId) || !path(host.root) || !path(host.resourceRuntime) ||
     typeof host.expectedRuntimeDigest !== 'string' || !HASH.test(host.expectedRuntimeDigest) ||
     typeof host.constitutionVersion !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(host.constitutionVersion) ||
@@ -153,7 +163,7 @@ export function createFirmEngineeringControlHandler(input: FirmEngineeringContro
   // This proof collector is shared by initial execution and read-only restart
   // recovery. It never invokes the controller, a worker, or Git publication.
   const prove = (report: UniversePortfolioControllerReport, graphDispatch: PortfolioControllerGraphDispatch,
-    stopped: () => boolean, recovered: boolean): ControlHandlerResult => {
+    stopped: () => boolean, recovered: boolean | 'continued'): ControlHandlerResult => {
     const controller = { id: report.controllerId, definitionDigest: report.definitionDigest, sourceState: report.sourceState,
       status: report.status, deadlineAt: report.deadlineAt };
     if (report.sourceState !== 'healthy' || report.status !== 'completed' || report.reasons.length !== 0 ||
@@ -192,7 +202,7 @@ export function createFirmEngineeringControlHandler(input: FirmEngineeringContro
     if (stopped()) return reject('execution-stopped', evidence);
     const result: ControlHandlerResult = { outcome: 'completed', verifier: { id: 'universe-fixed-evaluator', verdict: 'pass', independent: true },
       // Campaign totals include prior work; do not misattribute them to this graph invocation.
-      spend: { unknown: true }, artifact: { ...artifactBase, reason: recovered ? 'engineering-reconciled' : 'engineering-delivered',
+      spend: { unknown: true }, artifact: { ...artifactBase, reason: recovered === 'continued' ? 'engineering-continued' : recovered ? 'engineering-reconciled' : 'engineering-delivered',
         verifiedAccepted: true, ...evidence } };
     if (Buffer.byteLength(canonical(result)) > MAX_RESULT_BYTES) return reject('evidence-too-large', {
       controller, deliveryProofsDigest: digest(canonical(deliveries)), deliveryCount: deliveries.length });
@@ -255,6 +265,31 @@ export function createFirmEngineeringControlHandler(input: FirmEngineeringContro
         report = reconciled;
       }
       const result = prove(report, graphDispatch, stopped, true);
+      return result.outcome === 'completed' ? result : null;
+    } catch { return null; }
+  });
+  if (host.allowPendingContinuation === true) continuations.set(handler, async context => {
+    try {
+      const authority = readGraphContinuationAuthority(context, bindingDigest);
+      if (!authority || canonical(authority.graphDispatch) !== canonical(dispatch(context))) return null;
+      checkEnrollment();
+      const stopped = () => {
+        if (authority.isExecutionStopped()) return true;
+        // Called inside campaign record publication too. Reading that campaign
+        // here would reject our own writer lock. Full campaign pins are checked
+        // before execution, by controller admission, and again before proof.
+        inspectPrivateDirectory(host.root);
+        if (canonical(runtime(host)) !== canonical(pool)) throw new Error('Engineering resource enrollment changed');
+        return authority.isExecutionStopped();
+      };
+      if (stopped()) return null;
+      const report = await continueGraphOwnedPortfolioController(host.definition, {
+        root: host.root, deliveryPlan: host.deliveryPlan, resourceRuntime: host.resourceRuntime,
+        expectedResourceRuntimeDigest: host.expectedRuntimeDigest, isExecutionStopped: stopped,
+      }, context, bindingDigest);
+      if (stopped()) return null;
+      checkEnrollment();
+      const result = prove(report, authority.graphDispatch, stopped, 'continued');
       return result.outcome === 'completed' ? result : null;
     } catch { return null; }
   });

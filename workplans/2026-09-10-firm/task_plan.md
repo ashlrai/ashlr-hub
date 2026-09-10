@@ -68,7 +68,12 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Independently verify real confined evaluation/delivery failure and restart without replaying uncertain work.
 - [x] Preserve unresolved graph acknowledgements and reconcile exact delivered child receipts without repeating effects.
 - [x] Update operator guidance and verify 2,051 selected tests / 113 files, no skips; record local-only commissioning readiness.
-- [ ] Extend graph-owned recovery to untouched pending descendants under the original graph authority, without replaying uncertain work.
+- [x] Extend graph-owned recovery to untouched pending descendants under the original graph authority, without replaying uncertain work.
+- [x] Explore scheduler, graph ownership, enrollment and runnable CLI/console boundaries with three agents.
+- [x] Implement explicitly enrolled pending continuation using the existing controller scheduler and a live graph-owned capability.
+- [x] Wire CLI and console disclosure without changing historical receipt-only enrollment behavior.
+- [x] Verify actual upstream acknowledgement to one downstream request, repeated interruption and stop/drift/capacity refusal.
+- [x] Update docs and run frozen local gates for pending continuation.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 

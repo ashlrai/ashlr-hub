@@ -10,6 +10,7 @@ export interface ResourceConsoleEngineeringEnrollment {
       maxStagnantGenerations: number; maxReportedTokens: number | null };
     budget: { maxTrials: number; maxDurationMs: number; trialTimeoutMs: number; maxParallel: number } }>;
   budget: { maxParallel: number; maxDurationMs: number };
+  allowPendingContinuation?: true;
   acceptanceScope: 'fixed-evaluator-and-local-branch-only';
 }
 
@@ -33,7 +34,7 @@ export interface ResourceConsoleEngineeringReadiness {
   enrollmentDigest: string;
   sampledAt: string;
   status: 'ready' | 'blocked' | 'not-applicable';
-  action: 'launch' | 'reconcile' | 'none';
+  action: 'launch' | 'reconcile' | 'continue' | 'none';
   reasons: ResourceConsoleEngineeringReadinessReason[];
   scope: 'local-admission-check-only';
   effectsExecuted: false;

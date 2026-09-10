@@ -261,7 +261,7 @@ settlement and, for a multi-node API graph, run
 otherwise-ready pending work within the original budget. Inspect first when you
 only want status; do not change IDs or delete history to force a retry.
 
-The concrete engineering adapter performs receipt-only recovery. It does not
+By default, the concrete engineering adapter performs receipt-only recovery. It does not
 call or resume the controller runner, run evaluators, reserve quota, contact providers,
 or publish another branch. It requires all of the following:
 
@@ -298,6 +298,32 @@ failure over completed outcomes, the adapter first rereads the exact persisted
 enrollment and all completed outcomes. Only that fresh proof can preserve an
 unresolved acknowledgement for later recovery; the thrown call or status wrapper
 is never accepted as success. Permanent delivery-proof rejections remain terminal.
+
+#### Continue declared pending campaigns after recovery
+
+For a **new** enrollment, set `host.allowPendingContinuation` to literal `true`
+to permit effectful continuation. The field is pinned in the enrollment and
+factory binding digests. Omitting it preserves receipt-only behavior. Changing
+an existing enrollment cannot upgrade its authority: its stored binding will
+no longer match. `--check` reports the enabled policy without executing it.
+
+Repeat the same execution command and digest to acknowledge proven completed
+work and continue the original plan's never-started campaigns. This can consume
+provider usage and publish the already-declared local branches. The existing
+controller scheduler retains one execution lease across recovery and admission;
+shared quota, account reserves, delivery dependencies, drain, KILL and the
+original controller and graph deadlines still apply. No budget is renewed.
+Uncertain dispatches, held campaigns, changed pins and drifted delivery receipts
+remain held. `dependsOn` gates execution; it does not substitute the upstream
+branch as a downstream campaign's independently pinned seed.
+
+The workspace discloses this policy in the inspector and names the recovery
+action **Continue pending work**, not **Reconcile completed work**. Its local
+readiness check is advisory and never dispatches. Successful continued delivery
+records `reason: "engineering-continued"`. Repeating completed work does not
+repeat its effects. The standalone controller runner still cannot resume a
+graph-linked controller; continuation requires the active graph owner's exact
+live context. This policy installs no resident service or automatic wakeup.
 Do not resume a graph-owned controller through the standalone controller runner:
 execution re-entry is refused even with the exact copied link, because that link
 cannot restore graph ownership or its shorter outer deadline. Read-only

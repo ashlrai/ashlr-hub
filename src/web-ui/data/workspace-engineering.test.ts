@@ -8,6 +8,18 @@ vi.mock('./auth-store.js', () => ({ getMutationToken: vi.fn(), clearMutationToke
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(getMutationToken).mockReturnValue('control-fixture'); });
 
 describe('workspace engineering evidence boundary', () => {
+  it('accepts literal opted-in policy and rejects readiness that mislabels its effects', async () => {
+    const selected = { ...engineeringEnrollment(), allowPendingContinuation: true as const };
+    vi.mocked(apiGet).mockResolvedValue([selected]);
+    await expect(listWorkspaceEngineering()).resolves.toEqual([selected]);
+    const readiness = engineeringReadiness(selected, { action: 'continue' });
+    vi.mocked(apiGet).mockResolvedValue(readiness);
+    await expect(readWorkspaceEngineeringReadiness(selected)).resolves.toEqual(readiness);
+    await expect(readWorkspaceEngineeringReadiness(engineeringEnrollment())).rejects.toThrow('verified');
+    vi.mocked(apiGet).mockResolvedValue({ ...readiness, action: 'reconcile' });
+    await expect(readWorkspaceEngineeringReadiness(selected)).rejects.toThrow('verified');
+    expect(apiPost).not.toHaveBeenCalled();
+  });
   it('reads bounded admission without mutation authority, including blocked and reconciliation states', async () => {
     const row = engineeringEnrollment(); const abort = new AbortController();
     for (const value of [engineeringReadiness(row), engineeringReadiness(row, { action: 'reconcile' }),
@@ -59,7 +71,7 @@ describe('workspace engineering evidence boundary', () => {
     vi.mocked(apiGet).mockResolvedValue({ ...engineeringJob(), ...patch });
     await expect(readWorkspaceEngineering(engineeringEnrollment())).rejects.toThrow('could not be verified');
   });
-  it.each([{ id: '../path' }, { id: 'Uppercase' }, { projectId: 'UPPER' }, { enrollmentDigest: 'not-a-digest' }, { campaigns: [] }, { extra: 'not-supported' }])('rejects malformed catalog identity %j', async (patch) => {
+  it.each([{ id: '../path' }, { id: 'Uppercase' }, { projectId: 'UPPER' }, { enrollmentDigest: 'not-a-digest' }, { campaigns: [] }, { extra: 'not-supported' }, { allowPendingContinuation: false }, { allowPendingContinuation: null }, { allowPendingContinuation: 'true' }])('rejects malformed catalog identity %j', async (patch) => {
     vi.mocked(apiGet).mockResolvedValue([{ ...engineeringEnrollment(), ...patch }]);
     await expect(listWorkspaceEngineering()).rejects.toThrow('could not be verified');
   });

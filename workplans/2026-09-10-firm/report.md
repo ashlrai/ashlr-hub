@@ -1,6 +1,79 @@
 # Verified local handoff
 
-## Current continuation: durable handoff diagnostics and receipt recovery
+## Current continuation: graph-owned pending work
+
+Baseline `a2f9931ec5da1132c5d8cf030b5f6f5a5dcc4f7d`, isolated `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents
+implemented the controller seam, actual process/evaluator acceptance, and cold
+kernel/console tests. Parent integrated the kernel, factory, CLI, console, UI,
+documentation and verification. The original checkout was not changed.
+
+The latest user decision is already supported: retain measured seed context
+across every eligible generation alongside current-parent and latest-trial
+feedback. Independent source review and 16 passing seed-context/model acceptance
+tests confirmed it; scheduling and acceptance rules were not changed.
+
+New host enrollments can explicitly pin `allowPendingContinuation: true`.
+Default/legacy enrollments remain receipt-only and cannot be upgraded by editing
+the file. A kernel-issued live context, bound to the original signed graph
+intent, allows one continuation call per graph invocation and is revoked on
+return or throw. Copied descriptors and standalone linked-controller commands
+remain insufficient. No new scheduler, model retry or quota ledger was added.
+
+The controller keeps one execution lease across exact completed-work
+acknowledgement and admission of untouched pending campaigns. Prerequisite
+campaign and delivery evidence is checked at admission, including current refs;
+it is not continuously revalidated throughout downstream execution. Original
+controller/graph deadlines, shared account reserves, drain and stop controls
+remain effective. Held or uncertain dispatches remain unresolved. Strict existing
+identity is required before record-lock cleanup; unreadable/foreign history is
+not adopted. Dependencies gate execution, not automatic artifact dataflow.
+
+CLI checks disclose the opt-in without effects. The console projects the policy
+and its distinct advisory `continue` action; the UI names the effectful button
+**Continue pending work**, preserves explicit click/unlock checks, and displays
+the policy beside original execution evidence. Existing fonts/layout and theme
+tokens were retained under the frontend-design guidance. Operator documentation
+separates tested continuation from resident automation and live activation.
+
+Independent actual acceptance: **5/5 passed**, zero skips (132.64 s), using
+private Git fixtures, loopback workers and the real confined evaluator. The
+upstream-delivery interruption path finishes with exactly **2 worker requests,
+4 evaluations and 2 ref publications**; the first artifact, original graph
+intent and both deadlines remain unchanged. A separate real CLI child is killed
+after A's durable settlement, then the same private enrollment continues B once;
+completed replay produces no repeated effects. Default-disabled, uncertain B
+intent, actual shared task-cap refusal/bounded cancellation, KILL, ownership,
+runtime/ref drift and drain/resume cases also pass.
+
+Other local checks: full web **1,248/75 files**; selected graph/CLI/console
+regression **145/7 files**; seed-context acceptance **16/2 files**;
+existing engineering adapter **21/1 file** (112.33 s); independent
+kernel capability **15/1 file**; controller focused **47/3 files** and existing
+compatibility **112/4 files**. These groups overlap in controller reconciliation;
+they are not an aggregate test count or the entire repository suite. Source/web
+and all five changed core-test strict typechecks pass. Full lint has zero errors
+and 107 existing warnings; real-I/O registration passes (292 real-I/O, 664 unit
+files). Documentation links pass with no external requests.
+The production build and all five compiled structural `verify-safety` checks
+pass. Build identity is recorded in `dist/build-identity.json`; a local artifact
+does not imply a remote deployment or active provider connection.
+
+The actual acceptance test found a reentrant parent stop check reading B's
+campaign while B held its writer lock. The fix keeps writer-safe live authority
+and runtime checks inside that callback, with full campaign checks before and
+after execution and existing controller admission checks intact. The reproduced
+failure passes after correction. Initial test-only double-spy recursion and
+pre-registration lane selection were corrected; an initially mistyped regression
+filename selected no test and was rerun separately using its actual path.
+
+This is local implementation and fixture acceptance, not an activated 24/7
+company. No live provider/account calls, reserve changes, global KILL removal,
+resident service, GitHub Actions, public deployment, npm publication or remote
+push occurred. The remaining operator milestone is an explicitly enrolled
+resident caller, evaluated through real-account commissioning separately.
+
+## Previous continuation: durable handoff diagnostics and receipt recovery
 
 Baseline `49206a87ec19b34861e5bb63a16af7e8b92b26fa`, isolated `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents

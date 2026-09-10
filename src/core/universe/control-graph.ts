@@ -7,7 +7,7 @@ import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStore
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
 import { signDecisionTraceV1, verifyDecisionTraceV1, type DecisionTraceV1, type DecisionTraceKeyOptions } from './decision-trace.js';
-import { isFirmEngineeringControlHandler, firmEngineeringControlRecovery } from './firm-engineering-control-handler.js';
+import { isFirmEngineeringControlHandler, firmEngineeringControlRecovery, firmEngineeringControlContinuation } from './firm-engineering-control-handler.js';
 import type { PortfolioControllerGraphDispatch } from './portfolio-controller-types.js';
 
 export const CONTROL_NODE_KINDS = ['plan', 'explore', 'implement', 'verify', 'critic', 'integrate', 'weigh', 'mutate-harness', 'sweep', 'invent', 'talk', 'deliver'] as const;
@@ -31,6 +31,23 @@ export interface ControlHandlerResult {
 export type ControlGraphHandler = (context: ControlHandlerContext) => Promise<ControlHandlerResult>;
 /** Receipt-only synchronous proof collection, never dispatch or controller resume. */
 export type ControlGraphRecoveryHandler = (context: ControlHandlerContext) => ControlHandlerResult | null;
+/** Separately enrolled execution of untouched child work, never replay of graph intent. */
+export type ControlGraphContinuationHandler = (context: ControlHandlerContext) => Promise<ControlHandlerResult | null>;
+export interface GraphContinuationAuthority {
+  readonly graphDispatch: Readonly<PortfolioControllerGraphDispatch>;
+  readonly signal: AbortSignal;
+  readonly deadlineMonotonicMs: number;
+  readonly isExecutionStopped: () => boolean;
+}
+const continuationAuthorities = new WeakMap<object, { bindingDigest: string; authority: GraphContinuationAuthority }>();
+/** Internal live-context lookup. Neither copied JSON nor a retained context grants execution. */
+export function readGraphContinuationAuthority(context: unknown, bindingDigest: string): GraphContinuationAuthority | null {
+  if (context === null || typeof context !== 'object') return null;
+  const entry = continuationAuthorities.get(context);
+  if (!entry || entry.bindingDigest !== bindingDigest) return null;
+  try { return entry.authority.isExecutionStopped() ? null : entry.authority; }
+  catch { return null; }
+}
 /** Trusted host declaration, not an effect permit or model-authored authority. */
 export type ControlHandlerExecution = { constitutionVersion: string; policyEpoch: number; bindingDigest: string } &
   ({ effectClass: 'resource-completion' } | { effectClass: 'engineering-portfolio-local-delivery' });
@@ -74,14 +91,15 @@ function executionMetadata(value: unknown): ControlHandlerExecution {
   return row;
 }
 function registration(value: ControlGraphHandlerRegistration): { run: ControlGraphHandler; execution?: ControlHandlerExecution;
-  engineeringDelivery?: true; recover?: ControlGraphRecoveryHandler } {
+  engineeringDelivery?: true; recover?: ControlGraphRecoveryHandler; continuePending?: ControlGraphContinuationHandler } {
   if (typeof value === 'function') return { run: value };
   if (!exact(value, ['run', 'effectClass', 'constitutionVersion', 'policyEpoch', 'bindingDigest']) ||
     Object.keys(value).some((key) => !Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value')) ||
     typeof value.run !== 'function') throw new Error('Invalid graph handler registration');
   const { run, ...metadata } = value;
   return { run, execution: executionMetadata(metadata),
-    ...(isFirmEngineeringControlHandler(value) ? { engineeringDelivery: true as const, recover: firmEngineeringControlRecovery(value) } : {}) };
+    ...(isFirmEngineeringControlHandler(value) ? { engineeringDelivery: true as const, recover: firmEngineeringControlRecovery(value),
+      continuePending: firmEngineeringControlContinuation(value) } : {}) };
 }
 function assertExecutionTrace(trace: DecisionTraceV1, execution?: ControlHandlerExecution): void {
   if (trace.authority.effectClass !== (execution?.effectClass ?? 'simulate') ||
@@ -308,8 +326,8 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
         (execution || Object.hasOwn(result, 'outcome')) && !['completed', 'rejected'].includes(result.outcome!)) throw new Error('Invalid handler result');
       return result;
     };
-    // One receipt-only pass per invocation. Failure stays unresolved; it cannot
-    // turn into a new intent, controller invocation, or provider reservation.
+    // Preserve receipt-only recovery first. Only explicitly bound handlers can
+    // then continue untouched child work, once per invocation, under this intent.
     for (const node of definition.nodes) {
       if (stop() || !own()) break;
       const prior = state.states.get(node.id)!;
@@ -321,7 +339,18 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
         reasons.add(`${node.id}:recovery-binding-mismatch`); continue;
       }
       try {
-        const output = handler.recover(context(node));
+        let output = handler.recover(context(node));
+        if (output === null && handler.continuePending && !stop() && own()) {
+          const current = context(node);
+          const authority: GraphContinuationAuthority = Object.freeze({
+            graphDispatch: Object.freeze({ ...current.graphDispatch! }), signal: controller.signal,
+            deadlineMonotonicMs: current.deadlineMonotonicMs!,
+            isExecutionStopped: () => continuationAuthorities.get(current)?.authority !== authority || stop() || !own(),
+          });
+          continuationAuthorities.set(current, { bindingDigest: handler.execution!.bindingDigest, authority });
+          try { output = await handler.continuePending(current); }
+          finally { continuationAuthorities.delete(current); }
+        }
         if (output === null) { reasons.add(`${node.id}:recovery-evidence-unavailable`); continue; }
         const result = handlerResult(output, prior.execution);
         if (result.outcome !== 'completed' || result.verifier?.verdict !== 'pass' || !result.verifier.independent) {

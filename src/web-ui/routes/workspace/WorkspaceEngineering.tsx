@@ -96,8 +96,9 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
   const currentJob = job?.enrollmentId === selected?.id && job?.enrollmentDigest === selected?.enrollmentDigest ? job : null;
   const currentReadiness = readiness?.enrollmentId === selected?.id && readiness?.enrollmentDigest === selected?.enrollmentDigest ? readiness : null;
   const reconcile = currentJob?.state === 'incomplete';
+  const continuePending = selected?.allowPendingContinuation === true;
   const launchable = available && canStart && !catalogError && !readError && !readinessError && !actionError && !busy && !loading &&
-    currentReadiness?.status === 'ready' && currentReadiness.action === (reconcile ? 'reconcile' : 'launch') &&
+    currentReadiness?.status === 'ready' && currentReadiness.action === (reconcile ? continuePending ? 'continue' : 'reconcile' : 'launch') &&
     currentJob && !currentJob.cancelled && (currentJob.state === 'ready' || reconcile && currentJob.nodes.some((n) => n.state === 'unresolved') && currentJob.nodes.every((n) => n.state !== 'pending'));
 
   async function act(action: 'start' | 'cancel') {
@@ -139,7 +140,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
       <section className={styles.admission} aria-label="Local launch checks">
         <div className={styles.admissionHeading}><h3>Before this plan runs</h3>
           <StatusBadge status={!available ? 'Connection unavailable' : readinessError ? 'Check unavailable' : !currentReadiness ? 'Checking local admission' :
-            currentReadiness.status === 'ready' ? currentReadiness.action === 'reconcile' ? 'Reconciliation checks passed' : 'Local checks passed' :
+            currentReadiness.status === 'ready' ? currentReadiness.action === 'continue' ? 'Continuation checks passed' : currentReadiness.action === 'reconcile' ? 'Reconciliation checks passed' : 'Local checks passed' :
               currentReadiness.status === 'blocked' ? 'Launch held' : 'No new launch'}
           tone={!available || readinessError || !currentReadiness ? 'unknown' : currentReadiness.status === 'ready' ? 'success' : currentReadiness.status === 'blocked' ? 'warning' : 'neutral'} />
         </div>
@@ -167,16 +168,17 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
         <aside className={styles.inspector} aria-label="Engineering evidence inspector"><h3>Execution evidence</h3>
           <dl className={styles.facts}><div><dt>Graph</dt><dd><code>{selected.graphId}</code></dd></div><div><dt>Original deadline</dt><dd>{currentJob?.deadlineAt ? resourceTime(currentJob.deadlineAt) : 'Not established'}</dd></div>
             <div><dt>Source</dt><dd>{currentJob?.sourceState ?? 'Not read'}</dd></div><div><dt>Durable stop</dt><dd>{currentJob?.cancelled ? 'Recorded' : 'Not recorded'}</dd></div></dl>
+          <p><strong>Recovery policy: </strong>{continuePending ? 'May execute declared pending campaigns after verified recovery, within original limits.' : 'Completed evidence only; pending work stays held after interruption.'}</p>
           {currentJob?.nodes.length ? <ul className={styles.receipts} aria-label="Signed graph nodes">{currentJob.nodes.map((node) => <li key={node.id}><strong>{node.id}</strong><StatusBadge status={node.state} tone={node.state === 'completed' ? 'success' : node.state === 'unresolved' ? 'warning' : 'neutral'} />
             {node.artifactDigest ? <details><summary>Artifact digest</summary><code>{node.artifactDigest}</code></details> : <p>No recorded artifact.</p>}</li>)}</ul> : <p>No graph artifact recorded yet.</p>}
           {currentJob?.reasons.length ? <ul className={styles.reasons}>{currentJob.reasons.map((reason, i) => <li key={`${i}:${reason}`}>{resourceReason(reason)}</li>)}</ul> : null}
           <details className={styles.identity}><summary>Enrollment identity</summary><p>Objective summaries may be shortened. This digest binds the full enrolled definitions.</p><code>{selected.enrollmentDigest}</code>{currentJob?.definitionDigest ? <><p>Graph definition</p><code>{currentJob.definitionDigest}</code></> : null}</details>
           <p className={styles.scope}>Acceptance scope: fixed evaluator and local branch only. Recorded evidence is not a deployment or proof that a branch has not changed since delivery.</p>
         </aside></div>
-      <footer className={styles.controls}><div><strong>{reconcile ? 'Recover evidence, not repeat work.' : 'One plan. One shared resource ledger.'}</strong>
-        <p>{reconcile ? 'Only exact completed-child proof can reconcile this graph, within its original deadline. Unfinished work stays held.' : 'Uses enrolled workers under existing quota and account-reserve policies. No accounts are connected by this action.'}</p></div>
+      <footer className={styles.controls}><div><strong>{reconcile ? continuePending ? 'Recover delivery. Continue pending work.' : 'Recover evidence, not repeat work.' : 'One plan. One shared resource ledger.'}</strong>
+        <p>{reconcile ? continuePending ? 'May start never-started campaigns using enrolled workers and shared quota after verifying completed work. Original deadlines and account reserves still apply; uncertain work stays held.' : 'Only exact completed-child proof can reconcile this graph, within its original deadline. Unfinished work stays held.' : 'Uses enrolled workers under existing quota and account-reserve policies. No accounts are connected by this action.'}</p></div>
         <div className={styles.actions}><button type="button" className={styles.button} disabled={!canStop || !currentJob?.cancellable || busy} onClick={() => { void act('cancel'); }}>{unlocked ? 'Stop engineering run' : 'Unlock to stop'}</button>
-          <button type="button" className={styles.primary} disabled={!launchable} onClick={() => { void act('start'); }}>{busy ? 'Submitting…' : unlocked ? reconcile ? 'Reconcile completed work' : 'Run enrolled plan' : 'Unlock to run'}</button></div></footer>
+          <button type="button" className={styles.primary} disabled={!launchable} onClick={() => { void act('start'); }}>{busy ? 'Submitting…' : unlocked ? reconcile ? continuePending ? 'Continue pending work' : 'Reconcile completed work' : 'Run enrolled plan' : 'Unlock to run'}</button></div></footer>
       {loading ? <p role="status" className={styles.message}>Reading graph evidence…</p> : null}
       {readError || actionError ? <p role="alert" className={styles.error}>{actionError ?? readError}</p> : null}
       {notice ? <p role="status" className={styles.message}>{notice}</p> : null}
