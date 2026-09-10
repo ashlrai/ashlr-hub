@@ -46,6 +46,13 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Implement standalone commissioning inspection and explicit CLI.
 - [x] Prove read-only behavior against real filesystem/history and subprocess fixtures.
 - [x] Verify compatibility and document the next actual Hub commissioning step.
+- [x] Independently map a real Hub work-selection campaign and fixed evaluator contract.
+- [x] Build and pin the independent evaluator before candidate implementation.
+- [x] Implement the scoped candidate on the evaluator-pinned baseline.
+- [x] Add opt-in delivery of a first passing repair against a measured failing exact seed, including restart and final-effect verification.
+- [x] Verify a full-Hub-seed graph, fixed evaluation and exact local branch delivery.
+- [x] Run frozen integrated regressions, build and record exact local release evidence.
+- [x] Document the reusable campaign and remaining live commissioning requirements.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -58,6 +65,15 @@ existing activation, provenance, evaluation and resource invariants.
   digest-bearing edges. Never invent terminal states to satisfy a count.
 
 ## Errors
+Real Hub campaign continuation: three diagnostic full-source runs correctly
+rejected delivery despite a passing repair. The first actual seed evaluation
+failed (82/142 cases); an evaluator edit was refused without a score; the third
+candidate passed (142/142). Existing delivery required a prior passing parent,
+so the healthy completed campaign remained `delivery-withheld`. Preserve the
+fixed evaluator and null parent/delta; add only an explicit evidence-backed
+initial-repair policy. Independent review also required rechecking baseline
+artifact bytes at final Git effects, not just at initial eligibility.
+
 Commissioning continuation: review caught a 1 MiB serializer cap imposed on valid
 4 MiB supervisor history; restored the store-specific limit and reran escaped
 history regressions. Fixed a project-binding type mismatch, fixture setup missing
@@ -96,6 +112,18 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Current continuation from `1a57744bd43ea5668f469bd8eaa394808a7f9bea`:
+first real Hub source campaign. Three agents independently own evaluator,
+candidate investigation and full-repository acceptance. The evaluator is fixed
+before candidate authoring, and the only mutable file is
+`src/core/portfolio/value-filter.ts`. Scope is marker-item path consistency for
+historical/custom backlog input, not a claim fresh scanner output wastes usage:
+the scanner already uses the raw-path filter. Existing classification policy and
+security/breaking overrides remain unchanged. VM isolation is for measurement,
+not a security sandbox; use the existing confined Universe evaluator. Host KILL,
+real accounts and production services remain unchanged during fixture acceptance.
+
+Previous completed continuation:
 Current continuation from `487d9ad67a430513071ddec700c03a9ffb95ddf6`:
 completed standalone commissioning increment. Frozen regression recorded 4,401
 passes and five existing skips; strict changed-test typechecking and the final

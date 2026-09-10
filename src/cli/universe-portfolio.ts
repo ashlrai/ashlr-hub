@@ -31,7 +31,10 @@ or production acceptance occurs in either mode. Only run accepts --delivery-plan
 an explicit owner-only (0600) regular JSON file in a private directory (at most
 64 KiB), with schemaVersion:1 and deliveries
 containing campaignId, branch (codex/...) and baseCommit (full pinned seed commit).
-Every planned handoff must deliver a strict measured improvement to a local Git
+Optional allowInitialRepair:true requires an earlier measured failed exact seed
+in the same campaign/niche and a changed passing repair with positive improvement.
+Omission keeps prior-passing-elite delivery; other flag values are invalid.
+Every planned handoff must deliver a measured improvement to a local Git
 branch before its dependent campaigns start. Withheld or failed delivery holds
 dependants; independent work may proceed. Completed campaigns can deliver without
 rerunning; matching receipts are reused on retry. No artifact transfer is implied.

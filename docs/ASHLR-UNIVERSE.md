@@ -1135,8 +1135,18 @@ Only a passing, retained artifact with strictly positive measured improvement
 and changed bytes is eligible for a new branch. Each configured outcome adds a
 `delivery` field: `delivered` includes the evidence-bound receipt; `withheld`
 explains cancellation, incomplete work, an unattempted handoff or no strict improvement; `failed`
-requires inspection. An initial admission or unchanged passing trial is not a
-delivered improvement. `attempted` continues to mean campaign execution, so a
+requires inspection. By default an initial admission is not a delivered
+improvement; unchanged passing trials never qualify. A plan target may opt in
+with `allowInitialRepair: true`: an earlier completed step of the same campaign
+must contain a valid failed evaluation of the byte-identical pinned seed in
+the same niche, and the changed passing artifact must improve that finite score
+by a positive amount meeting `minImprovement`. Operational failures without
+measurement, missing or changed baseline artifacts, and unrelated campaigns
+cannot supply that proof. The first elite retains its `null` parent/delta;
+delivery eligibility does not rewrite archive lineage. This mode neither runs a
+baseline automatically nor expands budgets. Only literal `true` or omission is
+valid. The opt-in is pinned in controller/graph enrollment and must also be
+present for recovery. `attempted` continues to mean campaign execution, so a
 successful delivery-only replay reports `attempted: false`.
 
 Repeat the same queue and plan after an interrupted handoff. Existing immutable
@@ -2194,7 +2204,7 @@ reserves; a delivery plan does not supply credentials or additional usage.
 The runtime validates all targets before dispatch: campaign identity, pinned
 seed base, and duplicate repository/branch assignments. For a planned handoff,
 campaign completion alone is insufficient. The existing delivery helper must
-retain a strict measured improvement and record its local Git branch receipt
+retain a measured improvement under the declared delivery policy and record its local Git branch receipt
 before new downstream work starts. This gate also applies through an
 already-completed intermediate campaign. Historical completion is preserved;
 it does not bypass a pending ancestor delivery. Independent branches may proceed.

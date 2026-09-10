@@ -61,6 +61,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-firm-memory.test.ts', // private immutable daily journals and consolidation CAS
   'test/universe-showcase-cli.test.ts', // private demo source/export custody and CLI subprocesses
   'test/universe-campaign-delivery.test.ts', // actual campaign evaluation and local Git branch delivery
+  'test/universe-campaign-initial-repair-delivery.test.ts', // measured failed seed, local repair branch and custody/recovery checks
   'test/m11.stream-file-sink.test.ts', // thousands of real sink writes and reads across secret boundaries
   'test/m442.runtime-release-launch-revalidation.test.ts', // large dependency fixtures, permissions and recursive cleanup
   'test/m444.external-skill-audit.test.ts', // large real audit trees and recursive cleanup
@@ -100,6 +101,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-engineering-inspect.test.ts', // read-only commissioning through real CLI, Git and history fixtures
   'test/resource-console-state-inspection.test.ts', // strict persisted-state decoding and pinned-directory previews
   'test/universe-backlog-marker-evaluator.test.ts', // real bounded Node evaluator processes over fixed source cases
+  'test/universe-hub-marker-campaign.test.ts', // full pinned Hub seed, confined evaluator and exact local Git delivery
   'test/resource-console-engineering-routes.test.ts', // actual HTTP auth and lifecycle with inert engineering owner
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership

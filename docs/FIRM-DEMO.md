@@ -146,7 +146,7 @@ The source-build `universe firm engineer` command connects a signed `deliver`
 node to the existing restartable portfolio controller. It does not introduce a
 second scheduler or resource ledger. The controller runs existing campaigns,
 applies declared file operations in confined candidates, uses the pinned fixed
-evaluator, and delivers strict measured improvements to explicit local branches.
+evaluator, and delivers measured improvements to explicit local branches.
 All tasks in this enrollment must have delivery targets; dependency ordering
 waits for their planned handoffs.
 
@@ -177,7 +177,7 @@ An owner-controlled `0600` JSON file in a private directory contains exactly
 | `root` | Existing private Universe store; not the graph directory |
 | `constitutionVersion`, `policyEpoch` | Host policy metadata, not an activation permit |
 | `definition` | Existing portfolio definition with explicit campaign IDs, dependencies, concurrency and duration |
-| `deliveryPlan` | Existing `schemaVersion: 1` plan: one campaign ID, new `codex/` branch and exact seed `baseCommit` per task |
+| `deliveryPlan` | `schemaVersion: 1` plan: one campaign ID, new `codex/` branch and exact seed `baseCommit` per task; optional `allowInitialRepair: true` requires the measured failing-seed proof below |
 | `resourceRuntime` | Explicit private canonical runtime file |
 | `expectedRuntimeDigest` | SHA-256 of the canonical validated runtime JSON; not a hash of raw file formatting |
 
@@ -223,10 +223,22 @@ supplying an arbitrary callback does not unlock delivery or other guarded kinds.
    `verifiedAccepted: true` means **fixed-evaluator and local-branch acceptance
    only**, not general correctness, human acceptance or production deployment.
 
-A passing first candidate establishes a baseline but has no measured improvement
-delta. An unchanged or merely passing candidate cannot satisfy strict-improvement
-delivery. A later changed, passing improvement over an accepted parent is needed.
-Keep this distinction when setting campaign budgets. Graph-level spend remains
+A passing first candidate establishes an archive baseline but has no parent or
+archive improvement delta. By default, delivery requires a later changed, passing
+improvement over an accepted parent. A delivery-plan target may explicitly set
+`allowInitialRepair: true` to deliver that first passing repair **only** when an
+earlier completed step of the same campaign evaluated the unchanged seed, failed
+with a valid finite score, and provides positive improvement in the same niche
+meeting the fixed metric threshold. Its archived bytes must still equal the
+pinned seed. Unmeasured failures, unchanged successes and arbitrary first passes
+do not qualify. The first repair's parent and archive delta remain `null`;
+eligibility is a separate proof, not rewritten lineage. Restart inspection
+requires the same opt-in and intact evidence. Omitting the field retains the
+default; `false`, `null` and other values are invalid.
+
+This mode consumes existing baseline evidence; it does not automatically run a
+seed evaluation or add requests. Keep the baseline evaluation inside campaign
+budgets. Graph-level spend remains
 unknown because campaign totals can include prior work; underlying resource
 receipts retain reported usage where available.
 
@@ -271,6 +283,80 @@ After expiry or under KILL, use read-only graph/controller inspection; recovery
 does not write a settlement or unlock descendants. Graph and campaign allowances
 are never renewed by re-entry. Recovering interrupted child work that has not
 durably completed is a separate workflow, not an automatic retry here.
+
+### A real Hub source campaign
+
+The first fixed Hub-code evaluator is
+[`scripts/evaluators/backlog-marker-paths.mjs`](../scripts/evaluators/backlog-marker-paths.mjs).
+This recipe requires the full source checkout; the evaluator and acceptance
+fixture are not shipped in the npm package.
+It measures marker-item path classification against 142 fixed cases. The raw
+scanner already filters non-code paths; this campaign repairs the shared item
+filter used for historical/custom backlog input. It does not introduce a new
+work-selection policy or claim measured subscription savings.
+
+The evaluator was committed before the candidate at
+`9bf75b598fbfc6a5b7ec289a2d3419b1a18469b8`. Use that full seed revision to
+reproduce the baseline: 82 cases pass and 60 fail, producing `passed: false`
+and score `0`. All 142 cases must pass for score `1`; an unchanged candidate
+cannot meet this objective. Security/breaking-change exceptions and ordinary
+source work are part of the fixed comparison, not optional follow-up checks.
+
+The automated acceptance uses a deterministic loopback worker supplying the
+independently reviewed source from
+`e2e4e33d588a63d36d81ed23e50adb18b197b8df`. It verifies resource-accounted
+application, evaluation and local delivery of that exact candidate, not real-model
+ideation or provider commissioning. Both pinned commits must be available in
+local Git history; a shallow checkout may need its history populated first.
+
+To prepare this campaign through the existing manifest/campaign interfaces:
+
+- Pin the canonical Hub repository path and full seed revision above. Preserve
+  the commit in local Git history; never substitute the current checkout when
+  reproducing the historical baseline.
+- Set `evaluation.command` to the canonical Node executable followed by
+  `--experimental-vm-modules`, `--no-warnings`, and
+  `scripts/evaluators/backlog-marker-paths.mjs`. The tested runtime is Node 24.
+  Use a bounded evaluator timeout, such as 5,000 ms. Universe runs the script
+  from the immutable seed and supplies `ASHLR_UNIVERSE_CANDIDATE`; the script
+  never defaults to the current directory.
+- Use one `resource-pool` variant with the existing pool ID, canonical
+  pool/bindings digest and explicit allowed worker IDs. The only mutable file
+  is `src/core/portfolio/value-filter.ts`. Enable `fileOperations` schema 1;
+  keep the evaluator and all tests outside the mutable scope.
+- Use the existing maximize metric with minimum improvement `0`. Keep explicit
+  trial, generation, request, time and reported-token limits. Three requests
+  and one concurrent generation are sufficient for the controlled acceptance
+  sequence; they are not a forecast of how many requests a real model needs.
+  An observed-token threshold is not a hard provider spend cap.
+- Bind the campaign to the registered Hub project, its same shared accounting
+  runtime, a separate sterile transport workspace, and a new explicit local
+  `codex/` delivery branch whose base commit is the seed revision. Do not enroll
+  additional accounts or replace ledger history to make the campaign admissible.
+- Set that delivery target's `allowInitialRepair` to `true`, and ensure an
+  earlier completed generation actually evaluates the unchanged seed in the
+  same campaign. The controlled acceptance sequence is unchanged seed (failed
+  evaluation), attempted evaluator edit (refused without measurement), then the
+  changed repair (all fixed cases passing). A real model response is not
+  guaranteed to follow this sequence. No initial delivery is allowed without
+  the recorded, byte-verified failing-seed measurement.
+
+Run the [standalone commissioning check](RESOURCE-POOLS.md#check-engineering-configuration-without-starting-the-fleet)
+before starting the console, then use the enrolled engineering execution path
+above. Real execution can consume the selected account allowance and create a
+local branch; it still requires the intended enrollment, budgets and effective
+stop policy. Inspect the graph, evaluated artifact and exact delivered diff
+before integrating it. This recipe does not clear KILL, change reserves, create
+credentials, push a branch or start a resident scheduler.
+
+The evaluator uses a timeout-bounded VM for measurement isolation, with expected
+results and the final verdict held outside candidate code. It accepts only
+synchronous boolean classifications, rejects runtime imports, and bounds source
+size and both synchronous and asynchronous evaluation. **The VM is not a security
+sandbox.** Continue to use Universe's existing OS-confined fixed evaluator.
+The documented Node/flag contract is required; unsupported runtimes may fail
+before the JSON protocol. A passing finite case matrix is evidence for this
+specific behavior, not independent business acceptance or general intelligence.
 
 ### What signatures establish
 

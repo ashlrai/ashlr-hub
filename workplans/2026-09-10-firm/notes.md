@@ -1,5 +1,50 @@
 # Firm build notes
 
+## September 10: measured initial Hub repair
+
+- Independent evaluator committed first at `9bf75b59`; actual source baseline
+  passes 82/142 fixed cases and fails 60. Candidate `e2e4e33d` changes only the
+  marker-title path extraction and adds 75 focused regressions. The raw scanner
+  already filters non-code paths: scope is shared historical/custom WorkItems,
+  not proven fresh-scanner leakage or measured token savings.
+- Real full-Hub-seed fixture initially reached the passing repair but withheld
+  delivery in three diagnostic runs. A first selected elite correctly has null
+  parent/delta; old campaign delivery required a prior passing parent. Do not
+  invent lineage or weaken the frozen evaluator to get a delivery receipt.
+- `allowInitialRepair: true` explicitly permits a positive finite improvement
+  against an earlier valid failed evaluation of the exact unchanged seed in the
+  same campaign/niche. Reuse immutable campaign/run/step/comparator identities;
+  verify baseline bytes at final Git effect checks and during read-only recovery.
+  Default delivery policy is unchanged. The mode consumes recorded evidence and
+  does not introduce an automatic baseline-evaluation request.
+- The helper has 47 pure tests; independent delivery review adds 14 actual local
+  campaign/Git tests including tamper inside the prepared ref transaction. An
+  early fixture run hit the default unit timeout before real-I/O classification;
+  no production budget was raised. Strict changed-test typecheck found a wrong
+  `universePath` import in full-Hub acceptance; that test-only import was corrected
+  after its in-flight run finished, then typechecked before one clean rerun.
+- Controlled worker proposals are baseline bytes, an evaluator edit that must
+  be refused, and the exact already-reviewed candidate blob. Their loopback
+  usage counts are fixtures, not provider telemetry or autonomous ideation.
+- Keep both evaluator and candidate commits in integration ancestry, not only
+  cherry-picked source, so full-history clones can reproduce immutable pins.
+- Host KILL remains active/healthy. No actual provider requests, account policy
+  changes, history migration, persistent activation, Actions or remote release.
+
+### Next-step exploration (proposal, not implemented)
+
+An immutable opt-in campaign seed-measurement phase could use the existing
+execution lease, fixed evaluator confinement, parser and original wall-clock
+deadline before generation. Record separate intent/result events pinned to
+campaign, comparator and exact seed; never invent a generation-zero variant,
+passing elite or failed parent. It should reserve zero model requests, reuse a
+settled exact result, and hold an unresolved intent rather than automatically
+rerun uncertain evaluator work. Delivery would need a distinct proof reference
+to those event digests. Test first-response repair, passing seed, malformed
+output, timeout/cancellation, crash replay, byte/comparator drift, exhaustion
+and unchanged legacy campaigns. This remains a proposal; the current release
+requires a measured failed exact seed from a completed campaign step.
+
 ## September 10: standalone engineering commissioning
 
 - Baseline 487d9ad6, isolated auto/p00; three agents mapped strict validation,

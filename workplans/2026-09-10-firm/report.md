@@ -1,6 +1,102 @@
 # Verified local handoff
 
-## Current continuation: standalone engineering commissioning
+## Current continuation: measured initial Hub repair
+
+Baseline `1a57744b`, isolated `auto/p00`. Three bounded agents independently
+authored the fixed evaluator, built/reviewed the candidate, and exercised the
+full Hub campaign; follow-up assignments covered pure proof validation, actual
+Git delivery/recovery, and cold documentation review. Parent integrated changes.
+
+The independent evaluator was committed first at
+`9bf75b598fbfc6a5b7ec289a2d3419b1a18469b8`. It checks 142 fixed path/filter cases:
+the unchanged source passes 82 and fails 60. Candidate
+`e2e4e33d588a63d36d81ed23e50adb18b197b8df` preserves complete marker-title paths
+with spaces, Windows separators/drive letters and filename colons, stripping
+only terminal numeric location metadata before using the existing path filter.
+Its scope is shared historical/custom backlog items: the raw scanner already
+filters non-code paths. No claim of measured token savings or fresh-scanner
+leakage is made. The candidate adds 75 focused regressions.
+
+Three full-Hub diagnostic runs correctly exposed an existing delivery gap:
+failed seed, refused evaluator edit, then passing first repair, but no previous
+passing parent meant `delivery-withheld`. New delivery-plan opt-in
+`allowInitialRepair: true` permits only a positive finite improvement over a
+valid failed evaluation of the byte-identical pinned seed in an earlier
+completed step of the same campaign/niche. The helper verifies recorded
+run/step/schedule/comparator linkage; delivery and read-only recovery verify
+archived baseline bytes. Existing final Git checkpoints recheck that evidence
+under the prepared ref transaction. No parent, archive delta or passing baseline
+is fabricated. Omission preserves prior-passing-elite delivery; malformed values
+are refused. This mode does not automatically evaluate the seed or add budget.
+
+Controlled full-Hub acceptance passed (1 test, 80.14 s test / 81.30 s suite):
+
+| Observation | Verified result |
+| --- | --- |
+| Unchanged full Hub seed | Failed, score 0, 82/142 cases; artifact exactly seed |
+| Attempted evaluator edit | Refused generation, no artifact or evaluator score |
+| Exact reviewed source correction | Passed, score 1, 142/142 cases; null parent/delta retained |
+| Delivery | One local `codex/` branch, only `src/core/portfolio/value-filter.ts` changed |
+| Exact target Git blob | `f04ff9d65cf5e0ef23c1c4182ca68ed3b8b67c56` |
+| Full seed artifact digest | `74198bc323225fe0c44566805f9a52de2d121ff32b9123e97a0b21a49241474a` |
+| Completed graph replay | Same traces, receipt and branch; still 3 requests and 3 ledger attempts |
+| Original fixture repository | Checkout, index, HEAD and evaluator unchanged; no remotes |
+
+That test's local delivered commit was
+`d3e735aedd0970ceea8bc46291ff2529bcedfdc8`, enrollment digest
+`b7535a1a9d2e7a36431035cb1d21444a51d5e89ef6e97d00b4bceacdd8708a52`.
+These identify a cleaned test-owned fixture, not a surviving production branch.
+The worker supplied deterministic loopback proposals, including the exact
+already-reviewed candidate; no real model ideated the repair during this test.
+Reported worker tokens are fixture counts, not subscription telemetry. Acceptance
+means fixed-evaluator/local-branch proof only, not general correctness or live
+provider commissioning. A wrong test-only helper import caused an earlier run
+to stop after graph completion; it was corrected, strictly typechecked and
+rerun. It is not counted as a pass.
+
+After acceptance, `auto/p00` fast-forwarded to the exact candidate commit, keeping
+both immutable pins in ancestry for full-history clones. The temporary candidate
+dependency symlink was removed; its dependency target and worktree remain intact.
+The candidate worktree is clean. Original desktop checkout remains untouched.
+
+Focused proof: 47 pure initial-repair tests and 14 actual delivery tests,
+including both metric directions, unmeasured/non-seed rejection, threshold,
+default refusal, exact-policy recovery, and baseline tamper inside the final
+Git transaction. These focused counts overlap the integrated runtime gate.
+
+Frozen web regression: **1,224 passed / 75 files**, no skips (10.79 s).
+Source/web and five changed-test strict typechecks passed. Full lint passed with
+zero errors and 107 existing warnings; 279 real-I/O files and 663 unit files
+were correctly classified. Frozen integrated campaign/delivery/controller/
+portfolio/engineering and marker-filter regression: **1,670 passed / 63 files**,
+no skips (963.83 s). This includes the full-Hub acceptance rerun and overlaps
+the focused counts above. Frozen H1–H8 plus artifact-firewall regression:
+**457 passed, five existing skips / 42 files** (184.45 s). The three disjoint
+regression groups total **3,351 passed and five existing skips**. No runtime or
+test sources changed during them; earlier continuation counts are historical.
+Production build, compiled portfolio/controller help, all five compiled
+`verify-safety` structural checks, documentation check and diff check passed.
+The build is local, not an installed service or public release.
+
+The [source campaign recipe](../../docs/FIRM-DEMO.md#a-real-hub-source-campaign)
+documents immutable pins, Node/evaluator requirements, mutable scope, explicit
+budgets, the measured-seed prerequisite and non-production acceptance limits.
+It requires a full source checkout, not just the npm package. Planning preserved
+separate ownership; agent guidance reused the existing runtime; documentation
+review required explicitly identifying the deterministic worker and live gaps.
+
+Remaining: actual provider/account commissioning, history-preserving Spark
+enrollment/reserve configuration, automatic measured-seed generation if desired,
+and proof of live model-generated accepted work before resident operation.
+Original checkout remains at `a01fc08663baab3039c4f1c084538de732a4fd0e`.
+Evaluator SHA-256 remains
+`a6478395e6a9be07a437b0ae797dc81306ec31ee890a3885576ad680c1c690f0`.
+Host KILL was reread active/healthy and left untouched. No actual provider
+requests, account/policy/history changes, resident service, GitHub Actions,
+remote push, npm publication or public deployment occurred. Entire remains
+enabled/manual-commit; resume found no checkpoint.
+
+## Previous continuation: standalone engineering commissioning
 
 Baseline: `487d9ad67a430513071ddec700c03a9ffb95ddf6`; isolated `auto/p00`
 at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents

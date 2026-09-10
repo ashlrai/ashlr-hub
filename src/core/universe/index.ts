@@ -40,7 +40,7 @@ export { initUniverseCampaign, readUniverseCampaign, readUniverseCampaigns, requ
   validateUniverseCampaignDefinition } from './campaign-store.js';
 export { runUniverseCampaign } from './campaign.js';
 export { runUniverseCampaignAndDeliver, deliverCompletedUniverseCampaign, validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
-export type { UniverseCampaignDeliveryOptions, UniverseCampaignDeliveryResult, UniverseCampaignDeliveryPlan } from './campaign-delivery.js';
+export type { UniverseCampaignDeliveryOptions, UniverseCampaignDeliveryResult, UniverseCampaignDeliveryPlan, UniverseCampaignDeliveryTarget } from './campaign-delivery.js';
 export { readUniverseCampaignReadiness } from './campaign-readiness.js';
 export type { UniverseCampaignReadiness } from './campaign-readiness.js';
 export { checkResourceGenerationRuntime } from './resource-runtime-check.js';
