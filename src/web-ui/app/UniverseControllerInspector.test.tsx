@@ -18,6 +18,34 @@ async function submit(id = 'fleet') {
 
 describe('scoped named controller inspector', () => {
   afterEach(() => vi.unstubAllGlobals());
+  it('keeps historical selection while navigating locally without new requests', async () => {
+    const request = vi.fn().mockResolvedValueOnce(json(report)).mockRejectedValue(new Error('offline'));
+    vi.stubGlobal('fetch', request); render(<UniverseControllerInspector />);
+    const user = await submit(); await screen.findByRole('table');
+    await user.type(screen.getByRole('searchbox', { name: 'Search campaigns' }), 'no-match');
+    expect(within(screen.getByRole('region', { name: 'Selected campaign detail' })).getByRole('heading', { name: 'build' })).toBeInTheDocument();
+    expect(request).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole('button', { name: 'Refresh controller' }));
+    await screen.findByRole('alert');
+    expect(screen.getByRole('status')).toHaveTextContent('Historical observation');
+    await user.clear(screen.getByRole('searchbox', { name: 'Search campaigns' }));
+    await user.type(screen.getByRole('searchbox', { name: 'Search campaigns' }), 'owner-paused');
+    await user.click(screen.getByRole('button', { name: 'Select campaign build' }));
+    expect(screen.getByRole('status')).toHaveTextContent('Historical observation');
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('button', { name: /^Run|^Drain|^Resume/ })).not.toBeInTheDocument();
+  });
+  it('resets local campaign navigation when inspecting a different controller', async () => {
+    const request = vi.fn().mockResolvedValueOnce(json(report)).mockResolvedValueOnce(json({ ...report, controllerId: 'other' }));
+    vi.stubGlobal('fetch', request); render(<UniverseControllerInspector />);
+    const user = await submit(); await screen.findByRole('table');
+    await user.type(screen.getByRole('searchbox', { name: 'Search campaigns' }), 'build');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Recorded state' }), 'held');
+    await submit('other'); await screen.findByRole('table');
+    expect(screen.getByRole('searchbox', { name: 'Search campaigns' })).toHaveValue('');
+    expect(screen.getByRole('combobox', { name: 'Recorded state' })).toHaveValue('all');
+    expect(request).toHaveBeenCalledTimes(2);
+  });
   it('does not query on mount or edit, rejects bad IDs, and observes only on explicit submit/refresh', async () => {
     const request = vi.fn(async () => json(report)); vi.stubGlobal('fetch', request);
     render(<UniverseControllerInspector />);
