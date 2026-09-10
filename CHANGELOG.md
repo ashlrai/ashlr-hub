@@ -11,6 +11,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Recorded controller mission topology
+
+- Adds a selectable campaign dependency diagram and evidence panel to the scoped
+  console, distinguishing direct ordering from inherited delivery prerequisites.
+- Projects bounded public relationships from verified controller enrollment,
+  preserving legacy observations, explicit refresh and existing execution rules.
+
 ### Proven unstarted controller dispatches
 
 - Records a held `dispatch-not-started` settlement when the owning invocation

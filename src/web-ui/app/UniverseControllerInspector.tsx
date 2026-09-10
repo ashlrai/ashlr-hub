@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { UniversePortfolioControllerView } from '../../core/web/universe-console-types.js';
 import { isControllerId, readControllerStatus } from '../data/controller-status.js';
+import { UniverseControllerTopology } from './UniverseControllerTopology.js';
 import styles from './UniverseControllerInspector.module.css';
 
 function RecordedTime({ value }: { value: string | null }) {
@@ -81,6 +82,7 @@ export function UniverseControllerInspector() {
           </ol>
           <p>{data.control.mode === 'drain' ? 'Drain blocks new dispatch intents; already-admitted work can continue. An unresolved intent prevents acknowledgement; absence of a visible worker proves neither completion nor failure.' : 'Execution requires a separate run invocation. Admission state does not renew the original deadline or establish a running controller.'}</p>
         </section> : <p className={styles.note}>No admission-control record. This does not establish process liveness.</p>}
+        <UniverseControllerTopology key={data.controllerId} data={data} />
         {data.outcomes.length ? <div className={styles.tableWrap} role="region" aria-label="Recorded campaign outcomes" tabIndex={0}>
           <table><caption>Recorded campaign outcomes</caption><thead><tr><th scope="col">Campaign</th><th scope="col">State</th><th scope="col">Campaign attempted</th><th scope="col">Reason</th></tr></thead>
             <tbody>{data.outcomes.map((row) => <tr key={row.campaignId}><th scope="row">{row.campaignId}</th><td>{row.state}</td><td>{row.attempted ? 'Yes' : 'No'}</td><td>{row.reasonCode}</td></tr>)}</tbody></table>

@@ -89,7 +89,10 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
       at >= enrollment.deadlineAt ? 'timed-out' : folded.control?.mode === 'drain'
         ? folded.control.acknowledgedAt === null ? 'draining' : 'drained' : 'incomplete',
     createdAt: folded.first.at, deadlineAt: enrollment.deadlineAt,
-    observedAt: at, outcomes, reasons, ...(folded.control ? { control: { ...folded.control } } : {}) };
+    observedAt: at, outcomes, reasons,
+    topology: enrollment.definition.tasks.map((task) => ({ campaignId: task.campaignId,
+      dependsOn: [...task.dependsOn], prerequisites: portfolioControllerPrerequisites(enrollment, task.campaignId) })),
+    ...(folded.control ? { control: { ...folded.control } } : {}) };
 }
 
 class ControllerTransactionWaitStopped extends Error {}

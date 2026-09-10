@@ -42,6 +42,18 @@ describe('scoped console public worker serialization', () => {
     expect(JSON.parse(serializeUniverseConsoleControllerStatus(source))).toEqual({ schemaVersion: 1, controllerId: 'one', sourceState,
       status: 'unavailable', createdAt: null, deadlineAt: null, observedAt: source.observedAt, outcomes: [], reasons: source.reasons });
   });
+  it('projects only independent enrollment topology IDs and arrays', () => {
+    const source = { schemaVersion: 1, controllerId: 'one', sourceState: 'healthy', status: 'incomplete',
+      createdAt: null, deadlineAt: null, observedAt: '2026-09-09T00:00:00Z', definitionDigest: null, outcomes: [], reasons: [],
+      topology: [{ campaignId: 'a', dependsOn: ['b'], prerequisites: ['b', 'c'], privatePath: '/private/repo',
+        campaignDigest: 'private-witness', futureAuthority: 'run' }] } as unknown as UniversePortfolioControllerReport;
+    const before = JSON.stringify(source); const projected = projectUniverseConsoleControllerStatus(source);
+    expect(projected.topology).toEqual([{ campaignId: 'a', dependsOn: ['b'], prerequisites: ['b', 'c'] }]);
+    const serialized = serializeUniverseConsoleControllerStatus(source);
+    expect(serialized).not.toContain('private'); expect(serialized).not.toContain('futureAuthority');
+    projected.topology![0]!.dependsOn.push('mutated'); projected.topology![0]!.prerequisites.push('mutated');
+    expect(JSON.stringify(source)).toBe(before);
+  });
   it('allowlists readiness observations without exposing private identity or automatic authority', () => {
     const source = { schemaVersion: 1, readinessScope: 'recorded-campaign-evidence', campaignId: 'one',
       universeId: 'universe-one', observedState: 'ready', sourceState: 'healthy', disposition: 'startable',

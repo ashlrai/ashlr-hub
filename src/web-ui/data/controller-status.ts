@@ -32,6 +32,41 @@ export function validateControllerStatus(value: unknown, controllerId: string): 
     seen.add(row.campaignId);
     return { campaignId: row.campaignId, state: row.state, attempted: row.attempted, reasonCode: row.reasonCode };
   });
+  let topology: UniversePortfolioControllerView['topology'];
+  if (value.topology !== undefined) {
+    if (!Array.isArray(value.topology) || value.topology.length > 64 || value.topology.length !== outcomes.length) throw invalid();
+    const topologyIds = new Set<string>();
+    topology = value.topology.map((node: unknown) => {
+      if (!record(node) || !isControllerId(node.campaignId) || !seen.has(node.campaignId) || topologyIds.has(node.campaignId)) throw invalid();
+      topologyIds.add(node.campaignId);
+      const references = (input: unknown): string[] => {
+        if (!Array.isArray(input) || input.length > 63 || !input.every((id) => isControllerId(id) && seen.has(id) && id !== node.campaignId) ||
+          new Set(input).size !== input.length) throw invalid();
+        return [...input] as string[];
+      };
+      const dependsOn = references(node.dependsOn); const prerequisites = references(node.prerequisites);
+      if (dependsOn.some((id) => !prerequisites.includes(id))) throw invalid();
+      return { campaignId: node.campaignId, dependsOn, prerequisites };
+    });
+    // Bound traversal and reject cycles in effective gates, not only declared edges.
+    // The server's additional gates must also be genuine declared ancestors.
+    const byId = new Map(topology.map((node) => [node.campaignId, node]));
+    const resolved = new Set<string>();
+    while (resolved.size < topology.length) {
+      const next = topology.find((node) => !resolved.has(node.campaignId) && node.prerequisites.every((id) => resolved.has(id)));
+      if (!next) throw invalid();
+      resolved.add(next.campaignId);
+    }
+    for (const node of topology) {
+      const ancestors = new Set<string>(); const pending = [...node.dependsOn];
+      while (pending.length) {
+        const id = pending.pop()!;
+        if (ancestors.has(id)) continue;
+        ancestors.add(id); pending.push(...byId.get(id)!.dependsOn);
+      }
+      if (node.prerequisites.some((id) => !ancestors.has(id))) throw invalid();
+    }
+  }
   let control: UniversePortfolioControllerView['control'];
   if (value.control !== undefined) {
     const current = value.control;
@@ -47,7 +82,7 @@ export function validateControllerStatus(value: unknown, controllerId: string): 
   // Explicit projection also prevents unexpected private fields entering UI state.
   return { schemaVersion: 1, controllerId, sourceState: value.sourceState, status: value.status,
     createdAt: value.createdAt, deadlineAt: value.deadlineAt, observedAt: value.observedAt,
-    reasons: [...value.reasons], outcomes, ...(control ? { control } : {}) } as UniversePortfolioControllerView;
+    reasons: [...value.reasons], outcomes, ...(topology ? { topology } : {}), ...(control ? { control } : {}) } as UniversePortfolioControllerView;
 }
 
 export async function readControllerStatus(controllerId: string, signal?: AbortSignal): Promise<UniversePortfolioControllerView> {
