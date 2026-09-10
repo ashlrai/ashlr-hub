@@ -43,6 +43,13 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/universe-firm-cli-integration.test.ts', // real CLI processes with test-owned provenance
+  'test/universe-value-allocation-store.test.ts', // private signed storage and concurrent final-slot admission
+  'test/resource-worker-kill.test.ts', // real loopback cancellation and native owned cleanup
+  'test/universe-firm-demo.test.ts', // complete signed fixture graph and CLI queries
+  'test/universe-control-graph.test.ts', // private signed graph records, ownership and restart
+  'test/universe-harness-archive.test.ts', // private immutable candidate snapshots and admission
+  'test/universe-firm-memory.test.ts', // private immutable daily journals and consolidation CAS
   'test/universe-showcase-cli.test.ts', // private demo source/export custody and CLI subprocesses
   'test/universe-campaign-delivery.test.ts', // actual campaign evaluation and local Git branch delivery
   'test/m11.stream-file-sink.test.ts', // thousands of real sink writes and reads across secret boundaries

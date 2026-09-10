@@ -1,7 +1,7 @@
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
-import { homedir } from 'node:os';
 import { performance } from 'node:perf_hooks';
+import { killSwitchOn } from '../sandbox/policy.js';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
@@ -174,7 +174,7 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
   let deadlineAt: string | null = null;
   const stop = () => {
     if (options.signal?.aborted) stopReason ??= 'caller-cancelled';
-    if (presentOrUncertain(join(homedir(), '.ashlr', 'KILL')) || presentOrUncertain(join(root, 'KILL'))) stopReason ??= 'kill-switch';
+    if (killSwitchOn() || presentOrUncertain(join(root, 'KILL'))) stopReason ??= 'kill-switch';
     if (performance.now() - started >= definition.maxDurationMs || deadlineAt && Date.now() >= Date.parse(deadlineAt)) stopReason ??= 'duration-exhausted';
     if (stopReason) controller.abort();
     return stopReason !== null;
@@ -214,6 +214,9 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
     } else if (canonical(state.definition) !== canonical(definition)) throw new Error('Graph definition drift');
     deadlineAt = state.deadlineAt;
     while (!stop() && own()) {
+      // Resolved handler promises alone can starve signal/timer callbacks.
+      // Yield a macrotask before another admission batch, then recheck authority.
+      await new Promise<void>((resolve) => setImmediate(resolve));
       let dispatched = false;
       for (const node of definition.nodes) {
         if (stop() || !own()) break;

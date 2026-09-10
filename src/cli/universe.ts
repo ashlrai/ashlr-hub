@@ -9,6 +9,7 @@ import { runUniverseDemo } from './universe-demo.js';
 const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--json]
 
   demo                         Build and evaluate two local demo generations
+  firm <demo|status|query>      Run or inspect the fixed signed firm-graph fixture
   init --manifest <file.json>   Register a pinned experiment definition
   run <id>                     Execute one budgeted generation
   status [id]                  Read objectives, runs, and measurements
@@ -157,6 +158,10 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'firm') {
+    const { cmdUniverseFirm } = await import('./universe-firm.js');
+    return cmdUniverseFirm(args.slice(1));
+  }
   if (args[0] === 'resources') {
     const { cmdUniverseResources } = await import('./universe-resources.js');
     return cmdUniverseResources(args.slice(1));

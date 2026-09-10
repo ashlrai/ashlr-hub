@@ -1,4 +1,23 @@
 export type * from './types.js';
+export { validateControlGraph, runControlGraph, readControlGraph, CONTROL_NODE_KINDS } from './control-graph.js';
+export type { ControlGraphDefinition, ControlGraphNode, ControlGraphOptions, ControlGraphReport,
+  ControlGraphHandler, ControlHandlerContext, ControlHandlerResult, ControlArtifact, ControlNodeKind } from './control-graph.js';
+export { signDecisionTraceV1, verifyDecisionTraceV1, validateDecisionTraceV1, queryDecisionTracesV1 } from './decision-trace.js';
+export type { DecisionTraceV1, UnsignedDecisionTraceV1, DecisionTraceKeyOptions } from './decision-trace.js';
+export { verifyUniverseCold, createColdVerificationRequest } from './cold-verifier.js';
+export type { ColdVerificationInput, ColdVerificationResult, ColdVerificationOptions, ColdVerifierTransport } from './cold-verifier.js';
+export { runFirmDemo, readFirmDemo, queryFirmDemo } from './firm-demo.js';
+export type { FirmDemoOptions, FirmDemoReport } from './firm-demo.js';
+export { registerHarnessArchive, storeHarnessCandidate, readHarnessArchive } from './harness-archive.js';
+export type { HarnessArchiveQuery, HarnessArchivedCandidate, HarnessArchiveRegistration,
+  RegisterHarnessArchiveOptions, StoreHarnessCandidateOptions } from './harness-archive.js';
+export { appendDailyMemory, readDailyMemory, consolidateFirmMemory, readFirmMemory } from './firm-memory.js';
+export type { DailyMemoryInput, FirmMemoryConsolidationInput, FirmMemoryVersion, DailyMemoryEntry } from './firm-memory.js';
+export { createPaymentBrokerState, reducePaymentBroker } from './payment-broker.js';
+export { createValueAllocationReceipt, verifyValueAllocationReceipt } from './value-allocation.js';
+export type { ValueAllocationInput, ValueAllocationOptions, ValueAllocationReceiptV1, ValueAllocationResult } from './value-allocation.js';
+export { recordValueAllocation, readValueAllocations } from './value-allocation-store.js';
+export type { StoredValueAllocationV1, ValueAllocationStoreRead } from './value-allocation-store.js';
 export type * from './file-operations-types.js';
 export { defaultUniverseRoot, ensureUniverseRoot } from './artifacts.js';
 export { initUniverse, validateUniverseManifest } from './store.js';

@@ -1,17 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { readControlGraph, runControlGraph, validateControlGraph, type ControlGraphDefinition, type ControlGraphHandler } from '../src/core/universe/control-graph.js';
 import { verifyDecisionTraceV1 } from '../src/core/universe/decision-trace.js';
 import { acquireLocalStoreLockWithOutcome, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
+import * as provenance from '../src/core/foundry/provenance.js';
 
 let root: string;
 const traceKeys = { testKey: randomBytes(32) };
 const pass = { id: 'cold-worker', verdict: 'pass' as const, independent: true };
 function graph(): ControlGraphDefinition {
-  return { schemaVersion: 1, id: 'fixture', maxConcurrent: 2, maxDurationMs: 5000, nodes: [
+  return { schemaVersion: 1, id: 'fixture', maxConcurrent: 2, maxDurationMs: 60_000, nodes: [
     { id: 'plan', kind: 'plan', requires: [], input: { alternatives: 2 } },
     { id: 'build', kind: 'implement', requires: ['plan'], input: {} },
     { id: 'check', kind: 'verify', requires: ['build'], input: {} },
@@ -93,6 +94,13 @@ describe('artifact-bearing durable control graph', () => {
     expect(report.nodes[0]!.state).toBe('completed');
   });
 
+  it('yields to queued cancellation before the next admission batch', async () => {
+    const controller = new AbortController(); const handler = vi.fn(emit);
+    setImmediate(() => controller.abort());
+    const report = await runControlGraph(graph(), { root, traceKeys, signal: controller.signal, handlers: { plan: handler } });
+    expect(report.status).toBe('stopped'); expect(handler).not.toHaveBeenCalled();
+  });
+
   it('stops on a kill file while active and drains the handler', async () => {
     const after = vi.fn(emit);
     const report = await runControlGraph(graph(), { root, traceKeys, handlers: { plan: async ({ signal }) => {
@@ -120,6 +128,28 @@ describe('artifact-bearing durable control graph', () => {
       const report = await runControlGraph(graph(), { root, traceKeys, handlers: { plan: emit } });
       expect(report.reasons).toEqual(['graph-owner-unavailable']);
     } finally { if (owner.state === 'acquired') releaseLocalStoreLock(owner.lock); }
+  });
+
+  it('aborts an active adapter on lost ownership and preserves unresolved intent', async () => {
+    const after = vi.fn(emit);
+    let drained = false;
+    const report = await runControlGraph(graph(), { root, traceKeys, handlers: { plan: async ({ signal }) => {
+      unlinkSync(join(root, '.control-execution.lock'));
+      await new Promise<void>((resolve) => signal.addEventListener('abort', () => resolve(), { once: true }));
+      drained = true; return { artifact: 'cannot settle under a lost owner' };
+    }, implement: after } });
+    expect(drained).toBe(true); expect(report.status).toBe('stopped');
+    expect(report.reasons).toContain('ownership-lost');
+    expect(report.nodes[0]!.state).toBe('unresolved'); expect(after).not.toHaveBeenCalled();
+  });
+
+  it('withholds all dispatch when existing provenance is unavailable and creates no key', async () => {
+    vi.spyOn(provenance, 'loadExistingProvenanceKeyReadOnly').mockReturnValue(null);
+    const create = vi.spyOn(provenance, 'loadOrCreateKey');
+    const handler = vi.fn(emit);
+    const report = await runControlGraph(graph(), { root, handlers: { plan: handler } });
+    expect(report.status).toBe('unavailable'); expect(report.traces).toEqual([]);
+    expect(handler).not.toHaveBeenCalled(); expect(create).not.toHaveBeenCalled();
   });
 
   it('refuses graph drift and forged disk evidence', async () => {

@@ -497,6 +497,8 @@ function rootPackageIsPortable(
     'docs/ELITE-AGENT-EFFICIENCY.md',
     'docs/MISSION-OS.md',
     'docs/ASHLR-UNIVERSE.md',
+    'docs/AUTONOMY-GAP.md',
+    'docs/FIRM-DEMO.md',
     'docs/UNIVERSE-RESEARCH.md',
     'docs/UNIVERSE-AUTONOMY-RESEARCH.md',
     'docs/NORTH-STAR.md',
