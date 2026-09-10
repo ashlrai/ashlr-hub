@@ -11,6 +11,7 @@ export type UniversePortfolioControllerView = Pick<UniversePortfolioControllerRe
   'schemaVersion' | 'controllerId' | 'sourceState' | 'status' | 'createdAt' | 'deadlineAt' | 'observedAt' | 'reasons'> & {
   outcomes: Array<Pick<UniversePortfolioControllerReport['outcomes'][number],
     'campaignId' | 'state' | 'attempted' | 'reasonCode'>>;
+  topology?: Array<{ campaignId: string; dependsOn: string[]; prerequisites: string[] }>;
   control?: Pick<NonNullable<UniversePortfolioControllerReport['control']>,
     'mode' | 'sequence' | 'requestedAt' | 'acknowledgedAt'>;
 };

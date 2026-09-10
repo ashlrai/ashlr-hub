@@ -191,6 +191,19 @@ an acknowledgement, and an acknowledged drain can coexist with a completed or
 expired controller. A recorded unsettled intent does not prove a worker is alive.
 If refresh fails, any retained result is marked historical, not current evidence.
 
+The mission topology groups campaigns by declared dependency depth. Select a
+campaign to inspect its recorded state, direct dependencies and additional
+inherited delivery prerequisites. These relationships come from the controller's
+verified enrollment, not a separately refreshed plan. Layers do not change
+scheduling priority, and completed prerequisites alone do not authorize dispatch
+or prove quota or worker availability. In-flight means an unresolved intent.
+
+Older observations without topology still show campaign states; unavailable
+relationships are never treated as an empty dependency list. Diagram links may
+be bounded for dense portfolios, with complete relationships available in the
+selected campaign details. Native buttons support keyboard selection; the outcome
+table remains available independently of the diagram.
+
 This view never starts work, acquires execution ownership, acknowledges drain,
 repairs a ledger or changes account allocation. Missing and degraded controllers
 are reported explicitly. Use the [CLI drain/resume workflow](#drain-and-reopen-a-preserved-queue)

@@ -31,23 +31,23 @@ describe('scoped named controller inspector', () => {
     await submit();
     await screen.findByRole('table', { name: 'Recorded campaign outcomes' });
     expect(request).toHaveBeenCalledTimes(1);
-    expect(screen.getByText(/Recorded snapshot/)).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Recorded snapshot.');
     expect(screen.queryByRole('button', { name: /^Drain|^Resume|^Run/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Refresh controller' }));
-    await screen.findByText(/Recorded snapshot/);
+    await screen.findByText(/Recorded snapshot\./);
     expect(request).toHaveBeenCalledTimes(2);
   });
   it('labels edited input separately and preserves historical evidence after a failed refresh', async () => {
     const request = vi.fn().mockResolvedValueOnce(json(report)).mockRejectedValue(new Error('/private/secret'));
     vi.stubGlobal('fetch', request); render(<UniverseControllerInspector />);
-    const user = await submit(); await screen.findByText('owner-paused');
+    const user = await submit(); expect(within(await screen.findByRole('table')).getByText('owner-paused')).toBeInTheDocument();
     await user.clear(screen.getByLabelText('Controller ID')); await user.type(screen.getByLabelText('Controller ID'), 'other');
     expect(screen.getByRole('heading', { name: 'Evidence for fleet' })).toBeInTheDocument();
     expect(screen.getByText(/form has changed/)).toHaveTextContent('still belongs to fleet');
     await user.click(screen.getByRole('button', { name: 'Refresh controller' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Observation failed');
     expect(screen.getByText(/Historical observation/)).toBeInTheDocument();
-    expect(screen.getByText('owner-paused')).toBeInTheDocument();
+    expect(within(screen.getByRole('table')).getByText('owner-paused')).toBeInTheDocument();
     expect(screen.queryByText('/private/secret')).not.toBeInTheDocument();
     expect(request.mock.calls[1][0]).toBe('/api/universe/controller-status?controllerId=fleet');
   });
@@ -56,7 +56,7 @@ describe('scoped named controller inspector', () => {
     const request = vi.fn().mockImplementationOnce(() => new Promise<Response>((resolve) => { finish = resolve; }))
       .mockResolvedValueOnce(json({ ...report, controllerId: 'other', outcomes: [] }));
     vi.stubGlobal('fetch', request); render(<UniverseControllerInspector />);
-    await submit('fleet'); await submit('other'); await screen.findByText(/Recorded snapshot/);
+    await submit('fleet'); await submit('other'); await screen.findByText(/Recorded snapshot\./);
     await act(async () => { finish(json(report)); });
     expect(screen.getByRole('heading', { name: 'Evidence for other' })).toBeInTheDocument();
     expect(screen.queryByText('owner-paused')).not.toBeInTheDocument();
@@ -64,7 +64,7 @@ describe('scoped named controller inspector', () => {
   });
   it('removes old evidence on switching IDs and rejects mismatched returned identity', async () => {
     const request = vi.fn(async () => json(report)); vi.stubGlobal('fetch', request); render(<UniverseControllerInspector />);
-    await submit(); await screen.findByText('owner-paused'); await submit('other');
+    await submit(); await screen.findByRole('table'); await submit('other');
     await screen.findByRole('alert');
     expect(screen.queryByText('owner-paused')).not.toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Evidence for other' })).toBeInTheDocument();
@@ -72,7 +72,7 @@ describe('scoped named controller inspector', () => {
   });
   it.each(['missing', 'degraded'])('distinguishes %s evidence without inferring execution', async (sourceState) => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ ...report, sourceState, status: 'unavailable', createdAt: null, deadlineAt: null, outcomes: [] })));
-    render(<UniverseControllerInspector />); await submit(); await screen.findByText(/Recorded snapshot/);
+    render(<UniverseControllerInspector />); await submit(); await screen.findByText(/Recorded snapshot\./);
     expect(screen.getByText(sourceState)).toBeInTheDocument();
     expect(screen.getByText(sourceState === 'missing' ? /No controller registration/ : /Evidence could not be fully verified/)).toBeInTheDocument();
   });
@@ -90,7 +90,7 @@ describe('scoped named controller inspector', () => {
     render(<UniverseControllerInspector />); await submit();
     expect(await screen.findByRole('heading', { name: 'Drain awaiting acknowledgement' })).toBeInTheDocument();
     expect(screen.getByText('Acknowledgement not recorded')).toBeInTheDocument();
-    expect(screen.getByText(/not proof of a live worker/)).toBeInTheDocument();
+    expect(screen.getByText(/“In-flight” means/)).toHaveTextContent('not proof of a live worker');
   });
   it('distinguishes a recorded campaign intent from a proven skipped worker call', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ ...report, outcomes: [{ ...report.outcomes[0], attempted: true, reasonCode: 'dispatch-not-started' }] })));

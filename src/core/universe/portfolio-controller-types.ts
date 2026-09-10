@@ -23,6 +23,8 @@ export interface UniversePortfolioControllerReport {
   deadlineAt: string | null;
   observedAt: string;
   outcomes: UniversePortfolioControllerOutcome[];
+  /** Recorded enrollment ordering only; prerequisites include planned ancestor delivery gates. */
+  topology?: Array<{ campaignId: string; dependsOn: string[]; prerequisites: string[] }>;
   reasons: string[];
   control?: UniversePortfolioControllerControl;
 }

@@ -99,6 +99,45 @@ function fixture(ids = ['a'], maxParallel = 1) {
 }
 
 describe('Portfolio controller private-ledger fault acceptance', () => {
+  it('projects topology from its persisted enrollment in declared order without aliasing caller arrays', async () => {
+    const f = fixture(['c', 'a', 'b']);
+    f.definition.tasks[0]!.dependsOn = ['b']; f.definition.tasks[2]!.dependsOn = ['a'];
+    for (const id of ['a', 'b', 'c']) f.finish(id);
+    const result = await runUniversePortfolioController(f.definition, f.options);
+    const expected = [
+      { campaignId: 'c', dependsOn: ['b'], prerequisites: ['b'] },
+      { campaignId: 'a', dependsOn: [], prerequisites: [] },
+      { campaignId: 'b', dependsOn: ['a'], prerequisites: ['a'] },
+    ];
+    expect(result.topology).toEqual(expected);
+    const before = JSON.stringify(f.events());
+    f.definition.tasks[0]!.dependsOn = []; result.topology![0]!.dependsOn.push('a');
+    result.topology![0]!.prerequisites.push('a');
+    expect(readUniversePortfolioController(f.definition.id, f.options).topology).toEqual(expected);
+    expect(JSON.stringify(f.events())).toBe(before);
+    expect(hooks.run).not.toHaveBeenCalled();
+  });
+
+  it('projects transitive planned delivery prerequisites beyond a precompleted intermediate', async () => {
+    const f = fixture(['a', 'b', 'c']);
+    f.definition.tasks[1]!.dependsOn = ['a']; f.definition.tasks[2]!.dependsOn = ['b'];
+    f.finish('a', 'paused'); f.finish('b');
+    const options = { ...f.options, deliveryPlan: { schemaVersion: 1 as const,
+      deliveries: [{ campaignId: 'a', branch: 'codex/topology', baseCommit: 'a'.repeat(40) }] } };
+    const result = await runUniversePortfolioController(f.definition, options);
+    expect(result.topology).toEqual([
+      { campaignId: 'a', dependsOn: [], prerequisites: [] },
+      { campaignId: 'b', dependsOn: ['a'], prerequisites: ['a'] },
+      { campaignId: 'c', dependsOn: ['b'], prerequisites: ['b', 'a'] },
+    ]);
+    expect(result.outcomes).toMatchObject([
+      { campaignId: 'a', state: 'held' }, { campaignId: 'b', state: 'completed' },
+      { campaignId: 'c', state: 'held', reasonCode: 'dependency-held' },
+    ]);
+    expect(readUniversePortfolioController(f.definition.id, f.options).topology).toEqual(result.topology);
+    expect(hooks.run).not.toHaveBeenCalled(); expect(hooks.deliver).not.toHaveBeenCalled();
+  });
+
   it('settles a delivery-only post-intent cancellation without pretending the campaign was attempted', async () => {
     const f = fixture(['a', 'b']); f.finish('a'); f.definition.tasks[1]!.dependsOn = ['a'];
     const deliveryPlan = { schemaVersion: 1 as const,

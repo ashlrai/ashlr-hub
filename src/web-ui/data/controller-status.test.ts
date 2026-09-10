@@ -48,4 +48,48 @@ describe('named controller observation query', () => {
     expect(validateControllerStatus(missing, 'fleet')).toEqual(missing);
     expect(validateControllerStatus({ ...report, createdAt: '2026-09-10T10:00:00Z' }, 'fleet').createdAt).toBe('2026-09-10T10:00:00Z');
   });
+  it('accepts declared order and ancestor delivery gates while stripping private topology fields', () => {
+    const topology = [
+      { campaignId: 'ship', dependsOn: ['build'], prerequisites: ['build', 'design'], privatePath: '/private/ship' },
+      { campaignId: 'design', dependsOn: [], prerequisites: [] },
+      { campaignId: 'build', dependsOn: ['design'], prerequisites: ['design'] },
+    ];
+    const value = { ...report, outcomes: topology.map(({ campaignId }) => ({ ...report.outcomes[0], campaignId })), topology };
+    const result = validateControllerStatus(value, 'fleet');
+    expect(result.topology).toEqual(topology.map(({ campaignId, dependsOn, prerequisites }) => ({ campaignId, dependsOn, prerequisites })));
+    expect(JSON.stringify(result)).not.toContain('/private/');
+    result.topology![0]!.prerequisites.push('mutated');
+    expect(topology[0]!.prerequisites).toEqual(['build', 'design']);
+  });
+  it.each([
+    null,
+    {},
+    [],
+    [{ campaignId: 'build', dependsOn: [], prerequisites: 'build' }],
+    [{ campaignId: 'build', dependsOn: [1], prerequisites: [] }],
+    [{ campaignId: 'other', dependsOn: [], prerequisites: [] }],
+    [{ campaignId: 'build', dependsOn: [], prerequisites: ['other'] }],
+    [{ campaignId: 'build', dependsOn: [], prerequisites: ['build'] }],
+    Array.from({ length: 65 }, () => ({ campaignId: 'build', dependsOn: [], prerequisites: [] })),
+  ])('rejects malformed topology without treating it as legacy absence (%j)', (topology) => {
+    expect(() => validateControllerStatus({ ...report, topology }, 'fleet')).toThrow('could not be validated');
+  });
+  it.each([
+    [{ campaignId: 'a', dependsOn: [], prerequisites: [] }, { campaignId: 'a', dependsOn: [], prerequisites: [] }],
+    [{ campaignId: 'a', dependsOn: [], prerequisites: [] }, { campaignId: 'b', dependsOn: ['a'], prerequisites: [] }],
+    [{ campaignId: 'a', dependsOn: [], prerequisites: [] }, { campaignId: 'b', dependsOn: ['a', 'a'], prerequisites: ['a'] }],
+    [{ campaignId: 'a', dependsOn: [], prerequisites: [] }, { campaignId: 'b', dependsOn: ['a'], prerequisites: ['a', 'a'] }],
+    [{ campaignId: 'a', dependsOn: ['b'], prerequisites: ['b'] }, { campaignId: 'b', dependsOn: ['a'], prerequisites: ['a'] }],
+    [{ campaignId: 'a', dependsOn: [], prerequisites: ['b'] }, { campaignId: 'b', dependsOn: [], prerequisites: [] }],
+  ])('rejects duplicate IDs, cycles, missing gates and nonancestor gates (%j)', (topology) => {
+    const value = { ...report, outcomes: ['a', 'b'].map((campaignId) => ({ ...report.outcomes[0], campaignId })), topology };
+    expect(() => validateControllerStatus(value, 'fleet')).toThrow('could not be validated');
+  });
+  it('accepts the full 64-node boundary and keeps legacy topology absent', () => {
+    const topology = Array.from({ length: 64 }, (_, index) => ({ campaignId: `node-${index}`,
+      dependsOn: index ? [`node-${index - 1}`] : [], prerequisites: index ? [`node-${index - 1}`] : [] }));
+    const value = { ...report, outcomes: topology.map(({ campaignId }) => ({ ...report.outcomes[0], campaignId })), topology };
+    expect(validateControllerStatus(value, 'fleet').topology).toHaveLength(64);
+    expect(validateControllerStatus(report, 'fleet')).not.toHaveProperty('topology');
+  });
 });

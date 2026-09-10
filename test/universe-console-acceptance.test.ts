@@ -125,6 +125,7 @@ describe('independent scoped Universe console HTTP acceptance', () => {
     const requested = await http(handle, path, { headers: authorized(handle) });
     expect(requested.status).toBe(200); expect(requested.headers['cache-control']).toContain('no-store');
     expect(JSON.parse(requested.body)).toMatchObject({ controllerId, sourceState: 'healthy', status: 'draining',
+      topology: [{ campaignId, dependsOn: [], prerequisites: [] }],
       createdAt: initial.createdAt, deadlineAt: initial.deadlineAt,
       control: { mode: 'drain', sequence: receipt.sequence, requestedAt: receipt.requestedAt, acknowledgedAt: null } });
     expect(snapshot(value.base)).toBe(requestedBytes);
@@ -156,6 +157,7 @@ describe('independent scoped Universe console HTTP acceptance', () => {
     expect(JSON.parse(response.body)).toMatchObject({ controllerId: 'same-console-controller', sourceState: 'missing',
       status: 'unavailable', createdAt: null, deadlineAt: null, outcomes: [] });
     expect(JSON.parse(response.body)).not.toHaveProperty('control');
+    expect(JSON.parse(response.body)).not.toHaveProperty('topology');
     await handle.close(); expect(existsSync(root)).toBe(false);
   });
 

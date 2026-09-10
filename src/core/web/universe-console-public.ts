@@ -50,6 +50,8 @@ export function projectUniverseConsoleControllerStatus(report: UniversePortfolio
   };
   if (report.control) view.control = { mode: report.control.mode, sequence: report.control.sequence,
     requestedAt: report.control.requestedAt, acknowledgedAt: report.control.acknowledgedAt };
+  if (report.topology) view.topology = report.topology.map((node) => ({ campaignId: node.campaignId,
+    dependsOn: [...node.dependsOn], prerequisites: [...node.prerequisites] }));
   return view;
 }
 
