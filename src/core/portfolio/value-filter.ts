@@ -57,11 +57,12 @@ export function isNonCodePath(filePath: string): boolean {
  */
 export function isNonCodeMarkerItem(item: WorkItem): boolean {
   if (!BARE_MARKER_TITLE_RE.test(item.title)) return false;
-  // Extract the file path portion: everything after "N marker(s) in "
-  const match = item.title.match(/^\d+ markers? in ([^\s:]+)/i);
+  // Preserve spaces, drive letters and filename colons. Only a terminal
+  // numeric line/column suffix is location metadata, not part of the path.
+  const match = item.title.match(/^\d+ markers? in (.+)$/i);
   if (!match) return false;
-  const filePath = match[1]!;
-  return NON_CODE_PATH_RE.test(filePath);
+  const filePath = match[1]!.replace(/:\d+(?::\d+)?$/, '');
+  return isNonCodePath(filePath);
 }
 
 // ---------------------------------------------------------------------------
