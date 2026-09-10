@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { startUniverseConsoleServer } from '../src/core/web/universe-console-server.js';
 import { MAX_UNIVERSE_CONSOLE_RESPONSE_BYTES, validateUniverseConsoleResponse } from '../src/core/web/universe-console-public.js';
 
-const fixture = vi.hoisted(() => ({ overview: vi.fn(), graph: vi.fn(), readiness: vi.fn(), close: vi.fn(), create: vi.fn(),
+const fixture = vi.hoisted(() => ({ overview: vi.fn(), graph: vi.fn(), readiness: vi.fn(), controller: vi.fn(), close: vi.fn(), create: vi.fn(),
   config: vi.fn(), generalServer: vi.fn(), broadWorker: vi.fn(), streaming: vi.fn() }));
 vi.mock('../src/core/web/universe-console-reads.js', async (original) => ({
   ...await original<typeof import('../src/core/web/universe-console-reads.js')>(),
@@ -33,7 +33,8 @@ function get(handle: Handle, path: string, options: { method?: string; token?: s
 }
 beforeEach(() => {
   vi.clearAllMocks(); fixture.close.mockResolvedValue(undefined);
-  fixture.create.mockReturnValue({ overview: fixture.overview, graph: fixture.graph, campaignReadiness: fixture.readiness, close: fixture.close });
+  fixture.create.mockReturnValue({ overview: fixture.overview, graph: fixture.graph, campaignReadiness: fixture.readiness,
+    controllerStatus: fixture.controller, close: fixture.close });
 });
 afterEach(async () => {
   for (const handle of handles.splice(0)) await handle.close();
@@ -41,6 +42,43 @@ afterEach(async () => {
 });
 
 describe('scoped console HTTP worker boundary', () => {
+  it('forwards only the authenticated controller selection and exact worker JSON', async () => {
+    const handle = await start(); const body = '{"schemaVersion":1,"controllerId":"one","status":"draining"}';
+    fixture.controller.mockResolvedValue(body);
+    expect(await get(handle, '/api/universe/controller-status?controllerId=one')).toEqual({ status: 200, body,
+      length: String(Buffer.byteLength(body)) });
+    expect(fixture.controller).toHaveBeenCalledExactlyOnceWith('one');
+    expect(fixture.overview).not.toHaveBeenCalled(); expect(fixture.readiness).not.toHaveBeenCalled();
+  });
+
+  it.each(['', '?controllerId=', '?controllerId=../one', '?controllerId=one&controllerId=one',
+    '?controllerId=one&root=/other', '?controllerId=one&campaignId=two', '?controllerId=one&extra=',
+    '?controllerId=UPPER', `?controllerId=${'a'.repeat(65)}`])('rejects expanded or ambiguous controller query %#', async (query) => {
+    const handle = await start();
+    expect((await get(handle, `/api/universe/controller-status${query}`)).status).toBe(400);
+    expect(fixture.controller).not.toHaveBeenCalled();
+  });
+
+  it('requires authority before controller validation and never exposes control mutations', async () => {
+    const handle = await start(); const path = '/api/universe/controller-status?controllerId=one';
+    expect((await get(handle, path, { token: '' })).status).toBe(401);
+    expect((await get(handle, `${path}&root=other`, { token: 'wrong' })).status).toBe(401);
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD']) {
+      expect((await get(handle, path, { method })).status).toBe(405);
+    }
+    expect(fixture.controller).not.toHaveBeenCalled();
+  });
+
+  it('withholds stale controller success and private errors after a worker failure', async () => {
+    const handle = await start(); const path = '/api/universe/controller-status?controllerId=one';
+    fixture.controller.mockResolvedValueOnce('{"schemaVersion":1,"status":"drained"}')
+      .mockRejectedValueOnce(new Error('/private/controller-secret'));
+    expect((await get(handle, path)).status).toBe(200);
+    const failure = await get(handle, path);
+    expect(failure.status).toBe(503);
+    expect(JSON.parse(failure.body)).toEqual({ error: 'Universe evidence is temporarily unavailable' });
+    expect(fixture.controller).toHaveBeenCalledTimes(2);
+  });
   it('forwards an authenticated selected-campaign read only through its pinned reader', async () => {
     const handle = await start(); const body = '{"schemaVersion":1,"campaignId":"one","sourceState":"healthy"}';
     fixture.readiness.mockResolvedValue(body);

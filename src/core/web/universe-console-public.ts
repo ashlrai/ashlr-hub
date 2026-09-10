@@ -1,7 +1,8 @@
 import type { UniverseOverview } from '../universe/types.js';
 import type { UniverseGraph } from '../universe/graph-types.js';
 import type { UniverseCampaignReadiness } from '../universe/campaign-readiness.js';
-import type { UniverseCampaignReadinessView } from './universe-console-types.js';
+import type { UniversePortfolioControllerReport } from '../universe/portfolio-controller-types.js';
+import type { UniverseCampaignReadinessView, UniversePortfolioControllerView } from './universe-console-types.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 
 export const MAX_UNIVERSE_CONSOLE_RESPONSE_BYTES = 16 * 1024 * 1024;
@@ -36,6 +37,24 @@ export function projectUniverseConsoleCampaignReadiness(readiness: UniverseCampa
 
 export function serializeUniverseConsoleCampaignReadiness(readiness: UniverseCampaignReadiness): string {
   return serialize(projectUniverseConsoleCampaignReadiness(readiness));
+}
+
+/** No private digests, future fields or execution authority leave the reader. */
+export function projectUniverseConsoleControllerStatus(report: UniversePortfolioControllerReport): UniversePortfolioControllerView {
+  const view: UniversePortfolioControllerView = {
+    schemaVersion: report.schemaVersion, controllerId: report.controllerId,
+    sourceState: report.sourceState, status: report.status, createdAt: report.createdAt,
+    deadlineAt: report.deadlineAt, observedAt: report.observedAt, reasons: [...report.reasons],
+    outcomes: report.outcomes.map((outcome) => ({ campaignId: outcome.campaignId,
+      state: outcome.state, attempted: outcome.attempted, reasonCode: outcome.reasonCode })),
+  };
+  if (report.control) view.control = { mode: report.control.mode, sequence: report.control.sequence,
+    requestedAt: report.control.requestedAt, acknowledgedAt: report.control.acknowledgedAt };
+  return view;
+}
+
+export function serializeUniverseConsoleControllerStatus(report: UniversePortfolioControllerReport): string {
+  return serialize(projectUniverseConsoleControllerStatus(report));
 }
 
 /** Bound the fixed worker protocol before passing its already-public JSON to HTTP. */

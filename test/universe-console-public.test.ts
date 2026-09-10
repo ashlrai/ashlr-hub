@@ -3,8 +3,10 @@ import { describe, expect, it } from 'vitest';
 import type { UniverseOverview } from '../src/core/universe/types.js';
 import type { UniverseGraph } from '../src/core/universe/graph-types.js';
 import type { UniverseCampaignReadiness } from '../src/core/universe/campaign-readiness.js';
+import type { UniversePortfolioControllerReport } from '../src/core/universe/portfolio-controller-types.js';
 import { MAX_UNIVERSE_CONSOLE_RESPONSE_BYTES, serializeUniverseConsoleGraph,
   projectUniverseConsoleCampaignReadiness, serializeUniverseConsoleCampaignReadiness,
+  projectUniverseConsoleControllerStatus, serializeUniverseConsoleControllerStatus,
   serializeUniverseConsoleOverview, validateUniverseConsoleResponse } from '../src/core/web/universe-console-public.js';
 
 function overview(): UniverseOverview {
@@ -14,6 +16,32 @@ function overview(): UniverseOverview {
 }
 
 describe('scoped console public worker serialization', () => {
+  it('allowlists controller, outcomes and controls without leaking private or future fields', () => {
+    const source = { schemaVersion: 1, controllerId: 'one', sourceState: 'healthy', status: 'drained',
+      createdAt: '2026-09-09T00:00:00Z', deadlineAt: '2026-09-09T00:01:00Z', observedAt: '2026-09-09T00:00:03Z',
+      definitionDigest: 'private-definition', reasons: [], futurePrivateField: 'private-future',
+      outcomes: [{ campaignId: 'a', state: 'held', attempted: false, reasonCode: 'campaign-paused',
+        campaignDigest: 'private-campaign', deliveryDigest: 'private-delivery', future: 'private-outcome' }],
+      control: { mode: 'drain', sequence: 3, requestedAt: '2026-09-09T00:00:01Z',
+        acknowledgedAt: '2026-09-09T00:00:02Z', future: 'private-control' } } as UniversePortfolioControllerReport;
+    const before = JSON.stringify(source); const projected = projectUniverseConsoleControllerStatus(source);
+    expect(Object.keys(projected).sort()).toEqual(['schemaVersion', 'controllerId', 'sourceState', 'status', 'createdAt',
+      'deadlineAt', 'observedAt', 'reasons', 'outcomes', 'control'].sort());
+    expect(projected.outcomes).toEqual([{ campaignId: 'a', state: 'held', attempted: false, reasonCode: 'campaign-paused' }]);
+    expect(projected.control).toEqual({ mode: 'drain', sequence: 3, requestedAt: '2026-09-09T00:00:01Z',
+      acknowledgedAt: '2026-09-09T00:00:02Z' });
+    const serialized = serializeUniverseConsoleControllerStatus(source);
+    expect(JSON.parse(serialized)).toEqual(projected); expect(serialized).not.toContain('private-');
+    expect(JSON.stringify(source)).toBe(before);
+  });
+
+  it.each(['missing', 'degraded'] as const)('preserves %s controller evidence without inventing control or timestamps', (sourceState) => {
+    const source: UniversePortfolioControllerReport = { schemaVersion: 1, controllerId: 'one', sourceState,
+      status: 'unavailable', createdAt: null, deadlineAt: null, observedAt: '2026-09-09T00:00:00Z',
+      definitionDigest: null, outcomes: [], reasons: ['controller-unavailable'] };
+    expect(JSON.parse(serializeUniverseConsoleControllerStatus(source))).toEqual({ schemaVersion: 1, controllerId: 'one', sourceState,
+      status: 'unavailable', createdAt: null, deadlineAt: null, observedAt: source.observedAt, outcomes: [], reasons: source.reasons });
+  });
   it('allowlists readiness observations without exposing private identity or automatic authority', () => {
     const source = { schemaVersion: 1, readinessScope: 'recorded-campaign-evidence', campaignId: 'one',
       universeId: 'universe-one', observedState: 'ready', sourceState: 'healthy', disposition: 'startable',

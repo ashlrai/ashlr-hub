@@ -1,12 +1,13 @@
 import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MAX_UNIVERSE_CONSOLE_RESPONSE_BYTES } from '../src/core/web/universe-console-public.js';
 
-const fixture = vi.hoisted(() => ({ on: vi.fn(), postMessage: vi.fn(), overview: vi.fn(), graph: vi.fn(), readiness: vi.fn() }));
+const fixture = vi.hoisted(() => ({ on: vi.fn(), postMessage: vi.fn(), overview: vi.fn(), graph: vi.fn(), readiness: vi.fn(), controller: vi.fn() }));
 vi.mock('node:worker_threads', async (original) => ({ ...await original<typeof import('node:worker_threads')>(),
   parentPort: { on: fixture.on, postMessage: fixture.postMessage }, workerData: { root: '/private/tmp/console-worker-unit-scope' } }));
 vi.mock('../src/core/universe/overview.js', () => ({ readUniverseOverview: fixture.overview }));
 vi.mock('../src/core/universe/graph-reader.js', () => ({ readUniverseGraph: fixture.graph }));
 vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampaignReadiness: fixture.readiness }));
+vi.mock('../src/core/universe/portfolio-controller.js', () => ({ readUniversePortfolioController: fixture.controller }));
 let dispatch: (request: unknown) => void;
 beforeAll(async () => {
   await import('../src/core/web/universe-console-worker.js');
@@ -14,9 +15,39 @@ beforeAll(async () => {
 });
 beforeEach(() => {
   fixture.postMessage.mockClear(); fixture.overview.mockReset(); fixture.graph.mockReset(); fixture.readiness.mockReset();
+  fixture.controller.mockReset();
 });
 
 describe('dedicated scoped console worker protocol', () => {
+  it('pins the controller read to its worker root and posts only allowlisted observations', () => {
+    fixture.controller.mockReturnValue({ schemaVersion: 1, controllerId: 'one', sourceState: 'healthy', status: 'draining',
+      createdAt: null, deadlineAt: null, observedAt: '2026-09-09T00:00:00Z', reasons: [],
+      definitionDigest: 'private-witness', futurePrivateField: 'private-witness',
+      outcomes: [{ campaignId: 'a', state: 'in-flight', attempted: true, reasonCode: 'dispatch-in-flight',
+        campaignDigest: 'private-witness', deliveryDigest: 'private-witness', extra: 'private-witness' }],
+      control: { mode: 'drain', sequence: 4, requestedAt: '2026-09-09T00:00:00Z', acknowledgedAt: null, extra: 'private-witness' } });
+    dispatch({ type: 'read', id: 20, kind: 'controller-status', payload: { controllerId: 'one' } });
+    expect(fixture.controller).toHaveBeenCalledExactlyOnceWith('one', { root: '/private/tmp/console-worker-unit-scope' });
+    const result = fixture.postMessage.mock.calls[0]![0];
+    expect(result).toMatchObject({ type: 'result', id: 20, ok: true });
+    expect(JSON.parse(result.value)).toMatchObject({ controllerId: 'one', status: 'draining', control: { acknowledgedAt: null } });
+    expect(result.value).not.toContain('private-witness'); expect(result.value).not.toContain('Digest');
+    expect(fixture.overview).not.toHaveBeenCalled(); expect(fixture.readiness).not.toHaveBeenCalled();
+  });
+
+  it.each([{}, undefined, { controllerId: '../one' }, { controllerId: 'one', root: '/other' },
+    { controllerId: 'one', campaignId: 'one' }, { controllerId: ['one'] }, { controllerId: 'x'.repeat(65) }])(
+    'rejects malformed controller selection before reading %#', (payload) => {
+      dispatch({ type: 'read', id: 21, kind: 'controller-status', payload });
+      expect(fixture.controller).not.toHaveBeenCalled();
+      expect(fixture.postMessage).toHaveBeenCalledExactlyOnceWith({ type: 'result', id: 21, ok: false });
+    });
+
+  it('withholds raw controller read errors', () => {
+    fixture.controller.mockImplementation(() => { throw new Error('/private/controller-secret'); });
+    dispatch({ type: 'read', id: 22, kind: 'controller-status', payload: { controllerId: 'one' } });
+    expect(fixture.postMessage).toHaveBeenCalledExactlyOnceWith({ type: 'result', id: 22, ok: false });
+  });
   it('pins campaign readiness to its worker root and strips private witnesses before posting', () => {
     fixture.readiness.mockReturnValue({ schemaVersion: 1, campaignId: 'one', universeId: 'u-one',
       sourceState: 'healthy', disposition: 'startable', automaticAction: 'run',

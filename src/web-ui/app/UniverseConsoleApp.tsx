@@ -7,6 +7,7 @@ import { useAuthPhase, useQuery, useRefetch, useTheme } from '../data/hooks.js';
 import { UniverseRootContext } from '../routes/universe/UniverseScope.js';
 import { UniverseView } from '../routes/universe/UniverseView.js';
 import { SkipToContent } from './SkipToContent.js';
+import { UniverseControllerInspector } from './UniverseControllerInspector.js';
 import styles from './UniverseConsoleApp.module.css';
 import '../design/global.css';
 
@@ -61,6 +62,7 @@ function ScopedWorkspace() {
           <button type="button" onClick={retry}>Retry scope check</button>
         </section> : scope.data ? <UniverseRootContext.Provider value={scope.data.root}>
           <p className={styles.explanation}>This console observes the selected Universe store. Run campaigns from your terminal; opening this page does not start work.</p>
+          <UniverseControllerInspector key={scope.data.root} />
           <UniverseView />
         </UniverseRootContext.Provider> : <p role="status">Checking the selected Universe store…</p>}
       </main>

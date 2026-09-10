@@ -177,6 +177,30 @@ seconds for active runs or campaigns, and every 15 seconds otherwise so it can
 discover work started elsewhere. Hidden tabs skip periodic refreshes; returning
 to the tab refreshes immediately. The graph refreshes only when requested.
 
+### Inspect a portfolio controller
+
+In the scoped console, enter the controller ID from your portfolio manifest in
+the controller inspector. This is a named, on-demand read; the page does not
+discover controllers or scan every controller ledger. The inspector remains
+available independently of the experiment overview. Use its refresh action to
+request another sample; overview polling does not refresh controller evidence.
+
+The result shows the persisted status, original deadline, observation time and
+campaign outcomes. Admission control appears separately: a drain request is not
+an acknowledgement, and an acknowledged drain can coexist with a completed or
+expired controller. A recorded unsettled intent does not prove a worker is alive.
+If refresh fails, any retained result is marked historical, not current evidence.
+
+This view never starts work, acquires execution ownership, acknowledges drain,
+repairs a ledger or changes account allocation. Missing and degraded controllers
+are reported explicitly. Use the [CLI drain/resume workflow](#drain-and-reopen-a-preserved-queue)
+for authorized changes; resuming admission does not reset the original deadline.
+Definition, campaign and delivery digests and private admission witnesses are
+omitted from this browser projection. Use `controller status` for the full local
+report.
+
+### Check a campaign's recorded readiness
+
 For a selected campaign, choose **Check recorded readiness** to inspect its
 saved controls, budget and outcomes. This separate read is on demand; overview
 polling does not repeat it. Use **Refresh check** to request another observation.
@@ -204,8 +228,9 @@ or failed work returns unavailable rather than a truncated successful graph.
 Use targeted CLI inspection when a store exceeds the console's response budget.
 
 The protected read surface consists of `/api/universe/console` (scope metadata),
-`/api/universe` (overview), `/api/universe/graph?universeId=ID` (graph), and
-`/api/universe/campaign-readiness?campaignId=ID` (recorded recovery check).
+`/api/universe` (overview), `/api/universe/graph?universeId=ID` (graph),
+`/api/universe/campaign-readiness?campaignId=ID` (recorded recovery check), and
+`/api/universe/controller-status?controllerId=ID` (recorded controller evidence).
 Browser-supplied roots, unknown parameters, unrelated Hub APIs and data mutations
 are rejected. Session exchange/logout use `/api/session`. The public `/health`
 route establishes listener liveness only; it does not attest store health.

@@ -43,6 +43,28 @@ afterEach(async () => {
 });
 
 describe('scoped console bounded reader', () => {
+  it('coalesces controller IDs only while pending and separates campaign selections', async () => {
+    const { reader, workers } = harness();
+    const first = reader.controllerStatus('one'); const duplicate = reader.controllerStatus('one');
+    const second = reader.controllerStatus('two'); const campaign = reader.campaignReadiness('one');
+    const worker = workers[0]!;
+    expect(worker.requests).toHaveLength(1);
+    expect(worker.requests[0]).toMatchObject({ kind: 'controller-status', payload: { controllerId: 'one' } });
+    worker.result(0, json); await Promise.all([first, duplicate]);
+    expect(worker.requests[1]).toMatchObject({ kind: 'controller-status', payload: { controllerId: 'two' } });
+    worker.result(1, json); await second;
+    expect(worker.requests[2]).toMatchObject({ kind: 'campaign-readiness', payload: { campaignId: 'one' } });
+    worker.result(2, json); await campaign;
+    const refresh = reader.controllerStatus('one');
+    expect(worker.requests).toHaveLength(4); worker.result(3, json); await refresh;
+  });
+
+  it('bounds controller reads without an inline fallback', async () => {
+    const { reader, workers } = harness(50); const pending = reader.controllerStatus('one');
+    const failure = expect(pending).rejects.toMatchObject({ code: 'READ_PROJECTION_TIMEOUT' });
+    await vi.advanceTimersByTimeAsync(50); await failure;
+    expect(workers[0]!.terminate).toHaveBeenCalledOnce();
+  });
   it('coalesces only pending same-campaign reads, separating other campaigns and graph kinds', async () => {
     const { reader, workers } = harness();
     const first = reader.campaignReadiness('one'); const duplicate = reader.campaignReadiness('one');
@@ -82,6 +104,10 @@ describe('scoped console bounded reader', () => {
     ['graph', { universeId: '../one' }], ['graph', {}], ['execute', undefined],
     ['campaign-readiness', { campaignId: 'one', root }], ['campaign-readiness', { campaignId: '../one' }],
     ['campaign-readiness', { campaignId: 'one', universeId: 'one' }], ['campaign-readiness', undefined],
+    ['controller-status', undefined], ['controller-status', {}], ['controller-status', { controllerId: '../one' }],
+    ['controller-status', { controllerId: ['one'] }], ['controller-status', { controllerId: 'one', root }],
+    ['controller-status', { controllerId: 'one', campaignId: 'one' }],
+    ['controller-status', { controllerId: 'x'.repeat(65) }], ['controller-status', { controllerId: 'UPPER' }],
   ])('rejects browser scope and unsupported operation %#', (kind, payload) => {
     expect(() => normalizeUniverseConsoleRead(kind, payload)).toThrow('Invalid Universe console read');
   });

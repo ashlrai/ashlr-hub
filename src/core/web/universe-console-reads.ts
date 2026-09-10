@@ -8,6 +8,7 @@ export interface UniverseConsoleReader {
   overview(): Promise<string>;
   graph(universeId: string): Promise<string>;
   campaignReadiness(campaignId: string): Promise<string>;
+  controllerStatus(controllerId: string): Promise<string>;
   close(): Promise<void>;
 }
 
@@ -18,7 +19,7 @@ export function validateUniverseConsoleRoot(value: unknown): string {
   return resolve(value);
 }
 
-export function normalizeUniverseConsoleRead(kind: unknown, payload: unknown): undefined | { universeId: string } | { campaignId: string } {
+export function normalizeUniverseConsoleRead(kind: unknown, payload: unknown): undefined | { universeId: string } | { campaignId: string } | { controllerId: string } {
   if (kind === 'overview' && payload === undefined) return undefined;
   if (kind === 'graph' && payload && typeof payload === 'object' && !Array.isArray(payload)) {
     const value = payload as Record<string, unknown>;
@@ -29,6 +30,11 @@ export function normalizeUniverseConsoleRead(kind: unknown, payload: unknown): u
     const value = payload as Record<string, unknown>;
     if (Object.keys(value).length === 1 && Object.hasOwn(value, 'campaignId') && typeof value.campaignId === 'string' &&
       /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.campaignId)) return { campaignId: value.campaignId };
+  }
+  if (kind === 'controller-status' && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const value = payload as Record<string, unknown>;
+    if (Object.keys(value).length === 1 && Object.hasOwn(value, 'controllerId') && typeof value.controllerId === 'string' &&
+      /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.controllerId)) return { controllerId: value.controllerId };
   }
   throw new ReadProjectionError('Invalid Universe console read', 'READ_PROJECTION_INVALID_REQUEST');
 }
@@ -51,5 +57,6 @@ export function createUniverseConsoleReader(root: string, options: Pick<BoundedR
   return { overview: () => transport.read('overview').then(validateUniverseConsoleResponse),
     graph: (universeId) => transport.read('graph', { universeId }).then(validateUniverseConsoleResponse),
     campaignReadiness: (campaignId) => transport.read('campaign-readiness', { campaignId }).then(validateUniverseConsoleResponse),
+    controllerStatus: (controllerId) => transport.read('controller-status', { controllerId }).then(validateUniverseConsoleResponse),
     close: () => transport.close() };
 }
