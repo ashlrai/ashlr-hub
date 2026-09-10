@@ -74,7 +74,7 @@ describe('scoped named controller inspector', () => {
     expect(screen.getByText(/form has changed/)).toHaveTextContent('still belongs to fleet');
     await user.click(screen.getByRole('button', { name: 'Refresh controller' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Observation failed');
-    expect(screen.getByText(/Historical observation/)).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('Historical observation');
     expect(within(screen.getByRole('table')).getByText('owner-paused')).toBeInTheDocument();
     expect(screen.queryByText('/private/secret')).not.toBeInTheDocument();
     expect(request.mock.calls[1][0]).toBe('/api/universe/controller-status?controllerId=fleet');

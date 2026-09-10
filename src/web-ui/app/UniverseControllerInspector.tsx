@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { UniversePortfolioControllerView } from '../../core/web/universe-console-types.js';
 import { isControllerId, readControllerStatus } from '../data/controller-status.js';
 import { UniverseControllerTopology } from './UniverseControllerTopology.js';
+import { UniverseControllerChanges } from './UniverseControllerChanges.js';
 import styles from './UniverseControllerInspector.module.css';
 
 function RecordedTime({ value }: { value: string | null }) {
@@ -12,7 +13,11 @@ function RecordedTime({ value }: { value: string | null }) {
 export function UniverseControllerInspector() {
   const [input, setInput] = useState('');
   const [selected, setSelected] = useState<string | null>(null);
-  const [data, setData] = useState<UniversePortfolioControllerView | null>(null);
+  const [observations, setObservations] = useState<{
+    current: UniversePortfolioControllerView | null;
+    previous: UniversePortfolioControllerView | null;
+  }>({ current: null, previous: null });
+  const data = observations.current;
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [validation, setValidation] = useState(false);
@@ -27,12 +32,16 @@ export function UniverseControllerInspector() {
     const abort = new AbortController();
     request.current.abort = abort;
     setSelected(id);
-    setData((previous) => previous?.controllerId === id ? previous : null);
+    setObservations((previous) => previous.current?.controllerId === id ? previous : { current: null, previous: null });
     setLoading(true);
     setError(null);
     try {
       const next = await readControllerStatus(id, abort.signal);
-      if (sequence === request.current.sequence) setData(next);
+      // Advance the pair together, only for the newest accepted request. Failed
+      // or superseded reads must not become the next comparison baseline.
+      if (sequence === request.current.sequence) setObservations((previous) => ({
+        current: next, previous: previous.current?.controllerId === id ? previous.current : null,
+      }));
     } catch {
       if (sequence === request.current.sequence) setError('Observation failed or returned invalid evidence. Check your connection and refresh this controller.');
     } finally {
@@ -71,6 +80,7 @@ export function UniverseControllerInspector() {
           <div><dt>Created at</dt><dd><RecordedTime value={data.createdAt} /></dd></div>
           <div><dt>Original deadline</dt><dd><RecordedTime value={data.deadlineAt} /></dd></div>
         </dl>
+        <UniverseControllerChanges previous={observations.previous} current={data} historical={Boolean(error)} loading={loading} />
         {data.sourceState === 'missing' ? <p className={styles.warning}>No controller registration was found in this store. Check the ID and selected Universe store.</p> : null}
         {data.sourceState === 'degraded' ? <p className={styles.warning}>Evidence could not be fully verified. This observation does not repair locks, reconcile work or prove a controller is running.</p> : null}
         {data.control ? <section className={styles.control} aria-label="Recorded admission control">

@@ -218,6 +218,19 @@ actual connections within the display limit; complete relationships remain in
 the details. None of these local navigation actions refreshes evidence or starts
 work. A historical observation stays historical until an explicit refresh succeeds.
 
+**Changes between observations** compares the last two accepted reads of the
+selected controller in this inspector session. Refresh explicitly to establish a
+comparison, then expand the before/after details to inspect recorded field changes.
+An unchanged refresh advances the baseline too. Failed refreshes preserve both
+observations and mark the comparison historical; switching controller IDs or
+reloading the page clears the session comparison. There is no persisted timeline.
+
+Comparison order follows accepted requests, not inferred event times. Equal or
+backward observation clocks are flagged. Changed registration identity prevents
+comparison, and incomplete evidence requires caution: a campaign absent from an
+observation is not proof it was deleted or completed. These differences describe
+public recorded fields, not worker liveness, elapsed execution or business value.
+
 This view never starts work, acquires execution ownership, acknowledges drain,
 repairs a ledger or changes account allocation. Missing and degraded controllers
 are reported explicitly. Use the [CLI drain/resume workflow](#drain-and-reopen-a-preserved-queue)
