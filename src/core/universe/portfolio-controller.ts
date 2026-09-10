@@ -17,9 +17,10 @@ import { readUniverseDeliveries } from './delivery.js';
 import { readUniversePortfolioPlan, validateUniversePortfolioDefinition } from './portfolio-plan.js';
 import { appendPortfolioControllerEvent, foldPortfolioController, portfolioControllerDirectory,
   portfolioControllerPrerequisites, readPortfolioControllerEvents, refreshPortfolioControllerEvents,
-  withPortfolioControllerTransaction, PortfolioControllerTransactionBusyError, PortfolioControllerDrainError } from './portfolio-controller-store.js';
+  withPortfolioControllerTransaction, PortfolioControllerTransactionBusyError, PortfolioControllerDrainError,
+  validatePortfolioControllerGraphDispatch } from './portfolio-controller-store.js';
 import type { UniversePortfolioRunOptions } from './portfolio.js';
-import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin,
+import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin, PortfolioControllerGraphDispatch,
   UniversePortfolioControllerReport } from './portfolio-controller-types.js';
 import type { UniverseStoreOptions } from './types.js';
 
@@ -120,6 +121,8 @@ export function readUniversePortfolioController(id: string, options: UniverseSto
 export interface UniversePortfolioControllerRunOptions extends UniversePortfolioRunOptions {
   /** Host graph enrollment must not adopt another invocation's existing controller. */
   requireNewEnrollment?: boolean;
+  /** Kernel-derived fresh-execution association, never authority to resume. */
+  graphDispatch?: PortfolioControllerGraphDispatch;
   /** In-process parent ownership/KILL check; never supplied by a portable manifest. */
   isExecutionStopped?: () => boolean;
   /** Optional outer monotonic deadline, which may only shorten the persisted allowance. */
@@ -127,6 +130,19 @@ export interface UniversePortfolioControllerRunOptions extends UniversePortfolio
 }
 
 export async function runUniversePortfolioController(input: unknown, options: UniversePortfolioControllerRunOptions = {}): Promise<UniversePortfolioControllerReport> {
+  // Capture linkage before any storage or trusted callbacks. Never execute an
+  // accessor while deciding which graph's durable dispatch is being associated.
+  const graphProperty = Object.getOwnPropertyDescriptor(options, 'graphDispatch');
+  if (graphProperty && (!graphProperty.enumerable || !Object.hasOwn(graphProperty, 'value')) ||
+    !graphProperty && 'graphDispatch' in options) throw new Error('Invalid controller graph dispatch option');
+  const graphDispatch = graphProperty ? validatePortfolioControllerGraphDispatch(graphProperty.value) : undefined;
+  const newProperty = Object.getOwnPropertyDescriptor(options, 'requireNewEnrollment');
+  if (newProperty && (!Object.hasOwn(newProperty, 'value') || newProperty.value !== undefined && typeof newProperty.value !== 'boolean') ||
+    !newProperty && 'requireNewEnrollment' in options) throw new Error('Invalid controller new enrollment option');
+  const requireNewEnrollment = newProperty?.value === true;
+  if (graphDispatch && !requireNewEnrollment) {
+    throw new Error('Graph-linked controllers require explicit fresh enrollment; use receipt-only reconciliation');
+  }
   const startedAt = new Date().toISOString();
   const startedMonotonic = performance.now();
   const definition = validateUniversePortfolioDefinition(input);
@@ -138,7 +154,6 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   const checkRuntime = resourceRuntime === undefined ? null : resourceAdmissionPreflight(resourceRuntime, expectedResourceRuntimeDigest);
   const signal = options.signal;
   const isExecutionStopped = options.isExecutionStopped;
-  const requireNewEnrollment = options.requireNewEnrollment === true;
   const outerDeadline = options.deadlineMonotonicMs ?? Infinity;
   if (options.deadlineMonotonicMs !== undefined && (!Number.isFinite(outerDeadline) || outerDeadline < 0)) {
     throw new Error('Invalid outer controller deadline');
@@ -153,7 +168,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   const acquired = acquireLocalStoreLockWithOutcome(join(directory, '.execution.lock'), 0, { anchorPath: directory, exactPrivateStorage: true });
   if (acquired.state !== 'acquired') {
     const report = readUniversePortfolioController(definition.id, { root });
-    return { ...report, ...(requireNewEnrollment ? { status: 'unavailable' as const } : {}),
+    return { ...report, ...(requireNewEnrollment || graphDispatch ? { status: 'unavailable' as const } : {}),
       reasons: [...report.reasons, acquired.state === 'contended' ? 'controller-owned' : 'controller-ownership-unavailable'] };
   }
   const controller = new AbortController();
@@ -249,11 +264,16 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   signal?.addEventListener('abort', cancel, { once: true });
   try {
     const existing = transaction(() => withPortfolioControllerTransaction(directory, () => {
-      recoverControllerRecordLock(definition.id, { root }, acquired.lock);
       try { lstatSync(join(directory, 'ledger')); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
       if (requireNewEnrollment) throw new Error('Host graph requires a new controller enrollment');
+      // The strict reader refuses every writer mutex. Reclaiming a proven-dead
+      // mutex is storage cleanup, not permission to resume graph-linked execution.
+      recoverControllerRecordLock(definition.id, { root }, acquired.lock);
       capture(readPortfolioControllerEvents(directory));
+      if (foldPortfolioController(events).first.enrollment.graphDispatch) {
+        throw new Error('Graph-linked controller execution cannot resume; use receipt-only reconciliation');
+      }
       return true;
     }));
     if (!(existing instanceof Promise ? await existing : existing)) {
@@ -285,7 +305,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
         refs.add(ref);
       }
       const enrollment: PortfolioControllerEnrollment = { definition, deliveryPlan, definitionDigest: digest(canonical(definition)), pins,
-        deadlineAt: new Date(Date.parse(startedAt) + definition.maxDurationMs).toISOString() };
+        deadlineAt: new Date(Date.parse(startedAt) + definition.maxDurationMs).toISOString(),
+        ...(graphDispatch ? { graphDispatch } : {}) };
       const created = append({ kind: 'created', at: startedAt, enrollment });
       if (created instanceof Promise) await created;
     }

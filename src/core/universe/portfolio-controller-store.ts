@@ -6,7 +6,7 @@ import { readImmutablePrivateRecords, writeImmutablePrivateRecord,
 import { canonical, defaultUniverseRoot, digest, inspectPrivateDirectory } from './artifacts.js';
 import { validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
 import { validateUniversePortfolioDefinition } from './portfolio-plan.js';
-import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin,
+import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin, PortfolioControllerGraphDispatch,
   UniversePortfolioControllerOutcome, UniversePortfolioControllerControl, UniversePortfolioControllerControlReceipt } from './portfolio-controller-types.js';
 import type { UniverseStoreOptions } from './types.js';
 
@@ -32,6 +32,18 @@ function iso(value: unknown): value is string {
 function reason(value: unknown): value is string { return typeof value === 'string' && /^[a-z][a-z0-9-]{0,79}$/.test(value); }
 function sequence(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) < MAX_EVENTS; }
 
+/** Strict detached linkage. Graph IDs intentionally share the graph's mixed-case grammar. */
+export function validatePortfolioControllerGraphDispatch(value: unknown): PortfolioControllerGraphDispatch {
+  if (!object(value) || !exact(value, ['schemaVersion', 'graphRootDigest', 'graphId', 'definitionDigest', 'nodeId', 'intentDigest']) ||
+    value.schemaVersion !== 1 || !hash(value.graphRootDigest) || !hash(value.definitionDigest) || !hash(value.intentDigest) ||
+    typeof value.graphId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value.graphId) ||
+    typeof value.nodeId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value.nodeId)) {
+    throw new Error('Invalid controller graph dispatch linkage');
+  }
+  return { schemaVersion: 1, graphRootDigest: value.graphRootDigest, graphId: value.graphId,
+    definitionDigest: value.definitionDigest, nodeId: value.nodeId, intentDigest: value.intentDigest };
+}
+
 function pin(value: unknown): value is PortfolioControllerPin {
   return object(value) && exact(value, ['campaignId', 'universeId', 'definitionDigest', 'manifestDigest', 'comparatorDigest',
     'campaignDigest', 'recordsDigest', 'initialState', 'dispatch', 'reasonCode']) && id(value.campaignId) && id(value.universeId) &&
@@ -41,9 +53,11 @@ function pin(value: unknown): value is PortfolioControllerPin {
 }
 
 function enrollment(value: unknown): value is PortfolioControllerEnrollment {
-  if (!object(value) || !exact(value, ['definition', 'deliveryPlan', 'definitionDigest', 'pins', 'deadlineAt']) ||
+  if (!object(value) || !exact(value, ['definition', 'deliveryPlan', 'definitionDigest', 'pins', 'deadlineAt',
+    ...(Object.hasOwn(value, 'graphDispatch') ? ['graphDispatch'] : [])]) ||
       !Array.isArray(value.pins) || !value.pins.every(pin) || !iso(value.deadlineAt)) return false;
   try {
+    if (Object.hasOwn(value, 'graphDispatch')) validatePortfolioControllerGraphDispatch(value.graphDispatch);
     const definition = validateUniversePortfolioDefinition(value.definition);
     const ids = definition.tasks.map((task) => task.campaignId);
     if (value.definitionDigest !== digest(canonical(definition)) || value.pins.length !== ids.length ||

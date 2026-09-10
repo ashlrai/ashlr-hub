@@ -8,9 +8,11 @@ import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
 import { campaignUniverse, readUniverseCampaign } from './campaign-store.js';
 import { readCompletedCampaignDelivery } from './campaign-delivery-recovery.js';
 import { validateUniverseCampaignDeliveryPlan, type UniverseCampaignDeliveryPlan } from './campaign-delivery.js';
-import type { ControlGraphHandlerRegistration, ControlHandlerResult } from './control-graph.js';
-import { runUniversePortfolioController } from './portfolio-controller.js';
-import { foldPortfolioController, portfolioControllerDirectory, readPortfolioControllerEvents } from './portfolio-controller-store.js';
+import type { ControlGraphHandlerRegistration, ControlHandlerContext, ControlHandlerResult, ControlGraphRecoveryHandler } from './control-graph.js';
+import { readUniversePortfolioController, runUniversePortfolioController } from './portfolio-controller.js';
+import { foldPortfolioController, portfolioControllerDirectory, readPortfolioControllerEvents,
+  validatePortfolioControllerGraphDispatch } from './portfolio-controller-store.js';
+import type { UniversePortfolioControllerReport, PortfolioControllerGraphDispatch } from './portfolio-controller-types.js';
 import { validateUniversePortfolioDefinition } from './portfolio-plan.js';
 import type { UniversePortfolioDefinition } from './portfolio-types.js';
 import { validateResourceGenerationRuntime } from './resource-generation.js';
@@ -30,9 +32,14 @@ export interface FirmEngineeringControlBinding {
   nodeInput: Readonly<{ bindingDigest: string; requestDigest: string }>;
 }
 const branded = new WeakSet<object>();
+const recoveries = new WeakMap<object, ControlGraphRecoveryHandler>();
 /** Recognition only; no exported operation can brand a caller-supplied callback. */
 export function isFirmEngineeringControlHandler(value: unknown): boolean {
   return value !== null && typeof value === 'object' && branded.has(value);
+}
+/** Internal registry lookup: a copied declaration never inherits recovery code. */
+export function firmEngineeringControlRecovery(value: object): ControlGraphRecoveryHandler | undefined {
+  return recoveries.get(value);
 }
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
@@ -99,10 +106,73 @@ export function createFirmEngineeringControlHandler(input: FirmEngineeringContro
   const reject = (reason: string, evidence: Record<string, unknown> = {}): ControlHandlerResult => ({ outcome: 'rejected',
     verifier: { id: 'universe-fixed-evaluator', verdict: 'unavailable', independent: false }, spend: { unknown: true },
     artifact: { ...artifactBase, reason, verifiedAccepted: false, ...evidence } });
+  const dispatch = (context: ControlHandlerContext): PortfolioControllerGraphDispatch => {
+    if (context.node.kind !== 'deliver' || context.node.id !== host.nodeId) throw new Error('Node not enrolled');
+    const value = snapshot(context.node.input, 1024);
+    if (!exact(value, ['bindingDigest', 'requestDigest']) || canonical(value) !== canonical(nodeInput)) throw new Error('Binding mismatch');
+    const link = validatePortfolioControllerGraphDispatch(context.graphDispatch);
+    if (link.nodeId !== host.nodeId) throw new Error('Dispatch node mismatch');
+    return link;
+  };
+  const checkEnrollment = () => {
+    inspectPrivateDirectory(host.root);
+    if (canonical(runtime(host)) !== canonical(pool) || canonical(campaignPins(host, pool)) !== canonical(pins)) {
+      throw new Error('Engineering enrollment changed');
+    }
+  };
+  // This proof collector is shared by initial execution and read-only restart
+  // recovery. It never invokes the controller, a worker, or Git publication.
+  const prove = (report: UniversePortfolioControllerReport, graphDispatch: PortfolioControllerGraphDispatch,
+    stopped: () => boolean, recovered: boolean): ControlHandlerResult => {
+    const controller = { id: report.controllerId, definitionDigest: report.definitionDigest, sourceState: report.sourceState,
+      status: report.status, deadlineAt: report.deadlineAt };
+    if (report.sourceState !== 'healthy' || report.status !== 'completed' || report.reasons.length !== 0 ||
+      report.definitionDigest !== digest(canonical(host.definition))) return reject('controller-not-completed', { controller });
+    const directory = portfolioControllerDirectory(host.definition.id, { root: host.root });
+    const events = readPortfolioControllerEvents(directory);
+    const folded = foldPortfolioController(events);
+    const enrolled = folded.first.enrollment;
+    if (report.controllerId !== host.definition.id || report.deadlineAt !== enrolled.deadlineAt ||
+      canonical(report.outcomes) !== canonical([...folded.states.values()]) ||
+      !enrolled.graphDispatch || canonical(enrolled.graphDispatch) !== canonical(graphDispatch) ||
+      canonical(enrolled.definition) !== canonical(host.definition) || canonical(enrolled.deliveryPlan) !== canonical(host.deliveryPlan) ||
+      canonical(enrolled.pins.map(({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest }) =>
+        ({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest }))) !== canonical(pins)) {
+      return reject('controller-enrollment-mismatch', { controller });
+    }
+    const deliveries = host.deliveryPlan.deliveries.map((target) => {
+      const campaign = readUniverseCampaign(target.campaignId, { root: host.root });
+      const receipt = readCompletedCampaignDelivery(campaign, target, { root: host.root });
+      const outcome = report.outcomes.find((row) => row.campaignId === target.campaignId);
+      if (!receipt || outcome?.state !== 'completed' || outcome.campaignDigest !== digest(canonical(campaign)) ||
+        outcome.deliveryDigest !== digest(canonical(receipt))) throw new Error('Engineering delivery proof unavailable');
+      const universe = campaignUniverse(campaign, { root: host.root });
+      const run = universe.runs.find((row) => row.id === receipt.runId)!;
+      const trial = run.trials.find((row) => row.id === receipt.trialId)!;
+      return { campaignId: target.campaignId, universeId: receipt.universeId, campaignDigest: outcome.campaignDigest,
+        campaignDefinitionDigest: campaign.definitionDigest, manifestDigest: receipt.manifestDigest, comparatorDigest: receipt.comparatorDigest,
+        runId: receipt.runId, trialId: receipt.trialId, artifactDigest: receipt.artifactDigest,
+        evaluationEvidenceDigest: digest(canonical({ comparatorDigest: receipt.comparatorDigest, runId: run.id,
+          trialId: trial.id, artifactDigest: receipt.artifactDigest, status: trial.status, score: trial.score, metrics: trial.metrics })),
+        deliveryDigest: outcome.deliveryDigest, branch: receipt.branch, baseCommit: receipt.baseCommit, commit: receipt.commit,
+        generationReceiptDigest: trial.generation?.resource?.receiptDigest ?? null };
+    });
+    const evidence = { graphDispatch, controller: { ...controller, recordsDigest: digest(canonical(events)) }, deliveries };
+    if (canonical(readPortfolioControllerEvents(directory)) !== canonical(events)) throw new Error('Controller evidence changed');
+    if (stopped()) return reject('execution-stopped', evidence);
+    const result: ControlHandlerResult = { outcome: 'completed', verifier: { id: 'universe-fixed-evaluator', verdict: 'pass', independent: true },
+      // Campaign totals include prior work; do not misattribute them to this graph invocation.
+      spend: { unknown: true }, artifact: { ...artifactBase, reason: recovered ? 'engineering-reconciled' : 'engineering-delivered',
+        verifiedAccepted: true, ...evidence } };
+    if (Buffer.byteLength(canonical(result)) > MAX_RESULT_BYTES) return reject('evidence-too-large', {
+      controller, deliveryProofsDigest: digest(canonical(deliveries)), deliveryCount: deliveries.length });
+    return result;
+  };
   const handler = Object.freeze<FirmEngineeringControlBinding['handler']>({
     effectClass: 'engineering-portfolio-local-delivery', constitutionVersion: host.constitutionVersion,
     policyEpoch: host.policyEpoch, bindingDigest,
-    run: async ({ node, signal, isExecutionStopped, deadlineMonotonicMs }) => {
+    run: async (context) => {
+      const { node, signal, isExecutionStopped, deadlineMonotonicMs } = context;
       if (node.kind !== 'deliver' || node.id !== host.nodeId) return reject('node-not-enrolled');
       try {
         const value = snapshot(node.input, 1024);
@@ -111,50 +181,25 @@ export function createFirmEngineeringControlHandler(input: FirmEngineeringContro
       const stopped = () => signal.aborted || (isExecutionStopped?.() ?? false);
       try {
         if (stopped()) return reject('execution-stopped');
-        inspectPrivateDirectory(host.root);
-        if (canonical(runtime(host)) !== canonical(pool) || canonical(campaignPins(host, pool)) !== canonical(pins)) return reject('enrollment-changed');
+        const graphDispatch = dispatch(context);
+        checkEnrollment();
         const report = await runUniversePortfolioController(host.definition, { root: host.root, deliveryPlan: host.deliveryPlan,
           resourceRuntime: host.resourceRuntime, expectedResourceRuntimeDigest: host.expectedRuntimeDigest,
-          requireNewEnrollment: true, isExecutionStopped: stopped, signal, deadlineMonotonicMs });
-        const controller = { id: report.controllerId, definitionDigest: report.definitionDigest, sourceState: report.sourceState,
-          status: report.status, deadlineAt: report.deadlineAt };
-        if (report.sourceState !== 'healthy' || report.status !== 'completed' || report.reasons.length !== 0 ||
-          report.definitionDigest !== digest(canonical(host.definition))) return reject('controller-not-completed', { controller });
-        const events = readPortfolioControllerEvents(portfolioControllerDirectory(host.definition.id, { root: host.root }));
-        const enrolled = foldPortfolioController(events).first.enrollment;
-        if (canonical(enrolled.definition) !== canonical(host.definition) || canonical(enrolled.deliveryPlan) !== canonical(host.deliveryPlan) ||
-          canonical(enrolled.pins.map(({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest }) =>
-            ({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest }))) !== canonical(pins)) {
-          return reject('controller-enrollment-mismatch', { controller });
-        }
-        const deliveries = host.deliveryPlan.deliveries.map((target) => {
-          const campaign = readUniverseCampaign(target.campaignId, { root: host.root });
-          const receipt = readCompletedCampaignDelivery(campaign, target, { root: host.root });
-          const outcome = report.outcomes.find((row) => row.campaignId === target.campaignId);
-          if (!receipt || outcome?.state !== 'completed' || outcome.campaignDigest !== digest(canonical(campaign)) ||
-            outcome.deliveryDigest !== digest(canonical(receipt))) throw new Error('Engineering delivery proof unavailable');
-          const universe = campaignUniverse(campaign, { root: host.root });
-          const run = universe.runs.find((row) => row.id === receipt.runId)!;
-          const trial = run.trials.find((row) => row.id === receipt.trialId)!;
-          return { campaignId: target.campaignId, universeId: receipt.universeId, campaignDigest: outcome.campaignDigest,
-            campaignDefinitionDigest: campaign.definitionDigest, manifestDigest: receipt.manifestDigest, comparatorDigest: receipt.comparatorDigest,
-            runId: receipt.runId, trialId: receipt.trialId, artifactDigest: receipt.artifactDigest,
-            evaluationEvidenceDigest: digest(canonical({ comparatorDigest: receipt.comparatorDigest, runId: run.id,
-              trialId: trial.id, artifactDigest: receipt.artifactDigest, status: trial.status, score: trial.score, metrics: trial.metrics })),
-            deliveryDigest: outcome.deliveryDigest, branch: receipt.branch, baseCommit: receipt.baseCommit, commit: receipt.commit,
-            generationReceiptDigest: trial.generation?.resource?.receiptDigest ?? null };
-        });
-        const evidence = { controller: { ...controller, recordsDigest: digest(canonical(events)) }, deliveries };
-        if (stopped()) return reject('execution-stopped', evidence);
-        const result: ControlHandlerResult = { outcome: 'completed', verifier: { id: 'universe-fixed-evaluator', verdict: 'pass', independent: true },
-          // Campaign totals include prior work; do not misattribute them to this graph invocation.
-          spend: { unknown: true }, artifact: { ...artifactBase, reason: 'engineering-delivered', verifiedAccepted: true, ...evidence } };
-        if (Buffer.byteLength(canonical(result)) > MAX_RESULT_BYTES) return reject('evidence-too-large', {
-          controller, deliveryProofsDigest: digest(canonical(deliveries)), deliveryCount: deliveries.length });
-        return result;
+          requireNewEnrollment: true, graphDispatch, isExecutionStopped: stopped, signal, deadlineMonotonicMs });
+        return prove(report, graphDispatch, stopped, false);
       } catch { return reject('engineering-evidence-unavailable'); }
     },
   });
   branded.add(handler);
+  recoveries.set(handler, (context) => {
+    try {
+      const stopped = () => context.signal.aborted || (context.isExecutionStopped?.() ?? false);
+      if (stopped()) return null;
+      const graphDispatch = dispatch(context);
+      checkEnrollment();
+      const result = prove(readUniversePortfolioController(host.definition.id, { root: host.root }), graphDispatch, stopped, true);
+      return result.outcome === 'completed' ? result : null;
+    } catch { return null; }
+  });
   return Object.freeze({ handler, nodeInput });
 }

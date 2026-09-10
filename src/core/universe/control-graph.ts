@@ -7,7 +7,8 @@ import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStore
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
 import { signDecisionTraceV1, verifyDecisionTraceV1, type DecisionTraceV1, type DecisionTraceKeyOptions } from './decision-trace.js';
-import { isFirmEngineeringControlHandler } from './firm-engineering-control-handler.js';
+import { isFirmEngineeringControlHandler, firmEngineeringControlRecovery } from './firm-engineering-control-handler.js';
+import type { PortfolioControllerGraphDispatch } from './portfolio-controller-types.js';
 
 export const CONTROL_NODE_KINDS = ['plan', 'explore', 'implement', 'verify', 'critic', 'integrate', 'weigh', 'mutate-harness', 'sweep', 'invent', 'talk', 'deliver'] as const;
 export type ControlNodeKind = typeof CONTROL_NODE_KINDS[number];
@@ -18,12 +19,16 @@ export interface ControlHandlerContext { node: ControlGraphNode; artifacts: Cont
   /** Trusted synchronous stop/ownership check, including the original graph deadline. */
   isExecutionStopped?: () => boolean;
   /** Invocation-only monotonic cap; never changes the durable graph definition. */
-  deadlineMonotonicMs?: number }
+  deadlineMonotonicMs?: number;
+  /** Derived only after durable signed intent publication; not an effect permit. */
+  graphDispatch?: PortfolioControllerGraphDispatch }
 export interface ControlHandlerResult {
   artifact: unknown; verifier?: DecisionTraceV1['verifier']; conflicts?: DecisionTraceV1['conflicts'];
   outcome?: 'completed' | 'rejected'; spend?: DecisionTraceV1['spend'];
 }
 export type ControlGraphHandler = (context: ControlHandlerContext) => Promise<ControlHandlerResult>;
+/** Receipt-only synchronous proof collection, never dispatch or controller resume. */
+export type ControlGraphRecoveryHandler = (context: ControlHandlerContext) => ControlHandlerResult | null;
 /** Trusted host declaration, not an effect permit or model-authored authority. */
 export type ControlHandlerExecution = { constitutionVersion: string; policyEpoch: number; bindingDigest: string } &
   ({ effectClass: 'resource-completion' } | { effectClass: 'engineering-portfolio-local-delivery' });
@@ -62,14 +67,15 @@ function executionMetadata(value: unknown): ControlHandlerExecution {
   }
   return row;
 }
-function registration(value: ControlGraphHandlerRegistration): { run: ControlGraphHandler; execution?: ControlHandlerExecution; engineeringDelivery?: true } {
+function registration(value: ControlGraphHandlerRegistration): { run: ControlGraphHandler; execution?: ControlHandlerExecution;
+  engineeringDelivery?: true; recover?: ControlGraphRecoveryHandler } {
   if (typeof value === 'function') return { run: value };
   if (!exact(value, ['run', 'effectClass', 'constitutionVersion', 'policyEpoch', 'bindingDigest']) ||
     Object.keys(value).some((key) => !Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value')) ||
     typeof value.run !== 'function') throw new Error('Invalid graph handler registration');
   const { run, ...metadata } = value;
   return { run, execution: executionMetadata(metadata),
-    ...(isFirmEngineeringControlHandler(value) ? { engineeringDelivery: true as const } : {}) };
+    ...(isFirmEngineeringControlHandler(value) ? { engineeringDelivery: true as const, recover: firmEngineeringControlRecovery(value) } : {}) };
 }
 function assertExecutionTrace(trace: DecisionTraceV1, execution?: ControlHandlerExecution): void {
   if (trace.authority.effectClass !== (execution?.effectClass ?? 'simulate') ||
@@ -140,7 +146,8 @@ function load(root: string, keys?: DecisionTraceKeyOptions) {
   const events = result.records;
   let definition: ControlGraphDefinition | null = null;
   let deadlineAt: string | null = null;
-  const states = new Map<string, { state: 'pending' | 'unresolved' | 'completed' | 'rejected'; artifact?: ControlArtifact; execution?: ControlHandlerExecution }>();
+  const states = new Map<string, { state: 'pending' | 'unresolved' | 'completed' | 'rejected'; artifact?: ControlArtifact;
+    execution?: ControlHandlerExecution; intent?: Event }>();
   const edges: ControlGraphReport['edges'] = [];
   for (let index = 0; index < events.length; index++) {
     const row = events[index]!;
@@ -169,7 +176,7 @@ function load(root: string, keys?: DecisionTraceKeyOptions) {
       }
       assertExecutionTrace(row.trace, execution);
       for (const item of inputs) edges.push({ from: item!.nodeId, to: node.id, artifactDigest: item!.digest });
-      states.set(node.id, { state: 'unresolved', ...(execution ? { execution } : {}) });
+      states.set(node.id, { state: 'unresolved', intent: row, ...(execution ? { execution } : {}) });
     } else if (row.kind === 'settled') {
       if (prior.state !== 'unresolved' || !exact(row.data, ['state', 'artifact', 'artifactDigest', ...(prior.execution ? ['execution'] : [])]) ||
           !['completed', 'rejected'].includes(String(row.data.state)) ||
@@ -207,7 +214,8 @@ function presentOrUncertain(path: string): boolean {
  * command/provider dispatch or activation authority is created here. Integrate,
  * sweep and live harness mutation remain withheld. Deliver admits only the
  * concrete factory-branded engineering adapter through its existing effect gates.
- * A persisted intent without settlement is never retried automatically.
+ * A persisted intent is never re-dispatched. Only the concrete engineering
+ * adapter can reconcile exact completed child evidence within the original budget.
  */
 export async function runControlGraph(input: unknown, options: ControlGraphOptions): Promise<ControlGraphReport> {
   const definition = validateControlGraph(input);
@@ -243,7 +251,8 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
     let state = load(root, traceKeys);
     const definitionDigest = digest(canonical(definition));
     const append = (kind: Event['kind'], nodeId: string | null, data: unknown, verifier: DecisionTraceV1['verifier'],
-      conflicts: DecisionTraceV1['conflicts'] = [], execution?: ControlHandlerExecution, spend: DecisionTraceV1['spend'] = { unknown: true }) => {
+      conflicts: DecisionTraceV1['conflicts'] = [], execution?: ControlHandlerExecution, spend: DecisionTraceV1['spend'] = { unknown: true },
+      requireRunning = false) => {
       if (!own()) throw new Error('Graph ownership lost');
       const current = load(root, traceKeys);
       if (current.events.length !== state.events.length || canonical(current.events.at(-1) ?? null) !== canonical(state.events.at(-1) ?? null)) throw new Error('Graph evidence changed');
@@ -255,7 +264,9 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
         constitutionVersion: execution?.constitutionVersion ?? 'existing-doctrine', policyEpoch: execution?.policyEpoch ?? 0, inputsDigest: digest(canonical(body)),
         ...(artifactDigest ? { artifactDigest } : {}), verifier, authority: { effectClass: execution?.effectClass ?? 'simulate' }, spend, conflicts }, traceKeys);
       if (!trace) throw new Error('Graph provenance unavailable');
-      const result = writeImmutablePrivateRecord(configuration(root, traceKeys), { ...body, trace }, { lockWaitMs: 0, prepublish: own });
+      const result = writeImmutablePrivateRecord(configuration(root, traceKeys), { ...body, trace }, {
+        lockWaitMs: 0, prepublish: () => own() && (!requireRunning || !stop()),
+      });
       if (!['recorded', 'replayed'].includes(result)) throw new Error('Graph publication unavailable');
       state = load(root, traceKeys);
     };
@@ -265,6 +276,48 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
       append('created', null, { definition, deadlineAt }, { id: 'pending', verdict: 'unavailable', independent: false });
     } else if (canonical(state.definition) !== canonical(definition)) throw new Error('Graph definition drift');
     deadlineAt = state.deadlineAt;
+    const context = (node: ControlGraphNode): ControlHandlerContext => {
+      const intent = state.states.get(node.id)?.intent;
+      if (!intent) throw new Error('Graph dispatch intent unavailable');
+      return { node: snapshot(node), artifacts: node.requires.map((id) => snapshot<ControlArtifact>(state.states.get(id)!.artifact!)),
+        signal: controller.signal, isExecutionStopped: () => stop() || !own(),
+        deadlineMonotonicMs: Math.min(started + definition.maxDurationMs,
+          performance.now() + Math.max(0, Date.parse(deadlineAt!) - Date.now())),
+        graphDispatch: { schemaVersion: 1, graphRootDigest: digest(canonical(root)), graphId: definition.id,
+          definitionDigest, nodeId: node.id, intentDigest: digest(canonical(intent)) } };
+    };
+    const handlerResult = (output: unknown, execution?: ControlHandlerExecution): ControlHandlerResult => {
+      const result = snapshot<ControlHandlerResult>(output, 64 * 1024);
+      if (!result || typeof result !== 'object' || !Object.hasOwn(result, 'artifact') ||
+        Object.keys(result).some((key) => !['artifact', 'verifier', 'conflicts', 'outcome', 'spend'].includes(key)) ||
+        (execution || Object.hasOwn(result, 'outcome')) && !['completed', 'rejected'].includes(result.outcome!)) throw new Error('Invalid handler result');
+      return result;
+    };
+    // One receipt-only pass per invocation. Failure stays unresolved; it cannot
+    // turn into a new intent, controller invocation, or provider reservation.
+    for (const node of definition.nodes) {
+      if (stop() || !own()) break;
+      const prior = state.states.get(node.id)!;
+      if (prior.state !== 'unresolved') continue;
+      const handler = handlers.get(node.kind);
+      if (node.kind !== 'deliver' || !handler?.engineeringDelivery || !handler.recover ||
+        prior.execution?.effectClass !== 'engineering-portfolio-local-delivery') continue;
+      if (canonical(prior.execution) !== canonical(handler.execution)) {
+        reasons.add(`${node.id}:recovery-binding-mismatch`); continue;
+      }
+      try {
+        const output = handler.recover(context(node));
+        if (output === null) { reasons.add(`${node.id}:recovery-evidence-unavailable`); continue; }
+        const result = handlerResult(output, prior.execution);
+        if (result.outcome !== 'completed' || result.verifier?.verdict !== 'pass' || !result.verifier.independent) {
+          reasons.add(`${node.id}:recovery-evidence-unavailable`); continue;
+        }
+        if (stop() || !own()) break;
+        append('settled', node.id, { state: 'completed', artifact: result.artifact,
+          artifactDigest: digest(canonical(result.artifact)), execution: prior.execution },
+        result.verifier, result.conflicts ?? [], prior.execution, result.spend ?? { unknown: true }, true);
+      } catch { reasons.add(`${node.id}:recovery-evidence-unavailable`); }
+    }
     while (!stop() && own()) {
       // Resolved handler promises alone can starve signal/timer callbacks.
       // Yield a macrotask before another admission batch, then recheck authority.
@@ -294,14 +347,8 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
           // Queued cancellation after intent cannot authorize a worker call.
           if (controller.signal.aborted || stop() || !own()) return;
           // A fan-in may contain many individually bounded artifacts.
-          const output = await handler.run({ node: snapshot(node), artifacts: artifacts.map((artifact) => snapshot<ControlArtifact>(artifact)), signal: controller.signal,
-            isExecutionStopped: () => stop() || !own(),
-            deadlineMonotonicMs: Math.min(started + definition.maxDurationMs,
-              performance.now() + Math.max(0, Date.parse(deadlineAt!) - Date.now())) });
-          const result = snapshot<ControlHandlerResult>(output, 64 * 1024);
-          if (!result || typeof result !== 'object' || !Object.hasOwn(result, 'artifact') ||
-            Object.keys(result).some((key) => !['artifact', 'verifier', 'conflicts', 'outcome', 'spend'].includes(key)) ||
-            (execution || Object.hasOwn(result, 'outcome')) && !['completed', 'rejected'].includes(result.outcome!)) throw new Error('Invalid handler result');
+          const output = await handler.run(context(node));
+          const result = handlerResult(output, execution);
           const verifier = result.verifier ?? { id: 'not-evaluated', verdict: 'unavailable' as const, independent: false };
           const accepted = result.outcome !== 'rejected' && !(execution && (stop() || controller.signal.aborted)) &&
             (!['verify', 'critic', 'weigh'].includes(node.kind) && execution?.effectClass !== 'engineering-portfolio-local-delivery' ||

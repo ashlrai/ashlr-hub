@@ -1,6 +1,83 @@
 # Verified local handoff
 
-## Current continuation: evaluated engineering graph
+## Current continuation: exact completed engineering recovery
+
+Baseline: `dc92e08cf4b4a55d7ee351e3d79c2e92a17f6c0a`; isolated `auto/p00`
+worktree at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.
+The commit containing this report is the local delivery. Parent integrated three
+agents: controller persistence, independent real crash acceptance, and cold
+graph/effect review. The implementation reuses the existing graph, controller,
+campaign and delivery stores, rather than creating a parallel runtime.
+
+- Signed graph intent is persisted before the kernel derives its exact parent
+  association. `graphDispatch` binds canonical graph-root digest, graph ID,
+  definition digest, node ID and full signed intent digest. The controller's
+  immutable creation record captures that link; legacy records are never backfilled.
+- Restart can reconcile a completed graph-owned controller and freshly verified
+  planned deliveries without invoking a controller, evaluator, provider worker,
+  resource reservation or Git publication. Report outcomes match the folded
+  controller ledger, which is reread after delivery proof collection.
+- Only the concrete factory's private recovery callback participates. Missing,
+  incomplete, unrelated, relocated, changed or unverifiable evidence remains
+  unresolved. Generic callbacks and copied descriptors never gain retry authority.
+- Recovery writes one signed settlement within the original graph deadline and
+  KILL/ownership gates, including a recheck at final immutable publication. A
+  dependent node consumes that recovered artifact once; replay does not repeat it.
+- Direct execution re-entry of graph-linked controllers is refused, even with a
+  copied exact link: attribution cannot restore parent ownership or its shorter
+  outer deadline. Legacy unlinked restart remains supported, including existing
+  proven-dead writer-mutex cleanup. Incomplete record staging remains held.
+
+Focused verification:
+
+- **21 real engineering integration tests passed**: actual child SIGKILL after
+  durable evaluated local delivery but before graph settlement; ordinary CLI
+  recovery/replay; exact signed attribution; missing/mismatched links; copied
+  registrations; changed graph root; branch drift; active graph owner; KILL;
+  incomplete controller; and dependent consumption exactly once. Recovery leaves
+  campaign/resource records, refs, HEAD, index and checkout unchanged, with no
+  additional loopback requests. Native confinement tests are Darwin-only; deadline
+  expiry uses an explicitly labeled Date-only clock advancement fixture.
+- **30 controller-link tests passed**, including two real child-owned orphan
+  writer-lock regressions. Together with existing reconciliation/crash suites,
+  the final focused run passed **50 tests**. These counts overlap.
+- **Five independent kernel guards passed**, including KILL injected after real
+  staging but before immutable publication. That callback-injection case is a
+  kernel-only fixture, separate from the concrete factory's real crash acceptance.
+- **449 safety/invariant tests passed, five existing skips / 41 files**. Compiled
+  structural safety checks also passed. Protected safety/policy source and tests
+  were not weakened or changed.
+- **3,166 tests passed / 123 suites** in the fresh frozen-source Universe plus
+  firm-MCP sweep. It started at 04:46:38 local on September 10, 2026, after the
+  final controller correction, and completed in 1,253.17 seconds. All focused
+  counts above overlap this sweep; they are not additive throughput.
+- Final build, core/web typecheck, ESLint (zero errors; the full lint run reports
+  107 existing warnings), documentation checks, real-I/O classification and diff
+  checks passed. Classification includes 271 real-I/O and 658 unit files. The
+  final compiled structural safety check passed all five checks.
+
+Review caught an outer-deadline bypass in proposed standalone linked resume;
+execution re-entry was removed. A follow-up compatibility review caught writer
+cleanup ordered after the strict reader. The broad run was intentionally stopped
+(exit 130, not counted as a pass), ordering restored, and real orphan-lock
+regressions added before restarting the full verification. A relocated-root
+negative fixture also needed its copied directories restored to private `0700`
+modes so it exercised attribution rather than an earlier storage rejection.
+
+Host KILL remains active; account allocation, personal General/Spark policy and
+actual providers were not changed. No GitHub Actions, remote push, npm publication,
+resident process, or production activation occurred. Original checkout remains
+`a01fc08663baab3039c4f1c084538de732a4fd0e` with its preexisting untracked workplans.
+Entire resume found no checkpoint; the existing manual-commit session mechanism
+remains enabled. Planning and agent-building guidance kept the existing runtime;
+documentation guidance kept tested source distinct from commissioned operation.
+
+Remaining: workspace launch/inspection of enrolled engineering graphs, recovery
+of unfinished child execution, desktop terminal/browser ownership, and explicit
+Hub always-on commissioning. This completes the exact completed-child recovery
+milestone, not the full autonomous-company north star or production acceptance.
+
+## Previous continuation: evaluated engineering graph
 
 Baseline: `c2b598dad9e65c82582d75e001c3b73430326d9f`; isolated `auto/p00`
 worktree at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.

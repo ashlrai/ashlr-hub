@@ -27,6 +27,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Verify file access, context isolation and browser interaction end-to-end.
 - [x] Trace and connect the next missing unattended execution/evaluation/delivery seam.
 - [x] Independently verify real outcomes and update the authoritative handoff.
+- [x] Map exact signed graph dispatch and child-controller enrollment recovery contracts.
+- [x] Persist parent linkage and implement factory-only receipt reconciliation without redispatch.
+- [x] Verify real crash-after-delivery recovery, attribution failures, deadlines and cold review.
+- [x] Build and document the verified recovery path and remaining commissioning gaps.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -39,12 +43,34 @@ existing activation, provenance, evaluation and resource invariants.
   digest-bearing edges. Never invent terminal states to satisfy a count.
 
 ## Errors
+Current recovery review caught a legacy ordering regression while refusing linked
+controller execution re-entry: strict history reads must follow proven-dead
+record-writer lock reclamation, not precede it. The broad run was intentionally
+stopped before counting it as verification; the ordering and a focused regression
+passed before restarting the final frozen-source sweep. Both legacy resume and
+linked refusal now have real child-owned orphan-writer-lock regressions.
+
 Independent review found graph serialization/ID limits, archive capacity races,
 signal starvation and an unsupported Windows native cancellation path. Fixed
 with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Current continuation from `dc92e08cf4b4a55d7ee351e3d79c2e92a17f6c0a`:
+exact completed-child reconciliation. Parent owns graph intent context, branded
+receipt-only recovery and documentation; controller agent owns strict optional
+parent-link enrollment with legacy compatibility; acceptance agent owns actual
+CLI-process crash after real delivery; cold reviewer owns independent guards.
+The parent link binds canonical graph-root digest, graph/definition/node identity
+and the full signed intent digest. Only completed matching child records plus
+fresh verified deliveries can settle an unresolved graph node. No new dispatch,
+budget renewal, host activation or external publication. Recovery runs only
+within the original deadline and existing KILL/ownership gates.
+Final frozen-source Universe/firm-MCP sweep: 3,166 passes across 123 suites.
+Safety: 449 passes and five existing skips. Build, core/web typecheck, lint,
+documentation and real-I/O classification passed. The local recovery milestone is
+complete; the broader north-star and host commissioning remain unfinished.
+
 Implemented locally from `c2b598da`: a host-enrolled signed graph adapter over the
 existing restartable portfolio controller, resource-backed campaigns, fixed
 evaluation and explicit local branch delivery. Core agent owns the concrete

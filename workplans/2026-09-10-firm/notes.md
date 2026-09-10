@@ -109,6 +109,64 @@ Original checkout and prior architecture worktree preserved.
 Current runtime has finite campaign/controller execution and immutable delivery
 primitives. A persistent company graph and self-improvement wiring are not yet
 commissioned. This work must add executable paths, not reclassify source as live.
+# September 10: exact completed engineering recovery
+
+- Baseline `dc92e08cf4b4a55d7ee351e3d79c2e92a17f6c0a`, clean `auto/p00`.
+  Entire resume found no checkpoint. Original checkout remains separately owned.
+- Reused signed graph intent, immutable controller enrollment, completed campaign
+  projection and verified local branch receipts; no second scheduler or ledger.
+- Optional strict `graphDispatch` binds schema, canonical graph-root digest,
+  graph ID, definition digest, node ID and full signed intent digest. The signed
+  event chain transitively binds the original graph enrollment/deadline. Existing
+  controller creation records are never backfilled with a new association.
+- Factory-private recovery is synchronous receipt collection. Generic callbacks,
+  copied registration metadata and unfinished controller work cannot be retried.
+- Recovery validates controller outcomes against the exact folded ledger snapshot
+  and rereads ledger bytes after checking every actual planned delivery/ref.
+  KILL, ownership and the original deadline are checked before settlement and
+  again at immutable record publication. Expiry never grants a new allowance.
+- Cold review confirmed that direct re-entry of a linked child controller could
+  omit the parent's shorter outer deadline. Such execution re-entry is refused,
+  even with an exact copied parent link. Unlinked legacy restart behavior remains
+  unchanged; graph recovery uses only existing read-only evidence projections.
+- New real crash fixture intercepts only the child controller's exact physical
+  lock release and sends SIGKILL after unlink. Campaign work, evaluation, delivery
+  and signed graph records remain real; no production fault-injection hooks.
+- Fixture-only linkage/ref mutations test refusal, not successful fabricated
+  evidence. The happy recovery uses untouched actual child records and signatures.
+- Initial transient test import failed while new graph imports preceded adapter
+  exports; no provider calls occurred. The final frozen-source run is authoritative.
+- Relocated-graph negative fixture initially copied directories with nonprivate
+  modes and therefore failed before attribution validation. Explicit fixture-only
+  `0700` directory modes make the copied history healthy before root-link refusal.
+  Actual 21-case engineering acceptance then passed, including single-consumption
+  downstream recovery with unchanged resource, campaign, branch and checkout data.
+
+## Next workspace integration: read-only exploration, not implemented
+
+Final recovery verification: 3,166 passes across 123 Universe/firm-MCP suites;
+449 safety passes with five existing skips. Build, typecheck, lint, docs and
+classification passed. Frozen-source broad run took 1,253.17 seconds; the earlier
+interrupted run was not counted. No provider commissioning or public release.
+
+- Reuse `src/core/web/resource-console-server.ts` for authenticated bounded HTTP
+  routes, `pool-supervisor.ts` project bindings, and existing WorkspaceView/query
+  controls. Existing jobs are individual resource tasks, not engineering graphs.
+- Proposed separate **Run enrolled engineering** action selects an explicit
+  startup catalog entry with project ID and expected enrollment digest. Browser
+  input must not become runtime paths, evaluator commands or CLI arguments.
+- Missing contracts: pinned project/repository association, durable graph-job
+  identity, locally owned cancellation and restart behavior. Keep signed graph
+  evidence authoritative instead of inventing duplicate task completion state.
+- The existing `resource-generation.ts` calls `runResourceTask`; pin the same
+  ledger/pool/bindings and shared-collector evidence as the resource console.
+  The sterile generation workspace remains separate from the project checkout.
+- Next acceptance should combine actual HTTP/UI launch with the real engineering
+  Git/loopback fixture, simultaneous shared-capacity ordinary tasks, drift refusal,
+  owned cancellation and exact recovery. No UI/server source changed in this pass.
+- Non-impacting documentation edit error: a patch context did not match; no file
+  changed, and the insertion was retried against this exact section heading.
+
 # September 10: durable workspace continuation
 
 ## Verified implementation

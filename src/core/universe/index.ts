@@ -62,6 +62,7 @@ export type * from './portfolio-types.js';
 export { runUniversePortfolioController, readUniversePortfolioController } from './portfolio-controller.js';
 export type { UniversePortfolioControllerRunOptions } from './portfolio-controller.js';
 export { requestUniversePortfolioControllerControl } from './portfolio-controller-store.js';
+export type { PortfolioControllerGraphDispatch } from './portfolio-controller-types.js';
 export type { UniversePortfolioControllerOutcome, UniversePortfolioControllerReport,
   UniversePortfolioControllerControl, UniversePortfolioControllerControlReceipt } from './portfolio-controller-types.js';
 export { validateUniverseIntegrationDefinition, readUniverseIntegrationPlan } from './integration-plan.js';

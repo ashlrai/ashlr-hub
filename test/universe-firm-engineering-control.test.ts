@@ -2,19 +2,20 @@
  * No campaign records, worker receipts, evaluator verdicts or delivery refs are fabricated.
  */
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { pathToFileURL } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { acquireLocalStoreLockWithOutcome, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import { artifactDigest, canonical, digest } from '../src/core/universe/artifacts.js';
-import { runControlGraph, type ControlGraphDefinition } from '../src/core/universe/control-graph.js';
+import { readControlGraph, runControlGraph, type ControlGraphDefinition } from '../src/core/universe/control-graph.js';
 import { verifyDecisionTraceV1 } from '../src/core/universe/decision-trace.js';
 import { readUniversePortfolioController, runUniversePortfolioController } from '../src/core/universe/portfolio-controller.js';
 import { portfolioControllerDirectory } from '../src/core/universe/portfolio-controller-store.js';
@@ -39,6 +40,7 @@ beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'firm-engineering-control-')));
 });
 afterEach(async () => {
+  vi.useRealTimers();
   for (const endpoint of endpoints.splice(0)) {
     endpoint.closeAllConnections(); await new Promise<void>((resolve) => endpoint.close(() => resolve()));
   }
@@ -124,6 +126,57 @@ async function fixture(options: { allInvalid?: boolean; graphDurationMs?: number
   const status = () => resourcePoolStatus(runtime.root, pool, bindings, observations);
   return { root, graphRoot, repo, revision, workspace, manifest, campaignId, branch, runtime, resourceRuntime, host, binding,
     definition, run, status, requests, fixtureErrors };
+}
+
+function crashControllerReleasePreload(f: Awaited<ReturnType<typeof fixture>>) {
+  const lockPath = join(portfolioControllerDirectory(f.host.definition.id, { root: f.root }), '.execution.lock');
+  // Instrument one physical release in this child only. Effects and durable
+  // records remain real; graph publication has not started yet.
+  const code = `import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';
+const original=fs.unlinkSync;fs.unlinkSync=function(path,...args){const result=original.call(this,path,...args);
+if(path===${JSON.stringify(lockPath)})process.kill(process.pid,'SIGKILL');return result;};syncBuiltinESMExports();`;
+  return `data:text/javascript,${encodeURIComponent(code)}`;
+}
+function engineeringCli(f: Awaited<ReturnType<typeof fixture>>) {
+  const enrollment = join(base, 'engineering-enrollment.json');
+  save(enrollment, { schemaVersion: 1, graphId: f.definition.id, host: f.host });
+  // Only fixture setup creates provenance. The actual CLI inherits the isolated
+  // test HOME and must use an existing key, never a test-key CLI option.
+  loadOrCreateKey();
+  const invoke = async (args: string[], crashAfterControllerRelease = false) => {
+    const result = await exec(process.execPath, [
+      ...(crashAfterControllerRelease ? ['--import', crashControllerReleasePreload(f)] : []),
+      '--import', 'tsx', 'src/cli/index.ts', 'universe', 'firm', 'engineer',
+      '--root', f.graphRoot, '--enrollment', enrollment, '--json', ...args], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+    return JSON.parse(result.stdout);
+  };
+  return { invoke };
+}
+
+function treeEvidence(root: string): unknown {
+  const files: Record<string, unknown> = {};
+  const visit = (path: string, name: string) => {
+    const stat = lstatSync(path);
+    if (stat.isDirectory()) { for (const entry of readdirSync(path).sort()) visit(join(path, entry), `${name}/${entry}`); }
+    else { expect(stat.isFile()).toBe(true); files[name] = { digest: digest(readFileSync(path)), mode: stat.mode, nlink: stat.nlink }; }
+  };
+  visit(root, ''); return files;
+}
+function durableEngineeringEvidence(f: Awaited<ReturnType<typeof fixture>>) {
+  return { universe: treeEvidence(f.root), ledger: treeEvidence(f.runtime.root),
+    refs: git(f.repo, 'for-each-ref', '--format=%(refname) %(objectname)'), head: git(f.repo, 'rev-parse', 'HEAD'),
+    index: digest(readFileSync(join(f.repo, '.git', 'index'))), checkout: git(f.repo, 'status', '--porcelain=v1') };
+}
+async function crashedEngineering(options: Parameters<typeof fixture>[0] = {}) {
+  const f = await fixture(options); const child = engineeringCli(f); const checked = await child.invoke(['--check']);
+  await expect(child.invoke(['--expected-enrollment-digest', checked.enrollmentDigest], true)).rejects.toMatchObject({ signal: 'SIGKILL' });
+  expect(f.fixtureErrors).toEqual([]); expect(f.requests).toHaveLength(3);
+  const graph = readControlGraph(f.graphRoot);
+  expect(graph.sourceState).toBe('healthy'); expect(graph.nodes[0]!.state).toBe('unresolved');
+  expect(graph.traces.map((trace) => trace.action)).toEqual(['graph-created', 'graph-intent']);
+  const definition = { ...f.definition, maxDurationMs: f.host.definition.maxDurationMs };
+  const resume = (handler = f.binding.handler, root = f.graphRoot) => runControlGraph(definition, { root, handlers: { deliver: handler } });
+  return { f, child, checked, graph, resume };
 }
 
 // The existing evaluated Universe engine requires real macOS confinement; these
@@ -254,15 +307,8 @@ describe.runIf(process.platform === 'darwin')('firm engineering adapter integrat
   });
 
   it('checks, executes and replays the real CLI using existing isolated-home provenance', async () => {
-    const f = await fixture(); const enrollment = join(base, 'engineering-enrollment.json');
-    save(enrollment, { schemaVersion: 1, graphId: f.definition.id, host: f.host });
-    // This fixture enrollment is explicit; the child CLI itself may not create keys.
-    loadOrCreateKey();
-    const cli = async (...args: string[]) => {
-      const result = await exec(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'firm', 'engineer',
-        '--root', f.graphRoot, '--enrollment', enrollment, '--json', ...args], { timeout: 60_000, maxBuffer: 1024 * 1024 });
-      return JSON.parse(result.stdout);
-    };
+    const f = await fixture(); const child = engineeringCli(f);
+    const cli = (...args: string[]) => child.invoke(args);
     const checked = await cli('--check');
     expect(checked).toMatchObject({ status: 'validated-enrollment', effectsExecuted: false, providerContacted: false });
     expect(checked.enrollmentDigest).toMatch(/^[a-f0-9]{64}$/);
@@ -277,6 +323,126 @@ describe.runIf(process.platform === 'darwin')('firm engineering adapter integrat
     expect(await cli('--expected-enrollment-digest', checked.enrollmentDigest)).toEqual(completed);
     expect(f.requests).toHaveLength(3); expect(f.status().attempts).toEqual(ledger.attempts);
     expect(readUniverseDeliveries(f.manifest.id, { root: f.root })).toEqual(deliveries);
+  });
+
+  it('reconciles authentic completed evidence after a child crash before graph settlement without replaying any effect', async () => {
+    const { f, child, checked, graph } = await crashedEngineering();
+    expect(graph.traces.every((trace) => verifyDecisionTraceV1(trace))).toBe(true);
+    expect(readUniversePortfolioController(f.host.definition.id, { root: f.root })).toMatchObject({ sourceState: 'healthy', status: 'completed' });
+    expect(f.status().attempts).toHaveLength(3); expect(git(f.repo, 'show', `${f.branch}:value.json`)).toBe('3');
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.repo, 'status', '--porcelain=v1')).toBe('');
+    expect(readdirSync(join(f.graphRoot, 'control-graph', 'staging'))).toEqual([]);
+    expect(existsSync(join(f.graphRoot, 'control-graph', '.records.lock'))).toBe(false);
+    const before = durableEngineeringEvidence(f);
+    const recovered = await child.invoke(['--expected-enrollment-digest', checked.enrollmentDigest]);
+    expect(recovered).toMatchObject({ status: 'completed', sourceState: 'healthy', deadlineAt: graph.deadlineAt });
+    expect(recovered.traces).toHaveLength(3); expect(recovered.traces.slice(0, 2)).toEqual(graph.traces);
+    expect(recovered.traces.every((trace: Parameters<typeof verifyDecisionTraceV1>[0]) => verifyDecisionTraceV1(trace))).toBe(true);
+    const settlement = JSON.parse(readFileSync(join(f.graphRoot, 'control-graph', 'records', '00000002.json'), 'utf8'));
+    expect(settlement.data.artifact).toMatchObject({ reason: 'engineering-reconciled', verifiedAccepted: true });
+    const created = JSON.parse(readFileSync(join(portfolioControllerDirectory(f.host.definition.id, { root: f.root }), 'ledger', 'records', '00000000.json'), 'utf8'));
+    const intent = JSON.parse(readFileSync(join(f.graphRoot, 'control-graph', 'records', '00000001.json'), 'utf8'));
+    expect(settlement.data.artifact.graphDispatch).toEqual(created.enrollment.graphDispatch);
+    expect(created.enrollment.graphDispatch).toEqual({ schemaVersion: 1, graphRootDigest: digest(canonical(f.graphRoot)),
+      graphId: f.definition.id, definitionDigest: graph.definitionDigest, nodeId: f.host.nodeId, intentDigest: digest(canonical(intent)) });
+    expect(durableEngineeringEvidence(f)).toEqual(before); expect(f.requests).toHaveLength(3);
+    expect(await child.invoke(['--expected-enrollment-digest', checked.enrollmentDigest])).toEqual(recovered);
+    expect(durableEngineeringEvidence(f)).toEqual(before); expect(f.requests).toHaveLength(3);
+  });
+
+  it('withholds recovery for missing or mismatched attribution, copied authority, relocated graph and drifted branch', async () => {
+    const { f, graph, resume } = await crashedEngineering();
+    const controllerFile = join(portfolioControllerDirectory(f.host.definition.id, { root: f.root }), 'ledger', 'records', '00000000.json');
+    const original = readFileSync(controllerFile, 'utf8'); const created = JSON.parse(original);
+    const graphRecords = treeEvidence(join(f.graphRoot, 'control-graph'));
+    const unchanged = async (operation: () => ReturnType<typeof resume>) => {
+      const before = durableEngineeringEvidence(f); const result = await operation();
+      expect(result.nodes[0]?.state, JSON.stringify(result)).toBe('unresolved'); expect(result.deadlineAt).toBe(graph.deadlineAt);
+      expect(treeEvidence(join(f.graphRoot, 'control-graph'))).toEqual(graphRecords);
+      expect(durableEngineeringEvidence(f)).toEqual(before); expect(f.requests).toHaveLength(3);
+    };
+    await unchanged(() => resume({ ...f.binding.handler }));
+    const owner = acquireLocalStoreLockWithOutcome(join(f.graphRoot, '.control-execution.lock'), 0,
+      { anchorPath: f.graphRoot, exactPrivateStorage: true });
+    expect(owner.state).toBe('acquired');
+    try { await unchanged(() => resume()); }
+    finally { if (owner.state === 'acquired') expect(releaseLocalStoreLock(owner.lock)).toBe(true); }
+    for (const field of ['missing', 'graphRootDigest', 'graphId', 'definitionDigest', 'nodeId', 'intentDigest']) {
+      const changed = structuredClone(created);
+      if (field === 'missing') delete changed.enrollment.graphDispatch;
+      else changed.enrollment.graphDispatch[field] = field.endsWith('Id') ? 'different-fixture-id' : 'f'.repeat(64);
+      try {
+        writeFileSync(controllerFile, `${canonical(changed)}\n`);
+        expect(readUniversePortfolioController(f.host.definition.id, { root: f.root }).sourceState, field).toBe('healthy');
+        await unchanged(() => resume());
+      } finally { writeFileSync(controllerFile, original); }
+    }
+    const relocated = join(base, 'relocated-graph'); mkdirSync(relocated, { mode: 0o700 });
+    cpSync(join(f.graphRoot, 'control-graph'), join(relocated, 'control-graph'), { recursive: true });
+    for (const path of ['control-graph', 'control-graph/records', 'control-graph/staging']) chmodSync(join(relocated, path), 0o700);
+    expect(readControlGraph(relocated).sourceState, JSON.stringify(readControlGraph(relocated))).toBe('healthy');
+    const relocatedBefore = treeEvidence(join(relocated, 'control-graph'));
+    await unchanged(() => resume(f.binding.handler, relocated));
+    expect(treeEvidence(join(relocated, 'control-graph'))).toEqual(relocatedBefore);
+    const delivered = git(f.repo, 'rev-parse', `refs/heads/${f.branch}`);
+    try {
+      git(f.repo, 'update-ref', `refs/heads/${f.branch}`, f.revision, delivered);
+      await unchanged(() => resume());
+    } finally { git(f.repo, 'update-ref', `refs/heads/${f.branch}`, delivered, f.revision); }
+    expect((await resume()).status).toBe('completed'); expect(f.requests).toHaveLength(3);
+  });
+
+  it('withholds crash recovery under KILL and deterministic clock advancement without renewing the original deadline', async () => {
+    const { f, graph, resume } = await crashedEngineering(); const before = durableEngineeringEvidence(f);
+    const graphRecords = treeEvidence(join(f.graphRoot, 'control-graph')); const kill = join(f.graphRoot, 'KILL');
+    writeFileSync(kill, 'isolated fixture stop\n', { mode: 0o600 });
+    try { expect(await resume()).toMatchObject({ status: 'stopped', reasons: ['kill-switch'] }); }
+    finally { rmSync(kill); }
+    // Clock advancement only: native crash/evaluation above uses real time.
+    vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.parse(graph.deadlineAt!) + 1);
+    try {
+      expect(await resume()).toMatchObject({ status: 'stopped', deadlineAt: graph.deadlineAt, reasons: ['duration-exhausted'] });
+    } finally { vi.useRealTimers(); }
+    expect(treeEvidence(join(f.graphRoot, 'control-graph'))).toEqual(graphRecords);
+    expect(durableEngineeringEvidence(f)).toEqual(before); expect(f.requests).toHaveLength(3);
+  });
+
+  it('never recovers an incomplete controller even when every worker request has a completed receipt', async () => {
+    const { f, resume } = await crashedEngineering({ allInvalid: true });
+    expect(readUniversePortfolioController(f.host.definition.id, { root: f.root }).status).not.toBe('completed');
+    expect(f.status().attempts.every((row) => row.status === 'completed')).toBe(true);
+    const before = durableEngineeringEvidence(f); const graphRecords = treeEvidence(join(f.graphRoot, 'control-graph'));
+    expect((await resume()).nodes[0]!.state).toBe('unresolved');
+    expect(durableEngineeringEvidence(f)).toEqual(before); expect(treeEvidence(join(f.graphRoot, 'control-graph'))).toEqual(graphRecords);
+    expect(f.requests).toHaveLength(3); expect(git(f.repo, 'branch', '--list', f.branch)).toBe('');
+  });
+
+  it('unlocks a dependent consumer once from recovered engineering evidence without another worker request', async () => {
+    const f = await fixture(); loadOrCreateKey();
+    const graph: ControlGraphDefinition = { ...f.definition, nodes: [...f.definition.nodes,
+      { id: 'consume-delivery', kind: 'plan', requires: [f.host.nodeId], input: {} }] };
+    const graphModule = pathToFileURL(join(process.cwd(), 'src/core/universe/control-graph.ts')).href;
+    const adapterModule = pathToFileURL(join(process.cwd(), 'src/core/universe/firm-engineering-control-handler.ts')).href;
+    const script = `import {runControlGraph} from ${JSON.stringify(graphModule)};
+import {createFirmEngineeringControlHandler} from ${JSON.stringify(adapterModule)};
+const binding=createFirmEngineeringControlHandler(${JSON.stringify(f.host)});
+await runControlGraph(${JSON.stringify(graph)},{root:${JSON.stringify(f.graphRoot)},handlers:{deliver:binding.handler,
+plan:async()=>{throw new Error('Consumer must not run before the injected crash');}}});`;
+    await expect(exec(process.execPath, ['--import', crashControllerReleasePreload(f), '--import', 'tsx',
+      '--input-type=module', '--eval', script], { timeout: 60_000, maxBuffer: 1024 * 1024 })).rejects.toMatchObject({ signal: 'SIGKILL' });
+    const interrupted = readControlGraph(f.graphRoot);
+    expect(interrupted.nodes.map((node) => node.state)).toEqual(['unresolved', 'pending']);
+    const before = durableEngineeringEvidence(f); let consumed = 0;
+    const resume = () => runControlGraph(graph, { root: f.graphRoot, handlers: { deliver: f.binding.handler, plan: async ({ artifacts }) => {
+      consumed++; expect(artifacts).toHaveLength(1);
+      expect(artifacts[0]!.value).toMatchObject({ reason: 'engineering-reconciled', verifiedAccepted: true });
+      return { artifact: { consumedDigest: artifacts[0]!.digest } };
+    } } });
+    const recovered = await resume(); expect(recovered.status).toBe('completed'); expect(consumed).toBe(1);
+    expect(recovered.deadlineAt).toBe(interrupted.deadlineAt); expect(recovered.traces).toHaveLength(5);
+    expect(durableEngineeringEvidence(f)).toEqual(before); expect(f.requests).toHaveLength(3);
+    expect(await resume()).toEqual(recovered); expect(consumed).toBe(1);
+    expect(durableEngineeringEvidence(f)).toEqual(before); expect(f.requests).toHaveLength(3);
   });
 
   it('honors graph-local KILL without changing the host kill switch or creating a worker ledger', async () => {

@@ -211,6 +211,8 @@ supplying an arbitrary callback does not unlock delivery or other guarded kinds.
    against the same graph root. A completed engineering artifact joins the
    controller record digest, campaign and comparator identities, generation
    receipt, fixed-evaluation evidence, frozen artifact, and verified local commit.
+   Its `graphDispatch` links the controller enrollment to the exact signed graph
+   intent, including the graph root, definition and node identities.
    `verifiedAccepted: true` means **fixed-evaluator and local-branch acceptance
    only**, not general correctness, human acceptance or production deployment.
 
@@ -224,12 +226,44 @@ receipts retain reported usage where available.
 Use a new controller ID for the first graph execution. The adapter refuses an
 already existing controller instead of attributing someone else's completion to
 this node. Repeating an intact completed graph within its original deadline does
-not dispatch again. After expiry, use read-only inspection. An unresolved graph
-intent remains held even if child work finished: inspect exact controller,
-campaign and delivery evidence before recovery; changing IDs is not a safe retry.
-The existing child controller's restart support does not imply automatic recovery
-of its enclosing graph. The graph and campaign allowances are never renewed by
-re-entry. No resident service or always-on loop is installed by this command.
+not dispatch again. No resident service or always-on loop is installed by this
+command.
+
+#### Recover a graph interrupted after completed delivery
+
+If the process died after the child controller durably completed but before the
+graph recorded settlement, repeat step 2 with the **same** graph directory,
+enrollment file and expected digest. This remains a mutating execution command:
+it may append a signed graph settlement and, for a multi-node API graph, run
+otherwise-ready pending work within the original budget. Inspect first when you
+only want status; do not change IDs or delete history to force a retry.
+
+The concrete engineering adapter performs receipt-only recovery. It does not
+call or resume the controller, run evaluators, reserve quota, contact providers,
+or publish another branch. It requires all of the following:
+
+- The original graph history verifies and the same factory enrollment is bound.
+- The child controller's persisted `graphDispatch` exactly matches the canonical
+  graph-root digest, graph/definition/node identity and full signed intent digest.
+- Controller outcomes are durably completed, with unchanged campaign evidence
+  and fresh verification of every planned delivery, including the current ref.
+- The original deadline has not expired, KILL is off, and graph ownership is held.
+
+A successful recovery appends one ordinary signed settlement whose artifact has
+`reason: "engineering-reconciled"`; subsequent calls do not repeat it. Legacy
+controllers without a parent link, missing or still-in-flight controllers,
+altered bindings, drifted branches and unverifiable evidence remain unresolved.
+The link is attribution evidence, not an activation permit or process isolation.
+Do not resume a graph-owned controller through the standalone controller runner:
+execution re-entry is refused even with the exact copied link, because that link
+cannot restore graph ownership or its shorter outer deadline. Read-only
+controller inspection remains supported; legacy unlinked controllers retain their
+existing restart behavior.
+
+After expiry or under KILL, use read-only graph/controller inspection; recovery
+does not write a settlement or unlock descendants. Graph and campaign allowances
+are never renewed by re-entry. Recovering interrupted child work that has not
+durably completed is a separate workflow, not an automatic retry here.
 
 ### What signatures establish
 

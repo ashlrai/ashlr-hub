@@ -56,6 +56,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-worker-kill.test.ts', // real loopback cancellation and native owned cleanup
   'test/universe-firm-demo.test.ts', // complete signed fixture graph and CLI queries
   'test/universe-control-graph.test.ts', // private signed graph records, ownership and restart
+  'test/universe-control-recovery-guards.test.ts', // signed intent linkage and no-retry private graph evidence
   'test/universe-harness-archive.test.ts', // private immutable candidate snapshots and admission
   'test/universe-firm-memory.test.ts', // private immutable daily journals and consolidation CAS
   'test/universe-showcase-cli.test.ts', // private demo source/export custody and CLI subprocesses
@@ -127,6 +128,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-integration-delivery.test.ts', // private delivery evidence and fault-injected local Git publication
   'test/universe-integration-handoff.test.ts', // immutable downstream registration and source-lineage verification
   'test/universe-portfolio-controller.test.ts', // durable controller records and injected dispatch/restart faults
+  'test/universe-portfolio-controller-graph-dispatch.test.ts', // immutable parent linkage and controller enrollment compatibility
   'test/universe-portfolio-controller-integration.test.ts', // native checkpointed DAG execution and replay
   'test/universe-dispatch-recovery-integration.test.ts', // native dispatch-attributed controller recovery without worker replay
   'test/universe-controller-reconciliation.test.ts', // private controller recovery ledger with injected attribution faults

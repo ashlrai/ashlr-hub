@@ -60,12 +60,24 @@ export interface PortfolioControllerPin {
   reasonCode: string;
 }
 
+/** Association with one already-persisted signed graph intent, not an effect permit. */
+export interface PortfolioControllerGraphDispatch {
+  schemaVersion: 1;
+  graphRootDigest: string;
+  graphId: string;
+  definitionDigest: string;
+  nodeId: string;
+  intentDigest: string;
+}
+
 export interface PortfolioControllerEnrollment {
   definition: UniversePortfolioDefinition;
   deliveryPlan: UniverseCampaignDeliveryPlan | null;
   definitionDigest: string;
   pins: PortfolioControllerPin[];
   deadlineAt: string;
+  /** Absent on legacy/direct controllers; never backfilled after creation. */
+  graphDispatch?: PortfolioControllerGraphDispatch;
 }
 
 export type PortfolioControllerEvent = { id: string; sequence: number; at: string } & (
