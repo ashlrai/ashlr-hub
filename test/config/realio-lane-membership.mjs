@@ -109,6 +109,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-controller-drain.test.ts', // persisted admission control, live transaction contention and drain acknowledgement
   'test/universe-controller-drain-integration.test.ts', // separate CLI drain/resume, active delivery and preserved queue across restart
   'test/universe-controller-admission-integration.test.ts', // separate-process admission contention and fresh evidence before intent
+  'test/universe-controller-not-started-integration.test.ts', // post-intent cancellation, verified no-call settlement and restart without replay
   'test/universe-campaign-owned.test.ts', // exact private execution leases and campaign admission authority
   'test/universe-integration-evaluate.test.ts', // real private candidate artifacts with injected evaluation and ledger faults
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review

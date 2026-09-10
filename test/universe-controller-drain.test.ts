@@ -32,6 +32,7 @@ const scratch: string[] = [];
 const HASH = 'a'.repeat(64);
 beforeEach(() => { for (const hook of Object.values(hooks)) hook.mockReset(); hooks.proof.mockReturnValue(null); });
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   const writable = (path: string): void => {
     const stat = lstatSync(path);
@@ -93,6 +94,85 @@ function fixture() {
 }
 
 describe('Durable controller drain execution', () => {
+  it.each(['unchanged', 'records', 'campaign-lease', 'controller-lease'] as const)('rechecks %s before no-start settlement after live transaction contention', async (changed) => {
+    const f = fixture(); f.definition.tasks[1]!.dependsOn = ['a'];
+    const caller = new AbortController(); const entered = deferred<void>();
+    let transactionLock: locks.LocalStoreLock | undefined;
+    const original = store.appendPortfolioControllerEvent;
+    vi.spyOn(store, 'appendPortfolioControllerEvent').mockImplementation((directory, input, options) => {
+      if (input.kind === 'settled' && !transactionLock) {
+        const acquired = locks.acquireLocalStoreLockWithOutcome(join(f.directory, '.control.lock'), 0,
+          { anchorPath: f.directory, exactPrivateStorage: true });
+        if (acquired.state !== 'acquired') throw new Error('Could not hold fixture settlement transaction');
+        transactionLock = acquired.lock; entered.resolve();
+      }
+      const next = original(directory, input, options);
+      if (input.kind === 'intent') caller.abort();
+      return next;
+    });
+    const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    const pending = runUniversePortfolioController(f.definition, { ...f.options, signal: caller.signal });
+    try {
+      await Promise.race([entered.promise, pending.then(() => { throw new Error('Controller returned before settlement contention'); })]);
+      const deadlineAt = readUniversePortfolioController(f.definition.id, f.options).deadlineAt;
+      expect(release).not.toHaveBeenCalledWith(f.executionLock);
+      if (changed === 'records') f.readiness.get('a')!.recordsDigest = 'd'.repeat(64);
+      if (changed === 'campaign-lease') f.loseExecution();
+      if (changed === 'controller-lease') rmSync(join(f.directory, '.execution.lock'));
+      expect(locks.releaseLocalStoreLock(transactionLock!)).toBe(true);
+      f.control('drain');
+      if (changed === 'controller-lease') await expect(pending).rejects.toThrow('Controller execution ownership lost');
+      const result = changed === 'controller-lease' ? readUniversePortfolioController(f.definition.id, f.options) : await pending;
+      expect(result.deadlineAt).toBe(deadlineAt);
+      expect(hooks.run).not.toHaveBeenCalled();
+      if (changed === 'unchanged') {
+        expect(result.outcomes[0]).toMatchObject({ state: 'held', attempted: true, reasonCode: 'dispatch-not-started' });
+        expect(result.control?.acknowledgedAt).toEqual(expect.any(String));
+        expect(f.events().filter((event) => event.kind === 'settled')).toHaveLength(1);
+      } else {
+        expect(result.outcomes[0]).toMatchObject({ state: 'in-flight', attempted: true, reasonCode: 'reconciliation-required' });
+        expect(result.control?.acknowledgedAt).toBeNull();
+        expect(f.events().some((event) => event.kind === 'settled')).toBe(false);
+      }
+      expect(release).toHaveBeenCalledWith(f.executionLock);
+      expect(existsSync(join(f.directory, '.execution.lock'))).toBe(false);
+    } finally {
+      caller.abort();
+      if (transactionLock && locks.ownsLocalStoreLock(transactionLock)) locks.releaseLocalStoreLock(transactionLock);
+      await pending.catch(() => undefined);
+    }
+  });
+
+  it.each(['cancelled', 'timed-out'] as const)('settles proven not-started work after post-intent %s and acknowledges drain', async (status) => {
+    const f = fixture(); f.definition.tasks[1]!.dependsOn = ['a'];
+    const caller = new AbortController();
+    const original = store.appendPortfolioControllerEvent;
+    vi.spyOn(store, 'appendPortfolioControllerEvent').mockImplementation((directory, input, options) => {
+      const next = original(directory, input, options);
+      if (input.kind === 'intent') {
+        f.control('drain');
+        if (status === 'cancelled') caller.abort();
+        else { vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(Date.now() + f.definition.maxDurationMs + 1); }
+      }
+      return next;
+    });
+    const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, signal: caller.signal });
+    expect(result).toMatchObject({ status, sourceState: 'healthy', control: { mode: 'drain', acknowledgedAt: expect.any(String) },
+      outcomes: [{ campaignId: 'a', state: 'held', attempted: true, reasonCode: 'dispatch-not-started' },
+        { campaignId: 'b', state: 'held', attempted: false, reasonCode: 'dependency-held' }] });
+    expect(hooks.run).not.toHaveBeenCalled();
+    expect(release).toHaveBeenCalledWith(f.executionLock);
+    expect(existsSync(join(f.directory, '.execution.lock'))).toBe(false);
+    const saved = f.events();
+    expect(saved.filter((event) => event.kind === 'intent')).toHaveLength(1);
+    expect(saved.filter((event) => event.kind === 'settled')).toHaveLength(1);
+    const restarted = await runUniversePortfolioController(f.definition, f.options);
+    expect(restarted).toMatchObject({ deadlineAt: result.deadlineAt, outcomes: result.outcomes });
+    expect(f.events()).toEqual(saved);
+    expect(hooks.run).not.toHaveBeenCalled();
+  });
+
   it.each(['unchanged', 'campaign', 'dependency', 'ownership'] as const)('revalidates %s evidence after final intent transaction contention', async (changed) => {
     const f = fixture();
     f.finish('a');

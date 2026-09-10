@@ -99,6 +99,51 @@ function fixture(ids = ['a'], maxParallel = 1) {
 }
 
 describe('Portfolio controller private-ledger fault acceptance', () => {
+  it('settles a delivery-only post-intent cancellation without pretending the campaign was attempted', async () => {
+    const f = fixture(['a', 'b']); f.finish('a'); f.definition.tasks[1]!.dependsOn = ['a'];
+    const deliveryPlan = { schemaVersion: 1 as const,
+      deliveries: [{ campaignId: 'a', branch: 'codex/not-started', baseCommit: 'a'.repeat(40) }] };
+    const caller = new AbortController(); const original = controllerStore.appendPortfolioControllerEvent;
+    vi.spyOn(controllerStore, 'appendPortfolioControllerEvent').mockImplementation((directory, input, options) => {
+      const next = original(directory, input, options);
+      if (input.kind === 'intent') caller.abort();
+      return next;
+    });
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan, signal: caller.signal });
+    expect(result).toMatchObject({ status: 'cancelled', sourceState: 'healthy', outcomes: [
+      { campaignId: 'a', state: 'held', attempted: false, reasonCode: 'dispatch-not-started', deliveryDigest: null },
+      { campaignId: 'b', state: 'held', attempted: false, reasonCode: 'dependency-held' },
+    ] });
+    expect(hooks.acquire).not.toHaveBeenCalled();
+    expect(hooks.run).not.toHaveBeenCalled();
+    expect(hooks.deliver).not.toHaveBeenCalled();
+    const evidence = f.events().filter((event) => event.kind !== 'observed');
+    const restarted = await runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan });
+    expect(restarted).toMatchObject({ deadlineAt: result.deadlineAt, outcomes: result.outcomes });
+    expect(f.events().filter((event) => event.kind !== 'observed')).toEqual(evidence);
+    expect(hooks.deliver).not.toHaveBeenCalled();
+  });
+
+  it('leaves a known pre-call cancellation unresolved if its held receipt cannot be persisted', async () => {
+    const f = fixture(); const caller = new AbortController(); const original = controllerStore.appendPortfolioControllerEvent;
+    vi.spyOn(controllerStore, 'appendPortfolioControllerEvent').mockImplementation((directory, input, options) => {
+      if (input.kind === 'settled') throw new Error('Fixture no-start receipt storage unavailable');
+      const next = original(directory, input, options);
+      if (input.kind === 'intent') caller.abort();
+      return next;
+    });
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, signal: caller.signal });
+    expect(result).toMatchObject({ status: 'cancelled', outcomes: [
+      { state: 'in-flight', attempted: true, reasonCode: 'reconciliation-required' },
+    ] });
+    expect(f.events().some((event) => event.kind === 'settled')).toBe(false);
+    expect(hooks.run).not.toHaveBeenCalled();
+    const restarted = await runUniversePortfolioController(f.definition, f.options);
+    expect(restarted).toMatchObject({ deadlineAt: result.deadlineAt, outcomes: result.outcomes });
+    expect(hooks.run).not.toHaveBeenCalled();
+    expect(f.events().some((event) => event.kind === 'settled')).toBe(false);
+  });
+
   it('rechecks a delivery-only campaign after final intent contention before any handoff', async () => {
     const f = fixture(); f.finish('a');
     const deliveryPlan = { schemaVersion: 1 as const,

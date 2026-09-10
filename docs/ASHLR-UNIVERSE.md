@@ -1829,6 +1829,22 @@ delivery can instead report its delivery-specific reason, such as
 `delivery-not-attempted`. Existing historical `campaign-held` records are not
 rewritten.
 
+`dispatch-not-started` means the owning invocation stopped after recording intent
+but before calling the campaign runner or delivery path. It records a `held`
+settlement only after verifying the exact intent, unchanged campaign evidence
+and retained ownership, including after any bounded settlement-lock wait. The
+campaign's history is untouched. Controller `attempted` still records campaign
+call intent (`true` for campaign dispatch, `false` for delivery-only dispatch),
+not proof of worker execution or provider usage. The original deadline remains
+unchanged; this receipt never restores a pending slot or grants a retry.
+
+A proven no-call settlement can permit drain acknowledgement once all other
+intents have settled. Without a verified durable settlement, a crash, lost
+ownership, changed evidence, failed receipt write or thrown call leaves the
+intent unresolved. A write can commit before reporting a cleanup error; inspect
+the stored receipt rather than assuming it is absent. Restart never infers that
+a call was skipped merely because no worker or campaign start record is visible.
+
 Recovery depends on which records are durably present, not just whether the old
 process exited:
 
@@ -1836,6 +1852,7 @@ process exited:
 | --- | --- |
 | Enrollment exists, but no campaign dispatch intent | Reclaim a proven-dead owner's lease and admit unchanged pristine work within the original deadline. |
 | Dispatch intent exists, but the campaign has not started | Retain the unresolved attempt and its concurrency slot; do not retry or release dependants. |
+| Owning invocation recorded a held `dispatch-not-started` settlement | Preserve the held outcome and original deadline; no worker replay or dependent release. |
 | Attributed campaign completion exists, but controller settlement does not | Reconcile the exact completed dispatch without rerunning its worker or evaluator. |
 | Attributed completion and required delivery both exist | Verify the existing receipt and current branch before releasing dependants; never recreate the delivery. |
 | Required delivery is missing or its branch has changed | Keep dependent work blocked; recovery does not repair or replace the branch. |

@@ -85,7 +85,7 @@ export function UniverseControllerInspector() {
           <table><caption>Recorded campaign outcomes</caption><thead><tr><th scope="col">Campaign</th><th scope="col">State</th><th scope="col">Campaign attempted</th><th scope="col">Reason</th></tr></thead>
             <tbody>{data.outcomes.map((row) => <tr key={row.campaignId}><th scope="row">{row.campaignId}</th><td>{row.state}</td><td>{row.attempted ? 'Yes' : 'No'}</td><td>{row.reasonCode}</td></tr>)}</tbody></table>
         </div> : <p className={styles.note}>No campaign outcomes available in this observation.</p>}
-        <p className={styles.note}>“In-flight” means an unresolved durable intent, not proof of a live worker. Attempted is not proof of successful evaluation.</p>
+        <p className={styles.note}>“In-flight” means an unresolved durable intent, not proof of a live worker. Campaign attempted records a call intent, not proof of worker execution or successful evaluation. A dispatch-not-started outcome remains held and does not authorize a retry.</p>
         {data.reasons.length ? <details className={styles.reasons}><summary>Evidence reasons ({data.reasons.length})</summary><ul>{data.reasons.map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}</ul></details> : null}
       </> : null}
     </div>}
