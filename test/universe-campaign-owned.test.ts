@@ -8,12 +8,9 @@ import { acquireUniverseExecution, withUniverseExecution } from '../src/core/uni
 import { campaignDirectory, initUniverseCampaign, readCampaignEvents, readUniverseCampaign } from '../src/core/universe/campaign-store.js';
 import { runUniverseCampaign, runUniverseCampaignOwned } from '../src/core/universe/campaign.js';
 import type { UniverseRun, UniverseSummary } from '../src/core/universe/types.js';
+import * as universeStore from '../src/core/universe/store.js';
 
 const hooks = vi.hoisted(() => ({ universe: undefined as UniverseSummary | undefined, run: vi.fn() }));
-vi.mock('../src/core/universe/store.js', async (original) => ({
-  ...await original<typeof import('../src/core/universe/store.js')>(),
-  projectUniverse: () => structuredClone(hooks.universe!),
-}));
 vi.mock('../src/core/universe/runner.js', () => ({ runUniverseOwned: hooks.run }));
 
 const roots: string[] = [];
@@ -23,6 +20,10 @@ afterEach(() => {
 });
 
 function fixture() {
+  // Install the same inert projection after module initialization: the raw
+  // campaign-context reader creates a store import cycle, so an async partial
+  // module factory can expose the original projection while it is resolving.
+  vi.spyOn(universeStore, 'projectUniverse').mockImplementation(() => structuredClone(hooks.universe!));
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'universe-campaign-owned-'))); roots.push(root);
   mkdirSync(join(root, 'universes', 'fixture'), { recursive: true, mode: 0o700 });
   hooks.universe = { manifest: { schemaVersion: 1, id: 'fixture', name: 'Owned campaign fixture', objective: 'Test retained ownership',

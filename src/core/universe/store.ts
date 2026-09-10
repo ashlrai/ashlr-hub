@@ -15,6 +15,8 @@ import type { UniverseArtifact, UniverseDiagnostic, UniverseElite, UniverseManif
 import { generationResources, newGenerationReceipt, resourceGenerationTaskId, validateGenerationConfig, validGenerationReceipt, validGenerationUsage } from './generation.js';
 import { buildUniverseFeedback, feedbackReceipt, validateDiagnostics } from './feedback.js';
 import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
+import { readCampaignSeedContext } from './campaign-seed-context.js';
+import { seedContextReceipt, validateUniverseSeedContext } from './seed-context.js';
 import { MAX_UNIVERSE_RECORD_BYTES } from './evidence-size.js';
 import type { UniverseIntegrationOrigin } from './integration-handoff-types.js';
 import { buildUniverseFileOperationsContext, fileOperationsContextDigest, verifyUniverseFileOperationOutcome } from './file-operations-context.js';
@@ -127,7 +129,12 @@ function validTrial(value: unknown): value is UniverseTrial {
     (!value.selected || value.status === 'passed');
 }
 function validRun(value: unknown): value is UniverseRun {
-  return object(value) && exact(value, ['id', 'universeId', 'generation', 'manifestDigest', 'comparatorDigest', 'startedAt', 'finishedAt', 'status', 'trials', 'durationMs', 'tokensUsed', 'costUsd', 'error', 'generationUsage', 'campaign', 'feedbackEnabled', 'feedbackVersion']) &&
+  const validSeed = (): boolean => {
+    if (!object(value) || value.seedContext === undefined) return true;
+    try { validateUniverseSeedContext(value.seedContext); return value.feedbackEnabled === true && value.feedbackVersion === 2 && value.campaign !== undefined; }
+    catch { return false; }
+  };
+  return object(value) && exact(value, ['id', 'universeId', 'generation', 'manifestDigest', 'comparatorDigest', 'startedAt', 'finishedAt', 'status', 'trials', 'durationMs', 'tokensUsed', 'costUsd', 'error', 'generationUsage', 'campaign', 'feedbackEnabled', 'feedbackVersion', 'seedContext']) &&
     text(value.id, 64) && RECORD_ID.test(value.id) && text(value.universeId, 64) && ID.test(value.universeId) &&
     integer(value.generation, 1, MAX_RECORDS) && text(value.manifestDigest, 64) && HASH.test(value.manifestDigest) &&
     text(value.comparatorDigest, 64) && HASH.test(value.comparatorDigest) && text(value.startedAt, 40) &&
@@ -136,7 +143,7 @@ function validRun(value: unknown): value is UniverseRun {
     new Set(value.trials.map((trial) => trial.id)).size === value.trials.length &&
     finite(value.durationMs) && value.durationMs >= 0 && (value.tokensUsed === null || integer(value.tokensUsed, 0, Number.MAX_SAFE_INTEGER)) && value.costUsd === null &&
     (value.generationUsage === undefined || validGenerationUsage(value.generationUsage)) &&
-    (value.feedbackEnabled === undefined || value.feedbackEnabled === true) &&
+    (value.feedbackEnabled === undefined || value.feedbackEnabled === true) && validSeed() &&
     (value.feedbackVersion === undefined || (value.feedbackVersion === 2 && value.feedbackEnabled === true)) &&
     (value.campaign === undefined || (object(value.campaign) && exact(value.campaign, ['id', 'ordinal', 'definitionDigest']) &&
       text(value.campaign.id, 64) && ID.test(value.campaign.id) && integer(value.campaign.ordinal, 1, 128) &&
@@ -324,6 +331,9 @@ export function projectUniverse(directory: string, records = readRecords(directo
       .map((record) => record.trial);
     if (start.run.universeId !== stored.manifest.id || start.run.manifestDigest !== stored.manifestDigest ||
         start.run.comparatorDigest !== stored.comparatorDigest) throw new Error('Run comparator does not match Universe');
+    if (start.run.seedContext && canonical(readCampaignSeedContext(start.run, stored, resolve(directory, '../..'))) !== canonical(start.run.seedContext)) {
+      throw new Error('Run seed context differs from its measured campaign evidence');
+    }
     let run: UniverseRun;
     if (final?.kind === 'final') {
       run = final.run;
@@ -331,6 +341,7 @@ export function projectUniverse(directory: string, records = readRecords(directo
           run.comparatorDigest !== start.run.comparatorDigest || run.startedAt !== start.run.startedAt ||
           canonical(run.campaign ?? null) !== canonical(start.run.campaign ?? null) || run.feedbackEnabled !== start.run.feedbackEnabled ||
           run.feedbackVersion !== start.run.feedbackVersion ||
+          canonical(run.seedContext ?? null) !== canonical(start.run.seedContext ?? null) ||
           !resourceEvidenceMatches(run, trials) || run.trials.length !== trials.length || run.trials.some((trial) => !trials.some((raw) =>
             canonical({ ...trial, selected: false, delta: null }) === canonical({ ...raw, selected: false, delta: null })))) {
         throw new Error('Final run does not match durable trial evidence');
@@ -386,6 +397,10 @@ export function projectUniverse(directory: string, records = readRecords(directo
             previous.get(trial.niche)?.artifact ?? stored.seedArtifact, trial.artifact);
         }
         const feedback = trial.generation.feedback;
+        if (trial.generation.seedContext && !run.seedContext || run.seedContext && trial.generation.promptDigest !== null &&
+            canonical(trial.generation.seedContext ?? null) !== canonical(seedContextReceipt(run.seedContext))) {
+          throw new Error('Trial seed context receipt differs from its immutable run pin');
+        }
         if (feedback) {
           const prior = [...runs].reverse().find((item) => item.status === 'completed' && item.finishedAt !== null &&
             item.trials.some((candidate) => candidate.variantId === variant.id));

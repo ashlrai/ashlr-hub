@@ -105,6 +105,8 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-campaign-seed-store.test.ts', // private campaign records and Git fixtures
   'test/universe-campaign-seed-evaluation.test.ts', // confined evaluator subprocess lifecycle
   'test/universe-seed-measurement-acceptance.test.ts', // loopback generation and verified local delivery
+  'test/universe-campaign-seed-context.test.ts', // raw campaign/run history and immutable context reconstruction
+  'test/universe-seed-context-model.test.ts', // candidate filesystem and actual model-boundary receipts
   'test/resource-console-engineering-routes.test.ts', // actual HTTP auth and lifecycle with inert engineering owner
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership

@@ -54,6 +54,23 @@ export interface UniverseDiagnostic {
   line?: number;
 }
 
+/** Fixed measured seed evidence, distinct from a trial or the current edit parent. */
+export interface UniverseSeedContext {
+  schemaVersion: 1;
+  source: {
+    universeId: string;
+    campaignId: string;
+    definitionDigest: string;
+    manifestDigest: string;
+    comparatorDigest: string;
+    seedArtifactDigest: string;
+    intentDigest: string;
+    resultDigest: string;
+  };
+  measurement: { passed: boolean; score: number; metrics: Record<string, number>; diagnostics: UniverseDiagnostic[] };
+}
+export interface UniverseSeedContextReceipt { schemaVersion: 1; digest: string }
+
 export interface UniverseFeedback {
   schemaVersion: 1;
   source: {
@@ -88,7 +105,7 @@ export interface UniverseSearchContext {
   niche: string;
   generation: number;
   metric: UniverseManifest['metric'];
-  /** Null means the pinned seed is the edit base; its score has not been measured. */
+  /** Null means the pinned seed is the edit base; this search protocol carries no seed score. */
   parent: (Omit<UniverseSearchAttempt, 'artifactDigest'> & { artifactDigest: string; score: number }) | null;
   previous: (UniverseSearchAttempt & {
     status: UniverseTrial['status'];
@@ -147,6 +164,7 @@ export interface UniverseGenerationReceipt {
   changedFiles: string[];
   feedback?: UniverseFeedback['source'] & { digest: string };
   search?: UniverseSearchContextReceipt;
+  seedContext?: UniverseSeedContextReceipt;
   fileOperations?: UniverseFileOperationsReceipt;
   resource?: UniverseResourceGenerationEvidence;
   error?: string;
@@ -209,6 +227,8 @@ export interface UniverseRun {
   feedbackEnabled?: true;
   /** Absent denotes legacy v1 feedback; new decision-context runs pin version 2 before execution. */
   feedbackVersion?: 2;
+  /** Optional complete immutable campaign seed context captured before generation. */
+  seedContext?: UniverseSeedContext;
   error?: string;
 }
 

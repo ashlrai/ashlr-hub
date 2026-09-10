@@ -1,6 +1,78 @@
 # Verified local handoff
 
-## Current continuation: automatic seed measurement
+## Current continuation: retained seed evidence for workers
+
+Baseline `5b8af0aecc1fc32f0f7ad7bcfacd05430697e665`, isolated `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents
+implemented shared generation context, actual resource/UI acceptance, and
+independent replay/stop verification; the parent integrated and reviewed.
+The user explicitly approved retaining the seed context across the campaign.
+
+New `measureSeed: true`, `feedback: true` campaign generations capture the exact
+measured seed in a separate bounded `seedContext`. The same historical evidence
+is present when later generations edit retained parents and receive latest-trial
+feedback. It creates no parent, trial, score delta, request or acceptance rule.
+The full run pin is limited to 16 KiB; the generation receipt carries its digest.
+Both local and resource-pool prompts include it. Previously unpinned runs remain
+valid and absent-context prompt bytes are unchanged.
+
+Raw history reconstruction binds campaign definition, manifest, comparator,
+seed artifact, intent/result and exact run step without recursively projecting
+the campaign. Replay rejects altered pins and missing/changed prompted receipts.
+Seeded runs require version-two search evidence. The final generation guard
+rechecks parent stop/deadline state after synchronous custody verification.
+Web views omit diagnostic text and paths in both campaign and run contexts;
+the existing inspector shows version/digest without another fetch. Private
+records retain their evidence. Operator and demo guidance are updated.
+
+The small actual loopback worker derives its response from the received source,
+seed score and declared diagnostic, not an out-of-band campaign read. A
+three-generation case retains identical seed context alongside accepted parents
+and later feedback. The full-Hub worker validates actual seed diagnostics before
+returning an independently pinned known repair. These fixtures prove the plumbing,
+not live model ideation, general intelligence or business acceptance.
+
+Validation status: final frozen-source gates passed. Source/web and
+seven changed-test strict typechecks passed. Full web gate: **1,229 passed /
+75 files**, no skips (10.74 s). Lint: zero errors, 107 existing warnings; lane
+check: 284 real-I/O and 665 unit files. Documentation check: 105 local, 31 source
+and 36 external links, no errors or external requests. Local build and all five
+read-only structural safety checks passed. Final full-Hub gate: **2 passed /
+1 file**, no skips (191.00 s), including exact delivery and replay for both the
+legacy three-request path and automatic one-request path. The automatic case
+passed all 142 cases after receiving the seed's 82/142 result and 16 declared
+diagnostics. Its delivered source blob is
+`f04ff9d65cf5e0ef23c1c4182ca68ed3b8b67c56`; fixture workers and repositories were
+cleaned up. Final core regression: **1,201 passed / 39 files**, no skips
+(365.35 s), covering campaign/seed/generation/model/feedback/search/file-operation/
+resource-generation and public-serializer contracts. These three disjoint final
+groups total **2,432 passed / 115 files**, no skips. This is the selected
+change-relevant gate, not the full repository inventory.
+
+Exploratory failures are not erased by reruns: the initial mixed-source broad
+run had 1,187 passes and nine failures. Two newly added stop tests loaded the
+old cached runner; seven ownership tests lost an asynchronous partial-mock seam
+through the new module cycle. The focused stop tests pass the corrected guard.
+The ownership fixture now installs an equivalent live namespace spy, preserving
+all assertions; all 142 tests across nine affected suites pass without changing
+the other eight files. Another cold review caught the missing version-two
+requirement, now covered by persisted version/search removal cases.
+
+The first full-Hub run passed its legacy case but failed automatic delivery
+after the candidate passed 142/142 cases. An automatic-only rerun completed
+delivery and replay with one request and one ledger attempt. The original
+failure remains unexplained, not a diagnosed fix. Failure-only read-only
+diagnostics now capture campaign proof, custody, delivery and ref state; explicit
+diagnostic mode can retain a failed private fixture after closing its worker.
+
+No provider requests, account migration, live enrollment, service activation,
+remote push, npm publication or GitHub Actions were performed. Host KILL remains
+present as a regular file; the original checkout remains at `a01fc086` with its
+preexisting untracked plans. Entire reports enabled/manual-commit on `auto/p00`;
+resume found no checkpoint. Production commissioning and the larger autonomous
+company loop remain separate, unfinished work.
+
+## Previous continuation: automatic seed measurement
 
 Baseline `2baeef061f23ca3ff5196ce250180a685bf44f4d`, isolated `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Parent integrates three

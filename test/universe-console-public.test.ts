@@ -23,7 +23,7 @@ describe('scoped console public worker serialization', () => {
       outcomes: [{ campaignId: 'a', state: 'held', attempted: false, reasonCode: 'campaign-paused',
         campaignDigest: 'private-campaign', deliveryDigest: 'private-delivery', future: 'private-outcome' }],
       control: { mode: 'drain', sequence: 3, requestedAt: '2026-09-09T00:00:01Z',
-        acknowledgedAt: '2026-09-09T00:00:02Z', future: 'private-control' } } as UniversePortfolioControllerReport;
+        acknowledgedAt: '2026-09-09T00:00:02Z', future: 'private-control' } } as unknown as UniversePortfolioControllerReport;
     const before = JSON.stringify(source); const projected = projectUniverseConsoleControllerStatus(source);
     expect(Object.keys(projected).sort()).toEqual(['schemaVersion', 'controllerId', 'sourceState', 'status', 'createdAt',
       'deadlineAt', 'observedAt', 'reasons', 'outcomes', 'control'].sort());
@@ -82,6 +82,27 @@ describe('scoped console public worker serialization', () => {
     }
     expect(JSON.stringify(source)).toBe(before);
     expect(validateUniverseConsoleResponse(json)).toBe(json);
+  });
+
+  it('omits seed diagnostic text and paths in campaign and run contexts without rewriting private evidence', () => {
+    const source = overview();
+    const measurement = { passed: false, score: 0, metrics: { checks: 142 },
+      diagnostics: [{ code: 'seed_case', message: 'private seed details', path: 'private-source.ts', line: 9 }] };
+    source.universes[0]!.runs[0]!.seedContext = { schemaVersion: 1, source: { universeId: 'u', campaignId: 'c',
+      definitionDigest: 'a'.repeat(64), manifestDigest: 'b'.repeat(64), comparatorDigest: 'c'.repeat(64),
+      seedArtifactDigest: 'd'.repeat(64), intentDigest: 'e'.repeat(64), resultDigest: 'f'.repeat(64) }, measurement };
+    source.campaigns = [{ seedEvaluation: { intent: {}, result: { status: 'measured', measurement } } },
+      { seedEvaluation: { intent: {}, result: null } }] as UniverseOverview['campaigns'];
+    const before = JSON.stringify(source);
+    const json = serializeUniverseConsoleOverview(source); const parsed = JSON.parse(json);
+    expect(json).not.toContain('private seed details'); expect(json).not.toContain('private-source.ts');
+    for (const value of [parsed.universes[0].runs[0].seedContext.measurement,
+      parsed.universes[0].activeRun.seedContext.measurement, parsed.campaigns[0].seedEvaluation.result.measurement]) {
+      expect(value).toEqual({ passed: false, score: 0, metrics: { checks: 142 },
+        diagnostics: [{ code: 'seed_case', message: '[omitted from web view]' }] });
+    }
+    expect(parsed.campaigns[1].seedEvaluation.result).toBeNull();
+    expect(JSON.stringify(source)).toBe(before);
   });
 
   it('uses the shared recursive public scrub for graph and overview text', () => {

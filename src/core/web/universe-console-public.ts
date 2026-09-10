@@ -1,4 +1,4 @@
-import type { UniverseOverview } from '../universe/types.js';
+import type { UniverseOverview, UniverseDiagnostic } from '../universe/types.js';
 import type { UniverseGraph } from '../universe/graph-types.js';
 import type { UniverseCampaignReadiness } from '../universe/campaign-readiness.js';
 import type { UniversePortfolioControllerReport } from '../universe/portfolio-controller-types.js';
@@ -17,11 +17,18 @@ function serialize(value: unknown): string {
 
 /** Runs inside the dedicated bounded worker, including recursive redaction and serialization. */
 export function serializeUniverseConsoleOverview(overview: UniverseOverview): string {
+  const redactMeasurement = <T extends { diagnostics?: UniverseDiagnostic[] }>(measurement: T) => ({ ...measurement,
+    ...(measurement.diagnostics ? { diagnostics: measurement.diagnostics.map(({ code }) => ({ code, message: '[omitted from web view]' })) } : {}) });
   const redactRun = (run: UniverseOverview['universes'][number]['runs'][number]) => ({ ...run,
+    ...(run.seedContext ? { seedContext: { ...run.seedContext, measurement: redactMeasurement(run.seedContext.measurement) } } : {}),
     trials: run.trials.map((trial) => ({ ...trial, ...(trial.diagnostics ? {
       diagnostics: trial.diagnostics.map(({ code }) => ({ code, message: '[omitted from web view]' })),
     } : {}) })) });
-  return serialize({ ...overview, universes: overview.universes.map((universe) => ({ ...universe,
+  return serialize({ ...overview,
+    ...(overview.campaigns ? { campaigns: overview.campaigns.map(campaign => ({ ...campaign,
+      ...(campaign.seedEvaluation?.result?.measurement ? { seedEvaluation: { ...campaign.seedEvaluation,
+        result: { ...campaign.seedEvaluation.result, measurement: redactMeasurement(campaign.seedEvaluation.result.measurement) } } } : {}),
+    })) } : {}), universes: overview.universes.map((universe) => ({ ...universe,
     runs: universe.runs.map(redactRun), activeRun: universe.activeRun ? redactRun(universe.activeRun) : null })) });
 }
 

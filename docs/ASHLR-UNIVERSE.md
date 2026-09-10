@@ -1170,8 +1170,27 @@ generation zero.
 A valid measured result may be passing or failing. A failed finite measurement
 can support `allowInitialRepair: true` for a changed, passing first candidate
 that meets the fixed improvement threshold. A completed seed measurement is
-reused after verifying its pins and bytes. The measurement is delivery evidence;
-it is not automatically added to the model's trial-feedback payload.
+reused after verifying its pins and bytes. When the campaign also enables
+`feedback: true`, each newly started generation receives that measurement in a
+separate `seedContext`, including generations editing an already retained elite.
+The historical seed context stays alongside current-parent source and latest
+trial feedback; it is not a synthetic trial or an acceptance decision.
+
+The context contains the finite score, passing status, declared numeric metrics
+and bounded evaluator diagnostics. It is limited to 16 KiB of UTF-8 canonical
+data, with at most 32 metrics and 16 diagnostics under the existing diagnostic
+limits. Diagnostic text is evidence, not instructions or permission to edit a
+file. No extra model request is made. Scheduling, archive selection, evaluation,
+request limits and delivery rules are unchanged.
+
+The durable run pins the full context to the campaign definition, manifest,
+comparator, seed artifact and exact measurement records. Both local and
+resource-pool generation include its digest receipt in the existing generation
+evidence. Reconstruction and pre-request checks refuse changed or mismatched
+history. Previously recorded runs without this optional pin stay unpinned;
+absent-context prompts retain their prior bytes. The generation inspector shows
+the receipt; web views omit diagnostic messages and paths while retaining codes
+and measured values. Private local records retain the original evidence.
 
 An operational failure, timeout or cancellation is not a measured rejection and
 holds generation. An intent without a confirmed result remains unresolved and

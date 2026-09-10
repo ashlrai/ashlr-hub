@@ -15,6 +15,8 @@ import { generationResources, newGenerationReceipt, validGenerationReceipt } fro
 import { generateModelCandidate } from './model-candidate.js';
 import { buildUniverseFeedback, feedbackReceipt } from './feedback.js';
 import { buildUniverseSearchContext, searchContextReceipt } from './search-context.js';
+import { readCampaignSeedContext } from './campaign-seed-context.js';
+import { seedContextReceipt } from './seed-context.js';
 import { buildUniverseFileOperationsContext, fileOperationsContextDigest,
   verifyUniverseFileOperationOutcome } from './file-operations-context.js';
 import type { UniverseFileOperationsContext } from './file-operations-types.js';
@@ -130,17 +132,36 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       artifact: { path: archivePath, digest: 'f'.repeat(64), revision: record.manifest.seed.revision },
       changedFiles: variant.generation?.files ?? [], ...(feedback ? { feedback: feedbackReceipt(feedback) } : {}),
       ...(searchContext ? { search: searchContextReceipt(searchContext) } : {}),
+      ...(run.seedContext ? { seedContext: seedContextReceipt(run.seedContext) } : {}),
       ...(fileOperationsContext ? { fileOperations: { schemaVersion: 1 as const,
         contextDigest: fileOperationsContextDigest(fileOperationsContext), operations: [] } } : {}),
     });
     if (variant.generation) {
+      const seedContext = run.seedContext;
+      const contextCurrent = (): void => {
+        if (!seedContext) return;
+        assertComparatorUnchanged(record);
+        if (canonical(readCampaignSeedContext(run, record, root)) !== canonical(seedContext)) {
+          throw new Error('Campaign seed context changed before generation');
+        }
+      };
+      contextCurrent();
+      const generationStopped = (): boolean => {
+        if (isExecutionStopped?.()) return true;
+        contextCurrent();
+        // Synchronous custody checks can outlast an outer deadline or a stop
+        // change; do not carry an earlier admission decision across that work.
+        return isExecutionStopped?.() ?? false;
+      };
       // The broker receives only declared text and file state. Model output is
       // operation data, never a tool call; the fixed evaluator is unchanged.
       trial.generation = await generateModelCandidate(variant.generation, {
         candidatePath: candidate, objective: record.manifest.objective, hypothesis: variant.hypothesis,
         generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(remaining())), signal,
-        ...(variant.generation.kind === 'resource-pool' ? { resourceRuntime, expectedResourceRuntimeDigest, isExecutionStopped, resourceUniverseRoot: root,
+        ...(variant.generation.kind === 'resource-pool' ? { resourceRuntime, expectedResourceRuntimeDigest, resourceUniverseRoot: root,
           resourceIdentity: { universeId: record.manifest.id, runId: run.id, variantId: variant.id } } : {}),
+        ...(seedContext ? { seedContext, seedContextDigest: seedContextReceipt(seedContext).digest,
+          isExecutionStopped: generationStopped } : { isExecutionStopped }),
         ...(feedback ? { feedback } : {}),
         ...(searchContext ? { searchContext, variantId: variant.id, niche: variant.niche } : {}),
         ...(fileOperationsContext ? { fileOperationsContext, variantId: variant.id, niche: variant.niche } : {}),
@@ -305,6 +326,8 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
     // Version the new prompt contract at its durable start. Returning or
     // interrupting an existing run above preserves its originally recorded pin.
     if (options.feedback) { nextRun.feedbackEnabled = true; nextRun.feedbackVersion = 2; }
+    const seedContext = readCampaignSeedContext(nextRun, record, root);
+    if (seedContext) nextRun.seedContext = seedContext;
     const scheduled = scheduledVariants(record.manifest, nextRun.generation);
     if (options.trialLimit !== undefined && options.trialLimit > scheduled.length) throw new Error('Campaign trial limit exceeds scheduled variants');
     const ownerStart = verifiedProcessStartRef(process.pid);

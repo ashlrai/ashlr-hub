@@ -338,8 +338,14 @@ To prepare this campaign through the existing manifest/campaign interfaces:
   additional accounts or replace ledger history to make the campaign admissible.
 - Set that delivery target's `allowInitialRepair` to `true`. For a new campaign,
   set `measureSeed: true` to evaluate the seed before the first worker request.
-  A one-response fixture then supplies the reviewed repair; this verifies
-  evaluator/dispatch/delivery plumbing, not autonomous model ideation. Without
+  Enable `feedback: true` so every new worker generation receives the bounded,
+  digest-pinned `seedContext` alongside its current source and trial feedback.
+  The one-response fixture checks the actual prompt's failed seed score,
+  case statistics and declared diagnostics before supplying the reviewed repair.
+  A separate three-generation acceptance fixture retains that exact seed context
+  alongside an accepted parent and later trial feedback. These are controlled
+  workers verifying evidence/dispatch/delivery plumbing, not autonomous model
+  ideation or proof of general model quality. Without
   seed measurement, ensure an earlier completed generation actually evaluates
   the unchanged seed in the same campaign. The legacy controlled acceptance
   sequence is unchanged seed (failed

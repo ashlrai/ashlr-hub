@@ -58,6 +58,11 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Connect exact measured-seed proof to first-response delivery and recorded readiness.
 - [x] Verify actual evaluator lifecycle, interruption refusal, one-request Hub repair and legacy compatibility.
 - [x] Update operator guidance and run frozen gates (2,383 passed, five existing skips); local commit/build handoff follows.
+- [x] Explore seed-to-worker context and confirm retention across all campaign generations.
+- [x] Implement distinct bounded seed context, durable run pin and exact reconstruction.
+- [x] Connect shared local/resource prompt and receipt handling without changing absent legacy bytes.
+- [x] Verify evidence-driven worker response, retained-parent context, replay, drift and recorded visibility.
+- [x] Document and validate the complete seed-feedback increment locally (2,432 selected tests passed / 115 files, no skips).
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -140,6 +145,14 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Seed-feedback continuation from clean `5b8af0aecc1fc32f0f7ad7bcfacd05430697e665`:
+user selected retaining seed evidence throughout the campaign, alongside latest
+trial feedback. Three agents mapped runtime/transport, independent projection
+invariants and actual acceptance. New context must have its own immutable run
+pin and receipt digest, never invented run/trial IDs. Parent owns raw-history
+reconstruction, run-store integration and final verification. Preserve existing
+absent-context prompt and receipt bytes. Entire resume found no checkpoint.
+
 Current continuation from `2baeef061f23ca3ff5196ce250180a685bf44f4d`:
 automatic fixed-seed measurement is implemented and locally verified within the
 original campaign time budget, without spending a model request or fabricating

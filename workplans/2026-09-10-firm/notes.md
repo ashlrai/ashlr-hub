@@ -364,3 +364,28 @@ interrupted run was not counted. No provider commissioning or public release.
   not become whole-account exclusions for explicitly independent quota scopes.
 - Non-impacting discovery errors: nonexistent pool-supervisor-types.ts and
   resource-api.ts guesses; located console-types.ts and existing resource modules.
+# September 10: retained measured seed context
+
+- Baseline `5b8af0aecc1fc32f0f7ad7bcfacd05430697e665`, isolated `auto/p00`.
+  User explicitly chose to retain seed context throughout a campaign.
+- Three parallel streams: shared broker/receipt codec, independent history and
+  restart validation, actual resource acceptance plus existing UI inspector.
+- Context is separate historical evidence, not a trial/parent or acceptance.
+  New measured-seed campaigns with feedback pin it once per generation; legacy
+  absent-context runs and prompt bytes remain unchanged.
+- Full run context is bounded to 16 KiB; each generation receipt stores only its
+  version and digest. Existing trial/final record budgets remain enforced.
+- Raw campaign reconstruction avoids recursive summary projection. Run start,
+  final and prompted receipts are checked against the same exact measurement.
+- Cold review found and corrected a missing parent-stop recheck after synchronous
+  context verification. Another review required version-two search evidence for
+  every seeded run; historical unpinned version-one runs remain supported.
+- Web serialization omits seed diagnostic messages and paths in both run and
+  campaign views, without rewriting private records. Inspector adds receipt
+  details only when present, with no extra requests or layout redesign.
+- Initial full-Hub acceptance exposed an unresolved automatic-delivery handoff
+  despite 142/142 evaluated cases passing; investigate before claiming delivery.
+  Final frozen-source results belong in report.md, not this exploratory log.
+- Non-impacting errors: early metrics narrowing fixed; standalone strict test
+  checking found an existing intentional extra-field fixture needing an unknown
+  cast. Initial empty patch hunk was rejected; corrected patch succeeded.
