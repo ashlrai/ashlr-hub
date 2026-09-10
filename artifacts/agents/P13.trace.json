@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P13",
+  "status": "unsigned-stub",
+  "authenticated": false,
+  "attestation": null,
+  "liveProviderExecution": false,
+  "effectAuthority": "none",
+  "source": "src/core/universe/cold-verifier.ts",
+  "tests": "test/universe-cold-verifier.test.ts",
+  "limitation": "Development handoff metadata only; not a signed trace, transport settlement receipt, or production acceptance."
+}
