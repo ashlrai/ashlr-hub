@@ -11,6 +11,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Controller observation comparison
+
+- Adds session-only before/after comparison for consecutive accepted controller
+  observations, including recorded reasons, intent, controls and graph changes.
+- Preserves historical comparisons after failed refreshes and resets them on
+  identity changes, with registration and clock-order caveats.
+
 ### Mission graph navigation
 
 - Adds campaign ID/reason search, recorded-state filters and paginated results
