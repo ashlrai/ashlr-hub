@@ -15,7 +15,8 @@ import { deliverCompletedUniverseCampaign, preflightUniverseCampaignDelivery, va
 import { readUniverseDeliveries } from './delivery.js';
 import { readUniversePortfolioPlan, validateUniversePortfolioDefinition } from './portfolio-plan.js';
 import { appendPortfolioControllerEvent, foldPortfolioController, portfolioControllerDirectory,
-  portfolioControllerPrerequisites, readPortfolioControllerEvents } from './portfolio-controller-store.js';
+  portfolioControllerPrerequisites, readPortfolioControllerEvents, refreshPortfolioControllerEvents,
+  withPortfolioControllerTransaction, PortfolioControllerTransactionBusyError, PortfolioControllerDrainError } from './portfolio-controller-store.js';
 import type { UniversePortfolioRunOptions } from './portfolio.js';
 import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin,
   UniversePortfolioControllerReport } from './portfolio-controller-types.js';
@@ -38,8 +39,8 @@ function empty(id: string, state: 'missing' | 'degraded', at: string): UniverseP
 }
 
 /** A projection validates source receipts, not process liveness; unresolved intents stay unresolved. */
-function inspect(id: string, events: PortfolioControllerEvent[], root: string, at: string): UniversePortfolioControllerReport {
-  if (canonical(readPortfolioControllerEvents(portfolioControllerDirectory(id, { root }))) !== canonical(events)) {
+function inspect(id: string, events: PortfolioControllerEvent[], root: string, at: string, verifyLedger = true): UniversePortfolioControllerReport {
+  if (verifyLedger && canonical(readPortfolioControllerEvents(portfolioControllerDirectory(id, { root }))) !== canonical(events)) {
     throw new Error('Controller ledger changed during observation');
   }
   const folded = foldPortfolioController(events);
@@ -85,9 +86,13 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
   const sourceState = reasons.length ? 'degraded' : 'healthy';
   return { schemaVersion: 1, controllerId: id, definitionDigest: enrollment.definitionDigest, sourceState,
     status: sourceState === 'degraded' ? 'unavailable' : outcomes.every((row) => row.state === 'completed') ? 'completed' :
-      at >= enrollment.deadlineAt ? 'timed-out' : 'incomplete', createdAt: folded.first.at, deadlineAt: enrollment.deadlineAt,
-    observedAt: at, outcomes, reasons };
+      at >= enrollment.deadlineAt ? 'timed-out' : folded.control?.mode === 'drain'
+        ? folded.control.acknowledgedAt === null ? 'draining' : 'drained' : 'incomplete',
+    createdAt: folded.first.at, deadlineAt: enrollment.deadlineAt,
+    observedAt: at, outcomes, reasons, ...(folded.control ? { control: { ...folded.control } } : {}) };
 }
+
+class ControllerTransactionWaitStopped extends Error {}
 
 /** Read-only: does not initialize storage, settle intents, acquire ownership or run campaigns. */
 export function readUniversePortfolioController(id: string, options: UniverseStoreOptions = {}): UniversePortfolioControllerReport {
@@ -135,7 +140,10 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   let timer: ReturnType<typeof setTimeout> | undefined;
   let poll: ReturnType<typeof setInterval> | undefined;
   let events: PortfolioControllerEvent[] = [];
-  let deadlineMonotonic = Infinity;
+  // Until the existing registration can be read, waiting is bounded by this
+  // invocation's supplied duration. No work can dispatch before the real pin.
+  let deadlineMonotonic = startedMonotonic + definition.maxDurationMs;
+  let drainSequence: number | null = null;
   const halt = (status: NonNullable<typeof stopped>, reason?: string): void => {
     stopped ??= status; if (reason && !errors.includes(reason)) errors.push(reason); controller.abort();
   };
@@ -144,23 +152,74 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   const stopping = (): boolean => {
     if (signal?.aborted) cancel();
     const now = new Date().toISOString();
-    const folded = foldPortfolioController(events);
-    if (now < folded.highWaterAt) halt('unavailable', 'controller-clock-rollback');
-    if (now >= folded.first.enrollment.deadlineAt || performance.now() >= deadlineMonotonic) halt('timed-out');
+    const folded = events.length ? foldPortfolioController(events) : null;
+    if (folded && now < folded.highWaterAt) halt('unavailable', 'controller-clock-rollback');
+    if (folded && now >= folded.first.enrollment.deadlineAt || performance.now() >= deadlineMonotonic) halt('timed-out');
     try { owned(); } catch { halt('unavailable', 'controller-ownership-lost'); }
     return controller.signal.aborted;
   };
-  const append = (event: Parameters<typeof appendPortfolioControllerEvent>[1]): void => {
-    owned();
-    if (events.length && canonical(readPortfolioControllerEvents(directory)) !== canonical(events)) throw new Error('Controller ledger changed before append');
-    events = appendPortfolioControllerEvent(directory, event);
+  const capture = (next: PortfolioControllerEvent[]): void => {
+    events = next;
+    const control = foldPortfolioController(events).control;
+    if (control?.mode === 'drain') drainSequence ??= control.sequence;
   };
+  // Preserve the synchronous uncontended path. Only a verified live short-lock
+  // owner causes a yield; unknown ownership and malformed storage still fail.
+  const transaction = <T>(operation: () => T, cleanup = false): T | Promise<T> => {
+    try { return operation(); }
+    catch (error) {
+      if (!(error instanceof PortfolioControllerTransactionBusyError)) throw error;
+      const waitDeadline = cleanup ? performance.now() + 5_000 : deadlineMonotonic;
+      return (async () => {
+        while (true) {
+          if ((!cleanup && stopping()) || performance.now() >= waitDeadline) {
+            if (!cleanup) stopping();
+            throw new ControllerTransactionWaitStopped('Controller transaction wait exhausted');
+          }
+          // Receipt cleanup may outlast cancellation by at most its bounded
+          // grace. This never grants time for a worker, intent or delivery.
+          await new Promise<void>((resolveWait) => setTimeout(resolveWait, Math.max(1, Math.min(25, waitDeadline - performance.now()))));
+          owned();
+          try { return operation(); }
+          catch (retryError) { if (!(retryError instanceof PortfolioControllerTransactionBusyError)) throw retryError; }
+        }
+      })();
+    }
+  };
+  const refresh = (): void | Promise<void> => transaction(() => capture(refreshPortfolioControllerEvents(directory, events)));
+  const observe = (): UniversePortfolioControllerReport | Promise<UniversePortfolioControllerReport> => {
+    const refreshed = refresh();
+    const project = () => inspect(definition.id, events, root, new Date().toISOString(), false);
+    return refreshed instanceof Promise ? refreshed.then(project) : project();
+  };
+  const append = (event: Parameters<typeof appendPortfolioControllerEvent>[1]): void | Promise<void> => transaction(() => {
+    owned();
+    if (event.kind === 'intent' && stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
+    capture(appendPortfolioControllerEvent(directory, event.kind === 'created' ? event : { ...event, at: new Date().toISOString() },
+      { expectedRecords: events }));
+  }, event.kind === 'settled' || event.kind === 'drained');
+  const acknowledgeDrain = (): void | Promise<void> => transaction(() => {
+    owned();
+    // Refresh and append are separate short transactions. The final append CAS
+    // and fold reject changed history; an unacknowledged drain cannot resume.
+    capture(refreshPortfolioControllerEvents(directory, events));
+    const folded = foldPortfolioController(events);
+    const control = folded.control;
+    if (control?.mode !== 'drain' || control.acknowledgedAt !== null ||
+        [...folded.states.values()].some((row) => row.state === 'in-flight')) return;
+    capture(appendPortfolioControllerEvent(directory, { kind: 'drained', drainSequence: control.sequence, at: new Date().toISOString() },
+      { expectedRecords: events }));
+  }, true);
   signal?.addEventListener('abort', cancel, { once: true });
   try {
-    recoverControllerRecordLock(definition.id, { root }, acquired.lock);
-    try { lstatSync(join(directory, 'ledger')); events = readPortfolioControllerEvents(directory); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    const existing = transaction(() => withPortfolioControllerTransaction(directory, () => {
+      recoverControllerRecordLock(definition.id, { root }, acquired.lock);
+      try { lstatSync(join(directory, 'ledger')); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+      capture(readPortfolioControllerEvents(directory));
+      return true;
+    }));
+    if (!(existing instanceof Promise ? await existing : existing)) {
       const plan = readUniversePortfolioPlan(definition, { root });
       if (plan.sourceState !== 'healthy') throw new Error('Controller requires healthy fixed campaign enrollment');
       const deliveryIds = new Set(deliveryPlan?.deliveries.map((row) => row.campaignId));
@@ -190,7 +249,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
       }
       const enrollment: PortfolioControllerEnrollment = { definition, deliveryPlan, definitionDigest: digest(canonical(definition)), pins,
         deadlineAt: new Date(Date.parse(startedAt) + definition.maxDurationMs).toISOString() };
-      append({ kind: 'created', at: startedAt, enrollment });
+      const created = append({ kind: 'created', at: startedAt, enrollment });
+      if (created instanceof Promise) await created;
     }
     const initial = foldPortfolioController(events);
     const enrollment = initial.first.enrollment;
@@ -198,8 +258,9 @@ export async function runUniversePortfolioController(input: unknown, options: Un
       throw new Error('Controller definition or delivery plan differs from its fixed enrollment');
     }
     deadlineMonotonic = startedMonotonic + Math.max(0, Date.parse(enrollment.deadlineAt) - Date.parse(startedAt));
-    const initialReport = inspect(definition.id, events, root, new Date().toISOString());
-    if (initialReport.sourceState !== 'healthy' || initialReport.status === 'completed') return initialReport;
+    const initialObservation = observe();
+    const initialReport = initialObservation instanceof Promise ? await initialObservation : initialObservation;
+    if (initialReport.sourceState !== 'healthy') return initialReport;
     // Recovery observes already completed effects, including after the original
     // deadline. It cannot launch workers, deliver branches, or renew admission.
     for (const [campaignId, intent] of initial.intentEvents) {
@@ -220,29 +281,39 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           current.expectedIdentity!.summaryDigest !== digest(canonical(proof.campaign))) continue;
       if (signal?.aborted) { cancel(); break; }
       try {
-        append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: proof.recordsDigest,
+        await append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: proof.recordsDigest,
           outcome: { campaignId, state: 'completed', attempted: true, reasonCode: 'completed-dispatch-reconciled',
             campaignDigest: current.expectedIdentity!.summaryDigest, deliveryDigest: delivery ? digest(canonical(delivery)) : null } });
       } catch { halt('unavailable', 'controller-reconciliation-persistence-failed'); break; }
     }
-    const recoveredReport = inspect(definition.id, events, root, new Date().toISOString());
+    const drainAck = acknowledgeDrain();
+    if (drainAck instanceof Promise) await drainAck;
+    const recoveredObservation = observe();
+    const recoveredReport = recoveredObservation instanceof Promise ? await recoveredObservation : recoveredObservation;
     if (stopped || recoveredReport.sourceState !== 'healthy' || recoveredReport.status === 'completed') {
       return { ...recoveredReport, ...(stopped ? { status: stopped } : {}), reasons: [...recoveredReport.reasons, ...errors] };
     }
     if (stopping()) return { ...recoveredReport, status: stopped!, reasons: [...recoveredReport.reasons, ...errors] };
-    append({ kind: 'observed', at: new Date().toISOString() });
+    if (drainSequence !== null) return recoveredReport;
+    const observed = append({ kind: 'observed', at: new Date().toISOString() });
+    if (observed instanceof Promise) await observed;
     timer = setTimeout(() => halt('timed-out'), Math.max(1, deadlineMonotonic - performance.now()));
     poll = setInterval(stopping, 250);
     const plan = readUniversePortfolioPlan(definition, { root });
     const targets = new Map(deliveryPlan?.deliveries.map((row) => [row.campaignId, row]));
-    const launch = (campaignId: string, admitted: UniverseCampaignReadiness, executionLock?: LocalStoreLock): void => {
+    const launch = async (campaignId: string, admitted: UniverseCampaignReadiness, executionLock?: LocalStoreLock): Promise<void> => {
       const pin = initial.pins.get(campaignId)!;
       let dispatchId: string | undefined;
       try {
         dispatchId = pin.dispatch === 'campaign' ? randomUUID() : undefined;
-        append({ kind: 'intent', at: new Date().toISOString(), campaignId, ...(dispatchId ? { dispatchId } : {}) });
+        const intent = append({ kind: 'intent', at: new Date().toISOString(), campaignId, ...(dispatchId ? { dispatchId } : {}) });
+        if (intent instanceof Promise) await intent;
       }
-      catch (error) { releaseLocalStoreLock(executionLock); throw error; }
+      catch (error) {
+        releaseLocalStoreLock(executionLock);
+        if (error instanceof PortfolioControllerDrainError) { const refreshed = refresh(); if (refreshed instanceof Promise) await refreshed; return; }
+        throw error;
+      }
       const work = Promise.resolve().then(async () => {
         try {
           let result;
@@ -289,7 +360,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== digest(canonical(result)) ||
               current.recordsDigest !== settledRecordsDigest) throw new Error('Campaign changed before settlement');
           try {
-            append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: current.recordsDigest!,
+            await append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: current.recordsDigest!,
               outcome: { campaignId, state: completed ? 'completed' : 'held', attempted: pin.dispatch === 'campaign',
                 reasonCode, campaignDigest: current.expectedIdentity!.summaryDigest, deliveryDigest } });
           } catch { halt('unavailable', 'controller-settlement-persistence-failed'); }
@@ -305,9 +376,10 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     while (true) {
       let waitingForOwner = false;
       if (!stopping()) {
-        const report = inspect(definition.id, events, root, new Date().toISOString());
+        const observation = observe();
+        const report = observation instanceof Promise ? await observation : observation;
         if (report.sourceState !== 'healthy') halt('unavailable', 'controller-source-evidence-changed');
-        else for (const campaignId of plan.topologicalOrder) {
+        else if (drainSequence === null) for (const campaignId of plan.topologicalOrder) {
           const folded = foldPortfolioController(events);
           if (stopping() || [...folded.states.values()].filter((row) => row.state === 'in-flight').length >= definition.maxParallel) break;
           if (folded.states.get(campaignId)?.state !== 'pending' || portfolioControllerPrerequisites(enrollment, campaignId)
@@ -325,10 +397,11 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           }
           // Fresh dependency receipts are checked again after potentially slow
           // campaign source reads, immediately before durable dispatch intent.
-          if (inspect(definition.id, events, root, new Date().toISOString()).sourceState !== 'healthy') {
+          const dependencyObservation = observe();
+          if ((dependencyObservation instanceof Promise ? await dependencyObservation : dependencyObservation).sourceState !== 'healthy') {
             halt('unavailable', 'controller-dependency-evidence-changed'); break;
           }
-          if (stopping()) break;
+          if (stopping() || drainSequence !== null) break;
           if (pin.dispatch === 'campaign' && waitable(admitted)) { waitingForOwner = true; continue; }
           let executionLock: LocalStoreLock | undefined;
           if (pin.dispatch === 'campaign') {
@@ -350,13 +423,14 @@ export async function runUniversePortfolioController(input: unknown, options: Un
               if (waitable(current)) waitingForOwner = true;
               continue;
             }
-            if (inspect(definition.id, events, root, new Date().toISOString()).sourceState !== 'healthy') {
+            const finalObservation = observe();
+            if ((finalObservation instanceof Promise ? await finalObservation : finalObservation).sourceState !== 'healthy') {
               halt('unavailable', 'controller-dependency-evidence-changed'); break;
             }
-            if (stopping()) break;
+            if (stopping() || drainSequence !== null) break;
             const transferred = executionLock;
             executionLock = undefined;
-            launch(campaignId, current, transferred);
+            await launch(campaignId, current, transferred);
           } finally { releaseLocalStoreLock(executionLock); }
         }
       }
@@ -386,8 +460,19 @@ export async function runUniversePortfolioController(input: unknown, options: Un
       }
     }
     stopping();
-    const result = inspect(definition.id, events, root, new Date().toISOString());
+    const acknowledged = acknowledgeDrain();
+    if (acknowledged instanceof Promise) await acknowledged;
+    const finalObservation = observe();
+    const result = finalObservation instanceof Promise ? await finalObservation : finalObservation;
     return { ...result, ...(stopped ? { status: stopped } : {}), reasons: [...result.reasons, ...errors] };
+  } catch (error) {
+    if (!(error instanceof ControllerTransactionWaitStopped)) throw error;
+    // Waiting never converts uncertainty into completion. Cleanup still drains
+    // all calls in finally; their durable receipts determine the next restart.
+    controller.abort();
+    await Promise.allSettled(active.values());
+    const report = readUniversePortfolioController(definition.id, { root });
+    return { ...report, status: stopped ?? 'unavailable', reasons: [...report.reasons, ...errors, 'controller-transaction-wait-exhausted'] };
   } finally {
     controller.abort();
     await Promise.allSettled(active.values());

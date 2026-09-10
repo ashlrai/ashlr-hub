@@ -1,7 +1,7 @@
 import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 import { readControllerRecoveryDiagnostic } from '../core/universe/controller-recovery-error.js';
 import {
-  readUniversePortfolioController, runUniversePortfolioController, validateUniversePortfolioDefinition,
+  readUniversePortfolioController, runUniversePortfolioController, requestUniversePortfolioControllerControl, validateUniversePortfolioDefinition,
   type UniverseCampaignDeliveryPlan,
 } from '../core/universe/index.js';
 
@@ -9,9 +9,14 @@ const USAGE = `usage: ashlr universe controller run --manifest <private absolute
        [--root <absolute private directory>] [--resource-runtime <private absolute JSON>]
        [--delivery-plan <private absolute JSON>] [--json]
        ashlr universe controller status <id> [--root <absolute private directory>] [--json]
+       ashlr universe controller drain <id> --root <absolute private directory> [--json]
+       ashlr universe controller resume <id> --drain-sequence <number>
+       --root <absolute private directory> [--json]
 
   run     Execute or reconcile the explicitly enrolled campaign graph
   status  Read the persisted controller evidence without starting work
+  drain   Stop new admission; already admitted work and planned delivery may finish
+  resume  Reopen an acknowledged drain; does not start a process or reset budgets
   help    Show this help
 
 The manifest is an owner-only (0600) regular JSON file at most 256 KiB with the
@@ -42,11 +47,20 @@ Campaign pause/stop targets only that campaign, not the entire controller.
 Wait for acknowledged campaign status; a successful request is not worker exit.
 Held prerequisites block dependants; independent ready work may continue.
 Pausing queued work changes its pinned evidence and can make this controller
-unavailable. There is no controller-wide durable drain/resume command.
+unavailable. Use controller drain to preserve the pending queue instead.
+Drain is durable and ordered against dispatch intent, not worker start. An intent
+recorded before drain remains admitted and may start afterward. A drain receipt
+is not an acknowledgement: inspect status until control.acknowledgedAt is set.
+Unsettled intents remain unresolved, never acknowledged merely because no worker
+is visible. Resume requires the exact acknowledged control.sequence and starts
+no work. Then run the original manifest and intended runtime/delivery options.
+Drain/resume require an explicit root and never initialize a missing controller.
+Old binaries cannot read new control records; do not downgrade a controlled ledger.
 This is an explicitly awaited foreground controller, not a resident daemon or
 discovery of new campaigns. Status never starts work or reconciles writes.
 Exit codes: run 0 completed, 1 incomplete/unavailable/timed-out, 130 cancelled;
             status 0 healthy evidence (even incomplete), 1 missing/degraded;
+            drain/resume 0 control recorded/replayed (not completion), 1 refused;
             all commands 2 invalid arguments or private manifests.
 `;
 
@@ -54,12 +68,13 @@ class UsageError extends Error {}
 class CancellationError extends Error {}
 
 interface Options {
-  command: 'run' | 'status' | 'help';
+  command: 'run' | 'status' | 'drain' | 'resume' | 'help';
   id?: string;
   manifest?: string;
   root?: string;
   resourceRuntime?: string;
   deliveryPlanPath?: string;
+  drainSequence?: number;
   json: boolean;
 }
 
@@ -96,22 +111,37 @@ function parse(args: string[]): Options {
         throw new UsageError(`${arg} requires a bounded private canonical absolute path`);
       }
       values.set(arg, value);
+    } else if (arg === '--drain-sequence') {
+      if (values.has(arg)) throw new UsageError('--drain-sequence may only be specified once');
+      const value = args[++index];
+      if (!value || !/^[1-9][0-9]{0,2}$/.test(value) || Number(value) > 511) {
+        throw new UsageError('--drain-sequence requires a recorded positive sequence below 512');
+      }
+      values.set(arg, value);
     } else if (arg.startsWith('-')) throw new UsageError('Unknown controller option');
     else positional.push(arg);
   }
   const command = positional[0];
-  if (command !== undefined && command !== 'run' && command !== 'status' && command !== 'help') {
-    throw new UsageError('Expected controller run, status, or help');
+  if (command !== undefined && !['run', 'status', 'drain', 'resume', 'help'].includes(command)) {
+    throw new UsageError('Expected controller run, status, drain, resume, or help');
   }
   if (command === 'status' && [...values.keys()].some((key) => key !== '--root')) {
     throw new UsageError('controller status only accepts --root and --json');
   }
-  if (positional.length > (command === 'status' ? 2 : 1)) throw new UsageError('Unexpected controller positional argument');
+  const named = command === 'status' || command === 'drain' || command === 'resume';
+  if (values.has('--drain-sequence') && command !== 'resume') throw new UsageError('--drain-sequence is only valid for controller resume');
+  if ((command === 'drain' || command === 'resume') && [...values.keys()].some((key) => key !== '--root' && key !== '--drain-sequence')) {
+    throw new UsageError('Controller controls do not accept manifests, delivery plans, or resource runtimes');
+  }
+  if (positional.length > (named ? 2 : 1)) throw new UsageError('Unexpected controller positional argument');
   if (help || command === 'help') return { command: 'help', json: false };
-  if (command === 'status') {
+  if (named) {
     const id = positional[1];
-    if (!id || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new UsageError('controller status requires a bounded controller id');
-    return { command, id, root: values.get('--root'), json };
+    if (!id || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new UsageError('Controller command requires a bounded controller id');
+    if (command !== 'status' && !values.has('--root')) throw new UsageError('Controller controls require --root <absolute private directory>');
+    if (command === 'resume' && !values.has('--drain-sequence')) throw new UsageError('controller resume requires --drain-sequence from acknowledged status');
+    return { command, id, root: values.get('--root'), json,
+      ...(command === 'resume' ? { drainSequence: Number(values.get('--drain-sequence')) } : {}) };
   }
   if (command !== 'run') throw new UsageError('Expected controller run or status');
   const manifest = values.get('--manifest');
@@ -126,6 +156,8 @@ function render(report: ReturnType<typeof readUniversePortfolioController>): str
     `Definition: ${report.definitionDigest ?? 'unavailable'}`,
     `Created: ${report.createdAt ?? 'unavailable'} · original deadline: ${report.deadlineAt ?? 'unavailable'}`,
     `Observed: ${report.observedAt}`,
+    ...(report.control ? [`Admission: ${report.control.mode} · control sequence: ${report.control.sequence}`,
+      `Control requested: ${report.control.requestedAt} · drained acknowledgement: ${report.control.acknowledgedAt ?? 'not recorded'}`] : []),
     ...report.outcomes.map((outcome) => `  ${outcome.campaignId} · ${outcome.state} · ${outcome.attempted ? 'attempted' : 'not attempted'} · ${outcome.reasonCode}` +
       `\n    Campaign digest: ${outcome.campaignDigest ?? 'unavailable'} · delivery digest: ${outcome.deliveryDigest ?? 'none'}`),
     ...report.reasons,
@@ -141,6 +173,22 @@ export async function cmdUniverseController(args: string[]): Promise<number> {
   try {
     const options = parse(args);
     if (options.command === 'help') { console.log(USAGE); return 0; }
+    if (options.command === 'drain' || options.command === 'resume') {
+      let receipt;
+      try {
+        receipt = requestUniversePortfolioControllerControl(options.id!, options.command, { root: options.root,
+          ...(options.drainSequence === undefined ? {} : { expectedDrainSequence: options.drainSequence }) });
+      } catch {
+        throw new Error('Controller control refused; inspect its recorded state, acknowledgement and ownership before retrying');
+      }
+      console.log(options.json ? JSON.stringify(receipt, null, 2) : [
+        `${receipt.controllerId} · ${receipt.action} ${receipt.changed ? 'recorded' : 'already recorded'} · sequence ${receipt.sequence}`,
+        options.command === 'drain' ? 'Request recorded, not proof of completed draining. Inspect controller status for acknowledgement.' :
+          'Admission reopened; no worker was started. Run the original manifest and intended runtime configuration to continue.',
+        'The original deadline and held attempts are unchanged.',
+      ].join('\n'));
+      return 0;
+    }
     if (options.command === 'status') {
       let report: ReturnType<typeof readUniversePortfolioController>;
       try { report = readUniversePortfolioController(options.id!, { root: options.root }); }

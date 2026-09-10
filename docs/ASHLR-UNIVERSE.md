@@ -1906,8 +1906,8 @@ For whole-invocation cancellation, interrupt the controller's foreground termina
 with Ctrl-C (`SIGINT`), or send `SIGTERM` to its verified process. The CLI awaits
 owned calls and returns `130` for cancellation. This is interruption, not graceful
 admission draining: active attempts may become held, and repeating the manifest
-does not automatically replay them. There is no durable controller-wide
-drain/resume command or persistent cancellation toggle in this release.
+does not automatically replay them. To finish already admitted work while
+preserving the remaining queue, use the durable drain control below instead.
 
 The macOS owner-control and signal acceptance tests exercise separate local
 processes with inert workers and private temporary Git repositories. They do not
@@ -1921,11 +1921,103 @@ npx vitest run test/universe-controller-owner-control-integration.test.ts \
 
 Run exits `0` for completion, `130` for cancellation, `1` for incomplete or
 unavailable execution, and `2` for invalid input. Status exits `0` for readable
-healthy state, including incomplete state, and `1` for missing/degraded state;
-readability does not imply successful work.
+healthy state, including incomplete or drained state, and `1` for missing/degraded
+state; readability does not imply successful work.
 
-The SDK exports `runUniversePortfolioController(definition, options)` and
-`readUniversePortfolioController(id, { root })`. Composition, evaluation and
+#### Drain and reopen a preserved queue
+
+Use drain before stopping an unattended controller for maintenance. Unlike
+SIGINT or campaign pause, drain leaves admitted campaigns running and allows
+their already-planned local branch delivery to finish. It does not alter the
+history of pending campaigns.
+
+From a checkout built with controller-control support, an authorized owner can
+request a drain against an existing controller and explicit private root:
+
+```sh
+node bin/ashlr universe controller drain build \
+  --root /absolute/private/universe --json
+node bin/ashlr universe controller status build \
+  --root /absolute/private/universe --json
+```
+
+The mutating `drain` command returns a persisted request receipt containing
+`action`, `sequence`, `requestedAt` and `changed`. A repeated drain returns the
+same sequence/time with `changed: false`. This receipt is **not** acknowledgement
+that admitted work has finished. Inspect `control.mode`, `control.sequence` and
+`control.acknowledgedAt` in status. `draining` means drain is requested but not
+acknowledged; `drained` means all recorded intents have settled and the controller
+has persisted the acknowledgement. Neither status is a worker-liveness probe or
+proof that the project is complete. Completion, degraded evidence and deadline
+expiry retain their own status; inspect control metadata as well.
+
+Drain and dispatch intent share one short ledger transaction. An intent recorded
+before drain remains admitted, even if its worker starts after the drain command
+returns. No later intent is admitted until an explicit resume. Unknown attempts
+left by a crash remain unresolved; an empty process list is not enough to
+acknowledge drain. Existing cancellation and deadlines can still interrupt active
+work. Drain does not extend their time allowance.
+
+A running controller acknowledges drain after settlement and exits. If it is not
+running, the control command does not start one: invoke `controller run` with the
+original manifest and intended delivery/runtime options to reconcile its existing
+evidence and acknowledge drain. An already acknowledged drain stays in force on
+restart without dispatching the pending queue.
+
+To reopen admission, use the exact acknowledged **drain** sequence from status
+(replace the illustrative `7` below with that value):
+
+```sh
+node bin/ashlr universe controller resume build --drain-sequence 7 \
+  --root /absolute/private/universe --json
+node bin/ashlr universe controller run \
+  --manifest /absolute/private/portfolio.json \
+  --root /absolute/private/universe --json
+```
+
+Both commands are mutating. Resume only reopens admission; it does not launch a
+process, discover account bindings, retry held campaigns or reset a budget. Add
+the original `--delivery-plan` and intended `--resource-runtime` to `run` when
+applicable. A stale or unacknowledged drain sequence is refused. A draining
+invocation still exits if resume arrives before that invocation finishes exiting;
+a later explicit run owns the reopened queue. Downtime counts against the
+original deadline, so resume cannot revive an expired allowance.
+
+Control commands return `0` for recorded/idempotently replayed requests, `1` for
+refused controls and `2` for invalid arguments. They never initialize a missing
+controller. On refusal, inspect the control acknowledgement and ownership; do not
+delete locks or staged records. Short transaction contention can make a control
+command refuse temporarily. The running controller waits for verified live
+transaction contention without treating drain as worker cancellation. Once
+enrollment is read, admission waits use the original deadline. If startup cannot
+yet read that enrollment, the supplied invocation duration bounds the wait;
+dispatch still requires loading and checking the original deadline. Settlement
+and acknowledgement may wait up to five seconds for transaction cleanup without
+granting more time for execution.
+
+Controls and acknowledgements consume the same bounded ledger as dispatches.
+New admission/observation reserves drain and acknowledgement capacity in addition
+to pending settlements; exhausted historical ledgers can still refuse controls
+or resume. History is never discarded to reopen capacity. Existing histories
+without controls remain readable and default to open admission. **Older binaries
+cannot read the new control event kinds.** Preserve the ledger and use a
+control-aware runtime after the first drain; do not roll it back to a binary
+that predates this protocol.
+
+The separate-process macOS acceptance suite covers active delivery during drain,
+unchanged pending campaigns, a fresh drained restart, explicit sequence-matched
+resume, and drain winning before the dispatch transaction. It uses inert local
+workers rather than subscription providers:
+
+```sh
+npx vitest run test/universe-controller-drain-integration.test.ts --no-file-parallelism
+```
+
+The SDK exports `runUniversePortfolioController(definition, options)`,
+`readUniversePortfolioController(id, { root })`, and
+`requestUniversePortfolioControllerControl(id, action, { root, expectedDrainSequence })`.
+The sequence option is required for `resume` and omitted for `drain`.
+Composition, evaluation and
 downstream registration remain separate explicit operations; this release does
 not yet schedule them as controller graph nodes or enable branch advancement,
 remote push, deployment, or automatic product-direction changes.

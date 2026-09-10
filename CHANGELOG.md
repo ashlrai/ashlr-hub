@@ -11,6 +11,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Durable controller drain and resume
+
+- Adds persisted controller-wide drain requests, ordered atomically against
+  dispatch intent. Admitted work and planned deliveries can finish while the
+  pending queue remains untouched.
+- Records drain acknowledgement only after all durable intents settle. Explicit
+  sequence-matched resume reopens admission without starting workers, resetting
+  deadlines or replaying held attempts.
+- Adds CLI/SDK controls, status metadata and native subprocess acceptance for
+  drain, active delivery, restart and preserved-queue continuation. Existing
+  histories remain readable; older binaries reject new control records.
+
 ### Controller owner intervention
 
 - Preserves verified campaign readiness reasons in non-completed controller
@@ -19,7 +31,7 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 - Adds native subprocess acceptance for campaign pause/stop and controller
   SIGINT/SIGTERM, including worker cleanup, dependency holds and restart without
   replay. Documents the distinction between campaign control and whole-controller
-  cancellation; durable controller-wide drain/resume is not yet implemented.
+  cancellation. Controller-wide drain/resume is a separate admission control.
 
 ### Release preparation
 

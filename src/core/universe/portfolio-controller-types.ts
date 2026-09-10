@@ -18,12 +18,30 @@ export interface UniversePortfolioControllerReport {
   controllerId: string;
   definitionDigest: string | null;
   sourceState: 'healthy' | 'missing' | 'degraded';
-  status: 'completed' | 'incomplete' | 'cancelled' | 'timed-out' | 'unavailable';
+  status: 'completed' | 'incomplete' | 'cancelled' | 'timed-out' | 'unavailable' | 'draining' | 'drained';
   createdAt: string | null;
   deadlineAt: string | null;
   observedAt: string;
   outcomes: UniversePortfolioControllerOutcome[];
   reasons: string[];
+  control?: UniversePortfolioControllerControl;
+}
+
+export interface UniversePortfolioControllerControl {
+  mode: 'open' | 'drain';
+  sequence: number;
+  requestedAt: string;
+  acknowledgedAt: string | null;
+}
+
+/** A durable owner request, not evidence that workers have exited. */
+export interface UniversePortfolioControllerControlReceipt {
+  schemaVersion: 1;
+  controllerId: string;
+  action: 'drain' | 'resume';
+  changed: boolean;
+  sequence: number;
+  requestedAt: string;
 }
 
 /** Internal fixed enrollment; source refresh cannot renew these admission pins. */
@@ -51,6 +69,9 @@ export interface PortfolioControllerEnrollment {
 export type PortfolioControllerEvent = { id: string; sequence: number; at: string } & (
   { kind: 'created'; enrollment: PortfolioControllerEnrollment } |
   { kind: 'observed' } |
+  { kind: 'control'; action: 'drain' } |
+  { kind: 'control'; action: 'resume'; drainSequence: number } |
+  { kind: 'drained'; drainSequence: number } |
   { kind: 'intent'; campaignId: string; /** Absent for legacy and delivery-only intents. */ dispatchId?: string } |
   { kind: 'settled'; outcome: UniversePortfolioControllerOutcome; recordsDigest: string }
 );
