@@ -1,0 +1,244 @@
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent } from 'react';
+import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput } from '../../../core/resources/console-types.js';
+import { StatusBadge } from '../../components/primitives/StatusBadge.js';
+import { readResourceTaskOutput } from '../../data/resource-pool-queries.js';
+import { buildResourceFleet } from '../resources/fleet-model.js';
+import { resourceReason, resourceTime } from '../resources/CapacityBoard.js';
+import { taskTone } from '../resources/TaskInspector.js';
+import { composeWorkspaceTaskPrompt, MAX_WORKSPACE_ATTACHMENTS, MAX_WORKSPACE_ATTACHMENT_BYTES, parseWorkspaceTextAttachment,
+  validateWorkspaceAttachments, WORKSPACE_TEXT_ATTACHMENT_ACCEPT, type WorkspaceTextAttachment } from './workspace-attachments.js';
+import styles from './WorkspaceView.module.css';
+
+export interface WorkspaceViewProps {
+  scope: ResourceConsoleScope; snapshot: ResourceConsoleSnapshot; historical: boolean;
+  enabled: boolean; stopEnabled: boolean; busy: boolean; unlocked: boolean;
+  onUnlock(): void; onSubmit(input: ResourceConsoleTaskInput): Promise<boolean>; onCancel(id: string): void;
+}
+const newTaskId = () => `task-${crypto.randomUUID().slice(0, 12)}`;
+const clampDock = (width: number) => Math.max(260, Math.min(520, width));
+
+/** A host scope change cannot carry drafts or output into another workspace. */
+export function WorkspaceView(props: WorkspaceViewProps) {
+  return <WorkspaceBody key={`${props.scope.root}:${props.scope.poolId}:${props.scope.workspace ?? ''}`} {...props} />;
+}
+
+function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy, unlocked, onUnlock, onSubmit, onCancel }: WorkspaceViewProps) {
+  const fleet = useMemo(() => buildResourceFleet(snapshot, historical), [snapshot, historical]);
+  const [selection, setSelection] = useState<string | null>(null);
+  const [prompt, setPrompt] = useState('');
+  const [taskId, setTaskId] = useState(newTaskId);
+  const [workerId, setWorkerId] = useState('');
+  const [mode, setMode] = useState<ResourceConsoleTaskInput['mode']>('read-only');
+  const [seconds, setSeconds] = useState('300');
+  const [tokens, setTokens] = useState('4096');
+  const [attachments, setAttachments] = useState<WorkspaceTextAttachment[]>([]);
+  const [readingFiles, setReadingFiles] = useState(false);
+  const [sending, setSending] = useState(false);
+  const sendingRef = useRef(false);
+  const fileGeneration = useRef(0);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [submitted, setSubmitted] = useState<Record<string, string>>({});
+  const [output, setOutput] = useState<{ key: string; value: ResourceConsoleOutput } | null>(null);
+  const [outputError, setOutputError] = useState<string | null>(null);
+  const [loadingOutput, setLoadingOutput] = useState(false);
+  const outputRequest = useRef<AbortController | null>(null);
+  const session = snapshot.supervisor?.instanceId ?? 'external';
+  const currentSession = useRef(session); currentSession.current = session;
+  const outputKey = `${session}:${selection ?? ''}`;
+  const currentOutputKey = useRef(outputKey); currentOutputKey.current = outputKey;
+  const alive = useRef(true);
+  const [dockTab, setDockTab] = useState<'output' | 'details'>('details');
+  const [dockWidth, setDockWidth] = useState(320);
+  const drag = useRef<{ id: number; x: number; width: number } | null>(null);
+  const [mobilePane, setMobilePane] = useState<'tasks' | 'task' | 'tools'>('task');
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  const tabs = useRef<HTMLDivElement>(null);
+  const selected = fleet.tasks.find((row) => row.id === selection);
+  const worker = snapshot.pool.workers.find((row) => row.id === workerId);
+  const assigned = snapshot.pool.workers.find((row) => row.id === selected?.workerId);
+  const response = selected && output?.key === outputKey ? output.value : null;
+  const canSend = enabled && !scope.readOnly && !!scope.workspace && !historical && snapshot.sourceState !== 'degraded';
+  const lockedForm = busy || sending || readingFiles;
+  const projectName = scope.workspace?.split(/[\\/]/).filter(Boolean).at(-1) ?? 'No execution workspace';
+
+  useEffect(() => {
+    alive.current = true;
+    return () => { alive.current = false; outputRequest.current?.abort(); };
+  }, []);
+  useEffect(() => {
+    outputRequest.current?.abort(); setOutput(null); setOutputError(null); setLoadingOutput(false);
+    fileGeneration.current++; setReadingFiles(false);
+  }, [outputKey]);
+  useEffect(() => { setSubmitted({}); }, [session]);
+
+  function select(id: string | null) {
+    outputRequest.current?.abort(); fileGeneration.current++; setReadingFiles(false);
+    setSelection(id); setMobilePane('task');
+    if (id === null) textarea.current?.focus();
+  }
+
+  async function addFiles(files: File[]) {
+    const generation = ++fileGeneration.current;
+    setError(null);
+    if (files.length + attachments.length > MAX_WORKSPACE_ATTACHMENTS || files.some((file) => file.size > MAX_WORKSPACE_ATTACHMENT_BYTES)) {
+      setError('Attach up to four text files, no more than 16 KiB each.'); return;
+    }
+    setReadingFiles(true);
+    try {
+      const parsed = await Promise.all(files.map(async (file) => parseWorkspaceTextAttachment(file.name, await file.arrayBuffer())));
+      if (alive.current && generation === fileGeneration.current) setAttachments(validateWorkspaceAttachments([...attachments, ...parsed]));
+    } catch (cause) {
+      if (alive.current && generation === fileGeneration.current) setError(cause instanceof Error ? cause.message : 'The selected text files could not be read.');
+    } finally { if (alive.current && generation === fileGeneration.current) setReadingFiles(false); }
+  }
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (sendingRef.current || lockedForm || !canSend) return;
+    setError(null); setNotice(null);
+    if (!unlocked) { onUnlock(); return; }
+    let composed: string;
+    const timeoutMs = Number(seconds) * 1000; const maxOutputTokens = Number(tokens);
+    try {
+      if (!worker || !prompt.trim() || !Number.isSafeInteger(Number(seconds)) || timeoutMs < 1000 || timeoutMs > 900_000 ||
+        !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 16_384) {
+        throw new Error('Write a task, choose an enrolled worker, and use 1–900 seconds with 1–16,384 output tokens.');
+      }
+      composed = composeWorkspaceTaskPrompt(prompt, attachments);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : 'Check the task before sending.'); return; }
+    sendingRef.current = true; setSending(true);
+    const sentId = taskId; const sentPrompt = prompt; const sentSession = session;
+    try {
+      const accepted = await onSubmit({ id: sentId, prompt: composed, allowedWorkerIds: [worker.id], mode, timeoutMs, maxOutputTokens });
+      if (!alive.current || currentSession.current !== sentSession) return;
+      if (!accepted) { setError('The task was not queued. Your draft is retained; check the task controls and try again.'); return; }
+      setSubmitted((current) => Object.fromEntries([...Object.entries(current), [sentId, sentPrompt]].slice(-64)));
+      setPrompt(''); setAttachments([]); fileGeneration.current++; setTaskId(newTaskId());
+      select(sentId); setNotice('Task queued. Its status and response appear when reported by this supervisor.');
+    } catch { if (alive.current && currentSession.current === sentSession) setError('The task could not be queued. Your draft is retained.'); }
+    finally { sendingRef.current = false; if (alive.current) setSending(false); }
+  }
+
+  async function loadOutput() {
+    if (!selected?.job?.outputAvailable || loadingOutput) return;
+    outputRequest.current?.abort(); const controller = new AbortController(); outputRequest.current = controller;
+    const key = outputKey; setLoadingOutput(true); setOutputError(null);
+    try {
+      const value = await readResourceTaskOutput(selected.id, controller.signal);
+      if (!controller.signal.aborted && alive.current && currentOutputKey.current === key) setOutput({ key, value });
+    } catch {
+      if (!controller.signal.aborted && alive.current && currentOutputKey.current === key) setOutputError('Output could not be read from this console session. Retry when the task is available.');
+    } finally { if (!controller.signal.aborted && alive.current && currentOutputKey.current === key) setLoadingOutput(false); }
+  }
+  function resizeKey(event: KeyboardEvent<HTMLDivElement>) {
+    const next = event.key === 'ArrowLeft' ? dockWidth + 20 : event.key === 'ArrowRight' ? dockWidth - 20
+      : event.key === 'Home' ? 260 : event.key === 'End' ? 520 : null;
+    if (next !== null) { event.preventDefault(); setDockWidth(clampDock(next)); }
+  }
+  function tabKey(event: KeyboardEvent<HTMLButtonElement>) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault(); const next = event.key === 'Home' ? 'output' : event.key === 'End' ? 'details' : dockTab === 'output' ? 'details' : 'output';
+    setDockTab(next); tabs.current?.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
+  }
+
+  const outputContent = <>
+    {selected?.job?.outputAvailable ? <button type="button" className={styles.subtleButton} disabled={loadingOutput}
+      onClick={() => { void loadOutput(); }}>{loadingOutput ? 'Reading response…' : response ? 'Reload response' : 'Read response'}</button>
+      : <p className={styles.caption}>{selection ? 'No response is available in this console session yet.' : 'Select a task to inspect its response.'}</p>}
+    {outputError ? <p role="alert" className={styles.error}>{outputError}</p> : null}
+    {response ? <><p className={styles.caption}>{outputError ? 'Previous successful read. ' : ''}{response.truncated ? 'Truncated response. ' : ''}Retained by this console session; not a live stream.</p>
+      <pre className={styles.responseText}>{response.text}</pre></> : null}
+  </>;
+
+  return <section className={styles.workspace} aria-label="Project task workspace" style={{ '--workspace-dock-width': `${dockWidth}px` } as CSSProperties}>
+    <div className={styles.mobileNav} role="group" aria-label="Workspace panes">
+      {(['tasks', 'task', 'tools'] as const).map((pane) => <button key={pane} type="button" aria-pressed={mobilePane === pane}
+        onClick={() => setMobilePane(pane)}>{pane === 'tasks' ? 'Task list' : pane === 'task' ? 'Task' : 'Tools'}</button>)}
+    </div>
+    <aside className={styles.rail} data-mobile-visible={mobilePane === 'tasks'} aria-label="Project and tasks">
+      <div className={styles.project}><span className={styles.projectIcon} aria-hidden="true">⌑</span><div><h2>{projectName}</h2><p>Pinned workspace</p></div></div>
+      {scope.workspace ? <p className={styles.projectPath} title={scope.workspace}>{scope.workspace}</p> : <p className={styles.caption}>This console has no execution workspace.</p>}
+      <button type="button" className={styles.newTask} onClick={() => select(null)}>+ New task</button>
+      <h3 className={styles.railHeading}>Tasks</h3>
+      {fleet.tasks.length ? <ul className={styles.taskList}>{fleet.tasks.map((row) => <li key={row.id}>
+        <button type="button" aria-current={selection === row.id ? 'true' : undefined} onClick={() => select(row.id)}>
+          <span>{row.id}</span><StatusBadge status={row.state} tone={taskTone(row)} />
+        </button></li>)}</ul> : <p className={styles.caption}>Your queued tasks will appear here.</p>}
+      <p className={styles.railFoot}>One confirmed workspace. Project switching is not connected yet.</p>
+    </aside>
+
+    <div className={styles.center} data-mobile-visible={mobilePane === 'task'}>
+      <header className={styles.heading}><div><h2>{selection ? selection : 'What would you like to work on?'}</h2>
+        <p>{selection ? selected?.ownership ?? 'Waiting for the task snapshot' : 'Describe a concrete task for this workspace.'}</p></div>
+        {selected ? <StatusBadge status={selected.state} tone={taskTone(selected)} /> : null}</header>
+      <div className={styles.conversation}>
+        {historical ? <p className={styles.notice}>Showing the last successful snapshot. Sending is paused until current evidence returns.</p> : null}
+        {scope.readOnly ? <p className={styles.notice}>Task execution is disabled for this console. You can inspect recorded work.</p> : null}
+        {notice ? <p role="status" className={styles.notice}>{notice}</p> : null}
+        {selection ? <>
+          {submitted[selection] ? <section className={styles.request}><h3>Your task</h3><p>{submitted[selection]}</p></section>
+            : <p className={styles.caption}>Original prompt text is not included in the task snapshot.</p>}
+          <section className={styles.answer} aria-label="Task response"><h3>Response</h3>{outputContent}</section>
+          {selected?.stateDisagreement ? <p className={styles.notice}>Supervisor and receipt states differ. Refreshing will reconcile the snapshots.</p> : null}
+          {selected?.job?.cancellable ? <button type="button" className={styles.subtleButton} disabled={!stopEnabled || busy}
+            onClick={() => onCancel(selected.id)}>{selected.job.state === 'queued' ? 'Cancel queued task' : 'Cancel owned task'}</button> : null}
+        </> : <div className={styles.invitation}><span aria-hidden="true" className={styles.workMark}>⌑</span><h3>Start with the work.</h3>
+          <p>Ask for an investigation, a proposed change, or a bounded implementation. Choose exactly which enrolled worker receives it.</p></div>}
+      </div>
+      <form className={styles.composer} onSubmit={(event) => { void submit(event); }} noValidate aria-label="Workspace task composer">
+        <label htmlFor="workspace-prompt">Task prompt</label>
+        <textarea id="workspace-prompt" ref={textarea} value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4}
+          placeholder="Describe the task and how to check the result…" disabled={scope.readOnly || lockedForm} />
+        {attachments.length ? <ul className={styles.attachments} aria-label="Attached text files">{attachments.map((file) => <li key={file.name}>
+          <span>{file.name}</span><button type="button" aria-label={`Remove ${file.name}`} disabled={lockedForm}
+            onClick={() => { fileGeneration.current++; setAttachments((current) => current.filter((item) => item.name !== file.name)); }}>×</button></li>)}</ul> : null}
+        <div className={styles.composeControls}>
+          <label className={styles.workerChoice}>Worker<select aria-label="Task worker" value={workerId} disabled={scope.readOnly || lockedForm} onChange={(event) => setWorkerId(event.target.value)}>
+            <option value="">Choose an enrolled worker</option>{snapshot.pool.workers.map((row) => <option key={row.id} value={row.id}>{row.model} ({row.id})</option>)}</select></label>
+          <label className={styles.fileButton}>Attach text<input type="file" multiple accept={WORKSPACE_TEXT_ATTACHMENT_ACCEPT} aria-label="Attach text files"
+            disabled={scope.readOnly || lockedForm} onChange={(event) => { const files = Array.from(event.target.files ?? []); event.target.value = ''; if (files.length) void addFiles(files); }} /></label>
+          <button className={styles.send} type="submit" disabled={!canSend || lockedForm}>{sending ? 'Sending…' : unlocked ? 'Send task' : 'Unlock to send'}</button>
+        </div>
+        <details className={styles.options}><summary>Task options</summary><div>
+          <label>Workspace access<select aria-label="Task workspace access" value={mode} disabled={scope.readOnly || lockedForm} onChange={(event) => setMode(event.target.value as ResourceConsoleTaskInput['mode'])}>
+            <option value="read-only">Read-only</option><option value="workspace-write">Allow workspace edits</option></select></label>
+          <label>Timeout in seconds<input aria-label="Task timeout in seconds" type="number" min="1" max="900" value={seconds} disabled={scope.readOnly || lockedForm} onChange={(event) => setSeconds(event.target.value)} /></label>
+          <label>Output token limit<input aria-label="Task output token limit" type="number" min="1" max="16384" value={tokens} disabled={scope.readOnly || lockedForm} onChange={(event) => setTokens(event.target.value)} /></label>
+        </div><p className={styles.caption}>Task ID: <code>{taskId}</code>. Text attachments become prompt content.</p></details>
+        {mode === 'workspace-write' ? <p className={styles.notice}>The worker may edit this pinned workspace. Completion does not verify those changes.</p> : null}
+        {worker?.provider === 'local' ? <p className={styles.caption}>This local worker receives prompt text only; it cannot read workspace files or apply edits.</p> : null}
+        {readingFiles ? <p role="status" className={styles.caption}>Reading selected text files…</p> : null}
+        {error ? <p role="alert" className={styles.error}>{error}</p> : null}
+      </form>
+    </div>
+
+    <div className={styles.resize} role="separator" tabIndex={0} aria-label="Resize tool panel" aria-orientation="vertical"
+      aria-valuemin={260} aria-valuemax={520} aria-valuenow={dockWidth} onKeyDown={resizeKey}
+      onPointerDown={(event) => { drag.current = { id: event.pointerId, x: event.clientX, width: dockWidth }; event.currentTarget.setPointerCapture?.(event.pointerId); }}
+      onPointerMove={(event) => { if (drag.current?.id === event.pointerId) setDockWidth(clampDock(drag.current.width + drag.current.x - event.clientX)); }}
+      onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }} />
+    <aside className={styles.dock} data-mobile-visible={mobilePane === 'tools'} aria-label="Task tools">
+      <div className={styles.dockTabs} role="tablist" aria-label="Task tool tabs" ref={tabs}>
+        {(['output', 'details'] as const).map((tab) => <button key={tab} type="button" role="tab" data-tab={tab} id={`workspace-tab-${tab}`}
+          aria-controls={`workspace-panel-${tab}`} aria-selected={dockTab === tab} tabIndex={dockTab === tab ? 0 : -1}
+          onKeyDown={tabKey} onClick={() => setDockTab(tab)}>{tab === 'output' ? 'Output' : 'Task details'}</button>)}
+      </div>
+      <section className={styles.dockContent} role="tabpanel" id={`workspace-panel-${dockTab}`} aria-labelledby={`workspace-tab-${dockTab}`}>
+        {dockTab === 'output' ? <><h3>Response text</h3>{response ? <><p className={styles.caption}>{response.truncated ? 'Truncated. ' : ''}Console-session output.</p><pre className={styles.responseText}>{response.text}</pre></>
+          : <p className={styles.caption}>Read a selected task’s response in the task pane to inspect its text here.</p>}</>
+          : <><h3>{selection ? 'Task routing' : 'Next task routing'}</h3><dl className={styles.facts}>
+            <div><dt>Worker</dt><dd>{selection ? selected?.workerId ?? 'No confirmed assignment' : worker?.id ?? 'Choose a worker'}</dd></div>
+            <div><dt>Provider</dt><dd>{(selection ? assigned : worker)?.provider ?? 'Not assigned'}</dd></div>
+            <div><dt>Model</dt><dd>{(selection ? assigned : worker)?.model ?? 'Not assigned'}</dd></div>
+            <div><dt>Workspace</dt><dd>{scope.workspace ?? 'Not configured'}</dd></div>
+            <div><dt>Access</dt><dd>{selection ? selected?.job?.mode ?? 'Not reported' : mode}</dd></div>
+            {selected ? <><div><dt>Ownership</dt><dd>{selected.ownership}</dd></div><div><dt>Updated</dt><dd>{resourceTime(selected.job?.updatedAt ?? selected.receipt?.finishedAt)}</dd></div>
+              <div><dt>Reported tokens</dt><dd>{selected.receipt?.inputTokens != null && selected.receipt.outputTokens != null ? selected.receipt.inputTokens + selected.receipt.outputTokens : 'Unknown'}</dd></div>
+              <div><dt>Reason</dt><dd>{resourceReason(selected.job?.reason ?? selected.receipt?.reason ?? 'not-reported')}</dd></div></> : null}
+          </dl><p className={styles.caption}>An enrolled worker is a routing choice. Current capacity is checked before dispatch; completion is not independent acceptance.</p></>}
+      </section>
+      <p className={styles.capabilities}>Text attachments are supported. Interactive terminal, browser and workspace file panels are not connected yet.</p>
+    </aside>
+  </section>;
+}

@@ -554,18 +554,22 @@
     {
       "id": "P04",
       "title": "Agent-first graph resources",
-      "state": "planned",
+      "state": "landed-local",
       "branch": "auto/p04",
-      "artifactDigest": null,
-      "receipt": null
+      "artifactDigest": "b5e7f58f637823ece3d11f62a4db27919b1b018f962a98ef6de950e795ae6dd2",
+      "receipt": "artifacts/merge-traces.json#merge:8f86b2f990c5e57fee7b58a9734b4c6be220e621",
+      "commit": "8f86b2f990c5e57fee7b58a9734b4c6be220e621",
+      "completionScope": "tested optional signed MCP resources; explicit host configuration required"
     },
     {
       "id": "P05",
       "title": "Sandboxed engine trace adapter",
-      "state": "planned",
+      "state": "landed-local",
       "branch": "auto/p05",
-      "artifactDigest": null,
-      "receipt": null
+      "artifactDigest": "1ce31c6514d5742aae1b31ff6eb0f58e309ff72aa737f565a6fb62808f8ec5a0",
+      "receipt": "artifacts/merge-traces.json#merge:f98ddaf0fe7f4b262ab454fee5e679dd937813e5",
+      "commit": "f98ddaf0fe7f4b262ab454fee5e679dd937813e5",
+      "completionScope": "tested resource-generation graph adapter only; full sandbox engines and independent acceptance remain separate"
     },
     {
       "id": "P06",

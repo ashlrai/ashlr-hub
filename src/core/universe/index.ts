@@ -1,7 +1,8 @@
 export type * from './types.js';
 export { validateControlGraph, runControlGraph, readControlGraph, CONTROL_NODE_KINDS } from './control-graph.js';
 export type { ControlGraphDefinition, ControlGraphNode, ControlGraphOptions, ControlGraphReport,
-  ControlGraphHandler, ControlHandlerContext, ControlHandlerResult, ControlArtifact, ControlNodeKind } from './control-graph.js';
+  ControlGraphHandler, ControlGraphHandlerRegistration, ControlHandlerExecution,
+  ControlHandlerContext, ControlHandlerResult, ControlArtifact, ControlNodeKind } from './control-graph.js';
 export { signDecisionTraceV1, verifyDecisionTraceV1, validateDecisionTraceV1, queryDecisionTracesV1 } from './decision-trace.js';
 export type { DecisionTraceV1, UnsignedDecisionTraceV1, DecisionTraceKeyOptions, DecisionTraceQueryV1 } from './decision-trace.js';
 export { verifyUniverseCold, createColdVerificationRequest } from './cold-verifier.js';
@@ -23,6 +24,8 @@ export type { StoredValueAllocationV1, ValueAllocationStoreRead } from './value-
 export { executeFirmResourceTask } from './firm-resource-execution.js';
 export type { FirmResourceEnrollmentV1, FirmResourceExecutionHost, FirmResourceExecutionRequest,
   FirmResourceExecutionResult } from './firm-resource-execution.js';
+export { createFirmResourceControlHandler } from './firm-resource-control-handler.js';
+export type { FirmResourceControlBinding } from './firm-resource-control-handler.js';
 export type * from './file-operations-types.js';
 export { defaultUniverseRoot, ensureUniverseRoot } from './artifacts.js';
 export { initUniverse, validateUniverseManifest } from './store.js';

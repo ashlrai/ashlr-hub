@@ -50,7 +50,8 @@ export interface FirmResourceExecutionResult {
     'enrollment-unavailable' | 'budget-held' | 'kill-or-cancellation' | 'runtime-result';
   taskId: string | null;
   completion: ResourceGenerationCompletion | null;
-  /** Completion is response data, never graph success or independent acceptance. */
+  /** Response data, not independent acceptance. An enrolled graph adapter can
+   * record successful generation without claiming a verified product outcome. */
   verifiedAccepted: false;
 }
 

@@ -12,6 +12,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Connect selected allocation receipts to explicit resource runtime enrollment.
 - [x] Add general signed graph inspection and actual CLI-process coverage.
 - [x] Enforce KILL at Git publication and absolute deadlines at resource admission.
+- [x] Bind enrolled resource generation to graph effects, outcomes and measured usage.
+- [x] Expose signed graph evidence through explicitly configured MCP resources.
+- [x] Separate General/Spark quota scopes without splitting shared account capacity.
+- [x] Build and independently verify the first real project-bound human task workspace; final integrated gates recorded in report.md.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -30,17 +34,29 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Current continuation: graph execution and signed MCP resources integrated;
+independent Codex quota scopes integrated through collector, shared evidence,
+locked admission, supervision and console IPC. Personal General remains reserved;
+personal Spark is authorized by user intent but not commissioned. Existing account
+pause and pinned historical ledger need scoped-policy/enrollment migration first.
+
+User added the desktop operating-layer direction and approved Ashlr Hub first,
+with other projects explicitly selected. Three investigations found no existing
+durable conversation, file-browser, PTY or embedded browser contract. The first
+slice reuses real scoped resource task APIs, a project/task rail, composer, output
+and details dock, text attachments and existing account controls. Persistent chat,
+multi-project shared-ledger dispatch and native tools remain separate milestones.
+
 P03 and P08 are integrated; cold review also tightened publication KILL checks,
 runtime pinning and absolute admission deadlines. Allocation signatures remain
 selection evidence; separate trusted host enrollment invokes existing resource
 reservations. Real inert native/HTTP fixtures and CLI processes passed.
 
-Thirteen locally landed component artifacts; thirty-five packages remain planned.
+Fifteen locally landed component artifacts; thirty-three packages remain planned.
 Full north-star completion is not claimed. Actual host KILL is active and remains
 untouched. Local package, CLI, UI, release-contract and safety gates passed;
 the full north-star implementation and production activation remain unfinished.
 
-Next: connect the host adapter to truthful graph execution traces and confined
-implementation/independent acceptance, then resident ticks through existing
-activation. Keep cumulative cross-receipt budget accounting explicit; current
-receipt bounds are not a firm-wide spend ledger.
+Next: durable project-bound conversation and
+confined implementation/independent acceptance. Resident ticks still require the
+existing activation path. Current receipt bounds are not a firm-wide spend ledger.

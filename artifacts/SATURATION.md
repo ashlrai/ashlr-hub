@@ -1,6 +1,34 @@
 # Firm build evidence — September 10, 2026
 
-## Actual work, not simulated agent counts
+## Current continuation
+
+Through `d6207e8a`, the plan has **15 locally landed component artifacts and
+33 planned packages**. There are 20 verified existing-key merge attestations.
+P04 adds optional signed MCP resources; P05 adds an enrolled resource-generation
+graph adapter, not every sandbox engine. General and Spark quota scopes now stay
+independent while sharing account concurrency, retries and task accounting.
+
+Integrated graph/MCP checks: 201 passed. Resource changes: 574 distinct focused
+cases passed in the worker; parent integration rerun passed 199 overlapping cases.
+Safety rerun: 449 passed, five skipped. Final UI run: 1,061 passed across 62 files.
+Core/web typecheck, build, quiet repository lint, docs, real-I/O classification
+and all five compiled structural safety checks passed.
+Actual host KILL and account settings are unchanged.
+Personal Spark is permitted by the user but not enrolled; personal General remains
+paused. Enrollment migration and a durable General-only exclusion are still needed.
+
+The user has also approved a Hub-first desktop operating workspace. Its first
+task surface now uses real resource-console APIs: pinned project/task rail,
+explicit worker selection, text attachments, actual output, cancellation and a
+keyboard-resizable inspector. Independent acceptance caught and verified the fix
+for a prior-session submission race. Browser checks on an inert local fixture
+passed at 320, 390, 1,140 and 1,440 pixels without horizontal overflow; mobile
+panes and draft preservation worked, and the inspector matched its announced
+520-pixel width. No real-provider browser task was sent. Durable conversations,
+multi-project routing, embedded terminal/browser and filesystem contracts are
+not yet delivered. Historical counts below describe the prior wave.
+
+## Prior-wave work, not simulated agent counts
 
 - Host limit: four concurrent agents including the parent.
 - The initial wave used six worker/reviewer identities. This continuation used

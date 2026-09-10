@@ -43,6 +43,10 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/resource-quota-scopes.test.ts', // scoped quota collection, native fixtures and console IPC
+  'test/mcp-firm-resources.test.ts', // signed history via real CLI MCP processes
+  'test/universe-control-execution.test.ts', // private signed effect and interrupted settlement records
+  'test/universe-firm-resource-control-handler.test.ts', // enrolled graph dispatch to real inert transports
   'test/universe-firm-cli-integration.test.ts', // real CLI processes with test-owned provenance
   'test/universe-firm-graph-query.test.ts', // verified history and immutable read-only inspection
   'test/universe-firm-resource-execution.test.ts', // enrolled receipt to real inert resource transport

@@ -23,6 +23,40 @@ prove that no provider work occurred. Native Windows workers report
 `worker-kill-cancellation-unsupported` before launch because owned cancellation
 is not implemented there; the local HTTP worker remains supported.
 
+## Engineering workspace
+
+The scoped console offers **Workspace** alongside **Resources**, also reachable
+at `/resources/#resource-workspace`. It uses the same read session, explicit
+control-token unlock, supervisor, account policies and quota-aware admission.
+Opening the workspace does not start a task. The first slice contains:
+
+- A project rail showing the server-confirmed workspace and actual task records.
+- A central task composer with enrolled model/worker selection and read-only
+  workspace access by default. Explicit edit mode still needs control authority.
+- A resizable output/details dock, recorded task state, reported usage, and
+  cancellation of console-owned work.
+- Explicitly selected UTF-8 text attachments. Up to four files, 16 KiB each;
+  the complete prompt including framing must fit 32 KiB. Unsupported formats,
+  invalid text, duplicate names and overflow are rejected without truncation.
+
+Attachment text is included in the selected task's prompt only when submitted.
+Selection alone does not upload files. Drafts and attachments remain in tab memory,
+not browser storage. Switching surfaces preserves them; closing/disconnecting or
+changing the confirmed scope discards them. Existing private queue retention
+applies to submitted prompts. Returned output is plain text, not executable markup.
+
+This is a project-bound **task workspace**, not durable multi-turn chat. Native
+invocations remain ephemeral; prior turns are not automatically sent as context.
+Output comes from the producing console session and is not a token stream. A
+completed task does not establish independent acceptance of its changes.
+
+The current console pins one workspace at startup. Other projects need explicit
+enrollment; selecting an arbitrary path in the browser is not supported. The next
+operating-layer milestones are durable conversations and attachment custody,
+multi-project dispatch retaining one shared account ledger, scoped file browsing,
+owned PTY sessions, and an isolated browser bridge. The existing Tauri wrapper
+remains a source-only draft; this web surface is not a commissioned installer.
+
 ## Resource semantics
 
 | Resource | Source | Admission behavior |
@@ -42,8 +76,54 @@ Limits are per ledger, not machine-global provider limits. `capacityKey` is an
 operator-declared identity: Hub does not inspect credentials to establish whether
 two profiles actually represent the same account. All aliases of one account must
 use the same key. Shared groups must have identical concurrency/task bounds.
-Known denials conservatively block the entire group, even when their precise
-model applicability is not established.
+Account-health, transport, retry and operator-pause denials block the entire
+group. Quota denials also remain account-wide unless exact model quota scopes
+have been explicitly enrolled as described below.
+
+### Independent Codex quota scopes
+
+Optional `quotaScope` on a pool worker pins a versioned quota association. It is
+not model discovery, an entitlement claim, or a new concurrency identity:
+
+| Exact model | Worker `quotaScope` | Collector `bucketIds` |
+| --- | --- | --- |
+| `gpt-6-astra`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna` | `codex-general-v1` | `["codex"]` |
+| `gpt-5.3-codex-spark` | `codex-spark-v1` | `["codex_bengalfox"]` |
+
+General and Spark workers for one account must retain the **same `capacityKey`**,
+account-hint match, concurrency bound and rolling task cap. Separate bucket IDs
+are accepted only for explicitly supported provider/model/scope combinations.
+Unknown models and unscoped aliases retain conservative sharing. Claude and local
+workers remain supported by their existing adapters; no Claude quota association
+is inferred from a display name such as Fable, Opus or Sonnet.
+
+When enrolled, General exhaustion or stale General quota does not consume Spark's
+independent headroom. Spark exhaustion, missing evidence or unknown percentages
+cannot borrow General headroom. Account authentication failures, explicit pauses,
+retry/cooldown and uncertain process ownership still apply across both. Existing
+operator-capped unknown-quota opt-in is unchanged; adding a scope does not enable it.
+
+The collector, shared evidence, capacity wait, locked admission, queue and console
+carry quota-only vetoes separately from account vetoes. The host API's optional
+`quotaUnavailableWorkerIds` denotes a quota-only veto; `unavailableWorkerIds`
+retains its account-wide meaning. Callers of a scoped collector must forward
+both. A valid percentage remains a provider observation, not an inferred token
+price or a benchmark score. No paid overage or automatic credit reset is enabled.
+
+Scope mappings are source-supported associations, not proof a specific account
+can execute a model. Confirm availability and both current quota windows using
+the enrolled account's native evidence before an authenticated canary. OpenAI
+describes Spark as a fast, text-only coding model; that is not evidence that it
+is interchangeable with Sonnet or a local Qwen model. See the
+[official model documentation](https://learn.chatgpt.com/docs/models).
+
+**Existing-pool migration remains separate.** Pool/binding digests pin historical
+receipts. Do not edit an active ledger's enrollment in place, rewrite prior
+receipts, or select an empty ledger to reset usage history. This increment does
+not migrate enrollment or change account policy. A saved account pause still
+blocks Spark aliases. Reserving only one account's General scope while allowing
+its Spark scope needs a distinct persisted scope exclusion and a recoverable
+enrollment transition; task-level `allowedWorkerIds` is not a durable reservation.
 
 ## Enroll explicit workers
 

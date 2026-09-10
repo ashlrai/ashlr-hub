@@ -549,6 +549,142 @@
         "conflicts": [],
         "provenanceSig": "6373e317ead0f02c0f17705c1f6ac74fc183c4bc6a03879b70206a6959e8a5e6"
       }
+    },
+    {
+      "packageId": "P04",
+      "commit": "8f86b2f990c5e57fee7b58a9734b4c6be220e621",
+      "patchDigest": "b5e7f58f637823ece3d11f62a4db27919b1b018f962a98ef6de950e795ae6dd2",
+      "tests": 33,
+      "verificationLayer": "local-targeted-tests",
+      "independentOutcomeEvidence": false,
+      "trace": {
+        "id": "merge:8f86b2f990c5e57fee7b58a9734b4c6be220e621",
+        "ts": "2026-09-10T05:55:14.738Z",
+        "entities": [
+          "package:P04",
+          "commit:8f86b2f990c5e57fee7b58a9734b4c6be220e621"
+        ],
+        "action": "local-package-integrated",
+        "constitutionVersion": "existing-doctrine",
+        "policyEpoch": 0,
+        "inputsDigest": "e9a020de20fd68f1217f68e1770b137f7f6db9b0abd29127c34a79aaaeca8c41",
+        "artifactDigest": "b5e7f58f637823ece3d11f62a4db27919b1b018f962a98ef6de950e795ae6dd2",
+        "verifier": {
+          "id": "parent-local-gates",
+          "verdict": "pass",
+          "independent": false
+        },
+        "authority": {
+          "effectClass": "workspace"
+        },
+        "spend": {
+          "unknown": true
+        },
+        "conflicts": [],
+        "provenanceSig": "471399af5e34e90c77a6be319f918a78363b4ae6b8a2e25c3def1b02150f32ec"
+      }
+    },
+    {
+      "packageId": "P00",
+      "commit": "94a0e7a76b869a51435731205e2991fb5a994675",
+      "patchDigest": "1f24bbe96e1f5dedb1e43b4628d7fb6df0937d4ca94ce8e85c38f47adab6d02e",
+      "tests": 18,
+      "verificationLayer": "local-targeted-tests",
+      "independentOutcomeEvidence": false,
+      "trace": {
+        "id": "merge:94a0e7a76b869a51435731205e2991fb5a994675",
+        "ts": "2026-09-10T05:55:14.768Z",
+        "entities": [
+          "package:P00",
+          "commit:94a0e7a76b869a51435731205e2991fb5a994675"
+        ],
+        "action": "local-package-integrated",
+        "constitutionVersion": "existing-doctrine",
+        "policyEpoch": 0,
+        "inputsDigest": "bf60f0f697d7e534426e75dea66c7c03f80462313184fc85428702b2ab51d036",
+        "artifactDigest": "1f24bbe96e1f5dedb1e43b4628d7fb6df0937d4ca94ce8e85c38f47adab6d02e",
+        "verifier": {
+          "id": "parent-local-gates",
+          "verdict": "pass",
+          "independent": false
+        },
+        "authority": {
+          "effectClass": "workspace"
+        },
+        "spend": {
+          "unknown": true
+        },
+        "conflicts": [],
+        "provenanceSig": "59470ff669f6c50892165e12ff702392903966fe3b9b7c82690e56c932faa7b5"
+      }
+    },
+    {
+      "packageId": "P05",
+      "commit": "f98ddaf0fe7f4b262ab454fee5e679dd937813e5",
+      "patchDigest": "1ce31c6514d5742aae1b31ff6eb0f58e309ff72aa737f565a6fb62808f8ec5a0",
+      "tests": 28,
+      "verificationLayer": "local-targeted-tests",
+      "independentOutcomeEvidence": false,
+      "trace": {
+        "id": "merge:f98ddaf0fe7f4b262ab454fee5e679dd937813e5",
+        "ts": "2026-09-10T05:55:14.791Z",
+        "entities": [
+          "package:P05",
+          "commit:f98ddaf0fe7f4b262ab454fee5e679dd937813e5"
+        ],
+        "action": "local-package-integrated",
+        "constitutionVersion": "existing-doctrine",
+        "policyEpoch": 0,
+        "inputsDigest": "f9008d2783e044045578f915f7953242156ba897e269654685d0dcd562792ead",
+        "artifactDigest": "1ce31c6514d5742aae1b31ff6eb0f58e309ff72aa737f565a6fb62808f8ec5a0",
+        "verifier": {
+          "id": "parent-local-gates",
+          "verdict": "pass",
+          "independent": false
+        },
+        "authority": {
+          "effectClass": "workspace"
+        },
+        "spend": {
+          "unknown": true
+        },
+        "conflicts": [],
+        "provenanceSig": "59c266eb37047e28518a7e7c2ffa2bdba731aab9e4fc0dc4365de115ddd2951e"
+      }
+    },
+    {
+      "packageId": "resource-intelligence",
+      "commit": "d6207e8a433075a81213200f48d7bfb45ef16317",
+      "patchDigest": "8047071da126b38425973f0d2c0985764ba4a8697b8b0e00220d7f9fe362a14f",
+      "tests": 574,
+      "verificationLayer": "local-targeted-tests",
+      "independentOutcomeEvidence": false,
+      "trace": {
+        "id": "merge:d6207e8a433075a81213200f48d7bfb45ef16317",
+        "ts": "2026-09-10T05:55:14.817Z",
+        "entities": [
+          "package:resource-intelligence",
+          "commit:d6207e8a433075a81213200f48d7bfb45ef16317"
+        ],
+        "action": "local-package-integrated",
+        "constitutionVersion": "existing-doctrine",
+        "policyEpoch": 0,
+        "inputsDigest": "03ba0622a4f64cdca460897893f14a5807cb99d98df1d9ce8493f6eeecdd90ea",
+        "artifactDigest": "8047071da126b38425973f0d2c0985764ba4a8697b8b0e00220d7f9fe362a14f",
+        "verifier": {
+          "id": "parent-local-gates",
+          "verdict": "pass",
+          "independent": false
+        },
+        "authority": {
+          "effectClass": "workspace"
+        },
+        "spend": {
+          "unknown": true
+        },
+        "conflicts": [],
+        "provenanceSig": "e25e77a5b6884b80f8d892d9bbdb7ab2697cf7b79e530d9f6eeaccb9110307d6"
+      }
     }
   ]
 }

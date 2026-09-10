@@ -18,6 +18,7 @@ import { WorkerAccessControl } from './WorkerAccessControl.js';
 import { TaskInspector, taskOwnership, taskState, taskTone } from './TaskInspector.js';
 import { FleetMap } from './FleetMap.js';
 import { buildResourceFleet } from './fleet-model.js';
+import { WorkspaceView } from '../workspace/WorkspaceView.js';
 import styles from './ResourcePoolView.module.css';
 
 export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
@@ -37,6 +38,9 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   const [tab, setTab] = useState<'inspect' | 'compose'>('compose');
   const [filter, setFilter] = useState<'all' | 'active' | 'completed'>('all');
   const [showAllOwned, setShowAllOwned] = useState(false);
+  const [surface, setSurface] = useState<'workspace' | 'resources'>(() =>
+    window.location.hash === '#resource-workspace' ? 'workspace' : 'resources');
+  const [workspaceVisited, setWorkspaceVisited] = useState(() => window.location.hash === '#resource-workspace');
   const inspector = useRef<HTMLDivElement>(null);
   const fleetMapRegion = useRef<HTMLDivElement>(null);
   const focusVersion = useRef(0);
@@ -60,6 +64,22 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     snapshot.sourceState !== 'degraded' && !historical && query.status !== 'loading';
   const workerAccessEnabled = scope.allocationWritable === true && !!snapshot?.workerAccess &&
     snapshot.sourceState !== 'degraded' && !historical && query.status !== 'loading';
+
+  useEffect(() => {
+    const navigate = () => {
+      const workspace = window.location.hash === '#resource-workspace';
+      setSurface(workspace ? 'workspace' : 'resources');
+      if (workspace) setWorkspaceVisited(true);
+    };
+    window.addEventListener('hashchange', navigate);
+    return () => window.removeEventListener('hashchange', navigate);
+  }, []);
+
+  function switchSurface(next: 'workspace' | 'resources') {
+    setSurface(next);
+    if (next === 'workspace') setWorkspaceVisited(true);
+    window.location.hash = next === 'workspace' ? 'resource-workspace' : 'resource-fleet';
+  }
 
   async function saveWorkerAccess(pausedWorkerIds: string[], expectedRevision: number): Promise<boolean> {
     if (!workerAccessEnabled || workerAccessBusy) return false;
@@ -125,7 +145,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     const requestedAtFocus = focusVersion.current;
     const submitted = await action(() => submitResourceTask(task),
       `Task ${task.id} queued. The supervisor will recheck capacity before dispatch.`);
-    if (submitted && requestedAtFocus === focusVersion.current) inspectSelection({ kind: 'task', id: task.id });
+    if (submitted && surface === 'resources' && requestedAtFocus === focusVersion.current) inspectSelection({ kind: 'task', id: task.id });
     return submitted;
   }
 
@@ -134,15 +154,20 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     const succeeded = await action(() => cancelResourceTask(id), `Cancellation requested for ${id}.`, true);
     // Cancellation can remove its focused button. Repair that focus only when
     // the operator has not moved elsewhere during the request and refresh.
-    if (succeeded && requestedAtFocus === focusVersion.current) inspectSelection({ kind: 'task', id });
+    if (succeeded && surface === 'resources' && requestedAtFocus === focusVersion.current) inspectSelection({ kind: 'task', id });
   }
 
   const visibleRows = rows.filter((row) => filter === 'all' || (filter === 'active'
     ? row.active : taskState(row) === 'completed'));
   return <div className={styles.view} onFocusCapture={() => { focusVersion.current += 1; }}>
     <header className={styles.pageHeading}>
-      <div><h1>Resource dispatch desk</h1><p>Route work across your enrolled accounts and local models.</p></div>
+      <div><h1>{surface === 'workspace' ? 'Engineering workspace' : 'Resource dispatch desk'}</h1>
+        <p>{surface === 'workspace' ? 'Work in one pinned project with your enrolled intelligence fleet.' : 'Route work across your enrolled accounts and local models.'}</p></div>
       <div className={styles.headerActions}>
+        <nav className={styles.tabs} aria-label="Operating surface">
+          <button type="button" aria-pressed={surface === 'workspace'} onClick={() => switchSurface('workspace')}>Workspace</button>
+          <button type="button" aria-pressed={surface === 'resources'} onClick={() => switchSurface('resources')}>Resources</button>
+        </nav>
         <button type="button" className={styles.secondaryButton} onClick={() => { void refresh(); }} disabled={query.status === 'loading' || query.status === 'refreshing'}>Refresh</button>
         {!scope.readOnly || scope.allocationWritable ? <button type="button" className={hold.hasHold ? styles.secondaryButton : styles.primaryButton}
           onClick={() => hold.hasHold ? hold.clear() : setUnlockOpen(true)}>{hold.hasHold ? 'Lock controls' : 'Unlock controls'}</button> : null}
@@ -151,7 +176,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     <div className={styles.statusBar}><div className={styles.freshness}>
       <strong>{scope.poolId}</strong>{snapshot ? <span>{historical ? 'Last successful read' : 'Observed'} {resourceTime(snapshot.sampledAt)}</span> : null}
       <span>Refreshes every 3 seconds while visible</span>{query.status === 'refreshing' ? <RefreshIndicator /> : null}
-    </div>{snapshot ? <nav className={styles.sectionNav} aria-label="Resource sections">
+    </div>{snapshot && surface === 'resources' ? <nav className={styles.sectionNav} aria-label="Resource sections">
       <a href="#resource-fleet">Fleet</a><a href="#resource-accounts">Accounts</a><a href="#resource-performance">Performance</a>
     </nav> : null}</div>
     {historical ? <div className={styles.notice} role="alert"><strong>Resource records unavailable</strong>
@@ -162,6 +187,13 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     {notice ? <p className={styles.actionNotice} role="status">{notice}</p> : null}
     {query.status === 'loading' ? <section className={styles.loading} aria-label="Loading resource pool"><SkeletonLine width="50%" /><SkeletonLine /><SkeletonLine width="80%" /></section> : null}
     {snapshot ? <>
+      {/* Keep drafts in tab memory while switching surfaces; never persist task text. */}
+      <div hidden={surface !== 'workspace'} id="resource-workspace">
+        {workspaceVisited ? <WorkspaceView key={`${scope.root}:${scope.poolId}:${scope.workspace ?? ''}`} scope={scope} snapshot={snapshot}
+          historical={historical} enabled={enabled} stopEnabled={stopEnabled} busy={busy} unlocked={hold.hasHold}
+          onUnlock={() => setUnlockOpen(true)} onSubmit={submit} onCancel={(id) => { void cancel(id); }} /> : null}
+      </div>
+      <div hidden={surface !== 'resources'}>
       <section className={styles.supervisor} aria-label="Foreground supervisor">
         <div><h2>{scope.readOnly ? 'Observation only' : supervisor?.paused ? 'Queue paused' : 'Foreground supervisor'}</h2>
           <p>{scope.readOnly ? 'No tasks are started or cancelled from this read-only session.' : supervisor
@@ -245,6 +277,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
           <p className={styles.muted}>{resourceNumber(snapshot.usage.reportedAttempts)} attempts with reported usage; {resourceNumber(snapshot.usage.unknownAttempts)} without complete usage. No conversion into provider quota is inferred. Completed tasks are not verified accepted changes.</p>
         </section>
       </section>
+      </div>
     </> : null}
     {unlockOpen ? <MutationTokenDialog open onClose={() => setUnlockOpen(false)} tokenLabel="Control token"
       tokenHelp="the control token this resource console printed" reason={scope.readOnly

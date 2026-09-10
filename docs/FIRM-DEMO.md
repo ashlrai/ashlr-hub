@@ -70,6 +70,74 @@ Missing or unverifiable history exits with code 1 and exposes no traces; invalid
 filters exit with code 2. No keys are created. Read-only inspection remains
 available under KILL, but it does not prove a worker is currently alive.
 
+### Agent-first MCP resources
+
+The existing MCP gateway exposes signed graph history only when the host has
+explicitly configured an existing private graph directory in its Ashlr config:
+
+```json
+{ "firm": { "graphRoot": "/absolute/private/firm-graph" } }
+```
+
+This is a config fragment, not a replacement for the rest of your configuration.
+The root must be absolute, canonical, owned by the current user and mode `0700`.
+Absent or invalid configuration advertises no firm resources. The gateway offers:
+
+- `ashlr://firm/graph` — verified graph history and recorded execution state.
+- `ashlr://firm/traces` — traces, with optional `entity`, `action`, `since`,
+  `until` and `limit` query parameters; the same limits as the CLI apply.
+
+The caller cannot supply a filesystem path or signing key in the URI. Reads
+neither execute work nor create keys, enrollment or audit records. This guarantee
+applies to the resource handlers: the gateway retains its existing startup and
+native-tool behavior. These resources contain private model/task evidence; expose
+the gateway only to clients trusted to read that configured graph.
+
+Signed JSON is preserved exactly. Responses exceeding 64 KiB return an explicit
+unavailable result, not a truncated or scrubbed signature-bearing document. Use
+narrower trace filters when possible. Unknown or duplicate parameters, unsafe
+roots and damaged evidence also return unavailable. Signature verification says
+nothing about current worker liveness or independent outcome acceptance.
+
+### Enrolled resource-generation graph nodes
+
+The `@ashlr/hub/universe` source-build API exports
+`createFirmResourceControlHandler(host, requestsByNodeId)`. The trusted host
+supplies existing allocation receipts, pinned runtime/pool/worker enrollment,
+and exact requests. The factory returns a frozen handler plus `nodeInputs`:
+
+```ts
+import { createFirmResourceControlHandler, runControlGraph } from '@ashlr/hub/universe';
+
+// host and request are already validated, explicitly enrolled host data.
+const binding = createFirmResourceControlHandler(host, { research: request });
+const report = await runControlGraph({
+  schemaVersion: 1, id: 'enrolled-research', maxConcurrent: 1,
+  maxDurationMs: 60_000,
+  nodes: [{ id: 'research', kind: 'explore', requires: [],
+    input: binding.nodeInputs.research }],
+}, { root: graphRoot, handlers: { explore: binding.handler } });
+```
+
+Do not construct `host` from model output or give a model runtime paths/commands
+to select. Request and enrollment digests bind the node to its captured host
+configuration. Existing quota, reserve, ownership, cancellation, runtime pin and
+durable task-replay checks still apply. Only enrolled `explore` nodes are admitted.
+
+Successful generation records `resource-completion`, the host policy identity,
+an output digest, and reported token usage when available. USD stays unknown.
+It is **not** an independently verified implementation: the artifact keeps
+`verifiedAccepted: false`, and its verifier remains unavailable. A separate
+acceptance step must evaluate downstream work.
+
+Held, replayed, failed, uncertain, cancelled or oversized completions reject the
+node and withhold its dependents. An exception after intent can remain unresolved
+and is not automatically retried. Oversized content is omitted while its digest
+and bounded receipt remain; it cannot be mistaken for a successful truncated
+artifact. Guarded integration/delivery/harness mutation kinds still require their
+existing effect gates. This API is not resident-firm activation, automatic account
+commissioning, or cumulative cross-receipt budget accounting.
+
 ### What signatures establish
 
 The trace uses the existing provenance HMAC. This is integrity under a host-local

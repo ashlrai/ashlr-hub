@@ -1,5 +1,63 @@
 # Verified local handoff
 
+## Current continuation: intelligence scopes and human workspace
+
+Integration branch: `auto/p00`, isolated from the original working checkout.
+Core commits: `8f86b2f9` (signed MCP resources), `94a0e7a7` (graph execution
+binding), `f98ddaf0` (resource graph adapter), `d6207e8a` (quota scopes).
+Workspace and documentation are recorded in the commit containing this report.
+
+- General and Spark have explicit independent quota associations, while account
+  concurrency, task caps, access and health remain shared. Unknown associations
+  remain conservative. Existing account settings were not migrated or changed.
+- The graph adapter binds execution policy and real completion metadata into
+  signed outcomes. Rejected/interrupted work cannot unlock dependent tasks.
+  Reported token usage is not independently accepted engineering yield.
+- Explicitly configured MCP resources expose verified graph/trace history;
+  malformed history is refused, not silently truncated or repaired.
+- Workspace adds a pinned-project/task sidebar, central task composer, exact
+  worker selection, actual response reads, cancellation and resizable tools dock.
+  Text attachments are bounded reference data, not instructions or automatic
+  uploads. The existing resource session and quota-aware dispatch path are reused.
+- Drafts survive Workspace/Resources navigation without browser storage. Auth
+  and host scope changes clear private state. A cold reviewer reproduced a
+  late-submit session race; the fix and regression test are integrated.
+- Final UI suite: **1,061 passed across 62 files**, including 56 new workspace,
+  attachment and independent acceptance/navigation tests. These overlap the
+  builder's 26 focused workspace/acceptance cases and are not additive.
+- Graph/MCP integration: 201 passed across eight files. Quota worker: 574 distinct
+  focused cases passed; parent rerun: 199 overlapping resource/graph cases.
+- Final safety rerun: **449 passed, five skipped across 41 files**. Full core/web
+  typecheck, production build, quiet whole-repository ESLint, documentation and
+  real-I/O classification passed. Compiled `verify-safety` passed all five
+  structural checks. These are local gates, not production activation evidence.
+- Browser acceptance used only a clearly named inert local fixture. At 320,
+  390, 1,140 and 1,440 pixels there was no horizontal overflow. Mobile panes,
+  surface draft preservation and exact 520-pixel keyboard dock resizing worked.
+  No browser errors were logged. No real-provider task was submitted.
+- Existing-key verification: all 20 local merge attestations verify. The plan
+  retains 48 packages, 15 locally landed component artifacts and 33 planned.
+  Workspace and quota extensions do not fabricate additional package completion.
+- Original checkout remains at `a01fc08663baab3039c4f1c084538de732a4fd0e`,
+  with its prior untracked workplans untouched. This continuation changes no
+  daemon/conductor activation code, constitution or H1–H8 tests from `1bcda18e`.
+- Entire remains enabled in manual-commit mode; resume found no checkpoint.
+  No provider activation, account migration, GitHub Actions, remote push, npm
+  publication, native application installation or production deployment occurred.
+
+Personal General remains paused. Personal Spark is authorized by user intent but
+not commissioned: a durable General-only exclusion and history-preserving quota
+enrollment migration are required first. Global KILL remains present and unchanged.
+The desktop slice is a task workspace, **not durable multi-turn chat**. Project
+switching, file browsing, PTYs, browser tools, resident firm execution and verified
+self-improvement remain next milestones. Output is session-retained, not streamed;
+completion is not independent acceptance. The full north star is not complete.
+
+Frontend-design and React guidance shaped the responsive three-pane UI and scoped
+async state. Browser guidance provided actual local visual acceptance. Planning,
+agent-building and engineering-documentation guidance kept ownership explicit,
+reused the runtime and distinguished tested implementation from activation.
+
 ## Continuation: allocation execution and general graph inspection
 
 Implementation revision: `63d1c1016f59ae42528cb674d3f3bcc9fe77f891`, branch `auto/p00`.

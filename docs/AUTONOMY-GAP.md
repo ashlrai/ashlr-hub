@@ -24,15 +24,15 @@ stubs are review aids, not signed runtime evidence.
 | North-star function | State | Existing machinery and remaining gap |
 | --- | --- | --- |
 | Purpose and living end state | UNWIRED | `value-allocation.ts` binds mission/spec evidence to the pure portfolio scorer; `value-allocation-store.ts` persists signed ID-bound receipts. `firm-resource-execution.ts` now consumes a selected receipt through explicit host enrollment and existing resource reservations. The resident planner/graph caller remains unwired. |
-| Competing plans and artifact graph | UNWIRED | New `src/core/universe/control-graph.ts` persists signed intent/settlement and artifact dependencies. Trusted callbacks are not a model execution backend. |
+| Competing plans and artifact graph | UNWIRED | `control-graph.ts` persists signed intent/settlement and artifact dependencies. `firm-resource-control-handler.ts` connects explicitly enrolled resource generation with bound host policy, reported usage and rejected-result propagation. Confined implementation and independently accepted outcomes remain unwired. |
 | Worker identity, quotas and reserves | UNWIRED | `src/core/resources/pool-runtime.ts` and `native-profile.ts` already implement explicit bindings, admission and profile isolation. Actual account commissioning remains unverified here. |
-| Codex, Claude and local execution | UNWIRED | Existing resource generation calls the pool. Preserve personal-worker exclusion and configured reserve ceilings; do not interpret worker usage as account-wide spend. |
+| Codex, Claude and local execution | UNWIRED | Existing resource generation calls the pool. Personal general Codex remains reserved; personal Spark is permitted by user intent but needs explicit quota-scoped enrollment and safe policy/ledger migration. Preserve configured ceilings; do not interpret worker usage as account-wide spend. |
 | Grok execution | MISSING | Account connection/display is distinct from the core pool provider enum, which supports Codex, Claude and local workers. |
 | Learned routing | UNWIRED | `src/core/run/router.ts` and daemon already call learned routing. New accepted-work receipts still need an evidence-backed feedback connection. |
 | Best-of-N worktree execution | UNWIRED | `src/cli/swarm.ts` dispatches existing swarms. The new firm graph does not yet dispatch these swarms or isolate their sessions. |
 | Cold rival verification | UNWIRED | `cold-verifier.ts` binds a minimal request to distinct enrolled execution IDs and a nonce. Physical isolation and evaluator quality belong to the transport; identity strings alone do not prove either. |
 | Signed decisions and conflicts | UNWIRED | `decision-trace.ts` signs with existing read-only provenance and preserves conflicts. The graph uses it; sandboxed engine, daemon and all other effects are not yet joined. |
-| Agent-first queries and MCP | UNWIRED | `firm graph` and `firm traces` inspect any persisted signed control graph with bounded filters and retained conflicts. Actual CLI processes are tested; a signed-graph MCP resource remains unwired. |
+| Agent-first queries and MCP | UNWIRED | `firm graph` / `firm traces` and optional gateway resources inspect signed history with bounded filters and retained conflicts. MCP requires an explicit private `firm.graphRoot`; real CLI processes are tested. Live ownership, operator controls and resident projections remain separate. |
 | Integration and handoff | UNWIRED | Existing integration/evaluation/delivery/handoff commands are local primitives. Git publication now rechecks global KILL under its prepared ref lock; exact already-published intents can still settle receipts under KILL. New integrate/deliver graph kinds remain withheld until these gates are explicitly connected. |
 | Automatic branch advancement | MISSING | Existing delivery creates a new branch. Expected-old-commit CAS advancement must preserve unexpected human commits and exact evaluation evidence. |
 | Restart recovery | UNWIRED | Existing portfolio controller reconciles proven dispatch completion. New graph keeps unresolved intents held; it does not silently replay interrupted workers. |
@@ -45,16 +45,18 @@ stubs are review aids, not signed runtime evidence.
 | Payment broker | UNWIRED | `payment-broker.ts` is a pure capped simulation with carried holds. No rail, keys, transfers or AP2/x402 compatibility is claimed. Durable authenticated serialization remains the caller's responsibility. |
 | Exception-only inbox | UNWIRED | Existing daemon opt-in auto-merge pass already uses inbox authority. Reuse it; do not create a parallel ungated drainer. |
 | Global stop | UNWIRED | Existing sandbox KILL policy is authoritative. New graph checks it plus a restrictive root-local sentinel. Resource workers now use the same shared policy before transport and during active cancellation; broader pre-intent controller integration still needs wiring. Native Windows dispatch is explicitly unavailable until owned cancellation is supported; local HTTP still works. |
-| Operator interface | UNWIRED | Reuse `UniverseControllerInspector` and existing console. Historical intents, live ownership and acknowledged controls must remain distinct. No new visual console was implemented in this wave. |
+| Operator interface | UNWIRED | The resource console now includes a pinned-project task workspace: task sidebar, explicit worker selection, bounded text attachments, actual output, cancellation and a resizable inspector. Drafts survive switching to Resources but are not persisted; authentication/scope changes clear private state. Durable conversations, project switching, terminal/browser/file panels and resident-firm controls remain unwired. |
 | Activation | UNWIRED | Existing daemon/conductor compiled roots remain empty, and broader conductor activation returns false. Runtime source completeness is not permission to bypass that door. |
 
 ## Next executable milestones
 
 1. Exercise the signed graph demo, its lying-builder rejection and conflict query.
-2. Connect the tested `executeFirmResourceTask` host adapter to the graph caller,
-   with truthful execution traces and cumulative hypothesis accounting. Its current
-   receipt-scoped dispatch already reuses resource reservations and current policy;
-   real account commissioning and provider acceptance remain unverified.
+2. Extend the enrolled resource-generation graph adapter into confined change and
+   independent acceptance, with cumulative hypothesis accounting. Its current
+   receipt-scoped dispatch reuses resource reservations and current policy;
+   real account commissioning and provider acceptance remain unverified. Personal
+   Spark enrollment must preserve general-account reservation and prior ledger
+   history; a fresh empty ledger is not an acceptable migration shortcut.
 3. Wire existing integration/evaluation/delivery APIs into graph nodes, then add
    independently tested expected-old-commit branch advancement.
 4. Add durable tick production, overlap suppression and exact attempt receipts
