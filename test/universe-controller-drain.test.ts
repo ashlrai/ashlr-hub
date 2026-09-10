@@ -79,16 +79,71 @@ function fixture() {
   };
   hooks.run.mockImplementation(async (id: string) => finish(id));
   const executionLock = { path: '/synthetic/.execution.lock', token: 'fixture', dev: 1n, ino: 1n };
+  const originalOwns = locks.ownsLocalStoreLock;
+  let executionOwned = true;
+  vi.spyOn(locks, 'ownsLocalStoreLock').mockImplementation((lock) => lock === executionLock ? executionOwned : originalOwns(lock));
   hooks.acquire.mockReturnValue({ state: 'acquired', lock: executionLock });
   const options = { root };
   const directory = store.portfolioControllerDirectory(definition.id, options);
   const events = () => store.readPortfolioControllerEvents(directory);
   const control = (action: 'drain' | 'resume', expectedDrainSequence?: number) =>
     store.requestUniversePortfolioControllerControl(definition.id, action, { root, ...(expectedDrainSequence === undefined ? {} : { expectedDrainSequence }) });
-  return { root, directory, definition, options, readiness, finish, events, control, executionLock };
+  return { root, directory, definition, options, readiness, finish, events, control, executionLock,
+    loseExecution: () => { executionOwned = false; } };
 }
 
 describe('Durable controller drain execution', () => {
+  it.each(['unchanged', 'campaign', 'dependency', 'ownership'] as const)('revalidates %s evidence after final intent transaction contention', async (changed) => {
+    const f = fixture();
+    f.finish('a');
+    f.definition.tasks[1]!.dependsOn = ['a'];
+    const entered = deferred<void>();
+    let transactionLock: locks.LocalStoreLock | undefined;
+    const original = store.appendPortfolioControllerEvent;
+    vi.spyOn(store, 'appendPortfolioControllerEvent').mockImplementation((directory, input, options) => {
+      if (input.kind === 'intent' && !transactionLock) {
+        const acquired = locks.acquireLocalStoreLockWithOutcome(join(f.directory, '.control.lock'), 0,
+          { anchorPath: f.directory, exactPrivateStorage: true });
+        if (acquired.state !== 'acquired') throw new Error('Could not hold fixture admission transaction');
+        transactionLock = acquired.lock;
+        entered.resolve();
+      }
+      return original(directory, input, options);
+    });
+    const release = vi.spyOn(locks, 'releaseLocalStoreLock');
+    const caller = new AbortController();
+    const pending = runUniversePortfolioController(f.definition, { ...f.options, signal: caller.signal });
+    try {
+      await Promise.race([entered.promise, pending.then(() => { throw new Error('Controller returned before admission contention'); })]);
+      const before = f.events();
+      const originalDeadline = readUniversePortfolioController(f.definition.id, f.options).deadlineAt;
+      if (changed === 'ownership') f.loseExecution();
+      else if (changed !== 'unchanged') {
+        const id = changed === 'campaign' ? 'b' : 'a';
+        f.readiness.set(id, { ...f.readiness.get(id)!, recordsDigest: 'd'.repeat(64) });
+      }
+      expect(locks.releaseLocalStoreLock(transactionLock!)).toBe(true);
+      const result = await pending;
+      expect(result.deadlineAt).toBe(originalDeadline);
+      if (changed === 'unchanged') {
+        expect(result).toMatchObject({ status: 'completed', sourceState: 'healthy' });
+        expect(hooks.run).toHaveBeenCalledExactlyOnceWith('b', expect.any(Object), f.executionLock);
+        expect(f.events().filter((row) => row.kind === 'intent')).toHaveLength(1);
+      } else {
+        expect(result).toMatchObject({ status: 'unavailable', sourceState: changed === 'ownership' ? 'healthy' : 'degraded' });
+        expect(hooks.run).not.toHaveBeenCalled();
+        expect(f.events()).toEqual(before);
+        expect(f.events().some((row) => row.kind === 'intent')).toBe(false);
+      }
+      expect(release).toHaveBeenCalledWith(f.executionLock);
+      expect(existsSync(join(f.directory, '.execution.lock'))).toBe(false);
+    } finally {
+      caller.abort();
+      if (transactionLock && locks.ownsLocalStoreLock(transactionLock)) locks.releaseLocalStoreLock(transactionLock);
+      await pending;
+    }
+  });
+
   it('acknowledges drain while waiting for Universe ownership without consuming an intent', async () => {
     const f = fixture(); hooks.acquire.mockReturnValue({ state: 'contended', lock: null });
     const pending = runUniversePortfolioController(f.definition, f.options);

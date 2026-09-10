@@ -2020,6 +2020,15 @@ dispatch still requires loading and checking the original deadline. Settlement
 and acknowledgement may wait up to five seconds for transaction cleanup without
 granting more time for execution.
 
+Before recording a dispatch intent, the controller rechecks target campaign
+identity and records, prerequisite completion and required delivery receipts
+inside the acquired control transaction. This check runs again after lock
+contention; waiting does not preserve an earlier permission to dispatch. Changed
+evidence prevents the new intent and releases the unused execution lease.
+Cancellation, the original deadline and recorded drain still apply. This is a
+fresh admission check, not a globally atomic snapshot of independent campaign
+stores or Git refs, and does not authorize repair or replay of changed work.
+
 Controls and acknowledgements consume the same bounded ledger as dispatches.
 New admission/observation reserves drain and acknowledgement capacity in addition
 to pending settlements; exhausted historical ledgers can still refuse controls

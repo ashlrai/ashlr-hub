@@ -93,6 +93,7 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
 }
 
 class ControllerTransactionWaitStopped extends Error {}
+class ControllerAdmissionRejected extends Error {}
 
 /** Read-only: does not initialize storage, settle intents, acquire ownership or run campaigns. */
 export function readUniversePortfolioController(id: string, options: UniverseStoreOptions = {}): UniversePortfolioControllerReport {
@@ -192,11 +193,20 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     const project = () => inspect(definition.id, events, root, new Date().toISOString(), false);
     return refreshed instanceof Promise ? refreshed.then(project) : project();
   };
-  const append = (event: Parameters<typeof appendPortfolioControllerEvent>[1]): void | Promise<void> => transaction(() => {
+  const append = (event: Parameters<typeof appendPortfolioControllerEvent>[1], beforeIntent?: () => void): void | Promise<void> => transaction(() => {
     owned();
     if (event.kind === 'intent' && stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
     capture(appendPortfolioControllerEvent(directory, event.kind === 'created' ? event : { ...event, at: new Date().toISOString() },
-      { expectedRecords: events }));
+      { expectedRecords: events, ...(event.kind === 'intent' ? { beforeIntent: (current: readonly PortfolioControllerEvent[]) => {
+        capture([...current]);
+        owned();
+        if (stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
+        beforeIntent?.();
+        // Synchronous evidence reads can consume the remaining deadline while
+        // timers cannot run. Check again before the store publishes the intent.
+        if (stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
+        owned();
+      } } : {}) }));
   }, event.kind === 'settled' || event.kind === 'drained');
   const acknowledgeDrain = (): void | Promise<void> => transaction(() => {
     owned();
@@ -303,15 +313,39 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     const targets = new Map(deliveryPlan?.deliveries.map((row) => [row.campaignId, row]));
     const launch = async (campaignId: string, admitted: UniverseCampaignReadiness, executionLock?: LocalStoreLock): Promise<void> => {
       const pin = initial.pins.get(campaignId)!;
+      let latestAdmission = admitted;
       let dispatchId: string | undefined;
       try {
         dispatchId = pin.dispatch === 'campaign' ? randomUUID() : undefined;
-        const intent = append({ kind: 'intent', at: new Date().toISOString(), campaignId, ...(dispatchId ? { dispatchId } : {}) });
+        const intent = append({ kind: 'intent', at: new Date().toISOString(), campaignId, ...(dispatchId ? { dispatchId } : {}) }, () => {
+          const checkLease = (): void => {
+            if (pin.dispatch === 'campaign' && (!executionLock || !ownsLocalStoreLock(executionLock))) {
+              halt('unavailable', 'campaign-execution-ownership-unavailable');
+              throw new ControllerAdmissionRejected('Campaign admission ownership lost');
+            }
+          };
+          checkLease();
+          // Every short-lock retry must discard its old evidence. This is a
+          // fresh synchronous projection, not a lock over all campaign stores.
+          // The caller still holds the exact Universe lease passed to the runner.
+          const report = inspect(definition.id, events, root, new Date().toISOString(), false);
+          const current = readUniverseCampaignReadiness(campaignId, { root });
+          if (stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
+          checkLease();
+          const reason = !matches(pin, current) || current.expectedIdentity!.summaryDigest !== pin.campaignDigest ||
+            current.recordsDigest !== pin.recordsDigest ||
+            (pin.dispatch === 'campaign' ? current.automaticAction !== 'run' || current.resourceRuntimeRequired && resourceRuntime === undefined :
+              current.observedState !== 'completed') ? 'controller-admission-evidence-changed' :
+              report.sourceState !== 'healthy' ? 'controller-dependency-evidence-changed' : null;
+          if (reason) { halt('unavailable', reason); throw new ControllerAdmissionRejected('Controller admission evidence changed'); }
+          latestAdmission = current;
+        });
         if (intent instanceof Promise) await intent;
       }
       catch (error) {
         releaseLocalStoreLock(executionLock);
         if (error instanceof PortfolioControllerDrainError) { const refreshed = refresh(); if (refreshed instanceof Promise) await refreshed; return; }
+        if (error instanceof ControllerAdmissionRejected) return;
         throw error;
       }
       const work = Promise.resolve().then(async () => {
@@ -322,7 +356,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
             result = pin.dispatch === 'campaign' ? await runUniverseCampaignOwned(campaignId, { root, signal: controller.signal,
               dispatchId,
               ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
-              expectedIdentity: { ...admitted.expectedIdentity!, recordsDigest: admitted.recordsDigest! } }, executionLock!) : readUniverseCampaign(campaignId, { root });
+              expectedIdentity: { ...latestAdmission.expectedIdentity!, recordsDigest: latestAdmission.recordsDigest! } }, executionLock!) : readUniverseCampaign(campaignId, { root });
           } finally {
             // Delivery acquires its own execution lease. Never retain the
             // campaign lease across that separate handoff or any early return.

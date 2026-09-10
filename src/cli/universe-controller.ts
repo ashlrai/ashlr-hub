@@ -27,6 +27,8 @@ manifest and delivery intent on restart; existing experiments are not rewritten.
 The original persisted deadline includes downtime and is not renewed by restart.
 Never-dispatched campaigns wait for a busy Universe execution lock within that
 same deadline. No dispatch intent or worker request is recorded while waiting.
+After control-lock contention, admission rechecks campaign and prerequisite
+evidence before recording intent; waiting never preserves a stale dispatch check.
 Changed evidence, owner pauses and uncertain ownership do not authorize a retry.
 Already settled work is reconciled; uncertain or paused work is not automatically
 retried. An in-flight record is evidence of an attempt, not proof of a live worker.
