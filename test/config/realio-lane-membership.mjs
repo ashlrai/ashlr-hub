@@ -129,6 +129,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-local-refresh-integration.test.ts', // inert inventory and local-chat campaign lifecycle
   'test/universe-campaign-readiness.test.ts', // immutable private campaign and evaluator readback
   'test/universe-supervision-integration.test.ts', // confined multi-campaign supervision and owned cleanup
+  'test/universe-campaign-supervisor-restart.test.ts', // real campaign ledgers, admission and leases across foreground reinvocations
   'test/universe-feedback-replay.test.ts', // durable feedback integrity and a complete 64-trial record footprint
   'test/universe-evaluator-diagnostics.test.ts', // immutable fixture stores and evaluator phase feedback replay
   'test/universe-generation-diagnostics.test.ts', // immutable failure evidence and next-generation feedback
