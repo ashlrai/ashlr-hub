@@ -171,7 +171,9 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       scope.allocationWritable !== undefined && typeof scope.allocationWritable !== 'boolean' ||
       scope.historySupported !== undefined && (typeof scope.historySupported !== 'boolean' || scope.historySupported && scope.readOnly) ||
       scope.followUpSupported !== undefined && (typeof scope.followUpSupported !== 'boolean' ||
-        scope.followUpSupported && (scope.readOnly || scope.historySupported !== true)) || !validProjects(scope)) {
+        scope.followUpSupported && (scope.readOnly || scope.historySupported !== true)) || !validProjects(scope) ||
+      scope.workspaceFilesSupported !== undefined && (typeof scope.workspaceFilesSupported !== 'boolean' ||
+        scope.workspaceFilesSupported && (scope.readOnly || !scope.projects))) {
       throw new Error('The server did not establish an explicit resource-pool scope.');
     }
     return scope;

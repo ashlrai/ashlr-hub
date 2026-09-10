@@ -22,6 +22,9 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Register multiple projects with immutable bindings over one shared ledger.
 - [x] Connect explicit project selection and isolated session drafts in the workspace.
 - [x] Verify catalog migration, project-local holds, accounting and UI isolation.
+- [x] Map existing desktop file/tool primitives and choose the next complete integration.
+- [x] Implement registered-project file browsing and explicit task-context attachment.
+- [x] Verify file access, context isolation and browser interaction end-to-end.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -40,6 +43,13 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Implemented locally from `1d1febaf`: three agents mapped and built scoped file
+access, HTTP integration and independent acceptance. Parent integrated the Files
+inspector, snapshot provenance, responsive clearing and documentation. Real files
+can be previewed and explicitly attached without invoking a worker. Resource
+2,475, UI 1,174 and safety 449 passes/five skips are recorded in report.md.
+Native PTY/browser support and unattended commissioning remain next milestones.
+
 Implemented locally from `b3ad1a26`: shared-ledger project selection. Preserve legacy default
 workspace and scope digest; schema 4 adds immutable registered project bindings.
 Startup catalogs may add projects or omit them to disable new work, never silently

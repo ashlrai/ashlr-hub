@@ -1,5 +1,27 @@
 # Firm build notes
 
+## September 10: file-tool continuation
+
+- Resumed clean `1d1febaf` worktree; Entire found no checkpoint. Three parallel
+  explorers mapped filesystem utilities, HTTP lifecycle and real evaluator gaps.
+- Existing stable-file-read is private-store-oriented, lossy UTF-8 and rejects
+  oversized files. New project reads reuse its identity/nofollow/owner pattern
+  with all relative ancestors checked and a strict bounded UTF-8 prefix.
+- Existing finite command/browser verifiers are not interactive PTY/browser
+  sessions. No suitable routes/dependencies exist; this milestone wires real
+  file browsing and explicit copied context without labeling those tools complete.
+- Reviewer found generic404 dispatch wording and top-level hidden-workspace
+  preview lifecycle gaps; fixed both with tests. Parent also cleared previews on
+  mobile-pane changes and preserved three-tab keyboard navigation.
+- One old UI assertion expected the obsolete file-panel-unavailable wording;
+  updated it to the new capability-specific message. Corrected an attachment
+  validator type annotation; discovery guesses for attachments.ts/api.ts and
+  safety globs failed, then resolved against rg file inventories.
+- Full resource suite 2,475 passed; browser inert fixture browsed/read/attached
+  README and verified control-lock clearing. No real task submitted in browser.
+- Known limits remain explicit: observational not OS confinement, private-name
+  filters not secret detection, bounded previews not silently truncated context.
+
 ## September 10: shared-ledger project continuation
 
 - Baseline `b3ad1a26`; three agents divided core, HTTP and independent acceptance.

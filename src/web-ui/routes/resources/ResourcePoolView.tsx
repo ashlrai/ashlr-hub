@@ -205,6 +205,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
       {/* Keep drafts in tab memory while switching surfaces; never persist task text. */}
       <div hidden={surface !== 'workspace'} id="resource-workspace">
         {workspaceVisited ? <WorkspaceView key={`${scope.root}:${scope.poolId}:${scope.workspace ?? ''}`} scope={scope} snapshot={snapshot}
+          surfaceActive={surface === 'workspace'}
           historical={historical} enabled={enabled} stopEnabled={stopEnabled} busy={busy} unlocked={hold.hasHold}
           onUnlock={() => setUnlockOpen(true)} onSubmit={submit} onCancel={(id) => { void cancel(id); }} onDeleteHistory={deleteHistory} /> : null}
       </div>
@@ -297,6 +298,6 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     {unlockOpen ? <MutationTokenDialog open onClose={() => setUnlockOpen(false)} tokenLabel="Control token"
       tokenHelp="the control token this resource console printed" reason={scope.readOnly
         ? `This console’s separate control token enables ${snapshot?.workerAccess ? 'allocation and fleet account access' : 'allocation'} changes only. Task execution remains disabled.`
-        : `This console’s separate control token enables configured ${snapshot?.workerAccess ? 'account access, ' : ''}allocation, queue, submit, and owned-task cancellation actions. Read access alone cannot dispatch work.`} /> : null}
+        : `This console’s separate control token enables configured ${snapshot?.workerAccess ? 'account access, ' : ''}allocation, queue, submit, and owned-task cancellation actions.${scope.workspaceFilesSupported ? ' It also permits explicit project file previews.' : ''} Read access alone cannot dispatch work.`} /> : null}
   </div>;
 }

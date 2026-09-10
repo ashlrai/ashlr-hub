@@ -89,6 +89,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-projects-server.test.ts', // catalog HTTP boundaries and actual CLI bootstrap
   'test/resource-console-projects-acceptance.test.ts', // independent project cwd, shared accounting and migration
   'test/resource-console-project-state.test.ts', // pinned-directory drift at reservation and worker dispatch
+  'test/resource-console-files.test.ts', // registered-project filesystem reads
+  'test/resource-console-files-server.test.ts', // authenticated project-file HTTP routes
+  'test/resource-console-files-acceptance.test.ts', // independent real file-to-task snapshot acceptance
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership
   'test/resource-worker.test.ts', // native worker fixtures and numeric-loopback model transport

@@ -57,6 +57,7 @@ export interface ResourcePoolSupervisorOptions {
 export interface ResourcePoolSupervisor {
   snapshot(): ResourceSupervisorSnapshot;
   projects(): ResourceConsoleProject[] | undefined;
+  projectFileBinding(projectId: string): ResourceConsoleProjectBinding;
   submit(input: ResourceConsoleTaskInput): ResourceSupervisorJob;
   cancel(id: string): ResourceSupervisorJob;
   setPaused(paused: boolean): ResourceSupervisorSnapshot;
@@ -532,6 +533,16 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
 
   const supervisor: ResourcePoolSupervisor = {
+    projectFileBinding(projectId) {
+      ensureAvailable();
+      if (typeof projectId !== 'string' || !ID.test(projectId)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource project');
+      if (!projectBindings || state.schemaVersion !== 4) throw new ResourceSupervisorError('UNAVAILABLE', 'Register projects before browsing files.');
+      const binding = projectBindings.find((project) => project.id === projectId);
+      if (!binding) throw new ResourceSupervisorError('NOT_FOUND', 'Resource project was not found');
+      const reason = projectHold(projectId);
+      if (reason) throw new ResourceSupervisorError('UNAVAILABLE', reason);
+      return detached(binding);
+    },
     projects() {
       return projectBindings ? detached(projectBindings.map(({ dev: _dev, ino: _ino, ...project }) =>
         ({ ...project, enabled: enabledProjects.has(project.id) }))) : undefined;

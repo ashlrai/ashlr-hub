@@ -12,6 +12,7 @@ import { acquireResourceQuotaRefreshLease, ResourceQuotaRefreshLeaseError, type 
 import { publishSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
 import { expandResourceQuotaDenials } from '../resources/quota-scope.js';
 import { validateResourceConsoleProjects } from '../resources/console-projects.js';
+import { listResourceConsoleFiles, readResourceConsoleFile, ResourceConsoleFileError } from '../resources/console-files.js';
 import { createResourceConnectionMonitor, validateResourceConnectionConfig, type ResourceConnectionMonitor } from '../resources/connection-monitor.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from '../resources/metadata-coordinator.js';
 import type { ResourceConsoleScope, ResourceConsoleTaskInput, ResourceConsoleSnapshot } from '../resources/console-types.js';
@@ -272,6 +273,19 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         }
         if (!supervisor || !controlToken) throw new RequestError(403, 'Execution is disabled for this console');
         if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
+        const files = /^\/api\/resources\/projects\/([a-z0-9][a-z0-9_-]{0,63})\/files\/(list|read)$/.exec(url.pathname);
+        if (files) {
+          // Project content is a separate control-unlocked read capability. A
+          // GET session or an originless local request cannot expose file text.
+          if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Project file inspection requires an explicit matching Origin');
+          if (!scope.workspaceFilesSupported) throw new RequestError(403, 'Project file inspection requires a registered project catalog');
+          const input = await body(req);
+          if (!exact(input, ['path']) || typeof input.path !== 'string') throw new RequestError(400, 'Expected one project-relative path');
+          if (closing) throw new RequestError(503, 'Console is closing');
+          const binding = supervisor.projectFileBinding(files[1]!);
+          const result = files[2] === 'list' ? listResourceConsoleFiles(binding, input.path) : readResourceConsoleFile(binding, input.path);
+          sendSnapshot(res, result); return;
+        }
         const cancel = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})\/cancel$/.exec(url.pathname);
         const deleteHistory = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})\/history\/delete$/.exec(url.pathname);
         if (url.pathname !== '/api/resources/tasks' && url.pathname !== '/api/resources/queue' && !cancel && !deleteHistory) {
@@ -388,6 +402,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     void route(req, res).catch((error: unknown) => {
       if (res.headersSent || res.destroyed) { if (!res.writableEnded) res.end(); return; }
       if (error instanceof RequestError) { sendJson(res, error.status, { error: error.message }); return; }
+      if (error instanceof ResourceConsoleFileError) {
+        const statuses = { INVALID_INPUT: 400, NOT_FOUND: 404, UNAVAILABLE: 503, LIMIT_EXCEEDED: 413 };
+        sendJson(res, statuses[error.code], { error: `Project file operation refused: ${error.code.toLowerCase().replaceAll('_', ' ')}` }); return;
+      }
       if (error instanceof ResourceSupervisorError) {
         const statuses = { INVALID_INPUT: 400, CONFLICT: 409, CAPACITY: 429, NOT_FOUND: 404, UNAVAILABLE: 503 };
         sendJson(res, statuses[error.code] ?? 503, { error: `Resource operation refused: ${error.code.toLowerCase().replaceAll('_', ' ')}` }); return;
@@ -460,6 +478,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         readQuotaUnavailableWorkerIds: () => quotaRefresher?.quotaUnavailableWorkerIds() ?? [] } : {}), signal });
     const publishedProjects = supervisor?.projects?.();
     if (publishedProjects !== undefined) { scope.projects = publishedProjects; scope.defaultProjectId = 'default'; }
+    if (publishedProjects !== undefined && typeof supervisor?.projectFileBinding === 'function') scope.workspaceFilesSupported = true;
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     if (quotaConfig || connectionsConfig) {
       // Execution ownership and all startup preflight must succeed before the

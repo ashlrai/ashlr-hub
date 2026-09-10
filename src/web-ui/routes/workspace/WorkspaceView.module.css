@@ -1,5 +1,16 @@
 .workspace { display: grid; grid-template-columns: 192px minmax(0, 1fr) 8px var(--workspace-dock-width, 320px); min-width: 0; min-height: 600px; height: clamp(600px, calc(100dvh - 180px), 1100px); overflow: hidden; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-lg); color: var(--text-primary); font-family: var(--font-ui); }
 .workspace > * { min-width: 0; }
+.fileBrowse { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-block: var(--space-4); }
+.fileBrowse label { flex: 1 1 180px; font-size: var(--text-xs-size); }
+.fileBrowse input { display: block; width: 100%; box-sizing: border-box; min-height: 40px; margin-top: var(--space-1); padding: var(--space-2); border: 1px solid var(--border-default); border-radius: var(--radius-sm); color: var(--text-primary); background: var(--bg-surface); }
+.fileHeading { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-size: var(--text-sm-size); overflow-wrap: anywhere; }
+.fileList { list-style: none; padding: 0; max-height: 280px; overflow-y: auto; }
+.fileList button { display: flex; align-items: baseline; gap: var(--space-2); width: 100%; min-height: 40px; padding: var(--space-2); border: 0; border-bottom: 1px solid var(--border-subtle); text-align: left; color: var(--text-primary); background: transparent; }
+.fileList button:hover { background: var(--bg-hover); }
+.fileList button > span:nth-child(2) { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.fileList small { flex-shrink: 0; color: var(--text-tertiary); font-size: var(--text-xs-size); }
+.files h4, .files code { overflow-wrap: anywhere; }
+.filePreview { font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: 1.65; tab-size: 2; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; max-height: 420px; overflow: auto; padding: var(--space-3); border: 1px solid var(--border-default); background: var(--bg-surface); border-radius: var(--radius-sm); }
 .transcript { margin-block: var(--space-5); padding: var(--space-4); border: 1px solid var(--border-default); border-radius: var(--radius-md); }
 .transcript h3, .transcript h4 { font-size: var(--text-sm-size); margin-block: var(--space-3); }
 .transcriptActions { display: flex; flex-wrap: wrap; gap: var(--space-2); }

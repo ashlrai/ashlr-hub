@@ -9,8 +9,10 @@ import { composeWorkspaceTaskPrompt, MAX_WORKSPACE_ATTACHMENTS, MAX_WORKSPACE_AT
   validateWorkspaceAttachments, WORKSPACE_TEXT_ATTACHMENT_ACCEPT, type WorkspaceTextAttachment } from './workspace-attachments.js';
 import styles from './WorkspaceView.module.css';
 import { TaskTranscript } from './TaskTranscript.js';
+import { WorkspaceFiles } from './WorkspaceFiles.js';
 
 export interface WorkspaceViewProps {
+  surfaceActive?: boolean;
   scope: ResourceConsoleScope; snapshot: ResourceConsoleSnapshot; historical: boolean;
   enabled: boolean; stopEnabled: boolean; busy: boolean; unlocked: boolean;
   onUnlock(): void; onSubmit(input: ResourceConsoleTaskInput): Promise<boolean>; onCancel(id: string): void;
@@ -24,7 +26,7 @@ const projectLabel = (project: ResourceConsoleProject) => project.id === 'defaul
 /** A host scope change cannot carry drafts or output into another workspace. */
 export function WorkspaceView(props: WorkspaceViewProps) {
   const key = `${props.scope.root}:${props.scope.poolId}:${props.scope.workspace ?? ''}`;
-  return props.scope.projects ? <ProjectWorkspaces key={key} {...props} /> : <WorkspaceBody key={key} {...props} />;
+  return props.scope.projects ? <ProjectWorkspaces key={key} {...props} /> : <WorkspaceBody key={key} {...props} active={props.surfaceActive !== false} />;
 }
 
 /** Keep only visited drafts in session memory. Hidden projects cannot initiate UI reads. */
@@ -46,7 +48,7 @@ function ProjectWorkspaces(props: WorkspaceViewProps) {
       supervisor: props.snapshot.supervisor ? { ...props.snapshot.supervisor, jobs } : null };
     return <div key={`${project.id}:${project.workspace}`} hidden={projectId !== project.id}>
       <WorkspaceBody {...props} scope={{ ...props.scope, workspace: project.workspace }} snapshot={snapshot}
-        project={project} projects={projects} onSelectProject={choose} active={projectId === project.id} />
+        project={project} projects={projects} onSelectProject={choose} active={props.surfaceActive !== false && projectId === project.id} />
     </div>;
   })}</>;
 }
@@ -83,7 +85,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   const outputKey = `${session}:${selection ?? ''}`;
   const currentOutputKey = useRef(outputKey); currentOutputKey.current = outputKey;
   const alive = useRef(true);
-  const [dockTab, setDockTab] = useState<'output' | 'details'>('details');
+  const [dockTab, setDockTab] = useState<'output' | 'details' | 'files'>('details');
   const [dockWidth, setDockWidth] = useState(320);
   const drag = useRef<{ id: number; x: number; width: number } | null>(null);
   const [mobilePane, setMobilePane] = useState<'tasks' | 'task' | 'tools'>('task');
@@ -157,6 +159,9 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     let composed: string;
     const timeoutMs = Number(seconds) * 1000; const maxOutputTokens = Number(tokens);
     try {
+      if (attachments.some((attachment) => attachment.source && attachment.source.projectId !== (project?.id ?? 'default'))) {
+        throw new Error('Attached project snapshots must belong to the selected project.');
+      }
       if (!worker || !prompt.trim() || !Number.isSafeInteger(Number(seconds)) || timeoutMs < 1000 || timeoutMs > 900_000 ||
         !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 16_384) {
         throw new Error('Write a task, choose an enrolled worker, and use 1–900 seconds with 1–16,384 output tokens.');
@@ -210,7 +215,11 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   }
   function tabKey(event: KeyboardEvent<HTMLButtonElement>) {
     if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
-    event.preventDefault(); const next = event.key === 'Home' ? 'output' : event.key === 'End' ? 'details' : dockTab === 'output' ? 'details' : 'output';
+    event.preventDefault();
+    const order: Array<typeof dockTab> = scope.workspaceFilesSupported ? ['output', 'details', 'files'] : ['output', 'details'];
+    const current = Math.max(0, order.indexOf(dockTab));
+    const next = order[event.key === 'Home' ? 0 : event.key === 'End' ? order.length - 1 :
+      (current + (event.key === 'ArrowRight' ? 1 : -1) + order.length) % order.length]!;
     setDockTab(next); tabs.current?.querySelector<HTMLButtonElement>(`[data-tab="${next}"]`)?.focus();
   }
 
@@ -313,12 +322,15 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
       onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }} />
     <aside className={styles.dock} data-mobile-visible={mobilePane === 'tools'} aria-label="Task tools">
       <div className={styles.dockTabs} role="tablist" aria-label="Task tool tabs" ref={tabs}>
-        {(['output', 'details'] as const).map((tab) => <button key={tab} type="button" role="tab" data-tab={tab} id={`${domId}-tab-${tab}`}
+        {(['output', 'details', ...(scope.workspaceFilesSupported ? ['files' as const] : [])] as const).map((tab) => <button key={tab} type="button" role="tab" data-tab={tab} id={`${domId}-tab-${tab}`}
           aria-controls={`${domId}-panel-${tab}`} aria-selected={dockTab === tab} tabIndex={dockTab === tab ? 0 : -1}
-          onKeyDown={tabKey} onClick={() => setDockTab(tab)}>{tab === 'output' ? 'Output' : 'Task details'}</button>)}
+          onKeyDown={tabKey} onClick={() => setDockTab(tab)}>{tab === 'output' ? 'Output' : tab === 'files' ? 'Files' : 'Task details'}</button>)}
       </div>
       <section className={styles.dockContent} role="tabpanel" id={`${domId}-panel-${dockTab}`} aria-labelledby={`${domId}-tab-${dockTab}`}>
-        {dockTab === 'output' ? <><h3>Response text</h3>{response ? <><p className={styles.caption}>{response.truncated ? 'Truncated. ' : ''}Console-session output.</p><pre className={styles.responseText}>{response.text}</pre></>
+        {dockTab === 'files' ? active && scope.workspaceFilesSupported ? <WorkspaceFiles key={`${session}:${project?.id ?? 'default'}:${mobilePane}`} projectId={project?.id ?? 'default'}
+          unlocked={unlocked} available={!historical && enabled && project?.enabled !== false} canAttach={canSend && !lockedForm} onUnlock={onUnlock}
+          onAttach={(attachment) => { const checked = validateWorkspaceAttachments([...attachments, attachment]); setAttachments(checked); }} /> : null
+          : dockTab === 'output' ? <><h3>Response text</h3>{response ? <><p className={styles.caption}>{response.truncated ? 'Truncated. ' : ''}Console-session output.</p><pre className={styles.responseText}>{response.text}</pre></>
           : <p className={styles.caption}>Read a selected task’s response in the task pane to inspect its text here.</p>}</>
           : <><h3>{selection ? 'Task routing' : 'Next task routing'}</h3><dl className={styles.facts}>
             <div><dt>Worker</dt><dd>{selection ? selected?.workerId ?? 'No confirmed assignment' : worker?.id ?? 'Choose a worker'}</dd></div>
@@ -331,7 +343,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
               <div><dt>Reason</dt><dd>{resourceReason(selected.job?.reason ?? selected.receipt?.reason ?? 'not-reported')}</dd></div></> : null}
           </dl><p className={styles.caption}>An enrolled worker is a routing choice. Current capacity is checked before dispatch; completion is not independent acceptance.</p></>}
       </section>
-      <p className={styles.capabilities}>Text attachments are supported. Interactive terminal, browser and workspace file panels are not connected yet.</p>
+      <p className={styles.capabilities}>{scope.workspaceFilesSupported ? 'Project text previews and snapshot attachments are connected. Interactive terminal and browser are not connected yet.' : 'Text attachments are supported. Register a project catalog to enable file previews. Interactive terminal and browser are not connected yet.'}</p>
     </aside>
   </section>;
 }

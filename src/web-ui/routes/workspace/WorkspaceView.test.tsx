@@ -27,7 +27,7 @@ describe('project task workspace', () => {
     expect(screen.getByRole('heading', { name: 'project' })).toBeVisible();
     expect(screen.getAllByText('/private/project').length).toBeGreaterThan(0);
     expect(screen.getByRole('button', { name: /queued-task/ })).toBeInTheDocument();
-    expect(screen.getByText(/Interactive terminal, browser and workspace file panels are not connected yet/)).toBeInTheDocument();
+    expect(screen.getByText(/Register a project catalog to enable file previews. Interactive terminal and browser are not connected yet/)).toBeInTheDocument();
     expect(screen.getByLabelText('Task workspace access')).toHaveValue('read-only');
     expect(screen.getByLabelText('Task worker')).toHaveValue('');
     expect(request).not.toHaveBeenCalled(); expect(props.onSubmit).not.toHaveBeenCalled();

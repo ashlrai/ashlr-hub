@@ -211,8 +211,54 @@ invented. This project-local failure does not establish a provider outage. These
 checks reduce replacement races; string-based process working directories do not
 eliminate every time-of-check/time-of-use race or provide confinement.
 
+### Browse project files and attach a snapshot
+
+Catalog-enabled execution consoles expose a **Files** tab in the workspace
+inspector. Select a registered project, unlock controls, and choose **Browse
+files**. A read-session link alone cannot inspect source files. The same control
+authority used for task actions authorizes these explicit file reads; merely
+unlocking or opening the tab does not read a directory or invoke a model.
+
+Open a directory or enter a project-relative directory, then select a file to
+preview. The server reads regular UTF-8 text up to 64 KiB, marks partial previews,
+and returns a SHA-256 digest of the **returned bytes**, not any omitted suffix.
+Directories are inspected one level at a time, with a 256-entry scan limit;
+oversized listings fail explicitly rather than masquerading as complete. No
+recursive indexing or background filesystem scan occurs.
+
+**Attach viewed snapshot** copies the preview into the current project's draft.
+It does not reread the file on send. Its relative path, project ID and snapshot
+digest accompany the copied reference text. Files changed after preview do not
+silently replace the attachment. Attachments remain bounded at four files and
+16 KiB each, within the complete 32 KiB request limit. Partial/oversized previews
+cannot be attached; duplicate basenames must be resolved by removing the existing
+attachment first. Common extensionless repository files such as `Dockerfile`,
+`Makefile`, `LICENSE`, and the allowed metadata files can also be attached. Other
+unsupported filenames can be previewed but not attached. Sending, provider admission and optional transcript retention remain
+separate actions with the existing accounting and plaintext-retention behavior.
+
+Reads require a currently enabled, pinned project binding and console ownership.
+All relative directory components and file identities are checked before/after
+reading. Symlinks, hardlinks, special files, unsafe permissions, known credential
+paths and dependency/build directories are refused. Hidden paths are excluded
+except ordinary repository metadata: `.github`, `.gitignore`, `.gitattributes`
+and `.editorconfig`. These checks are not comprehensive secret detection or an
+OS-enforced filesystem sandbox. Review previews before sending their content to a
+provider; ordinary source files can also contain secrets.
+
+Preview text and listing state stay out of polling snapshots and browser storage.
+Switching projects, hiding the workspace/file panel, losing control access or
+changing console sessions clears previews and cancels in-flight reads. Explicitly
+attached draft copies remain separate from preview state and retain the existing
+session-only draft lifecycle. File browsing itself changes no task/ledger state.
+
+The API uses control-token-authenticated POST requests with a matching Origin:
+`/api/resources/projects/:id/files/list` and `/api/resources/projects/:id/files/read`,
+each with exactly `{ "path": "relative/path" }` (empty path lists the root).
+Paths stay out of request URLs; responses are `no-store`. No filesystem write,
+delete, rename, terminal command or browser navigation API is introduced.
+
 The next operating-layer milestones are conversation grouping and compaction,
-scoped file browsing,
 owned PTY sessions, and an isolated browser bridge. The existing Tauri wrapper
 remains a source-only draft; this web surface is not a commissioned installer.
 

@@ -1,6 +1,59 @@
 # Verified local handoff
 
-## Current continuation: multiple projects, one intelligence ledger
+## Current continuation: real project file tools
+
+Baseline: `1d1febaf031cb9fe2eeef8d19987427313371c89`; isolated `auto/p00`
+worktree at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.
+The commit containing this report is the delivered source. Three agents mapped
+existing primitives, then implemented bounded filesystem reads, HTTP integration,
+and independent acceptance. Parent integrated file queries, inspector UI, snapshot
+attachments, responsive lifecycle behavior and documentation.
+
+- The Files tab browses actual registered project directories and previews UTF-8
+  source. Explicit control-token and same-origin authority are required; existing
+  read links do not gain filesystem access. No reads occur merely from unlocking,
+  opening a tab or selecting a project. No separate ledger, schema migration or
+  provider adapter was introduced.
+- Reads resolve only enabled, pinned project bindings. Directory/file identities,
+  ancestors, ownership and permissions are checked around bounded reads. Links,
+  special files and known private paths are refused. Ordinary repository metadata
+  remains usable. This is observational checking, not an OS sandbox or exhaustive
+  secret detection; source may contain secrets and must be reviewed before sending.
+- Directory scans stop at 256 entries; previews at 64 KiB. Partial previews retain
+  honest byte counts and a digest of returned bytes only. Explicit attachments copy
+  the viewed snapshot with project/path/digest provenance; later disk changes are
+  never silently reread. Existing four-file/16 KiB/32 KiB request limits apply;
+  same-basename collisions refuse instead of overwriting. Common repository text
+  filenames are supported alongside existing text extensions.
+- Project, surface, mobile-pane, session, tab and control-access changes cancel
+  preview reads and clear their private state. Explicit draft attachments remain
+  separate; no preview text enters polling snapshots or persistent browser storage.
+  Keyboard navigation includes the third Files tab; markup renders as text.
+- **2,475 resource tests passed / 75 files**; **1,174 UI tests passed / 71 files**. Safety:
+  **449 passed, five existing skips / 41 files**. Builder/reviewer subsets overlap
+  integrated counts and are not additional work totals. Typecheck, lint, docs,
+  real-I/O classification, build and all five compiled safety checks passed.
+- Independent HTTP acceptance reads actual files, changes the source afterward,
+  and proves one explicit inert task receives the copied snapshot only. Browser
+  verification separately browsed a real fixture README, previewed and attached
+  it, then locked controls: preview cleared, draft attachment remained. No browser
+  task was sent. The disposable preview server and tab were stopped.
+
+Original checkout and active host KILL remain unchanged. No real Hub provider
+job, account changes, GitHub Actions, remote push, npm publication, desktop
+installation or production activation occurred. Entire resume found no checkpoint;
+manual-commit session tracking remains enabled. A post-commit build pins clean
+source identity. Planning/agent-building skills kept the existing runtime;
+frontend/React guidance shaped explicit private reads and interaction;
+documentation guidance separates verified functionality from live commissioning.
+
+The full goal remains active. Native PTY ownership, interactive browser tooling,
+conversation compaction and the verified unattended implementation/evaluation/
+delivery loop are still outstanding, as is real-account commissioning. Historical
+package accounting remains 15 locally landed component artifacts and 33 planned;
+working file tools do not prove an always-on autonomous engineering company.
+
+## Prior continuation: multiple projects, one intelligence ledger
 
 Baseline: `b3ad1a266f53d05c3bb3d604f7947459ebb987a0`; isolated branch `auto/p00`.
 The commit containing this report is the delivered source. Three parallel agents

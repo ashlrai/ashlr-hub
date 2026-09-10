@@ -23,6 +23,8 @@ export interface ResourceConsoleScope {
   followUpSupported?: boolean;
   projects?: ResourceConsoleProject[];
   defaultProjectId?: 'default';
+  /** Control-unlocked, project-pinned local file inspection; never read-session authority. */
+  workspaceFilesSupported?: true;
 }
 
 export interface ResourceConsoleProjectInput { id: string; label: string; workspace: string }

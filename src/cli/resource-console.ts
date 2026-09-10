@@ -21,6 +21,8 @@ provider allowances and edit the selected workspace when a queued task requests 
 {schemaVersion:1,projects:[{id,label,workspace}]} with at most 31 additional projects;
 the ID default is reserved. Browser requests select IDs, never arbitrary paths.
 Projects share the same supervisor, resource ledger, account limits and collector.
+Registered catalogs also enable explicit control-token-unlocked project file previews.
+Browsing reads local source without invoking a worker; attaching and sending are separate.
 Project selection binds task context and working directory, not a filesystem sandbox.
 Queued intents and pause state are durable; previously dispatching work is never
 silently replayed after restart. Ordinary output is bounded and session-only;

@@ -1,5 +1,19 @@
 # Firm build evidence — September 10, 2026
 
+## File-tool continuation from 1d1febaf
+
+Three implementation/review agents and parent integration connected real
+registered-project directory browsing, text previews and explicit snapshot
+attachments. Reads require control authority and never invoke a worker; accepted
+attachments carry copied text and provenance through ordinary task admission.
+
+Full resource verification: 2,475 passes across 75 files. Safety: 449 passes with
+five existing skips. UI: 1,174 passes across 71 files. Browser acceptance
+used a real file in an inert local fixture, with no task submission. Core and
+HTTP tests cover drift, links, binary refusal, bounds and snapshot-to-task input.
+No account changes, remote publication or live activation. Interactive PTY/browser
+tools and always-on commissioning remain outstanding; full goal stays active.
+
 ## Project workspace continuation from b3ad1a26
 
 Three parallel builder/reviewer assignments plus parent integration delivered

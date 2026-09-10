@@ -1,15 +1,17 @@
-/** Browser-selected text only. This helper performs no file, storage, or network IO. */
+/** Explicitly selected text snapshots. No file, storage, or network IO occurs here. */
 export const MAX_WORKSPACE_ATTACHMENTS = 4;
 export const MAX_WORKSPACE_ATTACHMENT_BYTES = 16 * 1024;
 export const MAX_WORKSPACE_PROMPT_BYTES = 32 * 1024;
 const EXTENSIONS = ['txt', 'md', 'markdown', 'json', 'csv', 'tsv', 'yaml', 'yml', 'toml', 'xml', 'html',
   'css', 'js', 'jsx', 'ts', 'tsx', 'mjs', 'cjs', 'py', 'rs', 'go', 'java', 'c', 'cpp', 'h', 'hpp', 'sh', 'sql', 'log', 'ini', 'conf'];
+const TEXT_NAMES = new Set(['dockerfile', 'makefile', 'license', 'readme', '.gitignore', '.gitattributes', '.editorconfig']);
 export const WORKSPACE_TEXT_ATTACHMENT_ACCEPT = EXTENSIONS.map((extension) => `.${extension}`).join(',');
 
 export interface WorkspaceTextAttachment {
   readonly name: string;
   readonly text: string;
   readonly byteLength: number;
+  readonly source?: { readonly projectId: string; readonly path: string; readonly digest: string };
 }
 
 const encoder = new TextEncoder();
@@ -23,7 +25,7 @@ function filename(value: unknown): string {
       [...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159) ||
       encoder.encode(value).byteLength > 255 || !validUnicode(value)) throw new Error('Use a plain filename without paths or control characters.');
   const extension = value.slice(value.lastIndexOf('.') + 1).toLowerCase();
-  if (!value.includes('.') || !EXTENSIONS.includes(extension)) {
+  if ((!value.includes('.') || !EXTENSIONS.includes(extension)) && !TEXT_NAMES.has(value.toLowerCase())) {
     throw new Error('Only supported UTF-8 text files can be attached. Images, PDFs, and other binary files are not supported yet.');
   }
   return value;
@@ -37,7 +39,7 @@ function textContent(text: unknown): string {
   return text;
 }
 
-/** The caller obtains these bytes only from a user-selected File.arrayBuffer(). */
+/** Bytes come from a selected browser file or explicitly viewed project snapshot. */
 export function parseWorkspaceTextAttachment(name: string, bytes: ArrayBuffer | Uint8Array): WorkspaceTextAttachment {
   const checkedName = filename(name);
   let byteLength: number;
@@ -59,14 +61,23 @@ export function validateWorkspaceAttachments(attachments: readonly WorkspaceText
   const names = new Set<string>(); const result: WorkspaceTextAttachment[] = [];
   for (const attachment of attachments) {
     if (!attachment || typeof attachment !== 'object' ||
-      Reflect.ownKeys(attachment).length !== 3 || !['name', 'text', 'byteLength'].every((key) =>
+      Reflect.ownKeys(attachment).length !== (Object.hasOwn(attachment, 'source') ? 4 : 3) || !['name', 'text', 'byteLength',
+        ...(Object.hasOwn(attachment, 'source') ? ['source'] : [])].every((key) =>
         Object.hasOwn(Object.getOwnPropertyDescriptor(attachment, key) ?? {}, 'value'))) throw new Error('Invalid text attachment.');
     const name = filename(attachment.name); const text = textContent(attachment.text);
     const byteLength = encoder.encode(text).byteLength;
     if (attachment.byteLength !== byteLength) throw new Error('The text attachment changed; select it again.');
     const key = name.normalize('NFC').toLowerCase();
     if (names.has(key)) throw new Error('Attachment filenames must be distinct, including letter case and Unicode variants.');
-    names.add(key); result.push(Object.freeze({ name, text, byteLength }));
+    const source = attachment.source;
+    if (Object.hasOwn(attachment, 'source') && (!source || typeof source !== 'object' || Reflect.ownKeys(source).length !== 3 ||
+      !['projectId', 'path', 'digest'].every((field) => Object.hasOwn(Object.getOwnPropertyDescriptor(source, field) ?? {}, 'value')) ||
+      typeof source.projectId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(source.projectId) || typeof source.path !== 'string' ||
+      encoder.encode(source.path).byteLength > 4096 || source.path.includes('\\') || !validUnicode(source.path) ||
+      source.path.split('/').some((part: string) => !part || part === '.' || part === '..') || source.path.split('/').at(-1) !== name ||
+      [...source.path].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) >= 127 && c.charCodeAt(0) <= 159) ||
+      typeof source.digest !== 'string' || !/^[a-f0-9]{64}$/.test(source.digest))) throw new Error('Invalid project file snapshot.');
+    names.add(key); result.push(Object.freeze({ name, text, byteLength, ...(source ? { source: Object.freeze({ ...source }) } : {}) }));
   }
   return result;
 }
@@ -80,7 +91,7 @@ export function composeWorkspaceTaskPrompt(prompt: string, attachments: readonly
   }
   const checked = validateWorkspaceAttachments(attachments);
   const result = checked.length ? FRAME + JSON.stringify({ request: prompt,
-    attachments: checked.map(({ name, text }) => ({ name, text })) }) : prompt;
+    attachments: checked.map(({ name, text, source }) => ({ name, text, ...(source ? { source } : {}) })) }) : prompt;
   if (encoder.encode(result).byteLength > MAX_WORKSPACE_PROMPT_BYTES) {
     throw new Error('The complete task, filenames, and attached text must fit within 32 KiB. Remove a file or shorten the task.');
   }
