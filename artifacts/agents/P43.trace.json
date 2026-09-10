@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "package": "P43",
+  "artifactKind": "unsigned-development-stub",
+  "productionEvidence": false,
+  "provenanceSig": null,
+  "scope": "Runnable inert demo implementation; actual signed evidence is produced only in an explicit private graph root with an existing provenance key."
+}
