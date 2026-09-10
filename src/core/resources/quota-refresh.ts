@@ -9,6 +9,7 @@ import { validateResourceBindings, type ResourceBinding } from './worker.js';
 import { probeCodexResourceAccount, type CodexResourceProbeOptions, type CodexResourceProbeResult } from './codex-account-probe.js';
 import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from './quota-refresh-lease.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from './metadata-coordinator.js';
+import { resourceQuotaBuckets, expandResourceQuotaDenials } from './quota-scope.js';
 
 export const RESOURCE_QUOTA_REFRESH_INTERVAL_MS = 30_000;
 export const RESOURCE_QUOTA_REFRESH_TTL_MS = 60_000;
@@ -63,6 +64,8 @@ export interface ResourceQuotaRefresher {
   readObservations(base: ResourceObservation[]): ResourceObservation[];
   /** Ephemeral admission constraint, not a fabricated provider observation or persisted quota measurement. */
   unavailableWorkerIds(deferAllocationToAdmission?: boolean): string[];
+  /** Quota-only vetoes; explicit account/transport denials remain in unavailableWorkerIds. */
+  quotaUnavailableWorkerIds(deferAllocationToAdmission?: boolean): string[];
   snapshot(): ResourceQuotaRefreshSnapshot;
   close(): Promise<void>;
 }
@@ -108,6 +111,8 @@ export function validateResourceQuotaRefreshConfig(value: unknown, poolValue: Re
       pool.workers.find((worker) => worker.id === row.workerId)?.provider !== 'codex' ||
       bindings.find((binding) => binding.workerId === row.workerId)?.kind !== 'native-cli') return invalid();
     seen.add(row.workerId);
+    const expected = resourceQuotaBuckets(pool.workers.find((worker) => worker.id === row.workerId)!);
+    if (expected && canonical([...row.bucketIds].sort()) !== canonical(expected)) return invalid();
     workers.push({ workerId: row.workerId, accountHint: row.accountHint, bucketIds: [...row.bucketIds as string[]].sort() });
   }
   const hints = new Map<string, string>(); const byWorker = new Map(workers.map((worker) => [worker.workerId, worker]));
@@ -118,7 +123,10 @@ export function validateResourceQuotaRefreshConfig(value: unknown, poolValue: Re
     hints.set(row.accountHint, binding.capacityKey);
     for (const alias of bindings.filter((candidate) => candidate.capacityKey === binding.capacityKey)) {
       const enrolled = byWorker.get(alias.workerId);
-      if (!enrolled || enrolled.accountHint !== row.accountHint || canonical(enrolled.bucketIds) !== canonical(row.bucketIds)) return invalid();
+      if (!enrolled || enrolled.accountHint !== row.accountHint) return invalid();
+      const a = resourceQuotaBuckets(pool.workers.find((worker) => worker.id === row.workerId)!);
+      const b = resourceQuotaBuckets(pool.workers.find((worker) => worker.id === alias.workerId)!);
+      if ((!a || !b) && canonical(enrolled.bucketIds) !== canonical(row.bucketIds)) return invalid();
     }
   }
   return immutable({ schemaVersion: 1, poolDigest: value.poolDigest, workers });
@@ -209,6 +217,13 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
     if (observation.windows.length === 0 || observation.windows.some((window) => window.usedPercent === null ||
       window.resetsAt === null || Date.parse(window.resetsAt) <= now)) return 'managed-quota-unknown';
     return null;
+  }
+
+  function quotaOnly(row: ManagedWorker, reason: string | null): boolean {
+    return resourceQuotaBuckets(pool.workers.find((worker) => worker.id === row.config.workerId)!) !== null &&
+      row.observation?.health === 'ready' && !(row.observation.retryAfter && Date.parse(row.observation.retryAfter) > Date.now()) &&
+      reason !== null && ['managed-quota-future', 'managed-quota-expired', 'managed-quota-reserve-reached',
+        'managed-quota-unknown'].includes(reason);
   }
 
   function checkedObservation(result: CodexResourceProbeResult, row: ManagedWorker, attemptAt: string): ResourceObservation | null {
@@ -348,9 +363,18 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
     },
     unavailableWorkerIds(deferAllocationToAdmission = false): string[] {
       owns();
-      const now = Date.now(); const unavailable = new Set(rows.filter((row) => unavailableReason(row, now, deferAllocationToAdmission) !== null)
+      const now = Date.now(); const unavailable = new Set(rows.filter((row) => {
+        const reason = unavailableReason(row, now, deferAllocationToAdmission);
+        return reason !== null && !quotaOnly(row, reason);
+      })
         .map((row) => row.capacityKey));
       return Object.freeze(rows.filter((row) => unavailable.has(row.capacityKey)).map((row) => row.config.workerId)) as string[];
+    },
+    quotaUnavailableWorkerIds(deferAllocationToAdmission = false): string[] {
+      owns();
+      const now = Date.now();
+      return expandResourceQuotaDenials(pool, bindings, rows.filter((row) =>
+        quotaOnly(row, unavailableReason(row, now, deferAllocationToAdmission))).map((row) => row.config.workerId));
     },
     snapshot(): ResourceQuotaRefreshSnapshot {
       const now = Date.now();
@@ -376,7 +400,7 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
   capacityWaitMs?: number;
   /** The caller retains measured usage and reevaluates the current policy at atomic admission. */
   deferAllocationToAdmission?: boolean;
-}): Promise<{ observations: ResourceObservation[]; unavailableWorkerIds: string[] }> {
+}): Promise<{ observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] }> {
   const started = performance.now();
   const timeoutMs = options.timeoutMs;
   if (options.deferAllocationToAdmission !== undefined && typeof options.deferAllocationToAdmission !== 'boolean') {
@@ -409,7 +433,7 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
   let coordinator: NativeMetadataCoordinator | undefined;
   let refresher: ResourceQuotaRefresher | undefined;
   let preservePending = false;
-  let result: { observations: ResourceObservation[]; unavailableWorkerIds: string[] } | undefined;
+  let result: { observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] } | undefined;
   let failure: Error | undefined;
   try {
     const available = remaining();
@@ -441,7 +465,9 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
       // Preserve capture-time evidence, not the intentionally closed collector's
       // availability. The caller must recheck freshness after awaited cleanup.
       result = { observations: refresher.readObservations(observations),
-        unavailableWorkerIds: refresher.unavailableWorkerIds(options.deferAllocationToAdmission) };
+        unavailableWorkerIds: refresher.unavailableWorkerIds(options.deferAllocationToAdmission),
+        ...(checked.pool.workers.some((worker) => worker.quotaScope) ? {
+          quotaUnavailableWorkerIds: refresher.quotaUnavailableWorkerIds(options.deferAllocationToAdmission) } : {}) };
     }
   } catch {
     failure = new Error('Resource quota refresh could not complete');

@@ -156,7 +156,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   function managedQuotaEvidence() {
     if (!quotaConfig) return undefined;
     return quotaRefresher ? { observations: quotaRefresher.readObservations([]),
-      unavailableWorkerIds: quotaRefresher.unavailableWorkerIds() } : {
+      unavailableWorkerIds: quotaRefresher.unavailableWorkerIds(), quotaUnavailableWorkerIds: quotaRefresher.quotaUnavailableWorkerIds() } : {
       observations: [], unavailableWorkerIds: quotaConfig.workers.map((row) => row.workerId),
     };
   }
@@ -179,6 +179,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           // Allocation may change independently; the consuming admission lock
           // applies the current ceiling, rather than a cached policy veto.
           unavailableWorkerIds: quotaRefresher.unavailableWorkerIds(true),
+          quotaUnavailableWorkerIds: quotaRefresher.quotaUnavailableWorkerIds(true),
         } });
     } catch {
       // Invalidate the preceding success immediately, even if native teardown
@@ -288,7 +289,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             // Retry once, then withhold rather than attach newer collector
             // metadata to an earlier eligibility decision.
             if (JSON.stringify(managed) !== JSON.stringify(current)) continue;
-            evidence = withholdResourceConsoleWorkers(evidence, current.unavailableWorkerIds);
+            evidence = withholdResourceConsoleWorkers(evidence, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
           }
           // A deduplicated worker read can predate this request's policy read.
           // Reapply current pauses so a cached projection cannot show readiness.
@@ -409,7 +410,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
         return quotaRefresher ? quotaRefresher.readObservations(base) : base; },
       ...(quotaConfig ? { readUnavailableWorkerIds: () => quotaRefresher ? quotaRefresher.unavailableWorkerIds()
-        : quotaConfig.workers.map((row) => row.workerId) } : {}), signal });
+        : quotaConfig.workers.map((row) => row.workerId),
+        readQuotaUnavailableWorkerIds: () => quotaRefresher?.quotaUnavailableWorkerIds() ?? [] } : {}), signal });
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     if (quotaConfig || connectionsConfig) {
       // Execution ownership and all startup preflight must succeed before the

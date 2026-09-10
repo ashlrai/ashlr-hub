@@ -7,7 +7,8 @@ import { performance } from 'node:perf_hooks';
 import { mergeResourceObservations, readResourceJson, readResourcePoolAllocation, resourcePoolStatus, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
 import { refreshResourceQuotaOnce, validateResourceQuotaRefreshConfig } from '../resources/quota-refresh.js';
 import { readSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
-import { waitForResourceCapacity } from '../resources/capacity-wait.js';
+import { waitForResourceCapacity, type ResourceCapacityEvidence } from '../resources/capacity-wait.js';
+import { sharesResourceQuota } from '../resources/quota-scope.js';
 import { refreshResourceLocalModelsOnce, validateResourceLocalModelConfig } from '../resources/local-model-refresh.js';
 import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
 import { validateResourceBindings } from '../resources/worker.js';
@@ -157,6 +158,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     const fileObservations = validateResourceObservations(readResourceJson(runtime.observationsPath), pool);
     let observations = fileObservations;
     let managedUnavailable: string[] = [];
+    const managedQuotaUnavailable = new Set<string>();
     let capturedObservations: typeof fileObservations = [];
     const quotaConfig = runtime.quotaConfigPath ?
       validateResourceQuotaRefreshConfig(readResourceJson(runtime.quotaConfigPath), pool, bindings) : null;
@@ -221,6 +223,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
         observeDenials(latestFile);
         observeDenials(capturedObservations);
         managedUnavailable = refreshed.unavailableWorkerIds;
+        for (const id of refreshed.quotaUnavailableWorkerIds ?? []) managedQuotaUnavailable.add(id);
       }
     }
     if (localConfig) {
@@ -243,7 +246,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     // Only managed captures can supplement the current file during waiting.
     // Unmanaged workers removed from that file must not regain cached readiness.
     let evidenceRead = false;
-    const readEvidence = () => {
+    const readEvidence = (): ResourceCapacityEvidence => {
       if (priorReceipt) return { observations: fileObservations, unavailableWorkerIds: [] };
       if (sharedCollector && quotaConfig) {
         let shared: ReturnType<typeof readSharedQuotaEvidence>;
@@ -260,6 +263,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
         // A failed refresh remains a veto for this invocation, even if the
         // collector later recovers while it is waiting for a worker slot.
         for (const id of shared.unavailableWorkerIds) deniedWorkerIds.add(id);
+        for (const id of shared.quotaUnavailableWorkerIds ?? []) managedQuotaUnavailable.add(id);
         observeDenials(shared.observations);
         evidenceRead = true;
       }
@@ -270,15 +274,19 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       }
       evidenceRead = true;
       const now = Date.now();
+      const quotaUnavailableWorkerIds = new Set(managedQuotaUnavailable);
       // This integration requires current explicit evidence even when a general
       // resource pool permits operator-capped unknown-quota bootstrap elsewhere.
       const unavailableWorkerIds = new Set(validated.allowedWorkerIds.filter((id) => {
         const worker = pool.workers.find((row) => row.id === id)!;
         const observation = observations.find((row) => row.workerId === id);
-        return !observation || observation.health !== 'ready' || Date.parse(observation.expiresAt) <= now || Date.parse(observation.observedAt) > now ||
+        const invalid = !observation || observation.health !== 'ready' || Date.parse(observation.expiresAt) <= now || Date.parse(observation.observedAt) > now ||
           observation.updatedAt !== undefined && Date.parse(observation.updatedAt) > now || worker.provider !== 'local' &&
           (!observation.windows.length || observation.windows.some((window) => window.usedPercent === null ||
             window.resetsAt === null || Date.parse(window.resetsAt) <= now));
+        if (invalid && worker.quotaScope && observation?.health !== 'unavailable' &&
+          !(observation?.retryAfter && Date.parse(observation.retryAfter) > now)) { quotaUnavailableWorkerIds.add(id); return false; }
+        return invalid;
       }));
       for (const id of deniedWorkerIds) unavailableWorkerIds.add(id);
       // Retain measured usage across capture, but not an obsolete operator
@@ -286,16 +294,19 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       const allocation = readResourcePoolAllocation(runtime.root, pool, bindings);
       for (const [id, usedPercent] of retainedUsage) {
         const capacityKey = bindings.find((binding) => binding.workerId === id)!.capacityKey;
+        const source = pool.workers.find((worker) => worker.id === id)!;
         const aliases = pool.workers.filter((worker) => validated.allowedWorkerIds.includes(worker.id) &&
-          bindings.find((binding) => binding.workerId === worker.id)!.capacityKey === capacityKey);
+          bindings.find((binding) => binding.workerId === worker.id)!.capacityKey === capacityKey && sharesResourceQuota(source, worker));
+        if (!aliases.length) continue;
         const ceiling = allocation.ceilingPercent ?? 100 - Math.max(...aliases.map((worker) => worker.reservePercent));
-        if (usedPercent >= ceiling) unavailableWorkerIds.add(id);
+        if (usedPercent >= ceiling) (source.quotaScope ? quotaUnavailableWorkerIds : unavailableWorkerIds).add(id);
       }
       for (const id of managedUnavailable) unavailableWorkerIds.add(id);
       // Process identity checks are synchronous. A timer cannot interrupt them,
       // so enforce the outer deadline again before locked admission can proceed.
       remaining();
-      return { observations, unavailableWorkerIds: [...unavailableWorkerIds] };
+      return { observations, unavailableWorkerIds: [...unavailableWorkerIds],
+        ...(pool.workers.some((worker) => worker.quotaScope) ? { quotaUnavailableWorkerIds: [...quotaUnavailableWorkerIds] } : {}) };
     };
     // The ID never depends on temporary trial paths. The full task digest also
     // binds this call's effective budget, workspace and prompt: a changed
@@ -313,7 +324,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
           // Derived zero is not the operator's legacy no-wait setting. After
           // expiry only an existing identity may reach atomic replay/conflict.
           current = readEvidence();
-          const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds);
+          const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
           remaining();
           if (!prior.attempts.some((attempt) => attempt.id === taskId)) return withheld();
         } else {
@@ -321,13 +332,14 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
             waitMs, signal: controller.signal, readEvidence });
           remaining();
           if (!capacity.ready) return withheld();
-          current = { observations: capacity.observations, unavailableWorkerIds: capacity.unavailableWorkerIds };
+          current = { observations: capacity.observations, unavailableWorkerIds: capacity.unavailableWorkerIds,
+            ...(capacity.quotaUnavailableWorkerIds === undefined ? {} : { quotaUnavailableWorkerIds: capacity.quotaUnavailableWorkerIds }) };
         }
         capacityWaiting = false;
       } else current = readEvidence();
       remaining();
       if (runtime.capacityWaitMs && capacityRemaining() < 1) {
-        const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds);
+        const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
         remaining();
         if (!prior.attempts.some((attempt) => attempt.id === taskId)) return withheld();
       }

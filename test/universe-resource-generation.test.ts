@@ -634,6 +634,23 @@ describe.skipIf(process.platform === 'win32')('current-file veto against an exis
 });
 
 describe.skipIf(process.platform === 'win32')('Universe allocation transitions at real locked admission', () => {
+  it('keeps independent model reserve thresholds separate through real locked admission', async () => {
+    const f = fixture(true);
+    const pool = validateResourcePool({ ...f.pool, workers: [
+      { ...f.pool.workers[0], model: 'gpt-6-astra', quotaScope: 'codex-general-v1', reservePercent: 90 },
+      { ...f.pool.workers[1], model: 'gpt-5.3-codex-spark', quotaScope: 'codex-spark-v1', reservePercent: 10 },
+    ] });
+    const observations = f.observations.map((row, index) => ({ ...row, windows: [{
+      id: index ? 'codex_codex_bengalfox_primary' : 'codex_codex_primary', usedPercent: 20, resetsAt: f.at(120_000),
+    }] }));
+    save(f.runtime.poolPath, pool); save(f.runtime.observationsPath, observations);
+    f.config.poolDigest = digest(canonical({ pool, bindings: f.bindings }));
+    f.config.allowedWorkerIds = ['native', 'alias'];
+    const actual = await vi.importActual<typeof import('../src/core/resources/pool-runtime.js')>('../src/core/resources/pool-runtime.js');
+    vi.mocked(runResourceTask).mockImplementation(actual.runResourceTask);
+    expect(await f.run()).toMatchObject({ status: 'succeeded', resource: { workerId: 'alias', workerModel: 'gpt-5.3-codex-spark' } });
+    expect(readFileSync(f.marker, 'utf8')).toBe('x');
+  });
   it.each(['refresh', 'wait'].flatMap((stage) => ['lower', 'raise', 'native-exhaustion'].map((transition) => ({ stage, transition }))))(
     '$transition during $stage uses current allocation without discarding native exhaustion', async ({ stage, transition }) => {
       const f = fixture(true);

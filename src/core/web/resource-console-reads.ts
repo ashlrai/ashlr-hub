@@ -5,13 +5,14 @@ import { types } from 'node:util';
 import { validateResourceObservations, validateResourcePool, type ResourceAssignmentExclusion,
   type ResourceObservation, type ResourcePool } from '../resources/pool-policy.js';
 import { validateResourceBindings, type ResourceBinding } from '../resources/worker.js';
+import { expandResourceQuotaDenials } from '../resources/quota-scope.js';
 import type { ResourceConsoleEvidence } from '../resources/console-types.js';
 import { createBoundedReadWorker, ReadProjectionError, type BoundedReadWorkerOptions } from './bounded-read-worker.js';
 import { degradedResourceConsoleEvidence, validateResourceConsoleResponse } from './resource-console-public.js';
 
 export interface ResourceConsoleReadScope { root: string; pool: ResourcePool; bindings: ResourceBinding[]; observationsFile: string;
   managedWorkerIds?: string[] }
-export interface ResourceConsoleManagedRead { observations: ResourceObservation[]; unavailableWorkerIds: string[] }
+export interface ResourceConsoleManagedRead { observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] }
 export interface ResourceConsoleReader { snapshot(managed?: ResourceConsoleManagedRead): Promise<ResourceConsoleEvidence>; close(): Promise<void> }
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -100,29 +101,35 @@ export function normalizeResourceConsoleRead(kind: unknown, payload: unknown, sc
   if (!scope?.managedWorkerIds) { if (payload !== undefined) return invalid(); return undefined; }
   // This payload comes only from the owning collector, never browser input.
   // A managed reader without its paired admission gate must fail closed.
-  if (!plain(payload) || !exact(payload, ['observations', 'unavailableWorkerIds']) || !boundedPlainData(payload) ||
-    !workerIds(payload.unavailableWorkerIds, scope.managedWorkerIds)) return invalid();
+  if (!plain(payload) || !exact(payload, ['observations', 'unavailableWorkerIds'], ['quotaUnavailableWorkerIds']) || !boundedPlainData(payload) ||
+    !workerIds(payload.unavailableWorkerIds, scope.managedWorkerIds) || payload.quotaUnavailableWorkerIds !== undefined &&
+    !workerIds(payload.quotaUnavailableWorkerIds, scope.managedWorkerIds)) return invalid();
   let observations: ResourceObservation[];
   try { observations = validateResourceObservations(payload.observations, scope.pool); } catch { return invalid(); }
   if (observations.some((row) => !scope.managedWorkerIds!.includes(row.workerId))) return invalid();
-  const normalized = { observations, unavailableWorkerIds: [...payload.unavailableWorkerIds] };
+  const normalized = { observations, unavailableWorkerIds: [...payload.unavailableWorkerIds],
+    ...(payload.quotaUnavailableWorkerIds === undefined ? {} : { quotaUnavailableWorkerIds: [...payload.quotaUnavailableWorkerIds as string[]] }) };
   if (Buffer.byteLength(JSON.stringify(normalized)) > MAX_MANAGED_BYTES) return invalid();
   Object.freeze(normalized.unavailableWorkerIds);
+  if (normalized.quotaUnavailableWorkerIds) Object.freeze(normalized.quotaUnavailableWorkerIds);
   return Object.freeze(normalized);
 }
 
 /** Current gate for captured managed readings; an owner file cannot refresh them. */
 export function unavailableManagedResourceWorkers(scope: ResourceConsoleReadScope, managed: ResourceConsoleManagedRead,
-  nowMs: number): string[] {
-  const unavailable = new Set(managed.unavailableWorkerIds);
+  nowMs: number, quotaOnly = false): string[] {
+  const unavailable = new Set(quotaOnly ? managed.quotaUnavailableWorkerIds ?? [] : managed.unavailableWorkerIds);
   for (const id of scope.managedWorkerIds ?? []) {
     const row = managed.observations.find((observation) => observation.workerId === id);
+    const scopedQuota = Boolean(scope.pool.workers.find((worker) => worker.id === id)?.quotaScope) && row?.health !== 'unavailable' &&
+      !(row?.retryAfter && Date.parse(row.retryAfter) > nowMs);
+    if (scopedQuota !== quotaOnly) continue;
     if (!Number.isSafeInteger(nowMs) || nowMs < 0 || !row || row.health !== 'ready' || Date.parse(row.observedAt) > nowMs ||
       row.updatedAt !== undefined && Date.parse(row.updatedAt) > nowMs || Date.parse(row.expiresAt) <= nowMs ||
       !row.windows.length || row.windows.some((window) => window.usedPercent === null ||
         window.resetsAt === null || Date.parse(window.resetsAt) <= nowMs)) unavailable.add(id);
   }
-  return [...unavailable];
+  return quotaOnly ? expandResourceQuotaDenials(scope.pool, scope.bindings, [...unavailable]) : [...unavailable];
 }
 
 /**
@@ -130,14 +137,16 @@ export function unavailableManagedResourceWorkers(scope: ResourceConsoleReadScop
  * remove candidates, never create admission or rewrite recorded source evidence.
  * Shared aliases are withheld together, including aliases absent from the veto.
  */
-export function withholdResourceConsoleWorkers(evidence: ResourceConsoleEvidence, unavailableWorkerIds: string[]): ResourceConsoleEvidence {
-  if (!workerIds(unavailableWorkerIds, evidence.pool.workers.map((worker) => worker.id))) {
+export function withholdResourceConsoleWorkers(evidence: ResourceConsoleEvidence, unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[] = []): ResourceConsoleEvidence {
+  if (!workerIds(unavailableWorkerIds, evidence.pool.workers.map((worker) => worker.id)) ||
+    !workerIds(quotaUnavailableWorkerIds, evidence.pool.workers.map((worker) => worker.id))) {
     throw new ReadProjectionError('Invalid managed resource admission gate', 'READ_PROJECTION_INVALID_REQUEST');
   }
-  if (!evidence.plan || unavailableWorkerIds.length === 0) return evidence;
+  if (!evidence.plan || unavailableWorkerIds.length === 0 && quotaUnavailableWorkerIds.length === 0) return evidence;
   const selected = new Set(unavailableWorkerIds);
   const capacities = new Set(evidence.pool.workers.filter((worker) => selected.has(worker.id)).map((worker) => worker.capacityKey));
   const blocked = new Set(evidence.pool.workers.filter((worker) => capacities.has(worker.capacityKey)).map((worker) => worker.id));
+  for (const id of quotaUnavailableWorkerIds) blocked.add(id);
   const candidates = evidence.plan.candidates.filter((candidate) => !blocked.has(candidate.workerId));
   const exclusions: ResourceAssignmentExclusion[] = evidence.pool.workers.flatMap((worker) => {
     const prior = evidence.plan!.exclusions.find((row) => row.workerId === worker.id);
@@ -175,7 +184,8 @@ export function createResourceConsoleReader(options: ResourceConsoleReadScope,
         const value = await transport.read('snapshot', captured);
         if (closed) throw new ReadProjectionError('Resource console reader is closed', 'READ_PROJECTION_CLOSED');
         const evidence = validateResourceConsoleResponse(value, scope.pool, scope.bindings);
-        return captured ? withholdResourceConsoleWorkers(evidence, unavailableManagedResourceWorkers(scope, captured, Date.now())) : evidence;
+        return captured ? withholdResourceConsoleWorkers(evidence, unavailableManagedResourceWorkers(scope, captured, Date.now()),
+          unavailableManagedResourceWorkers(scope, captured, Date.now(), true)) : evidence;
       }
       catch (error) {
         if (closed) throw error;

@@ -36,6 +36,7 @@ export interface ResourcePoolSupervisorOptions {
   readObservations(): ResourceObservation[];
   /** Non-durable admission veto; callback failure blocks new work until recovery. */
   readUnavailableWorkerIds?(): string[];
+  readQuotaUnavailableWorkerIds?(): string[];
   maxParallel?: number; maxQueued?: number; pollIntervalMs?: number; signal?: AbortSignal;
 }
 export interface ResourcePoolSupervisor {
@@ -97,6 +98,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   const root = options.root; const workspace = options.workspace;
   const readObservations = options.readObservations; const signal = options.signal;
   const readUnavailableWorkerIds = options.readUnavailableWorkerIds === undefined ? () => [] : options.readUnavailableWorkerIds;
+  const readQuotaUnavailableWorkerIds = options.readQuotaUnavailableWorkerIds === undefined ? () => [] : options.readQuotaUnavailableWorkerIds;
   const maxParallel = limit(options.maxParallel, 4, 16);
   const maxQueued = limit(options.maxQueued, 64, 64);
   const pollIntervalMs = limit(options.pollIntervalMs, 2000, 60_000, 20);
@@ -105,7 +107,8 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   try {
     if (process.platform === 'win32' || !path(root) || !path(workspace) ||
       realpathSync(workspace) !== workspace || !lstatSync(workspace).isDirectory() ||
-      typeof readObservations !== 'function' || typeof readUnavailableWorkerIds !== 'function') throw new Error();
+      typeof readObservations !== 'function' || typeof readUnavailableWorkerIds !== 'function' ||
+      typeof readQuotaUnavailableWorkerIds !== 'function') throw new Error();
     const nested = relative(workspace, root);
     if (nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested)) throw new Error();
     pool = validateResourcePool(options.pool); bindings = validateResourceBindings(options.bindings, pool);
@@ -273,7 +276,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     timerAt = at;
     timer = setTimeout(() => { timer = null; pump(); }, delay);
   }
-  function start(job: DurableJob, observations: ResourceObservation[], unavailableWorkerIds: string[]): void {
+  function start(job: DurableJob, observations: ResourceObservation[], unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]): void {
     if (!job.input) throw new Error('Queued task input unavailable');
     update(job.id, { state: 'dispatching', reason: 'dispatch-requested', workerId: null });
     // Publish the supervisor's irreversible intent before entering the runtime.
@@ -283,7 +286,8 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     dispatched.add(job.id);
     attemptedAt.set(job.id, performance.now());
     const input = taskFor(job.input);
-    owned.promise = runResourceTask({ root, pool, bindings, observations, task: input, signal: controller.signal, unavailableWorkerIds }).then((result) => {
+    owned.promise = runResourceTask({ root, pool, bindings, observations, task: input, signal: controller.signal,
+      unavailableWorkerIds, quotaUnavailableWorkerIds }).then((result) => {
       if (result.replayed || !result.receipt) dispatched.delete(job.id);
       if (!result.receipt) {
         update(job.id, { state: controller.signal.aborted || closing ? 'cancelled' : 'queued',
@@ -314,8 +318,9 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       if (!(cause instanceof ResourceSupervisorError && cause.code === 'CONFLICT')) throw cause;
     }
   }
-  function admissionConstraint(): string[] | null {
-    try { return validateUnavailableResourceWorkerIds(readUnavailableWorkerIds(), pool); }
+  function admissionConstraint(): { account: string[]; quota: string[] } | null {
+    try { return { account: validateUnavailableResourceWorkerIds(readUnavailableWorkerIds(), pool),
+      quota: validateUnavailableResourceWorkerIds(readQuotaUnavailableWorkerIds(), pool) }; }
     catch { sourceError = 'supervisor-admission-constraint-unavailable'; return null; }
   }
   function pump(): void {
@@ -344,7 +349,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
           const unavailableWorkerIds = admissionConstraint();
           if (unavailableWorkerIds === null || closing || error || state.paused) break;
           if (state.jobs.find((row) => row.id === job.id)?.state !== 'queued') continue;
-          const status = resourcePoolStatus(root, pool, bindings, observations, unavailableWorkerIds);
+          const status = resourcePoolStatus(root, pool, bindings, observations, unavailableWorkerIds.account, unavailableWorkerIds.quota);
           let receipt: ResourceTaskReceipt | undefined;
           try { receipt = receiptFor(job, status.attempts); }
           catch (cause) {
@@ -355,7 +360,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
           // Even a denied admission persists new quota evidence in the existing
           // runtime. Recently denied jobs are skipped until their retry interval,
           // so they cannot starve other enrolled workers behind them in the queue.
-          start(job, observations, unavailableWorkerIds);
+          start(job, observations, unavailableWorkerIds.account, unavailableWorkerIds.quota);
         }
       }
     } catch { fault('supervisor-evidence-unavailable'); }

@@ -9,13 +9,14 @@ import { validateResourceObservations, validateResourcePool, type ResourceObserv
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
 import { RESOURCE_QUOTA_REFRESH_TTL_MS, validateResourceQuotaRefreshConfig, type ResourceQuotaRefreshConfig } from './quota-refresh.js';
 import { inspectResourceQuotaRefreshOwner, type ResourceQuotaRefreshLease } from './quota-refresh-lease.js';
+import { expandResourceQuotaDenials, resourceQuotaBuckets } from './quota-scope.js';
 
 export const RESOURCE_SHARED_QUOTA_EVIDENCE_TTL_MS = 5_000;
 export const RESOURCE_SHARED_QUOTA_EVIDENCE_FILENAME = '.resource-quota-shared-evidence.json';
 const MAX_BYTES = 128 * 1024;
 const UNAVAILABLE = 'Shared resource quota evidence unavailable';
 interface SharedQuotaScope { root: string; pool: ResourcePool; bindings: ResourceBinding[]; config: ResourceQuotaRefreshConfig }
-export interface SharedQuotaEvidence { observations: ResourceObservation[]; unavailableWorkerIds: string[] }
+export interface SharedQuotaEvidence { observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] }
 
 function scope(options: SharedQuotaScope) {
   if (typeof options.root !== 'string' || !isAbsolute(options.root) || resolve(options.root) !== options.root ||
@@ -39,20 +40,31 @@ function checkedEvidence(value: unknown, checked: ReturnType<typeof scope>, now:
     input.unavailableWorkerIds.length > ids.size || input.unavailableWorkerIds.some((id) => !ids.has(id)) ||
     new Set(input.unavailableWorkerIds).size !== input.unavailableWorkerIds.length) throw new Error();
   const unavailable = new Set(input.unavailableWorkerIds);
+  const quotaIds = input.quotaUnavailableWorkerIds === undefined ? [] : input.quotaUnavailableWorkerIds;
+  if (!Array.isArray(quotaIds) || quotaIds.length > ids.size || quotaIds.some((id) => !ids.has(id)) ||
+    new Set(quotaIds).size !== quotaIds.length) throw new Error();
+  const quotaUnavailable = new Set(quotaIds);
   for (const id of ids) {
     const row = observations.find((item) => item.workerId === id);
     // Publication does not renew a native reading. A heartbeat cannot turn an
     // expired or unknown capture into readiness, even if the owner is alive.
-    if (!row || row.health !== 'ready' || Date.parse(row.observedAt) > now ||
+    if (row && (row.health !== 'ready' || row.retryAfter !== null && Date.parse(row.retryAfter) > now)) {
+      unavailable.add(id); continue;
+    }
+    if (!row || Date.parse(row.observedAt) > now ||
       row.updatedAt !== undefined && row.updatedAt !== row.observedAt ||
       Date.parse(row.expiresAt) <= now || Date.parse(row.expiresAt) - Date.parse(row.observedAt) > RESOURCE_QUOTA_REFRESH_TTL_MS ||
       row.retryAfter !== null && Date.parse(row.retryAfter) > now || !row.windows.length ||
       row.windows.some((window) => window.usedPercent === null || window.usedPercent >= 100 ||
-        window.resetsAt === null || Date.parse(window.resetsAt) <= now)) unavailable.add(id);
+        window.resetsAt === null || Date.parse(window.resetsAt) <= now)) {
+      (resourceQuotaBuckets(checked.pool.workers.find((worker) => worker.id === id)!) ? quotaUnavailable : unavailable).add(id);
+    }
   }
   const deniedCapacities = new Set(checked.bindings.filter((row) => unavailable.has(row.workerId)).map((row) => row.capacityKey));
   for (const binding of checked.bindings) if (ids.has(binding.workerId) && deniedCapacities.has(binding.capacityKey)) unavailable.add(binding.workerId);
-  return { observations, unavailableWorkerIds: [...unavailable].sort() };
+  return { observations, unavailableWorkerIds: [...unavailable].sort(),
+    ...(checked.pool.workers.some((worker) => worker.quotaScope) || input.quotaUnavailableWorkerIds !== undefined ? {
+      quotaUnavailableWorkerIds: expandResourceQuotaDenials(checked.pool, checked.bindings, [...quotaUnavailable]).sort() } : {}) };
 }
 
 export function publishSharedQuotaEvidence(options: SharedQuotaScope & {
@@ -91,7 +103,8 @@ export function readSharedQuotaEvidence(options: SharedQuotaScope & { expectedOw
     const value = readResourceJson(join(checked.root, RESOURCE_SHARED_QUOTA_EVIDENCE_FILENAME), MAX_BYTES);
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
     const row = value as Record<string, unknown>;
-    const keys = ['schemaVersion', 'scope', 'poolDigest', 'configDigest', 'owner', 'state', 'publishedAt', 'expiresAt', 'observations', 'unavailableWorkerIds'];
+    const keys = ['schemaVersion', 'scope', 'poolDigest', 'configDigest', 'owner', 'state', 'publishedAt', 'expiresAt', 'observations', 'unavailableWorkerIds',
+      ...(Object.hasOwn(row, 'quotaUnavailableWorkerIds') ? ['quotaUnavailableWorkerIds'] : [])];
     const now = Date.now();
     if (Object.keys(row).length !== keys.length || !keys.every((key) => Object.hasOwn(row, key)) || row.schemaVersion !== 1 ||
       row.scope !== 'codex-native-metadata' || row.poolDigest !== checked.config.poolDigest || row.configDigest !== digest(canonical(checked.config)) ||

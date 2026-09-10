@@ -30,10 +30,12 @@ port.on('message', (message: unknown) => {
       // A queued IPC read may outlive its captured freshness. Recheck the exact
       // managed readings here; a newer owner file is not a native refresh.
       const unavailable = managed ? unavailableManagedResourceWorkers(scope, managed, Date.now()) : [];
+      const quotaUnavailable = managed ? unavailableManagedResourceWorkers(scope, managed, Date.now(), true) : [];
       evidence = projectResourceConsoleEvidence(scope.pool, scope.bindings,
-        managed ? resourcePoolStatus(scope.root, scope.pool, scope.bindings, incoming, unavailable)
+        managed ? resourcePoolStatus(scope.root, scope.pool, scope.bindings, incoming, unavailable, quotaUnavailable)
           : resourcePoolStatus(scope.root, scope.pool, scope.bindings, incoming));
-      if (managed) evidence = withholdResourceConsoleWorkers(evidence, unavailableManagedResourceWorkers(scope, managed, Date.now()));
+      if (managed) evidence = withholdResourceConsoleWorkers(evidence, unavailableManagedResourceWorkers(scope, managed, Date.now()),
+        unavailableManagedResourceWorkers(scope, managed, Date.now(), true));
     } catch { evidence = degradedResourceConsoleEvidence(scope.pool, scope.bindings, new Date().toISOString()); }
     port.postMessage({ type: 'result', id: request.id, ok: true,
       value: serializeResourceConsoleEvidence(evidence, scope.pool, scope.bindings) });
