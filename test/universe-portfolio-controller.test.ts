@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { chmodSync, lstatSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import type { UniverseCampaignReadiness } from '../src/core/universe/campaign-readiness.js';
 import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
@@ -12,8 +13,9 @@ import * as records from '../src/core/util/immutable-private-record-store.js';
 import * as locks from '../src/core/fleet/local-store-lock.js';
 
 const hooks = vi.hoisted(() => ({ readiness: vi.fn(), run: vi.fn(), campaign: vi.fn(), plan: vi.fn(),
-  preflight: vi.fn(), deliver: vi.fn(), deliveries: vi.fn(), acquire: vi.fn() }));
+  preflight: vi.fn(), deliver: vi.fn(), deliveries: vi.fn(), acquire: vi.fn(), runtime: vi.fn() }));
 vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampaignReadiness: hooks.readiness }));
+vi.mock('../src/core/universe/resource-runtime-check.js', () => ({ checkResourceGenerationRuntime: hooks.runtime }));
 vi.mock('../src/core/universe/campaign.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/campaign.js')>(), runUniverseCampaignOwned: hooks.run,
 }));
@@ -39,7 +41,7 @@ const scratch: string[] = [];
 const HASH = 'a'.repeat(64);
 const INITIAL_RECORDS = 'b'.repeat(64);
 const FINAL_RECORDS = 'c'.repeat(64);
-beforeEach(() => { for (const hook of Object.values(hooks)) hook.mockReset(); });
+beforeEach(() => { for (const hook of Object.values(hooks)) hook.mockReset(); hooks.runtime.mockReturnValue({ status: 'valid' }); });
 afterEach(() => {
   vi.useRealTimers(); vi.restoreAllMocks();
   const writable = (path: string): void => {
@@ -140,6 +142,8 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
 
   it('settles a delivery-only post-intent cancellation without pretending the campaign was attempted', async () => {
     const f = fixture(['a', 'b']); f.finish('a'); f.definition.tasks[1]!.dependsOn = ['a'];
+    f.readiness.get('a')!.resourceRuntimeRequired = true;
+    hooks.runtime.mockReturnValue({ status: 'invalid', checks: [{ code: 'runtime', status: 'failed' }] });
     const deliveryPlan = { schemaVersion: 1 as const,
       deliveries: [{ campaignId: 'a', branch: 'codex/not-started', baseCommit: 'a'.repeat(40) }] };
     const caller = new AbortController(); const original = controllerStore.appendPortfolioControllerEvent;
@@ -148,7 +152,7 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
       if (input.kind === 'intent') caller.abort();
       return next;
     });
-    const result = await runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan, signal: caller.signal });
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan, signal: caller.signal, resourceRuntime: '/private/runtime.json' });
     expect(result).toMatchObject({ status: 'cancelled', sourceState: 'healthy', outcomes: [
       { campaignId: 'a', state: 'held', attempted: false, reasonCode: 'dispatch-not-started', deliveryDigest: null },
       { campaignId: 'b', state: 'held', attempted: false, reasonCode: 'dependency-held' },
@@ -156,6 +160,7 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
     expect(hooks.acquire).not.toHaveBeenCalled();
     expect(hooks.run).not.toHaveBeenCalled();
     expect(hooks.deliver).not.toHaveBeenCalled();
+    expect(hooks.runtime).not.toHaveBeenCalled();
     const evidence = f.events().filter((event) => event.kind !== 'observed');
     const restarted = await runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan });
     expect(restarted).toMatchObject({ deadlineAt: result.deadlineAt, outcomes: result.outcomes });
@@ -462,6 +467,64 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
     expect(hooks.run).not.toHaveBeenCalled();
     expect(f.events().some((event) => event.kind === 'intent')).toBe(false);
     expect(JSON.stringify(f.events())).not.toContain('resourceRuntime');
+    expect(hooks.runtime).not.toHaveBeenCalled();
+  });
+
+  it('keeps invalid-runtime campaigns pending without intents while independent work completes', async () => {
+    const f = fixture(['a', 'b', 'c']);
+    f.readiness.get('a')!.resourceRuntimeRequired = true; f.readiness.get('c')!.resourceRuntimeRequired = true;
+    hooks.runtime.mockReturnValue({ status: 'invalid', checks: [{ code: 'bindings', status: 'failed' }] });
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, resourceRuntime: '/private/runtime.json' });
+    expect(result.status).toBe('incomplete');
+    expect(result.outcomes.map((row) => row.state)).toEqual(['pending', 'completed', 'pending']);
+    expect(result.reasons).toEqual(expect.arrayContaining(['a:resource-runtime-invalid:bindings', 'c:resource-runtime-invalid:bindings']));
+    expect(hooks.run.mock.calls.map(([id]) => id)).toEqual(['b']); expect(hooks.runtime).toHaveBeenCalledOnce();
+    expect(f.events().filter((event) => event.kind === 'intent').map((event) => event.campaignId)).toEqual(['b']);
+    expect(JSON.stringify(f.events())).not.toMatch(/resource-runtime-invalid|runtime\.json/);
+    expect(f.readiness.get('a')!.observedState).toBe('ready');
+  });
+
+  it('rechecks invalid configuration on a new invocation without rewriting prior pins or deadlines', async () => {
+    const f = fixture(); f.readiness.get('a')!.resourceRuntimeRequired = true;
+    hooks.runtime.mockReturnValueOnce({ status: 'invalid', checks: [{ code: 'runtime', status: 'failed' }] }).mockReturnValue({ status: 'valid' });
+    const first = await runUniversePortfolioController(f.definition, { ...f.options, resourceRuntime: '/private/runtime.json' });
+    const firstRecord = f.events()[0];
+    expect(first.outcomes[0]).toMatchObject({ state: 'pending', attempted: false });
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false);
+    const second = await runUniversePortfolioController(f.definition, { ...f.options, resourceRuntime: '/private/runtime.json' });
+    expect(second.status).toBe('completed'); expect(second.deadlineAt).toBe(first.deadlineAt);
+    expect(f.events()[0]).toEqual(firstRecord); expect(hooks.run).toHaveBeenCalledOnce(); expect(hooks.runtime).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not gate valid configuration on a zero-capacity observation', async () => {
+    const f = fixture(['a', 'b']); for (const report of f.readiness.values()) report.resourceRuntimeRequired = true;
+    hooks.runtime.mockReturnValue({ status: 'valid', counts: { eligibleWorkers: 0 }, warnings: ['quota-refresh-not-configured'] });
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, resourceRuntime: '/private/runtime.json' });
+    expect(result.status).toBe('completed'); expect(hooks.run).toHaveBeenCalledTimes(2); expect(hooks.runtime).toHaveBeenCalledOnce();
+  });
+
+  it.each(['cancelled', 'queued-cancel', 'timed-out'] as const)('rechecks %s after synchronous resource preflight before recording an intent', async (status) => {
+    const f = fixture(); f.readiness.get('a')!.resourceRuntimeRequired = true;
+    const controller = new AbortController(); let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    hooks.runtime.mockImplementation(() => {
+      if (status === 'cancelled') controller.abort();
+      else if (status === 'queued-cancel') setImmediate(() => controller.abort());
+      else now = 10_001;
+      return { status: 'valid' };
+    });
+    const result = await runUniversePortfolioController(f.definition, { ...f.options, resourceRuntime: '/private/runtime.json', signal: controller.signal });
+    expect(result.status).toBe(status === 'queued-cancel' ? 'cancelled' : status); expect(hooks.run).not.toHaveBeenCalled(); expect(hooks.acquire).not.toHaveBeenCalled();
+    expect(f.events().some((event) => event.kind === 'intent')).toBe(false);
+    expect(result.outcomes[0]).toMatchObject({ state: 'pending', attempted: false });
+  });
+
+  it.each(['completed', 'non-resource', 'cancelled'] as const)('bypasses runtime preflight for %s campaigns', async (state) => {
+    const f = fixture(); const controller = new AbortController();
+    f.readiness.get('a')!.resourceRuntimeRequired = state !== 'non-resource';
+    if (state === 'completed') f.finish('a'); if (state === 'cancelled') controller.abort();
+    await runUniversePortfolioController(f.definition, { ...f.options, resourceRuntime: '/private/runtime.json', signal: controller.signal });
+    expect(hooks.runtime).not.toHaveBeenCalled();
   });
 
   it('rejects a changed or omitted frozen delivery plan before any effect', async () => {

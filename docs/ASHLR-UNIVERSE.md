@@ -530,6 +530,15 @@ ashlr universe resources check \
   --resource-runtime /absolute/private/resource-runtime.json --json
 ```
 
+The checksum-pinned installed launcher supports the same read-only check. It
+needs the runtime file, not a Universe `--root`:
+
+```sh
+ashlr runtime run --store /absolute/private/installed-runtime -- \
+  universe resources check \
+  --resource-runtime /absolute/private/resource-runtime.json --json
+```
+
 This reads only the named private files, bounded sterile-workspace Git metadata,
 and existing pool ledger. It validates pool/bindings and configured refresh pins,
 reports capacity groups and timestamped snapshot exclusions, and warns about
@@ -1025,6 +1034,18 @@ For resource-pool campaigns, also supply
 discovered from global accounts or saved into campaign records. All queue entries
 use this supplied runtime, and normal resource admission still applies.
 
+Before dispatching eligible resource work, supervision checks this configuration
+once per invocation. An invalid check holds the affected queue entries with
+`attempted: false` and `resource-runtime-invalid:<stage>` (or
+`resource-runtime-check-failed` when no safe stage is available). It does not
+start their campaigns or reserve generations/model requests. Independent
+non-resource work continues. After correcting the configuration, invoke
+supervision again with the intended queue; this does not resume work that was
+already started. Completed delivery-only work does not require this preflight.
+Validity is not availability: zero eligible workers, explicit owner pauses and
+snapshot warnings do not make otherwise valid configuration invalid. Existing
+worker admission still enforces current identity, quota, reserves and pool pins.
+
 The fixed queue accepts 1–32 unique IDs and at most four concurrent campaign
 runners (default one). `--max-duration-ms` is required and limited to 24 hours.
 The supervisor dispatches each eligible, never-started campaign at most once. A
@@ -1049,7 +1070,11 @@ derived from durable campaign evidence, not just a resolved worker promise, and
 does not by itself establish useful accepted engineering changes.
 
 SIGINT, SIGTERM and the invocation time limit cancel only this supervisor's owned
-runners and await their cleanup. Cleanup can outlast the requested time limit;
+runners and await their cleanup. Initial queue observations check cancellation
+and the deadline between entries, with an event-loop turn for queued signals;
+all initial pins are still captured before callbacks or dispatch. A synchronous
+observation already in progress is not interrupted. Cleanup can outlast the
+requested time limit;
 the supervisor does not detach unfinished work to report an early success. Exit
 codes are 0 for a completed queue, 1 for incomplete/failed/timed-out work, 2 for
 invalid arguments, and 130 for caller cancellation. No campaigns registered later
@@ -1806,6 +1831,19 @@ account exclusions, reserves, pool pins and admission checks remain in force.
 Controller concurrency is not a host-wide quota or a subscription spending cap.
 Missing runtime configuration leaves the campaign undispatched and reports
 `resource-runtime-required`; the controller does not discover account bindings.
+
+Malformed supplied configuration is also withheld before dispatch intent. The
+affected campaign stays `pending`, `attempted: false`, with a transient reason
+`<campaign-id>:resource-runtime-invalid:<stage>` or
+`<campaign-id>:resource-runtime-check-failed`; it is not durably rewritten as
+held. Independent ready non-resource branches can proceed. The check is lazy,
+read-only and cached once per invocation, so it is not a repeated provider probe
+or a configuration watcher. Correct the files and repeat the same enrollment
+within its original deadline to recheck untouched work. A valid report, including
+one with zero eligible workers, does not authorize execution: the runner repeats
+its actual admission checks. Cancellation and the deadline are checked again
+after preflight, and current campaign pins and ownership are rechecked before
+intent. Completed delivery-only work bypasses this configuration check.
 
 To continue the same enrollment, repeat the exact command. Downtime consumes the
 original duration allowance. Restarts do not renew campaign or controller

@@ -5,10 +5,11 @@ import { runUniverseCampaign } from './campaign.js';
 import { deliverCompletedUniverseCampaign, preflightUniverseCampaignDelivery, validateUniverseCampaignDeliveryPlan,
   type UniverseCampaignDeliveryPlan, type UniverseCampaignDeliveryResult } from './campaign-delivery.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadiness, type UniverseCampaignReadinessReason } from './campaign-readiness.js';
+import { resourceAdmissionPreflight, type ResourceAdmissionPreflightReason } from './resource-admission-preflight.js';
 import type { UniverseCampaignSummary } from './types.js';
 
 export type UniverseCampaignSupervisorStatus = 'queued' | 'waiting' | 'running' | 'delivering' | 'completed' | 'held' | 'failed' | 'cancelled' | 'unavailable';
-export type UniverseCampaignSupervisorReason = UniverseCampaignReadinessReason | 'queued' | 'waiting-for-universe-owner' |
+export type UniverseCampaignSupervisorReason = UniverseCampaignReadinessReason | ResourceAdmissionPreflightReason | 'queued' | 'waiting-for-universe-owner' |
   'dispatched' | 'evidence-changed' | 'runner-failed' | 'caller-cancelled' | 'invocation-duration-exhausted' |
   'transition-callback-failed' | 'resource-runtime-required' | 'delivery-requested' | 'delivery-completed' | 'delivery-withheld' | 'delivery-failed';
 export interface UniverseCampaignSupervisorOutcome {
@@ -134,6 +135,7 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
   const active = new Map<string, Promise<void>>();
   const activeUniverses = new Set<string>();
   const initial = new Map<string, UniverseCampaignReadiness>();
+  const checkRuntime = config.resourceRuntime === undefined ? null : resourceAdmissionPreflight(config.resourceRuntime);
   const halt = (reason: NonNullable<typeof stop>): void => { stop ??= reason; controller.abort(); };
   const cancel = (): void => halt('cancelled');
   const expire = (): void => halt('timed-out');
@@ -225,11 +227,15 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
     // Capture every enrollment before any callback or runner can change another
     // campaign. Subsequent queue polls can reject, but never renew, these pins.
     for (const id of config.ids) {
+      if (stopping()) break;
       const report = observe(id);
       const pin = deliveryPins.get(id);
       if (report && (!pin || report.expectedIdentity?.universeId === pin.definition.universeId &&
           report.expectedIdentity.definitionDigest === pin.definitionDigest && report.expectedIdentity.manifestDigest === pin.manifestDigest &&
           report.expectedIdentity.comparatorDigest === pin.comparatorDigest)) initial.set(id, report);
+      // Source reads are synchronous; let queued abort notifications run before
+      // observing another campaign. No observer or dispatch runs before pinning.
+      await new Promise<void>((resolveYield) => setImmediate(resolveYield));
     }
     for (const id of config.ids) {
       const report = initial.get(id);
@@ -259,7 +265,17 @@ export async function superviseUniverseCampaigns(ids: string[], options: Univers
           if (report.disposition === 'owned' || activeUniverses.has(report.universeId!)) {
             mark(id, 'waiting', 'waiting-for-universe-owner', report); continue;
           }
-          if (active.size < config.maxConcurrent) launch(id, initial.get(id)!);
+          if (active.size < config.maxConcurrent) {
+            if (!deliveryOnly(id, report) && report.resourceRuntimeRequired && checkRuntime) {
+              const reason = checkRuntime();
+              await new Promise<void>((resolveYield) => setImmediate(resolveYield));
+              // A synchronous Git/configuration check can exhaust the budget
+              // or queue a cancellation before timers get an opportunity.
+              if (stopping()) break;
+              if (reason) { pending.delete(id); mark(id, 'held', reason, report); continue; }
+            }
+            launch(id, initial.get(id)!);
+          }
         }
       }
       if (!pending.size && !active.size) break;

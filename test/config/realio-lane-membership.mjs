@@ -102,6 +102,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-dispatch-recovery-integration.test.ts', // native dispatch-attributed controller recovery without worker replay
   'test/universe-controller-reconciliation.test.ts', // private controller recovery ledger with injected attribution faults
   'test/universe-controller-contention-integration.test.ts', // native execution-lock contention, bounded waiting and cancellation
+  'test/universe-admission-preflight-integration.test.ts', // invalid resource configuration withheld before real campaign dispatch
   'test/universe-controller-crash-integration.test.ts', // separate-process SIGKILL, stale leases and exact-dispatch recovery
   'test/universe-controller-owner-control-integration.test.ts', // separate campaign control CLI, worker drain and persisted DAG restart
   'test/universe-controller-signal-integration.test.ts', // real controller SIGINT/SIGTERM and owned worker cleanup
