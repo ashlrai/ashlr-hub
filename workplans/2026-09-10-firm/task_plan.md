@@ -16,6 +16,8 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Expose signed graph evidence through explicitly configured MCP resources.
 - [x] Separate General/Spark quota scopes without splitting shared account capacity.
 - [x] Build and independently verify the first real project-bound human task workspace; final integrated gates recorded in report.md.
+- [x] Add explicit local transcript retention and deletion through the existing task supervisor, API and workspace.
+- [x] Verify per-scope quota ceilings stay independent in the final HTTP projection.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -34,6 +36,13 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Completed continuation from `f94387ef`: opt-in transcripts and final per-scope
+HTTP ceiling projection are implemented and independently tested. Legacy tasks
+keep settled-prompt deletion and session-only output; retained tasks survive
+restart without replay. UI deletion clears both surfaces' cached private text.
+Project selection must keep one ledger and one supervisor, not a quota store per
+project. Its immutable catalog/job-scope migration is a separate follow-up.
+
 Current continuation: graph execution and signed MCP resources integrated;
 independent Codex quota scopes integrated through collector, shared evidence,
 locked admission, supervision and console IPC. Personal General remains reserved;
@@ -57,6 +66,6 @@ Full north-star completion is not claimed. Actual host KILL is active and remain
 untouched. Local package, CLI, UI, release-contract and safety gates passed;
 the full north-star implementation and production activation remain unfinished.
 
-Next: durable project-bound conversation and
+Next: bounded multi-turn context, explicit shared-ledger project selection and
 confined implementation/independent acceptance. Resident ticks still require the
 existing activation path. Current receipt bounds are not a firm-wide spend ledger.

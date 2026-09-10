@@ -18,6 +18,8 @@ export interface ResourceConsoleScope {
   quotaRefreshEnabled?: boolean;
   connectionsEnabled?: boolean;
   allocationWritable?: boolean;
+  /** Explicit capability to retain opt-in task text in the private local store. */
+  historySupported?: boolean;
 }
 
 export interface ResourceConsoleGroup {
@@ -62,6 +64,8 @@ export interface ResourceConsoleTaskInput {
   mode: 'read-only' | 'workspace-write';
   timeoutMs: number;
   maxOutputTokens: number;
+  /** Consent is immutable for this task ID; omission and false are equivalent. */
+  retainHistory?: boolean;
 }
 
 export interface ResourceSupervisorJob {
@@ -76,6 +80,7 @@ export interface ResourceSupervisorJob {
   reason: string | null;
   cancellable: boolean;
   outputAvailable: boolean;
+  historyAvailable?: true;
 }
 
 export interface ResourceSupervisorSnapshot {
@@ -137,4 +142,12 @@ export interface ResourceConsoleOutput {
   text: string;
   truncated: boolean;
   retention: 'this-console-session';
+}
+
+/** Private task text, returned only by a dedicated authenticated read. */
+export interface ResourceConsoleTranscript {
+  id: string;
+  prompt: string;
+  output: { text: string; truncated: boolean } | null;
+  retention: 'local-until-deleted';
 }

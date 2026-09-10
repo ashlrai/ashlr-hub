@@ -40,19 +40,59 @@ Opening the workspace does not start a task. The first slice contains:
   invalid text, duplicate names and overflow are rejected without truncation.
 
 Attachment text is included in the selected task's prompt only when submitted.
-Selection alone does not upload files. Drafts and attachments remain in tab memory,
-not browser storage. Switching surfaces preserves them; closing/disconnecting or
-changing the confirmed scope discards them. Existing private queue retention
-applies to submitted prompts. Returned output is plain text, not executable markup.
+Selection alone does not upload files. Unsent drafts and attachments remain in tab
+memory, not browser storage. Switching surfaces preserves them; closing/disconnecting
+or changing the confirmed scope discards them. Returned output is plain text, not
+executable markup.
+
+### Retained task transcripts
+
+On execution-enabled consoles, select **Retain this task locally** before sending
+to keep its exact submitted prompt (including attachment text) and captured response
+in the private local supervisor store. This is opt-in per task; legacy requests
+with no `retainHistory` flag, or `false`, retain their existing ephemeral behavior.
+Text is not encrypted by Ashlrverse. Only retain information appropriate for this
+computer and its backups.
+
+Select the task and choose **Read transcript** to inspect retained text after a
+browser or console restart. The authenticated read is on demand, never included in
+fleet polling snapshots. A response is captured only from a fresh completed result
+whose receipt matches the ledger. Terminal state and captured text are published
+together. If a crash leaves a completed receipt without captured output, the UI
+reports no response; it never reruns work to reconstruct one.
+
+Captured output is limited to a UTF-8-safe 64 KiB prefix with explicit truncation.
+Admission reserves worst-case JSON-escaped output space for all pending retained
+tasks within the existing 4 MiB supervisor state limit. Capacity refusal happens
+before dispatch. Deleting retained text frees text capacity, **not** the existing
+256-job identity limit; task tombstones and quota accounting remain intact.
+
+For a settled or cancelled task, unlock controls and choose **Delete transcript**,
+then confirm. This removes active transcript and console-session output, not task
+records, provider history, backups, crash-left temporary copies or recoverable disk
+blocks. It is not secure disk erasure and cannot be undone through this console.
+Queued, dispatching and unresolved tasks cannot have their transcript deleted.
+Deletion and identical retries preserve the original retention choice and never
+restore deleted text or create a new usage allowance.
+
+API: `POST /api/resources/tasks` accepts optional boolean `retainHistory`;
+`GET /api/resources/tasks/:id/history` requires read authority;
+`POST /api/resources/tasks/:id/history/delete` requires control authority and `{}`.
+Only the fixed-workspace execution console exposes this capability. Starting a
+supervisor simply to read history is not supported: it can resume queued work.
+The first opted-in task upgrades supervisor state to schema 2 without changing
+legacy task rows or resource-ledger digests. Older binaries cannot read schema 2;
+do not downgrade against that live state or clear it to bypass incompatibility.
 
 This is a project-bound **task workspace**, not durable multi-turn chat. Native
 invocations remain ephemeral; prior turns are not automatically sent as context.
-Output comes from the producing console session and is not a token stream. A
+Live output comes from the producing console session; opted-in transcripts can
+survive it. Neither is a token stream. A
 completed task does not establish independent acceptance of its changes.
 
 The current console pins one workspace at startup. Other projects need explicit
 enrollment; selecting an arbitrary path in the browser is not supported. The next
-operating-layer milestones are durable conversations and attachment custody,
+operating-layer milestones are bounded multi-turn context and conversation grouping,
 multi-project dispatch retaining one shared account ledger, scoped file browsing,
 owned PTY sessions, and an isolated browser bridge. The existing Tauri wrapper
 remains a source-only draft; this web surface is not a commissioned installer.

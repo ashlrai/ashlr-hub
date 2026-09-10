@@ -12,7 +12,8 @@ import { validateResourceObservations, validateResourcePool, type ResourceObserv
 import { readResourceJson, resourcePoolStatus, runResourceTask, validateResourceTask, validateUnavailableResourceWorkerIds,
   type ResourceTask, type ResourceTaskReceipt } from './pool-runtime.js';
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
-import type { ResourceConsoleOutput, ResourceConsoleTaskInput, ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
+import type { ResourceConsoleOutput, ResourceConsoleTaskInput, ResourceConsoleTranscript,
+  ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
 
 export class ResourceSupervisorError extends Error {
   constructor(readonly code: 'INVALID_INPUT' | 'CONFLICT' | 'CAPACITY' | 'UNAVAILABLE' | 'NOT_FOUND', message: string) {
@@ -23,14 +24,18 @@ export const MAX_RESOURCE_SUPERVISOR_JOBS = 256;
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_OUTPUT_BYTES = 256 * 1024;
 const MAX_TOTAL_OUTPUT_BYTES = 4 * 1024 * 1024;
+const MAX_HISTORY_OUTPUT_BYTES = 64 * 1024;
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
 const STATES = ['queued', 'dispatching', 'settled', 'cancelled', 'unresolved'];
 const OUTCOMES = ['reserved', 'completed', 'failed', 'timed-out', 'cancelled', 'uncertain'];
-type DurableJob = Omit<ResourceSupervisorJob, 'cancellable' | 'outputAvailable'> & {
+type DurableJob = Omit<ResourceSupervisorJob, 'cancellable' | 'outputAvailable' | 'historyAvailable'> & {
   taskDigest: string; input: ResourceConsoleTaskInput | null;
+  /** Never changed after admission, including after explicit text deletion. */
+  retainHistory?: true;
+  history?: Omit<ResourceConsoleTranscript, 'id' | 'retention'> | null;
 };
-interface DurableState { schemaVersion: 1; scopeDigest: string; paused: boolean; jobs: DurableJob[] }
+interface DurableState { schemaVersion: 1 | 2; scopeDigest: string; paused: boolean; jobs: DurableJob[] }
 export interface ResourcePoolSupervisorOptions {
   root: string; pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
   readObservations(): ResourceObservation[];
@@ -45,6 +50,8 @@ export interface ResourcePoolSupervisor {
   cancel(id: string): ResourceSupervisorJob;
   setPaused(paused: boolean): ResourceSupervisorSnapshot;
   output(id: string): ResourceConsoleOutput | null;
+  history(id: string): ResourceConsoleTranscript | null;
+  deleteHistory(id: string): ResourceSupervisorJob;
   close(): Promise<void>;
 }
 
@@ -83,13 +90,27 @@ function assertStateHeadroom(next: DurableState): void {
   // canonical ISO dates are at most 27 characters. Every other job field is
   // immutable, or its only future change is to drop the private input. Keeping
   // that input while maximizing all metadata therefore bounds every transition.
-  const envelope = { ...next, paused: false, jobs: next.jobs.map((job) => job.input === null ? job : {
-    ...job, state: 'dispatching', workerId: 'w'.repeat(64), outcome: 'completed',
-    reason: 'r'.repeat(120), updatedAt: '+275760-09-13T00:00:00.000Z',
+  let futureOutputBytes = 0;
+  const envelope = { ...next, paused: false, jobs: next.jobs.map((job) => {
+    if (job.input === null) return job;
+    // A raw byte can require six JSON bytes (for example U+0000). Reserve
+    // every pending opted-in response, including ones not yet dispatching.
+    if (job.history) futureOutputBytes += 6 * MAX_HISTORY_OUTPUT_BYTES;
+    return {
+      ...job, state: 'dispatching', workerId: 'w'.repeat(64), outcome: 'completed',
+      reason: 'r'.repeat(120), updatedAt: '+275760-09-13T00:00:00.000Z',
+      ...(job.history ? { history: { prompt: job.history.prompt, output: { text: '', truncated: false } } } : {}),
+    };
   }) };
-  if (Buffer.byteLength(canonical(envelope) + '\n') > MAX_STATE_BYTES) {
+  if (Buffer.byteLength(canonical(envelope) + '\n') + futureOutputBytes > MAX_STATE_BYTES) {
     throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor state capacity reached');
   }
+}
+
+function boundedOutput(text: string, maximum: number): { text: string; truncated: boolean } {
+  const bytes = Buffer.from(text); let end = Math.min(bytes.length, maximum);
+  while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
+  return { text: bytes.subarray(0, end).toString('utf8'), truncated: end < bytes.length };
 }
 
 /** Scope is explicit and immutable; no input callback can alter the chosen worker bindings. */
@@ -124,27 +145,37 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
 
   function taskInput(value: unknown): ResourceConsoleTaskInput {
     try {
-      if (!object(value) || !exact(value, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens']) ||
+      if (!object(value) || !exact(value, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens',
+        ...(Object.hasOwn(value, 'retainHistory') ? ['retainHistory'] : [])]) ||
+        Object.hasOwn(value, 'retainHistory') && typeof value.retainHistory !== 'boolean' ||
         typeof value.prompt !== 'string' || Buffer.byteLength(value.prompt) > 32 * 1024) throw new Error();
       const ids = value.allowedWorkerIds;
       if (!Array.isArray(ids) || Reflect.ownKeys(ids).length !== ids.length + 1 ||
         !Array.from({ length: ids.length }, (_, index) => index).every((index) =>
           Object.hasOwn(ids, index) && 'value' in Object.getOwnPropertyDescriptor(ids, index)!)) throw new Error();
-      const task = validateResourceTask({ ...value, schemaVersion: 1, cwd: workspace });
+      const { retainHistory, ...runtimeInput } = value;
+      const task = validateResourceTask({ ...runtimeInput, schemaVersion: 1, cwd: workspace });
       if (task.allowedWorkerIds.some((id) => !workerIds.has(id))) throw new Error();
       return { id: task.id, prompt: task.prompt, allowedWorkerIds: task.allowedWorkerIds, mode: task.mode,
-        timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens };
+        timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, ...(retainHistory === true ? { retainHistory: true } : {}) };
     } catch { throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource console task'); }
   }
-  const taskFor = (input: ResourceConsoleTaskInput): ResourceTask => ({ ...detached(input), schemaVersion: 1, cwd: workspace });
+  // Local text-retention consent is not provider input or a new ledger identity.
+  const taskFor = (input: ResourceConsoleTaskInput): ResourceTask => {
+    const { retainHistory: _retention, ...runtimeInput } = detached(input);
+    return { ...runtimeInput, schemaVersion: 1, cwd: workspace };
+  };
   function decode(value: unknown): DurableState {
-    if (!object(value) || !exact(value, ['schemaVersion', 'scopeDigest', 'paused', 'jobs']) || value.schemaVersion !== 1 ||
+    if (!object(value) || !exact(value, ['schemaVersion', 'scopeDigest', 'paused', 'jobs']) || ![1, 2].includes(Number(value.schemaVersion)) ||
+      typeof value.schemaVersion !== 'number' ||
       value.scopeDigest !== scopeDigest || typeof value.paused !== 'boolean' || !Array.isArray(value.jobs) ||
       value.jobs.length > MAX_RESOURCE_SUPERVISOR_JOBS) throw new Error('Invalid resource supervisor state');
     const ids = new Set<string>();
     for (const row of value.jobs) {
+      const retained = object(row) && (Object.hasOwn(row, 'retainHistory') || Object.hasOwn(row, 'history'));
       if (!object(row) || !exact(row, ['id', 'state', 'enqueuedAt', 'updatedAt', 'allowedWorkerIds', 'mode', 'workerId',
-        'outcome', 'reason', 'taskDigest', 'input']) || typeof row.id !== 'string' || !ID.test(row.id) || ids.has(row.id) ||
+        'outcome', 'reason', 'taskDigest', 'input', ...(retained ? ['retainHistory', 'history'] : [])]) ||
+        typeof row.id !== 'string' || !ID.test(row.id) || ids.has(row.id) ||
         typeof row.state !== 'string' || !STATES.includes(row.state) || !iso(row.enqueuedAt) || !iso(row.updatedAt) ||
         row.updatedAt < row.enqueuedAt || !Array.isArray(row.allowedWorkerIds) || row.allowedWorkerIds.length < 1 ||
         row.allowedWorkerIds.length > 32 || row.allowedWorkerIds.some((id) => typeof id !== 'string' || !workerIds.has(id)) ||
@@ -154,10 +185,27 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         !(row.outcome === null || typeof row.outcome === 'string' && OUTCOMES.includes(row.outcome)) ||
         !(row.reason === null || typeof row.reason === 'string' && /^[a-z0-9-]{1,120}$/.test(row.reason)) ||
         typeof row.taskDigest !== 'string' || !HASH.test(row.taskDigest)) throw new Error('Invalid resource supervisor job');
+      if (retained) {
+        if (value.schemaVersion !== 2 || row.retainHistory !== true) throw new Error('Invalid history consent');
+        const history = row.history;
+        if (history !== null) {
+          if (!object(history) || !exact(history, ['prompt', 'output']) || typeof history.prompt !== 'string' ||
+            !history.prompt.trim() || Buffer.byteLength(history.prompt) > 32 * 1024) throw new Error('Invalid task history');
+          if (history.output !== null && (!object(history.output) || !exact(history.output, ['text', 'truncated']) ||
+            typeof history.output.text !== 'string' || Buffer.byteLength(history.output.text) > MAX_HISTORY_OUTPUT_BYTES ||
+            typeof history.output.truncated !== 'boolean' || row.state !== 'settled' || row.outcome !== 'completed')) {
+            throw new Error('Invalid captured output');
+          }
+        }
+      }
       if (row.state === 'queued' || row.state === 'dispatching') {
         const input = taskInput(row.input);
         if (input.id !== row.id || input.mode !== row.mode || canonical(input.allowedWorkerIds) !== canonical(row.allowedWorkerIds) ||
-          digest(canonical(taskFor(input))) !== row.taskDigest || row.outcome !== null) throw new Error('Invalid queued task identity');
+          digest(canonical(taskFor(input))) !== row.taskDigest || row.outcome !== null ||
+          (input.retainHistory === true) !== retained || retained &&
+          (!object(row.history) || row.history.prompt !== input.prompt || row.history.output !== null)) {
+          throw new Error('Invalid queued task identity');
+        }
       } else if (row.input !== null) throw new Error('Settled resource task retained private prompt');
       if (row.state === 'settled' && !['completed', 'failed', 'timed-out', 'cancelled'].includes(String(row.outcome))) throw new Error('Invalid settled outcome');
       if (row.state === 'settled' && row.workerId === null) throw new Error('Settled task has no worker');
@@ -166,7 +214,11 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       if (row.state === 'cancelled' && (row.outcome !== 'cancelled' || row.workerId !== null)) throw new Error('Invalid queued cancellation');
       ids.add(row.id);
     }
-    return detached(value as unknown as DurableState);
+    const decoded = detached(value as unknown as DurableState);
+    // A restored pending record must have the same guaranteed settlement space
+    // as a newly admitted one; do not dispatch externally edited overfull state.
+    if (decoded.schemaVersion === 2) assertStateHeadroom(decoded);
+    return decoded;
   }
 
   stoppedBeforeStart();
@@ -240,9 +292,9 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     persist(next);
   }
   function publicJob(job: DurableJob): ResourceSupervisorJob {
-    const { taskDigest: _digest, input: _input, ...publicFields } = job;
+    const { taskDigest: _digest, input: _input, retainHistory: _consent, history, ...publicFields } = job;
     return detached({ ...publicFields, cancellable: !closing && !error && (job.state === 'queued' || job.state === 'dispatching' && active.has(job.id)),
-      outputAvailable: outputs.has(job.id) });
+      outputAvailable: outputs.has(job.id), ...(history ? { historyAvailable: true as const } : {}) });
   }
   function ensureAvailable(): void {
     if (closing || error) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor unavailable');
@@ -254,19 +306,22 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       !job.allowedWorkerIds.includes(receipt.workerId))) throw new ResourceSupervisorError('CONFLICT', 'Task receipt identity mismatch');
     return receipt;
   }
-  function settle(job: DurableJob, receipt: ResourceTaskReceipt | undefined, reason: string): void {
+  function settle(job: DurableJob, receipt: ResourceTaskReceipt | undefined, reason: string, output?: string): void {
     const terminal = receipt && !['reserved', 'uncertain'].includes(receipt.status);
+    const history = state.jobs.find((row) => row.id === job.id)?.history;
+    // Supervisor terminal state and captured text publish together. A recovered receipt
+    // without its fresh return value cannot reconstruct or regenerate output.
     update(job.id, { state: terminal ? 'settled' : 'unresolved', workerId: receipt?.workerId ?? null,
-      outcome: receipt?.status ?? null, reason: receipt?.reason ?? reason, input: null });
+      outcome: receipt?.status ?? null, reason: receipt?.reason ?? reason, input: null,
+      ...(history && receipt?.status === 'completed' && output !== undefined
+        ? { history: { prompt: history.prompt, output: boundedOutput(output, MAX_HISTORY_OUTPUT_BYTES) } } : {}) });
   }
   function retainOutput(id: string, text: string): void {
-    const bytes = Buffer.from(text); let end = Math.min(bytes.length, MAX_OUTPUT_BYTES);
-    while (end < bytes.length && (bytes[end]! & 0xc0) === 0x80) end--;
-    const retained = bytes.subarray(0, end).toString('utf8');
-    while (outputBytes + end > MAX_TOTAL_OUTPUT_BYTES && outputs.size) {
+    const retained = boundedOutput(text, MAX_OUTPUT_BYTES); const bytes = Buffer.byteLength(retained.text);
+    while (outputBytes + bytes > MAX_TOTAL_OUTPUT_BYTES && outputs.size) {
       const first = outputs.keys().next().value!; outputBytes -= Buffer.byteLength(outputs.get(first)!.text); outputs.delete(first);
     }
-    outputs.set(id, { id, text: retained, truncated: end < bytes.length, retention: 'this-console-session' }); outputBytes += end;
+    outputs.set(id, { id, ...retained, retention: 'this-console-session' }); outputBytes += bytes;
   }
   function schedule(delay = pollIntervalMs): void {
     if (closing || error) return;
@@ -297,7 +352,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         const recorded = resourcePoolStatus(root, pool, bindings, []).attempts;
         const receipt = receiptFor(job, recorded);
         if (!receipt || canonical(receipt) !== canonical(result.receipt)) throw new Error('Settlement evidence mismatch');
-        settle(job, receipt, 'settlement-unavailable');
+        settle(job, receipt, 'settlement-unavailable', !result.replayed && result.output !== null ? result.output : undefined);
         if (receipt.status === 'completed' && !result.replayed && result.output !== null) retainOutput(job.id, result.output);
       }
     }).catch(() => {
@@ -379,6 +434,9 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       const previous = state.jobs.find((job) => job.id === input.id);
       if (previous) {
         if (previous.taskDigest !== taskDigest) throw new ResourceSupervisorError('CONFLICT', 'Resource task identity already used');
+        if ((previous.retainHistory === true) !== (input.retainHistory === true)) {
+          throw new ResourceSupervisorError('CONFLICT', 'Resource task retention consent already set');
+        }
         return publicJob(previous);
       }
       let previousRuntime: ResourceTaskReceipt | undefined;
@@ -392,8 +450,10 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       }
       const now = new Date().toISOString();
       const job: DurableJob = { id: input.id, state: 'queued', enqueuedAt: now, updatedAt: now,
-        allowedWorkerIds: [...input.allowedWorkerIds], mode: input.mode, workerId: null, outcome: null, reason: null, input, taskDigest };
-      const next = { ...detached(state), jobs: [...detached(state.jobs), job] };
+        allowedWorkerIds: [...input.allowedWorkerIds], mode: input.mode, workerId: null, outcome: null, reason: null, input, taskDigest,
+        ...(input.retainHistory === true ? { retainHistory: true as const, history: { prompt: input.prompt, output: null } } : {}) };
+      const next: DurableState = { ...detached(state), schemaVersion: input.retainHistory === true ? 2 : state.schemaVersion,
+        jobs: [...detached(state.jobs), job] };
       assertStateHeadroom(next); persist(next); schedule(0); return publicJob(job);
     },
     cancel(id) {
@@ -411,6 +471,27 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       schedule(0); return supervisor.snapshot();
     },
     output(id) { const value = outputs.get(id); return value ? detached(value) : null; },
+    history(id) {
+      ensureAvailable();
+      if (typeof id !== 'string' || !ID.test(id)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource task id');
+      const history = state.jobs.find((job) => job.id === id)?.history;
+      return history ? detached({ id, ...history, retention: 'local-until-deleted' as const }) : null;
+    },
+    deleteHistory(id) {
+      ensureAvailable();
+      if (typeof id !== 'string' || !ID.test(id)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource task id');
+      const job = state.jobs.find((row) => row.id === id);
+      if (!job) throw new ResourceSupervisorError('NOT_FOUND', 'Resource task unavailable');
+      if (job.state !== 'settled' && job.state !== 'cancelled') {
+        throw new ResourceSupervisorError('CONFLICT', 'Task history can be deleted only after terminal settlement');
+      }
+      // Consent and task identity remain, so identical retries cannot restore
+      // deliberately removed text or acquire a second runtime allowance.
+      if (job.history) update(id, { history: null });
+      const ephemeral = outputs.get(id);
+      if (ephemeral) { outputBytes -= Buffer.byteLength(ephemeral.text); outputs.delete(id); }
+      return publicJob(state.jobs.find((row) => row.id === id)!);
+    },
     close() {
       if (closePromise) return closePromise;
       closing = true; if (timer) { clearTimeout(timer); timer = null; }

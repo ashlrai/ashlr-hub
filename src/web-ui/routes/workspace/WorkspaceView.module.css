@@ -1,5 +1,10 @@
 .workspace { display: grid; grid-template-columns: 192px minmax(0, 1fr) 8px var(--workspace-dock-width, 320px); min-width: 0; min-height: 600px; height: clamp(600px, calc(100dvh - 180px), 1100px); overflow: hidden; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: var(--radius-lg); color: var(--text-primary); font-family: var(--font-ui); }
 .workspace > * { min-width: 0; }
+.transcript { margin-block: var(--space-5); padding: var(--space-4); border: 1px solid var(--border-default); border-radius: var(--radius-md); }
+.transcript h3, .transcript h4 { font-size: var(--text-sm-size); margin-block: var(--space-3); }
+.transcriptActions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.retention { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-3); font-size: var(--text-sm-size); color: var(--text-secondary); }
+.retention input { margin-top: 3px; flex: 0 0 auto; }
 .workspace button, .workspace input, .workspace select, .workspace textarea { font: inherit; }
 .workspace button { cursor: pointer; }
 .workspace button:disabled, .workspace input:disabled, .workspace select:disabled, .workspace textarea:disabled { cursor: not-allowed; opacity: .65; }

@@ -1,5 +1,20 @@
 # Firm build evidence — September 10, 2026
 
+## Transcript continuation from f94387ef
+
+Opt-in atomic task transcripts now survive console restart. Terminal deletion
+retains execution identity and quota accounting; captured-output gaps never cause
+redispatch. The final HTTP ceiling projection also preserves independent Spark
+capacity when General is exhausted. New source does not commission real accounts.
+
+Integrated verification: 153 resource/supervisor/history tests; 1,090 UI tests;
+449 safety passes with five skips. Typecheck, build, repository lint, docs and
+real-I/O classification passed. Browser verification used one queued/cancelled
+inert fixture with readable retained text after reload; no provider was invoked.
+Plan count remains 15 locally landed components, 33 planned; 20 existing-key merge
+attestations are historical local component receipts, not live activation proof.
+See `workplans/2026-09-10-firm/report.md` for limits and the current handoff.
+
 ## Current continuation
 
 Through `d6207e8a`, the plan has **15 locally landed component artifacts and

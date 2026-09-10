@@ -124,6 +124,7 @@ function managedFixture() {
   const refresher: refreshers.ResourceQuotaRefresher = {
     readObservations: (base) => mergeResourceObservations(base, state.observations),
     unavailableWorkerIds: () => [...state.unavailable],
+    quotaUnavailableWorkerIds: () => [],
     snapshot: () => ({ schemaVersion: 1, scope: 'codex-native-metadata', state: 'running', sampledAt: new Date().toISOString(),
       workers: [{ workerId: 'codex-a', status: state.status, lastAttemptAt: observations[0]!.observedAt,
         lastSuccessAt: state.status === 'observed' ? observations[0]!.observedAt : null,

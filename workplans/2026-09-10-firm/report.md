@@ -1,5 +1,62 @@
 # Verified local handoff
 
+## Current continuation: restart-safe private transcripts
+
+Baseline: `f94387ef33761def1f71f14ba6c5c9e0589a2365`; branch `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Final source is the commit
+containing this report. Three parallel workers covered core implementation,
+resource/HTTP integration, and independent failure/privacy acceptance; parent
+implemented the UI/query layer and integrated the result.
+
+- Explicit per-task retention persists the exact composed request (attachments
+  included) and a captured response across restarts. Legacy ephemeral tasks are
+  unchanged. This is a durable task transcript, not automatic multi-turn context.
+- The existing supervisor's atomic state transaction stores terminal status and
+  captured response together. Receipt-only recovery reports missing output and
+  never reruns a task to reconstruct it. Resource task digests and ledger remain
+  unchanged; no per-project or per-transcript quota allowance is created.
+- UTF-8-safe response capture is bounded to 64 KiB. Worst-case JSON escaping and
+  every pending retained response are reserved before admission within 4 MiB.
+  Terminal-only deletion removes active transcript/session text, keeps execution
+  tombstones and immutable consent, and does not renew the 256-task history limit.
+- Authenticated, on-demand history reads and control-token deletion are connected
+  to the workspace. Deletion clears loaded/in-flight text in both operating
+  surfaces, including when the operator switches tasks while deletion is pending.
+  Local plaintext retention and deletion/backup limitations are visible and documented.
+- Corrected the final HTTP usage-ceiling projection: General-only quota denial
+  no longer hides explicitly independent Spark capacity. Same-bucket aliases,
+  account access and health vetoes remain shared. The prior server test fixture
+  was updated to implement the required quota-only callback.
+- **153 resource/supervisor/history tests passed across seven files**; **1,090
+  UI tests passed across 65 files**. Focused worker/reviewer runs overlap these
+  integrated totals. Safety: **449 passed, five skipped across 41 files**.
+- Core/web typecheck, production build, quiet repository ESLint, real-I/O lane
+  classification and documentation checks passed. Source and compiled safety
+  verification remain local checks, not evidence of production activation.
+- Browser acceptance used a named inert local fixture: retention defaulted off,
+  unlocking did not submit, explicit submission queued without provider capacity,
+  cancellation enabled terminal history controls, and a reload preserved readable
+  request history without execution authority. HTTP tests additionally restarted
+  actual console servers and verified deletion, no resurrection and no replay.
+
+Schema 2 is first written on opted-in admission; older binaries cannot read it.
+Do not downgrade against that state or clear execution history. Deletion is not
+secure disk erasure and does not remove backups, crash-left temporary copies or
+provider history. Read-only consoles do not start a supervisor to inspect history.
+
+Host accounts, allocation settings and global KILL were not changed. Personal
+General remains reserved; personal Spark commissioning is still outstanding.
+No provider invocation, remote push, GitHub Actions, npm release, daemon activation
+or production deployment occurred. The original checkout and its workplans remain
+untouched. The package plan stays at 15 locally landed components and 33 planned;
+these extensions do not imply full autonomous-firm completion.
+
+Next: bounded conversation context, explicit project catalog/selection over one
+shared ledger, history-preserving account enrollment, and confined implementation
+with independent acceptance. Planning/agent-building guidance preserved existing
+runtime contracts; frontend/React guidance shaped privacy-safe interaction;
+engineering-documentation guidance kept retention, migration and activation clear.
+
 ## Current continuation: intelligence scopes and human workspace
 
 Integration branch: `auto/p00`, isolated from the original working checkout.

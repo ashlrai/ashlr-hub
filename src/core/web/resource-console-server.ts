@@ -10,6 +10,7 @@ import { createResourcePoolSupervisor, ResourceSupervisorError } from '../resour
 import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, type ResourceQuotaRefresher } from '../resources/quota-refresh.js';
 import { acquireResourceQuotaRefreshLease, ResourceQuotaRefreshLeaseError, type ResourceQuotaRefreshLease } from '../resources/quota-refresh-lease.js';
 import { publishSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
+import { expandResourceQuotaDenials } from '../resources/quota-scope.js';
 import { createResourceConnectionMonitor, validateResourceConnectionConfig, type ResourceConnectionMonitor } from '../resources/connection-monitor.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from '../resources/metadata-coordinator.js';
 import type { ResourceConsoleScope, ResourceConsoleTaskInput, ResourceConsoleSnapshot } from '../resources/console-types.js';
@@ -139,7 +140,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const scope: ResourceConsoleScope = { schemaVersion: 1, mode: 'resource-pool', root, poolId: pool.id,
     readOnly: !options.execute, workspace, maxParallel: options.execute ? maxParallel : 0, maxQueued: options.execute ? 64 : 0,
     ...(quotaConfig ? { quotaRefreshEnabled: true } : {}), ...(connectionsConfig ? { connectionsEnabled: true } : {}),
-    ...(options.allocationControls ? { allocationWritable: true } : {}) };
+    ...(options.allocationControls ? { allocationWritable: true } : {}), ...(options.execute ? { historySupported: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
@@ -249,17 +250,23 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         if (!supervisor || !controlToken) throw new RequestError(403, 'Execution is disabled for this console');
         if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
         const cancel = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})\/cancel$/.exec(url.pathname);
-        if (url.pathname !== '/api/resources/tasks' && url.pathname !== '/api/resources/queue' && !cancel) {
+        const deleteHistory = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})\/history\/delete$/.exec(url.pathname);
+        if (url.pathname !== '/api/resources/tasks' && url.pathname !== '/api/resources/queue' && !cancel && !deleteHistory) {
           throw new RequestError(404, 'Unknown resource control route');
         }
         const input = await body(req);
         if (closing) throw new RequestError(503, 'Console is closing');
         if (url.pathname === '/api/resources/tasks') {
-          if (!exact(input, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens'])) {
+          const historyField = input !== null && typeof input === 'object' && Object.hasOwn(input, 'retainHistory');
+          if (!exact(input, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens', ...(historyField ? ['retainHistory'] : [])]) ||
+            historyField && typeof input.retainHistory !== 'boolean') {
             throw new RequestError(400, 'Expected a scoped task without filesystem or command fields');
           }
           const job = supervisor.submit(input as unknown as ResourceConsoleTaskInput);
           sendJson(res, 202, { job });
+        } else if (deleteHistory) {
+          if (!exact(input, [])) throw new RequestError(400, 'History deletion expects an empty JSON object');
+          sendJson(res, 200, { job: supervisor.deleteHistory(deleteHistory[1]!) });
         } else if (cancel) {
           if (!exact(input, [])) throw new RequestError(400, 'Cancel expects an empty JSON object');
           sendJson(res, 200, { job: supervisor.cancel(cancel[1]!) });
@@ -299,8 +306,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             const now = Date.now();
             // This is a subtractive display gate only: preserve the sampled
             // plan, but never pair old eligibility with a newly lowered ceiling.
-            // Check every alias; withholding expands to its shared capacity.
-            const unavailable = pool.workers.filter((worker) => {
+            // Ceiling/freshness is quota-only. Expand same-bucket and unknown
+            // aliases conservatively without withholding a pinned independent
+            // bucket. Account health/access vetoes remain on their own path.
+            const quotaUnavailable = pool.workers.filter((worker) => {
               if (worker.provider === 'local') return false;
               const row = evidence.observations.find((item) => item.workerId === worker.id);
               return ceiling === 0 || !row || Date.parse(row.observedAt) > now ||
@@ -308,7 +317,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
                 !row.windows.length || row.windows.some((window) => window.usedPercent === null ||
                   window.usedPercent >= ceiling || window.resetsAt === null || Date.parse(window.resetsAt) <= now);
             }).map((worker) => worker.id);
-            evidence = withholdResourceConsoleWorkers(evidence, unavailable);
+            evidence = withholdResourceConsoleWorkers(evidence, [], expandResourceQuotaDenials(pool, bindings, quotaUnavailable));
           }
           sendSnapshot(res, { ...evidence, supervisor: supervisor?.snapshot() ?? null,
             ...(metadataCollector ? { metadataCollector: collectorLifecycle() } : {}),
@@ -317,6 +326,12 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             allocation, workerAccess }); return;
         }
         throw new RequestError(503, 'Resource quota or allocation evidence changed during this read');
+      }
+      const history = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})\/history$/.exec(url.pathname);
+      if (history) {
+        const value = supervisor?.history(history[1]!);
+        if (!value) throw new RequestError(404, 'No retained local transcript for this task');
+        sendSnapshot(res, value); return;
       }
       const output = /^\/api\/resources\/tasks\/([^/]+)\/output$/.exec(url.pathname);
       if (output && ID.test(output[1]!)) {

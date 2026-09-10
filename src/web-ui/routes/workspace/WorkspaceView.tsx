@@ -8,11 +8,13 @@ import { taskTone } from '../resources/TaskInspector.js';
 import { composeWorkspaceTaskPrompt, MAX_WORKSPACE_ATTACHMENTS, MAX_WORKSPACE_ATTACHMENT_BYTES, parseWorkspaceTextAttachment,
   validateWorkspaceAttachments, WORKSPACE_TEXT_ATTACHMENT_ACCEPT, type WorkspaceTextAttachment } from './workspace-attachments.js';
 import styles from './WorkspaceView.module.css';
+import { TaskTranscript } from './TaskTranscript.js';
 
 export interface WorkspaceViewProps {
   scope: ResourceConsoleScope; snapshot: ResourceConsoleSnapshot; historical: boolean;
   enabled: boolean; stopEnabled: boolean; busy: boolean; unlocked: boolean;
   onUnlock(): void; onSubmit(input: ResourceConsoleTaskInput): Promise<boolean>; onCancel(id: string): void;
+  onDeleteHistory?(id: string): Promise<boolean>;
 }
 const newTaskId = () => `task-${crypto.randomUUID().slice(0, 12)}`;
 const clampDock = (width: number) => Math.max(260, Math.min(520, width));
@@ -22,7 +24,7 @@ export function WorkspaceView(props: WorkspaceViewProps) {
   return <WorkspaceBody key={`${props.scope.root}:${props.scope.poolId}:${props.scope.workspace ?? ''}`} {...props} />;
 }
 
-function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy, unlocked, onUnlock, onSubmit, onCancel }: WorkspaceViewProps) {
+function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy, unlocked, onUnlock, onSubmit, onCancel, onDeleteHistory }: WorkspaceViewProps) {
   const fleet = useMemo(() => buildResourceFleet(snapshot, historical), [snapshot, historical]);
   const [selection, setSelection] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
@@ -31,6 +33,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   const [mode, setMode] = useState<ResourceConsoleTaskInput['mode']>('read-only');
   const [seconds, setSeconds] = useState('300');
   const [tokens, setTokens] = useState('4096');
+  const [retainHistory, setRetainHistory] = useState(false);
   const [attachments, setAttachments] = useState<WorkspaceTextAttachment[]>([]);
   const [readingFiles, setReadingFiles] = useState(false);
   const [sending, setSending] = useState(false);
@@ -45,6 +48,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   const outputRequest = useRef<AbortController | null>(null);
   const session = snapshot.supervisor?.instanceId ?? 'external';
   const currentSession = useRef(session); currentSession.current = session;
+  const retentionSeen = useRef<{ session: string; ids: Set<string> }>({ session, ids: new Set() });
   const outputKey = `${session}:${selection ?? ''}`;
   const currentOutputKey = useRef(outputKey); currentOutputKey.current = outputKey;
   const alive = useRef(true);
@@ -57,7 +61,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   const selected = fleet.tasks.find((row) => row.id === selection);
   const worker = snapshot.pool.workers.find((row) => row.id === workerId);
   const assigned = snapshot.pool.workers.find((row) => row.id === selected?.workerId);
-  const response = selected && output?.key === outputKey ? output.value : null;
+  const response = selected?.job?.outputAvailable && output?.key === outputKey ? output.value : null;
   const canSend = enabled && !scope.readOnly && !!scope.workspace && !historical && snapshot.sourceState !== 'degraded';
   const lockedForm = busy || sending || readingFiles;
   const projectName = scope.workspace?.split(/[\\/]/).filter(Boolean).at(-1) ?? 'No execution workspace';
@@ -71,6 +75,20 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     fileGeneration.current++; setReadingFiles(false);
   }, [outputKey]);
   useEffect(() => { setSubmitted({}); }, [session]);
+  useEffect(() => {
+    if (retentionSeen.current.session !== session) retentionSeen.current = { session, ids: new Set() };
+    const removed = new Set<string>();
+    for (const job of snapshot.supervisor?.jobs ?? []) {
+      if (job.historyAvailable === true) retentionSeen.current.ids.add(job.id);
+      else if (retentionSeen.current.ids.delete(job.id)) removed.add(job.id);
+    }
+    if (removed.size) {
+      setSubmitted((current) => Object.fromEntries(Object.entries(current).filter(([id]) => !removed.has(id))));
+      if (selection && removed.has(selection)) {
+        outputRequest.current?.abort(); setOutput(null); setOutputError(null); setLoadingOutput(false);
+      }
+    }
+  }, [session, snapshot.supervisor?.jobs, selection]);
 
   function select(id: string | null) {
     outputRequest.current?.abort(); fileGeneration.current++; setReadingFiles(false);
@@ -110,7 +128,8 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     sendingRef.current = true; setSending(true);
     const sentId = taskId; const sentPrompt = prompt; const sentSession = session;
     try {
-      const accepted = await onSubmit({ id: sentId, prompt: composed, allowedWorkerIds: [worker.id], mode, timeoutMs, maxOutputTokens });
+      const accepted = await onSubmit({ id: sentId, prompt: composed, allowedWorkerIds: [worker.id], mode, timeoutMs, maxOutputTokens,
+        ...(retainHistory && scope.historySupported ? { retainHistory: true } : {}) });
       if (!alive.current || currentSession.current !== sentSession) return;
       if (!accepted) { setError('The task was not queued. Your draft is retained; check the task controls and try again.'); return; }
       setSubmitted((current) => Object.fromEntries([...Object.entries(current), [sentId, sentPrompt]].slice(-64)));
@@ -130,6 +149,18 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     } catch {
       if (!controller.signal.aborted && alive.current && currentOutputKey.current === key) setOutputError('Output could not be read from this console session. Retry when the task is available.');
     } finally { if (!controller.signal.aborted && alive.current && currentOutputKey.current === key) setLoadingOutput(false); }
+  }
+  async function deleteHistory(): Promise<boolean> {
+    if (!selection || !onDeleteHistory) return false;
+    const id = selection; const key = outputKey; const sentSession = session;
+    const deleted = await onDeleteHistory(id);
+    if (deleted && alive.current && currentSession.current === sentSession) {
+      setSubmitted((current) => Object.fromEntries(Object.entries(current).filter(([task]) => task !== id)));
+      if (currentOutputKey.current === key) {
+        outputRequest.current?.abort(); setOutput(null); setOutputError(null); setLoadingOutput(false);
+      }
+    }
+    return deleted;
   }
   function resizeKey(event: KeyboardEvent<HTMLDivElement>) {
     const next = event.key === 'ArrowLeft' ? dockWidth + 20 : event.key === 'ArrowRight' ? dockWidth - 20
@@ -179,6 +210,9 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         {selection ? <>
           {submitted[selection] ? <section className={styles.request}><h3>Your task</h3><p>{submitted[selection]}</p></section>
             : <p className={styles.caption}>Original prompt text is not included in the task snapshot.</p>}
+          {selected?.job?.historyAvailable === true ? <TaskTranscript key={outputKey} id={selection}
+            canDelete={stopEnabled && !busy && !!onDeleteHistory && ['settled', 'cancelled'].includes(selected.job.state)}
+            unlocked={unlocked} onUnlock={onUnlock} onDelete={deleteHistory} /> : null}
           <section className={styles.answer} aria-label="Task response"><h3>Response</h3>{outputContent}</section>
           {selected?.stateDisagreement ? <p className={styles.notice}>Supervisor and receipt states differ. Refreshing will reconcile the snapshots.</p> : null}
           {selected?.job?.cancellable ? <button type="button" className={styles.subtleButton} disabled={!stopEnabled || busy}
@@ -200,6 +234,11 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
             disabled={scope.readOnly || lockedForm} onChange={(event) => { const files = Array.from(event.target.files ?? []); event.target.value = ''; if (files.length) void addFiles(files); }} /></label>
           <button className={styles.send} type="submit" disabled={!canSend || lockedForm}>{sending ? 'Sending…' : unlocked ? 'Send task' : 'Unlock to send'}</button>
         </div>
+        {scope.historySupported ? <label className={styles.retention}>
+          <input type="checkbox" checked={retainHistory} disabled={scope.readOnly || lockedForm}
+            onChange={(event) => setRetainHistory(event.target.checked)} />
+          <span>Retain this task locally<br /><small>Save prompt, attachment text and captured response as local unencrypted text until deleted.</small></span>
+        </label> : null}
         <details className={styles.options}><summary>Task options</summary><div>
           <label>Workspace access<select aria-label="Task workspace access" value={mode} disabled={scope.readOnly || lockedForm} onChange={(event) => setMode(event.target.value as ResourceConsoleTaskInput['mode'])}>
             <option value="read-only">Read-only</option><option value="workspace-write">Allow workspace edits</option></select></label>

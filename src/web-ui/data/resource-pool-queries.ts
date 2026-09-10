@@ -1,4 +1,4 @@
-import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput,
+import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput, ResourceConsoleTranscript,
   ResourceSupervisorJob, ResourceSupervisorSnapshot } from '../../core/resources/console-types.js';
 import { RESOURCE_COLLECTOR_RECOVERY_REASONS, RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS } from '../../core/resources/console-types.js';
 import { validResourceNativeProcessForReceipt } from '../../core/resources/native-diagnostics.js';
@@ -151,7 +151,8 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       !Number.isSafeInteger(scope.maxQueued) || scope.maxQueued < (scope.readOnly ? 0 : 1) || scope.maxQueued > 64 ||
       scope.quotaRefreshEnabled !== undefined && typeof scope.quotaRefreshEnabled !== 'boolean' ||
       scope.connectionsEnabled !== undefined && typeof scope.connectionsEnabled !== 'boolean' ||
-      scope.allocationWritable !== undefined && typeof scope.allocationWritable !== 'boolean') {
+      scope.allocationWritable !== undefined && typeof scope.allocationWritable !== 'boolean' ||
+      scope.historySupported !== undefined && (typeof scope.historySupported !== 'boolean' || scope.historySupported && scope.readOnly)) {
       throw new Error('The server did not establish an explicit resource-pool scope.');
     }
     return scope;
@@ -252,4 +253,27 @@ export async function readResourceTaskOutput(id: string, signal?: AbortSignal): 
     throw new Error('Task output is unavailable in this console session.');
   }
   return output;
+}
+
+/** Private text is read on demand, never through the polling query cache. */
+export async function readResourceTaskHistory(id: string, signal?: AbortSignal): Promise<ResourceConsoleTranscript> {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new Error('Invalid task identity.');
+  const value = await apiGet<unknown>(`/api/resources/tasks/${encodeURIComponent(id)}/history`, signal);
+  const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+  if (!record(value) || !exact(value, ['id', 'prompt', 'output', 'retention']) || value.id !== id ||
+    typeof value.prompt !== 'string' || bytes(value.prompt) > 32 * 1024 || value.retention !== 'local-until-deleted' ||
+    value.output !== null && (!record(value.output) || !exact(value.output, ['text', 'truncated']) ||
+      typeof value.output.text !== 'string' || bytes(value.output.text) > 64 * 1024 || typeof value.output.truncated !== 'boolean')) {
+    throw new Error('The retained task transcript could not be verified.');
+  }
+  return value as unknown as ResourceConsoleTranscript;
+}
+
+export async function deleteResourceTaskHistory(id: string): Promise<void> {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new Error('Invalid task identity.');
+  const response = await control<{ job: ResourceSupervisorJob }>(`/api/resources/tasks/${encodeURIComponent(id)}/history/delete`, {});
+  if (response?.job?.id !== id || response.job.historyAvailable !== undefined ||
+    !['settled', 'cancelled'].includes(response.job.state)) {
+    throw new Error('Transcript deletion could not be verified. Refresh before trying again.');
+  }
 }

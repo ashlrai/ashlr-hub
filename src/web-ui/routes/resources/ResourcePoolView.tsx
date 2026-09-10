@@ -7,7 +7,7 @@ import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { runQuery } from '../../data/cache.js';
 import { ApiError } from '../../data/client.js';
 import { useMutationHold, useQuery } from '../../data/hooks.js';
-import { cancelResourceTask, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceQueuePaused, setResourceWorkerAccessControl, submitResourceTask } from '../../data/resource-pool-queries.js';
+import { cancelResourceTask, deleteResourceTaskHistory, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceQueuePaused, setResourceWorkerAccessControl, submitResourceTask } from '../../data/resource-pool-queries.js';
 import { CapacityBoard, resourceNumber, resourceTime, WorkerInspector } from './CapacityBoard.js';
 import { TaskComposer } from './TaskComposer.js';
 import { PerformancePanel } from './PerformancePanel.js';
@@ -157,6 +157,20 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     if (succeeded && surface === 'resources' && requestedAtFocus === focusVersion.current) inspectSelection({ kind: 'task', id });
   }
 
+  async function deleteHistory(id: string): Promise<boolean> {
+    if (!stopEnabled || !scope.historySupported || busy) return false;
+    if (!hold.hasHold) { setUnlockOpen(true); return false; }
+    setBusy(true); setActionError(null); setNotice(null);
+    try { await deleteResourceTaskHistory(id); }
+    catch { setActionError('Transcript deletion was not confirmed. Refresh before trying again.'); return false; }
+    finally { setBusy(false); }
+    setNotice(`Local transcript for ${id} deleted. Task records and provider history are unchanged.`);
+    // A failed polling refresh cannot undo the acknowledged deletion or prevent
+    // the workspace from clearing private text immediately.
+    void refresh().catch(() => setActionError('Transcript deleted; the task list could not refresh.'));
+    return true;
+  }
+
   const visibleRows = rows.filter((row) => filter === 'all' || (filter === 'active'
     ? row.active : taskState(row) === 'completed'));
   return <div className={styles.view} onFocusCapture={() => { focusVersion.current += 1; }}>
@@ -191,7 +205,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
       <div hidden={surface !== 'workspace'} id="resource-workspace">
         {workspaceVisited ? <WorkspaceView key={`${scope.root}:${scope.poolId}:${scope.workspace ?? ''}`} scope={scope} snapshot={snapshot}
           historical={historical} enabled={enabled} stopEnabled={stopEnabled} busy={busy} unlocked={hold.hasHold}
-          onUnlock={() => setUnlockOpen(true)} onSubmit={submit} onCancel={(id) => { void cancel(id); }} /> : null}
+          onUnlock={() => setUnlockOpen(true)} onSubmit={submit} onCancel={(id) => { void cancel(id); }} onDeleteHistory={deleteHistory} /> : null}
       </div>
       <div hidden={surface !== 'resources'}>
       <section className={styles.supervisor} aria-label="Foreground supervisor">
@@ -247,7 +261,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
           <div hidden={tab !== 'compose'}><TaskComposer scope={scope} workers={snapshot.pool.workers} enabled={enabled}
             unlocked={hold.hasHold} busy={busy} onUnlock={() => setUnlockOpen(true)} onSubmit={submit} /></div>
           {tab === 'inspect' ? <div ref={inspector} className={styles.inspectionTarget}>{selectedWorker ? <WorkerInspector worker={selectedWorker} snapshot={snapshot} historical={historical} /> : selectedTask
-            ? <TaskInspector key={`${supervisor?.instanceId ?? 'external'}:${selectedTask.id}`} row={selectedTask} fleetTask={selectedTask} enabled={stopEnabled} busy={busy}
+            ? <TaskInspector key={`${supervisor?.instanceId ?? 'external'}:${selectedTask.id}:${selectedTask.job?.historyAvailable === true}:${selectedTask.job?.outputAvailable === true}`} row={selectedTask} fleetTask={selectedTask} enabled={stopEnabled} busy={busy}
               onCancel={(id) => { void cancel(id); }} />
             : <section className={styles.empty}><h2 tabIndex={-1} data-inspector-heading>{selection
               ? `${selection.kind === 'worker' ? 'Worker' : 'Task'} ${selection.id} is not in this snapshot`

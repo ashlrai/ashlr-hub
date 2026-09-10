@@ -79,6 +79,10 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-pool-supervisor.test.ts', // durable queues, verified locks, native and loopback tasks
   'test/resource-console-worker.test.ts', // fixed-scope worker threads and private evidence files
   'test/resource-console-server.test.ts', // real scoped HTTP listener and authentication fences
+  'test/resource-console-quota-scopes.test.ts', // final HTTP quota projection and shared account ceilings
+  'test/resource-console-history-server.test.ts', // private history HTTP reads, deletes and restart persistence
+  'test/resource-console-history.test.ts', // durable supervisor transcripts with real inert transports
+  'test/resource-console-history-acceptance.test.ts', // independent restart, deletion and receipt reconciliation
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership
   'test/resource-worker.test.ts', // native worker fixtures and numeric-loopback model transport
