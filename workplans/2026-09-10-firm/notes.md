@@ -389,3 +389,98 @@ interrupted run was not counted. No provider commissioning or public release.
 - Non-impacting errors: early metrics narrowing fixed; standalone strict test
   checking found an existing intentional extra-field fixture needing an unknown
   cast. Initial empty patch hunk was rejected; corrected patch succeeded.
+# September 10: durable handoff diagnosis and exact recovery
+
+- Final small actual graph acceptance passed (1 test, no skips, 27.50 s).
+  It proves one worker request, two evaluations and one Git ref publication
+  across injected degraded confirmation, exact-link/stop/ownership/drift
+  refusals, expired child/live parent plus drain recovery, and replay.
+- First graph fixture retained an unresolved result instead of completing its
+  acknowledgement. The helper's aggregate ten-second cap was removed in favor
+  of the already supplied parent deadline, with a ten-second fallback only
+  when absent. A later run passed; the first refusal's exact cause was not
+  recorded, so this is not a claim that the historical full-Hub failure is fixed.
+- Cold review added final immutable-publication proof/stop guards, old terminal
+  rejected-node immutability, and preservation of near-capacity legacy cleanup.
+  A preexisting control test assumed a once-only settlement callback and reread
+  its ledger recursively; it now checks the captured records at both the short
+  transaction and immutable writer publication boundaries. Final diagnostics
+  and controls: 66 passed; source/strict test types and scoped lint passed.
+- Final web suite: 1,243 passed / 75 files, no skips (10.73 s). Existing UI
+  inspector now shows historical closed stage/code diagnostics without exposing
+  private intent digests or adding fetches, retries, or raw exception text.
+- Final controller/portfolio gate: 665 passed / 29 files, no skips (236.48 s).
+  Final graph/control/engineering gate after cleanup-edge additions: 141 passed /
+  eight files, no skips (109.68 s). All eight changed core tests pass strict
+  TypeScript. Production build and five compiled structural checks pass. Final
+  full-Hub same-source acceptance: two passes, no skips (180.98 s). Together
+  with the web gate: 2,051 passes / 113 disjoint files, no skips. Local commit
+  and clean build identity are the final handoff steps.
+- First 29-file gate reported 658 passes and one fixture JSONL parse failure
+  while waiting for initial native contact, before cancellation assertions.
+  The unchanged cancellation case passed in isolation. The fixture reader now
+  waits for a complete newline-terminated snapshot and still rejects malformed
+  complete records; six parser cases were added. All original cancellation
+  assertions and budgets remain unchanged. Focused file: 13 passed, no skips.
+- Parent/cold review found a further committed-settlement cleanup edge: the
+  controller can throw after durable metadata publication or return an
+  unavailable wrapper over complete outcomes. The adapter now preserves only
+  freshly proven exact all-completed acknowledgements for later recovery,
+  not permanent delivery-proof rejections. In-flight matching separately permits
+  projected pending dependency reasons; pending work is never executed by the
+  receipt-only helper. Actual cleanup/wrapper and pending-child tests passed.
+  Early fixture setup issues (same-Universe child; fault hook before
+  initial ledger creation) required test-only corrections.
+
+- Baseline `49206a87ec19b34861e5bb63a16af7e8b92b26fa`, clean isolated
+  `auto/p00`; Entire resume found no checkpoint. Previous turn was verified
+  progress, not a wait or blocker. Host/provider/account settings remain outside
+  the fixture work.
+- Explore found a concrete seed recovery bug: completed dispatch attribution
+  admitted only step events, rejecting valid seed measurement intent/result
+  events. The strict campaign fold already proves that pair belongs to the same
+  session; recovery can accept it without relaxing dispatch identity.
+- A post-publication read-only delivery inspection can fail while the actual
+  branch and receipt exist. Its ten-second inspection budget is a plausible
+  trigger for the historical intermittent failure, not a proven diagnosis.
+- New immutable diagnostic events record one bounded controller-owned phase and
+  closed code per exact dispatch intent. They do not settle work, release slots,
+  change outcomes, retry calls or expose raw exception properties.
+- Independent real fixture reproduces post-publication confirmation failure:
+  one worker, two evaluations and one branch publication; direct receipt-only
+  restart acknowledges completed work without repeating any effect.
+- Graph-level gap: initial incomplete controller reports became terminal rejected
+  nodes, while branded recovery only accepted already settled child controllers.
+  Implement receipt-only metadata reconciliation for the exact graph binding and
+  leave healthy in-flight acknowledgement failures unresolved. Do not reopen
+  historical terminal rejected graphs or weaken normal fresh-enrollment rules.
+- Preserve existing clocks: child deadline is not renewed; completed-effect
+  metadata cleanup may occur after it, but graph deadline/KILL/ownership still
+  gate graph-linked reconciliation. Drain blocks new admission, not settlement.
+- Design plan uses existing white #ffffff/ice #f5f7fc/navy #172746 and #0e1730/
+  indigo #526fe8 tokens, Space Grotesk display and IBM Plex text. A left-aligned
+  diagnostic table reuses bounded horizontal scrolling and existing focus styles.
+  Layout: outcomes -> historical failure stage/code/time -> receipt guidance.
+  No new animation, hooks, fetches or decorative dashboard cards.
+- Cold review caught optional diagnostic capacity competing with old settlement
+  and control reserves; preserve already-admitted cleanup. Another review asked
+  for final prepublication settlement checks used by graph metadata recovery.
+- Read-only discovery guessed nonexistent Controller route globs; located the
+  actual inspector under src/web-ui/app and controller-status decoder under data.
+
+## Next-step exploration (proposal only, not implemented)
+
+- Reuse the existing controller scheduler and shared ledger for untouched pending
+  descendants; it already checks original campaign pins, prerequisite delivery,
+  ownership and no prior intent. Do not create another scheduling subsystem.
+- Keep receipt-only recovery distinguishable from effectful continuation. A
+  proposed host-bound opt-in plus separate branded asynchronous callback would
+  preserve old enrollment semantics; this is an architectural option, not an
+  implemented or approved permission change.
+- Require the original graph intent and live kernel context, reconcile proven
+  prior effects, then admit only genuinely pending campaign rows under both
+  original deadlines and existing drain/KILL/runtime/quota guards. Never resume
+  through a copied graph descriptor or renew an enrollment deadline.
+- Acceptance should prove one downstream request after upstream delivery,
+  repeated-interruption idempotency, unchanged reserves, exact pins/receipts,
+  and no new effects from legacy receipt-only or ambiguous histories.

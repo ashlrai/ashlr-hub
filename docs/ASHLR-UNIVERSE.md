@@ -1922,7 +1922,10 @@ and the campaign's start and settlement records. If the campaign completed but
 the controller lost its response or settlement write, repeating `controller run`
 can record that proven completion without running the worker again. Recovery
 requires the original campaign history as an exact prefix, one matching start,
-only the attributed session's steps, and its matching completed settlement.
+only the attributed session's steps and validated optional seed-intent/result
+pair, and its matching completed settlement. Seed records must satisfy the
+campaign's ordinary once-only, exact-session validation; their presence is not
+permission to accept unrelated history.
 An external resume, owner control, changed history, or merely completed-looking
 summary is not sufficient.
 
@@ -1960,6 +1963,32 @@ recorded settlement, **not** proof that a worker is alive. `held` is not success
 not acquire or probe execution locks: a lock-only conflict is detected by `run`,
 and `pending` alone does not establish that capacity is available.
 Read-only status never creates missing stores or reconciles uncertain work.
+
+When dispatch throws or its handoff cannot be verified, the controller attempts
+to record one `dispatch-diagnostic` against that exact unresolved intent. The
+optional `diagnostics` report array preserves this history even after a later
+verified settlement; it is not the current outcome or permission to retry.
+Each private row carries `campaignId`, `intentDigest`, `phase`, `code` and `at`.
+The console omits the private intent digest and shows the remaining fields in
+the inspector's **Recorded handoff diagnostics** section. Raw exception text,
+stack traces, command output and credentials are not retained by this feature.
+
+| Recorded stage | Closed failure codes |
+| --- | --- |
+| `campaign-execution` | `campaign-call-threw` |
+| `campaign-verification` | `campaign-evidence-changed` |
+| `delivery-execution` | `delivery-call-threw` |
+| `delivery-verification` | `delivery-evidence-changed`, `delivery-receipt-unverified` |
+| `settlement-publication` | `settlement-write-failed` |
+
+These codes identify the failed boundary, not an inferred root cause. In
+particular, an unverified receipt does not prove that branch publication failed.
+If diagnostic publication itself cannot retain ownership or valid storage, the
+invocation reports `dispatch-diagnostic-unavailable` and leaves the intent
+unresolved. Absence of diagnostics does not prove success or that no call ran.
+Legacy histories without diagnostics remain readable. Diagnostic events consume
+bounded history, never release a concurrency slot, change acceptance, restore a
+budget or authorize an otherwise-forbidden dispatch.
 
 When a dispatched campaign settles without completing, its outcome preserves
 the verified readiness reason, such as `owner-paused`, `campaign-stopped`,
@@ -2048,7 +2077,10 @@ npx vitest run test/universe-controller-crash-integration.test.ts
 The controller has a separate local execution lock and bounded immutable history
 under `<root>/portfolios/<id>/`. Only one invocation owns that controller at a
 time. History is limited to 512 records and 4 MiB, with a 128 KiB canonical
-enrollment limit. Dispatch reserves space for settlement; repeated run
+enrollment limit. New dispatch admission reserves space for a diagnostic and
+settlement, in addition to control cleanup. Existing near-capacity histories
+retain their original settlement/drain/acknowledgement allowance; adding this
+diagnostic reserve must not strand their cleanup. Repeated run
 observations consume history capacity. Exhaustion refuses new work rather than
 discarding checkpoints. SIGINT/SIGTERM and deadline expiry cancel and await owned
 calls; cleanup can extend elapsed time beyond the allowance. No daemon or background restart is

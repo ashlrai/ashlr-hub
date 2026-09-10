@@ -39,6 +39,27 @@ function git(cwd: string, ...args: string[]): string {
   }).trim();
 }
 
+function parseFixtureCalls(bytes: string): Array<{ pid: number }> {
+  // A concurrent append can expose an empty file or an unfinished final line.
+  // Do not report readiness from a prefix that might conceal another contact.
+  if (bytes.length === 0 || !bytes.endsWith('\n')) return [];
+  return bytes.slice(0, -1).split('\n').map((line) => JSON.parse(line));
+}
+
+describe('native fixture contact records', () => {
+  it.each(['', '{"pid":', '{"pid":1}', '{"pid":1}\n{"pid":'])('waits for a complete snapshot: %j', (bytes) => {
+    expect(parseFixtureCalls(bytes)).toEqual([]);
+  });
+
+  it('parses all newline-terminated contacts', () => {
+    expect(parseFixtureCalls('{"pid":1}\n{"pid":2}\n')).toEqual([{ pid: 1 }, { pid: 2 }]);
+  });
+
+  it('does not hide malformed completed records', () => {
+    expect(() => parseFixtureCalls('{"pid":1}\ninvalid\n')).toThrow(SyntaxError);
+  });
+});
+
 function fixture(specifications: Array<{ name: string; command?: boolean }>,
   options: { usedPercent?: number; maxTasks?: number; workerDelayMs?: number; holdUntilReleased?: boolean } = {}) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'universe-portfolio-resource-')));
@@ -119,7 +140,7 @@ function fixture(specifications: Array<{ name: string; command?: boolean }>,
     tasks: definitions.map((definition) => ({ campaignId: definition.id, dependsOn: dependencies[definition.id] ?? [] })),
   });
   return { base, root, resourceRuntime, runtime, pool, bindings, observations, ledgerRoot, workspace, seeds, definitions, privateFiles, portfolio,
-    calls: (): Array<{ pid: number }> => existsSync(callsFile) ? readFileSync(callsFile, 'utf8').trim().split('\n').map((line) => JSON.parse(line)) : [],
+    calls: (): Array<{ pid: number }> => existsSync(callsFile) ? parseFixtureCalls(readFileSync(callsFile, 'utf8')) : [],
     release: (): void => writeFileSync(releaseFile, '', { mode: 0o600 }),
     status: () => resourcePoolStatus(ledgerRoot, pool, bindings, observations) };
 }

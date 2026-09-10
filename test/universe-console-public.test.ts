@@ -16,6 +16,21 @@ function overview(): UniverseOverview {
 }
 
 describe('scoped console public worker serialization', () => {
+  it('projects historical handoff diagnostics without private intent or error fields', () => {
+    const diagnostic = { campaignId: 'a', intentDigest: 'private-intent', phase: 'delivery-verification',
+      code: 'delivery-receipt-unverified', at: '2026-09-10T12:00:00.000Z', error: '/private/exception', future: 'private-future' };
+    const source = { schemaVersion: 1, controllerId: 'one', sourceState: 'healthy', status: 'completed',
+      createdAt: diagnostic.at, deadlineAt: diagnostic.at, observedAt: diagnostic.at, definitionDigest: 'private-definition',
+      reasons: [], outcomes: [{ campaignId: 'a', state: 'completed', attempted: true, reasonCode: 'reconciled',
+        campaignDigest: 'private-campaign', deliveryDigest: 'private-delivery' }], diagnostics: [diagnostic] } as unknown as UniversePortfolioControllerReport;
+    const before = JSON.stringify(source);
+    const result = JSON.parse(serializeUniverseConsoleControllerStatus(source));
+    expect(result.diagnostics).toEqual([{ campaignId: 'a', phase: 'delivery-verification', code: 'delivery-receipt-unverified', at: diagnostic.at }]);
+    expect(result.status).toBe('completed'); expect(JSON.stringify(result)).not.toContain('private');
+    expect(JSON.stringify(source)).toBe(before);
+    delete source.diagnostics;
+    expect(projectUniverseConsoleControllerStatus(source)).not.toHaveProperty('diagnostics');
+  });
   it('allowlists controller, outcomes and controls without leaking private or future fields', () => {
     const source = { schemaVersion: 1, controllerId: 'one', sourceState: 'healthy', status: 'drained',
       createdAt: '2026-09-09T00:00:00Z', deadlineAt: '2026-09-09T00:01:00Z', observedAt: '2026-09-09T00:00:03Z',

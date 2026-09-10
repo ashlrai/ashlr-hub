@@ -63,6 +63,12 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Connect shared local/resource prompt and receipt handling without changing absent legacy bytes.
 - [x] Verify evidence-driven worker response, retained-parent context, replay, drift and recorded visibility.
 - [x] Document and validate the complete seed-feedback increment locally (2,432 selected tests passed / 115 files, no skips).
+- [x] Investigate the unresolved delivery failure and map durable controller diagnostics with parallel agents; historical root cause remains unproven.
+- [x] Implement actionable persisted handoff failure evidence using existing dispatch identity and recovery rules.
+- [x] Independently verify real confined evaluation/delivery failure and restart without replaying uncertain work.
+- [x] Preserve unresolved graph acknowledgements and reconcile exact delivered child receipts without repeating effects.
+- [x] Update operator guidance and verify 2,051 selected tests / 113 files, no skips; record local-only commissioning readiness.
+- [ ] Extend graph-owned recovery to untouched pending descendants under the original graph authority, without replaying uncertain work.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 

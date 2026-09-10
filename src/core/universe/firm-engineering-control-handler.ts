@@ -16,6 +16,7 @@ import type { UniversePortfolioControllerReport, PortfolioControllerGraphDispatc
 import { validateUniversePortfolioDefinition } from './portfolio-plan.js';
 import type { UniversePortfolioDefinition } from './portfolio-types.js';
 import { validateResourceGenerationRuntime } from './resource-generation.js';
+import { reconcileGraphControllerDispatch } from './graph-controller-reconciliation.js';
 
 export interface FirmEngineeringControlHost {
   nodeId: string;
@@ -44,6 +45,8 @@ export function firmEngineeringControlRecovery(value: object): ControlGraphRecov
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
 const MAX_RESULT_BYTES = 48 * 1024;
+/** Only the kernel's existing unresolved path may handle an unsettled acknowledgment. */
+class EngineeringAcknowledgmentUnresolved extends Error {}
 function snapshot<T>(value: unknown, maxBytes = 256 * 1024): T {
   const serialized = canonicalEvidencePackJsonV3(value);
   if (serialized === null || Buffer.byteLength(serialized) > maxBytes) throw new Error('Invalid engineering control enrollment');
@@ -120,6 +123,33 @@ export function createFirmEngineeringControlHandler(input: FirmEngineeringContro
       throw new Error('Engineering enrollment changed');
     }
   };
+  const matchesControllerEnrollment = (report: UniversePortfolioControllerReport, graphDispatch: PortfolioControllerGraphDispatch,
+    compareOutcomes = true): boolean => {
+    const directory = portfolioControllerDirectory(host.definition.id, { root: host.root });
+    const events = readPortfolioControllerEvents(directory); const folded = foldPortfolioController(events);
+    const enrollment = folded.first.enrollment;
+    return report.controllerId === host.definition.id && report.definitionDigest === digest(canonical(host.definition)) &&
+      report.deadlineAt === enrollment.deadlineAt && (!compareOutcomes || canonical(report.outcomes) === canonical([...folded.states.values()])) &&
+      canonical(enrollment.graphDispatch) === canonical(graphDispatch) && canonical(enrollment.definition) === canonical(host.definition) &&
+      canonical(enrollment.deliveryPlan) === canonical(host.deliveryPlan) &&
+      canonical(enrollment.pins.map(({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest }) =>
+        ({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest }))) === canonical(pins) &&
+      canonical(readPortfolioControllerEvents(directory)) === canonical(events);
+  };
+  // A call can fail after its metadata was committed (for example lock cleanup).
+  // Fresh exact settlement only preserves recovery; it is never a success result.
+  const completedAfterCallFailure = (graphDispatch: PortfolioControllerGraphDispatch, stopped: () => boolean): boolean => {
+    try {
+      if (stopped()) return false;
+      checkEnrollment();
+      const fresh = readUniversePortfolioController(host.definition.id, { root: host.root });
+      if (fresh.sourceState !== 'healthy' || fresh.status !== 'completed' || fresh.reasons.length !== 0 ||
+          fresh.outcomes.length !== host.definition.tasks.length || fresh.outcomes.some(row => row.state !== 'completed') ||
+          !matchesControllerEnrollment(fresh, graphDispatch)) return false;
+      checkEnrollment();
+      return !stopped();
+    } catch { return false; }
+  };
   // This proof collector is shared by initial execution and read-only restart
   // recovery. It never invokes the controller, a worker, or Git publication.
   const prove = (report: UniversePortfolioControllerReport, graphDispatch: PortfolioControllerGraphDispatch,
@@ -183,11 +213,30 @@ export function createFirmEngineeringControlHandler(input: FirmEngineeringContro
         if (stopped()) return reject('execution-stopped');
         const graphDispatch = dispatch(context);
         checkEnrollment();
-        const report = await runUniversePortfolioController(host.definition, { root: host.root, deliveryPlan: host.deliveryPlan,
-          resourceRuntime: host.resourceRuntime, expectedResourceRuntimeDigest: host.expectedRuntimeDigest,
-          requireNewEnrollment: true, graphDispatch, isExecutionStopped: stopped, signal, deadlineMonotonicMs });
+        let report: UniversePortfolioControllerReport;
+        try {
+          report = await runUniversePortfolioController(host.definition, { root: host.root, deliveryPlan: host.deliveryPlan,
+            resourceRuntime: host.resourceRuntime, expectedResourceRuntimeDigest: host.expectedRuntimeDigest,
+            requireNewEnrollment: true, graphDispatch, isExecutionStopped: stopped, signal, deadlineMonotonicMs });
+        } catch {
+          if (completedAfterCallFailure(graphDispatch, stopped)) throw new EngineeringAcknowledgmentUnresolved('Engineering acknowledgment remains unresolved');
+          return reject('engineering-evidence-unavailable');
+        }
+        if (report.outcomes.length > 0 && report.outcomes.every(row => row.state === 'completed') &&
+            (report.status !== 'completed' || report.sourceState !== 'healthy' || report.reasons.length !== 0) &&
+            completedAfterCallFailure(graphDispatch, stopped)) {
+          throw new EngineeringAcknowledgmentUnresolved('Engineering acknowledgment remains unresolved');
+        }
+        if (report.sourceState === 'healthy' && report.outcomes.some(row => row.state === 'in-flight')) {
+          if (matchesControllerEnrollment(report, graphDispatch, false)) {
+            throw new EngineeringAcknowledgmentUnresolved('Engineering acknowledgment remains unresolved');
+          }
+        }
         return prove(report, graphDispatch, stopped, false);
-      } catch { return reject('engineering-evidence-unavailable'); }
+      } catch (error) {
+        if (error instanceof EngineeringAcknowledgmentUnresolved) throw error;
+        return reject('engineering-evidence-unavailable');
+      }
     },
   });
   branded.add(handler);
@@ -197,7 +246,15 @@ export function createFirmEngineeringControlHandler(input: FirmEngineeringContro
       if (stopped()) return null;
       const graphDispatch = dispatch(context);
       checkEnrollment();
-      const result = prove(readUniversePortfolioController(host.definition.id, { root: host.root }), graphDispatch, stopped, true);
+      let report = readUniversePortfolioController(host.definition.id, { root: host.root });
+      if (report.sourceState === 'healthy' && report.outcomes.some(row => row.state === 'in-flight')) {
+        const reconciled = reconcileGraphControllerDispatch({ root: host.root, definition: host.definition,
+          deliveryPlan: host.deliveryPlan, graphDispatch, pins, checkEnrollment, isExecutionStopped: stopped,
+          ...(context.deadlineMonotonicMs === undefined ? {} : { deadlineMonotonicMs: context.deadlineMonotonicMs }) });
+        if (!reconciled) return null;
+        report = reconciled;
+      }
+      const result = prove(report, graphDispatch, stopped, true);
       return result.outcome === 'completed' ? result : null;
     } catch { return null; }
   });

@@ -1,6 +1,24 @@
 import type { UniverseCampaignDeliveryPlan } from './campaign-delivery.js';
 import type { UniversePortfolioDefinition } from './portfolio-types.js';
 
+/** Closed historical diagnoses; none of these codes grants settlement or retry authority. */
+export const PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES = Object.freeze({
+  'campaign-execution': Object.freeze(['campaign-call-threw'] as const),
+  'campaign-verification': Object.freeze(['campaign-evidence-changed'] as const),
+  'delivery-execution': Object.freeze(['delivery-call-threw'] as const),
+  'delivery-verification': Object.freeze(['delivery-evidence-changed', 'delivery-receipt-unverified'] as const),
+  'settlement-publication': Object.freeze(['settlement-write-failed'] as const),
+});
+export type UniversePortfolioControllerDiagnosticPhase = keyof typeof PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES;
+export type UniversePortfolioControllerDiagnosticCode = typeof PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES[UniversePortfolioControllerDiagnosticPhase][number];
+export interface UniversePortfolioControllerDiagnostic {
+  campaignId: string;
+  intentDigest: string;
+  phase: UniversePortfolioControllerDiagnosticPhase;
+  code: UniversePortfolioControllerDiagnosticCode;
+  at: string;
+}
+
 export interface UniversePortfolioControllerOutcome {
   campaignId: string;
   /** In-flight means an unsettled durable intent, never proof of a live process. */
@@ -27,6 +45,8 @@ export interface UniversePortfolioControllerReport {
   topology?: Array<{ campaignId: string; dependsOn: string[]; prerequisites: string[] }>;
   reasons: string[];
   control?: UniversePortfolioControllerControl;
+  /** Historical call-boundary evidence, independent of current outcome or settlement. */
+  diagnostics?: UniversePortfolioControllerDiagnostic[];
 }
 
 export interface UniversePortfolioControllerControl {
@@ -87,5 +107,6 @@ export type PortfolioControllerEvent = { id: string; sequence: number; at: strin
   { kind: 'control'; action: 'resume'; drainSequence: number } |
   { kind: 'drained'; drainSequence: number } |
   { kind: 'intent'; campaignId: string; /** Absent for legacy and delivery-only intents. */ dispatchId?: string } |
+  ({ kind: 'dispatch-diagnostic' } & Omit<UniversePortfolioControllerDiagnostic, 'at'>) |
   { kind: 'settled'; outcome: UniversePortfolioControllerOutcome; recordsDigest: string }
 );

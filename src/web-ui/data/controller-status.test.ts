@@ -9,6 +9,26 @@ const report = { schemaVersion: 1, controllerId: 'fleet', sourceState: 'healthy'
 
 describe('named controller observation query', () => {
   afterEach(() => vi.unstubAllGlobals());
+  it('retains historical diagnostics on completed outcomes but strips private details', () => {
+    const diagnosis = { campaignId: 'build', intentDigest: 'private-intent', phase: 'delivery-verification',
+      code: 'delivery-receipt-unverified', at, error: 'private-error' };
+    const source = { ...report, status: 'completed', outcomes: [{ ...report.outcomes[0], state: 'completed' }], diagnostics: [diagnosis] };
+    const before = JSON.stringify(source); const result = validateControllerStatus(source, 'fleet');
+    expect(result.diagnostics).toEqual([{ campaignId: 'build', phase: diagnosis.phase, code: diagnosis.code, at }]);
+    expect(result.status).toBe('completed'); expect(JSON.stringify(result)).not.toContain('private');
+    result.diagnostics![0]!.code = 'delivery-evidence-changed'; expect(JSON.stringify(source)).toBe(before);
+    expect(validateControllerStatus(report, 'fleet')).not.toHaveProperty('diagnostics');
+  });
+  it.each([null, {}, [null], [{ campaignId: 'other', phase: 'delivery-verification', code: 'delivery-receipt-unverified', at }],
+    [{ campaignId: 'build', phase: 'delivery-verification', code: 'delivery-receipt-unverified', at }],
+    [{ campaignId: 'build', phase: 'constructor', code: 'delivery-receipt-unverified', at }],
+    [{ campaignId: 'build', phase: 'delivery-verification', code: 'campaign-call-threw', at }],
+    [{ campaignId: 'build', phase: 'delivery-verification', code: 'delivery-receipt-unverified', at: 'yesterday' }],
+    [{ campaignId: 'build', phase: ['delivery-verification'], code: 'delivery-receipt-unverified', at }],
+    Array.from({ length: 2 }, () => ({ campaignId: 'build', phase: 'delivery-verification', code: 'delivery-receipt-unverified', at }))
+  ])('rejects malformed, foreign, duplicate and mismatched diagnostics (%j)', diagnostics => {
+    expect(() => validateControllerStatus({ ...report, diagnostics }, 'fleet')).toThrow('could not be validated');
+  });
   it.each(['', '../fleet', 'Fleet', 'fleet?root=x', 'fleet/root', 'a'.repeat(65), ['fleet'], undefined, null])('rejects invalid IDs (%j) without fetching', async (id) => {
     const request = vi.fn(); vi.stubGlobal('fetch', request);
     expect(isControllerId(id)).toBe(false);

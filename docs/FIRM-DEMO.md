@@ -253,29 +253,51 @@ command.
 
 #### Recover a graph interrupted after completed delivery
 
-If the process died after the child controller durably completed but before the
-graph recorded settlement, repeat step 2 with the **same** graph directory,
+If the process died after completed campaign delivery but before the controller
+or graph recorded settlement, repeat step 2 with the **same** graph directory,
 enrollment file and expected digest. This remains a mutating execution command:
-it may append a signed graph settlement and, for a multi-node API graph, run
+it may acknowledge a proven completed child dispatch, append a signed graph
+settlement and, for a multi-node API graph, run
 otherwise-ready pending work within the original budget. Inspect first when you
 only want status; do not change IDs or delete history to force a retry.
 
 The concrete engineering adapter performs receipt-only recovery. It does not
-call or resume the controller, run evaluators, reserve quota, contact providers,
+call or resume the controller runner, run evaluators, reserve quota, contact providers,
 or publish another branch. It requires all of the following:
 
 - The original graph history verifies and the same factory enrollment is bound.
 - The child controller's persisted `graphDispatch` exactly matches the canonical
   graph-root digest, graph/definition/node identity and full signed intent digest.
-- Controller outcomes are durably completed, with unchanged campaign evidence
-  and fresh verification of every planned delivery, including the current ref.
-- The original deadline has not expired, KILL is off, and graph ownership is held.
+- Controller outcomes are already completed or exact attributed in-flight
+  dispatches have proven completed campaign history and existing delivery.
+  Every planned delivery is freshly verified, including its current ref.
+- The original **parent graph** deadline has not expired, KILL is off, and graph
+  ownership is held. A child's earlier deadline is never renewed: expiry does
+  not prevent acknowledgement of effects already completed under its dispatch.
+
+For the second case, the adapter acquires the existing controller execution
+lease and appends only verified `settled` metadata before proving graph success.
+It rechecks exact parent linkage, enrollment, runtime pins, campaign/receipt
+evidence, stop state and ownership at final record publication. A drain request
+does not prevent acknowledgement of completed work; recovery does not resume
+admission or manufacture a drain acknowledgement. Pending or held child work is
+not executed by this path. A failed lock release can leave a valid durable
+settlement while returning no recovery result; inspect history before retrying.
 
 A successful recovery appends one ordinary signed settlement whose artifact has
 `reason: "engineering-reconciled"`; subsequent calls do not repeat it. Legacy
-controllers without a parent link, missing or still-in-flight controllers,
+controllers without a parent link, missing controllers, unproven in-flight work,
 altered bindings, drifted branches and unverifiable evidence remain unresolved.
 The link is attribution evidence, not an activation permit or process isolation.
+An exact-owned healthy in-flight controller leaves a new graph attempt
+unresolved even when no diagnostic could be recorded. Only proof of completed
+effects can resolve it. Already terminal rejected graph nodes are not reopened
+or rewritten by this change.
+If the controller call throws after settlement committed, or returns a transient
+failure over completed outcomes, the adapter first rereads the exact persisted
+enrollment and all completed outcomes. Only that fresh proof can preserve an
+unresolved acknowledgement for later recovery; the thrown call or status wrapper
+is never accepted as success. Permanent delivery-proof rejections remain terminal.
 Do not resume a graph-owned controller through the standalone controller runner:
 execution re-entry is refused even with the exact copied link, because that link
 cannot restore graph ownership or its shorter outer deadline. Read-only
@@ -286,6 +308,20 @@ After expiry or under KILL, use read-only graph/controller inspection; recovery
 does not write a settlement or unlock descendants. Graph and campaign allowances
 are never renewed by re-entry. Recovering interrupted child work that has not
 durably completed is a separate workflow, not an automatic retry here.
+
+The macOS acceptance fixtures exercise actual confined evaluation and local Git
+publication, then fault only the confirmation read. Run them from a development
+checkout with dependencies installed:
+
+```sh
+npx vitest run test/universe-controller-handoff-diagnostics.test.ts test/universe-engineering-handoff-recovery.test.ts
+```
+
+They assert no repeated worker request, evaluation or branch publication during
+recovery. The separate `test/universe-graph-controller-reconciliation.test.ts`
+suite uses real private records with inert proof fixtures to check final-write
+vetoes and terminal rejected-node preservation. These are local acceptance
+tests, not provider activation or unattended production commissioning.
 
 ### A real Hub source campaign
 

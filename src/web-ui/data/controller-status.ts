@@ -1,4 +1,5 @@
 import type { UniversePortfolioControllerView } from '../../core/web/universe-console-types.js';
+import { PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES } from '../../core/universe/portfolio-controller-types.js';
 import { apiGet } from './client.js';
 
 export function isControllerId(value: unknown): value is string {
@@ -68,6 +69,21 @@ export function validateControllerStatus(value: unknown, controllerId: string): 
     }
   }
   let control: UniversePortfolioControllerView['control'];
+  let diagnostics: UniversePortfolioControllerView['diagnostics'];
+  if (value.diagnostics !== undefined) {
+    if (!Array.isArray(value.diagnostics) || value.diagnostics.length > outcomes.length) throw invalid();
+    const diagnosed = new Set<string>();
+    diagnostics = value.diagnostics.map((row: unknown) => {
+      if (!record(row) || !isControllerId(row.campaignId) || !seen.has(row.campaignId) || diagnosed.has(row.campaignId) ||
+          outcomes.find(outcome => outcome.campaignId === row.campaignId)?.state === 'pending' ||
+          typeof row.phase !== 'string' || !Object.hasOwn(PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES, row.phase) ||
+          typeof row.code !== 'string' || !timestamp(row.at)) throw invalid();
+      const phase = row.phase as keyof typeof PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES;
+      if (!(PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES[phase] as readonly string[]).includes(row.code)) throw invalid();
+      diagnosed.add(row.campaignId);
+      return { campaignId: row.campaignId, phase, code: row.code, at: row.at } as NonNullable<typeof diagnostics>[number];
+    });
+  }
   if (value.control !== undefined) {
     const current = value.control;
     if (!record(current) || typeof current.mode !== 'string' || !['open', 'drain'].includes(current.mode) || !Number.isInteger(current.sequence) ||
@@ -82,7 +98,8 @@ export function validateControllerStatus(value: unknown, controllerId: string): 
   // Explicit projection also prevents unexpected private fields entering UI state.
   return { schemaVersion: 1, controllerId, sourceState: value.sourceState, status: value.status,
     createdAt: value.createdAt, deadlineAt: value.deadlineAt, observedAt: value.observedAt,
-    reasons: [...value.reasons], outcomes, ...(topology ? { topology } : {}), ...(control ? { control } : {}) } as UniversePortfolioControllerView;
+    reasons: [...value.reasons], outcomes, ...(topology ? { topology } : {}), ...(control ? { control } : {}),
+    ...(diagnostics ? { diagnostics } : {}) } as UniversePortfolioControllerView;
 }
 
 export async function readControllerStatus(controllerId: string, signal?: AbortSignal): Promise<UniversePortfolioControllerView> {

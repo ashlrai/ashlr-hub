@@ -34,8 +34,12 @@ export function readCompletedUniverseCampaignDispatch(id: string, expected: Univ
     if (startIndex < 1 || digest(canonical(records.slice(0, startIndex))) !== pin.recordsDigest) return null;
     const suffix = records.slice(startIndex);
     const settled = suffix.at(-1);
+    // The strict campaign fold already binds a once-only measured seed pair to
+    // this owned session and requires it before steps. It is evaluator evidence,
+    // not another dispatch or permission to accept controls/resumed sessions.
     if (suffix.length < 2 || settled?.kind !== 'settled' || settled.state !== 'completed' || settled.dispatchId !== pin.dispatchId ||
-        suffix.slice(1, -1).some((event) => event.kind !== 'step')) return null;
+        suffix.slice(1, -1).some((event) => event.kind !== 'step' && event.kind !== 'seed-evaluation-intent' &&
+          event.kind !== 'seed-evaluation-result')) return null;
     let previousAt = pin.intentAt;
     const observedAt = new Date().toISOString();
     for (const event of suffix) {

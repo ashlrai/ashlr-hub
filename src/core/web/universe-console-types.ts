@@ -12,6 +12,7 @@ export type UniversePortfolioControllerView = Pick<UniversePortfolioControllerRe
   outcomes: Array<Pick<UniversePortfolioControllerReport['outcomes'][number],
     'campaignId' | 'state' | 'attempted' | 'reasonCode'>>;
   topology?: Array<{ campaignId: string; dependsOn: string[]; prerequisites: string[] }>;
+  diagnostics?: Array<Omit<NonNullable<UniversePortfolioControllerReport['diagnostics']>[number], 'intentDigest'>>;
   control?: Pick<NonNullable<UniversePortfolioControllerReport['control']>,
     'mode' | 'sequence' | 'requestedAt' | 'acknowledgedAt'>;
 };

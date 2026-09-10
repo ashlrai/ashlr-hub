@@ -145,6 +145,11 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-portfolio-controller-integration.test.ts', // native checkpointed DAG execution and replay
   'test/universe-dispatch-recovery-integration.test.ts', // native dispatch-attributed controller recovery without worker replay
   'test/universe-controller-reconciliation.test.ts', // private controller recovery ledger with injected attribution faults
+  'test/universe-controller-diagnostics.test.ts', // private diagnostic history and failure publication invariants
+  'test/universe-controller-handoff-diagnostics.test.ts', // real evaluated delivery and receipt-only acknowledgement recovery
+  'test/universe-engineering-handoff-recovery.test.ts', // graph-linked delivery acknowledgement without repeating effects
+  'test/universe-graph-controller-reconciliation.test.ts', // immutable settlement guards and terminal graph preservation
+  'test/universe-campaign-dispatch.test.ts', // exact dispatch recovery with actual private measured-seed records
   'test/universe-controller-contention-integration.test.ts', // native execution-lock contention, bounded waiting and cancellation
   'test/universe-admission-preflight-integration.test.ts', // invalid resource configuration withheld before real campaign dispatch
   'test/universe-controller-crash-integration.test.ts', // separate-process SIGKILL, stale leases and exact-dispatch recovery

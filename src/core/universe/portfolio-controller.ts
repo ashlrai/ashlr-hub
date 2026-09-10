@@ -21,7 +21,7 @@ import { appendPortfolioControllerEvent, foldPortfolioController, portfolioContr
   validatePortfolioControllerGraphDispatch } from './portfolio-controller-store.js';
 import type { UniversePortfolioRunOptions } from './portfolio.js';
 import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin, PortfolioControllerGraphDispatch,
-  UniversePortfolioControllerReport } from './portfolio-controller-types.js';
+  UniversePortfolioControllerReport, UniversePortfolioControllerDiagnosticPhase, UniversePortfolioControllerDiagnosticCode } from './portfolio-controller-types.js';
 import type { UniverseStoreOptions } from './types.js';
 
 function matches(pin: PortfolioControllerPin, report: UniverseCampaignReadiness): boolean {
@@ -92,6 +92,7 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
         ? folded.control.acknowledgedAt === null ? 'draining' : 'drained' : 'incomplete',
     createdAt: folded.first.at, deadlineAt: enrollment.deadlineAt,
     observedAt: at, outcomes, reasons,
+    ...(folded.diagnostics.size ? { diagnostics: [...folded.diagnostics.values()].map(value => ({ ...value })) } : {}),
     topology: enrollment.definition.tasks.map((task) => ({ campaignId: task.campaignId,
       dependsOn: [...task.dependsOn], prerequisites: portfolioControllerPrerequisites(enrollment, task.campaignId) })),
     ...(folded.control ? { control: { ...folded.control } } : {}) };
@@ -247,8 +248,9 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     };
     capture(appendPortfolioControllerEvent(directory, event.kind === 'created' ? event : { ...event, at: new Date().toISOString() },
       { expectedRecords: events, ...(event.kind === 'intent' ? { beforeIntent: check } :
-        event.kind === 'settled' && beforeWrite ? { beforeSettlement: check } : {}) }));
-  }, event.kind === 'settled' || event.kind === 'drained');
+        event.kind === 'settled' && beforeWrite ? { beforeSettlement: check } :
+          event.kind === 'dispatch-diagnostic' && beforeWrite ? { beforeDiagnostic: check } : {}) }));
+  }, event.kind === 'settled' || event.kind === 'drained' || event.kind === 'dispatch-diagnostic');
   const acknowledgeDrain = (): void | Promise<void> => transaction(() => {
     owned();
     // Refresh and append are separate short transactions. The final append CAS
@@ -400,6 +402,10 @@ export async function runUniversePortfolioController(input: unknown, options: Un
         throw error;
       }
       const work = Promise.resolve().then(async () => {
+        // Values originate only from these controller-owned call boundaries;
+        // caught exception messages, properties and stacks are never inspected.
+        let phase: UniversePortfolioControllerDiagnosticPhase = pin.dispatch === 'campaign' ? 'campaign-execution' : 'campaign-verification';
+        let code: UniversePortfolioControllerDiagnosticCode = pin.dispatch === 'campaign' ? 'campaign-call-threw' : 'campaign-evidence-changed';
         try {
           let result;
           try {
@@ -407,6 +413,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
               // Only this direct pre-call path knows no runner or delivery was
               // invoked. A restart or thrown call can never infer this receipt.
               if (stopped !== 'cancelled' && stopped !== 'timed-out') return;
+              phase = 'settlement-publication'; code = 'settlement-write-failed';
               await append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: latestAdmission.recordsDigest!,
                 outcome: { campaignId, state: 'held', attempted: pin.dispatch === 'campaign', reasonCode: 'dispatch-not-started',
                   campaignDigest: latestAdmission.expectedIdentity!.summaryDigest, deliveryDigest: null } }, () => {
@@ -443,6 +450,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
             // campaign lease across that separate handoff or any early return.
             releaseLocalStoreLock(executionLock);
           }
+          phase = 'campaign-verification'; code = 'campaign-evidence-changed';
           let current = readUniverseCampaignReadiness(campaignId, { root });
           if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== digest(canonical(result))) throw new Error('Runner settlement changed');
           const settledRecordsDigest = current.recordsDigest;
@@ -455,13 +463,16 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           if (target && completed) {
             if (stopping()) { completed = false; reasonCode = 'delivery-not-attempted'; }
             else {
+              phase = 'delivery-execution'; code = 'delivery-call-threw';
               const delivered = await deliverCompletedUniverseCampaign(campaignId, { root, delivery: target, signal: controller.signal,
                 isExecutionStopped: stopping, deadlineMonotonicMs: deadlineMonotonic,
                 expectedIdentity: { ...current.expectedIdentity!, recordsDigest: current.recordsDigest! } });
+              phase = 'delivery-verification'; code = 'delivery-evidence-changed';
               if (digest(canonical(delivered.campaign)) !== current.expectedIdentity!.summaryDigest) throw new Error('Delivery campaign evidence changed');
               completed = delivered.delivery.status === 'delivered';
               reasonCode = completed ? 'campaign-and-delivery-completed' : 'delivery-withheld';
               if (delivered.delivery.status === 'delivered') {
+                code = 'delivery-receipt-unverified';
                 const receipts = readUniverseDeliveries(pin.universeId, { root });
                 deliveryDigest = digest(canonical(delivered.delivery.receipt));
                 if (delivered.delivery.receipt.universeId !== pin.universeId || delivered.delivery.receipt.branch !== target.branch ||
@@ -472,19 +483,34 @@ export async function runUniversePortfolioController(input: unknown, options: Un
               }
             }
           }
+          phase = 'campaign-verification'; code = 'campaign-evidence-changed';
           current = readUniverseCampaignReadiness(campaignId, { root });
           if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== digest(canonical(result)) ||
               current.recordsDigest !== settledRecordsDigest) throw new Error('Campaign changed before settlement');
           try {
+            phase = 'settlement-publication'; code = 'settlement-write-failed';
             await append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: current.recordsDigest!,
               outcome: { campaignId, state: completed ? 'completed' : 'held', attempted: pin.dispatch === 'campaign',
                 reasonCode, campaignDigest: current.expectedIdentity!.summaryDigest, deliveryDigest } });
-          } catch { halt('unavailable', 'controller-settlement-persistence-failed'); }
+          } catch (error) { halt('unavailable', 'controller-settlement-persistence-failed'); throw error; }
         } catch {
           // A thrown call or unconfirmed publication proves no settlement here;
           // persisted evidence determines restart. An unresolved intent needs
           // exact dispatch-linked completion proof; workers are never replayed.
           errors.push(`${campaignId}:dispatch-unsettled`);
+          try {
+            await append({ kind: 'dispatch-diagnostic', at: new Date().toISOString(), campaignId,
+              intentDigest: digest(localIntent), phase, code }, () => {
+              owned();
+              const current = foldPortfolioController(events);
+              if (current.states.get(campaignId)?.state !== 'in-flight' ||
+                  canonical(current.intentEvents.get(campaignId)) !== localIntent) throw new Error('Diagnostic dispatch identity changed');
+            });
+          } catch {
+            // Diagnostic publication cannot consume settlement authority or
+            // replace missing evidence with a success claim.
+            errors.push(`${campaignId}:dispatch-diagnostic-unavailable`);
+          }
         }
       }).finally(() => { active.delete(campaignId); });
       active.set(campaignId, work);

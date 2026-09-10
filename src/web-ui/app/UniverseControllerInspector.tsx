@@ -9,6 +9,14 @@ function RecordedTime({ value }: { value: string | null }) {
   return value ? <time dateTime={value}>{value.replace('T', ' ').replace('Z', ' UTC')}</time> : <>Not recorded</>;
 }
 
+const diagnosticStages = {
+  'campaign-execution': 'Campaign execution',
+  'campaign-verification': 'Campaign verification',
+  'delivery-execution': 'Local branch delivery',
+  'delivery-verification': 'Delivery confirmation',
+  'settlement-publication': 'Controller acknowledgement',
+};
+
 /** Named, user-triggered observation. Never polls, discovers controllers or changes their state. */
 export function UniverseControllerInspector() {
   const [input, setInput] = useState('');
@@ -98,6 +106,17 @@ export function UniverseControllerInspector() {
             <tbody>{data.outcomes.map((row) => <tr key={row.campaignId}><th scope="row">{row.campaignId}</th><td>{row.state}</td><td>{row.attempted ? 'Yes' : 'No'}</td><td>{row.reasonCode}</td></tr>)}</tbody></table>
         </div> : <p className={styles.note}>No campaign outcomes available in this observation.</p>}
         <p className={styles.note}>“In-flight” means an unresolved durable intent, not proof of a live worker. Campaign attempted records a call intent, not proof of worker execution or successful evaluation. A dispatch-not-started outcome remains held and does not authorize a retry.</p>
+        {data.diagnostics?.length ? <section aria-label="Recorded handoff diagnostics">
+          <h4>Recorded handoff diagnostics</h4>
+          <p className={styles.note}>These are historical failure records, not live errors. Check the campaign outcome above for its current recorded state. A diagnostic never authorizes retrying a worker or publishing a branch.</p>
+          <div className={styles.tableWrap} role="region" aria-label="Handoff diagnostic details" tabIndex={0}>
+            <table><caption>Where the handoff stopped</caption><thead><tr><th scope="col">Campaign</th><th scope="col">Stage</th><th scope="col">Failure code</th><th scope="col">Recorded at</th></tr></thead>
+              <tbody>{data.diagnostics.map(row => <tr key={row.campaignId}><th scope="row">{row.campaignId}</th>
+                <td>{diagnosticStages[row.phase]}</td><td>{row.code}</td><td><RecordedTime value={row.at} /></td></tr>)}</tbody>
+            </table>
+          </div>
+          <p className={styles.note}>Inspect the pinned campaign and delivery receipts before recovery. Completed outcomes can retain an earlier diagnostic; raw error text and private intent digests are omitted here.</p>
+        </section> : null}
         {data.reasons.length ? <details className={styles.reasons}><summary>Evidence reasons ({data.reasons.length})</summary><ul>{data.reasons.map((reason, index) => <li key={`${reason}-${index}`}>{reason}</li>)}</ul></details> : null}
       </> : null}
     </div>}

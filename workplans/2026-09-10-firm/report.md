@@ -1,6 +1,97 @@
 # Verified local handoff
 
-## Current continuation: retained seed evidence for workers
+## Current continuation: durable handoff diagnostics and receipt recovery
+
+Baseline `49206a87ec19b34861e5bb63a16af7e8b92b26fa`, isolated `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents
+built durable controller diagnostics, reproduced a real post-delivery failure,
+and independently reviewed recovery. The parent integrated the public decoder,
+historical inspector, documentation and verification.
+
+Controller history can now retain one closed stage/code diagnostic per exact
+unresolved dispatch. These records preserve the failed boundary after eventual
+completion without changing outcomes, acceptance, concurrency or budgets. The
+public projection strips private intent digests and unexpected fields; the UI
+shows historical diagnostics separately from current state. No raw exception
+text, stack, provider output or credentials enter these diagnostic records.
+New history admission reserves diagnostic space without taking away legacy
+near-capacity settlement/drain/acknowledgement capacity.
+
+Completed-dispatch proof now accepts the strict campaign fold's validated
+optional seed measurement pair. Previously its step-only suffix rule rejected
+otherwise valid measured-seed completions. Exact dispatch/session identity,
+original history prefix and once-only seed validation remain required.
+
+The engineering adapter leaves an exact-owned healthy in-flight child unresolved
+instead of terminally rejecting an incomplete acknowledgement. Its branded
+restart path can append verified child settlement metadata under the controller
+execution lease, then prove the existing delivery for graph settlement. It does
+not call the controller runner, worker, evaluator, delivery writer or Git ref
+writer. Parent ownership, KILL, deadline, enrollment and evidence are checked
+again at final immutable publication. A child deadline is not renewed; existing
+completed effects can be acknowledged during drain and after child expiry only
+while the parent graph still permits recovery. Already terminal rejected nodes
+remain terminal. Missing/ambiguous effects, pending siblings, orphan record
+locks and staging are not resumed or repaired by this path.
+If cleanup reports an error after settlement committed, a fresh strict read
+must prove exact all-completed enrollment before the adapter can preserve an
+unresolved graph acknowledgement. Transient status wrappers do not become
+success, and permanent proof or evidence-size rejections remain terminal.
+Pending dependency reason projections are not mistaken for ledger drift; the
+in-flight graph remains unresolved while its descendant stays unstarted.
+
+The real fault fixtures use private Git repositories, a loopback worker and an
+actual confined evaluator. They publish the corrected branch and receipt, then
+inject a degraded confirmation read. Direct and graph restart/replay each retain
+exactly **one worker request, two evaluations and one branch publication**.
+Wrong linkage, expired parent budget, KILL, contention, branch/runtime drift and
+final-publication proof refusal do not publish completion. The graph case also
+verifies drain plus expired-child/live-parent recovery. These fixtures prove
+local plumbing and fixed acceptance, not live model capability or business value.
+
+Final frozen-source gates: full web **1,243 passed / 75 files** (10.73 s);
+controller/portfolio **665 passed / 29 files** (236.48 s);
+graph/control/engineering **141 passed / 8 files** (109.68 s); and the full-Hub
+source campaign **2 passed / 1 file** (180.98 s). All four disjoint groups have
+zero skips or failures: **2,051 passed / 113 files**. This is the selected
+change-relevant gate, not the entire repository inventory. The full-Hub cases
+verify both the legacy three-request and measured-seed one-request delivery
+paths using independently pinned source and evaluation, including replay.
+Source/web and all eight changed core-test strict typechecks passed. Lint has
+zero errors and 107 existing warnings; lane check passes with 289 real-I/O and
+664 unit files. Documentation check passes (105 local, 31 source, 36 external
+links; no external requests). Production build and all five compiled read-only
+structural checks passed. The local handoff is this source commit and a clean
+rebuild identified by `dist/build-identity.json`; no public release is implied.
+
+Exploratory failures remain recorded. The first small graph recovery attempt
+stayed unresolved. Its arbitrary aggregate ten-second helper cap was replaced
+by the supplied parent deadline (ten seconds only as a fallback); subsequent
+real acceptance passed. The initial refusal's exact cause was not captured, so
+neither this nor the earlier intermittent full-Hub failure is claimed diagnosed.
+A deterministic confirmation fault is now covered and its failure boundary is
+durable. One legacy callback test expected a single pre-settlement check and a
+recursive ledger read; it now verifies the same captured records at both the
+short-lock and final immutable-publication boundaries. Independent tests prove
+final vetoes do not publish a settlement.
+The first broad controller/portfolio run had 658 passes and one fixture JSONL
+parse failure before cancellation assertions. The unchanged case passed alone;
+the fixture now waits for complete records and retains malformed-record errors.
+Six parser cases were added without changing production cancellation or test
+budgets. The final 29-file run passed all 665 cases with no skips (236.48 s).
+New cleanup tests initially used an invalid same-Universe child and inspected a
+not-yet-created ledger from their fault hook. Those fixture-only mistakes were
+corrected; all four real handoff cases passed before the combined graph rerun.
+
+No provider requests, account/reserve changes, live enrollment, service
+activation, public deployment, remote push, npm publication or GitHub Actions
+were performed. The host KILL remains a regular file. The original checkout is
+unchanged at `a01fc08663baab3039c4f1c084538de732a4fd0e`, preserving its preexisting
+untracked plans. Entire is enabled/manual-commit; resume found no checkpoint.
+Unattended host commissioning and the larger autonomous-company loop remain
+unfinished; this increment improves proven local recovery, not production status.
+
+## Previous continuation: retained seed evidence for workers
 
 Baseline `5b8af0aecc1fc32f0f7ad7bcfacd05430697e665`, isolated `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents
