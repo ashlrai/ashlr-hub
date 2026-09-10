@@ -7,6 +7,7 @@ import type { UniverseCampaignReadiness } from '../src/core/universe/campaign-re
 import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
 import type { UniversePortfolioDefinition } from '../src/core/universe/portfolio-types.js';
 import { readPortfolioControllerEvents, portfolioControllerDirectory } from '../src/core/universe/portfolio-controller-store.js';
+import * as controllerStore from '../src/core/universe/portfolio-controller-store.js';
 import * as records from '../src/core/util/immutable-private-record-store.js';
 import * as locks from '../src/core/fleet/local-store-lock.js';
 
@@ -89,6 +90,8 @@ function fixture(ids = ['a'], maxParallel = 1) {
   };
   hooks.run.mockImplementation(async (id: string) => finish(id));
   const executionLock = { path: '/synthetic/.execution.lock', token: 'fixture', dev: 1n, ino: 1n };
+  const originalOwns = locks.ownsLocalStoreLock;
+  vi.spyOn(locks, 'ownsLocalStoreLock').mockImplementation((lock) => lock === executionLock || originalOwns(lock));
   hooks.acquire.mockReturnValue({ state: 'acquired', lock: executionLock });
   const options = { root };
   const events = () => readPortfolioControllerEvents(portfolioControllerDirectory(definition.id, options));
@@ -96,6 +99,44 @@ function fixture(ids = ['a'], maxParallel = 1) {
 }
 
 describe('Portfolio controller private-ledger fault acceptance', () => {
+  it('rechecks a delivery-only campaign after final intent contention before any handoff', async () => {
+    const f = fixture(); f.finish('a');
+    const deliveryPlan = { schemaVersion: 1 as const,
+      deliveries: [{ campaignId: 'a', branch: 'codex/recheck', baseCommit: 'a'.repeat(40) }] };
+    const directory = portfolioControllerDirectory(f.definition.id, f.options);
+    const entered = deferred<void>();
+    let transactionLock: locks.LocalStoreLock | undefined;
+    const original = controllerStore.appendPortfolioControllerEvent;
+    vi.spyOn(controllerStore, 'appendPortfolioControllerEvent').mockImplementation((target, input, options) => {
+      if (input.kind === 'intent' && !transactionLock) {
+        const acquired = locks.acquireLocalStoreLockWithOutcome(join(directory, '.control.lock'), 0,
+          { anchorPath: directory, exactPrivateStorage: true });
+        if (acquired.state !== 'acquired') throw new Error('Could not hold fixture admission transaction');
+        transactionLock = acquired.lock; entered.resolve();
+      }
+      return original(target, input, options);
+    });
+    const caller = new AbortController();
+    const pending = runUniversePortfolioController(f.definition, { ...f.options, deliveryPlan, signal: caller.signal });
+    try {
+      await Promise.race([entered.promise, pending.then(() => { throw new Error('Controller returned before admission contention'); })]);
+      const before = f.events();
+      const deadlineAt = readUniversePortfolioController(f.definition.id, f.options).deadlineAt;
+      f.readiness.get('a')!.recordsDigest = 'd'.repeat(64);
+      expect(locks.releaseLocalStoreLock(transactionLock!)).toBe(true);
+      expect(await pending).toMatchObject({ status: 'unavailable', sourceState: 'degraded', deadlineAt });
+      expect(hooks.acquire).not.toHaveBeenCalled();
+      expect(hooks.run).not.toHaveBeenCalled();
+      expect(hooks.deliver).not.toHaveBeenCalled();
+      expect(f.events()).toEqual(before);
+      expect(f.events().some((event) => event.kind === 'intent')).toBe(false);
+    } finally {
+      caller.abort();
+      if (transactionLock && locks.ownsLocalStoreLock(transactionLock)) locks.releaseLocalStoreLock(transactionLock);
+      await pending;
+    }
+  });
+
   it('waits for pristine observed ownership with pinned state and no polling records', async () => {
     const f = fixture(); const readiness = f.readiness.get('a')!;
     Object.assign(readiness, { disposition: 'owned', reasonCode: 'owner-active', automaticAction: 'none' });

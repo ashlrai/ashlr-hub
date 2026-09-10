@@ -245,11 +245,21 @@ export function refreshPortfolioControllerEvents(directory: string, expected: Po
 
 type EventInput<T = PortfolioControllerEvent> = T extends PortfolioControllerEvent ? Omit<T, 'id' | 'sequence'> : never;
 
-function appendUnlocked(directory: string, records: PortfolioControllerEvent[], input: EventInput): PortfolioControllerEvent[] {
+function appendUnlocked(directory: string, records: PortfolioControllerEvent[], input: EventInput,
+  beforeIntent?: (records: readonly PortfolioControllerEvent[]) => void): PortfolioControllerEvent[] {
   // Only refusal of a new admission is a drain outcome. An already-invalid
   // history remains an evidence failure, never a successfully observed drain.
   if (input.kind === 'intent' && records.length && foldPortfolioController(records).control?.mode === 'drain') {
     throw new PortfolioControllerDrainError('Controller admission is drained');
+  }
+  if (beforeIntent !== undefined) {
+    if (input.kind !== 'intent' || typeof beforeIntent !== 'function') throw new Error('Controller intent check is invalid');
+    const checked: unknown = beforeIntent(records);
+    if (checked !== null && (typeof checked === 'object' || typeof checked === 'function') && 'then' in checked) {
+      void Promise.resolve(checked).catch(() => undefined);
+      throw new Error('Controller intent check must be synchronous');
+    }
+    if (checked !== undefined) throw new Error('Controller intent check must return no value');
   }
   const event = { ...input, sequence: records.length, id: String(records.length).padStart(8, '0') } as PortfolioControllerEvent;
   const next = [...records, event];
@@ -275,7 +285,9 @@ function appendUnlocked(directory: string, records: PortfolioControllerEvent[], 
 /** Execution events require the caller's lifetime execution lease. Owner controls
  * share only this short transaction; final intent admission sees their exact order. */
 export function appendPortfolioControllerEvent(directory: string, input: EventInput,
-  options: { expectedRecords?: PortfolioControllerEvent[] } = {}): PortfolioControllerEvent[] {
+  options: { expectedRecords?: PortfolioControllerEvent[];
+    /** Internal synchronous evidence check under the short lock, after drain refusal. */
+    beforeIntent?: (records: readonly PortfolioControllerEvent[]) => void } = {}): PortfolioControllerEvent[] {
   return withPortfolioControllerTransaction(directory, () => {
     let records: PortfolioControllerEvent[];
     // Only creation may initialize an absent ledger. A missing nested directory
@@ -288,7 +300,7 @@ export function appendPortfolioControllerEvent(directory: string, input: EventIn
       records = [];
     } else records = readPortfolioControllerEvents(directory);
     if (options.expectedRecords) assertExpectedRecords(records, options.expectedRecords);
-    return appendUnlocked(directory, records, input);
+    return appendUnlocked(directory, records, input, options.beforeIntent);
   });
 }
 

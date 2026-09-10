@@ -51,6 +51,48 @@ function fixture() {
 }
 
 describe('Controller durable control ordering and transactions', () => {
+  it('checks intent evidence synchronously under the acquired short lock before publishing', () => {
+    const f = fixture();
+    const beforeIntent = vi.fn((records: readonly PortfolioControllerEvent[]) => {
+      expect(records).toEqual(f.created);
+      expect(existsSync(join(f.directory, '.control.lock'))).toBe(true);
+      expect(f.read()).toEqual(f.created);
+    });
+    const next = appendPortfolioControllerEvent(f.directory, { kind: 'intent', campaignId: 'a', at: new Date().toISOString() },
+      { expectedRecords: f.created, beforeIntent });
+    expect(beforeIntent).toHaveBeenCalledOnce();
+    expect(next.at(-1)?.kind).toBe('intent');
+    expect(existsSync(join(f.directory, '.control.lock'))).toBe(false);
+  });
+
+  it.each(['throw', 'async', 'value'] as const)('rejects a %s intent guard without history or lock leakage', async (kind) => {
+    const f = fixture();
+    const beforeIntent = () => {
+      if (kind === 'throw') throw new Error('Fixture admission refused');
+      if (kind === 'async') return Promise.reject(new Error('Fixture asynchronous refusal'));
+      return true;
+    };
+    expect(() => appendPortfolioControllerEvent(f.directory,
+      { kind: 'intent', campaignId: 'a', at: new Date().toISOString() }, { expectedRecords: f.created, beforeIntent })).toThrow();
+    await Promise.resolve();
+    expect(f.read()).toEqual(f.created);
+    expect(existsSync(join(f.directory, '.control.lock'))).toBe(false);
+  });
+
+  it('rejects non-intent guard use and preserves drain precedence before invoking a guard', () => {
+    const f = fixture(); const beforeIntent = vi.fn();
+    expect(() => appendPortfolioControllerEvent(f.directory, { kind: 'observed', at: new Date().toISOString() },
+      { beforeIntent })).toThrow('intent check is invalid');
+    expect(beforeIntent).not.toHaveBeenCalled();
+    expect(f.read()).toEqual(f.created);
+    f.request('drain'); const drained = f.read();
+    expect(() => appendPortfolioControllerEvent(f.directory, { kind: 'intent', campaignId: 'a', at: new Date().toISOString() },
+      { expectedRecords: f.created, beforeIntent })).toThrow(PortfolioControllerDrainError);
+    expect(beforeIntent).not.toHaveBeenCalled();
+    expect(f.read()).toEqual(drained);
+    expect(existsSync(join(f.directory, '.control.lock'))).toBe(false);
+  });
+
   it('keeps legacy histories open with no invented control metadata', () => {
     const f = fixture();
     expect(foldPortfolioController(f.created).control).toBeUndefined();

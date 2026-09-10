@@ -11,6 +11,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Controller admission revalidation
+
+- Rechecks target campaign and prerequisite evidence inside the acquired intent
+  transaction, including after short-lock contention, before dispatch is recorded.
+- Refuses stale admission without starting the queued work, retaining original
+  deadlines, drain ordering and fixed enrollment instead of granting a retry.
+
 ### Scoped controller inspector
 
 - Adds on-demand controller observation to the authenticated, root-scoped
