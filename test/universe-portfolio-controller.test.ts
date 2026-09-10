@@ -78,7 +78,7 @@ function fixture(ids = ['a'], maxParallel = 1) {
     nodes: ids.map((id) => ({ campaignId: id, campaign: structuredClone(summaries.get(id)!) })) }));
   hooks.preflight.mockImplementation((id: string) => ({ repo: '/synthetic/repository', campaign: structuredClone(summaries.get(id)!) }));
   hooks.deliveries.mockReturnValue({ sourceState: 'healthy', deliveries: [] });
-  const finish = (id: string, state: 'completed' | 'paused' = 'completed') => {
+  const finish = (id: string, state: 'completed' | 'paused' | 'stopped' | 'failed' = 'completed') => {
     const summary = { fixtureId: id, state } as unknown as UniverseCampaignSummary;
     summaries.set(id, summary);
     const before = readiness.get(id)!;
@@ -220,6 +220,82 @@ describe('Portfolio controller private-ledger fault acceptance', () => {
     expect(f.events().at(-1)).toMatchObject({ kind: 'settled', recordsDigest: FINAL_RECORDS });
     expect(JSON.stringify(f.events())).not.toContain('synthetic-runtime');
     expect(hooks.run).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['owner-paused', 'paused', 'owner-held'],
+    ['campaign-stopped', 'stopped', 'terminal'],
+    ['campaign-failed', 'failed', 'terminal'],
+    ['resource-withheld', 'paused', 'resource-withheld'],
+    ['resource-outcome-ambiguous', 'paused', 'recovery-required'],
+    ['usage-unavailable', 'paused', 'attention-required'],
+    ['request-budget-exhausted', 'paused', 'budget-exhausted'],
+    ['duration-budget-exhausted', 'paused', 'budget-exhausted'],
+  ] as const)('persists verified %s without replaying held work or changing graph scheduling', async (reasonCode, state, disposition) => {
+    const f = fixture(['a', 'b', 'c']);
+    f.definition.tasks[1]!.dependsOn = ['a'];
+    const options = { ...f.options, deliveryPlan: { schemaVersion: 1 as const,
+      deliveries: [{ campaignId: 'a', branch: 'codex/held', baseCommit: 'a'.repeat(40) }] } };
+    hooks.run.mockImplementation(async (id: string) => {
+      if (id !== 'a') return f.finish(id);
+      const summary = f.finish(id, state);
+      Object.assign(f.readiness.get(id)!, { reasonCode, disposition });
+      return summary;
+    });
+    const first = await runUniversePortfolioController(f.definition, options);
+    expect(first).toMatchObject({ sourceState: 'healthy', status: 'incomplete', outcomes: [
+      { campaignId: 'a', state: 'held', attempted: true, reasonCode, deliveryDigest: null },
+      { campaignId: 'b', state: 'held', attempted: false, reasonCode: 'dependency-held' },
+      { campaignId: 'c', state: 'completed', attempted: true, reasonCode: 'campaign-completed' },
+    ] });
+    const readback = readUniversePortfolioController(f.definition.id, f.options);
+    expect(readback.outcomes).toEqual(first.outcomes);
+    const settled = f.events().filter((event) => event.kind === 'settled');
+    expect(settled.find((event) => event.outcome.campaignId === 'a')).toMatchObject({
+      recordsDigest: FINAL_RECORDS, outcome: { state: 'held', reasonCode },
+    });
+    const restarted = await runUniversePortfolioController(f.definition, options);
+    expect(restarted).toMatchObject({ status: 'incomplete', sourceState: 'healthy',
+      deadlineAt: first.deadlineAt, createdAt: first.createdAt, outcomes: first.outcomes });
+    expect(f.events().filter((event) => event.kind === 'settled')).toEqual(settled);
+    expect(f.events().filter((event) => event.kind === 'intent').map((event) => event.campaignId)).toEqual(['a', 'c']);
+    expect(hooks.run.mock.calls.map(([id]) => id)).toEqual(['a', 'c']);
+    expect(hooks.deliver).not.toHaveBeenCalled();
+  });
+
+  it('keeps completed budget outcomes completed rather than treating a reason as a hold', async () => {
+    const f = fixture(['a', 'b']); f.definition.tasks[1]!.dependsOn = ['a'];
+    hooks.run.mockImplementation(async (id: string) => {
+      const summary = f.finish(id);
+      if (id === 'a') {
+        summary.reason = 'Campaign duration budget exhausted';
+        f.summaries.set(id, summary);
+        f.readiness.get(id)!.expectedIdentity!.summaryDigest = digest(canonical(summary));
+      }
+      return summary;
+    });
+    const first = await runUniversePortfolioController(f.definition, f.options);
+    expect(first.status).toBe('completed');
+    expect(first.outcomes[0]).toMatchObject({ state: 'completed', reasonCode: 'campaign-completed' });
+    const before = f.events();
+    expect((await runUniversePortfolioController(f.definition, f.options)).outcomes).toEqual(first.outcomes);
+    expect(f.events()).toEqual(before);
+    expect(hooks.run.mock.calls.map(([id]) => id)).toEqual(['a', 'b']);
+  });
+
+  it('keeps delivery refusal as the reason for an otherwise completed campaign', async () => {
+    const f = fixture();
+    const options = { ...f.options, deliveryPlan: { schemaVersion: 1 as const,
+      deliveries: [{ campaignId: 'a', branch: 'codex/withheld', baseCommit: 'a'.repeat(40) }] } };
+    hooks.deliver.mockImplementation(async (id: string) => ({ campaign: structuredClone(f.summaries.get(id)!),
+      delivery: { status: 'withheld', reason: 'synthetic-delivery-refusal' } }));
+    const first = await runUniversePortfolioController(f.definition, options);
+    expect(first.outcomes[0]).toMatchObject({ state: 'held', reasonCode: 'delivery-withheld', deliveryDigest: null });
+    expect(readUniversePortfolioController(f.definition.id, f.options).outcomes).toEqual(first.outcomes);
+    const settled = f.events().filter((event) => event.kind === 'settled');
+    expect((await runUniversePortfolioController(f.definition, options)).outcomes).toEqual(first.outcomes);
+    expect(f.events().filter((event) => event.kind === 'settled')).toEqual(settled);
+    expect(hooks.run).toHaveBeenCalledOnce(); expect(hooks.deliver).toHaveBeenCalledOnce();
   });
 
   it('keeps thrown runner work unresolved even if external readiness later says completed', async () => {

@@ -1796,6 +1796,14 @@ not acquire or probe execution locks: a lock-only conflict is detected by `run`,
 and `pending` alone does not establish that capacity is available.
 Read-only status never creates missing stores or reconciles uncertain work.
 
+When a dispatched campaign settles without completing, its outcome preserves
+the verified readiness reason, such as `owner-paused`, `campaign-stopped`,
+`resource-withheld` or `resource-outcome-ambiguous`. These distinguish an owner
+control from a resource hold; none authorizes automatic replay. A planned
+delivery can instead report its delivery-specific reason, such as
+`delivery-not-attempted`. Existing historical `campaign-held` records are not
+rewritten.
+
 Recovery depends on which records are durably present, not just whether the old
 process exited:
 
@@ -1863,6 +1871,53 @@ observations consume history capacity. Exhaustion refuses new work rather than
 discarding checkpoints. SIGINT/SIGTERM and deadline expiry cancel and await owned
 calls; cleanup can extend elapsed time beyond the allowance. No daemon or background restart is
 installed. Existing campaign pause and stop controls remain authoritative.
+
+#### Intervene in active work
+
+Campaign controls target one campaign, not the whole controller. From another
+terminal, an authorized owner can request a pause on the exact active campaign
+and private root:
+
+```sh
+node bin/ashlr universe campaign pause campaign-a \
+  --root /absolute/private/universe --json
+node bin/ashlr universe campaign status campaign-a \
+  --root /absolute/private/universe --json
+node bin/ashlr universe controller status build \
+  --root /absolute/private/universe --json
+```
+
+Replace the IDs and root with the enrolled controller and campaign. The first
+command writes an owner request. Its success does not mean the worker has
+exited: wait for acknowledged `paused` status and inspect the controller's
+settlement. Use `campaign stop` instead of `pause` only when a terminal stop is
+intended; a terminal campaign cannot be resumed. The owner polls controls during
+execution, cancels active work, and awaits cleanup before settling the campaign.
+
+A held prerequisite blocks its dependants; unrelated ready branches may still
+run. Pausing a queued, never-dispatched campaign changes its pinned history and
+can make the existing controller unavailable. It is not a supported way to pause
+the whole queue. Repeating the controller manifest does not resume held attempts
+or renew its deadline. A separate explicit campaign `run`/`resume` changes the
+campaign's evidence and is not a transparent continuation of the old controller;
+inspect the resulting evidence before planning further work.
+
+For whole-invocation cancellation, interrupt the controller's foreground terminal
+with Ctrl-C (`SIGINT`), or send `SIGTERM` to its verified process. The CLI awaits
+owned calls and returns `130` for cancellation. This is interruption, not graceful
+admission draining: active attempts may become held, and repeating the manifest
+does not automatically replay them. There is no durable controller-wide
+drain/resume command or persistent cancellation toggle in this release.
+
+The macOS owner-control and signal acceptance tests exercise separate local
+processes with inert workers and private temporary Git repositories. They do not
+establish provider cancellation, machine-reboot recovery or resident operation.
+From a development checkout with dependencies installed, run:
+
+```sh
+npx vitest run test/universe-controller-owner-control-integration.test.ts \
+  test/universe-controller-signal-integration.test.ts --no-file-parallelism
+```
 
 Run exits `0` for completion, `130` for cancellation, `1` for incomplete or
 unavailable execution, and `2` for invalid input. Status exits `0` for readable

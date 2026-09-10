@@ -38,6 +38,11 @@ handoffs gate downstream work; no push, merge, deployment or acceptance is impli
 Repeat --resource-runtime for every intended resource-pool invocation; its private
 locator is not stored in the controller. Account reserves and policy still apply.
 SIGINT/SIGTERM requests cancellation and waits for started work to settle.
+Campaign pause/stop targets only that campaign, not the entire controller.
+Wait for acknowledged campaign status; a successful request is not worker exit.
+Held prerequisites block dependants; independent ready work may continue.
+Pausing queued work changes its pinned evidence and can make this controller
+unavailable. There is no controller-wide durable drain/resume command.
 This is an explicitly awaited foreground controller, not a resident daemon or
 discovery of new campaigns. Status never starts work or reconciles writes.
 Exit codes: run 0 completed, 1 incomplete/unavailable/timed-out, 130 cancelled;
