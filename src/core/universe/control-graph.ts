@@ -14,12 +14,20 @@ export interface ControlGraphNode { id: string; kind: ControlNodeKind; requires:
 export interface ControlGraphDefinition { schemaVersion: 1; id: string; nodes: ControlGraphNode[]; maxConcurrent: number; maxDurationMs: number }
 export interface ControlArtifact { nodeId: string; digest: string; value: unknown }
 export interface ControlHandlerContext { node: ControlGraphNode; artifacts: ControlArtifact[]; signal: AbortSignal }
-export interface ControlHandlerResult { artifact: unknown; verifier?: DecisionTraceV1['verifier']; conflicts?: DecisionTraceV1['conflicts'] }
+export interface ControlHandlerResult {
+  artifact: unknown; verifier?: DecisionTraceV1['verifier']; conflicts?: DecisionTraceV1['conflicts'];
+  outcome?: 'completed' | 'rejected'; spend?: DecisionTraceV1['spend'];
+}
 export type ControlGraphHandler = (context: ControlHandlerContext) => Promise<ControlHandlerResult>;
+/** Trusted host declaration, not an effect permit or model-authored authority. */
+export interface ControlHandlerExecution {
+  effectClass: 'resource-completion'; constitutionVersion: string; policyEpoch: number; bindingDigest: string;
+}
+export type ControlGraphHandlerRegistration = ControlGraphHandler | (ControlHandlerExecution & { run: ControlGraphHandler });
 export interface ControlGraphOptions {
   root: string;
   /** Trusted host adapters, never executable code or command strings from graph JSON. */
-  handlers: Partial<Record<ControlNodeKind, ControlGraphHandler>>;
+  handlers: Partial<Record<ControlNodeKind, ControlGraphHandlerRegistration>>;
   signal?: AbortSignal;
   /** Only local test fixtures may inject a key; runtime default uses existing provenance. */
   traceKeys?: DecisionTraceKeyOptions;
@@ -39,6 +47,29 @@ const HASH = /^[a-f0-9]{64}$/;
 const MAX_BYTES = 512 * 1024;
 const MAX_EVENTS = 257;
 const GUARDED = new Set<ControlNodeKind>(['integrate', 'deliver', 'mutate-harness', 'sweep']);
+
+function executionMetadata(value: unknown): ControlHandlerExecution {
+  const row = snapshot<ControlHandlerExecution>(value, 1024);
+  if (!exact(row, ['effectClass', 'constitutionVersion', 'policyEpoch', 'bindingDigest']) || row.effectClass !== 'resource-completion' ||
+    typeof row.constitutionVersion !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.constitutionVersion) ||
+    !Number.isSafeInteger(row.policyEpoch) || row.policyEpoch < 0 || typeof row.bindingDigest !== 'string' || !HASH.test(row.bindingDigest)) {
+    throw new Error('Invalid graph execution declaration');
+  }
+  return row;
+}
+function registration(value: ControlGraphHandlerRegistration): { run: ControlGraphHandler; execution?: ControlHandlerExecution } {
+  if (typeof value === 'function') return { run: value };
+  if (!exact(value, ['run', 'effectClass', 'constitutionVersion', 'policyEpoch', 'bindingDigest']) ||
+    Object.keys(value).some((key) => !Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value')) ||
+    typeof value.run !== 'function') throw new Error('Invalid graph handler registration');
+  const { run, ...metadata } = value;
+  return { run, execution: executionMetadata(metadata) };
+}
+function assertExecutionTrace(trace: DecisionTraceV1, execution?: ControlHandlerExecution): void {
+  if (trace.authority.effectClass !== (execution?.effectClass ?? 'simulate') ||
+    trace.constitutionVersion !== (execution?.constitutionVersion ?? 'existing-doctrine') ||
+    trace.policyEpoch !== (execution?.policyEpoch ?? 0)) throw new Error('Graph execution declaration changed');
+}
 
 function snapshot<T>(value: unknown, limit = MAX_BYTES): T {
   const text = canonicalEvidencePackJsonV3(value);
@@ -103,7 +134,7 @@ function load(root: string, keys?: DecisionTraceKeyOptions) {
   const events = result.records;
   let definition: ControlGraphDefinition | null = null;
   let deadlineAt: string | null = null;
-  const states = new Map<string, { state: 'pending' | 'unresolved' | 'completed' | 'rejected'; artifact?: ControlArtifact }>();
+  const states = new Map<string, { state: 'pending' | 'unresolved' | 'completed' | 'rejected'; artifact?: ControlArtifact; execution?: ControlHandlerExecution }>();
   const edges: ControlGraphReport['edges'] = [];
   for (let index = 0; index < events.length; index++) {
     const row = events[index]!;
@@ -112,6 +143,7 @@ function load(root: string, keys?: DecisionTraceKeyOptions) {
       if (row.kind !== 'created' || row.nodeId !== null || !exact(row.data, ['definition', 'deadlineAt']) || typeof row.data.deadlineAt !== 'string' ||
           !Number.isFinite(Date.parse(row.data.deadlineAt))) throw new Error('Invalid graph enrollment');
       definition = validateControlGraph(row.data.definition); deadlineAt = row.data.deadlineAt;
+      assertExecutionTrace(row.trace);
       if (row.definitionDigest !== digest(canonical(definition))) throw new Error('Graph definition changed');
       for (const node of definition.nodes) states.set(node.id, { state: 'pending' });
       continue;
@@ -122,14 +154,19 @@ function load(root: string, keys?: DecisionTraceKeyOptions) {
     if (!node || !prior) throw new Error('Unknown graph node');
     if (row.kind === 'intent') {
       const inputs = node.requires.map((id) => states.get(id)?.artifact);
-      if (prior.state !== 'pending' || inputs.some((item) => !item) || !exact(row.data, ['inputDigests']) ||
+      if (prior.state !== 'pending' || inputs.some((item) => !item) ||
+          !(exact(row.data, ['inputDigests']) || exact(row.data, ['inputDigests', 'execution'])) ||
           canonical(row.data.inputDigests) !== canonical(inputs.map((item) => ({ nodeId: item!.nodeId, digest: item!.digest })))) throw new Error('Invalid graph intent');
+      const execution = Object.hasOwn(row.data, 'execution') ? executionMetadata(row.data.execution) : undefined;
+      assertExecutionTrace(row.trace, execution);
       for (const item of inputs) edges.push({ from: item!.nodeId, to: node.id, artifactDigest: item!.digest });
-      states.set(node.id, { state: 'unresolved' });
+      states.set(node.id, { state: 'unresolved', ...(execution ? { execution } : {}) });
     } else if (row.kind === 'settled') {
-      if (prior.state !== 'unresolved' || !exact(row.data, ['state', 'artifact', 'artifactDigest']) ||
+      if (prior.state !== 'unresolved' || !exact(row.data, ['state', 'artifact', 'artifactDigest', ...(prior.execution ? ['execution'] : [])]) ||
           !['completed', 'rejected'].includes(String(row.data.state)) ||
           row.data.artifactDigest !== digest(canonical(row.data.artifact)) || row.trace.artifactDigest !== row.data.artifactDigest) throw new Error('Invalid graph settlement');
+      if (prior.execution && canonical(executionMetadata(row.data.execution)) !== canonical(prior.execution)) throw new Error('Graph execution binding changed');
+      assertExecutionTrace(row.trace, prior.execution);
       if (['verify', 'critic', 'weigh'].includes(node.kind) && row.data.state === 'completed' &&
           (row.trace.verifier.verdict !== 'pass' || !row.trace.verifier.independent)) throw new Error('Missing independent graph verdict');
       states.set(node.id, { state: row.data.state as 'completed' | 'rejected', ...(row.data.state === 'completed' ? {
@@ -167,7 +204,12 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
   const definition = validateControlGraph(input);
   const root = inspectPrivateDirectory(options.root);
   const traceKeys = options.traceKeys?.testKey ? { testKey: Buffer.from(options.traceKeys.testKey) } : undefined;
-  const handlers = { ...options.handlers };
+  // Capture trusted callbacks and detached metadata before the first async yield.
+  const handlers = new Map<ControlNodeKind, ReturnType<typeof registration>>();
+  for (const kind of CONTROL_NODE_KINDS) {
+    const value = options.handlers[kind];
+    if (value !== undefined) handlers.set(kind, registration(value));
+  }
   const controller = new AbortController();
   const started = performance.now();
   let stopReason: string | null = null;
@@ -191,7 +233,8 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
   try {
     let state = load(root, traceKeys);
     const definitionDigest = digest(canonical(definition));
-    const append = (kind: Event['kind'], nodeId: string | null, data: unknown, verifier: DecisionTraceV1['verifier'], conflicts: DecisionTraceV1['conflicts'] = []) => {
+    const append = (kind: Event['kind'], nodeId: string | null, data: unknown, verifier: DecisionTraceV1['verifier'],
+      conflicts: DecisionTraceV1['conflicts'] = [], execution?: ControlHandlerExecution, spend: DecisionTraceV1['spend'] = { unknown: true }) => {
       if (!own()) throw new Error('Graph ownership lost');
       const current = load(root, traceKeys);
       if (current.events.length !== state.events.length || canonical(current.events.at(-1) ?? null) !== canonical(state.events.at(-1) ?? null)) throw new Error('Graph evidence changed');
@@ -200,8 +243,8 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
       const artifactDigest = kind === 'settled' ? (body.data as { artifactDigest: string }).artifactDigest : undefined;
       const trace = signDecisionTraceV1({ id: `${definition.id}:${body.sequence}`, ts: new Date().toISOString(),
         entities: nodeId ? [`graph:${definition.id}`, `node:${nodeId}`] : [`graph:${definition.id}`], action: `graph-${kind}`,
-        constitutionVersion: 'existing-doctrine', policyEpoch: 0, inputsDigest: digest(canonical(body)),
-        ...(artifactDigest ? { artifactDigest } : {}), verifier, authority: { effectClass: 'simulate' }, spend: { unknown: true }, conflicts }, traceKeys);
+        constitutionVersion: execution?.constitutionVersion ?? 'existing-doctrine', policyEpoch: execution?.policyEpoch ?? 0, inputsDigest: digest(canonical(body)),
+        ...(artifactDigest ? { artifactDigest } : {}), verifier, authority: { effectClass: execution?.effectClass ?? 'simulate' }, spend, conflicts }, traceKeys);
       if (!trace) throw new Error('Graph provenance unavailable');
       const result = writeImmutablePrivateRecord(configuration(root, traceKeys), { ...body, trace }, { lockWaitMs: 0, prepublish: own });
       if (!['recorded', 'replayed'].includes(result)) throw new Error('Graph publication unavailable');
@@ -223,22 +266,28 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
         if (active.size >= definition.maxConcurrent) break;
         if (state.states.get(node.id)?.state !== 'pending' || !node.requires.every((id) => state.states.get(id)?.state === 'completed')) continue;
         if (GUARDED.has(node.kind)) { reasons.add(`${node.id}:existing-effect-gate-required`); continue; }
-        const handler = handlers[node.kind];
+        const handler = handlers.get(node.kind);
         if (!handler) { reasons.add(`${node.id}:handler-unavailable`); continue; }
         const artifacts = node.requires.map((id) => state.states.get(id)!.artifact!);
-        append('intent', node.id, { inputDigests: artifacts.map(({ nodeId, digest: hash }) => ({ nodeId, digest: hash })) },
-          { id: 'pending', verdict: 'unavailable', independent: false });
+        const execution = handler.execution;
+        append('intent', node.id, { inputDigests: artifacts.map(({ nodeId, digest: hash }) => ({ nodeId, digest: hash })),
+          ...(execution ? { execution } : {}) }, { id: 'pending', verdict: 'unavailable', independent: false }, [], execution);
         dispatched = true;
         const task = Promise.resolve().then(async () => {
           // Queued cancellation after intent cannot authorize a worker call.
-          if (stop() || !own()) return;
+          if (controller.signal.aborted || stop() || !own()) return;
           // A fan-in may contain many individually bounded artifacts.
-          const output = await handler({ node: snapshot(node), artifacts: artifacts.map((artifact) => snapshot<ControlArtifact>(artifact)), signal: controller.signal });
+          const output = await handler.run({ node: snapshot(node), artifacts: artifacts.map((artifact) => snapshot<ControlArtifact>(artifact)), signal: controller.signal });
           const result = snapshot<ControlHandlerResult>(output, 64 * 1024);
-          if (!result || typeof result !== 'object' || !Object.hasOwn(result, 'artifact') || Object.keys(result).some((key) => !['artifact', 'verifier', 'conflicts'].includes(key))) throw new Error('Invalid handler result');
+          if (!result || typeof result !== 'object' || !Object.hasOwn(result, 'artifact') ||
+            Object.keys(result).some((key) => !['artifact', 'verifier', 'conflicts', 'outcome', 'spend'].includes(key)) ||
+            (execution || Object.hasOwn(result, 'outcome')) && !['completed', 'rejected'].includes(result.outcome!)) throw new Error('Invalid handler result');
           const verifier = result.verifier ?? { id: 'not-evaluated', verdict: 'unavailable' as const, independent: false };
-          const accepted = !['verify', 'critic', 'weigh'].includes(node.kind) || verifier.verdict === 'pass' && verifier.independent;
-          append('settled', node.id, { state: accepted ? 'completed' : 'rejected', artifact: result.artifact, artifactDigest: digest(canonical(result.artifact)) }, verifier, result.conflicts ?? []);
+          const accepted = result.outcome !== 'rejected' && !(execution && (stop() || controller.signal.aborted)) &&
+            (!['verify', 'critic', 'weigh'].includes(node.kind) || verifier.verdict === 'pass' && verifier.independent);
+          append('settled', node.id, { state: accepted ? 'completed' : 'rejected', artifact: result.artifact,
+            artifactDigest: digest(canonical(result.artifact)), ...(execution ? { execution } : {}) },
+          verifier, result.conflicts ?? [], execution, result.spend ?? { unknown: true });
         }).catch(() => { reasons.add(`${node.id}:dispatch-unresolved`); }).finally(() => active.delete(node.id));
         active.set(node.id, task);
       }
