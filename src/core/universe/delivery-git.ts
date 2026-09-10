@@ -4,6 +4,7 @@ import { realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { canonical, digest, MAX_ARTIFACT_BYTES, type UniverseArtifactEntry } from './artifacts.js';
 import { fileOperationsPathKey, validFileOperationsPath } from './generation.js';
+import { killSwitchOn } from '../sandbox/policy.js';
 
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const MAX_ENTRIES = 8_192;
@@ -159,6 +160,7 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
   }
   async function createRef(branch: string, commit: string, beforeCommit?: () => void): Promise<void> {
     if (beforeCommit !== undefined && typeof beforeCommit !== 'function') throw new Error('Delivery ref pre-commit check must be a function');
+    if (killSwitchOn()) throw new Error('Delivery publication withheld by global KILL');
     const remaining = Math.min(30_000, Math.floor(deadline - performance.now()));
     if (remaining <= 0) throw new Error('Delivery Git operation deadline exceeded');
     const transactionDeadline = Math.min(deadline, performance.now() + remaining);
@@ -203,6 +205,12 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
               throw new Error('Delivery ref pre-commit check must be synchronous');
             }
             if (checked !== undefined) throw new Error('Delivery ref pre-commit check must return undefined');
+            if (error || performance.now() >= transactionDeadline) throw new Error('Delivery Git ref transaction deadline exceeded');
+            // Both guarded integration delivery and legacy two-argument callers
+            // observe the global stop at the last synchronous publication check.
+            // Once commit is sent, callers must reconcile rather than assume
+            // that a later stop means the branch was never published.
+            if (killSwitchOn()) throw new Error('Delivery publication withheld by global KILL');
             if (error || performance.now() >= transactionDeadline) throw new Error('Delivery Git ref transaction deadline exceeded');
             phase = 'committing';
             child.stdin.end('commit\n');
