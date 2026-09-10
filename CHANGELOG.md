@@ -11,6 +11,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Mission graph navigation
+
+- Adds campaign ID/reason search, recorded-state filters and paginated results
+  without hiding graph nodes or changing selection and scheduling order.
+- Reveals selected nodes within the diagram and prioritizes their real links in
+  dense graphs, preserving complete evidence details and explicit stale states.
+
 ### Recorded controller mission topology
 
 - Adds a selectable campaign dependency diagram and evidence panel to the scoped

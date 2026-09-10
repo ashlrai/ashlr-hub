@@ -204,6 +204,20 @@ be bounded for dense portfolios, with complete relationships available in the
 selected campaign details. Native buttons support keyboard selection; the outcome
 table remains available independently of the diagram.
 
+Use **Search campaigns** to match campaign IDs or recorded reason codes, and
+**Recorded state** to narrow the campaign index. Search is literal and ignores
+case. Filters do not hide graph nodes, rearrange dependency layers or change the
+selected campaign. A selected campaign excluded by filters remains in the evidence
+panel with an explicit notice. Reset filters to clear the search and close its
+results; the full diagram remains visible throughout.
+
+Choose a search result or prerequisite to reveal its node inside the diagram.
+**Locate selected** also focuses the node for keyboard navigation, without
+scrolling the whole page. Dense diagrams prioritize the selected campaign's
+actual connections within the display limit; complete relationships remain in
+the details. None of these local navigation actions refreshes evidence or starts
+work. A historical observation stays historical until an explicit refresh succeeds.
+
 This view never starts work, acquires execution ownership, acknowledges drain,
 repairs a ledger or changes account allocation. Missing and degraded controllers
 are reported explicitly. Use the [CLI drain/resume workflow](#drain-and-reopen-a-preserved-queue)
