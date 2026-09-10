@@ -6,9 +6,10 @@ import type { UniverseCampaignReadiness } from '../src/core/universe/campaign-re
 import type { UniverseCampaignSummary } from '../src/core/universe/types.js';
 import { superviseUniverseCampaigns, type UniverseCampaignSupervisorOptions } from '../src/core/universe/campaign-supervisor.js';
 
-const hooks = vi.hoisted(() => ({ read: vi.fn(), run: vi.fn() }));
+const hooks = vi.hoisted(() => ({ read: vi.fn(), run: vi.fn(), runtime: vi.fn() }));
 vi.mock('../src/core/universe/campaign-readiness.js', () => ({ readUniverseCampaignReadiness: hooks.read }));
 vi.mock('../src/core/universe/campaign.js', () => ({ runUniverseCampaign: hooks.run }));
+vi.mock('../src/core/universe/resource-runtime-check.js', () => ({ checkResourceGenerationRuntime: hooks.runtime }));
 
 const options = (): UniverseCampaignSupervisorOptions => ({ root: '/private/fixture-store', maxDurationMs: 5_000, pollIntervalMs: 50 });
 function report(id: string): UniverseCampaignReadiness {
@@ -32,7 +33,7 @@ function fixture(ids = ['a', 'b']) {
   hooks.run.mockImplementation(async (id: string) => finish(id));
   return { reports, finish };
 }
-beforeEach(() => { hooks.read.mockReset(); hooks.run.mockReset(); });
+beforeEach(() => { hooks.read.mockReset(); hooks.run.mockReset(); hooks.runtime.mockReset().mockReturnValue({ status: 'valid' }); });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('foreground campaign supervisor input envelope', () => {
@@ -111,7 +112,7 @@ describe('bounded explicit enrollment', () => {
   });
 
   it.each(['runner', 'evidence', 'observer'] as const)('reconciles a final synchronous %s overrun without losing completed evidence', async (phase) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
     const f = fixture(['a']); const controller = new AbortController(); let now = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
     hooks.run.mockImplementation(async (id: string) => {
@@ -135,7 +136,7 @@ describe('bounded explicit enrollment', () => {
   });
 
   it.each(['cancelled', 'failed', 'timed-out'] as const)('preserves %s precedence over a final synchronous overrun', async (status) => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
     const f = fixture(['a']); const controller = new AbortController(); let now = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => now);
     hooks.run.mockImplementation(async (id: string) => f.finish(id));
@@ -159,6 +160,64 @@ describe('bounded explicit enrollment', () => {
     const result = await superviseUniverseCampaigns(['a'], options());
     expect(result.outcomes[0]).toMatchObject({ status: 'held', reasonCode: 'resource-runtime-required', attempted: false });
     expect(hooks.run).not.toHaveBeenCalled();
+    expect(hooks.runtime).not.toHaveBeenCalled();
+  });
+
+  it('withholds invalid resource configuration once while independent non-resource work completes', async () => {
+    const f = fixture(['a', 'b', 'c']);
+    f.reports.get('a')!.resourceRuntimeRequired = true; f.reports.get('c')!.resourceRuntimeRequired = true;
+    hooks.runtime.mockReturnValue({ status: 'invalid', checks: [{ code: 'workspace', status: 'failed' }] });
+    const result = await superviseUniverseCampaigns(['a', 'b', 'c'], { ...options(), resourceRuntime: '/private/runtime.json' });
+    expect(result.status).toBe('incomplete');
+    expect(result.outcomes[0]).toMatchObject({ status: 'held', attempted: false, reasonCode: 'resource-runtime-invalid:workspace' });
+    expect(result.outcomes[1]).toMatchObject({ status: 'completed', attempted: true });
+    expect(result.outcomes[2]).toMatchObject({ status: 'held', attempted: false, reasonCode: 'resource-runtime-invalid:workspace' });
+    expect(hooks.run.mock.calls.map(([id]) => id)).toEqual(['b']);
+    expect(hooks.runtime).toHaveBeenCalledOnce();
+    expect(f.reports.get('a')!.observedState).toBe('ready');
+    expect(JSON.stringify(result)).not.toContain('/private');
+  });
+
+  it('leaves temporary capacity and warnings to actual resource admission after valid preflight', async () => {
+    const f = fixture(['a', 'b']);
+    for (const value of f.reports.values()) value.resourceRuntimeRequired = true;
+    hooks.runtime.mockReturnValue({ status: 'valid', counts: { eligibleWorkers: 0 }, warnings: ['quota-refresh-not-configured'] });
+    const result = await superviseUniverseCampaigns(['a', 'b'], { ...options(), resourceRuntime: '/private/runtime.json' });
+    expect(result.status).toBe('completed'); expect(hooks.run).toHaveBeenCalledTimes(2);
+    expect(hooks.runtime).toHaveBeenCalledOnce();
+  });
+
+  it.each(['cancelled', 'queued-cancel', 'timed-out'] as const)('does not dispatch after synchronous runtime preflight becomes %s', async (status) => {
+    const f = fixture(['a']); f.reports.get('a')!.resourceRuntimeRequired = true;
+    const controller = new AbortController(); let now = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => now);
+    hooks.runtime.mockImplementation(() => {
+      if (status === 'cancelled') controller.abort();
+      else if (status === 'queued-cancel') setImmediate(() => controller.abort());
+      else now = 5_001;
+      return { status: 'valid' };
+    });
+    const result = await superviseUniverseCampaigns(['a'], { ...options(), resourceRuntime: '/private/runtime.json', signal: controller.signal });
+    expect(result.status).toBe(status === 'queued-cancel' ? 'cancelled' : status); expect(hooks.run).not.toHaveBeenCalled();
+    expect(result.outcomes[0]).toMatchObject({ status: 'cancelled', attempted: false });
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
+  });
+
+  it.each(['completed', 'non-resource', 'cancelled'] as const)('bypasses configured runtime inspection for %s work', async (state) => {
+    const f = fixture(['a']); const controller = new AbortController();
+    f.reports.get('a')!.resourceRuntimeRequired = state !== 'non-resource';
+    if (state === 'completed') f.finish('a');
+    if (state === 'cancelled') controller.abort();
+    await superviseUniverseCampaigns(['a'], { ...options(), resourceRuntime: '/private/runtime.json', signal: controller.signal });
+    expect(hooks.runtime).not.toHaveBeenCalled();
+  });
+
+  it('does not preflight while a pristine campaign is still owned elsewhere', async () => {
+    const f = fixture(['a']); const controller = new AbortController();
+    Object.assign(f.reports.get('a')!, { resourceRuntimeRequired: true, disposition: 'owned', reasonCode: 'owner-active' });
+    const result = await superviseUniverseCampaigns(['a'], { ...options(), resourceRuntime: '/private/runtime.json', signal: controller.signal,
+      onTransition(event) { if (event.status === 'waiting') controller.abort(); } });
+    expect(result.status).toBe('cancelled'); expect(hooks.runtime).not.toHaveBeenCalled();
   });
 
   it.each(['recordsDigest', 'summaryDigest'] as const)('never adopts changed queued %s pins', async (field) => {

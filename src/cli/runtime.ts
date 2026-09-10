@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { constants } from 'node:os';
-import { isAbsolute } from 'node:path';
+import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 import { installLocalRuntime, readLocalRuntimeStatus, resolveLocalRuntime, rollbackLocalRuntime,
   type LocalRuntimeStatus, type LocalRuntimeResolution } from '../core/local-runtime/store.js';
 
@@ -18,6 +18,8 @@ previous verified installation. This is not production qualification, registry
 publication, or resident-service activation. No global command or service is changed.
 The foreground run command only forwards Universe. Operational commands require
 one explicit absolute --root <private directory>; help-only commands are exempt.
+The read-only resources check instead requires exactly one explicit canonical
+--resource-runtime <private absolute JSON> and optionally --json; it has no root.
 The selected package and Node interpreter are verified once immediately before
 launch and pinned for that process lifetime. No HOME is substituted. NODE_OPTIONS
 and NODE_PATH are removed from the child environment. Child exit codes propagate;
@@ -48,8 +50,25 @@ function helpOnly(args: string[]): boolean {
   if (args.length === 1 && ['help', '--help', '-h'].includes(args[0]!)) return true;
   const command = args[0];
   if (args.length === 2 && ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'deliver',
-    'deliveries', 'graph', 'compare', 'console'].includes(command ?? '') && ['--help', '-h'].includes(args[1]!)) return true;
-  return args.length === 2 && ['campaign', 'portfolio'].includes(command ?? '') && args[1] === 'help';
+    'deliveries', 'graph', 'compare', 'console', 'controller', 'integration', 'resources'].includes(command ?? '') && ['--help', '-h'].includes(args[1]!)) return true;
+  if (args.length === 2 && ['campaign', 'portfolio', 'controller', 'integration'].includes(command ?? '') && args[1] === 'help') return true;
+  return args.length === 3 && command === 'campaign' && ['supervise', 'check'].includes(args[1]!) && ['--help', '-h'].includes(args[2]!);
+}
+
+/** Rootless exception for one existing read-only command; execution never uses this path. */
+function validateResourceCheck(args: string[]): void {
+  let runtime: string | undefined;
+  let json = false;
+  for (let index = 2; index < args.length; index++) {
+    const arg = args[index];
+    if (arg === '--json' && !json) { json = true; continue; }
+    if (arg !== '--resource-runtime' || runtime !== undefined) throw new UsageError('Resource check only accepts one --resource-runtime and optional --json');
+    runtime = absolutePath(args[++index], '--resource-runtime');
+    if (resolve(runtime) !== runtime || parsePath(runtime).root === runtime || Buffer.byteLength(runtime, 'utf8') > 4_096) {
+      throw new UsageError('--resource-runtime requires a bounded canonical absolute non-root path');
+    }
+  }
+  if (runtime === undefined) throw new UsageError('Resource check requires an explicit --resource-runtime');
 }
 
 function validateForwarded(args: string[]): void {
@@ -58,9 +77,10 @@ function validateForwarded(args: string[]): void {
   if (universe.includes('--')) throw new UsageError('A second separator is not accepted in Universe arguments');
   if (helpOnly(universe)) return;
   if (universe.some((arg) => ['--help', '-h'].includes(arg)) || universe[0] === 'help' ||
-      ['campaign', 'portfolio'].includes(universe[0] ?? '') && universe[1] === 'help') {
+      ['campaign', 'portfolio', 'controller', 'integration'].includes(universe[0] ?? '') && universe[1] === 'help') {
     throw new UsageError('Help must be an unambiguous help-only Universe command');
   }
+  if (universe[0] === 'resources' && universe[1] === 'check') { validateResourceCheck(universe); return; }
   const roots = universe.reduce<number[]>((indexes, arg, index) => arg === '--root' ? [...indexes, index] : indexes, []);
   if (roots.length !== 1) throw new UsageError('Universe operations require exactly one explicit --root <absolute private directory>');
   absolutePath(universe[roots[0]! + 1], '--root');

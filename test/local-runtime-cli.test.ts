@@ -136,11 +136,64 @@ describe('local runtime CLI', () => {
     handle.emit('close', 7, null); expect(await running).toBe(7); expect(output).not.toHaveBeenCalled();
   });
 
-  it.each([['help'], ['--help'], ['status', '--help'], ['campaign', 'help'], ['portfolio', '--help'], ['console', '--help'], ['console', '-h']])('forwards unambiguous Universe help %j without a default root', async (...args) => {
+  it.each([['help'], ['--help'], ['status', '--help'], ['campaign', 'help'], ['portfolio', '--help'], ['console', '--help'], ['console', '-h'],
+    ['controller', '--help'], ['controller', '-h'], ['controller', 'help'], ['integration', '--help'], ['integration', '-h'], ['integration', 'help'],
+    ['resources', '--help'], ['resources', '-h'], ['campaign', 'supervise', '--help'], ['campaign', 'supervise', '-h'],
+    ['campaign', 'check', '--help'], ['campaign', 'check', '-h'],
+  ])('forwards unambiguous Universe help %j without a default root', async (...args) => {
     const handle = child(); childProcess.spawn.mockReturnValue(handle);
     const running = cmdRuntime(['run', '--store', '/private/fixture/store', '--', 'universe', ...args]);
     handle.emit('close', 0, null); expect(await running).toBe(0);
     expect(childProcess.spawn.mock.calls[0]![1]).toEqual([installation().binPath, 'universe', ...args]);
+  });
+
+  it.each([
+    ['--resource-runtime', '/private/fixture/runtime.json'],
+    ['--resource-runtime', '/private/fixture/runtime.json', '--json'],
+    ['--json', '--resource-runtime', "/private/fixture owner's/runtime.json"],
+  ])('forwards exact rootless read-only resource check options %j through the verified runtime', async (...options) => {
+    const handle = child(); childProcess.spawn.mockReturnValue(handle);
+    const forwarded = ['universe', 'resources', 'check', ...options];
+    const running = cmdRuntime(['run', '--store', '/private/fixture/store', '--', ...forwarded]);
+    expect(core.resolveLocalRuntime).toHaveBeenCalledExactlyOnceWith('/private/fixture/store');
+    expect(childProcess.spawn).toHaveBeenCalledWith(installation().nodePath, [installation().binPath, ...forwarded],
+      expect.objectContaining({ stdio: 'inherit', shell: false }));
+    handle.emit('close', 1, null); expect(await running).toBe(1);
+    expect(output).not.toHaveBeenCalled(); expect(errors).not.toHaveBeenCalled();
+    expect(core.installLocalRuntime).not.toHaveBeenCalled(); expect(core.rollbackLocalRuntime).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [], ['--json'], ['--resource-runtime'], ['--resource-runtime', 'relative'], ['--resource-runtime', '/'],
+    ['--resource-runtime', '/private/../runtime.json'], ['--resource-runtime', '/private//runtime.json'],
+    ['--resource-runtime', '/private/runtime.json/'], ['--resource-runtime', `/private/${'é'.repeat(2050)}`],
+    ['--resource-runtime', '/private/runtime.json', '--resource-runtime', '/private/other.json'],
+    ['--resource-runtime', '/private/runtime.json', '--json', '--json'],
+    ['--resource-runtime', '/private/runtime.json', '--root', '/private/universe'],
+    ['--root', '/private/universe', '--resource-runtime', '/private/runtime.json'],
+    ['--resource-runtime', '/private/runtime.json', '--help'], ['--help'], ['help'],
+    ['--resource-runtime', '/private/runtime.json', '--unknown'], ['--resource-runtime=/private/runtime.json'],
+    ['--resource-runtime', '/private/runtime.json', 'run'], ['--resource-runtime', '--json'],
+    ['--resource-runtime', '/private/runtime.json', '--', 'help'],
+  ])('rejects ambiguous rootless resource-check options %j before resolution', async (...options) => {
+    expect(await cmdRuntime(['run', '--store', '/private/fixture/store', '--', 'universe', 'resources', 'check', ...options])).toBe(2);
+    for (const fn of Object.values(core)) expect(fn).not.toHaveBeenCalled();
+    expect(childProcess.spawn).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['controller', '--help', '--root', '/private/universe'], ['controller', 'help', '--root', '/private/universe'],
+    ['integration', 'help', '--root', '/private/universe'], ['resources', '--help', '--resource-runtime', '/private/runtime.json'],
+    ['resources', 'check', '--help'], ['resources', 'help'],
+    ['campaign', 'supervise', '--help', '--root', '/private/universe'], ['campaign', 'check', '--help', '--json'],
+    ['campaign', 'check', 'help'], ['campaign', 'supervise', 'help'],
+    ['controller', 'run', '--manifest', '/private/portfolio.json'],
+    ['campaign', 'supervise', 'task-a', '--max-duration-ms', '1000'],
+    ['resources', 'run', '--resource-runtime', '/private/runtime.json'],
+  ])('keeps mixed help and rootless execution outside the exception %j', async (...forwarded) => {
+    expect(await cmdRuntime(['run', '--store', '/private/fixture/store', '--', 'universe', ...forwarded])).toBe(2);
+    for (const fn of Object.values(core)) expect(fn).not.toHaveBeenCalled();
+    expect(childProcess.spawn).not.toHaveBeenCalled();
   });
 
   it('forwards the explicit console root and port to one verified foreground runtime', async () => {

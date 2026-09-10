@@ -11,6 +11,7 @@ import { recoverControllerRecordLock } from './controller-lock-recovery.js';
 import { runUniverseCampaignOwned } from './campaign.js';
 import { acquireUniverseExecution } from './execution.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadiness } from './campaign-readiness.js';
+import { resourceAdmissionPreflight } from './resource-admission-preflight.js';
 import { deliverCompletedUniverseCampaign, preflightUniverseCampaignDelivery, validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
 import { readUniverseDeliveries } from './delivery.js';
 import { readUniversePortfolioPlan, validateUniversePortfolioDefinition } from './portfolio-plan.js';
@@ -124,6 +125,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     definition.tasks.map((task) => task.campaignId));
   const root = resolve(options.root ?? defaultUniverseRoot());
   const resourceRuntime = options.resourceRuntime;
+  const checkRuntime = resourceRuntime === undefined ? null : resourceAdmissionPreflight(resourceRuntime);
   const signal = options.signal;
   const directory = portfolioControllerDirectory(definition.id, { root });
   if (signal?.aborted) return { ...readUniversePortfolioController(definition.id, { root }), status: 'cancelled' };
@@ -472,6 +474,20 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           }
           if (stopping() || drainSequence !== null) break;
           if (pin.dispatch === 'campaign' && waitable(admitted)) { waitingForOwner = true; continue; }
+          if (pin.dispatch === 'campaign' && admitted.resourceRuntimeRequired && checkRuntime) {
+            const reason = checkRuntime();
+            await new Promise<void>((resolveYield) => setImmediate(resolveYield));
+            // Configuration reads cannot be interrupted by the timer. Recheck
+            // cancellation, original deadline and execution ownership now.
+            if (stopping()) break;
+            if (reason) {
+              const diagnostic = `${campaignId}:${reason}`;
+              if (!errors.includes(diagnostic)) errors.push(diagnostic);
+              // Keep the durable campaign pending: no intent, reservation or
+              // held rewrite. Independent non-resource branches may continue.
+              continue;
+            }
+          }
           let executionLock: LocalStoreLock | undefined;
           if (pin.dispatch === 'campaign') {
             let execution;
