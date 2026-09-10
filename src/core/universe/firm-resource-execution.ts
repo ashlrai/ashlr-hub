@@ -197,7 +197,8 @@ export async function executeFirmResourceTask(input: unknown, hostInput: FirmRes
       poolDigest: enrollment.poolDigest, allowedWorkerIds: [enrollment.workerId], files: ['completion.txt'], maxOutputTokens: requestData.maxOutputTokens },
     { messages: [{ role: 'user', content: requestData.prompt }], candidatePath: hostData.candidatePath,
       timeoutMs: requestData.timeoutMs, signal: controller.signal, resourceRuntime: enrollment.resourceRuntime,
-      expectedRuntimeDigest: enrollment.runtimeDigest, resourceUniverseRoot: hostData.allocationRoot, resourceIdentity: identity });
+      expectedRuntimeDigest: enrollment.runtimeDigest, deadlineAt: new Date(deadline).toISOString(),
+      resourceUniverseRoot: hostData.allocationRoot, resourceIdentity: identity });
     return { disposition: 'attempted', reason: 'runtime-result', taskId, completion, verifiedAccepted: false };
   } catch { return held(phase); }
   finally {

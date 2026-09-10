@@ -87,6 +87,46 @@ beforeEach(() => {
 });
 afterEach(() => { vi.restoreAllMocks(); rmSync(base, { recursive: true, force: true }); });
 
+describe('host-pinned resource runtime consumption', () => {
+  it.each(['expired', 'invalid'])('withholds an %s absolute deadline before contact', async (kind) => {
+    const f = fixture();
+    const deadlineAt = kind === 'expired' ? new Date(Date.now() - 1).toISOString() : 'yesterday';
+    expect(await f.run({ deadlineAt })).toMatchObject({ status: kind === 'expired' ? 'timed-out' : 'failed', content: null });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(refreshResourceQuotaOnce).not.toHaveBeenCalled();
+  });
+  it('rechecks the host deadline inside locked admission even after synchronous setup', async () => {
+    const f = fixture(); const deadline = Date.now() + 60_000;
+    vi.mocked(runResourceTask).mockImplementation(async (options) => {
+      vi.spyOn(Date, 'now').mockReturnValue(deadline + 1);
+      expect(options.readAdmissionEvidence).toBeTypeOf('function');
+      expect(() => options.readAdmissionEvidence!()).toThrow();
+      expect(options.signal?.aborted).toBe(true);
+      throw new Error('No reservation admitted');
+    });
+    expect(await f.run({ deadlineAt: new Date(deadline).toISOString() })).toMatchObject({ status: 'timed-out', content: null });
+    expect(runResourceTask).toHaveBeenCalledOnce(); expect(existsSync(f.marker)).toBe(false);
+  });
+  it('admits the exact pinned runtime using the existing task path', async () => {
+    const f = fixture();
+    expect(await f.run({ expectedRuntimeDigest: digest(canonical(f.runtime)) })).toMatchObject({ status: 'succeeded' });
+    expect(runResourceTask).toHaveBeenCalledOnce();
+  });
+  it.each(['different', 'malformed'])('withholds a %s runtime pin before quota or task contact', async (kind) => {
+    const f = fixture();
+    const expectedRuntimeDigest = kind === 'different' ? '0'.repeat(64) : 'not-a-digest';
+    expect(await f.run({ expectedRuntimeDigest })).toMatchObject({ status: 'failed', content: null });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(refreshResourceQuotaOnce).not.toHaveBeenCalled();
+    expect(refreshResourceLocalModelsOnce).not.toHaveBeenCalled();
+  });
+  it('refuses a changed ledger root between enrollment and runtime consumption', async () => {
+    const f = fixture(); const expectedRuntimeDigest = digest(canonical(f.runtime));
+    const changedRoot = join(base, 'different-ledger');
+    save(f.runtimePath, { ...f.runtime, root: changedRoot });
+    expect(await f.run({ expectedRuntimeDigest })).toMatchObject({ status: 'failed', content: null });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(existsSync(changedRoot)).toBe(false);
+  });
+});
+
 function localFixture() {
   const f = fixture();
   const pool = validateResourcePool({ ...f.pool, workers: f.pool.workers.map((worker) => ({ ...worker, provider: 'local' })) });

@@ -3,11 +3,13 @@ export { validateControlGraph, runControlGraph, readControlGraph, CONTROL_NODE_K
 export type { ControlGraphDefinition, ControlGraphNode, ControlGraphOptions, ControlGraphReport,
   ControlGraphHandler, ControlHandlerContext, ControlHandlerResult, ControlArtifact, ControlNodeKind } from './control-graph.js';
 export { signDecisionTraceV1, verifyDecisionTraceV1, validateDecisionTraceV1, queryDecisionTracesV1 } from './decision-trace.js';
-export type { DecisionTraceV1, UnsignedDecisionTraceV1, DecisionTraceKeyOptions } from './decision-trace.js';
+export type { DecisionTraceV1, UnsignedDecisionTraceV1, DecisionTraceKeyOptions, DecisionTraceQueryV1 } from './decision-trace.js';
 export { verifyUniverseCold, createColdVerificationRequest } from './cold-verifier.js';
 export type { ColdVerificationInput, ColdVerificationResult, ColdVerificationOptions, ColdVerifierTransport } from './cold-verifier.js';
 export { runFirmDemo, readFirmDemo, queryFirmDemo } from './firm-demo.js';
 export type { FirmDemoOptions, FirmDemoReport } from './firm-demo.js';
+export { readFirmGraph, queryFirmGraph } from './firm-graph.js';
+export type { FirmGraphReadOptions, FirmGraphReport } from './firm-graph.js';
 export { registerHarnessArchive, storeHarnessCandidate, readHarnessArchive } from './harness-archive.js';
 export type { HarnessArchiveQuery, HarnessArchivedCandidate, HarnessArchiveRegistration,
   RegisterHarnessArchiveOptions, StoreHarnessCandidateOptions } from './harness-archive.js';
@@ -18,6 +20,9 @@ export { createValueAllocationReceipt, verifyValueAllocationReceipt } from './va
 export type { ValueAllocationInput, ValueAllocationOptions, ValueAllocationReceiptV1, ValueAllocationResult } from './value-allocation.js';
 export { recordValueAllocation, readValueAllocations } from './value-allocation-store.js';
 export type { StoredValueAllocationV1, ValueAllocationStoreRead } from './value-allocation-store.js';
+export { executeFirmResourceTask } from './firm-resource-execution.js';
+export type { FirmResourceEnrollmentV1, FirmResourceExecutionHost, FirmResourceExecutionRequest,
+  FirmResourceExecutionResult } from './firm-resource-execution.js';
 export type * from './file-operations-types.js';
 export { defaultUniverseRoot, ensureUniverseRoot } from './artifacts.js';
 export { initUniverse, validateUniverseManifest } from './store.js';

@@ -44,6 +44,8 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  */
 export const REAL_IO_TEST_FILES = [
   'test/universe-firm-cli-integration.test.ts', // real CLI processes with test-owned provenance
+  'test/universe-firm-graph-query.test.ts', // verified history and immutable read-only inspection
+  'test/universe-firm-resource-execution.test.ts', // enrolled receipt to real inert resource transport
   'test/universe-value-allocation-store.test.ts', // private signed storage and concurrent final-slot admission
   'test/resource-worker-kill.test.ts', // real loopback cancellation and native owned cleanup
   'test/universe-firm-demo.test.ts', // complete signed fixture graph and CLI queries
@@ -102,6 +104,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-git-entries.test.ts', // bounded real Git blob loading and read-only inventory verification
   'test/universe-delivery-git-precommit.test.ts', // prepared real Git transaction guards and create-only ref outcomes
+  'test/universe-delivery-kill.test.ts', // global stop under real prepared Git ref locks
   'test/universe-integration-delivery.test.ts', // private delivery evidence and fault-injected local Git publication
   'test/universe-integration-handoff.test.ts', // immutable downstream registration and source-lineage verification
   'test/universe-portfolio-controller.test.ts', // durable controller records and injected dispatch/restart faults

@@ -187,6 +187,23 @@ describe.skipIf(process.platform === 'win32')('explicitly enrolled firm resource
     expect(f.requests()).toBe(0); expect(existsSync(f.runtime.root)).toBe(false);
   });
 
+  it('refuses expiry observed under the actual resource ledger lock without reserving or dispatching', async () => {
+    const f = await fixture({ resetOffset: 30_000 }); const original = poolRuntime.readResourceJson;
+    let inspectedUnderLock = false;
+    vi.spyOn(poolRuntime, 'readResourceJson').mockImplementation((path, maxBytes) => {
+      const result = original(path, maxBytes);
+      if (path === f.runtime.observationsPath && existsSync(join(f.runtime.root, '.pool.lock'))) {
+        inspectedUnderLock = true;
+        vi.spyOn(Date, 'now').mockReturnValue(f.now + 30_001);
+      }
+      return result;
+    });
+    expect(await f.run()).toMatchObject({ completion: { status: 'timed-out', content: null } });
+    expect(inspectedUnderLock).toBe(true); expect(f.requests()).toBe(0);
+    expect(existsSync(join(f.runtime.root, '.pool.lock'))).toBe(false);
+    expect(poolRuntime.resourcePoolStatus(f.runtime.root, f.pool, f.bindings, f.observations).attempts).toEqual([]);
+  });
+
   it('cancels in-flight work at selection reset expiry before the hypothesis deadline', async () => {
     const f = await fixture({ hang: true, resetOffset: 30_000 }); const pending = f.run();
     await until(() => f.requests() === 1); vi.spyOn(Date, 'now').mockReturnValue(f.now + 30_001);

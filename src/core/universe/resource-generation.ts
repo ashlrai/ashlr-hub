@@ -37,6 +37,10 @@ export interface ResourceGenerationContext {
   timeoutMs: number;
   signal: AbortSignal;
   resourceRuntime?: string;
+  /** Optional host pin, checked against the runtime actually consumed here. */
+  expectedRuntimeDigest?: string;
+  /** Optional absolute host deadline; never renewed by setup, waiting or retry. */
+  deadlineAt?: string;
   resourceUniverseRoot?: string;
   resourceIdentity?: { universeId: string; runId: string; variantId: string };
 }
@@ -98,6 +102,8 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
   const result: ResourceGenerationCompletion = { status: 'failed', content: null, resource: evidence,
     usage: { state: 'unavailable', inputTokens: null, outputTokens: null } };
   const started = performance.now(); const controller = new AbortController(); let timedOut = false;
+  const absoluteDeadline = context.deadlineAt === undefined ? null :
+    typeof context.deadlineAt === 'string' ? Date.parse(context.deadlineAt) : NaN;
   let quotaRefreshStarted = false;
   let sharedEvidenceFailed = false;
   let localRefreshStarted = false;
@@ -108,7 +114,8 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
   if (context.signal.aborted) cancel();
   const remaining = (): number => {
     if (context.signal.aborted) throw new Error();
-    const available = Math.floor(context.timeoutMs - (performance.now() - started));
+    const available = Math.floor(Math.min(context.timeoutMs - (performance.now() - started),
+      absoluteDeadline === null ? Infinity : absoluteDeadline - Date.now()));
     if (available < 1) { timedOut = true; controller.abort(); throw new Error(); }
     return available;
   };
@@ -117,14 +124,19 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     if (validated.kind !== 'resource-pool' || !Number.isSafeInteger(context.timeoutMs) || context.timeoutMs < 1 ||
       context.timeoutMs > 900_000 || !context.resourceIdentity || !path(context.resourceRuntime) ||
       !path(context.resourceUniverseRoot) || !path(context.candidatePath)) throw new Error();
+    if (absoluteDeadline !== null && (!Number.isFinite(absoluteDeadline) || typeof context.deadlineAt !== 'string' ||
+      new Date(absoluteDeadline).toISOString() !== context.deadlineAt)) throw new Error();
     const taskId = resourceGenerationTaskId(context.resourceIdentity);
     const withheld = (): ResourceGenerationCompletion => {
       evidence.taskId = taskId; evidence.dispatch = 'withheld';
       result.error = 'Resource generation withheld by current capacity evidence'; return result;
     };
-    timer = setTimeout(() => { timedOut = true; controller.abort(); }, context.timeoutMs);
+    timer = setTimeout(() => { timedOut = true; controller.abort(); }, remaining());
     remaining();
     const runtime = validateResourceGenerationRuntime(readResourceJson(context.resourceRuntime));
+    if (context.expectedRuntimeDigest !== undefined &&
+      (typeof context.expectedRuntimeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(context.expectedRuntimeDigest) ||
+        digest(canonical(runtime)) !== context.expectedRuntimeDigest)) throw new Error('Resource runtime pin changed');
     inspectPrivateDirectory(context.resourceUniverseRoot);
     if (realpathSync(context.candidatePath) !== context.candidatePath || !lstatSync(context.candidatePath).isDirectory()) throw new Error();
     for (const boundary of [context.candidatePath, context.resourceUniverseRoot, runtime.root]) {
@@ -321,7 +333,11 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       }
       evidence.taskId = taskId; evidence.dispatch = 'unavailable';
       handoff = await runResourceTask({ root: runtime.root, pool, bindings, ...current, task, signal: controller.signal,
-        ...(sharedCollector ? { readAdmissionEvidence: readEvidence } : {}) });
+        ...(sharedCollector || absoluteDeadline !== null ? { readAdmissionEvidence: () => {
+          // Recheck under the ledger lock: synchronous setup/lock waits cannot
+          // renew the host's absolute allocation window before reservation.
+          remaining(); return readEvidence();
+        } } : {}) });
       // Only an explicit no-reservation concurrency race can return to waiting.
       // Throws and every receipt retain the existing no-retry semantics.
       if (handoff.receipt || handoff.replayed || !runtime.capacityWaitMs || capacityRemaining() < 1 ||
