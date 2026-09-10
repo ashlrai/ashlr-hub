@@ -1,7 +1,3 @@
-# Firm build receipt
-
-In progress. No release or activation claimed.
-Actual package receipts, tests and remaining gaps will be recorded here.
 # Verified local handoff
 
 Implementation source: `307a55def0ec438ac6d24b9c3c187fb782551436`, plus the
