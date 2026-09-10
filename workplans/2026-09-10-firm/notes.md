@@ -1,5 +1,27 @@
 # Firm build notes
 
+## September 10: follow-up conversation continuation
+
+- Baseline `75d7897e`; clean isolated `auto/p00`, original checkout preserved.
+  Entire resume found no checkpoint. Three agents covered core, HTTP and cold
+  acceptance; parent integrated UI/query contracts and documentation.
+- Chose copied flat context rather than live ancestry lookup: accepted children
+  remain stable after source deletion. Each task retains only its own prompt plus
+  flat prior turns, never a recursively composed provider prompt.
+- Added separate immutable submission digest so duplicate child retry precedes
+  parent lookup and remains idempotent after deletion/restart. Runtime receipt
+  identities and shared account ledger are unchanged.
+- Cold review caught silent draft detachment on parent deletion and a too-small
+  JSON read bound for escaped captured output. Both corrected with UI/query tests.
+- Integrated 200 resource tests; 1,106 UI tests; 449 safety passes, five skips.
+  Independent and builder subsets overlap, not additive productivity counts.
+- Real browser fixture queued/cancelled a retained child, displayed copied
+  ancestry, and recovered it on reload with read authority only. Local HTTP
+  transport fixtures additionally proved actual flat prompt input and no replay.
+- Original KILL sentinel remains active. No Hub account/provider commissioning,
+  publication, GitHub Actions or remote pushes. Project switching/native tools
+  and full autonomous company loop remain unfinished.
+
 Baseline: 5c270bc73890e474463c31764d51e76196ad2e3f.
 User specification read in full from the attachment supplied this turn.
 Original checkout and prior architecture worktree preserved.

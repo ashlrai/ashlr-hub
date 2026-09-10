@@ -131,7 +131,8 @@ describe('resource console retained history HTTP boundary', () => {
     const read = await http(first, historyPath(), { headers: readHeaders(first) }); expect(read.status).toBe(200);
     expect(read.headers['cache-control']).toBe('no-store'); expect(read.headers['x-content-type-options']).toBe('nosniff');
     expect(JSON.parse(read.text)).toEqual({ id: task.id, prompt: task.prompt,
-      output: { text: 'PRIVATE_HISTORY_OUTPUT', truncated: false }, retention: 'local-until-deleted' });
+      output: { text: 'PRIVATE_HISTORY_OUTPUT', truncated: false }, retention: 'local-until-deleted',
+      transcriptDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
     const proof = randomBytes(32).toString('hex');
     const session = await http(first, '/api/session', { method: 'POST', headers: { ...readHeaders(first), 'x-ashlr-read-client': proof } });
     expect(session.status).toBe(204); const cookie = session.headers['set-cookie']![0]!.split(';')[0]!;

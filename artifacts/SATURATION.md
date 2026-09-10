@@ -1,5 +1,19 @@
 # Firm build evidence — September 10, 2026
 
+## Follow-up continuation from 75d7897e
+
+Three parallel implementation/review agents plus parent integration delivered
+server-assembled flat conversation context with digest-pinned parent identity,
+ordinary shared-ledger admission, restart-safe copies and explicit UI follow-ups.
+Identical retries never rebuild deleted context or acquire a second allowance.
+
+Integrated checks: 200 resource/conversation tests, 1,106 UI tests, 449 safety
+passes with five skips. Typecheck, build, lint, documentation and real-I/O
+classification passed. An inert browser fixture verified queue/cancel/read/reload;
+real local transport tests verified multi-generation input and ledger accounting.
+No Hub real-provider dispatch, account changes or production activation occurred.
+Full goal remains active; see the current report for remaining work and limits.
+
 ## Transcript continuation from f94387ef
 
 Opt-in atomic task transcripts now survive console restart. Terminal deletion

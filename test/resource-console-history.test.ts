@@ -101,7 +101,8 @@ describe.skipIf(process.platform === 'win32')('opt-in atomic resource transcript
     const captured = owner.history('task')!; captured.prompt = 'changed'; captured.output!.text = 'changed';
     await owner.close(); const next = await f.start();
     expect(next.history('task')).toEqual({ id: 'task', prompt: f.task().prompt,
-      output: { text: 'PRIVATE_OUTPUT', truncated: false }, retention: 'local-until-deleted' });
+      output: { text: 'PRIVATE_OUTPUT', truncated: false }, retention: 'local-until-deleted',
+      transcriptDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(next.output('task')).toBeNull(); expect(f.requests).toHaveLength(1);
   });
 

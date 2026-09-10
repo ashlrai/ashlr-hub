@@ -1,6 +1,54 @@
 # Verified local handoff
 
-## Current continuation: restart-safe private transcripts
+## Current continuation: real follow-up conversations
+
+Baseline: `75d7897e9bcbd7b8677f37eca58fd95dfa29020c`; branch `auto/p00`,
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Final source is the commit
+containing this report. Three parallel agents implemented core context storage,
+HTTP integration, and independent failure/recovery acceptance. Parent integrated
+the workspace/query UI, documentation and verification.
+
+- Follow-ups carry an explicit parent ID and transcript digest. The supervisor
+  copies a flat conversation and dispatches through the existing task runtime and
+  shared resource ledger. Each new task consumes normal admission; identical
+  retries compare immutable submission identity before source-history lookup.
+- Schema 3 preserves schemas 1/2 and existing task receipts. Accepted child copies
+  survive parent deletion and restart; deleted child text is never resurrected.
+  Non-retained copies are scrubbed at terminal settlement. Missing and truncated
+  responses keep their actual evidence markers rather than becoming fake answers.
+- New messages stay within 32 KiB; compiled conversation prompts within 256 KiB.
+  Existing 4 MiB state admission reserves escaped context and future retained
+  output. Malformed restored context fails closed before replay or state writes.
+- UI explicitly pins a read transcript, displays copied history, and preserves
+  parent intent across inspection, source deletion and same-scope restart. Only
+  explicit standalone/new-task actions detach context. Worker, access, limits and
+  retention remain explicit choices; no provider-native session is claimed.
+- **200 resource/conversation tests passed across 11 files**, including 47 added
+  cases; **1,106 UI tests passed across 66 files**. Worker/reviewer subsets overlap
+  these integrated totals. Safety: **449 passed, five skipped across 41 files**.
+- Full core/web typecheck, production build, quiet source/test ESLint, docs,
+  real-I/O lane classification and compiled structural safety verification passed.
+  A final build follows the integrated commit so build identity names clean source.
+- Browser fixture verified pinning, explicit submission to an inert Spark worker,
+  queued cancellation, copied null-response ancestry and retention across reload.
+  Reload removed control authority while authenticated reads remained available.
+  Fixture endpoints cannot contact a real provider; no Hub provider job or account
+  allocation change was performed. Preview stopped after verification.
+- Actual host KILL remains active; original user checkout is unchanged. No GitHub
+  Actions, remote push, npm publication, desktop installation or production
+  activation occurred. The entire autonomous-company goal remains active.
+
+Next: explicit project selection over one shared account ledger, conversation
+grouping/compaction, confined implementation and independent acceptance, native
+desktop bootstrap/tools, then evidence-backed always-on commissioning. The 48-node
+package plan is not inflated by this UI continuation: 15 locally landed component
+artifacts and 33 planned packages remain the historical package accounting.
+
+Planning and agent-building skills preserved the existing runtime; frontend and
+React guidance kept context explicit and private reads out of polling caches;
+engineering-documentation guidance separates tested source from live activation.
+
+## Prior continuation: restart-safe private transcripts
 
 Baseline: `f94387ef33761def1f71f14ba6c5c9e0589a2365`; branch `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Final source is the commit

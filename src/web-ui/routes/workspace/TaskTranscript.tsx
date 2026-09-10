@@ -4,8 +4,9 @@ import { readResourceTaskHistory } from '../../data/resource-pool-queries.js';
 import styles from './WorkspaceView.module.css';
 
 /** Mounted with a host/session/task key. Private text never enters the query cache. */
-export function TaskTranscript({ id, canDelete, unlocked, onUnlock, onDelete }: {
+export function TaskTranscript({ id, canDelete, unlocked, onUnlock, onDelete, onFollowUp }: {
   id: string; canDelete: boolean; unlocked: boolean; onUnlock(): void; onDelete(): Promise<boolean>;
+  onFollowUp?(parent: { taskId: string; expectedTranscriptDigest: string }, turns: number): void;
 }) {
   const [transcript, setTranscript] = useState<ResourceConsoleTranscript | null>(null);
   const [loading, setLoading] = useState(false);
@@ -58,15 +59,23 @@ export function TaskTranscript({ id, canDelete, unlocked, onUnlock, onDelete }: 
       </button>
       {confirm && !deleting ? <button type="button" className={styles.subtleButton} onClick={() => setConfirm(false)}>Keep transcript</button> : null}
     </div>
-    {confirm ? <p className={styles.caption}>Removes active transcript and session text, not task records, backups or provider history. Not secure disk erasure. This cannot be undone here and does not rerun the task.</p> : null}
+    {confirm ? <p className={styles.caption}>Removes this transcript and its context copies, not copies in accepted follow-ups, task records, backups or provider history. Not secure disk erasure. This cannot be undone here and does not rerun the task.</p> : null}
     {!canDelete ? <p className={styles.caption}>Deletion requires an unlocked, available console and a settled or cancelled task.</p> : null}
     {error ? <p role="alert" className={styles.error}>{error}</p> : null}
     {transcript ? <>
+      {transcript.context?.length ? <details className={styles.contextHistory}><summary>Prior conversation · {transcript.context.length} {transcript.context.length === 1 ? 'turn' : 'turns'}</summary>
+        <ol>{transcript.context.map((turn) => <li key={turn.taskId}><h4>{turn.taskId} · {turn.outcome ?? 'No reported outcome'}</h4>
+          <p className={styles.caption}>Request</p><pre className={styles.responseText}>{turn.prompt}</pre>
+          <p className={styles.caption}>Response{turn.output?.truncated ? ' (truncated)' : ''}</p>
+          {turn.output ? <pre className={styles.responseText}>{turn.output.text}</pre> : <p className={styles.caption}>No captured response.</p>}
+        </li>)}</ol></details> : null}
       <h4>Submitted request</h4><pre className={styles.responseText}>{transcript.prompt}</pre>
       <h4>Captured response</h4>
       {transcript.output ? <>{transcript.output.truncated ? <p className={styles.caption}>Truncated to the local retention limit.</p> : null}
         <pre className={styles.responseText}>{transcript.output.text}</pre></>
         : <p className={styles.caption}>No response was captured in this transcript. Work is never rerun to reconstruct it.</p>}
+      {onFollowUp && transcript.transcriptDigest ? <button type="button" className={styles.subtleButton} disabled={loading || deleting}
+        onClick={() => onFollowUp({ taskId: id, expectedTranscriptDigest: transcript.transcriptDigest! }, (transcript.context?.length ?? 0) + 1)}>Follow up from this task</button> : null}
     </> : null}
   </section>;
 }

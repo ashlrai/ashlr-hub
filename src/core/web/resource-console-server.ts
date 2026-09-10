@@ -140,7 +140,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const scope: ResourceConsoleScope = { schemaVersion: 1, mode: 'resource-pool', root, poolId: pool.id,
     readOnly: !options.execute, workspace, maxParallel: options.execute ? maxParallel : 0, maxQueued: options.execute ? 64 : 0,
     ...(quotaConfig ? { quotaRefreshEnabled: true } : {}), ...(connectionsConfig ? { connectionsEnabled: true } : {}),
-    ...(options.allocationControls ? { allocationWritable: true } : {}), ...(options.execute ? { historySupported: true } : {}) };
+    ...(options.allocationControls ? { allocationWritable: true } : {}),
+    ...(options.execute ? { historySupported: true, followUpSupported: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
@@ -258,8 +259,13 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         if (closing) throw new RequestError(503, 'Console is closing');
         if (url.pathname === '/api/resources/tasks') {
           const historyField = input !== null && typeof input === 'object' && Object.hasOwn(input, 'retainHistory');
-          if (!exact(input, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens', ...(historyField ? ['retainHistory'] : [])]) ||
-            historyField && typeof input.retainHistory !== 'boolean') {
+          const parentField = input !== null && typeof input === 'object' && Object.hasOwn(input, 'parent');
+          if (!exact(input, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens',
+            ...(historyField ? ['retainHistory'] : []), ...(parentField ? ['parent'] : [])]) ||
+            historyField && typeof input.retainHistory !== 'boolean' || parentField &&
+            (!exact(input.parent, ['taskId', 'expectedTranscriptDigest']) ||
+              typeof input.parent.taskId !== 'string' || !ID.test(input.parent.taskId) ||
+              typeof input.parent.expectedTranscriptDigest !== 'string' || !/^[a-f0-9]{64}$/.test(input.parent.expectedTranscriptDigest))) {
             throw new RequestError(400, 'Expected a scoped task without filesystem or command fields');
           }
           const job = supervisor.submit(input as unknown as ResourceConsoleTaskInput);

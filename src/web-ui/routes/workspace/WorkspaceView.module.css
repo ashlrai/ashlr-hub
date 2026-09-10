@@ -3,6 +3,13 @@
 .transcript { margin-block: var(--space-5); padding: var(--space-4); border: 1px solid var(--border-default); border-radius: var(--radius-md); }
 .transcript h3, .transcript h4 { font-size: var(--text-sm-size); margin-block: var(--space-3); }
 .transcriptActions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
+.followUp { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--space-3); border-left: 3px solid var(--accent-600); background: var(--bg-canvas); padding: var(--space-3); margin-bottom: var(--space-3); font-size: var(--text-xs-size); overflow-wrap: anywhere; }
+.followUp > div { flex: 1 1 230px; min-width: 0; }
+.followUp p { color: var(--text-secondary); margin: var(--space-1) 0; line-height: 1.6; }
+.contextHistory { font-size: var(--text-sm-size); }
+.contextHistory summary { cursor: pointer; padding-block: var(--space-3); }
+.contextHistory ol { padding-left: var(--space-5); }
+.contextHistory li { border-left: 1px solid var(--border-default); padding-left: var(--space-3); overflow-wrap: anywhere; }
 .retention { display: flex; align-items: flex-start; gap: var(--space-2); margin-top: var(--space-3); font-size: var(--text-sm-size); color: var(--text-secondary); }
 .retention input { margin-top: 3px; flex: 0 0 auto; }
 .workspace button, .workspace input, .workspace select, .workspace textarea { font: inherit; }

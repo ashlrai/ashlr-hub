@@ -152,7 +152,9 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       scope.quotaRefreshEnabled !== undefined && typeof scope.quotaRefreshEnabled !== 'boolean' ||
       scope.connectionsEnabled !== undefined && typeof scope.connectionsEnabled !== 'boolean' ||
       scope.allocationWritable !== undefined && typeof scope.allocationWritable !== 'boolean' ||
-      scope.historySupported !== undefined && (typeof scope.historySupported !== 'boolean' || scope.historySupported && scope.readOnly)) {
+      scope.historySupported !== undefined && (typeof scope.historySupported !== 'boolean' || scope.historySupported && scope.readOnly) ||
+      scope.followUpSupported !== undefined && (typeof scope.followUpSupported !== 'boolean' ||
+        scope.followUpSupported && (scope.readOnly || scope.historySupported !== true))) {
       throw new Error('The server did not establish an explicit resource-pool scope.');
     }
     return scope;
@@ -260,11 +262,29 @@ export async function readResourceTaskHistory(id: string, signal?: AbortSignal):
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new Error('Invalid task identity.');
   const value = await apiGet<unknown>(`/api/resources/tasks/${encodeURIComponent(id)}/history`, signal);
   const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
-  if (!record(value) || !exact(value, ['id', 'prompt', 'output', 'retention']) || value.id !== id ||
+  const validId = (candidate: unknown) => typeof candidate === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(candidate);
+  const digest = (candidate: unknown) => typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
+  const validOutput = (candidate: unknown) => candidate === null || record(candidate) && exact(candidate, ['text', 'truncated']) &&
+    typeof candidate.text === 'string' && bytes(candidate.text) <= 64 * 1024 && typeof candidate.truncated === 'boolean';
+  const optional = ['transcriptDigest', 'parent', 'context'].filter((key) => record(value) && Object.hasOwn(value, key));
+  if (!record(value) || !exact(value, ['id', 'prompt', 'output', 'retention', ...optional]) || value.id !== id ||
     typeof value.prompt !== 'string' || bytes(value.prompt) > 32 * 1024 || value.retention !== 'local-until-deleted' ||
-    value.output !== null && (!record(value.output) || !exact(value.output, ['text', 'truncated']) ||
-      typeof value.output.text !== 'string' || bytes(value.output.text) > 64 * 1024 || typeof value.output.truncated !== 'boolean')) {
+    !validOutput(value.output) || Object.hasOwn(value, 'transcriptDigest') && !digest(value.transcriptDigest) ||
+    Object.hasOwn(value, 'parent') && (!record(value.parent) || !exact(value.parent, ['taskId', 'expectedTranscriptDigest']) ||
+      !validId(value.parent.taskId) || value.parent.taskId === id || !digest(value.parent.expectedTranscriptDigest)) ||
+    Object.hasOwn(value, 'context') && (!Array.isArray(value.context) || value.context.length > 256 || value.context.some((turn) =>
+      !record(turn) || !exact(turn, ['taskId', 'prompt', 'output', 'outcome']) || !validId(turn.taskId) || turn.taskId === id ||
+      typeof turn.prompt !== 'string' || bytes(turn.prompt) > 32 * 1024 || !validOutput(turn.output) ||
+      turn.outcome !== null && !['reserved', 'completed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(String(turn.outcome)))) ||
+    bytes(JSON.stringify(value)) > 1024 * 1024) {
     throw new Error('The retained task transcript could not be verified.');
+  }
+  if (value.parent !== undefined || value.context !== undefined) {
+    const context = value.context as Array<{ taskId: string }> | undefined;
+    if (!digest(value.transcriptDigest) || !record(value.parent) || !context?.length ||
+      context.at(-1)?.taskId !== value.parent.taskId || new Set(context.map((turn) => turn.taskId)).size !== context.length) {
+      throw new Error('The retained task transcript could not be verified.');
+    }
   }
   return value as unknown as ResourceConsoleTranscript;
 }

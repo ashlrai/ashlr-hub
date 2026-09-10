@@ -48,7 +48,8 @@ executable markup.
 ### Retained task transcripts
 
 On execution-enabled consoles, select **Retain this task locally** before sending
-to keep its exact submitted prompt (including attachment text) and captured response
+to keep its exact submitted prompt (including attachment text), copied conversation
+context when following up, and captured response
 in the private local supervisor store. This is opt-in per task; legacy requests
 with no `retainHistory` flag, or `false`, retain their existing ephemeral behavior.
 Text is not encrypted by Ashlrverse. Only retain information appropriate for this
@@ -68,31 +69,72 @@ before dispatch. Deleting retained text frees text capacity, **not** the existin
 256-job identity limit; task tombstones and quota accounting remain intact.
 
 For a settled or cancelled task, unlock controls and choose **Delete transcript**,
-then confirm. This removes active transcript and console-session output, not task
+then confirm. This removes this transcript, its copied context and console-session output, not task
 records, provider history, backups, crash-left temporary copies or recoverable disk
 blocks. It is not secure disk erasure and cannot be undone through this console.
 Queued, dispatching and unresolved tasks cannot have their transcript deleted.
 Deletion and identical retries preserve the original retention choice and never
 restore deleted text or create a new usage allowance.
+Already accepted follow-ups have independent copies of their context. Deleting
+the source transcript does not delete those copies or cancel accepted work;
+delete each retained descendant separately when needed.
 
 API: `POST /api/resources/tasks` accepts optional boolean `retainHistory`;
 `GET /api/resources/tasks/:id/history` requires read authority;
 `POST /api/resources/tasks/:id/history/delete` requires control authority and `{}`.
 Only the fixed-workspace execution console exposes this capability. Starting a
 supervisor simply to read history is not supported: it can resume queued work.
-The first opted-in task upgrades supervisor state to schema 2 without changing
-legacy task rows or resource-ledger digests. Older binaries cannot read schema 2;
+The first opted-in task upgrades supervisor state to schema 2; the first follow-up
+upgrades it to schema 3, without changing legacy task rows or resource-ledger
+digests. Older binaries cannot read these newer schemas;
 do not downgrade against that live state or clear it to bypass incompatibility.
 
-This is a project-bound **task workspace**, not durable multi-turn chat. Native
-invocations remain ephemeral; prior turns are not automatically sent as context.
+### Follow-up conversations
+
+On a console advertising `followUpSupported`, read a retained transcript for a
+settled or cancelled task, then choose **Follow up from this task**. The composer
+shows the parent identity and number of prior turns. Choose the enrolled worker,
+workspace access and limits for the new task, then send it explicitly. Selecting
+another task for inspection does not retarget that draft. **Start standalone** or
+**New task** explicitly removes the parent. No previous worker, edit permission
+or retention choice is inherited.
+
+The browser submits only the new request and an explicit content pin:
+
+```json
+"parent": {
+  "taskId": "earlier-task",
+  "expectedTranscriptDigest": "<64-character digest returned by the history read>"
+}
+```
+
+The server validates the pin, copies the flat prior conversation and appends the
+new request in a versioned prompt envelope. It never nests previously assembled
+prompts or trusts browser-supplied history. Missing responses and truncation remain
+explicit evidence, not fabricated answers. Each child has its own task ID and
+normal admission through the **same account ledger**. Branching from one parent
+is supported; identical retries return the accepted task before looking up the
+parent again, including after parent deletion or restart.
+
+The new request (including attachments) remains limited to 32 KiB. The complete
+serialized provider prompt is limited to 256 KiB; overflow is refused before
+admission, without silent truncation or summarization. The existing 4 MiB state
+limit also applies. These are byte limits, not model token-capacity estimates.
+Pending tasks keep frozen context across restarts. Without retention consent,
+copies are discarded at terminal settlement; retained children keep copies until
+explicit deletion. A new follow-up cannot read a deleted parent, but an already
+accepted child does not depend on that parent's remaining text.
+
+This is server-supplied multi-turn context, not native provider-session resumption.
+Native invocations remain ephemeral. Long-conversation compaction and live token
+streaming are not implemented.
 Live output comes from the producing console session; opted-in transcripts can
 survive it. Neither is a token stream. A
 completed task does not establish independent acceptance of its changes.
 
 The current console pins one workspace at startup. Other projects need explicit
 enrollment; selecting an arbitrary path in the browser is not supported. The next
-operating-layer milestones are bounded multi-turn context and conversation grouping,
+operating-layer milestones are conversation grouping and compaction,
 multi-project dispatch retaining one shared account ledger, scoped file browsing,
 owned PTY sessions, and an isolated browser bridge. The existing Tauri wrapper
 remains a source-only draft; this web surface is not a commissioned installer.

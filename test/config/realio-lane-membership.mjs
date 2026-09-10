@@ -83,6 +83,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-history-server.test.ts', // private history HTTP reads, deletes and restart persistence
   'test/resource-console-history.test.ts', // durable supervisor transcripts with real inert transports
   'test/resource-console-history-acceptance.test.ts', // independent restart, deletion and receipt reconciliation
+  'test/resource-console-followup.test.ts', // context headroom and corrupted durable-state refusal
+  'test/resource-console-followup-server.test.ts', // authenticated follow-up HTTP and shared quota accounting
+  'test/resource-console-followup-acceptance.test.ts', // independent context deletion, replay and real local transport
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership
   'test/resource-worker.test.ts', // native worker fixtures and numeric-loopback model transport

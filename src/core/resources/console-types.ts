@@ -20,6 +20,7 @@ export interface ResourceConsoleScope {
   allocationWritable?: boolean;
   /** Explicit capability to retain opt-in task text in the private local store. */
   historySupported?: boolean;
+  followUpSupported?: boolean;
 }
 
 export interface ResourceConsoleGroup {
@@ -66,6 +67,15 @@ export interface ResourceConsoleTaskInput {
   maxOutputTokens: number;
   /** Consent is immutable for this task ID; omission and false are equivalent. */
   retainHistory?: boolean;
+  parent?: ResourceConsoleParent;
+}
+
+export interface ResourceConsoleParent { taskId: string; expectedTranscriptDigest: string }
+export interface ResourceConsoleContextTurn {
+  taskId: string;
+  prompt: string;
+  output: { text: string; truncated: boolean } | null;
+  outcome: ResourceTaskReceipt['status'] | null;
 }
 
 export interface ResourceSupervisorJob {
@@ -81,6 +91,7 @@ export interface ResourceSupervisorJob {
   cancellable: boolean;
   outputAvailable: boolean;
   historyAvailable?: true;
+  parent?: ResourceConsoleParent;
 }
 
 export interface ResourceSupervisorSnapshot {
@@ -150,4 +161,7 @@ export interface ResourceConsoleTranscript {
   prompt: string;
   output: { text: string; truncated: boolean } | null;
   retention: 'local-until-deleted';
+  transcriptDigest?: string;
+  context?: ResourceConsoleContextTurn[];
+  parent?: ResourceConsoleParent;
 }

@@ -36,6 +36,19 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Completed local continuation from `75d7897e`: real server-assembled follow-up
+conversations on the existing shared quota ledger. Three parallel assignments:
+core snapshot/digest persistence, HTTP validation and tests, and independent
+acceptance. Parent owns UI/query integration and final verification.
+
+Contract: explicit parent task plus transcript digest; new request retains its
+own text. Flat context copies survive source-parent deletion and restart without
+replay. Every child receives ordinary task admission. Retained child copies are
+deleted separately; non-retained copies are scrubbed at terminal settlement.
+New-message limit stays 32 KiB; canonical runtime context is bounded at 256 KiB
+with visible refusal, not silent truncation. Project switching and commissioning
+remain next milestones, not claimed complete by this work.
+
 Completed continuation from `f94387ef`: opt-in transcripts and final per-scope
 HTTP ceiling projection are implemented and independently tested. Legacy tasks
 keep settled-prompt deletion and session-only output; retained tasks survive
@@ -66,6 +79,7 @@ Full north-star completion is not claimed. Actual host KILL is active and remain
 untouched. Local package, CLI, UI, release-contract and safety gates passed;
 the full north-star implementation and production activation remain unfinished.
 
-Next: bounded multi-turn context, explicit shared-ledger project selection and
-confined implementation/independent acceptance. Resident ticks still require the
+Next: conversation grouping, explicit shared-ledger project selection and
+confined implementation/independent acceptance. Multi-turn context is implemented;
+conversation grouping and compaction remain. Resident ticks still require the
 existing activation path. Current receipt bounds are not a firm-wide spend ledger.

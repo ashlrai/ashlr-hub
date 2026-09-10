@@ -34,6 +34,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   const [seconds, setSeconds] = useState('300');
   const [tokens, setTokens] = useState('4096');
   const [retainHistory, setRetainHistory] = useState(false);
+  const [followUp, setFollowUp] = useState<{ parent: NonNullable<ResourceConsoleTaskInput['parent']>; turns: number } | null>(null);
   const [attachments, setAttachments] = useState<WorkspaceTextAttachment[]>([]);
   const [readingFiles, setReadingFiles] = useState(false);
   const [sending, setSending] = useState(false);
@@ -93,7 +94,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   function select(id: string | null) {
     outputRequest.current?.abort(); fileGeneration.current++; setReadingFiles(false);
     setSelection(id); setMobilePane('task');
-    if (id === null) textarea.current?.focus();
+    if (id === null) { setFollowUp(null); setTaskId(newTaskId()); textarea.current?.focus(); }
   }
 
   async function addFiles(files: File[]) {
@@ -123,17 +124,19 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         !Number.isSafeInteger(maxOutputTokens) || maxOutputTokens < 1 || maxOutputTokens > 16_384) {
         throw new Error('Write a task, choose an enrolled worker, and use 1–900 seconds with 1–16,384 output tokens.');
       }
+      if (followUp && !scope.followUpSupported) throw new Error('Follow-ups are unavailable in this console. Start a standalone task instead.');
       composed = composeWorkspaceTaskPrompt(prompt, attachments);
     } catch (cause) { setError(cause instanceof Error ? cause.message : 'Check the task before sending.'); return; }
     sendingRef.current = true; setSending(true);
     const sentId = taskId; const sentPrompt = prompt; const sentSession = session;
     try {
       const accepted = await onSubmit({ id: sentId, prompt: composed, allowedWorkerIds: [worker.id], mode, timeoutMs, maxOutputTokens,
+        ...(followUp ? { parent: followUp.parent } : {}),
         ...(retainHistory && scope.historySupported ? { retainHistory: true } : {}) });
       if (!alive.current || currentSession.current !== sentSession) return;
       if (!accepted) { setError('The task was not queued. Your draft is retained; check the task controls and try again.'); return; }
       setSubmitted((current) => Object.fromEntries([...Object.entries(current), [sentId, sentPrompt]].slice(-64)));
-      setPrompt(''); setAttachments([]); fileGeneration.current++; setTaskId(newTaskId());
+      setPrompt(''); setAttachments([]); setFollowUp(null); fileGeneration.current++; setTaskId(newTaskId());
       select(sentId); setNotice('Task queued. Its status and response appear when reported by this supervisor.');
     } catch { if (alive.current && currentSession.current === sentSession) setError('The task could not be queued. Your draft is retained.'); }
     finally { sendingRef.current = false; if (alive.current) setSending(false); }
@@ -190,7 +193,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     <aside className={styles.rail} data-mobile-visible={mobilePane === 'tasks'} aria-label="Project and tasks">
       <div className={styles.project}><span className={styles.projectIcon} aria-hidden="true">⌑</span><div><h2>{projectName}</h2><p>Pinned workspace</p></div></div>
       {scope.workspace ? <p className={styles.projectPath} title={scope.workspace}>{scope.workspace}</p> : <p className={styles.caption}>This console has no execution workspace.</p>}
-      <button type="button" className={styles.newTask} onClick={() => select(null)}>+ New task</button>
+      <button type="button" className={styles.newTask} disabled={lockedForm} onClick={() => select(null)}>+ New task</button>
       <h3 className={styles.railHeading}>Tasks</h3>
       {fleet.tasks.length ? <ul className={styles.taskList}>{fleet.tasks.map((row) => <li key={row.id}>
         <button type="button" aria-current={selection === row.id ? 'true' : undefined} onClick={() => select(row.id)}>
@@ -212,7 +215,10 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
             : <p className={styles.caption}>Original prompt text is not included in the task snapshot.</p>}
           {selected?.job?.historyAvailable === true ? <TaskTranscript key={outputKey} id={selection}
             canDelete={stopEnabled && !busy && !!onDeleteHistory && ['settled', 'cancelled'].includes(selected.job.state)}
-            unlocked={unlocked} onUnlock={onUnlock} onDelete={deleteHistory} /> : null}
+            unlocked={unlocked} onUnlock={onUnlock} onDelete={deleteHistory}
+            onFollowUp={scope.followUpSupported && canSend && !lockedForm && ['settled', 'cancelled'].includes(selected.job.state)
+              ? (parent, turns) => { setFollowUp({ parent, turns }); setTaskId(newTaskId()); setError(null); textarea.current?.focus(); }
+              : undefined} /> : null}
           <section className={styles.answer} aria-label="Task response"><h3>Response</h3>{outputContent}</section>
           {selected?.stateDisagreement ? <p className={styles.notice}>Supervisor and receipt states differ. Refreshing will reconcile the snapshots.</p> : null}
           {selected?.job?.cancellable ? <button type="button" className={styles.subtleButton} disabled={!stopEnabled || busy}
@@ -221,6 +227,11 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
           <p>Ask for an investigation, a proposed change, or a bounded implementation. Choose exactly which enrolled worker receives it.</p></div>}
       </div>
       <form className={styles.composer} onSubmit={(event) => { void submit(event); }} noValidate aria-label="Workspace task composer">
+        {followUp ? <div className={styles.followUp} role="status"><div><strong>Follow-up context</strong>
+          <p>{followUp.turns} prior {followUp.turns === 1 ? 'turn' : 'turns'} through <code>{followUp.parent.taskId}</code>.</p>
+          <p>A new task using your selected worker and limits. Accepted context copies are independent of the original transcript.</p></div>
+          <button type="button" className={styles.subtleButton} disabled={lockedForm} onClick={() => { setFollowUp(null); setTaskId(newTaskId()); }}>Start standalone</button>
+        </div> : null}
         <label htmlFor="workspace-prompt">Task prompt</label>
         <textarea id="workspace-prompt" ref={textarea} value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4}
           placeholder="Describe the task and how to check the result…" disabled={scope.readOnly || lockedForm} />
@@ -237,7 +248,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         {scope.historySupported ? <label className={styles.retention}>
           <input type="checkbox" checked={retainHistory} disabled={scope.readOnly || lockedForm}
             onChange={(event) => setRetainHistory(event.target.checked)} />
-          <span>Retain this task locally<br /><small>Save prompt, attachment text and captured response as local unencrypted text until deleted.</small></span>
+          <span>Retain this task locally<br /><small>Save prompt, attachment text, copied conversation context and captured response as local unencrypted text until deleted.</small></span>
         </label> : null}
         <details className={styles.options}><summary>Task options</summary><div>
           <label>Workspace access<select aria-label="Task workspace access" value={mode} disabled={scope.readOnly || lockedForm} onChange={(event) => setMode(event.target.value as ResourceConsoleTaskInput['mode'])}>
