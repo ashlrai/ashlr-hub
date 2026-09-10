@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { randomBytes } from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { existsSync, lstatSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -11,6 +13,7 @@ import * as provenance from '../src/core/foundry/provenance.js';
 
 let root: string;
 let options: FirmGraphReadOptions;
+const exec = promisify(execFile);
 const definition: ControlGraphDefinition = { schemaVersion: 1, id: 'custom-research', maxConcurrent: 1, maxDurationMs: 60_000,
   nodes: [{ id: 'outline', kind: 'plan', requires: [], input: {} },
     { id: 'alternative', kind: 'plan', requires: ['outline'], input: {} }] };
@@ -40,6 +43,21 @@ async function cli(command: string, ...args: string[]) {
   const code = await cmdUniverseFirm([command, '--root', root, '--json', ...args]);
   const text = output.mock.calls.map(([line]) => String(line)).join('\n');
   return { code, text, value: text ? JSON.parse(text) : null };
+}
+async function subprocessCli(command: string, ...args: string[]) {
+  // Inherit the standard isolated fixture HOME so source CLI processes can
+  // read its existing signing key without accessing the developer's key.
+  try {
+    const result = await exec(process.execPath, ['--import', 'tsx', 'src/cli/index.ts', 'universe', 'firm', command,
+      '--root', root, '--json', ...args], { timeout: 60_000, maxBuffer: 1024 * 1024 });
+    return { code: 0, value: JSON.parse(result.stdout), stderr: result.stderr };
+  } catch (error) {
+    const failure = error as { code?: unknown; stdout?: unknown; stderr?: unknown; killed?: boolean };
+    // Timeouts and launch errors must fail the test rather than resemble a
+    // deliberate nonzero evidence-verification exit.
+    if (failure.killed || typeof failure.code !== 'number' || typeof failure.stdout !== 'string') throw error;
+    return { code: failure.code, value: JSON.parse(failure.stdout), stderr: failure.stderr };
+  }
 }
 
 describe('general signed firm graph inspection', () => {
@@ -144,6 +162,43 @@ describe('general signed firm graph inspection', () => {
     expect(await cmdUniverseFirm(['graph', '--root', root])).toBe(0);
     expect(output.mock.calls.flat().join('\n')).toContain('Node alternative: plan, completed');
   });
+
+  it('routes graph and traces in real CLI processes and exits 1 without partial evidence after damage', async () => {
+    provenance.loadOrCreateKey();
+    const history = await fixture({ root });
+    expect(history.status).toBe('completed');
+    const final = history.traces.at(-1)!;
+    const before = snapshot();
+
+    const graph = await subprocessCli('graph');
+    expect(graph.code).toBe(0);
+    expect(graph.value).toMatchObject({ status: 'available', integrityVerified: true,
+      signatureVerification: 'verified-history', keyScope: 'existing-host-key',
+      graph: { graphId: definition.id, sourceState: 'healthy', status: 'completed', traces: history.traces } });
+    const traces = await subprocessCli('traces', '--entity', 'node:alternative', '--action', 'graph-settled',
+      '--since', final.ts, '--until', final.ts, '--limit', '1');
+    expect(traces.code).toBe(0);
+    expect(traces.value).toMatchObject({ integrityVerified: true, signatureVerification: 'verified-history',
+      query: { traces: [final], total: 1, truncated: false, signatureVerification: 'not-performed' } });
+    expect(traces.value.query.traces[0].conflicts).toEqual([{ otherId: history.traces[2]!.id, reason: 'value' }]);
+    expect(traces.value.query.traces.map((trace: { id: string }) => trace.id)).not.toContain(history.traces[2]!.id);
+    expect(snapshot()).toEqual(before);
+
+    const path = join(root, 'control-graph', 'records', '00000002.json');
+    const record = JSON.parse(readFileSync(path, 'utf8'));
+    record.trace.provenanceSig = '0'.repeat(64);
+    writeFileSync(path, JSON.stringify(record), { mode: 0o600 });
+    const damaged = snapshot();
+    const damagedGraph = await subprocessCli('graph');
+    expect(damagedGraph.code).toBe(1);
+    expect(damagedGraph.value).toMatchObject({ status: 'unavailable', integrityVerified: false,
+      signatureVerification: 'not-verified', graph: { sourceState: 'degraded', nodes: [], edges: [], traces: [] } });
+    const damagedTraces = await subprocessCli('traces', '--entity', 'node:alternative', '--limit', '1');
+    expect(damagedTraces.code).toBe(1);
+    expect(damagedTraces.value).toMatchObject({ status: 'unavailable', integrityVerified: false,
+      sourceState: 'degraded', query: { traces: [], total: 0, truncated: false } });
+    expect(snapshot()).toEqual(damaged);
+  }, 60_000);
 
   it.each([
     ['--limit', '0'], ['--limit', '257'], ['--limit', '1.5'], ['--limit', '1', '--limit', '2'],
