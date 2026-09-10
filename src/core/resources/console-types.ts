@@ -25,6 +25,8 @@ export interface ResourceConsoleScope {
   defaultProjectId?: 'default';
   /** Control-unlocked, project-pinned local file inspection; never read-session authority. */
   workspaceFilesSupported?: true;
+  /** Explicit host-enrolled evaluated engineering; separate from ordinary task completion. */
+  engineeringSupported?: true;
 }
 
 export interface ResourceConsoleProjectInput { id: string; label: string; workspace: string }

@@ -3,6 +3,7 @@ import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindings ABS --observations ABS [--port N] [--json]
        add --execute --workspace ABS [--max-parallel N] to enable foreground queued tasks
        add --projects ABS to pin additional projects while keeping --workspace as default
+       add --engineering ABS to expose explicitly enrolled evaluated engineering actions
        add --quota-config ABS to refresh explicitly pinned Codex account metadata
        add --connections-config ABS to monitor explicit Codex/Claude/Grok accounts
        add --allocation-controls to adjust this pool's usage ceiling and worker access
@@ -24,6 +25,12 @@ Projects share the same supervisor, resource ledger, account limits and collecto
 Registered catalogs also enable explicit control-token-unlocked project file previews.
 Browsing reads local source without invoking a worker; attaching and sending are separate.
 Project selection binds task context and working directory, not a filesystem sandbox.
+--engineering requires --execute and --projects. Its private JSON file contains
+{schemaVersion:1,enrollments:[{id,projectId,graphId,graphRoot,host}]}.
+Startup validates enrollment without running a graph. An explicit control-unlocked
+start selects an enrollment ID and digest, never browser-supplied paths or commands.
+Engineering shares this pool's ledger and limits; acceptance means fixed checks
+and delivery to an enrolled local branch, not merge, push or deployment.
 Queued intents and pause state are durable; previously dispatching work is never
 silently replayed after restart. Ordinary output is bounded and session-only;
 opt-in transcripts persist locally until deleted. Accepted follow-ups freeze copied
@@ -38,7 +45,7 @@ Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid argumen
 `;
 class UsageError extends Error {}
 type Options = { help: true } | { help: false; root: string; poolFile: string; bindingsFile: string;
-  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; allocationControls?: boolean;
+  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; engineeringFile?: string; allocationControls?: boolean;
   port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
 
 function path(value: string): string {
@@ -58,7 +65,7 @@ function parse(args: string[]): Options {
     if (flag === '--execute') { if (execute) throw new UsageError('Duplicate console option'); execute = true; continue; }
     if (flag === '--json') { if (json) throw new UsageError('Duplicate console option'); json = true; continue; }
     if (flag === '--allocation-controls') { if (allocationControls) throw new UsageError('Duplicate console option'); allocationControls = true; continue; }
-    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects'].includes(flag) || values.has(flag)) {
+    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects', '--engineering'].includes(flag) || values.has(flag)) {
       throw new UsageError('Unknown or duplicate console option');
     }
     const value = args[++index];
@@ -70,6 +77,9 @@ function parse(args: string[]): Options {
   if (execute ? !values.has('--workspace') : values.has('--workspace') || values.has('--max-parallel') || values.has('--projects')) {
     throw new UsageError('Execution requires --execute with --workspace; projects and parallelism are execution-only');
   }
+  if (values.has('--engineering') && (!execute || !values.has('--projects'))) {
+    throw new UsageError('Engineering requires --execute and an explicit --projects catalog');
+  }
   const portText = values.get('--port') ?? '0'; const parallelText = values.get('--max-parallel') ?? '4';
   if (!/^(0|[1-9]\d{0,4})$/.test(portText) || Number(portText) > 65_535 ||
     !/^[1-9]\d?$/.test(parallelText) || Number(parallelText) > 16) throw new UsageError('Invalid port or parallel limit');
@@ -78,6 +88,7 @@ function parse(args: string[]): Options {
     ...(values.has('--quota-config') ? { quotaConfigFile: path(values.get('--quota-config')!) } : {}),
     ...(values.has('--connections-config') ? { connectionsConfigFile: path(values.get('--connections-config')!) } : {}),
     ...(values.has('--projects') ? { projectsFile: path(values.get('--projects')!) } : {}),
+    ...(values.has('--engineering') ? { engineeringFile: path(values.get('--engineering')!) } : {}),
     ...(allocationControls ? { allocationControls: true } : {}),
     port: Number(portText), execute, ...(execute ? { workspace: path(values.get('--workspace')!), maxParallel: Number(parallelText) } : {}), json };
 }
@@ -112,6 +123,7 @@ export async function cmdResourceConsole(args: string[]): Promise<number> {
           ...(server.scope.connectionsEnabled ? ['Native account metadata monitoring is configured; inspect collector status in the console.'] : []),
           ...(server.controlToken ? [`Private control token: ${server.controlToken}`] : []),
           ...(server.scope.allocationWritable ? ['Usage allocation and worker access controls are enabled; in-flight tasks are unaffected.'] : []),
+          ...(server.scope.engineeringSupported ? ['Enrolled evaluated engineering actions are available for explicit control-unlocked start.'] : []),
           ...(!server.scope.readOnly ? [`Execution workspace: ${server.scope.workspace}`,
             'Durable queued tasks may execute while this foreground console is running.'] : ['Task execution is disabled.']),
           'Paste tokens into the console; they are never included in URLs.',

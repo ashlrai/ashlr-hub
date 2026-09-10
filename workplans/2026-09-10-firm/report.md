@@ -1,6 +1,94 @@
 # Verified local handoff
 
-## Current continuation: exact completed engineering recovery
+## Current continuation: project-bound workspace engineering
+
+Baseline: `a0f820058d32dc86b5c2eabbc52f7c390ec4ba6e`; isolated `auto/p00`
+at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. The commit containing
+this report is the local source delivery. Three parallel agents mapped and built
+core ownership, CLI/HTTP wiring, and independent real-I/O acceptance. Parent
+integrated the technical-control-room UI, query boundary, documentation and gates.
+
+- The private startup catalog binds a registered project, fixed engineering host,
+  distinct graph/controller and the existing resource accounting scope. A signed
+  optional graph association binds the enrollment digest; legacy graphs remain
+  compatible and cannot be adopted as unrelated console work. First creation is
+  also guarded under graph ownership.
+- The browser reads enrolled summaries and graph evidence, then sends only ID
+  and digest for an explicit launch. No paths, evaluator commands, model-authored
+  host settings, auto-enrollment, extra scheduler or extra quota ledger. Selected
+  source checkout and sterile transport workspace remain separate.
+- Durable cancellation precedes abort; restarting neither replays unfinished work
+  nor renews its deadline. Missing/pending intent after accepted launch stays held.
+  Exact completed-child proof may reconcile the existing graph. Queue pause holds
+  new launches without terminating active engineering; explicit Stop is separate.
+- Shutdown drains engineering and ordinary owned work before the shared receipt
+  fence. Unreadable accounting or reserved/uncertain receipts withhold clean close;
+  the diagnosis does not attribute unrelated shared-pool work to engineering.
+- Workspace Engineering runs is separate from chat, with objective summaries,
+  declared dependencies, campaign/experiment budgets, planned branches, original
+  deadline, graph states and digests. Hidden scopes stop reads; late control or
+  connection responses cannot become apparent success. Lost responses never
+  automatically retry execution. Recorded delivery is not a deployment or a fresh
+  assertion that a branch has not subsequently changed.
+
+Final verification:
+
+- Seven real HTTP/Git acceptance tests: read/control/Origin fences, no startup
+  graph writes, exact digest, cross-project shared capacity, failed/corrected/
+  improved generations, local branch delivery, persistent cancel/restart,
+  replaced-project isolation, prior-launch holds, queue pause, and simultaneous
+  ordinary/engineering shutdown with both resource receipts confirmed cancelled.
+- Core ownership/shutdown tests: 32 passed, including immutable signed identity,
+  initial-creation race, captured stop hook, shared receipt uncertainty and peer
+  drain ordering. Route/CLI and existing graph regression subsets also passed;
+  these overlap broader runs and must not be added as unique throughput.
+- Full web suite: **1,203 passed / 74 files**. Safety: **449 passed, five existing
+  skips / 41 files**. Core/web typecheck, build, changed-source lint, documentation,
+  classification and diff checks passed. Full ESLint reports zero errors and the
+  same 107 existing warnings. Classification: 274 real-I/O and 659 unit files.
+- Real isolated headless Chrome acceptance: authenticated UI launch, three
+  completed loopback requests, fixed evaluation and branch value `3`; original
+  checkout value `0` and clean Git state preserved. Chat draft survived mode/
+  project changes; unrelated project showed no enrollment. Desktop 1440 and mobile
+  390 layouts had no horizontal overflow or off-viewport visible elements and no
+  browser JavaScript errors. Parent inspected desktop and mobile screenshots.
+- Final frozen-source broad resource/graph sweep: **2,588 passed / 82 files**,
+  started September 10 at 05:45:23 local, duration 384.52 seconds. Together with
+  the disjoint web and safety runs: 4,240 passing tests and five existing skips.
+  The compiled read-only structural safety check passed all five checks.
+
+The first broad run overlapped the final peer-drain implementation. Vitest loaded
+the pre-hook module with the new hook tests: 2,584 passes, three failures and one
+unhandled rejection. This is recorded as a failed mixed-revision run, not counted
+as final verification. A complete frozen-source rerun replaces it. Browser harness
+corrections were explicit: in-app navigation was blocked; an isolated local Chrome
+profile was used instead. The temporary fixture initially imported source modules
+whose static assets were not built alongside them; importing `dist` fixed that.
+Dashboard polling required DOM/element waits instead of `networkidle`.
+
+Browser evidence is retained under
+`/tmp/ashlr-engineering-browser-script-8kvUk0/screenshots/`: `report.json`,
+`desktop-delivered-top.png`, `mobile-delivered.png` and supporting views. Both
+synthetic fixture processes shut down cleanly and their private trees were removed;
+scripts/screenshots remain outside the repository. These fixtures did not contact
+external models, alter actual accounts or change host configuration.
+
+Host KILL remains active. Original checkout remains at
+`a01fc08663baab3039c4f1c084538de732a4fd0e` with preexisting untracked workplans.
+Entire resume found no checkpoint; manual-commit remains enabled. No GitHub Actions,
+remote push, npm publication, resident fleet activation or production deployment.
+Planning guidance kept explicit ownership; frontend/React guidance shaped the
+project-isolated pane; documentation guidance preserves these evidence boundaries.
+
+Remaining north-star work: verify host readiness/KILL preflight and commission a
+real Hub enrollment and account policy,
+establish the resident idea-to-evaluated-delivery improvement loop, recover safely
+from unfinished work, add desktop terminal/browser ownership, expose deeper
+artifact/commit/yield inspection, and perform explicit release/production
+acceptance. This is a complete local workspace-engineering integration, not a
+claim that the autonomous engineering company or production rollout is complete.
+
+## Previous continuation: exact completed engineering recovery
 
 Baseline: `dc92e08cf4b4a55d7ee351e3d79c2e92a17f6c0a`; isolated `auto/p00`
 worktree at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.

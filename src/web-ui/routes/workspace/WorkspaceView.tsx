@@ -10,6 +10,7 @@ import { composeWorkspaceTaskPrompt, MAX_WORKSPACE_ATTACHMENTS, MAX_WORKSPACE_AT
 import styles from './WorkspaceView.module.css';
 import { TaskTranscript } from './TaskTranscript.js';
 import { WorkspaceFiles } from './WorkspaceFiles.js';
+import { WorkspaceEngineering } from './WorkspaceEngineering.js';
 
 export interface WorkspaceViewProps {
   surfaceActive?: boolean;
@@ -59,6 +60,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   }) {
   const fleet = useMemo(() => buildResourceFleet(snapshot, historical), [snapshot, historical]);
   const [selection, setSelection] = useState<string | null>(null);
+  const [engineering, setEngineering] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [taskId, setTaskId] = useState(newTaskId);
   const [workerId, setWorkerId] = useState('');
@@ -132,7 +134,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
 
   function select(id: string | null) {
     outputRequest.current?.abort(); fileGeneration.current++; setReadingFiles(false);
-    setSelection(id); setMobilePane('task');
+    setSelection(id); setMobilePane('task'); setEngineering(false);
     if (id === null) { setFollowUp(null); setTaskId(newTaskId()); textarea.current?.focus(); }
   }
 
@@ -235,7 +237,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   return <section className={styles.workspace} aria-label="Project task workspace" style={{ '--workspace-dock-width': `${dockWidth}px` } as CSSProperties}>
     <div className={styles.mobileNav} role="group" aria-label="Workspace panes">
       {(['tasks', 'task', 'tools'] as const).map((pane) => <button key={pane} type="button" aria-pressed={mobilePane === pane}
-        onClick={() => setMobilePane(pane)}>{pane === 'tasks' ? 'Task list' : pane === 'task' ? 'Task' : 'Tools'}</button>)}
+        onClick={() => { setMobilePane(pane); if (pane === 'tools') setEngineering(false); }}>{pane === 'tasks' ? 'Task list' : pane === 'task' ? engineering ? 'Engineering' : 'Task' : 'Tools'}</button>)}
     </div>
     <aside className={styles.rail} data-mobile-visible={mobilePane === 'tasks'} aria-label="Project and tasks">
       {projects ? <nav aria-label="Registered projects" className={styles.projectList}><h3>Projects</h3>
@@ -245,15 +247,23 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
       <div className={styles.project}><span className={styles.projectIcon} aria-hidden="true">⌑</span><div><h2>{projectName}</h2><p>{projects ? 'Registered workspace' : 'Pinned workspace'}</p></div></div>
       {scope.workspace ? <p className={styles.projectPath} title={scope.workspace}>{scope.workspace}</p> : <p className={styles.caption}>This console has no execution workspace.</p>}
       <button type="button" className={styles.newTask} disabled={lockedForm} onClick={() => select(null)}>+ New task</button>
+      {scope.engineeringSupported ? <button type="button" className={styles.engineeringLink} aria-pressed={engineering} disabled={lockedForm}
+        onClick={() => { outputRequest.current?.abort(); setOutput(null); setOutputError(null); setLoadingOutput(false); setEngineering(true); setMobilePane('task'); }}>Engineering runs <span aria-hidden="true">↗</span></button> : null}
       <h3 className={styles.railHeading}>Tasks</h3>
       {fleet.tasks.length ? <ul className={styles.taskList}>{fleet.tasks.map((row) => <li key={row.id}>
-        <button type="button" aria-current={selection === row.id ? 'true' : undefined} onClick={() => select(row.id)}>
+        <button type="button" aria-current={!engineering && selection === row.id ? 'true' : undefined} onClick={() => select(row.id)}>
           <span>{row.id}</span><StatusBadge status={row.state} tone={taskTone(row)} />
         </button></li>)}</ul> : <p className={styles.caption}>Your queued tasks will appear here.</p>}
       <p className={styles.railFoot}>{projects ? 'One shared account ledger. Project drafts stay separate in this browser session. Unattributed tasks remain in Resources.' : 'One confirmed workspace. Add a startup project catalog to enable project switching.'}</p>
     </aside>
 
-    <div className={styles.center} data-mobile-visible={mobilePane === 'task'}>
+    {engineering && scope.engineeringSupported ? <div className={styles.engineeringPane} data-mobile-visible={mobilePane === 'task'}>
+      {active && mobilePane !== 'tasks' ? <WorkspaceEngineering key={`${session}:${project?.id ?? 'default'}`} projectId={project?.id ?? 'default'}
+        projectName={projectName} available={!historical && snapshot.sourceState === 'healthy'}
+        canStart={canSend && !busy && snapshot.supervisor?.paused !== true} canStop={stopEnabled} unlocked={unlocked} onUnlock={onUnlock}
+        startBlockedReason={project?.enabled === false ? 'This project is disabled. Recorded engineering evidence remains available.'
+          : snapshot.supervisor?.paused ? 'The task queue is paused. New engineering launches are withheld; active engineering runs are not stopped.' : undefined} /> : null}
+    </div> : <><div className={styles.center} data-mobile-visible={mobilePane === 'task'}>
       <header className={styles.heading}><div><h2>{selection ? selection : 'What would you like to work on?'}</h2>
         <p>{selection ? selected?.ownership ?? 'Waiting for the task snapshot' : 'Describe a concrete task for this workspace.'}</p></div>
         {selected ? <StatusBadge status={selected.state} tone={taskTone(selected)} /> : null}</header>
@@ -344,6 +354,6 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
           </dl><p className={styles.caption}>An enrolled worker is a routing choice. Current capacity is checked before dispatch; completion is not independent acceptance.</p></>}
       </section>
       <p className={styles.capabilities}>{scope.workspaceFilesSupported ? 'Project text previews and snapshot attachments are connected. Interactive terminal and browser are not connected yet.' : 'Text attachments are supported. Register a project catalog to enable file previews. Interactive terminal and browser are not connected yet.'}</p>
-    </aside>
+    </aside></>}
   </section>;
 }

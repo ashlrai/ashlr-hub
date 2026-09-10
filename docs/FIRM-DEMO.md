@@ -150,6 +150,13 @@ evaluator, and delivers strict measured improvements to explicit local branches.
 All tasks in this enrollment must have delivery targets; dependency ordering
 waits for their planned handoffs.
 
+The same engine is available through the private resource console's
+[project-bound Engineering runs pane](RESOURCE-POOLS.md#evaluated-engineering-runs).
+Its startup catalog binds the project and shared accounting scope into the signed
+graph definition. The browser supplies only an enrolled ID and digest; ordinary
+chat remains a separate operation. Console-owned graphs must retain their console
+enrollment identity and cannot be adopted as unrelated CLI graphs.
+
 Prerequisites: macOS with the existing verified evaluator confinement, initialized
 Universe experiments and campaigns, fixed evaluator wrappers using the documented
 JSON measurement protocol, a private resource runtime, and an existing host

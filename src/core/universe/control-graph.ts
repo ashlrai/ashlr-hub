@@ -13,7 +13,9 @@ import type { PortfolioControllerGraphDispatch } from './portfolio-controller-ty
 export const CONTROL_NODE_KINDS = ['plan', 'explore', 'implement', 'verify', 'critic', 'integrate', 'weigh', 'mutate-harness', 'sweep', 'invent', 'talk', 'deliver'] as const;
 export type ControlNodeKind = typeof CONTROL_NODE_KINDS[number];
 export interface ControlGraphNode { id: string; kind: ControlNodeKind; requires: string[]; input: unknown }
-export interface ControlGraphDefinition { schemaVersion: 1; id: string; nodes: ControlGraphNode[]; maxConcurrent: number; maxDurationMs: number }
+export interface ControlGraphDefinition { schemaVersion: 1; id: string; nodes: ControlGraphNode[]; maxConcurrent: number; maxDurationMs: number;
+  /** Optional host association, signed with the definition; never effect authority. */
+  hostEnrollmentDigest?: string }
 export interface ControlArtifact { nodeId: string; digest: string; value: unknown }
 export interface ControlHandlerContext { node: ControlGraphNode; artifacts: ControlArtifact[]; signal: AbortSignal;
   /** Trusted synchronous stop/ownership check, including the original graph deadline. */
@@ -38,6 +40,10 @@ export interface ControlGraphOptions {
   /** Trusted host adapters, never executable code or command strings from graph JSON. */
   handlers: Partial<Record<ControlNodeKind, ControlGraphHandlerRegistration>>;
   signal?: AbortSignal;
+  /** Trusted enclosing owner/project guard. True or a throw vetoes effects. */
+  isExecutionStopped?: () => boolean;
+  /** First-launch race guard, checked under graph execution ownership. */
+  requireNewGraph?: boolean;
   /** Only local test fixtures may inject a key; runtime default uses existing provenance. */
   traceKeys?: DecisionTraceKeyOptions;
 }
@@ -94,7 +100,9 @@ function exact(value: unknown, keys: string[]): value is Record<string, unknown>
 }
 export function validateControlGraph(input: unknown): ControlGraphDefinition {
   const value = snapshot<ControlGraphDefinition>(input, 256 * 1024);
-  if (!exact(value, ['schemaVersion', 'id', 'nodes', 'maxConcurrent', 'maxDurationMs']) || value.schemaVersion !== 1 ||
+  if (!exact(value, ['schemaVersion', 'id', 'nodes', 'maxConcurrent', 'maxDurationMs',
+    ...(Object.hasOwn(value, 'hostEnrollmentDigest') ? ['hostEnrollmentDigest'] : [])]) || value.schemaVersion !== 1 ||
+      Object.hasOwn(value, 'hostEnrollmentDigest') && (typeof value.hostEnrollmentDigest !== 'string' || !HASH.test(value.hostEnrollmentDigest)) ||
       typeof value.id !== 'string' || !ID.test(value.id) || !Array.isArray(value.nodes) || value.nodes.length < 1 || value.nodes.length > 128 ||
       !Number.isSafeInteger(value.maxConcurrent) || value.maxConcurrent < 1 || value.maxConcurrent > 8 ||
       !Number.isSafeInteger(value.maxDurationMs) || value.maxDurationMs < 1 || value.maxDurationMs > 86_400_000) throw new Error('Invalid control graph definition');
@@ -220,6 +228,10 @@ function presentOrUncertain(path: string): boolean {
 export async function runControlGraph(input: unknown, options: ControlGraphOptions): Promise<ControlGraphReport> {
   const definition = validateControlGraph(input);
   const root = inspectPrivateDirectory(options.root);
+  const parentStopped = options.isExecutionStopped;
+  if (parentStopped !== undefined && typeof parentStopped !== 'function') throw new Error('Invalid graph stop guard');
+  const requireNewGraph = options.requireNewGraph;
+  if (requireNewGraph !== undefined && typeof requireNewGraph !== 'boolean') throw new Error('Invalid graph enrollment requirement');
   const traceKeys = options.traceKeys?.testKey ? { testKey: Buffer.from(options.traceKeys.testKey) } : undefined;
   // Capture trusted callbacks and detached metadata before the first async yield.
   const handlers = new Map<ControlNodeKind, ReturnType<typeof registration>>();
@@ -233,6 +245,8 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
   let deadlineAt: string | null = null;
   const stop = () => {
     if (options.signal?.aborted) stopReason ??= 'caller-cancelled';
+    try { if (parentStopped?.()) stopReason ??= 'enclosing-execution-stopped'; }
+    catch { stopReason ??= 'enclosing-execution-stopped'; }
     if (killSwitchOn() || presentOrUncertain(join(root, 'KILL'))) stopReason ??= 'kill-switch';
     if (performance.now() - started >= definition.maxDurationMs || deadlineAt && Date.now() >= Date.parse(deadlineAt)) stopReason ??= 'duration-exhausted';
     if (stopReason) controller.abort();
@@ -249,6 +263,7 @@ export async function runControlGraph(input: unknown, options: ControlGraphOptio
   const reasons = new Set<string>();
   try {
     let state = load(root, traceKeys);
+    if (requireNewGraph && state.definition) throw new Error('Host requires a new graph enrollment');
     const definitionDigest = digest(canonical(definition));
     const append = (kind: Event['kind'], nodeId: string | null, data: unknown, verifier: DecisionTraceV1['verifier'],
       conflicts: DecisionTraceV1['conflicts'] = [], execution?: ControlHandlerExecution, spend: DecisionTraceV1['spend'] = { unknown: true },

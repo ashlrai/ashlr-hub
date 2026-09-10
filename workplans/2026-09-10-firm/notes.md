@@ -1,5 +1,34 @@
 # Firm build notes
 
+## September 10: workspace engineering continuation
+
+- Baseline a0f82005, clean isolated auto/p00. Three Explore agents mapped core
+  ownership, HTTP/CLI and real acceptance before implementation. No graph-root
+  writes during catalog construction/status; ordinary supervisor startup can
+  initialize its own existing state. UI reads never dispatch.
+- Corrected an early proposal that equated the generation transport directory
+  with the selected project. It must remain sterile; actual campaign seeds and
+  delivery derive from the registered project and pinned directory identity.
+- Fresh ownership-store reads use missing as an empty unlaunched state, not a
+  malformed incomplete store. A read-only acceptance test caught the initial bug.
+- Signed optional hostEnrollmentDigest and under-lock requireNewGraph protect
+  initial race/restart attribution. Accepted launch with missing/pending intent
+  stays held. Queue pause applies to initial admission, not in-flight cancellation.
+- Shutdown needs more than a resolved graph promise: the final shared ledger
+  fence rejects reserved/uncertain/unreadable receipts. A captured peer-drain hook
+  prevents checking before ordinary owned tasks finish cancelling. No second
+  scheduler, ledger or callback authority exposed to browser inputs.
+- UI/query review corrected stale mutation responses after connection loss,
+  unlock changes, unavailable-enrollment wording, empty-intent reconcile controls
+  and paused-queue launch state. Existing React/style primitives were reused.
+- First broad suite ran across the final source edit; its mixed-revision failures
+  are not counted as a green verification. Full frozen-source rerun is required.
+- Tool discovery mistakes were read-only: ResourcePoolView lives under resources,
+  graph types are colocated, and a guessed manifest.ts does not exist. In-app
+  browser fixture navigation was blocked; isolated installed Chrome provided
+  actual local acceptance. Source static assets and networkidle waits required
+  fixture-only corrections. See report.md for final evidence and limitations.
+
 ## September 10: evaluated engineering graph continuation
 
 - Resumed clean `c2b598da` on `auto/p00`; Entire resume found no checkpoint.

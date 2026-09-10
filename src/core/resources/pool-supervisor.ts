@@ -58,6 +58,10 @@ export interface ResourcePoolSupervisor {
   snapshot(): ResourceSupervisorSnapshot;
   projects(): ResourceConsoleProject[] | undefined;
   projectFileBinding(projectId: string): ResourceConsoleProjectBinding;
+  /** Persisted identity for host enrollment; does not authorize execution. */
+  engineeringBinding(projectId: string): { project: ResourceConsoleProjectBinding; root: string; poolDigest: string };
+  /** Synchronous owning/paused/enabled/directory check at engineering effect boundaries. */
+  projectExecutionBinding(projectId: string): ResourceConsoleProjectBinding;
   submit(input: ResourceConsoleTaskInput): ResourceSupervisorJob;
   cancel(id: string): ResourceSupervisorJob;
   setPaused(paused: boolean): ResourceSupervisorSnapshot;
@@ -533,6 +537,19 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
 
   const supervisor: ResourcePoolSupervisor = {
+    engineeringBinding(projectId) {
+      ensureAvailable();
+      if (typeof projectId !== 'string' || !ID.test(projectId)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource project');
+      if (!projectBindings || state.schemaVersion !== 4) throw new ResourceSupervisorError('UNAVAILABLE', 'Register engineering projects first');
+      const project = projectBindings.find((row) => row.id === projectId);
+      if (!project) throw new ResourceSupervisorError('NOT_FOUND', 'Resource project was not found');
+      return { project: detached(project), root, poolDigest };
+    },
+    projectExecutionBinding(projectId) {
+      ensureAvailable();
+      if (state.paused) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor is paused');
+      return supervisor.projectFileBinding(projectId);
+    },
     projectFileBinding(projectId) {
       ensureAvailable();
       if (typeof projectId !== 'string' || !ID.test(projectId)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource project');

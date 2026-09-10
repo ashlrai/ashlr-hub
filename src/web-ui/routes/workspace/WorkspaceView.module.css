@@ -108,6 +108,9 @@
 .facts dd { color: var(--text-primary); font-size: var(--text-sm-size); line-height: 1.6; margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
 .capabilities { flex-shrink: 0; border-top: 1px solid var(--border-default); padding: var(--space-4); margin: 0; color: var(--text-tertiary); font-size: var(--text-xs-size); line-height: 1.6; overflow-wrap: anywhere; }
 .mobileNav { display: none; }
+.engineeringPane { grid-column: 2 / -1; min-width: 0; min-height: 0; overflow: auto; flex: 1; }
+.engineeringLink { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); width: 100%; min-height: 40px; margin-top: var(--space-2); padding: var(--space-2) var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-sm); font-size: var(--text-sm-size); text-align: left; }
+.engineeringLink[aria-pressed=true] { background: var(--bg-selected); border-color: var(--accent-300); color: var(--accent-600); }
 @media (max-width: 1280px) { .workspace { grid-template-columns: 176px minmax(0, 1fr) 8px var(--workspace-dock-width, 320px); } .heading, .conversation { padding: var(--space-4); } .composer { padding: var(--space-3); } }
 /* At the maximum dock width, narrower desktop grids squeeze the task into an
    unusable strip. Switch all panes together; never silently clamp the dock away

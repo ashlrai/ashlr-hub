@@ -27,7 +27,9 @@ The expected digest pins configuration, not authority or correctness.
 
 SIGINT/SIGTERM and existing KILL controls stop new effects and await settlement.
 Repeating a completed graph reads its signed result without another dispatch.
-Unresolved graph intents remain held; do not use a new ID to replay uncertain work.
+Unresolved graph intents remain held unless exact completed child evidence can be
+reconciled read-only within the original graph deadline and stop controls. Recovery
+does not rerun a controller or provider. Do not use a new ID to replay uncertain work.
 The first execution requires a NEW controller ID; preexisting controllers cannot
 be adopted. Existing graph/controller/campaign deadlines are not renewed.
 No merge, checkout, remote push, deployment, account-policy change, resident

@@ -31,6 +31,11 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Persist parent linkage and implement factory-only receipt reconciliation without redispatch.
 - [x] Verify real crash-after-delivery recovery, attribution failures, deadlines and cold review.
 - [x] Build and document the verified recovery path and remaining commissioning gaps.
+- [x] Explore workspace engineering enrollment, shared-ledger ownership and HTTP contracts with three agents.
+- [x] Implement project-pinned engineering catalog and durable owned graph launch/cancellation.
+- [x] Wire private startup enrollment, authenticated HTTP and engineering workspace controls.
+- [x] Verify real HTTP evaluation/delivery, shared capacity, cancellation/restart and browser interaction.
+- [x] Review integration, update canonical documentation and record exact local delivery state.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -43,6 +48,12 @@ existing activation, provenance, evaluation and resource invariants.
   digest-bearing edges. Never invent terminal states to satisfy a count.
 
 ## Errors
+Workspace verification: the first broad sweep overlapped a final peer-drain
+patch, loading old runtime with new tests. Its three failures and unhandled
+rejection are recorded as a failed mixed-source run; the frozen-source rerun is
+the release gate. No test weakened to accommodate it. Independent checks also
+caught fresh-store and termination-uncertainty gaps; both have regressions.
+
 Current recovery review caught a legacy ordering regression while refusing linked
 controller execution re-entry: strict history reads must follow proven-dead
 record-writer lock reclamation, not precede it. The broad run was intentionally
@@ -56,6 +67,24 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Current continuation from `a0f820058d32dc86b5c2eabbc52f7c390ec4ba6e`:
+project-bound workspace engineering. Three agents own core enrollment/runtime,
+HTTP/CLI integration and independent real-I/O acceptance. Parent owns UI/query,
+documentation and final integration. Existing graph/controller/resource ledgers
+remain execution truth. Catalog/status never start work; explicit ID-and-digest
+launch does. Cancellation is durable, and restart never renews a deadline.
+
+UI plan: retain the project/task rail; add a separate Engineering mode spanning
+the conversation and inspector area. Use existing Space Grotesk / IBM Plex Sans,
+deep-blue/ice semantic tokens and compact mono only for evidence identifiers.
+Show enrolled objective, dependency order, budget, delivery branch and observed
+state beside explicit launch/cancel controls. Text labels accompany all colors.
+Critique: a second narrow chat card would hide the graph/evidence relationship;
+the full-width engineering pane resolves this while keeping ordinary task drafts
+intact. Stack dependency details on narrow viewports; keyboard focus and reduced
+motion use existing conventions. Do not imply a successful model reply is an
+accepted change, or a configured enrollment is active work.
+
 Current continuation from `dc92e08cf4b4a55d7ee351e3d79c2e92a17f6c0a`:
 exact completed-child reconciliation. Parent owns graph intent context, branded
 receipt-only recovery and documentation; controller agent owns strict optional

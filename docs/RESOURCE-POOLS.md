@@ -45,6 +45,97 @@ memory, not browser storage. Switching surfaces preserves them; closing/disconne
 or changing the confirmed scope discards them. Returned output is plain text, not
 executable markup.
 
+### Evaluated engineering runs
+
+The optional **Engineering runs** pane is separate from ordinary chat. It runs an
+explicitly enrolled portfolio through the existing signed graph, campaign
+controller, resource pool, confined evaluation and local branch delivery. Opening
+the pane, selecting a plan or refreshing evidence never dispatches work. Account
+connections, quota reserves and worker permissions are unchanged.
+
+Prerequisites are the same as the [enrolled engineering CLI](FIRM-DEMO.md#execute-an-enrolled-engineering-portfolio):
+initialized experiments and campaigns, fixed evaluators, explicit new `codex/`
+delivery targets, private resource runtime and existing host provenance. Every
+campaign seed must be the selected registered project. The generation transport
+workspace must remain a separate sterile Git directory. The runtime must use the
+console's exact pool, bindings, observations and accounting root. When quota
+collection is configured, use that same quota configuration with
+`quotaEvidenceMode: "shared-collector"`; do not start another collector.
+
+For a source-built local console:
+
+1. Review the existing engineering host enrollment and the intended project,
+   campaign budgets, evaluator and delivery branches. This action can consume
+   enrolled model allowance and create local Git branches; it does not publish
+   them remotely. Preserve the seed checkout and record the intended branch names.
+2. Create a private `0600` catalog outside writable projects. The exact
+   [`ResourceConsoleEngineeringCatalog`](../src/core/resources/console-engineering.ts)
+   has `schemaVersion: 1` and `enrollments` (1–32 entries). Each entry contains
+   `id`, `projectId`, `graphId`, `graphRoot`, and the same `host` object documented
+   for the engineering CLI. Use registered lowercase project/enrollment IDs,
+   distinct controllers, and distinct existing private graph directories. Never
+   store the catalog in the repository or accept model-generated host settings.
+3. Start the existing execution console with `--projects` and the new
+   `--engineering /absolute/private/engineering-catalog.json` option. For example,
+   after substituting the reviewed local paths:
+
+   ```sh
+   node bin/ashlr resources pool console \
+     --root /absolute/private/shared-resource-ledger \
+     --pool /absolute/private/pool.json \
+     --bindings /absolute/private/bindings.json \
+     --observations /absolute/private/observations.json \
+     --execute --workspace /absolute/projects/ashlr-hub \
+     --projects /absolute/private/projects.json \
+     --engineering /absolute/private/engineering-catalog.json
+   ```
+
+4. Open **Workspace**, select the registered project, then **Engineering runs**.
+   Inspect the declared dependency order, campaign and experiment limits,
+   delivery branches and enrollment digest. These limits are ceilings, not an
+   estimate of current account balance. The standard resource ledger still
+   decides admission across ordinary tasks and engineering generations.
+5. Unlock controls and select **Run enrolled plan**. The browser sends only the
+   enrollment ID and displayed digest, never a command, path or revised budget.
+   Launch creates durable ownership evidence; status reads show signed graph
+   evidence. A recorded delivery means fixed-evaluator/local-branch acceptance,
+   not production deployment or proof that the branch has not subsequently moved.
+
+**Stop engineering run** persists a stop record before aborting owned work. It
+does not undo a branch already delivered. **Pause task queue** prevents new
+engineering launches but does not terminate an already active engineering run.
+At most four enrolled graphs are active in one console owner; resource limits
+can impose a lower concurrency. There is no second engineering queue or quota
+ledger.
+
+Restart never automatically launches an enrollment, creates a new graph identity
+or renews its allowance. **Reconcile completed work** uses only the existing
+exact completed-child receipt recovery within the original deadline. A previous
+accepted launch with no graph intent stays held, as do unfinished or mismatched
+children. Do not rename the graph/controller to retry uncertain work. A cancelled
+enrollment remains cancelled after restart. If a request loses its response,
+refresh evidence before taking another action; closing a browser panel does not
+cancel backend work.
+
+Metadata/status routes use read-session authentication; start/cancel require
+control authority and an exact Origin. All responses are bounded and no-store:
+
+| Route | Result |
+| --- | --- |
+| `GET /api/resources/engineering` | Enrolled summaries, including project identity and digest |
+| `GET /api/resources/engineering/:id` | Recorded graph/ownership projection |
+| `POST /api/resources/engineering/start` | `{enrollmentId, expectedEnrollmentDigest}` → owned job, HTTP 202 |
+| `POST /api/resources/engineering/:id/cancel` | Empty object → durable stop projection |
+
+Startup may initialize the ordinary supervisor; it does not write graph records
+or invoke a worker. Explicit console close aborts and awaits owned engineering
+and ordinary work before collector teardown. An external stop signal can stop
+collectors concurrently. Neither path bypasses existing uncertainty holds.
+After graph execution, a clean close also requires a readable shared resource
+ledger with no reserved or uncertain attempts, checked after ordinary task drain.
+An unrelated unresolved attempt can conservatively withhold clean shutdown; the
+diagnosis does not claim that engineering created it.
+
 ### Retained task transcripts
 
 On execution-enabled consoles, select **Retain this task locally** before sending
