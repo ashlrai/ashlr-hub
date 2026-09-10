@@ -105,6 +105,9 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-controller-crash-integration.test.ts', // separate-process SIGKILL, stale leases and exact-dispatch recovery
   'test/universe-controller-owner-control-integration.test.ts', // separate campaign control CLI, worker drain and persisted DAG restart
   'test/universe-controller-signal-integration.test.ts', // real controller SIGINT/SIGTERM and owned worker cleanup
+  'test/universe-controller-controls.test.ts', // immutable drain/resume ordering and short transaction locking
+  'test/universe-controller-drain.test.ts', // persisted admission control, live transaction contention and drain acknowledgement
+  'test/universe-controller-drain-integration.test.ts', // separate CLI drain/resume, active delivery and preserved queue across restart
   'test/universe-campaign-owned.test.ts', // exact private execution leases and campaign admission authority
   'test/universe-integration-evaluate.test.ts', // real private candidate artifacts with injected evaluation and ledger faults
   'test/universe-delivery-review.test.ts', // independent Git provenance and historical receipt review

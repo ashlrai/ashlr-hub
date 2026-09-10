@@ -18,7 +18,8 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
                                Check local resource configuration before execution
   campaign <command>           Run or inspect a bounded multi-generation campaign
   portfolio <plan|run>         Coordinate explicitly declared campaign dependencies
-  controller <run|status>      Resume a persisted campaign graph within its original deadline
+  controller <run|status|drain|resume>
+                               Run or control a persisted graph within its original deadline
   integration <plan|evaluate|inspect|deliver|inspect-delivery|handoff>
                                Compose, verify, deliver, or register a downstream experiment
   deliver <id> --trial <id> --branch codex/<new-branch>

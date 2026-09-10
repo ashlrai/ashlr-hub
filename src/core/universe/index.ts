@@ -31,7 +31,9 @@ export { runUniversePortfolio } from './portfolio.js';
 export type { UniversePortfolioResult, UniversePortfolioOutcome, UniversePortfolioRunOptions } from './portfolio.js';
 export type * from './portfolio-types.js';
 export { runUniversePortfolioController, readUniversePortfolioController } from './portfolio-controller.js';
-export type { UniversePortfolioControllerOutcome, UniversePortfolioControllerReport } from './portfolio-controller-types.js';
+export { requestUniversePortfolioControllerControl } from './portfolio-controller-store.js';
+export type { UniversePortfolioControllerOutcome, UniversePortfolioControllerReport,
+  UniversePortfolioControllerControl, UniversePortfolioControllerControlReceipt } from './portfolio-controller-types.js';
 export { validateUniverseIntegrationDefinition, readUniverseIntegrationPlan } from './integration-plan.js';
 export type * from './integration-types.js';
 export { validateUniverseIntegrationEvaluationRequest, evaluateUniverseIntegration, readUniverseIntegrationEvaluation } from './integration-evaluate.js';

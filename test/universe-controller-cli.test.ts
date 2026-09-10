@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const core = vi.hoisted(() => ({ runUniversePortfolioController: vi.fn(), readUniversePortfolioController: vi.fn() }));
+const core = vi.hoisted(() => ({ runUniversePortfolioController: vi.fn(), readUniversePortfolioController: vi.fn(),
+  requestUniversePortfolioControllerControl: vi.fn() }));
 const files = vi.hoisted(() => ({ readResourceJson: vi.fn() }));
 vi.mock('../src/core/universe/index.js', async () => ({
   validateUniversePortfolioDefinition: (await import('../src/core/universe/portfolio-plan.js')).validateUniversePortfolioDefinition, ...core,
@@ -28,6 +29,7 @@ const recoveryCodes = [
 
 beforeEach(() => {
   vi.clearAllMocks();
+  core.requestUniversePortfolioControllerControl.mockReset();
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
   files.readResourceJson.mockImplementation((path: string) => path === '/private/config/delivery.json' ? deliveryPlan : definition);
@@ -85,7 +87,10 @@ describe('Universe persisted controller CLI', () => {
     expect(text).toContain('Campaign pause/stop targets only that campaign');
     expect(text).toContain('a successful request is not worker exit');
     expect(text).toContain('independent ready work may continue');
-    expect(text).toContain('There is no controller-wide durable drain/resume command');
+    expect(text).toContain('Use controller drain to preserve the pending queue');
+    expect(text).toContain('is not an acknowledgement');
+    expect(text).toContain('Resume requires the exact acknowledged control.sequence');
+    expect(text).toContain('do not downgrade a controlled ledger');
     expect(files.readResourceJson).not.toHaveBeenCalled();
     expect(core.runUniversePortfolioController).not.toHaveBeenCalled();
   });
@@ -109,11 +114,82 @@ describe('Universe persisted controller CLI', () => {
     expect(files.readResourceJson).toHaveBeenCalledTimes(1);
   });
 
-  it.each(['completed', 'incomplete', 'cancelled', 'timed-out', 'unavailable'])('maps run status %s without altering the JSON report', async (status) => {
+  it.each(['completed', 'incomplete', 'cancelled', 'timed-out', 'unavailable', 'draining', 'drained'])('maps run status %s without altering the JSON report', async (status) => {
     const value = report({ status });
     core.runUniversePortfolioController.mockResolvedValue(value);
     expect(await cmdUniverseController(['run', '--manifest', manifest, '--json'])).toBe(status === 'completed' ? 0 : status === 'cancelled' ? 130 : 1);
     expect(JSON.parse(vi.mocked(console.log).mock.calls[0]![0])).toEqual(value);
+  });
+
+  it.each([
+    ['drain'], ['drain', 'work'], ['drain', '../work', '--root', '/private/store'],
+    ['drain', 'work', '--root', '/private/store', '--drain-sequence', '3'],
+    ['drain', 'work', '--root', '/private/store', '--manifest', manifest],
+    ['drain', 'work', '--root', '/private/store', '--resource-runtime', '/private/runtime.json'],
+    ['resume', 'work', '--root', '/private/store'],
+    ['resume', 'work', '--drain-sequence', '3'],
+    ['resume', 'work', '--root', '/private/store', '--delivery-plan', '/private/delivery.json', '--drain-sequence', '3'],
+    ...['0', '-1', '1.5', '01', '1e2', '512', '999999999999999999', 'NaN', '3\n'].map((sequence) =>
+      ['resume', 'work', '--root', '/private/store', '--drain-sequence', sequence]),
+    ['resume', 'work', '--root', '/private/store', '--drain-sequence', '3', '--drain-sequence', '3'],
+    ['status', 'work', '--drain-sequence', '3'], ['run', '--manifest', manifest, '--drain-sequence', '3'],
+  ])('rejects invalid control invocation %j without effects', async (...args) => {
+    const before = listeners();
+    expect(await cmdUniverseController([...args, '--json'])).toBe(2);
+    expect(core.requestUniversePortfolioControllerControl).not.toHaveBeenCalled();
+    expect(core.runUniversePortfolioController).not.toHaveBeenCalled();
+    expect(core.readUniversePortfolioController).not.toHaveBeenCalled();
+    expect(files.readResourceJson).not.toHaveBeenCalled();
+    expect(listeners()).toEqual(before);
+  });
+
+  it.each(['drain', 'resume'] as const)('records %s without starting work or discovering runtime bindings', async (action) => {
+    const before = listeners();
+    const receipt = { schemaVersion: 1, controllerId: 'work', action, changed: true, sequence: 4,
+      requestedAt: '2026-09-09T00:00:10.000Z' };
+    core.requestUniversePortfolioControllerControl.mockReturnValue(receipt);
+    const args = [action, 'work', '--root', '/private/store', '--json', ...(action === 'resume' ? ['--drain-sequence', '3'] : [])];
+    expect(await cmdUniverseController(args)).toBe(0);
+    expect(core.requestUniversePortfolioControllerControl).toHaveBeenCalledWith('work', action,
+      { root: '/private/store', ...(action === 'resume' ? { expectedDrainSequence: 3 } : {}) });
+    expect(JSON.parse(vi.mocked(console.log).mock.calls[0]![0])).toEqual(receipt);
+    expect(core.runUniversePortfolioController).not.toHaveBeenCalled();
+    expect(core.readUniversePortfolioController).not.toHaveBeenCalled();
+    expect(files.readResourceJson).not.toHaveBeenCalled();
+    expect(listeners()).toEqual(before);
+  });
+
+  it.each(['drain', 'resume'] as const)('sanitizes %s refusals without claiming success', async (action) => {
+    core.requestUniversePortfolioControllerControl.mockImplementation(() => { throw new Error('PRIVATE-CREDENTIAL /private/secret'); });
+    expect(await cmdUniverseController([action, 'work', '--root', '/private/store', '--json',
+      ...(action === 'resume' ? ['--drain-sequence', '3'] : [])])).toBe(1);
+    const output = JSON.parse(vi.mocked(console.log).mock.calls[0]![0]);
+    expect(output.error).toContain('Controller control refused');
+    expect(JSON.stringify(output)).not.toContain('PRIVATE-CREDENTIAL');
+    expect(core.runUniversePortfolioController).not.toHaveBeenCalled();
+  });
+
+  it.each(['drain', 'resume'] as const)('renders idempotent %s receipt without claiming worker execution', async (action) => {
+    core.requestUniversePortfolioControllerControl.mockReturnValue({ schemaVersion: 1, controllerId: 'work', action,
+      changed: false, sequence: 4, requestedAt: '2026-09-09T00:00:10.000Z' });
+    expect(await cmdUniverseController([action, 'work', '--root', '/private/store',
+      ...(action === 'resume' ? ['--drain-sequence', '3'] : [])])).toBe(0);
+    const output = vi.mocked(console.log).mock.calls[0]![0];
+    expect(output).toContain(`${action} already recorded · sequence 4`);
+    expect(output).toContain(action === 'drain' ? 'not proof of completed draining' : 'no worker was started');
+    expect(output).toContain('original deadline and held attempts are unchanged');
+    expect(core.runUniversePortfolioController).not.toHaveBeenCalled();
+  });
+
+  it.each([null, '2026-09-09T00:00:20.000Z'])('renders a drain acknowledgement of %s without inferring liveness', async (acknowledgedAt) => {
+    core.readUniversePortfolioController.mockReturnValue(report({ status: acknowledgedAt ? 'drained' : 'draining',
+      control: { mode: 'drain', sequence: 3, requestedAt: '2026-09-09T00:00:10.000Z', acknowledgedAt } }));
+    expect(await cmdUniverseController(['status', 'work'])).toBe(0);
+    const output = vi.mocked(console.log).mock.calls[0]![0];
+    expect(output).toContain('Admission: drain · control sequence: 3');
+    expect(output).toContain(`drained acknowledgement: ${acknowledgedAt ?? 'not recorded'}`);
+    expect(output).toContain('not proof of a live worker');
+    expect(core.requestUniversePortfolioControllerControl).not.toHaveBeenCalled();
   });
 
   it.each(['healthy', 'missing', 'degraded'])('reads %s status evidence without mutation or signal handlers', async (sourceState) => {
