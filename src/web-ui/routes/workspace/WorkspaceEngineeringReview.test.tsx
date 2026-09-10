@@ -41,6 +41,15 @@ beforeEach(() => { setMutationToken(token); });
 afterEach(() => { act(() => clearMutationToken()); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('independent engineering UI authority review', () => {
+  it('gives an actionable preparation entry point without registering or launching from the empty state', async () => {
+    const fetcher = vi.fn(async (_path: string) => json([])); vi.stubGlobal('fetch', fetcher);
+    render(<WorkspaceEngineering {...props()} />);
+    await screen.findByText('No engineering plan enrolled for this project.');
+    expect(screen.getByText('ashlr resources pool engineering prepare --help')).toBeInTheDocument();
+    expect(screen.getByText(/without starting work/)).toBeInTheDocument();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0]?.[0]).toBe('/api/resources/engineering');
+  });
   it.each(['connection', 'control'])('discards a late mutation after %s loss without cancelling the owned run', async (kind) => {
     const f = transport(); const input = props(); const view = render(<WorkspaceEngineering {...input} />);
     await start(); expect(f.posts()).toHaveLength(1);

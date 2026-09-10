@@ -1,6 +1,64 @@
 # Verified local handoff
 
-## Current continuation: console-owned unattended engineering
+## Current continuation: prepare an evaluated engineering objective
+
+Baseline `c19d586a5fbf3aab475780e65174dde7a51a8af5`, isolated `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents
+implemented the preparation bridge, independent boundaries and real CLI-backed
+acceptance. Parent integrated CLI routing, workspace guidance, canonical docs,
+review fixes and local build verification. Original checkout remains untouched.
+
+`ashlr resources pool engineering prepare` now turns a reviewed objective,
+pinned seed/evaluator, allowed files/workers and budgets into a linked experiment,
+campaign, engineering enrollment and supervision queue. It uses the existing
+resource runtime and ledger. `--check` writes nothing; preparation itself never
+starts workers, evaluators, a console or supervision. A plan digest can pin the
+reviewed configuration. Final receipts prove complete registration; incomplete
+output is preserved, and exact completed replay does not rewrite state.
+
+The returned manual/automatic console arguments are usable without hand-editing
+the generated catalogs. Both are execution-capable when explicitly run; automatic
+mode additionally invokes the finite engineering queue. Commissioning reasons
+remain visible rather than being hidden behind a successful preparation status.
+The workspace's empty state points directly to this operator workflow.
+
+Actual CLI-backed acceptance: **4/4 passed**, no skips, 29.62 s. The unchanged
+prepared files passed the checker, launched through a real local console, made
+one fixture worker request, evaluated seed/candidate and delivered one verified
+local Git branch. Replay before and after execution preserved all files/effects.
+Independent boundaries: **28/28 passed**, no skips, 22.70 s. Builder tests: **6/6**.
+Final combined preparation, CLI, engineering and campaign regression: **165 tests
+/ 7 files**, no skips, 46.69 s. Full web: **1,295 tests / 77 files**, no skips.
+These focused groups overlap and are not a full core-suite claim.
+
+Strict source/web and new CLI test/import typechecks pass. Full lint has zero
+errors and 107 existing warnings; scoped lint has zero warnings. Documentation,
+real-I/O lane registration, production build, compiled help and five structural
+safety checks pass. The final local commit is followed by a clean identity build.
+
+The latest seed-context decision was independently rechecked: eligible later
+workers retain the same bounded seed score/diagnostics alongside changing parent
+and latest-trial feedback. No scheduling or acceptance changes were needed.
+Fresh verification passed 72 validator/model/reconstruction tests with no skips
+and the targeted real-loopback three-generation case (one unrelated test excluded).
+Seed evidence remained identical while accepted scores advanced; replay added no
+requests or accounting attempts.
+
+Remaining live gaps are explicit: host KILL is present, known quota evidence is
+expired, and legacy pending collector metadata cannot be reclaimed without
+ownership proof. Spark is not enrolled in the actual account pool; enabling it
+must preserve the personal General reservation, existing pause and receipt
+history. A past Hub marker defect is already fixed, so repeating that historical
+campaign is a commissioning demonstration, not new engineering yield.
+
+This milestone is locally implemented and fixture-verified, not live activation
+or production deployment. No user-provider calls, account/reserve/credential
+changes, KILL removal, service installation, GitHub Actions, remote push or npm
+publication occurred. Dynamic objective generation and integrating delivered
+branches into a working checkout remain unfinished. Entire is enabled in
+manual-commit mode; resuming `auto/p00` found no checkpoint.
+
+## Previous continuation: console-owned unattended engineering
 
 Baseline `074312449218ae5d89a137c63b493bf6859bc58a`, isolated `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents

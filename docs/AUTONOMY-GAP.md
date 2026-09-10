@@ -65,10 +65,18 @@ durable pause/resume, original deadlines and per-enrollment invocation/hold
 evidence. Its status reads have no dispatch effect. Terminal/browser panels,
 conversation compaction and native desktop bootstrap remain separate gaps.
 
+The [engineering preparation command](RESOURCE-POOLS.md#prepare-an-engineering-objective)
+now connects a reviewed objective, fixed evaluator, selected project and existing
+workers to initialized experiments/campaigns and linked console catalogs. It
+derives matching digests and preserves the existing account ledger. Preparation
+does not invent the objective or evaluator, start work or establish live capacity.
+Incomplete registration remains explicit; exact completed replay changes no state.
+
 1. Apply the standalone check to the intended Hub enrollment and resolve its
    actual configuration/ownership findings without resetting shared accounting.
-2. Prepare a meaningful pinned Hub evaluator and campaign, with explicit mutable
-   files, allowed workers, budgets and local delivery targets. Commission the real
+2. Prepare a meaningful pinned Hub evaluator and reviewed recipe using the
+   preparation command, with explicit mutable files, allowed workers, budgets
+   and local delivery targets. Commission the real
    accounts separately: personal Spark must preserve General reservation, shared
    account capacity, existing account-wide pauses and prior ledger history. A
    fresh empty ledger is not an acceptable migration shortcut.

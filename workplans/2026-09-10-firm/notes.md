@@ -1,5 +1,51 @@
 # Firm build notes
 
+## September 10: objective-to-campaign commissioning exploration
+
+- Delivered one reviewed recipe to initialized experiment/campaign, matching
+  engineering enrollment and finite supervision queue. Check is read-only;
+  preparation retains the existing ledger and does not start execution. Exact
+  replay verifies final evidence, including after completed work; incomplete
+  output stays held. Existing runtime and artifact validators are reused.
+- Review corrected selected-project registration truth, artifact file/directory
+  capacity preflight, occupied fresh delivery branches, top-level commissioning
+  reasons, and the report's execution-versus-registration distinction. Parent
+  exported/reused the artifact entry limit rather than duplicating its value.
+- Actual CLI-backed acceptance passed 4/4, no skips (29.62 s): generated files
+  passed unchanged through checker, real console, one worker request, two fixed
+  evaluations and one local branch delivery. This used isolated local fixtures,
+  not user accounts. Independent boundaries passed 28/28 (22.70 s). Final combined
+  preparation/CLI/engineering/campaign regressions passed 165/165 across 7 files
+  (46.69 s). Full web passed 1,295/77 files; these are not a full core test run.
+- Strict CLI test/import and source/web typechecks pass. Full lint has zero
+  errors and 107 existing warnings; scoped lint has no warnings. Build, compiled
+  help and five structural safety checks passed. Documentation/lane checks pass.
+- Renewed user choice is already implemented in HEAD by 49206a87: all eligible
+  generations retain bounded seed evidence beside latest feedback and changing
+  parent context. Independent source review found no missing implementation.
+  Fresh independent verification passed 72/72 tests (32.13 s) plus the targeted
+  three-generation loopback case (16.20 s; one unrelated case excluded). Replay
+  added no requests or ledger attempts. No seed pipeline files were changed.
+- Actual host state remains uncommissioned: KILL is present; known quota evidence
+  is stale; legacy pending collector metadata lacks reclamation ownership proof.
+  Personal/CMP/Claude workers exist but Spark is not enrolled; account policy and
+  history must survive any later migration. No credentials or provider state
+  was changed, tested or inferred from configuration alone.
+- Recovery corrected nonexistent source/test filename guesses, an unmatched
+  shell glob and a rejected documentation patch before edits. Strict checking
+  caught optional state.projects narrowing and an untyped test callback tuple;
+  both were fixed and rerun. No protected history was reset.
+
+- Prior turn was verified progress: `c19d586a5fbf3aab475780e65174dde7a51a8af5`,
+  clean build identity and source. Entire resume found no checkpoint. No blocked
+  audit applies. Memory used only to recheck repository and activation boundaries.
+- Three Explore assignments: existing setup primitives; actual known local
+  commissioning state without secrets; actionable operator flow and acceptance.
+  Parent is mapping manifest/campaign initialization and reviewing the user's
+  supplied north-star context. No new transport/framework is proposed.
+- Initial search for `manifest.ts` found none; the existing strict manifest and
+  experiment initialization APIs are in `src/core/universe/store.ts`.
+
 ## September 10: unattended engineering supervision exploration
 
 - Final implementation: explicit console-owned finite queue, no new transport or

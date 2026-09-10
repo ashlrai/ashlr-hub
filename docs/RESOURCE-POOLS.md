@@ -45,6 +45,87 @@ memory, not browser storage. Switching surfaces preserves them; closing/disconne
 or changing the confirmed scope discards them. Returned output is plain text, not
 executable markup.
 
+### Prepare an engineering objective
+
+`ashlr resources pool engineering prepare` turns one reviewed objective and
+competing hypotheses into a complete campaign bundle. It derives matching pool
+and enrollment digests from your existing runtime and project catalog. It does
+**not** run the objective, connect an account or start supervision.
+
+Prerequisites are a built source checkout, existing private resource runtime and
+project catalog, and an enabled project with a full Git seed commit containing
+an independently reviewed evaluator. Preserve the existing accounting directory,
+allocation, account pauses and receipt history. The new output needs an existing
+private `0700` parent outside projects, transport workspaces and shared accounting.
+Do not move the prepared bundle: experiment evidence contains absolute paths.
+`--workspace` is the existing console's default workspace; the recipe's
+`projectId` selects the target from its project catalog.
+
+The exact recipe is defined by
+[`ResourceEngineeringRecipe`](../src/core/resources/engineering-preparation-types.ts).
+It includes identity/objective/project/seed, metric and fixed evaluator,
+trial/campaign budgets, generation scope, delivery, execution metadata and
+supervision limits. `generation.hypotheses` contains each variant's `id`, `niche`
+and `hypothesis`; `files` are mutable, `contextFiles` are read-only context,
+and `allowedWorkerIds` must already exist in the pool. The evaluator stays outside
+mutable scope. The preparer enables seed measurement, retained feedback and
+confined file operations; it does not invent an evaluator or choose a valuable
+objective. `delivery.allowInitialRepair: true` still requires measured failing-seed
+evidence before first-pass delivery.
+
+1. Write a reviewed recipe as private `0600` JSON, including a new `codex/`
+   delivery branch and explicit budgets. The [historical marker-filter recipe](FIRM-DEMO.md#a-real-hub-source-campaign)
+   supplies a reproducible evaluator and failing seed. That defect is already
+   repaired on this package branch; reproducing it is not a new improvement.
+2. Inspect without creating files or registering work:
+
+   ```sh
+   node bin/ashlr resources pool engineering prepare \
+     --recipe /absolute/private/reviewed-recipe.json \
+     --output /absolute/private/bundles/hub-improvement \
+     --resource-runtime /absolute/private/resource-runtime.json \
+     --workspace /absolute/projects/ashlr-hub \
+     --projects /absolute/private/projects.json \
+     --check --json
+   ```
+
+   `status: "planned"` includes `planDigest`, project/seed identity and intended
+   output paths. This is configuration evidence, not authenticated capacity or
+   acceptance. No campaign, key, directory or execution owner is created.
+3. **Register the bundle** by repeating the command without `--check`. Optionally
+   supply `--expected-plan-digest` to pin the separately reviewed check. Without
+   it, the command captures and rechecks its own plan in one invocation. This
+   materializes the pinned seed and registers local experiment/campaign state,
+   but never runs a worker or evaluator.
+
+   | Output | Purpose |
+   | --- | --- |
+   | `manifest.json` / `campaign.json` | Derived definitions with seed measurement and feedback |
+   | `universe/` | Immutable seed/comparator and initialized campaign |
+   | `graph/` | Dedicated graph root, not a started execution |
+   | `engineering.json` | Project-pinned enrollment using the existing shared ledger |
+   | `supervision.json` | Digest-pinned queue for explicit automatic startup |
+   | `receipt.json` | Final verified preparation receipt |
+
+4. Read `commissioning.status` and reasons. A prepared bundle can still be held
+   by KILL, account policy, missing evidence or ownership. Use the
+   [standalone checker](#check-engineering-configuration-without-starting-the-fleet)
+   and resolve the actual hold without resetting history.
+5. To intentionally start execution, use the returned `consoleArguments.manual`
+   or `consoleArguments.automatic` with the built CLI. Human output prints quoted
+   commands; JSON preserves argument arrays. Neither is executed by preparation.
+   Both start an execution-capable console and can resume ordinary queued tasks;
+   the automatic form also starts the engineering queue without a browser click.
+
+Exact completed preparation can be replayed before or after execution: it verifies
+recipe/runtime/project/evaluator pins, generated catalogs and immutable experiment
+evidence without rewriting them or resetting usage/deadlines. Incomplete or
+changed bundles are refused and retained for inspection, never automatically
+deleted or repaired. `intent.json` is not proof of completion; the final receipt
+is required. This bridge prepares one project/objective with multiple variants;
+dynamic idea generation, cross-project dependencies and integrating delivered
+branches into your working checkout remain separate capabilities.
+
 ### Evaluated engineering runs
 
 The optional **Engineering runs** pane is separate from ordinary chat. It runs an
@@ -61,6 +142,10 @@ workspace must remain a separate sterile Git directory. The runtime must use the
 console's exact pool, bindings, observations and accounting root. When quota
 collection is configured, use that same quota configuration with
 `quotaEvidenceMode: "shared-collector"`; do not start another collector.
+
+For a new objective, the [preparation command](#prepare-an-engineering-objective)
+generates the experiment, campaign and catalogs used below. Manual enrollment
+remains available for existing advanced portfolio configurations.
 
 For a source-built local console:
 

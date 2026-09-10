@@ -133,7 +133,9 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
     {catalogError ? <p role="alert" className={styles.error}>{catalogError}</p> : null}
     {catalog === null && !catalogError && available ? <p role="status" className={styles.empty}>Reading enrolled engineering plans…</p> : null}
     {catalog?.length === 0 ? <div className={styles.empty}><span className={styles.orbit} aria-hidden="true">◎</span><h3>No engineering plan enrolled for this project.</h3>
-      <p>Register an evaluated campaign and its delivery plan in the console’s private startup catalog. Ordinary chat tasks remain available.</p>
+      <p>Prepare a reviewed objective with a fixed evaluator, allowed files, workers and budget. The preparation command creates linked campaign and startup catalogs without starting work.</p>
+      <p><code>ashlr resources pool engineering prepare --help</code></p>
+      <p>Use the returned console configuration to make the plan available here. Ordinary chat tasks remain available.</p>
       <p>Opening this panel never invents an objective, enrolls an account or starts a worker.</p></div> : null}
     {selected ? <>
       <div className={styles.selection}><label>Enrolled engineering plan<select aria-label="Enrolled engineering plan" value={selected.id} disabled={busy}

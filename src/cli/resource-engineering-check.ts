@@ -4,6 +4,9 @@ const USAGE = `usage: ashlr resources pool engineering check --root ABS --pool A
        --observations ABS --workspace ABS --projects ABS --engineering ABS
        [--quota-config ABS] [--json]
 
+To create an experiment/campaign and linked catalogs from a reviewed objective,
+use: ashlr resources pool engineering prepare --help
+
 Checks explicit engineering enrollment, projects and shared resource accounting
 using existing local evidence. No default configuration is discovered. All paths
 must be canonical absolute non-root paths. --workspace is the default project;

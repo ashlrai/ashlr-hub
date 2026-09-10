@@ -8,7 +8,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
 
 export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
-const MAX_ARTIFACT_ENTRIES = 8_192;
+export const MAX_ARTIFACT_ENTRIES = 8_192;
 
 export function digest(value: string | Buffer): string {
   return createHash('sha256').update(value).digest('hex');

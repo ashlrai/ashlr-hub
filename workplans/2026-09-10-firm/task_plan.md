@@ -78,6 +78,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Implement the next complete unattended execution path using existing enrollment, graph and resource ownership.
 - [x] Expose durable supervision intent and truthful live state through the operating workspace.
 - [x] Verify shutdown/restart, admission holds, unchanged deadlines and no duplicate effects; update canonical operator guidance.
+- [x] Explore actual Hub commissioning and objective-to-campaign setup with three agents.
+- [x] Implement the missing actionable setup bridge using existing experiment, evaluation and enrollment primitives.
+- [x] Verify an operator can prepare an executable campaign without hand-assembling inconsistent catalogs.
+- [x] Review independent acceptance, current activation gaps and local release evidence.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
