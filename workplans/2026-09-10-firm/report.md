@@ -1,6 +1,73 @@
 # Verified local handoff
 
-## Current continuation: observable engineering admission
+## Current continuation: standalone engineering commissioning
+
+Baseline: `487d9ad67a430513071ddec700c03a9ffb95ddf6`; isolated `auto/p00`
+at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents
+owned shared validation, CLI/cold review and independent real-I/O acceptance.
+Parent integrated the standalone checker and documentation. The containing
+commit is local source delivery, not production deployment or fleet activation.
+
+- `ashlr resources pool engineering check` validates explicit projects and
+  engineering catalogs against the same pool, bindings, observation files,
+  complete supervisor history and accounting root intended for console startup.
+  It does not construct a supervisor, collector or listener. Shared decoder and
+  enrollment preparation preserve startup validation and exact digest identities.
+- Missing registration is explicitly `would-register`; historical project pins,
+  retained task records, ledger digests, account-wide pauses and usage ceilings
+  survive inspection unchanged. Captured configuration is reread for drift.
+  Invalid, oversized or unsafe inputs return closed stage diagnostics.
+- Per-enrollment KILL, ownership, project, provenance and account-policy holds
+  remain explicit. Existing graph/launch/controller work is referred to its
+  owned console, never reclaimed or replayed by this command. Runtime inspection
+  performs three read-only Git queries and no provider login/probe/evaluation.
+- JSON binds scope, sampling time, enrollment/project identity and digest;
+  human output shows worker exclusions and recheck hints. `configured` is local
+  structural configuration, not authenticated capacity, admission or verified
+  delivery. Independent configured rows can coexist with held rows. Temporary
+  capacity does not become a new permanent launch denial.
+- Fifteen actual child-CLI fixtures preserve the complete fixture/HOME tree,
+  file/directory identities, modes, timestamps excluding atime and content hashes.
+  All record zero worker requests. Fifteen pure orchestration regressions cover
+  input accessors, drift, runtime cache pins and fixed failure-stage reasons.
+  Seven state inspection tests protect historical decoding and project previews;
+  29 command tests cover parsing, reports, failure handling and worker summaries.
+  These focused results overlap the full regression gates and are not additive.
+
+Core/web typechecks, production build, compiled CLI help, documentation checks
+and full lint passed. Lint has zero errors and 107 existing warnings; real-I/O
+classification is 276 files plus 661 unit files. Compiled `verify-safety` passes
+all five structural checks. The [operator guide](../../docs/RESOURCE-POOLS.md#check-engineering-configuration-without-starting-the-fleet)
+documents exact commands, exit codes, known holds and recovery boundaries.
+
+Frozen full web regression: **1,224 passed / 75 files**, no skips (10.77 s).
+Frozen unchanged H1–H8 safety suite: **449 passed, five existing skips / 41
+files** (192.53 s). No source or test changes occurred during these runs.
+Frozen resource/selected-graph regression: **2,728 passed / 87 files**
+(453.48 s). The three disjoint suites total **4,401 passed and five existing
+skips**. A subsequent explicit strict typecheck of all changed test files found
+one fixture Map inference error; an erased type annotation fixed it, followed by
+strict typecheck and the focused 15-test inspector rerun. No runtime code changed.
+
+The host's global KILL was re-read active/healthy and left untouched. No actual
+provider requests, account enrollment/migration, policy changes, service startup,
+GitHub Actions, remote push, npm publication or public deployment occurred.
+Original checkout remains at `a01fc08663baab3039c4f1c084538de732a4fd0e` with its
+pre-existing untracked workplans untouched. Entire resume found no checkpoint.
+
+Next: commit an independent pinned evaluator for a meaningful Hub campaign;
+commission real account/runtime evidence and preserve personal General reserves,
+shared account capacity and historical accounting when enabling Spark. A new
+empty ledger is not a migration. Then obtain actual evaluated branch-delivery
+acceptance before resident scheduling or self-improvement claims. Read-only
+exploration identified backlog marker-path classification as a concrete candidate;
+no new campaign or evaluator was created in this increment.
+
+Planning kept the parallel changes scoped; agent-building guidance reused the
+established runtime; documentation guidance separates source, configuration,
+execution, delivery and activation evidence. The full end state is still open.
+
+## Previous continuation: observable engineering admission
 
 Baseline: `2b4064a32769362b11a32664af459e29bdfb8ca8`; isolated `auto/p00`
 at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents explored

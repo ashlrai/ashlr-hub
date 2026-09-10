@@ -41,6 +41,11 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Surface actionable readiness in the workspace without hiding cancellation or claiming capacity.
 - [x] Verify pre-launch no-effect holds, post-launch races, API identity and responsive interaction.
 - [x] Record frozen-source validation and remaining commissioning requirements.
+- [x] Explore whole-enrollment commissioning without supervisor startup with three agents.
+- [x] Share strict persisted-state and project/enrollment validation with startup.
+- [x] Implement standalone commissioning inspection and explicit CLI.
+- [x] Prove read-only behavior against real filesystem/history and subprocess fixtures.
+- [x] Verify compatibility and document the next actual Hub commissioning step.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -53,6 +58,18 @@ existing activation, provenance, evaluation and resource invariants.
   digest-bearing edges. Never invent terminal states to satisfy a count.
 
 ## Errors
+Commissioning continuation: review caught a 1 MiB serializer cap imposed on valid
+4 MiB supervisor history; restored the store-specific limit and reran escaped
+history regressions. Fixed a project-binding type mismatch, fixture setup missing
+an await, per-project registration labeling, startup catalog size parity, and
+runtime-cache pins before the frozen sweep. Added fixed runtime failure reasons
+and worker exclusion summaries. Two guessed test-script paths did not exist;
+the real-I/O registry is `test/config/realio-lane-membership.mjs`. A plan patch
+matched stale wording and made no changes; corrected against the current file.
+There is no separate `tsconfig.test.json`; explicit strict changed-test checking
+found a fixture Map inference error after broad tests. Added only its generic
+type annotation and reran the changed test and strict test typecheck.
+
 Readiness continuation: an initial DOM test queried the asynchronous admission
 panel before the catalog loaded; corrected it to await rendered evidence. A
 transient web typecheck ran before the agreed graph-lock reason reached the
@@ -79,7 +96,22 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
-Current continuation from `2b4064a32769362b11a32664af459e29bdfb8ca8`:
+Current continuation from `487d9ad67a430513071ddec700c03a9ffb95ddf6`:
+completed standalone commissioning increment. Frozen regression recorded 4,401
+passes and five existing skips; strict changed-test typechecking and the final
+annotation-only rerun passed. Full end-state work remains open; see report.md.
+
+Implementation ownership and design:
+standalone whole-enrollment commissioning. Core agent extracts shared strict
+state/project/enrollment validation; CLI agent owns explicit engineering check
+command; acceptance agent owns real isolated subprocess/no-write tests. Parent
+joins inspection stages and documents operational use. No fake supervisor or
+shallow project-header decoder. Configuration validity and known local holds are
+not live admission, provider authentication or evaluation acceptance. Missing
+stores may be projected as would-register; never create them during inspection.
+Shared account history and pause policy remain authoritative and unchanged.
+
+Previous completed continuation from `2b4064a32769362b11a32664af459e29bdfb8ca8`:
 read-only engineering admission. Exploration confirmed pre-existing KILL can
 publish an accepted launch before the graph checks its stop gate, leaving the
 enrollment permanently held without work. Core agent owns observational checks

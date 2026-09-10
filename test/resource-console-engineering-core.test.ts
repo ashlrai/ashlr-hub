@@ -15,7 +15,7 @@ vi.mock('../src/core/universe/campaign-store.js', async (original) => ({
   ...await original<typeof import('../src/core/universe/campaign-store.js')>(),
   readUniverseCampaign: projections.campaign, campaignUniverse: projections.universe,
 }));
-import { createResourceConsoleEngineeringOwner, validateResourceConsoleEngineeringCatalog,
+import { createResourceConsoleEngineeringOwner, validateResourceConsoleEngineeringCatalog, prepareResourceConsoleEngineeringEnrollments,
   type ResourceConsoleEngineeringCatalog } from '../src/core/resources/console-engineering.js';
 import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
@@ -147,6 +147,17 @@ async function ownerFixture() {
   return { options, supervisor, graphRoot, run, pool, bindings, project, create: () => createResourceConsoleEngineeringOwner(options) };
 }
 describe('owned console engineering evidence', () => {
+  it('shares the exact prepared enrollment identity with startup without publishing graph records', async () => {
+    const f = await ownerFixture(); const owner = f.create();
+    try {
+      const projects = f.supervisor.projects()!;
+      const prepared = prepareResourceConsoleEngineeringEnrollments({ ...f.options, projects,
+        projectBindings: projects.map((project) => f.supervisor.engineeringBinding(project.id).project) });
+      expect(prepared.map((entry) => entry.summary)).toEqual(owner.catalog());
+      expect(prepared[0]!.definition.hostEnrollmentDigest).toBe(owner.catalog()[0]!.enrollmentDigest);
+      expect(readdirSync(f.graphRoot)).toEqual([]); expect(f.run).not.toHaveBeenCalled();
+    } finally { await owner.close(); await f.supervisor.close(); }
+  });
   it('keeps startup/catalog/status read-only and exposes separate experiment/campaign budgets', async () => {
     const f = await ownerFixture(); const owner = f.create();
     try {

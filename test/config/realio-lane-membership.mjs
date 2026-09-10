@@ -97,6 +97,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-files-acceptance.test.ts', // independent real file-to-task snapshot acceptance
   'test/resource-console-engineering-acceptance.test.ts', // actual HTTP, shared quota, Git evaluation and delivery
   'test/resource-console-engineering-core.test.ts', // signed graph attribution and durable console launch/cancel ownership
+  'test/resource-console-engineering-inspect.test.ts', // read-only commissioning through real CLI, Git and history fixtures
+  'test/resource-console-state-inspection.test.ts', // strict persisted-state decoding and pinned-directory previews
   'test/resource-console-engineering-routes.test.ts', // actual HTTP auth and lifecycle with inert engineering owner
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership

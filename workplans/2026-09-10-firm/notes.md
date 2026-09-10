@@ -1,5 +1,42 @@
 # Firm build notes
 
+## September 10: standalone engineering commissioning
+
+- Baseline 487d9ad6, isolated auto/p00; three agents mapped strict validation,
+  the CLI boundary and actual no-write acceptance before implementation. Entire
+  resume found no checkpoint. Parent owns checker, integration and final commit.
+- Shared detached schema 1–4 decoder validates complete task/transcript history;
+  project previews preserve immutable historical pins and append-only registration.
+  Shared enrollment preparation produces the live owner's same digests without
+  constructing a supervisor, taking a lease or activating a collector.
+- Standalone stages inspect explicit pool/bindings/observations, project catalog,
+  supervisor and ledger history, enrollment linkage and resource runtime. Re-read
+  captured configuration for drift. Missing state/key/ownership is not repaired.
+- Closed report exposes fixed failures, enrollment identities and local policy
+  holds; invalid runtime reports retain the failing runtime stage without leaking
+  private partial records. Runtime cache includes the expected digest, not just
+  a path. Per-enrollment registration does not inherit unrelated additions.
+- Fifteen real subprocess fixtures snapshot every fixture/HOME directory and file
+  (identity, permissions, timestamps excluding atime, contents), proving no
+  writes or create/remove lock cycles. Worker listener receives zero requests;
+  evaluator is never called. Historical policies, retained jobs, corrupt evidence,
+  missing roots/keys, replaced projects and ownership/KILL holds are covered.
+- Fifteen independent mocked tests cover option accessors, semantic snapshot
+  drift, digest-pinned runtime caching, runtime diagnostics and capacity honesty.
+  CLI tests show per-worker exclusions while keeping configured distinct from
+  admission. No fixture evidence is described as authenticated account acceptance.
+- Source/tests frozen before broad regression. Existing host KILL remains
+  active/healthy; actual accounts, personal General reservation, shared capacity,
+  old ledger, native profiles and services remain untouched.
+- Independent next-campaign exploration found a concrete selection-quality bug
+  in `src/core/portfolio/value-filter.ts`: backlog marker paths with spaces, test
+  suffixes or Windows separators can bypass non-code filtering. Candidate only,
+  not part of this release: first author a fixed evaluator proving baseline
+  failure and preserved security/source-work exceptions, commit it before pinning
+  the seed, and allow only that source file to change. Pin its existing shared
+  resource runtime, measured request budget and explicit local delivery branch.
+  No evaluator, campaign or provider execution was created by this exploration.
+
 ## September 10: local engineering admission continuation
 
 - Baseline 2b4064a3, clean isolated auto/p00; Entire resume again found no checkpoint.

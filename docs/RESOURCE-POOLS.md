@@ -75,7 +75,10 @@ For a source-built local console:
    for the engineering CLI. Use registered lowercase project/enrollment IDs,
    distinct controllers, and distinct existing private graph directories. Never
    store the catalog in the repository or accept model-generated host settings.
-3. Start the existing execution console with `--projects` and the new
+3. Run the [standalone commissioning check](#check-engineering-configuration-without-starting-the-fleet)
+   against the same files. Review every enrollment and worker, including holds.
+   The check is nonexecuting; it does not register projects or authenticate accounts.
+4. Start the existing execution console with `--projects` and the new
    `--engineering /absolute/private/engineering-catalog.json` option. For example,
    after substituting the reviewed local paths:
 
@@ -90,7 +93,7 @@ For a source-built local console:
      --engineering /absolute/private/engineering-catalog.json
    ```
 
-4. Open **Workspace**, select the registered project, then **Engineering runs**.
+5. Open **Workspace**, select the registered project, then **Engineering runs**.
    Inspect the declared dependency order, campaign and experiment limits,
    delivery branches and enrollment digest. These limits are ceilings, not an
    estimate of current account balance. The standard resource ledger still
@@ -98,7 +101,7 @@ For a source-built local console:
    **Before this plan runs** for local admission checks. A held plan lists fixed
    reason codes with operator guidance; after resolving the condition, select
    **Refresh evidence**. Refreshing never launches or retries work.
-5. Unlock controls and select **Run enrolled plan**. The browser sends only the
+6. Unlock controls and select **Run enrolled plan**. The browser sends only the
    enrollment ID and displayed digest, never a command, path or revised budget.
    Launch creates durable ownership evidence; status reads show signed graph
    evidence. A recorded delivery means fixed-evaluator/local-branch acceptance,
@@ -162,16 +165,69 @@ fail-closed; discovering a lost lease can stop already owned ordinary tasks.
 Readiness does not suppress that cancellation behavior or claim the surrounding
 service is inert. This endpoint checks an already started console; it is not a standalone
 read-only commissioning command, because console startup can initialize the
-ordinary supervisor. No private paths or raw storage errors are returned.
+ordinary supervisor. Use the standalone check below before startup. No private
+paths or raw storage errors are returned.
 
-Startup may initialize the ordinary supervisor; it does not write graph records
-or invoke a worker. Explicit console close aborts and awaits owned engineering
+Startup may initialize the ordinary supervisor and resume queued ordinary tasks,
+including worker dispatch. It does not itself launch engineering graph work.
+Explicit console close aborts and awaits owned engineering
 and ordinary work before collector teardown. An external stop signal can stop
 collectors concurrently. Neither path bypasses existing uncertainty holds.
 After graph execution, a clean close also requires a readable shared resource
 ledger with no reserved or uncertain attempts, checked after ordinary task drain.
 An unrelated unresolved attempt can conservatively withhold clean shutdown; the
 diagnosis does not claim that engineering created it.
+
+### Check engineering configuration without starting the fleet
+
+From a built source checkout, inspect the exact private files intended for console
+startup. Prepare the experiments, campaigns, delivery plan and catalogs described
+above first; this command does not discover or create them.
+
+```sh
+node bin/ashlr resources pool engineering check \
+  --root /absolute/private/shared-resource-ledger \
+  --pool /absolute/private/pool.json \
+  --bindings /absolute/private/bindings.json \
+  --observations /absolute/private/observations.json \
+  --workspace /absolute/projects/ashlr-hub \
+  --projects /absolute/private/projects.json \
+  --engineering /absolute/private/engineering-catalog.json \
+  --json
+```
+
+Include the same `--quota-config /absolute/private/quota.json` when the console
+uses a shared collector. The configuration is inspected, never refreshed. Omit
+`--json` for a human summary of stages, enrollment identities, worker policies,
+exclusions and recheck hints. Paths must be canonical, absolute and non-root;
+the command accepts neither execution flags nor implicit default configuration.
+
+| Result | Meaning and next step |
+| --- | --- |
+| `configured` / exit 0 | At least one enrollment has valid local configuration and no reported enrollment hold. Review all rows and worker exclusions before starting the console. This is not live admission or authenticated capacity. |
+| `held` / exit 1 | No enrollment is currently actionable under these local checks. Review fixed reasons; KILL, paused policies and ownership remain unchanged. |
+| `unavailable` / exit 1 | A required input or strict history check failed. Repair the identified configuration through its normal owner, preserving the existing ledger and project attribution, then recheck. |
+| Invalid arguments / exit 2 | Correct the explicit paths and supported options; no inspection was started. |
+
+Reports bind each enrollment to its digest and project ID. `would-register` means
+that project is only proposed; `persisted` means its historical binding already
+exists. Disabled or replaced directories remain held rather than being silently
+rebound. The check validates complete schema 1–4 supervisor history, shared pool
+history, resource runtime and project/campaign/delivery linkage. Captured
+configuration is reread to detect drift during inspection. Missing stores remain
+missing; drift never causes a new empty ledger to replace existing accounting.
+
+The report declares `scope: "local-commissioning-check-only"`,
+`admission: "not-attested"`, `effectsExecuted: false` and
+`providerContacted: false`. It starts no supervisor, listener, collector, provider
+or evaluator; creates no keys, storage or locks; performs no ownership recovery
+and changes no usage policy. Runtime inspection issues three bounded read-only
+Git queries in the explicit transport workspace. It is not a native login probe.
+Worker eligibility is an observation, not a reservation: stale quota, temporary
+capacity and exhausted windows remain visible without converting them into new
+permanent execution holds. Existing graph/launch/controller history requires
+inspection in the owned console; this command never reconciles or replays it.
+Successful launch, evaluation, delivery and production acceptance remain separate.
 
 ### Retained task transcripts
 

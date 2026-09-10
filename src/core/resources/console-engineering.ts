@@ -15,6 +15,8 @@ import { validateResourceGenerationRuntime } from '../universe/resource-generati
 import { readResourceJson, resourcePoolStatus } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
+import { validateResourceConsoleProjectBindings, type ResourceConsoleProjectBinding } from './console-projects.js';
+import type { ResourceConsoleProject } from './console-types.js';
 import { ResourceSupervisorError, type ResourcePoolSupervisor } from './pool-supervisor.js';
 import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob, ResourceConsoleEngineeringLaunch,
   ResourceConsoleEngineeringReadiness, ResourceConsoleEngineeringReadinessReason } from './console-engineering-types.js';
@@ -118,15 +120,23 @@ function records(root: string): ImmutablePrivateRecordStoreConfig<OwnershipRecor
     defaultMaxBytes: 2048, hardMaxBytes: 2048, codecForRead: () => codec, codecForWrite: () => codec };
 }
 
-/** Construction/status never write graph roots or dispatch. Only explicit launch/cancel does. */
-export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEngineeringOwnerOptions): ResourceConsoleEngineeringOwner {
-  const drainProperty = Object.getOwnPropertyDescriptor(options, 'waitForResourceDrain');
-  if (drainProperty && (!Object.hasOwn(drainProperty, 'value') ||
-      drainProperty.value !== undefined && typeof drainProperty.value !== 'function') ||
-    !drainProperty && 'waitForResourceDrain' in options) fail('INVALID_INPUT', 'Invalid engineering shutdown coordinator');
-  const waitForResourceDrain = drainProperty?.value as (() => Promise<void>) | undefined;
+export interface ResourceConsoleEngineeringPreparedEnrollment {
+  row: ResourceConsoleEngineeringCatalog['enrollments'][number];
+  binding: ReturnType<typeof createFirmEngineeringControlHandler>;
+  definition: ControlGraphDefinition;
+  definitionDigest: string;
+  summary: ResourceConsoleEngineeringEnrollment;
+  projectIdentity: Pick<ResourceConsoleProjectBinding, 'id' | 'workspace' | 'dev' | 'ino'>;
+  accountingPoolDigest: string;
+}
+
+/** Shared read-only enrollment validation. Prepared handlers are host-only, never a public report. */
+export function prepareResourceConsoleEngineeringEnrollments(options: {
+  catalog: ResourceConsoleEngineeringCatalog; root: string; poolFile: string; bindingsFile: string;
+  observationsFile: string; quotaConfigFile?: string;
+  projectBindings: ResourceConsoleProjectBinding[]; projects: ResourceConsoleProject[];
+}): ResourceConsoleEngineeringPreparedEnrollment[] {
   const catalog = validateResourceConsoleEngineeringCatalog(options.catalog);
-  const supervisor = options.supervisor; const signal = options.signal;
   const control = snapshot<{ root: string; poolFile: string; bindingsFile: string; observationsFile: string; quotaConfigFile?: string }>({
     root: options.root, poolFile: options.poolFile, bindingsFile: options.bindingsFile, observationsFile: options.observationsFile,
     ...(options.quotaConfigFile === undefined ? {} : { quotaConfigFile: options.quotaConfigFile }) });
@@ -134,15 +144,20 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
   const pool = validateResourcePool(readResourceJson(control.poolFile));
   const bindings = validateResourceBindings(readResourceJson(control.bindingsFile), pool);
   const poolDigest = digest(canonical({ pool, bindings }));
-  const projects = supervisor.projects();
-  if (!projects) fail('UNAVAILABLE', 'Register engineering projects first');
-  let closing = false; let closePromise: Promise<void> | undefined;
-  let ranGraph = false;
-  const active = new Map<string, { abort: AbortController; promise: Promise<void> }>();
-  const faults = new Set<string>();
-  const enrolled = new Map(catalog.enrollments.map((row) => {
-    const scope = supervisor.engineeringBinding(row.projectId);
-    if (scope.root !== control.root || scope.poolDigest !== poolDigest) fail('CONFLICT', 'Engineering accounting scope changed');
+  const captured = snapshot<{ projectBindings: ResourceConsoleProjectBinding[]; projects: ResourceConsoleProject[] }>({
+    projectBindings: options.projectBindings, projects: options.projects });
+  const projectBindings = validateResourceConsoleProjectBindings(captured.projectBindings, captured.projectBindings?.[0]?.workspace);
+  const projects = captured.projects;
+  if (!Array.isArray(projects) || projects.length !== projectBindings.length ||
+      projects.some((project, index) => !exact(project, ['id', 'label', 'workspace', 'enabled']) ||
+        typeof project.enabled !== 'boolean' || project.id !== projectBindings[index]!.id ||
+        project.label !== projectBindings[index]!.label || project.workspace !== projectBindings[index]!.workspace)) {
+    fail('INVALID_INPUT', 'Invalid engineering project projection');
+  }
+  return catalog.enrollments.map((row) => {
+    const project = projectBindings.find((value) => value.id === row.projectId);
+    if (!project) fail('NOT_FOUND', 'Resource project was not found');
+    const scope = { project };
     const runtime = validateResourceGenerationRuntime(readResourceJson(row.host.resourceRuntime));
     if (runtime.root !== control.root || runtime.poolPath !== control.poolFile || runtime.bindingsPath !== control.bindingsFile ||
       runtime.observationsPath !== control.observationsFile || runtime.quotaConfigPath !== control.quotaConfigFile ||
@@ -175,8 +190,39 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
       enrollmentDigest, objective: campaigns.map((campaign) => campaign.objective).join('\n').slice(0, 1024), campaigns,
       budget: { maxParallel: row.host.definition.maxParallel, maxDurationMs: row.host.definition.maxDurationMs },
       acceptanceScope: 'fixed-evaluator-and-local-branch-only' };
-    return [row.id, { row, binding, definition, definitionDigest, summary, projectIdentity }] as const;
-  }));
+    return { row, binding, definition, definitionDigest, summary, projectIdentity, accountingPoolDigest: poolDigest };
+  });
+}
+
+/** Construction/status never write graph roots or dispatch. Only explicit launch/cancel does. */
+export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEngineeringOwnerOptions): ResourceConsoleEngineeringOwner {
+  const drainProperty = Object.getOwnPropertyDescriptor(options, 'waitForResourceDrain');
+  if (drainProperty && (!Object.hasOwn(drainProperty, 'value') ||
+      drainProperty.value !== undefined && typeof drainProperty.value !== 'function') ||
+    !drainProperty && 'waitForResourceDrain' in options) fail('INVALID_INPUT', 'Invalid engineering shutdown coordinator');
+  const waitForResourceDrain = drainProperty?.value as (() => Promise<void>) | undefined;
+  const supervisor = options.supervisor; const signal = options.signal;
+  const control = snapshot<{ root: string; poolFile: string; bindingsFile: string; observationsFile: string; quotaConfigFile?: string }>({
+    root: options.root, poolFile: options.poolFile, bindingsFile: options.bindingsFile, observationsFile: options.observationsFile,
+    ...(options.quotaConfigFile === undefined ? {} : { quotaConfigFile: options.quotaConfigFile }) });
+  if (Object.values(control).some((value) => !path(value))) fail('INVALID_INPUT', 'Invalid engineering resource controls');
+  const pool = validateResourcePool(readResourceJson(control.poolFile));
+  const bindings = validateResourceBindings(readResourceJson(control.bindingsFile), pool);
+  const poolDigest = digest(canonical({ pool, bindings }));
+  const projects = supervisor.projects();
+  if (!projects) fail('UNAVAILABLE', 'Register engineering projects first');
+  let closing = false; let closePromise: Promise<void> | undefined;
+  let ranGraph = false;
+  const active = new Map<string, { abort: AbortController; promise: Promise<void> }>();
+  const faults = new Set<string>();
+  const projectBindings = projects.map((project) => {
+    const scope = supervisor.engineeringBinding(project.id);
+    if (scope.root !== control.root || scope.poolDigest !== poolDigest) fail('CONFLICT', 'Engineering accounting scope changed');
+    return scope.project;
+  });
+  const prepared = prepareResourceConsoleEngineeringEnrollments({ ...control, catalog: options.catalog, projects, projectBindings });
+  if (prepared.some((row) => row.accountingPoolDigest !== poolDigest)) fail('CONFLICT', 'Engineering accounting scope changed');
+  const enrolled = new Map(prepared.map((value) => [value.row.id, value] as const));
   type Entry = NonNullable<ReturnType<typeof enrolled.get>>;
   const entry = (id: string): Entry => {
     if (typeof id !== 'string' || !ID.test(id)) fail('INVALID_INPUT', 'Invalid engineering enrollment');

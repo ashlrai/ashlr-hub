@@ -54,11 +54,14 @@ The local workspace now connects signed engineering graphs to resource-accounted
 confined changes, fixed evaluation, explicit branch delivery and exact completed
 receipt recovery. Its [local admission view](RESOURCE-POOLS.md#evaluated-engineering-runs)
 exposes known stop/configuration/ownership holds before accepting a new launch.
+The [standalone commissioning check](RESOURCE-POOLS.md#check-engineering-configuration-without-starting-the-fleet)
+now validates the complete explicit enrollment before starting a console, without
+initializing stores or changing account history. It reports local configuration
+and known holds, not authenticated capacity or permission to launch.
 These are implemented local paths, not proof of an operating company.
 
-1. Add a standalone, nonexecuting whole-enrollment commissioning check. The
-   current readiness endpoint observes an already started console; startup may
-   initialize its supervisor. Existing runtime and campaign checks remain scoped.
+1. Apply the standalone check to the intended Hub enrollment and resolve its
+   actual configuration/ownership findings without resetting shared accounting.
 2. Prepare a meaningful pinned Hub evaluator and campaign, with explicit mutable
    files, allowed workers, budgets and local delivery targets. Commission the real
    accounts separately: personal Spark must preserve General reservation, shared

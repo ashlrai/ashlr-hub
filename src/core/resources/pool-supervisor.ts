@@ -43,8 +43,9 @@ type DurableJob = Omit<ResourceSupervisorJob, 'cancellable' | 'outputAvailable' 
   /** Accepted copies are independent of later edits/deletion of source history. */
   context?: ResourceConsoleContextTurn[] | null;
 };
-interface DurableState { schemaVersion: 1 | 2 | 3 | 4; scopeDigest: string; paused: boolean; jobs: DurableJob[];
+export interface ResourceConsoleDurableState { schemaVersion: 1 | 2 | 3 | 4; scopeDigest: string; paused: boolean; jobs: DurableJob[];
   projects?: ResourceConsoleProjectBinding[] }
+type DurableState = ResourceConsoleDurableState;
 export interface ResourcePoolSupervisorOptions {
   root: string; pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
   projects?: ResourceConsoleProjectInput[];
@@ -95,6 +96,26 @@ function limit(value: unknown, fallback: number, max: number, min = 1): number {
   return Number(value);
 }
 function detached<T>(value: T): T { return structuredClone(value); }
+/** The evidence-pack serializer has a smaller cap than this store; preserve 4MiB compatibility. */
+function assertStateData(value: unknown, ancestors = new Set<object>(), depth = 0, budget = { nodes: 0 }): void {
+  if (++budget.nodes > MAX_STATE_BYTES || depth > 32) throw new Error('Invalid resource supervisor state');
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') return;
+  if (typeof value === 'number' && Number.isFinite(value)) return;
+  if (typeof value !== 'object' || ancestors.has(value) || !Array.isArray(value) && !object(value)) {
+    throw new Error('Invalid resource supervisor state');
+  }
+  ancestors.add(value);
+  try {
+    for (const key of Reflect.ownKeys(value)) {
+      if (Array.isArray(value) && key === 'length') continue;
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)!;
+      if (typeof key !== 'string' || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+        throw new Error('Invalid resource supervisor state');
+      }
+      assertStateData(descriptor.value, ancestors, depth + 1, budget);
+    }
+  } finally { ancestors.delete(value); }
+}
 function entryExists(file: string): boolean {
   try { lstatSync(file); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
@@ -129,73 +150,14 @@ function boundedOutput(text: string, maximum: number): { text: string; truncated
   return { text: bytes.subarray(0, end).toString('utf8'), truncated: end < bytes.length };
 }
 
-/** Scope is explicit and immutable; no input callback can alter the chosen worker bindings. */
-export async function createResourcePoolSupervisor(options: ResourcePoolSupervisorOptions): Promise<ResourcePoolSupervisor> {
-  let pool: ResourcePool; let bindings: ResourceBinding[];
-  const root = options.root; const workspace = options.workspace;
-  const configuredCatalogValue = options.projects;
-  const readObservations = options.readObservations; const signal = options.signal;
-  const readUnavailableWorkerIds = options.readUnavailableWorkerIds === undefined ? () => [] : options.readUnavailableWorkerIds;
-  const readQuotaUnavailableWorkerIds = options.readQuotaUnavailableWorkerIds === undefined ? () => [] : options.readQuotaUnavailableWorkerIds;
-  const maxParallel = limit(options.maxParallel, 4, 16);
-  const maxQueued = limit(options.maxQueued, 64, 64);
-  const pollIntervalMs = limit(options.pollIntervalMs, 2000, 60_000, 20);
-  const stoppedBeforeStart = () => { if (signal?.aborted) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor startup cancelled'); };
-  stoppedBeforeStart();
-  let configuredProjects: ResourceConsoleProjectInput[] = [];
-  let projectBindings: ResourceConsoleProjectBinding[] | undefined;
-  // This read is only a startup validation hint. The owned decoder below still
-  // validates every byte before using any durable binding or queue record.
-  let persistedCatalog = false;
-  if (path(root)) {
-    try { persistedCatalog = (readResourceJson(join(root, 'resource-console-state.json'), MAX_STATE_BYTES) as { schemaVersion?: unknown }).schemaVersion === 4; }
-    catch { /* Missing/invalid state remains the owned decoder's responsibility. */ }
-  }
-  stoppedBeforeStart();
-  try {
-    if (process.platform === 'win32' || !path(root) || !path(workspace) ||
-      !persistedCatalog && (realpathSync(workspace) !== workspace || !lstatSync(workspace).isDirectory()) ||
-      typeof readObservations !== 'function' || typeof readUnavailableWorkerIds !== 'function' ||
-      typeof readQuotaUnavailableWorkerIds !== 'function') throw new Error();
-    const nested = relative(workspace, root);
-    if (nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested)) throw new Error();
-    if (configuredCatalogValue !== undefined || persistedCatalog) {
-      const insideStore = relative(root, workspace);
-      if (insideStore === '' || insideStore !== '..' && !insideStore.startsWith(`..${sep}`) && !isAbsolute(insideStore)) throw new Error();
-    }
-    configuredProjects = configuredCatalogValue === undefined ? [] : validateResourceConsoleProjects(configuredCatalogValue);
-    for (const project of configuredProjects) {
-      if (project.workspace === workspace) throw new Error();
-      for (const [from, to] of [[project.workspace, root], [root, project.workspace]]) {
-        const nested = relative(from!, to!);
-        if (nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested)) throw new Error();
-      }
-    }
-    pool = validateResourcePool(options.pool); bindings = validateResourceBindings(options.bindings, pool);
-    validateResourceObservations(readObservations(), pool);
-    // Read validates an existing ledger but never initializes a missing one.
-    resourcePoolStatus(root, pool, bindings, []);
-  } catch { throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource supervisor scope or evidence'); }
-  const scopeDigest = digest(canonical({ pool, bindings, workspace }));
-  const poolDigest = digest(canonical({ pool, bindings }));
-  const statePath = join(root, 'resource-console-state.json');
-  const instanceId = randomUUID();
-  const workerIds = new Set(pool.workers.map((worker) => worker.id));
-  const enabledProjects = new Set(['default', ...configuredProjects.map((project) => project.id)]);
+function consoleTaskCodec(workspace: string, workerIds: Set<string>, scopeDigest: string,
+  projectBindings?: ResourceConsoleProjectBinding[]) {
   function projectWorkspace(projectId?: string): string {
     if (projectId === undefined || projectId === 'default') return workspace;
     const binding = projectBindings?.find((project) => project.id === projectId);
     if (!binding) throw new ResourceSupervisorError('INVALID_INPUT', 'Unknown resource project');
     return binding.workspace;
   }
-  function projectHold(projectId?: string): string | null {
-    if (!projectBindings) return null;
-    const id = projectId ?? 'default';
-    if (!enabledProjects.has(id)) return 'project-not-enabled';
-    const binding = projectBindings.find((project) => project.id === id);
-    return binding && matchesResourceConsoleProject(binding) ? null : 'project-directory-unavailable';
-  }
-
   function taskInput(value: unknown): ResourceConsoleTaskInput {
     try {
       if (!object(value) || !exact(value, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens',
@@ -234,6 +196,19 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   const submissionDigestFor = (input: ResourceConsoleTaskInput): string => digest(canonical({
     domain: 'ashlr-resource-console-submission-v1', scopeDigest, input,
   }));
+  return { taskInput, taskFor, submissionDigestFor };
+}
+
+/** Strict detached schema1–4 validation; no ownership, recovery, reads or writes. */
+export function decodeResourceConsoleState(value: unknown, options: {
+  pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
+}): ResourceConsoleDurableState {
+  const pool = validateResourcePool(options.pool);
+  const bindings = validateResourceBindings(options.bindings, pool);
+  const workspace = options.workspace;
+  const scopeDigest = digest(canonical({ pool, bindings, workspace }));
+  const workerIds = new Set(pool.workers.map((worker) => worker.id));
+  let projectBindings: ResourceConsoleProjectBinding[] | undefined;
   function decode(value: unknown): DurableState {
     if (!object(value) || !exact(value, ['schemaVersion', 'scopeDigest', 'paused', 'jobs', ...(value.schemaVersion === 4 ? ['projects'] : [])]) ||
       ![1, 2, 3, 4].includes(Number(value.schemaVersion)) ||
@@ -241,6 +216,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       value.scopeDigest !== scopeDigest || typeof value.paused !== 'boolean' || !Array.isArray(value.jobs) ||
       value.jobs.length > MAX_RESOURCE_SUPERVISOR_JOBS) throw new Error('Invalid resource supervisor state');
     if (value.schemaVersion === 4) projectBindings = validateResourceConsoleProjectBindings(value.projects, workspace);
+    const { taskInput, taskFor, submissionDigestFor } = consoleTaskCodec(workspace, workerIds, scopeDigest, projectBindings);
     const ids = new Set<string>();
     for (const row of value.jobs) {
       const retained = object(row) && (Object.hasOwn(row, 'retainHistory') || Object.hasOwn(row, 'history'));
@@ -320,6 +296,124 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     // A restored pending record must have the same guaranteed settlement space
     // as a newly admitted one; do not dispatch externally edited overfull state.
     if (decoded.schemaVersion !== 1) assertStateHeadroom(decoded);
+    return decoded;
+  }
+  assertStateData(value);
+  if (Buffer.byteLength(canonical(value)) > MAX_STATE_BYTES) throw new Error('Invalid resource supervisor state');
+  return decode(value);
+}
+
+export interface ResourceConsoleProjectPreview {
+  bindings: ResourceConsoleProjectBinding[] | undefined;
+  projects: ResourceConsoleProject[] | undefined;
+  registration: 'persisted' | 'would-register' | 'not-configured';
+  changed: boolean;
+}
+
+/** Project registration projection only; never persists or replaces historical inode evidence. */
+export function previewResourceConsoleProjects(options: {
+  workspace: string; projects?: ResourceConsoleProjectInput[]; state?: ResourceConsoleDurableState;
+}): ResourceConsoleProjectPreview {
+  const configured = options.projects === undefined ? [] : validateResourceConsoleProjects(options.projects);
+  const prior = options.state?.schemaVersion === 4
+    ? validateResourceConsoleProjectBindings(options.state.projects, options.workspace) : undefined;
+  if (options.projects === undefined && !prior) {
+    return { bindings: undefined, projects: undefined, registration: 'not-configured', changed: false };
+  }
+  // Legacy paths are pinned NOW in a proposed registration, not retroactively.
+  const proposed = prior ? detached(prior) : [pinResourceConsoleProject({
+    id: 'default', label: 'Default workspace', workspace: options.workspace,
+  })];
+  let added = !prior;
+  for (const configuredProject of configured) {
+    const existing = proposed.find((project) => project.id === configuredProject.id);
+    if (existing) {
+      if (existing.workspace !== configuredProject.workspace) throw new ResourceSupervisorError('CONFLICT', 'Resource project binding cannot be changed');
+      existing.label = configuredProject.label;
+    } else {
+      if (proposed.length >= 32) throw new ResourceSupervisorError('CAPACITY', 'Resource project binding capacity reached');
+      const pinned = pinResourceConsoleProject(configuredProject);
+      if (proposed.some((project) => project.workspace === pinned.workspace || project.dev === pinned.dev && project.ino === pinned.ino)) {
+        throw new ResourceSupervisorError('CONFLICT', 'Resource projects must identify distinct directories');
+      }
+      proposed.push(pinned); added = true;
+    }
+  }
+  const enabled = new Set(['default', ...configured.map((project) => project.id)]);
+  return { bindings: proposed, projects: proposed.map(({ dev: _dev, ino: _ino, ...project }) =>
+    ({ ...project, enabled: enabled.has(project.id) })), registration: added ? 'would-register' : 'persisted',
+    changed: !prior || canonical(prior) !== canonical(proposed) };
+}
+
+/** Scope is explicit and immutable; no input callback can alter the chosen worker bindings. */
+export async function createResourcePoolSupervisor(options: ResourcePoolSupervisorOptions): Promise<ResourcePoolSupervisor> {
+  let pool: ResourcePool; let bindings: ResourceBinding[];
+  const root = options.root; const workspace = options.workspace;
+  const configuredCatalogValue = options.projects;
+  const readObservations = options.readObservations; const signal = options.signal;
+  const readUnavailableWorkerIds = options.readUnavailableWorkerIds === undefined ? () => [] : options.readUnavailableWorkerIds;
+  const readQuotaUnavailableWorkerIds = options.readQuotaUnavailableWorkerIds === undefined ? () => [] : options.readQuotaUnavailableWorkerIds;
+  const maxParallel = limit(options.maxParallel, 4, 16);
+  const maxQueued = limit(options.maxQueued, 64, 64);
+  const pollIntervalMs = limit(options.pollIntervalMs, 2000, 60_000, 20);
+  const stoppedBeforeStart = () => { if (signal?.aborted) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor startup cancelled'); };
+  stoppedBeforeStart();
+  let configuredProjects: ResourceConsoleProjectInput[] = [];
+  let projectBindings: ResourceConsoleProjectBinding[] | undefined;
+  // This read is only a startup validation hint. The owned decoder below still
+  // validates every byte before using any durable binding or queue record.
+  let persistedCatalog = false;
+  if (path(root)) {
+    try { persistedCatalog = (readResourceJson(join(root, 'resource-console-state.json'), MAX_STATE_BYTES) as { schemaVersion?: unknown }).schemaVersion === 4; }
+    catch { /* Missing/invalid state remains the owned decoder's responsibility. */ }
+  }
+  stoppedBeforeStart();
+  try {
+    if (process.platform === 'win32' || !path(root) || !path(workspace) ||
+      !persistedCatalog && (realpathSync(workspace) !== workspace || !lstatSync(workspace).isDirectory()) ||
+      typeof readObservations !== 'function' || typeof readUnavailableWorkerIds !== 'function' ||
+      typeof readQuotaUnavailableWorkerIds !== 'function') throw new Error();
+    const nested = relative(workspace, root);
+    if (nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested)) throw new Error();
+    if (configuredCatalogValue !== undefined || persistedCatalog) {
+      const insideStore = relative(root, workspace);
+      if (insideStore === '' || insideStore !== '..' && !insideStore.startsWith(`..${sep}`) && !isAbsolute(insideStore)) throw new Error();
+    }
+    configuredProjects = configuredCatalogValue === undefined ? [] : validateResourceConsoleProjects(configuredCatalogValue);
+    for (const project of configuredProjects) {
+      if (project.workspace === workspace) throw new Error();
+      for (const [from, to] of [[project.workspace, root], [root, project.workspace]]) {
+        const nested = relative(from!, to!);
+        if (nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested)) throw new Error();
+      }
+    }
+    pool = validateResourcePool(options.pool); bindings = validateResourceBindings(options.bindings, pool);
+    validateResourceObservations(readObservations(), pool);
+    // Read validates an existing ledger but never initializes a missing one.
+    resourcePoolStatus(root, pool, bindings, []);
+  } catch { throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource supervisor scope or evidence'); }
+  const scopeDigest = digest(canonical({ pool, bindings, workspace }));
+  const poolDigest = digest(canonical({ pool, bindings }));
+  const statePath = join(root, 'resource-console-state.json');
+  const instanceId = randomUUID();
+  const workerIds = new Set(pool.workers.map((worker) => worker.id));
+  const enabledProjects = new Set(['default', ...configuredProjects.map((project) => project.id)]);
+  function projectHold(projectId?: string): string | null {
+    if (!projectBindings) return null;
+    const id = projectId ?? 'default';
+    if (!enabledProjects.has(id)) return 'project-not-enabled';
+    const binding = projectBindings.find((project) => project.id === id);
+    return binding && matchesResourceConsoleProject(binding) ? null : 'project-directory-unavailable';
+  }
+
+  const taskInput = (value: unknown) => consoleTaskCodec(workspace, workerIds, scopeDigest, projectBindings).taskInput(value);
+  const taskFor = (input: ResourceConsoleTaskInput, context?: ResourceConsoleContextTurn[] | null) =>
+    consoleTaskCodec(workspace, workerIds, scopeDigest, projectBindings).taskFor(input, context);
+  const submissionDigestFor = (input: ResourceConsoleTaskInput) =>
+    consoleTaskCodec(workspace, workerIds, scopeDigest, projectBindings).submissionDigestFor(input);
+  function decode(value: unknown): DurableState {
+    const decoded = decodeResourceConsoleState(value, { pool, bindings, workspace });
+    projectBindings = decoded.projects;
     return decoded;
   }
 
@@ -699,29 +793,10 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     const receipts = resourcePoolStatus(root, pool, bindings, []).attempts;
     const recovered = detached(state); let changed = persistedDigest === null;
     if (configuredCatalogValue !== undefined || state.schemaVersion === 4) {
-      // Legacy tasks had canonical-path binding, not recorded inode evidence.
-      // The first explicit catalog adoption pins the default directory NOW;
-      // it does not manufacture historical identity evidence or alter task hashes.
-      const proposed = state.projects ? detached(state.projects) : [pinResourceConsoleProject({
-        id: 'default', label: 'Default workspace', workspace,
-      })];
-      for (const configured of configuredProjects) {
-        const prior = proposed.find((project) => project.id === configured.id);
-        if (prior) {
-          if (prior.workspace !== configured.workspace) throw new ResourceSupervisorError('CONFLICT', 'Resource project binding cannot be changed');
-          prior.label = configured.label;
-        } else {
-          if (proposed.length >= 32) throw new ResourceSupervisorError('CAPACITY', 'Resource project binding capacity reached');
-          const pinned = pinResourceConsoleProject(configured);
-          if (proposed.some((project) => project.workspace === pinned.workspace || project.dev === pinned.dev && project.ino === pinned.ino)) {
-            throw new ResourceSupervisorError('CONFLICT', 'Resource projects must identify distinct directories');
-          }
-          proposed.push(pinned);
-        }
-      }
-      projectBindings = proposed;
-      if (state.schemaVersion !== 4 || canonical(state.projects) !== canonical(proposed)) {
-        recovered.schemaVersion = 4; recovered.projects = detached(proposed); assertStateHeadroom(recovered); changed = true;
+      const preview = previewResourceConsoleProjects({ workspace, projects: configuredCatalogValue === undefined ? undefined : configuredProjects, state });
+      projectBindings = preview.bindings;
+      if (preview.changed) {
+        recovered.schemaVersion = 4; recovered.projects = detached(preview.bindings!); assertStateHeadroom(recovered); changed = true;
       }
     }
     for (const job of recovered.jobs) {
