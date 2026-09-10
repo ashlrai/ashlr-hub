@@ -51,6 +51,43 @@ function fixture() {
 }
 
 describe('Controller durable control ordering and transactions', () => {
+  it('checks a settlement under the acquired short lock after an external drain suffix', () => {
+    const f = fixture();
+    const intent = f.append({ kind: 'intent', campaignId: 'a', at: new Date().toISOString() });
+    f.request('drain'); const drained = f.read();
+    const beforeSettlement = vi.fn((records: readonly PortfolioControllerEvent[]) => {
+      expect(records).toEqual(drained);
+      expect(existsSync(join(f.directory, '.control.lock'))).toBe(true);
+      expect(f.read()).toEqual(drained);
+    });
+    const next = appendPortfolioControllerEvent(f.directory, f.settle(), { expectedRecords: intent, beforeSettlement });
+    expect(beforeSettlement).toHaveBeenCalledOnce();
+    expect(next.at(-1)?.kind).toBe('settled');
+    expect(existsSync(join(f.directory, '.control.lock'))).toBe(false);
+  });
+
+  it.each(['throw', 'async', 'value'] as const)('rejects a %s settlement guard without history or lock leakage', async (kind) => {
+    const f = fixture(); const before = f.append({ kind: 'intent', campaignId: 'a', at: new Date().toISOString() });
+    const beforeSettlement = () => {
+      if (kind === 'throw') throw new Error('Fixture settlement refused');
+      if (kind === 'async') return Promise.reject(new Error('Fixture asynchronous refusal'));
+      return true;
+    };
+    expect(() => appendPortfolioControllerEvent(f.directory, f.settle(), { expectedRecords: before, beforeSettlement })).toThrow();
+    await Promise.resolve();
+    expect(f.read()).toEqual(before);
+    expect(existsSync(join(f.directory, '.control.lock'))).toBe(false);
+  });
+
+  it('rejects a settlement guard attached to a non-settlement event before invoking it', () => {
+    const f = fixture(); const beforeSettlement = vi.fn();
+    expect(() => appendPortfolioControllerEvent(f.directory, { kind: 'observed', at: new Date().toISOString() },
+      { beforeSettlement })).toThrow('settlement check is invalid');
+    expect(beforeSettlement).not.toHaveBeenCalled();
+    expect(f.read()).toEqual(f.created);
+    expect(existsSync(join(f.directory, '.control.lock'))).toBe(false);
+  });
+
   it('checks intent evidence synchronously under the acquired short lock before publishing', () => {
     const f = fixture();
     const beforeIntent = vi.fn((records: readonly PortfolioControllerEvent[]) => {

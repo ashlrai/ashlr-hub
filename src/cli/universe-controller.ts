@@ -35,6 +35,10 @@ retried. An in-flight record is evidence of an attempt, not proof of a live work
 Lost controller receipts can be recovered only from an exact dispatch-attributed
 completed campaign and any required existing delivery. No worker or branch is
 recreated by recovery. Legacy or mismatched intents remain unresolved.
+Only the owning invocation can record dispatch-not-started when it stops before
+calling work and verifies unchanged campaign evidence. That outcome stays held;
+attempted still means a recorded campaign-call intent, not worker execution.
+Restart never infers no-start from missing worker evidence or grants a retry.
 Run may reclaim a proven-dead controller record-writer lock when no record is
 staged. It never discards staged records or repairs unknown lock ownership.
 Status does not clear locks; leftover writer locks can make evidence unavailable.

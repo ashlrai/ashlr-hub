@@ -92,6 +92,16 @@ describe('scoped named controller inspector', () => {
     expect(screen.getByText('Acknowledgement not recorded')).toBeInTheDocument();
     expect(screen.getByText(/not proof of a live worker/)).toBeInTheDocument();
   });
+  it('distinguishes a recorded campaign intent from a proven skipped worker call', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json({ ...report, outcomes: [{ ...report.outcomes[0], attempted: true, reasonCode: 'dispatch-not-started' }] })));
+    render(<UniverseControllerInspector />); await submit();
+    const table = await screen.findByRole('table');
+    expect(within(table).getByText('dispatch-not-started')).toBeInTheDocument();
+    expect(within(table).getByText('held')).toBeInTheDocument();
+    expect(within(table).getByText('Yes')).toBeInTheDocument();
+    expect(screen.getByText(/Campaign attempted records a call intent/)).toHaveTextContent('not proof of worker execution');
+    expect(screen.getByText(/does not authorize a retry/)).toBeInTheDocument();
+  });
   it('shows resumed admission without claiming no later run; delivery-only intent does not become an attempted campaign', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => json({ ...report, outcomes: [{ ...report.outcomes[0], state: 'in-flight', reasonCode: 'delivery-pending' }],
       control: { mode: 'open', sequence: 6, requestedAt: at, acknowledgedAt: null } })));

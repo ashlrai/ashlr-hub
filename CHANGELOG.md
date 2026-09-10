@@ -11,6 +11,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Proven unstarted controller dispatches
+
+- Records a held `dispatch-not-started` settlement when the owning invocation
+  stops after intent publication but before calling work, with unchanged evidence
+  and retained ownership. Known skipped calls no longer strand an in-flight slot.
+- Preserves intent accounting, deadlines and retry restrictions. Unknown crashes
+  and uncertain calls remain unresolved; inspector wording distinguishes intent
+  from actual worker execution.
+
 ### Controller admission revalidation
 
 - Rechecks target campaign and prerequisite evidence inside the acquired intent

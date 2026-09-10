@@ -193,20 +193,22 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     const project = () => inspect(definition.id, events, root, new Date().toISOString(), false);
     return refreshed instanceof Promise ? refreshed.then(project) : project();
   };
-  const append = (event: Parameters<typeof appendPortfolioControllerEvent>[1], beforeIntent?: () => void): void | Promise<void> => transaction(() => {
+  const append = (event: Parameters<typeof appendPortfolioControllerEvent>[1], beforeWrite?: () => void): void | Promise<void> => transaction(() => {
     owned();
     if (event.kind === 'intent' && stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
+    const check = (current: readonly PortfolioControllerEvent[]): void => {
+      capture([...current]);
+      owned();
+      if (event.kind === 'intent' && stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
+      beforeWrite?.();
+      // Synchronous evidence reads can consume the remaining deadline while
+      // timers cannot run. Settlement cleanup does not admit further work.
+      if (event.kind === 'intent' && stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
+      owned();
+    };
     capture(appendPortfolioControllerEvent(directory, event.kind === 'created' ? event : { ...event, at: new Date().toISOString() },
-      { expectedRecords: events, ...(event.kind === 'intent' ? { beforeIntent: (current: readonly PortfolioControllerEvent[]) => {
-        capture([...current]);
-        owned();
-        if (stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
-        beforeIntent?.();
-        // Synchronous evidence reads can consume the remaining deadline while
-        // timers cannot run. Check again before the store publishes the intent.
-        if (stopping()) throw new ControllerTransactionWaitStopped('Controller admission stopped');
-        owned();
-      } } : {}) }));
+      { expectedRecords: events, ...(event.kind === 'intent' ? { beforeIntent: check } :
+        event.kind === 'settled' && beforeWrite ? { beforeSettlement: check } : {}) }));
   }, event.kind === 'settled' || event.kind === 'drained');
   const acknowledgeDrain = (): void | Promise<void> => transaction(() => {
     owned();
@@ -315,6 +317,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
       const pin = initial.pins.get(campaignId)!;
       let latestAdmission = admitted;
       let dispatchId: string | undefined;
+      let localIntent: string;
       try {
         dispatchId = pin.dispatch === 'campaign' ? randomUUID() : undefined;
         const intent = append({ kind: 'intent', at: new Date().toISOString(), campaignId, ...(dispatchId ? { dispatchId } : {}) }, () => {
@@ -341,6 +344,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           latestAdmission = current;
         });
         if (intent instanceof Promise) await intent;
+        localIntent = canonical(foldPortfolioController(events).intentEvents.get(campaignId));
       }
       catch (error) {
         releaseLocalStoreLock(executionLock);
@@ -352,7 +356,35 @@ export async function runUniversePortfolioController(input: unknown, options: Un
         try {
           let result;
           try {
-            if (stopping()) return;
+            if (stopping()) {
+              // Only this direct pre-call path knows no runner or delivery was
+              // invoked. A restart or thrown call can never infer this receipt.
+              if (stopped !== 'cancelled' && stopped !== 'timed-out') return;
+              await append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: latestAdmission.recordsDigest!,
+                outcome: { campaignId, state: 'held', attempted: pin.dispatch === 'campaign', reasonCode: 'dispatch-not-started',
+                  campaignDigest: latestAdmission.expectedIdentity!.summaryDigest, deliveryDigest: null } }, () => {
+                const checkOwnership = (): void => {
+                  owned();
+                  if (errors.includes('controller-clock-rollback') || errors.includes('controller-ownership-lost') ||
+                      new Date().toISOString() < foldPortfolioController(events).highWaterAt ||
+                      pin.dispatch === 'campaign' && (!executionLock || !ownsLocalStoreLock(executionLock))) {
+                    throw new Error('Not-started dispatch ownership is unavailable');
+                  }
+                };
+                checkOwnership();
+                const folded = foldPortfolioController(events);
+                if (folded.states.get(campaignId)?.state !== 'in-flight' ||
+                    canonical(folded.intentEvents.get(campaignId)) !== localIntent) throw new Error('Not-started dispatch intent changed');
+                const current = readUniverseCampaignReadiness(campaignId, { root });
+                if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== latestAdmission.expectedIdentity!.summaryDigest ||
+                    current.recordsDigest !== latestAdmission.recordsDigest ||
+                    (pin.dispatch === 'campaign' ? current.automaticAction !== 'run' : current.observedState !== 'completed')) {
+                  throw new Error('Not-started dispatch campaign evidence changed');
+                }
+                checkOwnership();
+              });
+              return;
+            }
             result = pin.dispatch === 'campaign' ? await runUniverseCampaignOwned(campaignId, { root, signal: controller.signal,
               dispatchId,
               ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
@@ -399,9 +431,9 @@ export async function runUniversePortfolioController(input: unknown, options: Un
                 reasonCode, campaignDigest: current.expectedIdentity!.summaryDigest, deliveryDigest } });
           } catch { halt('unavailable', 'controller-settlement-persistence-failed'); }
         } catch {
-          // A thrown runner/delivery may have made progress. Leave the durable
-          // intent unresolved. Only an exact dispatch-linked completed receipt
-          // may close it during a later invocation; workers are never replayed.
+          // A thrown call or unconfirmed publication proves no settlement here;
+          // persisted evidence determines restart. An unresolved intent needs
+          // exact dispatch-linked completion proof; workers are never replayed.
           errors.push(`${campaignId}:dispatch-unsettled`);
         }
       }).finally(() => { active.delete(campaignId); });
