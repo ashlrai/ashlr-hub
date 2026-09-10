@@ -11,7 +11,7 @@ import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { artifactDigest, canonical, digest } from '../src/core/universe/artifacts.js';
-import { initUniverse, initUniverseCampaign, readUniverseDeliveries, readUniverseOverview, readUniversePortfolioController, type UniverseManifest } from '../src/core/universe/index.js';
+import { initUniverse, initUniverseCampaign, readUniverseCampaign, readUniverseDeliveries, readUniverseOverview, readUniversePortfolioController, type UniverseManifest } from '../src/core/universe/index.js';
 import { manifestRecord, universePath } from '../src/core/universe/store.js';
 
 const SOURCE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
@@ -29,7 +29,7 @@ function git(repo: string, ...args: string[]) {
     { encoding: 'utf8', timeout: 60_000, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } }).trim();
 }
-async function fixture() {
+async function fixture(measureSeed = false) {
   expect(homedir()).not.toBe(process.env.ASHLR_VITEST_REAL_HOME);
   expect(HUB_SEED_REVISION).toMatch(/^[a-f0-9]{40}$/);
   expect(HUB_CANDIDATE_REVISION).toMatch(/^[a-f0-9]{40}$/);
@@ -67,7 +67,8 @@ async function fixture() {
         const messages = JSON.parse(body.messages[0].content) as Array<{ role: string; content: string }>;
         const input = JSON.parse(messages.find(message => message.role === 'user')!.content);
         const generation = input.generation as number; requests.push(generation);
-        const operation = generation === 1 ? { op: 'replace', path: TARGET, content: baseline }
+        const operation = measureSeed && generation === 1 ? { op: 'replace', path: TARGET, content: candidate }
+          : generation === 1 ? { op: 'replace', path: TARGET, content: baseline }
           : generation === 2 ? { op: 'replace', path: EVALUATOR, content: 'console.log(JSON.stringify({passed:true,score:1,metrics:{}}));\n' }
             : generation === 3 ? { op: 'replace', path: TARGET, content: candidate } : null;
         if (!operation) throw new Error('Unexpected campaign generation');
@@ -80,7 +81,7 @@ async function fixture() {
   stopWorker = async () => { worker.closeAllConnections(); await new Promise<void>(resolve => worker.close(() => resolve())); };
   const address = worker.address(); if (!address || typeof address === 'string') throw new Error('Fixture worker unavailable');
   const pool = validateResourcePool({ schemaVersion: 1, id: 'hub-marker-pool', workers: [{ id: 'local-worker', provider: 'local', model: 'deterministic-candidate',
-    maxConcurrent: 1, reservePercent: 10, maxTasksPerWindow: 3, taskWindowMs: 240_000, priority: 1 }] });
+    maxConcurrent: 1, reservePercent: 10, maxTasksPerWindow: measureSeed ? 1 : 3, taskWindowMs: 240_000, priority: 1 }] });
   const bindings = validateResourceBindings([{ workerId: 'local-worker', capacityKey: 'fixture-shared-account', kind: 'local-chat',
     endpoint: `http://127.0.0.1:${address.port}/v1` }], pool);
   const observations = [{ workerId: 'local-worker', health: 'ready' as const, windows: [], retryAfter: null,
@@ -100,7 +101,9 @@ async function fixture() {
   initUniverse(manifest, { root });
   const campaignId = 'hub-marker-campaign'; const branch = 'codex/hub-marker-acceptance';
   initUniverseCampaign({ schemaVersion: 1, id: campaignId, universeId: manifest.id, feedback: true,
-    budget: { maxGenerations: 3, maxDurationMs: 150_000, maxModelRequests: 3, maxStagnantGenerations: 3, maxReportedTokens: null } }, { root });
+    ...(measureSeed ? { measureSeed: true as const } : {}),
+    budget: { maxGenerations: measureSeed ? 1 : 3, maxDurationMs: 150_000, maxModelRequests: measureSeed ? 1 : 3,
+      maxStagnantGenerations: 3, maxReportedTokens: null } }, { root });
   const host = { nodeId: 'deliver-hub-marker', root, constitutionVersion: 'fixture-v1', policyEpoch: 1,
     definition: { schemaVersion: 1, id: 'hub-marker-controller', tasks: [{ campaignId, dependsOn: [] }], maxParallel: 1, maxDurationMs: 180_000 },
     deliveryPlan: { schemaVersion: 1, deliveries: [{ campaignId, branch, baseCommit: HUB_SEED_REVISION, allowInitialRepair: true }] },
@@ -119,8 +122,9 @@ async function fixture() {
 }
 
 describe.runIf(process.platform === 'darwin')('real Hub marker-path engineering campaign', () => {
-  it('fails unchanged Hub source and evaluator edits, then delivers only the measured source correction', async () => {
-    const f = await fixture(); const index = readFileSync(join(f.repo, '.git', 'index'));
+  it.each([false, true])('delivers only the measured source correction (automatic seed measurement: %s)', async (measureSeed) => {
+    const f = await fixture(measureSeed); const index = readFileSync(join(f.repo, '.git', 'index'));
+    const expectedRequests = measureSeed ? [1] : [1, 2, 3];
     const checked = await f.invoke(['--check']); expect(checked.enrollmentDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(f.requests).toEqual([]); expect(readdirSync(f.graphRoot)).toEqual([]);
     let graph;
@@ -132,31 +136,45 @@ describe.runIf(process.platform === 'darwin')('real Hub marker-path engineering 
           trials: run.trials.map(trial => ({ status: trial.status, score: trial.score, metrics: trial.metrics, error: trial.error })) })) }));
       throw error;
     }
-    expect(graph.status, JSON.stringify(graph)).toBe('completed'); expect(f.errors).toEqual([]); expect(f.requests).toEqual([1, 2, 3]);
+    expect(graph.status, JSON.stringify(graph)).toBe('completed'); expect(f.errors).toEqual([]); expect(f.requests).toEqual(expectedRequests);
     const universe = readUniverseOverview({ root: f.root }).universes[0]!;
-    expect(universe.runs.map(run => run.trials[0]!.status)).toEqual(['failed', 'failed', 'passed']);
-    expect(universe.runs.map(run => run.trials[0]!.selected)).toEqual([false, false, true]);
-    expect(universe.runs[0]!.trials[0]!.score).toBe(0); expect(universe.runs[2]!.trials[0]!.score).toBe(1);
-    expect(universe.runs[0]!.trials[0]!.metrics).toMatchObject({ cases: 142, passedCases: 82, failedCases: 60 });
-    expect(universe.runs[2]!.trials[0]!.metrics).toMatchObject({ cases: 142, passedCases: 142, failedCases: 0 });
-    const [baselineTrial, refusedTrial, correctedTrial] = universe.runs.map(run => run.trials[0]!);
+    const campaign = readUniverseCampaign(f.campaignId, { root: f.root });
     const seed = manifestRecord(universePath(f.root, f.manifest.id)).seedArtifact;
+    const correctedTrial = universe.runs.at(-1)!.trials[0]!;
+    expect(campaign.steps).toHaveLength(expectedRequests.length);
+    expect(campaign.progress.reservedModelRequests).toBe(expectedRequests.length);
+    if (measureSeed) {
+      expect(campaign.seedEvaluation).toMatchObject({ intent: { seedArtifactDigest: seed.digest,
+        definitionDigest: campaign.definitionDigest, manifestDigest: universe.manifestDigest, comparatorDigest: universe.comparatorDigest },
+      result: { status: 'measured', measurement: { passed: false, score: 0, metrics: { cases: 142, passedCases: 82, failedCases: 60 } } } });
+      expect(universe.runs).toHaveLength(1);
+      expect(universe.runs[0]!.generation).toBe(1);
+      expect(correctedTrial).toMatchObject({ status: 'passed', selected: true, score: 1 });
+    } else {
+      expect(campaign.seedEvaluation).toBeUndefined();
+      expect(universe.runs.map(run => run.trials[0]!.status)).toEqual(['failed', 'failed', 'passed']);
+      expect(universe.runs.map(run => run.trials[0]!.selected)).toEqual([false, false, true]);
+      expect(universe.runs[0]!.trials[0]!.score).toBe(0); expect(universe.runs[2]!.trials[0]!.score).toBe(1);
+      expect(universe.runs[0]!.trials[0]!.metrics).toMatchObject({ cases: 142, passedCases: 82, failedCases: 60 });
+      const [baselineTrial, refusedTrial] = universe.runs.map(run => run.trials[0]!);
+      expect(baselineTrial!.artifact?.digest).toBe(seed.digest);
+      expect(artifactDigest(baselineTrial!.artifact!.path)).toBe(seed.digest);
+      expect(baselineTrial!.generation?.changedFiles).toEqual([]);
+      // Refusing an evaluator edit is generation failure, not a measured rejection.
+      expect(refusedTrial).toMatchObject({ score: null, metrics: {}, artifact: null,
+        error: 'Model file operations: each operation must target a unique declared mutable path',
+        generation: { status: 'failed' }, diagnostics: [{ code: 'generation-failed' }] });
+    }
     expect(seed.revision).toBe(HUB_SEED_REVISION);
     expect(artifactDigest(seed.path)).toBe(seed.digest);
-    expect(baselineTrial!.artifact?.digest).toBe(seed.digest);
-    expect(artifactDigest(baselineTrial!.artifact!.path)).toBe(seed.digest);
-    expect(baselineTrial!.generation?.changedFiles).toEqual([]);
-    // Refusing an evaluator edit is generation failure, not a measured rejection.
-    expect(refusedTrial).toMatchObject({ score: null, metrics: {}, artifact: null,
-      error: 'Model file operations: each operation must target a unique declared mutable path',
-      generation: { status: 'failed' }, diagnostics: [{ code: 'generation-failed' }] });
+    expect(correctedTrial.metrics).toMatchObject({ cases: 142, passedCases: 142, failedCases: 0 });
     expect(correctedTrial!.artifact?.digest).not.toBe(seed.digest);
     expect(correctedTrial!.generation?.changedFiles).toEqual([TARGET]);
     expect(readFileSync(join(correctedTrial!.artifact!.path, TARGET), 'utf8')).toBe(f.candidate);
     // Initial repair does not invent a passing parent or rewrite elite lineage.
     expect(correctedTrial).toMatchObject({ parentTrialId: null, delta: null });
     const ledger = resourcePoolStatus(f.ledgerRoot, f.pool, f.bindings, f.observations);
-    expect(ledger.attempts).toHaveLength(3);
+    expect(ledger.attempts).toHaveLength(expectedRequests.length);
     expect(ledger.attempts.every(row => row.status === 'completed' && row.capacityKey === 'fixture-shared-account' && row.verifiedAccepted === false)).toBe(true);
     const deliveries = readUniverseDeliveries(f.manifest.id, { root: f.root }); expect(deliveries.deliveries).toHaveLength(1);
     const delivery = deliveries.deliveries[0]!; expect(delivery).toMatchObject({ status: 'delivered', branch: f.branch, baseCommit: HUB_SEED_REVISION });
@@ -175,14 +193,14 @@ describe.runIf(process.platform === 'darwin')('real Hub marker-path engineering 
     const replay = await f.invoke(['--expected-enrollment-digest', checked.enrollmentDigest]);
     expect(replay).toMatchObject({ status: 'completed', definitionDigest: graph.definitionDigest, nodes: graph.nodes });
     expect(replay.traces).toEqual(graph.traces);
-    expect(f.requests).toEqual([1, 2, 3]);
+    expect(f.requests).toEqual(expectedRequests);
     expect(resourcePoolStatus(f.ledgerRoot, f.pool, f.bindings, f.observations).attempts).toEqual(ledger.attempts);
     expect(readUniverseDeliveries(f.manifest.id, { root: f.root }).deliveries).toEqual(deliveries.deliveries);
     expect(git(f.repo, 'rev-parse', `refs/heads/${f.branch}`)).toBe(delivery.commit);
     expect(readFileSync(join(f.repo, '.git', 'index'))).toEqual(index);
     expect(git(f.repo, 'status', '--porcelain=v1')).toBe('');
     // Deliberately path/key-free evidence for the handoff, not a new public API.
-    console.log(JSON.stringify({ receipt: 'hub-marker-campaign-acceptance', seedCommit: HUB_SEED_REVISION,
+    console.log(JSON.stringify({ receipt: 'hub-marker-campaign-acceptance', measureSeed, seedCommit: HUB_SEED_REVISION,
       candidateCommit: HUB_CANDIDATE_REVISION, deliveredCommit: delivery.commit,
       targetBlob: git(f.repo, 'rev-parse', `${f.branch}:${TARGET}`), enrollmentDigest: checked.enrollmentDigest,
       graphStatus: graph.status, replayStatus: replay.status, seedArtifactDigest: seed.digest,

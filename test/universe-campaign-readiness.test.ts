@@ -4,12 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as locks from '../src/core/fleet/local-store-lock.js';
 import * as execution from '../src/core/universe/execution.js';
+import * as evaluator from '../src/core/universe/fixed-evaluator.js';
 import { artifactDigest, canonical, digest } from '../src/core/universe/artifacts.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadinessReason } from '../src/core/universe/campaign-readiness.js';
 import * as campaigns from '../src/core/universe/campaign-store.js';
 import { generationResources, newGenerationReceipt, resourceGenerationTaskId } from '../src/core/universe/generation.js';
 import { appendRecord, comparatorDigest, newRun, projectUniverse, readRecords, scheduledVariants, type ManifestRecord } from '../src/core/universe/store.js';
-import type { UniverseCampaignDefinition, UniverseManifest, UniverseResourceGenerationEvidence, UniverseRun, UniverseTrial } from '../src/core/universe/types.js';
+import type { UniverseCampaignDefinition, UniverseCampaignSeedIntent, UniverseCampaignSeedResult, UniverseManifest, UniverseResourceGenerationEvidence, UniverseRun, UniverseTrial } from '../src/core/universe/types.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -22,7 +23,7 @@ type ResourceOutcome = 'withheld' | 'not-started' | 'unavailable' | 'replayed' |
   'completed' | 'failed' | 'timed-out' | 'cancelled' | 'uncertain';
 
 /** Real private immutable evidence and pinned bytes; nothing in the seed executes. */
-function fixture(kinds: VariantKind[] = ['resource'], budget: Partial<UniverseCampaignDefinition['budget']> = {}, maxTrials = kinds.length) {
+function fixture(kinds: VariantKind[] = ['resource'], budget: Partial<UniverseCampaignDefinition['budget']> = {}, maxTrials = kinds.length, measureSeed = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'universe-campaign-readiness-')));
   roots.push(root);
   const directory = join(root, 'universes', 'fixture');
@@ -46,6 +47,7 @@ function fixture(kinds: VariantKind[] = ['resource'], budget: Partial<UniverseCa
   const record: ManifestRecord = { ...partial, comparatorDigest: comparatorDigest(partial) };
   appendRecord(directory, record);
   const summary = campaigns.initUniverseCampaign({ schemaVersion: 1, id: 'campaign', universeId: manifest.id, feedback: false,
+    ...(measureSeed ? { measureSeed: true as const } : {}),
     budget: { maxGenerations: 10, maxDurationMs: 60_000, maxModelRequests: 64, maxStagnantGenerations: 10,
       maxReportedTokens: null, ...budget } }, { root });
   return { root, directory, record, summary, campaignDirectory: campaigns.campaignDirectory('campaign', { root }) };
@@ -189,6 +191,75 @@ describe('explicit read-only campaign readiness scope', () => {
   });
 });
 
+describe('read-only seed measurement readiness', () => {
+  function measuredFixture(status: 'pending' | UniverseCampaignSeedResult['status'] = 'pending') {
+    const f = fixture(['resource'], {}, 1, true); start(f);
+    const events = campaigns.readCampaignEvents(f.campaignDirectory);
+    const session = events.at(-1)!;
+    if (session.kind !== 'started') throw new Error('Missing fixture session');
+    const at = new Date().toISOString();
+    const intent: UniverseCampaignSeedIntent = { schemaVersion: 1, id: '11111111-1111-4111-8111-111111111111',
+      sessionSequence: session.sequence, definitionDigest: f.summary.definitionDigest,
+      manifestDigest: f.summary.manifestDigest, comparatorDigest: f.summary.comparatorDigest,
+      seedArtifactDigest: f.record.seedArtifact.digest, context: 'campaign-seed-v1', startedAt: at, deadlineAt: session.deadlineAt };
+    campaigns.appendCampaignEvent(f.campaignDirectory, { kind: 'seed-evaluation-intent', at, evaluation: intent });
+    if (status !== 'pending') {
+      const evaluation: UniverseCampaignSeedResult = { schemaVersion: 1, intentDigest: digest(canonical(intent)), status,
+        finishedAt: at, durationMs: 0, processGroupSettlement: 'group-exit-confirmed',
+        measurement: status === 'measured' ? { passed: false, score: 0, metrics: {} } : null,
+        reason: status === 'measured' ? null : status === 'failed' ? 'evaluator-failed' :
+          status === 'cancelled' ? 'evaluation-cancelled' : 'evaluation-timed-out' };
+      campaigns.appendCampaignEvent(f.campaignDirectory, { kind: 'seed-evaluation-result', at, evaluation });
+    }
+    return f;
+  }
+
+  it.each(['pending', 'failed', 'cancelled', 'timed-out'] as const)('holds %s seed evidence without writes, execution, or model contact', (status) => {
+    const f = measuredFixture(status); settle(f);
+    const before = inventory(f.root);
+    const lock = vi.spyOn(locks, 'acquireLocalStoreLock').mockImplementation(() => { throw new Error('Unexpected lock'); });
+    const execute = vi.spyOn(execution, 'withUniverseExecution').mockRejectedValue(new Error('Unexpected execution'));
+    const evaluate = vi.spyOn(evaluator, 'runFixedUniverseEvaluator').mockRejectedValue(new Error('Unexpected evaluator'));
+    const fetch = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Unexpected provider contact'));
+    const reason = status === 'pending' ? 'seed-evaluation-unresolved' : 'seed-evaluation-attention-required';
+    const report = expectReason(f, reason);
+    expect(report.disposition).toBe(status === 'pending' ? 'recovery-required' : 'attention-required');
+    expect(report.automaticAction).toBe('none'); expect(inventory(f.root)).toBe(before);
+    expect(canonical(report)).not.toContain(f.root);
+    for (const spy of [lock, execute, evaluate, fetch]) expect(spy).not.toHaveBeenCalled();
+  });
+
+  it.each(['pause', 'stop'] as const)('preserves owner %s priority over pending and failed seed records', (action) => {
+    for (const status of ['pending', 'failed'] as const) {
+      const f = measuredFixture(status); control(f, action);
+      const before = inventory(f.root);
+      expect(expectReason(f, action === 'pause' ? 'pause-requested' : 'stop-requested').disposition).toBe('owner-held');
+      expect(inventory(f.root)).toBe(before);
+    }
+  });
+
+  it('distinguishes a live owner from abandoned unresolved evidence and honors an acknowledged owner pause', () => {
+    const f = measuredFixture();
+    expectReason(f, 'owner-active');
+    const absent = vi.spyOn(process, 'kill').mockImplementation(() => { throw Object.assign(new Error('Absent'), { code: 'ESRCH' }); });
+    expectReason(f, 'seed-evaluation-unresolved');
+    absent.mockRestore();
+    control(f, 'pause'); settle(f);
+    expectReason(f, 'owner-paused');
+  });
+
+  it('does not present a valid measured failure as an operational seed error or new automatic launch', () => {
+    const f = measuredFixture('measured'); settle(f);
+    const before = inventory(f.root);
+    expectReason(f, 'paused-unclassified');
+    expect(inventory(f.root)).toBe(before);
+    expect(campaigns.readUniverseCampaign('campaign', { root: f.root })).toMatchObject({
+      seedEvaluation: { result: { status: 'measured', measurement: { passed: false, score: 0 } } },
+      progress: { attempts: 0, reservedModelRequests: 0 },
+    });
+  });
+});
+
 describe('recorded owner controls and interruption', () => {
   it.each(['pause', 'stop'] as const)('preserves pending %s even with exhausted budgets', (action) => {
     const f = fixture(['resource'], { maxModelRequests: 0 });
@@ -236,7 +307,7 @@ describe('recorded owner controls and interruption', () => {
     const f = fixture(['command']);
     const run = makeRun(f); delete run.campaign;
     persistRun(f, run, false);
-    vi.spyOn(locks, 'verifiedProcessStartRef').mockReturnValue(alive ? 'fixture-owner' : null);
+    vi.spyOn(locks, 'verifiedProcessStartRef').mockReturnValue(alive ? 'fixture-owner' : undefined);
     expectReason(f, alive ? 'owner-active' : 'run-incomplete');
   });
 

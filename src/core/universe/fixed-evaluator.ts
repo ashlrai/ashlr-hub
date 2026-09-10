@@ -35,13 +35,16 @@ export function confinedUniverseArgv(command: string[], writable: string, scratc
 /** Runs the already-pinned evaluator without granting any candidate write access. */
 export async function runFixedUniverseEvaluator(record: ManifestRecord, root: string, artifactPath: string,
   expectedArtifactDigest: string, scratch: string, timeoutMs: number, signal: AbortSignal, env: NodeJS.ProcessEnv,
-  requireProcessGroupExit = false): Promise<VerifySubprocessResult> {
+  requireProcessGroupExit = false, beforeStart?: () => void): Promise<VerifySubprocessResult> {
   assertComparatorUnchanged(record);
   if (artifactDigest(artifactPath) !== expectedArtifactDigest) throw new Error('Scored artifact changed before evaluation');
   const evaluator = record.evaluationCommand;
   if (digest(readFileSync(evaluator[0]!)) !== record.evaluationExecutableDigest) throw new Error('Evaluator executable changed');
-  const result = await runVerifySubprocessAsync(
-    confinedUniverseArgv(evaluator, scratch, scratch, [record.seedArtifact.path, artifactPath], root), {
+  const argv = confinedUniverseArgv(evaluator, scratch, scratch, [record.seedArtifact.path, artifactPath], root);
+  // Run after potentially expensive integrity/profile preparation. The async
+  // subprocess runner reaches its spawn synchronously from this call.
+  beforeStart?.();
+  const result = await runVerifySubprocessAsync(argv, {
       cwd: record.seedArtifact.path, env, timeoutMs, signal, requireProcessGroupExit,
     });
   // An unresolved process group is more important than integrity reporting: its

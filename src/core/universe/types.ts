@@ -275,6 +275,37 @@ export interface UniverseCampaignDefinition {
     maxReportedTokens: number | null;
   };
   feedback: boolean;
+  /** Measure the unchanged pinned seed once before any model-request reservation. */
+  measureSeed?: true;
+}
+
+export interface UniverseCampaignSeedIntent {
+  schemaVersion: 1;
+  id: string;
+  sessionSequence: number;
+  definitionDigest: string;
+  manifestDigest: string;
+  comparatorDigest: string;
+  seedArtifactDigest: string;
+  context: 'campaign-seed-v1';
+  startedAt: string;
+  deadlineAt: string;
+}
+
+export interface UniverseCampaignSeedResult {
+  schemaVersion: 1;
+  intentDigest: string;
+  status: 'measured' | 'failed' | 'timed-out' | 'cancelled';
+  finishedAt: string;
+  durationMs: number;
+  processGroupSettlement: 'not-started' | 'group-exit-confirmed';
+  measurement: { passed: boolean; score: number; metrics: Record<string, number>; diagnostics?: UniverseDiagnostic[] } | null;
+  reason: 'evaluator-failed' | 'evaluator-invalid-result' | 'evaluation-cancelled' | 'evaluation-timed-out' | 'integrity-changed' | null;
+}
+
+export interface UniverseCampaignSeedEvaluation {
+  intent: UniverseCampaignSeedIntent;
+  result: UniverseCampaignSeedResult | null;
 }
 
 export interface UniverseCampaignStep {
@@ -305,6 +336,8 @@ export interface UniverseCampaignSummary {
   deadlineAt: string | null;
   finishedAt: string | null;
   steps: UniverseCampaignStep[];
+  /** Absent until the evaluator-only intent is durably recorded. Never a trial/elite. */
+  seedEvaluation?: UniverseCampaignSeedEvaluation;
   progress: {
     attempts: number;
     completedRuns: number;

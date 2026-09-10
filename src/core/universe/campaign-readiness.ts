@@ -19,7 +19,7 @@ export type UniverseCampaignReadinessReason =
   'stagnation-budget-exhausted' | 'request-budget-exhausted' | 'reported-token-budget-exhausted' |
   'usage-unavailable' | 'campaign-completed' | 'campaign-stopped' | 'campaign-failed' |
   'paused-unclassified' | 'interrupted-unclassified' | 'campaign-missing' | 'evidence-degraded' |
-  'snapshot-changed';
+  'snapshot-changed' | 'seed-evaluation-unresolved' | 'seed-evaluation-attention-required';
 
 /** Recorded evidence only, not a provider, capacity, evaluator or execution-lease attestation. */
 export interface UniverseCampaignReadiness {
@@ -62,6 +62,12 @@ function classify(events: CampaignEvent[], summary: UniverseCampaignSummary, uni
     return decision('owner-held', 'owner-paused');
   }
   if (summary.owner || universe.activeRun) return decision('owned', 'owner-active');
+  if (summary.seedEvaluation && summary.seedEvaluation.result === null) {
+    return decision('recovery-required', 'seed-evaluation-unresolved');
+  }
+  if (summary.seedEvaluation?.result && summary.seedEvaluation.result.status !== 'measured') {
+    return decision('attention-required', 'seed-evaluation-attention-required');
+  }
   if (folded.state === 'running') return decision('recovery-required', 'owner-abandoned');
   if (summary.steps.some((step) => step.state !== 'completed') || universe.runs.some((run) => run.finishedAt === null)) {
     return decision('recovery-required', 'run-incomplete');

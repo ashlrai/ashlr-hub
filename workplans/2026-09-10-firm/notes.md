@@ -1,5 +1,31 @@
 # Firm build notes
 
+## September 10: evaluator-only seed measurement
+
+- `measureSeed: true` is an immutable opt-in; absence preserves legacy serialized
+  definitions and projections. The evaluator-only intent/result lives in the
+  existing campaign ledger, before any step or model reservation. Existing lease,
+  comparator, exact seed, confinement, KILL, parent stop and deadline still govern.
+- A measured result is not a trial, archive parent, delta or generation-zero
+  feedback. It is bounded parsed evidence with explicit seed context. A failing
+  measurement can support first-response local delivery only with the existing
+  explicit `allowInitialRepair: true` plan and positive threshold-meeting change.
+- Independent review identified two cross-cutting gaps: a residual evaluator
+  could outlive its campaign and a late stop could arrive during record writing.
+  Shared execution admission now refuses unresolved seed intents on that Universe;
+  result publication reuses the private writer's final prepublish guard. Known
+  unrelated Universes remain independent. No cleanup or replay is inferred.
+- Proof has distinct seed intent/result digest references; legacy failed-trial
+  proof shape is unchanged. Final Git checks and recovery reread current campaign,
+  trial, manifest and baseline bytes. No raw evaluator output is retained.
+- Readiness distinguishes unresolved and operational failures; its web decoder
+  accepts those closed reasons and renders them as past observations, with no
+  execution or automatic retry control. Seed measurement is not automatically
+  included in model feedback; that remains a separate provenance-aware increment.
+- Three parallel agents authored runtime, proof/acceptance and independent tests.
+  They exhausted account usage after saving work. Parent performs remaining local
+  gates and delivery; no substitute account/provider is silently selected.
+
 ## September 10: measured initial Hub repair
 
 - Independent evaluator committed first at `9bf75b59`; actual source baseline
@@ -31,7 +57,7 @@
 - Host KILL remains active/healthy. No actual provider requests, account policy
   changes, history migration, persistent activation, Actions or remote release.
 
-### Next-step exploration (proposal, not implemented)
+### Historical next-step exploration (implemented in the continuation above)
 
 An immutable opt-in campaign seed-measurement phase could use the existing
 execution lease, fixed evaluator confinement, parser and original wall-clock
@@ -42,8 +68,8 @@ settled exact result, and hold an unresolved intent rather than automatically
 rerun uncertain evaluator work. Delivery would need a distinct proof reference
 to those event digests. Test first-response repair, passing seed, malformed
 output, timeout/cancellation, crash replay, byte/comparator drift, exhaustion
-and unchanged legacy campaigns. This remains a proposal; the current release
-requires a measured failed exact seed from a completed campaign step.
+and unchanged legacy campaigns. This was the proposal at `2baeef06`; the new
+continuation above implements the opt-in evaluator-only path.
 
 ## September 10: standalone engineering commissioning
 

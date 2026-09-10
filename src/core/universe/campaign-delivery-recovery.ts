@@ -31,7 +31,7 @@ export function readCompletedCampaignDelivery(campaign: UniverseCampaignSummary,
     if (!trial?.selected || trial.status !== 'passed' || trial.score === null ||
         !trial.artifact || trial.artifact.digest !== receipt.artifactDigest || trial.artifact.digest === seedDigest) return null;
     const strictImprovement = trial.delta !== null && trial.delta > 0 && parent?.artifact && parent.artifact.digest !== trial.artifact.digest;
-    if (!strictImprovement && !(repairOption?.value === true && hasVerifiedInitialCampaignRepair(universe, campaign, trial, seedDigest))) return null;
+    if (!strictImprovement && !(repairOption?.value === true && hasVerifiedInitialCampaignRepair(universe, campaign, trial, seedDigest, options))) return null;
     return receipt;
   } catch { return null; }
 }

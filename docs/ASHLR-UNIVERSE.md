@@ -1137,17 +1137,50 @@ and changed bytes is eligible for a new branch. Each configured outcome adds a
 explains cancellation, incomplete work, an unattempted handoff or no strict improvement; `failed`
 requires inspection. By default an initial admission is not a delivered
 improvement; unchanged passing trials never qualify. A plan target may opt in
-with `allowInitialRepair: true`: an earlier completed step of the same campaign
-must contain a valid failed evaluation of the byte-identical pinned seed in
-the same niche, and the changed passing artifact must improve that finite score
+with `allowInitialRepair: true`: the campaign must contain a valid failed
+evaluation of the byte-identical pinned seed, either from an earlier completed
+step in the same niche or from its opt-in seed measurement described below.
+The changed passing artifact must improve that finite score
 by a positive amount meeting `minImprovement`. Operational failures without
 measurement, missing or changed baseline artifacts, and unrelated campaigns
 cannot supply that proof. The first elite retains its `null` parent/delta;
-delivery eligibility does not rewrite archive lineage. This mode neither runs a
-baseline automatically nor expands budgets. Only literal `true` or omission is
+delivery eligibility does not rewrite archive lineage. The delivery option
+alone neither evaluates a baseline nor expands budgets. Only literal `true` or omission is
 valid. The opt-in is pinned in controller/graph enrollment and must also be
 present for recovery. `attempted` continues to mean campaign execution, so a
 successful delivery-only replay reports `attempted: false`.
+
+### Measure the seed before spending a model request
+
+For a **new** campaign definition, set `measureSeed: true` to evaluate the exact
+pinned seed once, before reserving a generation or model request. Omit the field
+to preserve existing campaign behavior; `false`, `null` and other values are
+invalid. Definitions are immutable: use a new campaign ID instead of editing
+an existing campaign's policy or history.
+
+This evaluator-only phase uses the existing experiment execution lease, fixed
+comparator, OS confinement, stop checks and original campaign deadline. It has
+its own intent and result in campaign history, visible as `seedEvaluation` in
+campaign inspection. It creates no trial, elite, model reservation, model-token
+usage or synthetic parent. Elapsed time still counts against the campaign's
+time budget, including downtime on restart. Evaluators can identify this phase
+through `ASHLR_UNIVERSE_EVALUATION_CONTEXT=campaign-seed-v1`; there is no invented
+generation zero.
+
+A valid measured result may be passing or failing. A failed finite measurement
+can support `allowInitialRepair: true` for a changed, passing first candidate
+that meets the fixed improvement threshold. A completed seed measurement is
+reused after verifying its pins and bytes. The measurement is delivery evidence;
+it is not automatically added to the model's trial-feedback payload.
+
+An operational failure, timeout or cancellation is not a measured rejection and
+holds generation. An intent without a confirmed result remains unresolved and
+is never silently retried. It also prevents new execution on the same Universe,
+because the evaluator process may still exist even if its original owner died.
+Inspect the recorded campaign and process state; do not delete history or reset
+the deadline to force a retry. Recorded readiness distinguishes unresolved seed
+evaluation from an operational result needing attention. No provider probing or
+evaluator execution occurs during readiness inspection.
 
 Repeat the same queue and plan after an interrupted handoff. Existing immutable
 intents and receipts reconcile the same branch/commit, including a campaign that

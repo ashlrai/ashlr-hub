@@ -102,6 +102,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-state-inspection.test.ts', // strict persisted-state decoding and pinned-directory previews
   'test/universe-backlog-marker-evaluator.test.ts', // real bounded Node evaluator processes over fixed source cases
   'test/universe-hub-marker-campaign.test.ts', // full pinned Hub seed, confined evaluator and exact local Git delivery
+  'test/universe-campaign-seed-store.test.ts', // private campaign records and Git fixtures
+  'test/universe-campaign-seed-evaluation.test.ts', // confined evaluator subprocess lifecycle
+  'test/universe-seed-measurement-acceptance.test.ts', // loopback generation and verified local delivery
   'test/resource-console-engineering-routes.test.ts', // actual HTTP auth and lifecycle with inert engineering owner
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership

@@ -227,8 +227,9 @@ A passing first candidate establishes an archive baseline but has no parent or
 archive improvement delta. By default, delivery requires a later changed, passing
 improvement over an accepted parent. A delivery-plan target may explicitly set
 `allowInitialRepair: true` to deliver that first passing repair **only** when an
-earlier completed step of the same campaign evaluated the unchanged seed, failed
-with a valid finite score, and provides positive improvement in the same niche
+earlier completed step of the same campaign, or its opt-in evaluator-only seed
+measurement, evaluated the unchanged seed, failed with a valid finite score,
+and provides positive improvement (in the same niche for a prior trial)
 meeting the fixed metric threshold. Its archived bytes must still equal the
 pinned seed. Unmeasured failures, unchanged successes and arbitrary first passes
 do not qualify. The first repair's parent and archive delta remain `null`;
@@ -236,9 +237,11 @@ eligibility is a separate proof, not rewritten lineage. Restart inspection
 requires the same opt-in and intact evidence. Omitting the field retains the
 default; `false`, `null` and other values are invalid.
 
-This mode consumes existing baseline evidence; it does not automatically run a
-seed evaluation or add requests. Keep the baseline evaluation inside campaign
-budgets. Graph-level spend remains
+The delivery option consumes existing baseline evidence. For a new campaign,
+`measureSeed: true` performs the fixed seed evaluation before model reservation,
+inside the original time budget, with no generation, trial or model request.
+See [seed measurement and recovery](ASHLR-UNIVERSE.md#measure-the-seed-before-spending-a-model-request).
+Graph-level spend remains
 unknown because campaign totals can include prior work; underlying resource
 receipts retain reported usage where available.
 
@@ -333,9 +336,13 @@ To prepare this campaign through the existing manifest/campaign interfaces:
   runtime, a separate sterile transport workspace, and a new explicit local
   `codex/` delivery branch whose base commit is the seed revision. Do not enroll
   additional accounts or replace ledger history to make the campaign admissible.
-- Set that delivery target's `allowInitialRepair` to `true`, and ensure an
-  earlier completed generation actually evaluates the unchanged seed in the
-  same campaign. The controlled acceptance sequence is unchanged seed (failed
+- Set that delivery target's `allowInitialRepair` to `true`. For a new campaign,
+  set `measureSeed: true` to evaluate the seed before the first worker request.
+  A one-response fixture then supplies the reviewed repair; this verifies
+  evaluator/dispatch/delivery plumbing, not autonomous model ideation. Without
+  seed measurement, ensure an earlier completed generation actually evaluates
+  the unchanged seed in the same campaign. The legacy controlled acceptance
+  sequence is unchanged seed (failed
   evaluation), attempted evaluator edit (refused without measurement), then the
   changed repair (all fixed cases passing). A real model response is not
   guaranteed to follow this sequence. No initial delivery is allowed without

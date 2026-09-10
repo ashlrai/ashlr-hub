@@ -1,6 +1,68 @@
 # Verified local handoff
 
-## Current continuation: measured initial Hub repair
+## Current continuation: automatic seed measurement
+
+Baseline `2baeef061f23ca3ff5196ce250180a685bf44f4d`, isolated `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Parent integrates three
+parallel work streams: evaluator execution, first-response repair proof and
+acceptance, and independent history/readiness review. Agents saved their edits
+before reaching their account usage limit; parent continued local verification.
+
+New campaigns can set `measureSeed: true` to measure their pinned starting code
+before any model request, using the original deadline and fixed evaluator.
+Completed exact measurements are reused. Operational results hold generation;
+unresolved intents block execution on the same Universe without silently
+rerunning a possibly live process. No synthetic trial, parent or archive delta
+is created. Existing absent-option campaigns retain their previous behavior.
+
+First-response repair delivery still requires explicit `allowInitialRepair`, a
+valid failed exact-seed measurement, a changed passing candidate and positive
+improvement meeting the fixed metric threshold. Current campaign/trial/seed
+evidence is reread at final Git effects and during recovery. Readiness exposes
+closed unresolved/attention reasons through the existing observational UI.
+
+Frozen focused seed runtime/history/readiness/actual loopback-delivery gate:
+**149 passed / 4 files**, no skips (76.68 s). Frozen web gate:
+**1,226 passed / 75 files**, no skips (10.68 s). Six changed tests passed strict
+standalone typechecking; source/web typechecks passed. Lint: zero errors and
+107 existing warnings; lane check: 282 real-I/O files, 664 unit files.
+Documentation check: 105 local links, 31 source links, 36 external links,
+zero external requests, no errors. Full Hub acceptance: **2 passed / 1 file**,
+no skips (205.20 s); both legacy three-response and evaluator-only seed plus
+one-response repair preserve exact evaluated source, local delivery and replay.
+H1–H8 plus marker-path unit regression: **524 passed, five existing skips /
+42 files** (211.61 s). Separate artifact-firewall gate: **8 passed / 1 file**,
+no skips (1.83 s). Broad campaign/controller/delivery/fixed-evaluator regression:
+**474 passed / 17 files**, no skips (284.60 s). These six disjoint frozen groups
+total **2,383 passed, five existing skips / 140 files**. This is the selected
+change-relevant gate, not a claim the entire repository test inventory ran.
+
+The small acceptance used an actual confined evaluator, local loopback worker,
+private resource ledger and local Git delivery. It observed zero resource effects
+while the seed intent was pending, then exactly one worker request and one receipt,
+with delivery recovery and replay producing no additional request. The worker
+returns a controlled patch; this is not evidence of live model ideation or
+provider/subscription use. Seed measurement is not yet model feedback.
+
+No provider dispatch, account/reserve/history change, KILL clearing, resident
+service activation, GitHub Actions, remote push, npm publication or public deploy.
+Production build and all five compiled `verify-safety` structural checks passed.
+The containing commit is the local source handoff; clean-build identity is
+generated from that commit afterward, without claiming remote publication.
+Host KILL was reread active/healthy. Original checkout remains unchanged at
+`a01fc08663baab3039c4f1c084538de732a4fd0e`, with its preexisting untracked workplans.
+Entire is enabled/manual-commit on `auto/p00`; resume found no checkpoint.
+The overall autonomous engineering-company goal remains incomplete; this is a
+local runtime increment, not commissioning or production acceptance.
+
+Next functional increment: give the first worker bounded seed diagnostics through
+a distinct digest-pinned feedback context. Current trial feedback requires real
+run/trial IDs; do not put seed measurements into fabricated generation-zero
+lineage or silently change legacy feedback receipt bytes. Then commission an
+explicit live Hub campaign against intended accounts/reserves and verify an
+actual model-generated accepted change before enabling resident operation.
+
+## Previous continuation: measured initial Hub repair
 
 Baseline `1a57744b`, isolated `auto/p00`. Three bounded agents independently
 authored the fixed evaluator, built/reviewed the candidate, and exercised the

@@ -71,9 +71,22 @@ function initialRepairOption(target: UniverseCampaignDeliveryTarget): true | und
 
 /** The pure proof is not enough: delivery and restart inspection also verify its archived baseline bytes. */
 export function hasVerifiedInitialCampaignRepair(universe: UniverseSummary, campaign: UniverseCampaignSummary,
-  trial: UniverseTrial, seedDigest: string): boolean {
+  trial: UniverseTrial, seedDigest: string, options: { root: string }): boolean {
   const proof = verifiedInitialCampaignRepair(universe, campaign, trial, seedDigest);
   if (!proof) return false;
+  // Captured summaries cannot authorize a final effect after durable evidence
+  // changes. The strict campaign decoder also validates the seed session link.
+  const latest = readUniverseCampaign(campaign.definition.id, options);
+  if (canonical(latest) !== canonical(campaign)) return false;
+  const current = campaignUniverse(latest, options);
+  const currentTrial = current.runs.flatMap(run => run.trials).find(value => value.id === trial.id);
+  if (!currentTrial || canonical(currentTrial) !== canonical(trial) ||
+      canonical(verifiedInitialCampaignRepair(current, latest, currentTrial, seedDigest)) !== canonical(proof)) return false;
+  const record = manifestRecord(universePath(options.root, universe.manifest.id));
+  if (record.manifestDigest !== universe.manifestDigest || record.comparatorDigest !== universe.comparatorDigest ||
+      record.seedArtifact.digest !== seedDigest || artifactDigest(record.seedArtifact.path) !== seedDigest) return false;
+  if (!('baselineRunId' in proof)) return proof.seedIntentDigest === digest(canonical(latest.seedEvaluation!.intent)) &&
+    proof.seedResultDigest === digest(canonical(latest.seedEvaluation!.result));
   const baseline = universe.runs.find((run) => run.id === proof.baselineRunId)?.trials
     .find((item) => item.id === proof.baselineTrialId);
   return !!baseline?.artifact && artifactDigest(baseline.artifact.path) === proof.baselineArtifactDigest;
@@ -175,7 +188,7 @@ export async function deliverCompletedUniverseCampaign(id: string,
     // not publish a ref while still looking valid in the captured summary.
     const isExecutionStopped = selected.parentTrialId === null ? () => {
       if (options.isExecutionStopped?.()) return true;
-      if (!hasVerifiedInitialCampaignRepair(universe, current, selected, seedDigest)) {
+      if (!hasVerifiedInitialCampaignRepair(universe, current, selected, seedDigest, store)) {
         throw new Error('Initial campaign repair baseline artifact is missing or changed');
       }
       return false;

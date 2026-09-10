@@ -53,6 +53,11 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Verify a full-Hub-seed graph, fixed evaluation and exact local branch delivery.
 - [x] Run frozen integrated regressions, build and record exact local release evidence.
 - [x] Document the reusable campaign and remaining live commissioning requirements.
+- [x] Explore automatic seed measurement and its immutable evaluator-only lifecycle with three agents.
+- [x] Implement opt-in seed intent/result history and bounded execution before model reservation.
+- [x] Connect exact measured-seed proof to first-response delivery and recorded readiness.
+- [x] Verify actual evaluator lifecycle, interruption refusal, one-request Hub repair and legacy compatibility.
+- [x] Update operator guidance and run frozen gates (2,383 passed, five existing skips); local commit/build handoff follows.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -65,6 +70,29 @@ existing activation, provenance, evaluation and resource invariants.
   digest-bearing edges. Never invent terminal states to satisfy a count.
 
 ## Errors
+Final report patch included a stale plan context and was rejected without changes;
+the corrected scoped patch succeeded. The safety filter also initially named a
+nonexistent M457 path; its actual external-skill-artifact-firewall file was run
+separately (8 passes). `vitest list test/h --filesOnly` confirmed the broader
+42-file H filter also includes the marker-path unit test; counts are recorded
+for exactly those files, not relabeled as the previous turn's gate.
+
+Seed-measurement integration: early source typecheck caught a process-group
+union narrowing issue; web typecheck caught two new readiness codes missing
+from its closed decoder. Both were corrected and source/web checks passed.
+Additional read-only guesses used nonexistent diagnostics.ts, universe-console.ts,
+and shell globs without matches; no files changed. The first focused test command
+included nonexistent universe-seed-improvement.test.ts; Vitest ran the other
+four actual files (149 passes), and the correct universe-seed-repair-proof.test.ts
+is explicitly included in the broader gate. All three agents reached the account
+usage limit after saving their work; parent continued integration/testing without
+account switching or resetting usage. No agent completion status is treated as
+test evidence. Final shared runtime sources froze before the integrated gates.
+
+Seed-measurement continuation: initial searches guessed nonexistent evaluate.ts,
+confinement.ts and verify-subprocess paths. Actual shared primitives are
+fixed-evaluator.ts, store.ts::parseEvaluation and run/verify-commands.ts. No
+files were changed by those failed read-only lookups.
 Real Hub campaign continuation: three diagnostic full-source runs correctly
 rejected delivery despite a passing repair. The first actual seed evaluation
 failed (82/142 cases); an evaluator edit was refused without a score; the third
@@ -112,6 +140,17 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Current continuation from `2baeef061f23ca3ff5196ce250180a685bf44f4d`:
+automatic fixed-seed measurement is implemented and locally verified within the
+original campaign time budget, without spending a model request or fabricating
+trial lineage. Three agents completed saved implementation/review work before
+account usage exhaustion; parent completed integration and frozen gates. Legacy
+definitions remain unchanged when measureSeed is absent. Local source commit
+and clean build handoff follow; no live account, KILL, service or remote release
+changes are part of this continuation. Next increment is a distinct provenance-
+bound seed-feedback context, followed by explicitly commissioned live acceptance.
+
+Previous completed continuation:
 Current continuation from `1a57744bd43ea5668f469bd8eaa394808a7f9bea`:
 first real Hub source campaign. Three agents independently own evaluator,
 candidate investigation and full-repository acceptance. The evaluator is fixed
