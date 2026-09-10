@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type FormEvent, type KeyboardEvent } from 'react';
-import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput } from '../../../core/resources/console-types.js';
+import type { ResourceConsoleOutput, ResourceConsoleProject, ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput } from '../../../core/resources/console-types.js';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { readResourceTaskOutput } from '../../data/resource-pool-queries.js';
 import { buildResourceFleet } from '../resources/fleet-model.js';
@@ -18,13 +18,43 @@ export interface WorkspaceViewProps {
 }
 const newTaskId = () => `task-${crypto.randomUUID().slice(0, 12)}`;
 const clampDock = (width: number) => Math.max(260, Math.min(520, width));
+const projectLabel = (project: ResourceConsoleProject) => project.id === 'default' && project.label === 'Default workspace'
+  ? project.workspace.split(/[\\/]/).filter(Boolean).at(-1) ?? project.label : project.label;
 
 /** A host scope change cannot carry drafts or output into another workspace. */
 export function WorkspaceView(props: WorkspaceViewProps) {
-  return <WorkspaceBody key={`${props.scope.root}:${props.scope.poolId}:${props.scope.workspace ?? ''}`} {...props} />;
+  const key = `${props.scope.root}:${props.scope.poolId}:${props.scope.workspace ?? ''}`;
+  return props.scope.projects ? <ProjectWorkspaces key={key} {...props} /> : <WorkspaceBody key={key} {...props} />;
 }
 
-function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy, unlocked, onUnlock, onSubmit, onCancel, onDeleteHistory }: WorkspaceViewProps) {
+/** Keep only visited drafts in session memory. Hidden projects cannot initiate UI reads. */
+function ProjectWorkspaces(props: WorkspaceViewProps) {
+  const projects = props.scope.projects!;
+  const [projectId, setProjectId] = useState('default');
+  const [visited, setVisited] = useState(['default']);
+  function choose(id: string) {
+    if (!projects.some((project) => project.id === id)) return;
+    setVisited((current) => current.includes(id) ? current : [...current, id]); setProjectId(id);
+  }
+  return <>{projects.filter((project) => visited.includes(project.id)).map((project) => {
+    const jobs = props.snapshot.supervisor?.jobs.filter((job) => (job.projectId ?? 'default') === project.id) ?? [];
+    const ids = new Set(jobs.map((job) => job.id));
+    // A receipt without a supervisor binding has no proven project attribution.
+    // It remains visible in Resources, never guessed into a project's history.
+    const snapshot = { ...props.snapshot, activeAttempts: props.snapshot.activeAttempts.filter((row) => ids.has(row.id)),
+      recentAttempts: props.snapshot.recentAttempts.filter((row) => ids.has(row.id)),
+      supervisor: props.snapshot.supervisor ? { ...props.snapshot.supervisor, jobs } : null };
+    return <div key={`${project.id}:${project.workspace}`} hidden={projectId !== project.id}>
+      <WorkspaceBody {...props} scope={{ ...props.scope, workspace: project.workspace }} snapshot={snapshot}
+        project={project} projects={projects} onSelectProject={choose} active={projectId === project.id} />
+    </div>;
+  })}</>;
+}
+
+function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy, unlocked, onUnlock, onSubmit, onCancel, onDeleteHistory,
+  project, projects, onSelectProject, active = true }: WorkspaceViewProps & {
+    project?: ResourceConsoleProject; projects?: ResourceConsoleProject[]; onSelectProject?(id: string): void; active?: boolean;
+  }) {
   const fleet = useMemo(() => buildResourceFleet(snapshot, historical), [snapshot, historical]);
   const [selection, setSelection] = useState<string | null>(null);
   const [prompt, setPrompt] = useState('');
@@ -63,9 +93,10 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   const worker = snapshot.pool.workers.find((row) => row.id === workerId);
   const assigned = snapshot.pool.workers.find((row) => row.id === selected?.workerId);
   const response = selected?.job?.outputAvailable && output?.key === outputKey ? output.value : null;
-  const canSend = enabled && !scope.readOnly && !!scope.workspace && !historical && snapshot.sourceState !== 'degraded';
+  const canSend = active && project?.enabled !== false && enabled && !scope.readOnly && !!scope.workspace && !historical && snapshot.sourceState !== 'degraded';
   const lockedForm = busy || sending || readingFiles;
-  const projectName = scope.workspace?.split(/[\\/]/).filter(Boolean).at(-1) ?? 'No execution workspace';
+  const projectName = project ? projectLabel(project) : scope.workspace?.split(/[\\/]/).filter(Boolean).at(-1) ?? 'No execution workspace';
+  const domId = project && project.id !== 'default' ? `workspace-${project.id}` : 'workspace';
 
   useEffect(() => {
     alive.current = true;
@@ -76,6 +107,12 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     fileGeneration.current++; setReadingFiles(false);
   }, [outputKey]);
   useEffect(() => { setSubmitted({}); }, [session]);
+  useEffect(() => {
+    if (!active) {
+      outputRequest.current?.abort(); setOutput(null); setOutputError(null); setLoadingOutput(false);
+      fileGeneration.current++; setReadingFiles(false);
+    }
+  }, [active]);
   useEffect(() => {
     if (retentionSeen.current.session !== session) retentionSeen.current = { session, ids: new Set() };
     const removed = new Set<string>();
@@ -131,6 +168,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     const sentId = taskId; const sentPrompt = prompt; const sentSession = session;
     try {
       const accepted = await onSubmit({ id: sentId, prompt: composed, allowedWorkerIds: [worker.id], mode, timeoutMs, maxOutputTokens,
+        ...(project && project.id !== 'default' ? { projectId: project.id } : {}),
         ...(followUp ? { parent: followUp.parent } : {}),
         ...(retainHistory && scope.historySupported ? { retainHistory: true } : {}) });
       if (!alive.current || currentSession.current !== sentSession) return;
@@ -191,7 +229,11 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         onClick={() => setMobilePane(pane)}>{pane === 'tasks' ? 'Task list' : pane === 'task' ? 'Task' : 'Tools'}</button>)}
     </div>
     <aside className={styles.rail} data-mobile-visible={mobilePane === 'tasks'} aria-label="Project and tasks">
-      <div className={styles.project}><span className={styles.projectIcon} aria-hidden="true">⌑</span><div><h2>{projectName}</h2><p>Pinned workspace</p></div></div>
+      {projects ? <nav aria-label="Registered projects" className={styles.projectList}><h3>Projects</h3>
+        {projects.map((row) => <button type="button" key={row.id} aria-label={`Switch to ${projectLabel(row)}`} aria-current={row.id === project?.id ? 'true' : undefined}
+          onClick={() => onSelectProject?.(row.id)}><span>{projectLabel(row)}</span>{!row.enabled ? <small>Disabled</small> : null}</button>)}
+      </nav> : null}
+      <div className={styles.project}><span className={styles.projectIcon} aria-hidden="true">⌑</span><div><h2>{projectName}</h2><p>{projects ? 'Registered workspace' : 'Pinned workspace'}</p></div></div>
       {scope.workspace ? <p className={styles.projectPath} title={scope.workspace}>{scope.workspace}</p> : <p className={styles.caption}>This console has no execution workspace.</p>}
       <button type="button" className={styles.newTask} disabled={lockedForm} onClick={() => select(null)}>+ New task</button>
       <h3 className={styles.railHeading}>Tasks</h3>
@@ -199,7 +241,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         <button type="button" aria-current={selection === row.id ? 'true' : undefined} onClick={() => select(row.id)}>
           <span>{row.id}</span><StatusBadge status={row.state} tone={taskTone(row)} />
         </button></li>)}</ul> : <p className={styles.caption}>Your queued tasks will appear here.</p>}
-      <p className={styles.railFoot}>One confirmed workspace. Project switching is not connected yet.</p>
+      <p className={styles.railFoot}>{projects ? 'One shared account ledger. Project drafts stay separate in this browser session. Unattributed tasks remain in Resources.' : 'One confirmed workspace. Add a startup project catalog to enable project switching.'}</p>
     </aside>
 
     <div className={styles.center} data-mobile-visible={mobilePane === 'task'}>
@@ -209,11 +251,12 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
       <div className={styles.conversation}>
         {historical ? <p className={styles.notice}>Showing the last successful snapshot. Sending is paused until current evidence returns.</p> : null}
         {scope.readOnly ? <p className={styles.notice}>Task execution is disabled for this console. You can inspect recorded work.</p> : null}
+        {project?.enabled === false ? <p className={styles.notice}>This project is disabled. Its history remains available; new tasks cannot be sent.</p> : null}
         {notice ? <p role="status" className={styles.notice}>{notice}</p> : null}
         {selection ? <>
           {submitted[selection] ? <section className={styles.request}><h3>Your task</h3><p>{submitted[selection]}</p></section>
             : <p className={styles.caption}>Original prompt text is not included in the task snapshot.</p>}
-          {selected?.job?.historyAvailable === true ? <TaskTranscript key={outputKey} id={selection}
+          {active && selected?.job?.historyAvailable === true ? <TaskTranscript key={outputKey} id={selection} projectId={project?.id ?? 'default'}
             canDelete={stopEnabled && !busy && !!onDeleteHistory && ['settled', 'cancelled'].includes(selected.job.state)}
             unlocked={unlocked} onUnlock={onUnlock} onDelete={deleteHistory}
             onFollowUp={scope.followUpSupported && canSend && !lockedForm && ['settled', 'cancelled'].includes(selected.job.state)
@@ -232,8 +275,8 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
           <p>A new task using your selected worker and limits. Accepted context copies are independent of the original transcript.</p></div>
           <button type="button" className={styles.subtleButton} disabled={lockedForm} onClick={() => { setFollowUp(null); setTaskId(newTaskId()); }}>Start standalone</button>
         </div> : null}
-        <label htmlFor="workspace-prompt">Task prompt</label>
-        <textarea id="workspace-prompt" ref={textarea} value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4}
+        <label htmlFor={`${domId}-prompt`}>Task prompt</label>
+        <textarea id={`${domId}-prompt`} ref={textarea} value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4}
           placeholder="Describe the task and how to check the result…" disabled={scope.readOnly || lockedForm} />
         {attachments.length ? <ul className={styles.attachments} aria-label="Attached text files">{attachments.map((file) => <li key={file.name}>
           <span>{file.name}</span><button type="button" aria-label={`Remove ${file.name}`} disabled={lockedForm}
@@ -270,11 +313,11 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
       onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }} />
     <aside className={styles.dock} data-mobile-visible={mobilePane === 'tools'} aria-label="Task tools">
       <div className={styles.dockTabs} role="tablist" aria-label="Task tool tabs" ref={tabs}>
-        {(['output', 'details'] as const).map((tab) => <button key={tab} type="button" role="tab" data-tab={tab} id={`workspace-tab-${tab}`}
-          aria-controls={`workspace-panel-${tab}`} aria-selected={dockTab === tab} tabIndex={dockTab === tab ? 0 : -1}
+        {(['output', 'details'] as const).map((tab) => <button key={tab} type="button" role="tab" data-tab={tab} id={`${domId}-tab-${tab}`}
+          aria-controls={`${domId}-panel-${tab}`} aria-selected={dockTab === tab} tabIndex={dockTab === tab ? 0 : -1}
           onKeyDown={tabKey} onClick={() => setDockTab(tab)}>{tab === 'output' ? 'Output' : 'Task details'}</button>)}
       </div>
-      <section className={styles.dockContent} role="tabpanel" id={`workspace-panel-${dockTab}`} aria-labelledby={`workspace-tab-${dockTab}`}>
+      <section className={styles.dockContent} role="tabpanel" id={`${domId}-panel-${dockTab}`} aria-labelledby={`${domId}-tab-${dockTab}`}>
         {dockTab === 'output' ? <><h3>Response text</h3>{response ? <><p className={styles.caption}>{response.truncated ? 'Truncated. ' : ''}Console-session output.</p><pre className={styles.responseText}>{response.text}</pre></>
           : <p className={styles.caption}>Read a selected task’s response in the task pane to inspect its text here.</p>}</>
           : <><h3>{selection ? 'Task routing' : 'Next task routing'}</h3><dl className={styles.facts}>

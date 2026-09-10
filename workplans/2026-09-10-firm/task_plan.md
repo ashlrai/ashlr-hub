@@ -18,6 +18,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Build and independently verify the first real project-bound human task workspace; final integrated gates recorded in report.md.
 - [x] Add explicit local transcript retention and deletion through the existing task supervisor, API and workspace.
 - [x] Verify per-scope quota ceilings stay independent in the final HTTP projection.
+- [x] Add real digest-pinned follow-up conversations and independent replay/deletion acceptance.
+- [x] Register multiple projects with immutable bindings over one shared ledger.
+- [x] Connect explicit project selection and isolated session drafts in the workspace.
+- [x] Verify catalog migration, project-local holds, accounting and UI isolation.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -36,6 +40,15 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Implemented locally from `b3ad1a26`: shared-ledger project selection. Preserve legacy default
+workspace and scope digest; schema 4 adds immutable registered project bindings.
+Startup catalogs may add projects or omit them to disable new work, never silently
+rebind an old identity. Missing/replaced directories hold affected queued work;
+independent projects continue. Runtime resolves registered IDs, not browser paths.
+Three agents own core migration, CLI/HTTP and independent acceptance. Parent owns
+project UI/query integration, documentation and final verification. Session-only
+per-project drafts are the recommended default; no private drafts written to disk.
+
 Completed local continuation from `75d7897e`: real server-assembled follow-up
 conversations on the existing shared quota ledger. Three parallel assignments:
 core snapshot/digest persistence, HTTP validation and tests, and independent
@@ -79,7 +92,7 @@ Full north-star completion is not claimed. Actual host KILL is active and remain
 untouched. Local package, CLI, UI, release-contract and safety gates passed;
 the full north-star implementation and production activation remain unfinished.
 
-Next: conversation grouping, explicit shared-ledger project selection and
+Next: conversation grouping/compaction and
 confined implementation/independent acceptance. Multi-turn context is implemented;
 conversation grouping and compaction remain. Resident ticks still require the
 existing activation path. Current receipt bounds are not a firm-wide spend ledger.

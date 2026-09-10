@@ -2,6 +2,7 @@ import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 
 const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindings ABS --observations ABS [--port N] [--json]
        add --execute --workspace ABS [--max-parallel N] to enable foreground queued tasks
+       add --projects ABS to pin additional projects while keeping --workspace as default
        add --quota-config ABS to refresh explicitly pinned Codex account metadata
        add --connections-config ABS to monitor explicit Codex/Claude/Grok accounts
        add --allocation-controls to adjust this pool's usage ceiling and worker access
@@ -14,10 +15,17 @@ account hints, and refreshes selected quotas while this process runs. Native
 clients may maintain their own auth/cache state. Unavailable managed workers are
 blocked even if unknown quota is otherwise allowed. No account independence is
 inferred. Omit both metadata options to keep provider-free observation mode.
-Execution is an explicit capability for the fixed workspace. It can consume native
-provider allowances and edit that workspace when a queued task requests workspace-write.
+Execution is an explicit capability for the configured workspaces. It can consume native
+provider allowances and edit the selected workspace when a queued task requests workspace-write.
+--projects requires --execute and --workspace. Its private JSON file contains
+{schemaVersion:1,projects:[{id,label,workspace}]} with at most 31 additional projects;
+the ID default is reserved. Browser requests select IDs, never arbitrary paths.
+Projects share the same supervisor, resource ledger, account limits and collector.
+Project selection binds task context and working directory, not a filesystem sandbox.
 Queued intents and pause state are durable; previously dispatching work is never
-silently replayed after restart. Output is bounded and retained for this session only.
+silently replayed after restart. Ordinary output is bounded and session-only;
+opt-in transcripts persist locally until deleted. Accepted follow-ups freeze copied
+context independently of later deletion of their source transcripts.
 --port accepts 0..65535, default 0. --max-parallel accepts 1..16, default 4.
 Connections are informational native metadata only, separate from worker admission.
 Policy controls persist revision-checked usage ceilings and worker pauses for new tasks;
@@ -28,7 +36,7 @@ Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid argumen
 `;
 class UsageError extends Error {}
 type Options = { help: true } | { help: false; root: string; poolFile: string; bindingsFile: string;
-  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; allocationControls?: boolean;
+  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; allocationControls?: boolean;
   port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
 
 function path(value: string): string {
@@ -48,7 +56,7 @@ function parse(args: string[]): Options {
     if (flag === '--execute') { if (execute) throw new UsageError('Duplicate console option'); execute = true; continue; }
     if (flag === '--json') { if (json) throw new UsageError('Duplicate console option'); json = true; continue; }
     if (flag === '--allocation-controls') { if (allocationControls) throw new UsageError('Duplicate console option'); allocationControls = true; continue; }
-    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config'].includes(flag) || values.has(flag)) {
+    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects'].includes(flag) || values.has(flag)) {
       throw new UsageError('Unknown or duplicate console option');
     }
     const value = args[++index];
@@ -57,8 +65,8 @@ function parse(args: string[]): Options {
   if (['--root', '--pool', '--bindings', '--observations'].some((key) => !values.has(key))) {
     throw new UsageError('Explicit root, pool, bindings and observations paths are required');
   }
-  if (execute ? !values.has('--workspace') : values.has('--workspace') || values.has('--max-parallel')) {
-    throw new UsageError('Execution requires --execute with --workspace; parallelism is execution-only');
+  if (execute ? !values.has('--workspace') : values.has('--workspace') || values.has('--max-parallel') || values.has('--projects')) {
+    throw new UsageError('Execution requires --execute with --workspace; projects and parallelism are execution-only');
   }
   const portText = values.get('--port') ?? '0'; const parallelText = values.get('--max-parallel') ?? '4';
   if (!/^(0|[1-9]\d{0,4})$/.test(portText) || Number(portText) > 65_535 ||
@@ -67,6 +75,7 @@ function parse(args: string[]): Options {
     bindingsFile: path(values.get('--bindings')!), observationsFile: path(values.get('--observations')!),
     ...(values.has('--quota-config') ? { quotaConfigFile: path(values.get('--quota-config')!) } : {}),
     ...(values.has('--connections-config') ? { connectionsConfigFile: path(values.get('--connections-config')!) } : {}),
+    ...(values.has('--projects') ? { projectsFile: path(values.get('--projects')!) } : {}),
     ...(allocationControls ? { allocationControls: true } : {}),
     port: Number(portText), execute, ...(execute ? { workspace: path(values.get('--workspace')!), maxParallel: Number(parallelText) } : {}), json };
 }

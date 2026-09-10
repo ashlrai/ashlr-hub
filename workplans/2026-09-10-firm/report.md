@@ -1,6 +1,61 @@
 # Verified local handoff
 
-## Current continuation: real follow-up conversations
+## Current continuation: multiple projects, one intelligence ledger
+
+Baseline: `b3ad1a266f53d05c3bb3d604f7947459ebb987a0`; isolated branch `auto/p00`.
+The commit containing this report is the delivered source. Three parallel agents
+owned core migration, CLI/HTTP integration and independent acceptance; parent
+integrated the project interface, query contracts, documentation and final gates.
+
+- Private startup `--projects` catalogs register up to 31 additional directories
+  beside the legacy default. All projects share one supervisor, resource ledger,
+  account concurrency and quota/task limits. Browsers submit registered IDs,
+  never execution paths. Catalog membership is frozen until console restart.
+- Schema 4 preserves legacy scope, receipt, submission and transcript identities.
+  Directory bindings are append-only; labels can change, omitted projects become
+  disabled, and old history stays readable. An ID cannot silently change roots.
+  First adoption pins the current default directory, not its historical identity.
+- Missing, replaced or disabled project directories hold only their affected
+  queued work. Checks repeat at admission and immediately before worker dispatch.
+  A post-reservation veto retains honest task-cap accounting without inventing
+  provider execution, token usage or an account cooldown. Nested projects are
+  working-directory choices, not filesystem isolation or complete race elimination.
+- The sidebar switches registered projects with separately retained session
+  drafts, attachments, worker choices and follow-up pins. Private response reads
+  are cancelled on switching. Task/history attribution is explicit; unowned
+  receipts remain in Resources instead of being guessed into a project.
+- Integrated resource suite: **2,421 passed / 72 files**. UI: **1,126 passed / 68 files**.
+  Safety: **449 passed, five existing skips / 41 files**. Focused agent suites
+  overlap integrated counts and are not additional productivity totals.
+- The first broad resource run found three failures in two pre-existing mock
+  contracts missing a required quota-only method. Only those fixtures were
+  corrected; runtime checks stayed fail-closed. A subsequent 2,420-test run passed.
+  Cold review added a regression preserving legacy no-catalog nested-workspace
+  startup while explicit catalog adoption keeps stricter root separation.
+- Core/web typecheck, build, quiet source/test ESLint, docs and real-I/O
+  classification passed; compiled structural safety checks passed all five.
+  A final post-commit build will identify the exact clean source.
+- Browser verification used an inert local fixture: switching restored each
+  project's own draft and filtered task list; reload cleared unsaved text and
+  control authority. Final compiled desktop layout and labels were inspected.
+  Real local HTTP/native fixtures also proved selected cwd, shared accounting,
+  migration, drift recovery and retry identity. The preview was stopped.
+
+No real Hub provider job, account-policy change, remote push, GitHub Actions, npm
+publication, desktop installation or production activation occurred. Actual host
+KILL remains active; original user checkout is preserved. Full goal remains
+active: conversation grouping/compaction, confined implementation and independent
+acceptance, native file/PTY/browser tools, desktop bootstrap and evidence-backed
+always-on commissioning remain. Historical package accounting stays at 15 locally
+landed component artifacts and 33 planned packages; this milestone does not imply
+completion of the 48-node autonomous-company plan.
+
+Planning/agent-building guidance preserved the established runtime; frontend and
+React guidance shaped project-scoped private state; documentation guidance kept
+tested source, migration limits and live activation distinct. Entire resume found
+no existing checkpoint on `auto/p00`.
+
+## Prior continuation: real follow-up conversations
 
 Baseline: `75d7897e9bcbd7b8677f37eca58fd95dfa29020c`; branch `auto/p00`,
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Final source is the commit

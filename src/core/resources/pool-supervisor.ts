@@ -14,8 +14,10 @@ import { readResourceJson, resourcePoolStatus, runResourceTask, validateResource
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
 import { MAX_RESOURCE_CONVERSATION_BYTES, resourceConsoleConversationPrompt, resourceConsoleTranscriptDigest,
   validateResourceConsoleContext, validateResourceConsoleParent } from './console-conversation.js';
+import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResourceConsoleProjectBindings,
+  validateResourceConsoleProjects, type ResourceConsoleProjectBinding } from './console-projects.js';
 import type { ResourceConsoleContextTurn, ResourceConsoleOutput, ResourceConsoleTaskInput, ResourceConsoleTranscript,
-  ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
+  ResourceConsoleProject, ResourceConsoleProjectInput, ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
 
 export class ResourceSupervisorError extends Error {
   constructor(readonly code: 'INVALID_INPUT' | 'CONFLICT' | 'CAPACITY' | 'UNAVAILABLE' | 'NOT_FOUND', message: string) {
@@ -41,9 +43,11 @@ type DurableJob = Omit<ResourceSupervisorJob, 'cancellable' | 'outputAvailable' 
   /** Accepted copies are independent of later edits/deletion of source history. */
   context?: ResourceConsoleContextTurn[] | null;
 };
-interface DurableState { schemaVersion: 1 | 2 | 3; scopeDigest: string; paused: boolean; jobs: DurableJob[] }
+interface DurableState { schemaVersion: 1 | 2 | 3 | 4; scopeDigest: string; paused: boolean; jobs: DurableJob[];
+  projects?: ResourceConsoleProjectBinding[] }
 export interface ResourcePoolSupervisorOptions {
   root: string; pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
+  projects?: ResourceConsoleProjectInput[];
   readObservations(): ResourceObservation[];
   /** Non-durable admission veto; callback failure blocks new work until recovery. */
   readUnavailableWorkerIds?(): string[];
@@ -52,6 +56,7 @@ export interface ResourcePoolSupervisorOptions {
 }
 export interface ResourcePoolSupervisor {
   snapshot(): ResourceSupervisorSnapshot;
+  projects(): ResourceConsoleProject[] | undefined;
   submit(input: ResourceConsoleTaskInput): ResourceSupervisorJob;
   cancel(id: string): ResourceSupervisorJob;
   setPaused(paused: boolean): ResourceSupervisorSnapshot;
@@ -123,6 +128,7 @@ function boundedOutput(text: string, maximum: number): { text: string; truncated
 export async function createResourcePoolSupervisor(options: ResourcePoolSupervisorOptions): Promise<ResourcePoolSupervisor> {
   let pool: ResourcePool; let bindings: ResourceBinding[];
   const root = options.root; const workspace = options.workspace;
+  const configuredCatalogValue = options.projects;
   const readObservations = options.readObservations; const signal = options.signal;
   const readUnavailableWorkerIds = options.readUnavailableWorkerIds === undefined ? () => [] : options.readUnavailableWorkerIds;
   const readQuotaUnavailableWorkerIds = options.readQuotaUnavailableWorkerIds === undefined ? () => [] : options.readQuotaUnavailableWorkerIds;
@@ -131,13 +137,35 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   const pollIntervalMs = limit(options.pollIntervalMs, 2000, 60_000, 20);
   const stoppedBeforeStart = () => { if (signal?.aborted) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor startup cancelled'); };
   stoppedBeforeStart();
+  let configuredProjects: ResourceConsoleProjectInput[] = [];
+  let projectBindings: ResourceConsoleProjectBinding[] | undefined;
+  // This read is only a startup validation hint. The owned decoder below still
+  // validates every byte before using any durable binding or queue record.
+  let persistedCatalog = false;
+  if (path(root)) {
+    try { persistedCatalog = (readResourceJson(join(root, 'resource-console-state.json'), MAX_STATE_BYTES) as { schemaVersion?: unknown }).schemaVersion === 4; }
+    catch { /* Missing/invalid state remains the owned decoder's responsibility. */ }
+  }
+  stoppedBeforeStart();
   try {
     if (process.platform === 'win32' || !path(root) || !path(workspace) ||
-      realpathSync(workspace) !== workspace || !lstatSync(workspace).isDirectory() ||
+      !persistedCatalog && (realpathSync(workspace) !== workspace || !lstatSync(workspace).isDirectory()) ||
       typeof readObservations !== 'function' || typeof readUnavailableWorkerIds !== 'function' ||
       typeof readQuotaUnavailableWorkerIds !== 'function') throw new Error();
     const nested = relative(workspace, root);
     if (nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested)) throw new Error();
+    if (configuredCatalogValue !== undefined || persistedCatalog) {
+      const insideStore = relative(root, workspace);
+      if (insideStore === '' || insideStore !== '..' && !insideStore.startsWith(`..${sep}`) && !isAbsolute(insideStore)) throw new Error();
+    }
+    configuredProjects = configuredCatalogValue === undefined ? [] : validateResourceConsoleProjects(configuredCatalogValue);
+    for (const project of configuredProjects) {
+      if (project.workspace === workspace) throw new Error();
+      for (const [from, to] of [[project.workspace, root], [root, project.workspace]]) {
+        const nested = relative(from!, to!);
+        if (nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested)) throw new Error();
+      }
+    }
     pool = validateResourcePool(options.pool); bindings = validateResourceBindings(options.bindings, pool);
     validateResourceObservations(readObservations(), pool);
     // Read validates an existing ledger but never initializes a missing one.
@@ -148,30 +176,47 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   const statePath = join(root, 'resource-console-state.json');
   const instanceId = randomUUID();
   const workerIds = new Set(pool.workers.map((worker) => worker.id));
+  const enabledProjects = new Set(['default', ...configuredProjects.map((project) => project.id)]);
+  function projectWorkspace(projectId?: string): string {
+    if (projectId === undefined || projectId === 'default') return workspace;
+    const binding = projectBindings?.find((project) => project.id === projectId);
+    if (!binding) throw new ResourceSupervisorError('INVALID_INPUT', 'Unknown resource project');
+    return binding.workspace;
+  }
+  function projectHold(projectId?: string): string | null {
+    if (!projectBindings) return null;
+    const id = projectId ?? 'default';
+    if (!enabledProjects.has(id)) return 'project-not-enabled';
+    const binding = projectBindings.find((project) => project.id === id);
+    return binding && matchesResourceConsoleProject(binding) ? null : 'project-directory-unavailable';
+  }
 
   function taskInput(value: unknown): ResourceConsoleTaskInput {
     try {
       if (!object(value) || !exact(value, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens',
-        ...(Object.hasOwn(value, 'retainHistory') ? ['retainHistory'] : []), ...(Object.hasOwn(value, 'parent') ? ['parent'] : [])]) ||
+        ...(Object.hasOwn(value, 'retainHistory') ? ['retainHistory'] : []), ...(Object.hasOwn(value, 'parent') ? ['parent'] : []),
+        ...(Object.hasOwn(value, 'projectId') ? ['projectId'] : [])]) ||
         Object.hasOwn(value, 'retainHistory') && typeof value.retainHistory !== 'boolean' ||
+        Object.hasOwn(value, 'projectId') && (typeof value.projectId !== 'string' || !ID.test(value.projectId)) ||
         typeof value.prompt !== 'string' || Buffer.byteLength(value.prompt) > 32 * 1024) throw new Error();
       const ids = value.allowedWorkerIds;
       if (!Array.isArray(ids) || Reflect.ownKeys(ids).length !== ids.length + 1 ||
         !Array.from({ length: ids.length }, (_, index) => index).every((index) =>
           Object.hasOwn(ids, index) && 'value' in Object.getOwnPropertyDescriptor(ids, index)!)) throw new Error();
-      const { retainHistory, parent: parentValue, ...runtimeInput } = value;
+      const { retainHistory, parent: parentValue, projectId: projectValue, ...runtimeInput } = value;
+      const projectId = typeof projectValue === 'string' && projectValue !== 'default' ? projectValue : undefined;
       const parent = Object.hasOwn(value, 'parent') ? validateResourceConsoleParent(parentValue) : undefined;
       if (parent?.taskId === value.id) throw new Error();
-      const task = validateResourceTask({ ...runtimeInput, schemaVersion: 1, cwd: workspace });
+      const task = validateResourceTask({ ...runtimeInput, schemaVersion: 1, cwd: projectWorkspace(projectId) });
       if (task.allowedWorkerIds.some((id) => !workerIds.has(id))) throw new Error();
       return { id: task.id, prompt: task.prompt, allowedWorkerIds: task.allowedWorkerIds, mode: task.mode,
         timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, ...(retainHistory === true ? { retainHistory: true } : {}),
-        ...(parent ? { parent } : {}) };
+        ...(parent ? { parent } : {}), ...(projectId ? { projectId } : {}) };
     } catch { throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource console task'); }
   }
   // Local text-retention consent is not provider input or a new ledger identity.
   const taskFor = (input: ResourceConsoleTaskInput, context?: ResourceConsoleContextTurn[] | null): ResourceTask => {
-    const { retainHistory: _retention, parent, ...runtimeInput } = detached(input);
+    const { retainHistory: _retention, parent, projectId, ...runtimeInput } = detached(input);
     if (parent) {
       if (!context) throw new ResourceSupervisorError('UNAVAILABLE', 'Accepted conversation context is unavailable');
       runtimeInput.prompt = resourceConsoleConversationPrompt(input.prompt, context);
@@ -179,23 +224,25 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         throw new ResourceSupervisorError('CAPACITY', 'Conversation context exceeds the 256 KiB limit');
       }
     }
-    return { ...runtimeInput, schemaVersion: 1, cwd: workspace };
+    return { ...runtimeInput, schemaVersion: 1, cwd: projectWorkspace(projectId) };
   };
   const submissionDigestFor = (input: ResourceConsoleTaskInput): string => digest(canonical({
     domain: 'ashlr-resource-console-submission-v1', scopeDigest, input,
   }));
   function decode(value: unknown): DurableState {
-    if (!object(value) || !exact(value, ['schemaVersion', 'scopeDigest', 'paused', 'jobs']) || ![1, 2, 3].includes(Number(value.schemaVersion)) ||
+    if (!object(value) || !exact(value, ['schemaVersion', 'scopeDigest', 'paused', 'jobs', ...(value.schemaVersion === 4 ? ['projects'] : [])]) ||
+      ![1, 2, 3, 4].includes(Number(value.schemaVersion)) ||
       typeof value.schemaVersion !== 'number' ||
       value.scopeDigest !== scopeDigest || typeof value.paused !== 'boolean' || !Array.isArray(value.jobs) ||
       value.jobs.length > MAX_RESOURCE_SUPERVISOR_JOBS) throw new Error('Invalid resource supervisor state');
+    if (value.schemaVersion === 4) projectBindings = validateResourceConsoleProjectBindings(value.projects, workspace);
     const ids = new Set<string>();
     for (const row of value.jobs) {
       const retained = object(row) && (Object.hasOwn(row, 'retainHistory') || Object.hasOwn(row, 'history'));
       const continuation = object(row) && ['parent', 'submissionDigest', 'context'].some((key) => Object.hasOwn(row, key));
       if (!object(row) || !exact(row, ['id', 'state', 'enqueuedAt', 'updatedAt', 'allowedWorkerIds', 'mode', 'workerId',
         'outcome', 'reason', 'taskDigest', 'input', ...(retained ? ['retainHistory', 'history'] : []),
-        ...(continuation ? ['parent', 'submissionDigest', 'context'] : [])]) ||
+        ...(continuation ? ['parent', 'submissionDigest', 'context'] : []), ...(Object.hasOwn(row, 'projectId') ? ['projectId'] : [])]) ||
         typeof row.id !== 'string' || !ID.test(row.id) || ids.has(row.id) ||
         typeof row.state !== 'string' || !STATES.includes(row.state) || !iso(row.enqueuedAt) || !iso(row.updatedAt) ||
         row.updatedAt < row.enqueuedAt || !Array.isArray(row.allowedWorkerIds) || row.allowedWorkerIds.length < 1 ||
@@ -206,6 +253,8 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         !(row.outcome === null || typeof row.outcome === 'string' && OUTCOMES.includes(row.outcome)) ||
         !(row.reason === null || typeof row.reason === 'string' && /^[a-z0-9-]{1,120}$/.test(row.reason)) ||
         typeof row.taskDigest !== 'string' || !HASH.test(row.taskDigest)) throw new Error('Invalid resource supervisor job');
+      if (Object.hasOwn(row, 'projectId') && (value.schemaVersion !== 4 || typeof row.projectId !== 'string' ||
+        row.projectId === 'default' || !projectBindings?.some((project) => project.id === row.projectId))) throw new Error('Invalid task project');
       if (retained) {
         if (value.schemaVersion === 1 || row.retainHistory !== true) throw new Error('Invalid history consent');
         const history = row.history;
@@ -222,13 +271,18 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       let context: ResourceConsoleContextTurn[] | null = null;
       if (continuation) {
         const parent = validateResourceConsoleParent(row.parent);
-        if (value.schemaVersion !== 3 || !ids.has(parent.taskId) || typeof row.submissionDigest !== 'string' ||
+        if (Number(value.schemaVersion) < 3 || !ids.has(parent.taskId) || typeof row.submissionDigest !== 'string' ||
           !HASH.test(row.submissionDigest)) throw new Error('Invalid conversation identity');
+        const source = value.jobs.find((job: DurableJob) => job.id === parent.taskId) as DurableJob;
+        if (source.projectId !== row.projectId) throw new Error('Conversation parent crosses project bindings');
         const needsContext = row.input !== null || retained && row.history !== null;
         if (needsContext) {
           context = validateResourceConsoleContext(row.context, row.id, parent.taskId);
           if (context.some((turn) => !ids.has(turn.taskId))) throw new Error('Conversation source identity unavailable');
-          const source = value.jobs.find((job: DurableJob) => job.id === parent.taskId) as DurableJob;
+          if (context.some((turn) =>
+            (value.jobs as DurableJob[]).find((job) => job.id === turn.taskId)?.projectId !== row.projectId)) {
+            throw new Error('Conversation context crosses project bindings');
+          }
           const last = context.at(-1)!;
           if (!['settled', 'cancelled'].includes(source.state) || last.outcome !== source.outcome ||
             resourceConsoleTranscriptDigest(scopeDigest, source, { prompt: last.prompt, output: last.output }, context.slice(0, -1)) !==
@@ -241,6 +295,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       if (row.state === 'queued' || row.state === 'dispatching') {
         const input = taskInput(row.input);
         if (input.id !== row.id || input.mode !== row.mode || canonical(input.allowedWorkerIds) !== canonical(row.allowedWorkerIds) ||
+          input.projectId !== row.projectId ||
           digest(canonical(taskFor(input, context))) !== row.taskDigest || row.outcome !== null ||
           (input.parent !== undefined) !== continuation || continuation && (canonical(input.parent) !== canonical(row.parent) ||
             submissionDigestFor(input) !== row.submissionDigest) ||
@@ -377,6 +432,8 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
   function start(job: DurableJob, observations: ResourceObservation[], unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]): void {
     if (!job.input) throw new Error('Queued task input unavailable');
+    const initialProjectHold = projectHold(job.projectId);
+    if (initialProjectHold) { if (job.reason !== initialProjectHold) update(job.id, { reason: initialProjectHold }); return; }
     update(job.id, { state: 'dispatching', reason: 'dispatch-requested', workerId: null });
     // Publish the supervisor's irreversible intent before entering the runtime.
     // A crash anywhere after this point is never recovered by replaying input.
@@ -385,13 +442,18 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     dispatched.add(job.id);
     attemptedAt.set(job.id, performance.now());
     const input = taskFor(job.input, job.context);
+    let admissionProjectHold: string | null = null;
     owned.promise = runResourceTask({ root, pool, bindings, observations, task: input, signal: controller.signal,
-      unavailableWorkerIds, quotaUnavailableWorkerIds }).then((result) => {
+      unavailableWorkerIds, quotaUnavailableWorkerIds,
+      ...(projectBindings ? { beforeWorkerDispatch: () => projectHold(job.projectId) === null, readAdmissionEvidence: () => {
+        admissionProjectHold = projectHold(job.projectId);
+        return { observations, unavailableWorkerIds: admissionProjectHold ? [...workerIds] : unavailableWorkerIds, quotaUnavailableWorkerIds };
+      } } : {}) }).then((result) => {
       if (result.replayed || !result.receipt) dispatched.delete(job.id);
       if (!result.receipt) {
         update(job.id, { state: controller.signal.aborted || closing ? 'cancelled' : 'queued',
           outcome: controller.signal.aborted || closing ? 'cancelled' : null, workerId: null,
-          input: controller.signal.aborted || closing ? null : job.input, reason: 'no-eligible-capacity',
+          input: controller.signal.aborted || closing ? null : job.input, reason: admissionProjectHold ?? 'no-eligible-capacity',
           ...((controller.signal.aborted || closing) && job.parent && !job.history ? { context: null } : {}) });
       } else {
         const recorded = resourcePoolStatus(root, pool, bindings, []).attempts;
@@ -457,6 +519,8 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
             settle(job, undefined, 'task-identity-conflict'); continue;
           }
           if (receipt) { settle(job, receipt, 'existing-receipt-unresolved'); continue; }
+          const projectReason = projectHold(job.projectId);
+          if (projectReason) { if (job.reason !== projectReason) update(job.id, { reason: projectReason }); continue; }
           // Even a denied admission persists new quota evidence in the existing
           // runtime. Recently denied jobs are skipped until their retry interval,
           // so they cannot starve other enrolled workers behind them in the queue.
@@ -468,6 +532,10 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
 
   const supervisor: ResourcePoolSupervisor = {
+    projects() {
+      return projectBindings ? detached(projectBindings.map(({ dev: _dev, ino: _ino, ...project }) =>
+        ({ ...project, enabled: enabledProjects.has(project.id) }))) : undefined;
+    },
     snapshot() {
       if (!closing && !error) { try { own(); } catch { /* Snapshot reports loss without private diagnostics. */ } }
       return { instanceId, paused: state.paused, closing, error: error ?? sourceError, maxParallel, maxQueued,
@@ -478,6 +546,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       ensureAvailable(); const input = taskInput(value);
       const previous = state.jobs.find((job) => job.id === input.id);
       if (previous) {
+        if (previous.projectId !== input.projectId) throw new ResourceSupervisorError('CONFLICT', 'Resource task project already set');
         // Retry the accepted identity before looking up a potentially deleted
         // source. A retry is never permission to rebuild context or restore text.
         if (previous.parent) {
@@ -494,6 +563,8 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         }
         return publicJob(previous);
       }
+      const projectReason = projectHold(input.projectId);
+      if (projectReason) throw new ResourceSupervisorError('UNAVAILABLE', projectReason);
       if (state.jobs.length >= MAX_RESOURCE_SUPERVISOR_JOBS || state.jobs.filter((job) => job.state === 'queued').length >= maxQueued) {
         throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor history or queue capacity reached');
       }
@@ -501,6 +572,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       if (input.parent) {
         const parent = state.jobs.find((job) => job.id === input.parent!.taskId);
         if (!parent?.history) throw new ResourceSupervisorError('NOT_FOUND', 'Parent transcript is unavailable or deleted');
+        if (parent.projectId !== input.projectId) throw new ResourceSupervisorError('CONFLICT', 'Follow-up must remain in its parent project');
         if (parent.state !== 'settled' && parent.state !== 'cancelled') {
           throw new ResourceSupervisorError('CONFLICT', 'Parent task has not reached terminal settlement');
         }
@@ -520,9 +592,10 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       const now = new Date().toISOString();
       const job: DurableJob = { id: input.id, state: 'queued', enqueuedAt: now, updatedAt: now,
         allowedWorkerIds: [...input.allowedWorkerIds], mode: input.mode, workerId: null, outcome: null, reason: null, input, taskDigest,
+        ...(input.projectId ? { projectId: input.projectId } : {}),
         ...(input.parent ? { parent: detached(input.parent), submissionDigest: submissionDigestFor(input), context: context! } : {}),
         ...(input.retainHistory === true ? { retainHistory: true as const, history: { prompt: input.prompt, output: null } } : {}) };
-      const next: DurableState = { ...detached(state), schemaVersion: input.parent ? 3 :
+      const next: DurableState = { ...detached(state), schemaVersion: state.schemaVersion === 4 ? 4 : input.parent ? 3 :
         state.schemaVersion === 1 && input.retainHistory === true ? 2 : state.schemaVersion,
         jobs: [...detached(state.jobs), job] };
       assertStateHeadroom(next); persist(next); schedule(0); return publicJob(job);
@@ -549,6 +622,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       const job = state.jobs.find((row) => row.id === id);
       return job?.history ? detached({ id, ...job.history, retention: 'local-until-deleted' as const,
         transcriptDigest: resourceConsoleTranscriptDigest(scopeDigest, job, job.history, job.context),
+        ...(job.projectId ? { projectId: job.projectId } : {}),
         ...(job.parent ? { parent: job.parent, context: job.context! } : {}) }) : null;
     },
     deleteHistory(id) {
@@ -596,6 +670,32 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     }
     const receipts = resourcePoolStatus(root, pool, bindings, []).attempts;
     const recovered = detached(state); let changed = persistedDigest === null;
+    if (configuredCatalogValue !== undefined || state.schemaVersion === 4) {
+      // Legacy tasks had canonical-path binding, not recorded inode evidence.
+      // The first explicit catalog adoption pins the default directory NOW;
+      // it does not manufacture historical identity evidence or alter task hashes.
+      const proposed = state.projects ? detached(state.projects) : [pinResourceConsoleProject({
+        id: 'default', label: 'Default workspace', workspace,
+      })];
+      for (const configured of configuredProjects) {
+        const prior = proposed.find((project) => project.id === configured.id);
+        if (prior) {
+          if (prior.workspace !== configured.workspace) throw new ResourceSupervisorError('CONFLICT', 'Resource project binding cannot be changed');
+          prior.label = configured.label;
+        } else {
+          if (proposed.length >= 32) throw new ResourceSupervisorError('CAPACITY', 'Resource project binding capacity reached');
+          const pinned = pinResourceConsoleProject(configured);
+          if (proposed.some((project) => project.workspace === pinned.workspace || project.dev === pinned.dev && project.ino === pinned.ino)) {
+            throw new ResourceSupervisorError('CONFLICT', 'Resource projects must identify distinct directories');
+          }
+          proposed.push(pinned);
+        }
+      }
+      projectBindings = proposed;
+      if (state.schemaVersion !== 4 || canonical(state.projects) !== canonical(proposed)) {
+        recovered.schemaVersion = 4; recovered.projects = detached(proposed); assertStateHeadroom(recovered); changed = true;
+      }
+    }
     for (const job of recovered.jobs) {
       if (job.state !== 'dispatching' && job.state !== 'queued') continue;
       let receipt: ResourceTaskReceipt | undefined;

@@ -140,6 +140,23 @@ function validQuotaRefresh(value: unknown, workers: ResourceConsoleSnapshot['poo
   return true;
 }
 
+function validProjects(scope: ResourceConsoleScope): boolean {
+  if (scope.projects === undefined && scope.defaultProjectId === undefined) return true;
+  if (scope.readOnly || scope.defaultProjectId !== 'default' || !Array.isArray(scope.projects) ||
+    scope.projects.length < 1 || scope.projects.length > 32) return false;
+  const ids = new Set<string>(); const workspaces = new Set<string>();
+  for (const project of scope.projects) {
+    if (!record(project) || !exact(project, ['id', 'label', 'workspace', 'enabled']) ||
+      typeof project.id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(project.id) || ids.has(project.id) ||
+      typeof project.label !== 'string' || !project.label.trim() || project.label !== project.label.trim() || new TextEncoder().encode(project.label).byteLength > 128 ||
+      [...project.label].some((character) => character.charCodeAt(0) < 32 ||
+        character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159) || !absolutePath(project.workspace) ||
+      workspaces.has(project.workspace) || typeof project.enabled !== 'boolean') return false;
+    ids.add(project.id); workspaces.add(project.workspace);
+  }
+  return scope.projects.find((project) => project.id === 'default')?.workspace === scope.workspace;
+}
+
 export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
   key: 'resource-console-scope',
   async fetch(signal) {
@@ -154,7 +171,7 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       scope.allocationWritable !== undefined && typeof scope.allocationWritable !== 'boolean' ||
       scope.historySupported !== undefined && (typeof scope.historySupported !== 'boolean' || scope.historySupported && scope.readOnly) ||
       scope.followUpSupported !== undefined && (typeof scope.followUpSupported !== 'boolean' ||
-        scope.followUpSupported && (scope.readOnly || scope.historySupported !== true))) {
+        scope.followUpSupported && (scope.readOnly || scope.historySupported !== true)) || !validProjects(scope)) {
       throw new Error('The server did not establish an explicit resource-pool scope.');
     }
     return scope;
@@ -258,7 +275,7 @@ export async function readResourceTaskOutput(id: string, signal?: AbortSignal): 
 }
 
 /** Private text is read on demand, never through the polling query cache. */
-export async function readResourceTaskHistory(id: string, signal?: AbortSignal): Promise<ResourceConsoleTranscript> {
+export async function readResourceTaskHistory(id: string, signal?: AbortSignal, expectedProjectId?: string): Promise<ResourceConsoleTranscript> {
   if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new Error('Invalid task identity.');
   const value = await apiGet<unknown>(`/api/resources/tasks/${encodeURIComponent(id)}/history`, signal);
   const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
@@ -266,10 +283,12 @@ export async function readResourceTaskHistory(id: string, signal?: AbortSignal):
   const digest = (candidate: unknown) => typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
   const validOutput = (candidate: unknown) => candidate === null || record(candidate) && exact(candidate, ['text', 'truncated']) &&
     typeof candidate.text === 'string' && bytes(candidate.text) <= 64 * 1024 && typeof candidate.truncated === 'boolean';
-  const optional = ['transcriptDigest', 'parent', 'context'].filter((key) => record(value) && Object.hasOwn(value, key));
+  const optional = ['transcriptDigest', 'parent', 'context', 'projectId'].filter((key) => record(value) && Object.hasOwn(value, key));
   if (!record(value) || !exact(value, ['id', 'prompt', 'output', 'retention', ...optional]) || value.id !== id ||
     typeof value.prompt !== 'string' || bytes(value.prompt) > 32 * 1024 || value.retention !== 'local-until-deleted' ||
     !validOutput(value.output) || Object.hasOwn(value, 'transcriptDigest') && !digest(value.transcriptDigest) ||
+    Object.hasOwn(value, 'projectId') && !validId(value.projectId) ||
+    expectedProjectId !== undefined && (value.projectId ?? 'default') !== expectedProjectId ||
     Object.hasOwn(value, 'parent') && (!record(value.parent) || !exact(value.parent, ['taskId', 'expectedTranscriptDigest']) ||
       !validId(value.parent.taskId) || value.parent.taskId === id || !digest(value.parent.expectedTranscriptDigest)) ||
     Object.hasOwn(value, 'context') && (!Array.isArray(value.context) || value.context.length > 256 || value.context.some((turn) =>

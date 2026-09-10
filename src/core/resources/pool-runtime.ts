@@ -11,7 +11,7 @@ import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { MAX_RESOURCE_OBSERVATION_WINDOWS, RESOURCE_OBSERVATION_OVERFLOW, planResourceAssignment, validateResourceObservations, validateResourcePool,
   type ResourceAssignmentPlan, type ResourceObservation, type ResourcePool } from './pool-policy.js';
-import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask } from './worker.js';
+import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask, type ResourceWorkerResult } from './worker.js';
 import { resourceUsageScopeForProvider, validResourceExecutionDuration, validResourceExecutionMeasurement, type ResourceExecutionMeasurement } from './performance.js';
 import { RESOURCE_NATIVE_PROCESS_SIGNALS, validResourceNativeProcessForReceipt, type ResourceNativeProcessDiagnostic } from './native-diagnostics.js';
 
@@ -351,7 +351,11 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
       sharesResourceQuota(worker, pool.workers.find((source) => source.id === row.workerId)!) && row.windows.some((window) =>
         window.usedPercent !== null && window.usedPercent >= 100 - worker.reservePercent));
     const retryAfter = shared.flatMap((row) => row.retryAfter ? [row.retryAfter] : []).sort().at(-1);
-    const failures = attempts.filter((row) => row.status === 'failed' || row.status === 'timed-out');
+    // A host precondition veto consumed a reservation, but never invoked this
+    // worker. Keep task-cap accounting without inferring a provider cooldown.
+    const failures = attempts.filter((row) => (row.status === 'failed' || row.status === 'timed-out') &&
+      !(row.status === 'failed' && row.reason === 'worker-dispatch-precondition-failed' && row.execution === undefined &&
+        row.nativeProcess === undefined && row.outputDigest === null && row.inputTokens === null && row.outputTokens === null));
     const latestFailure = failures.map((row) => Date.parse(row.finishedAt!)).sort((a, b) => b - a)[0];
     const cooldown = latestFailure === undefined ? undefined : new Date(latestFailure + 60_000).toISOString();
     const retry = [retryAfter, cooldown].filter((value): value is string => value !== undefined).sort().at(-1);
@@ -483,17 +487,21 @@ function transaction<T>(root: string, pool: ResourcePool, bindings: ResourceBind
 export async function runResourceTask(options: { root: string; pool: ResourcePool; bindings: ResourceBinding[];
   observations: ResourceObservation[]; task: ResourceTask; signal?: AbortSignal; unavailableWorkerIds?: string[];
   quotaUnavailableWorkerIds?: string[];
+  /** Last synchronous host precondition after reservation, before any worker invocation. */
+  beforeWorkerDispatch?: () => boolean;
   /** Synchronous, read-only evidence recheck under the admission lock; exact receipts bypass it. */
   readAdmissionEvidence?: () => { observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] } }): Promise<{
     receipt: ResourceTaskReceipt | null; plan: ResourceAssignmentPlan | null; replayed: boolean; output: string | null;
   }> {
   const { root, signal } = options;
+  const beforeWorkerDispatch = options.beforeWorkerDispatch;
   const { pool, bindings, poolDigest } = scope(options.pool, options.bindings);
   const unavailable = validateUnavailableResourceWorkerIds(options.unavailableWorkerIds === undefined ? [] : options.unavailableWorkerIds, pool);
   const quotaUnavailable = validateUnavailableResourceWorkerIds(options.quotaUnavailableWorkerIds === undefined ? [] : options.quotaUnavailableWorkerIds, pool);
   if (options.readAdmissionEvidence !== undefined && typeof options.readAdmissionEvidence !== 'function') {
     throw new Error('Invalid resource admission evidence reader');
   }
+  if (beforeWorkerDispatch !== undefined && typeof beforeWorkerDispatch !== 'function') throw new Error('Invalid worker dispatch precondition');
   const task = validateResourceTask(options.task);
   if (task.allowedWorkerIds.some((id) => !pool.workers.some((worker) => worker.id === id))) throw new Error('Resource task references an unknown worker');
   if (!path(root)) throw new Error('Invalid resource store');
@@ -553,11 +561,18 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
   const reserved = admission.receipt;
   const worker = pool.workers.find((row) => row.id === reserved.workerId)!;
   const binding = bindings.find((row) => row.workerId === reserved.workerId)!;
+  let dispatchAllowed = true;
+  if (beforeWorkerDispatch) {
+    try { dispatchAllowed = beforeWorkerDispatch() === true; }
+    catch { dispatchAllowed = false; }
+  }
   // This interval excludes both durable-store transactions and any supervisor queue.
   // Adapter preparation, execution and cleanup are included; it is not provider latency.
   const executionStarted = performance.now();
-  const result = await executeResourceWorker(worker, binding, { prompt: task.prompt, cwd: task.cwd,
-    timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, mode: task.mode }, signal);
+  const result: ResourceWorkerResult = dispatchAllowed
+    ? await executeResourceWorker(worker, binding, { prompt: task.prompt, cwd: task.cwd,
+      timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, mode: task.mode }, signal)
+    : { status: 'failed', output: '', inputTokens: null, outputTokens: null, reason: 'worker-dispatch-precondition-failed' };
   const elapsed = performance.now() - executionStarted;
   const finishedAt = new Date(Math.max(Date.now(), Date.parse(reserved.startedAt))).toISOString();
   const knownUsage = count(result.inputTokens) && count(result.outputTokens) && count(result.inputTokens + result.outputTokens);
@@ -565,8 +580,8 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
     outputDigest: result.output ? digest(result.output) : null, inputTokens: knownUsage ? result.inputTokens : null,
     outputTokens: knownUsage ? result.outputTokens : null,
     reason: result.reason, ...(result.nativeProcess === undefined ? {} : { nativeProcess: { ...result.nativeProcess } }),
-    execution: { schemaVersion: 1, scope: 'worker-execution',
-      durationMs: validResourceExecutionDuration(elapsed) ? elapsed : null, usageScope: result.usageScope ?? null } };
+    ...(dispatchAllowed ? { execution: { schemaVersion: 1 as const, scope: 'worker-execution' as const,
+      durationMs: validResourceExecutionDuration(elapsed) ? elapsed : null, usageScope: result.usageScope ?? null } } : {}) };
   if (!checkedReceipt(receipt, poolDigest, bindings, pool)) throw new Error('Resource worker returned invalid settlement evidence');
   transaction(root, pool, bindings, poolDigest, (state) => {
     const index = state.attempts.findIndex((row) => row.id === reserved.id);

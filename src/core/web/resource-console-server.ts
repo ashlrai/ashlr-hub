@@ -11,6 +11,7 @@ import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, type 
 import { acquireResourceQuotaRefreshLease, ResourceQuotaRefreshLeaseError, type ResourceQuotaRefreshLease } from '../resources/quota-refresh-lease.js';
 import { publishSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
 import { expandResourceQuotaDenials } from '../resources/quota-scope.js';
+import { validateResourceConsoleProjects } from '../resources/console-projects.js';
 import { createResourceConnectionMonitor, validateResourceConnectionConfig, type ResourceConnectionMonitor } from '../resources/connection-monitor.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from '../resources/metadata-coordinator.js';
 import type { ResourceConsoleScope, ResourceConsoleTaskInput, ResourceConsoleSnapshot } from '../resources/console-types.js';
@@ -27,6 +28,8 @@ export interface ResourceConsoleServerOptions {
   /** Explicit opt-in to no-generation native metadata collection. */
   quotaConfigFile?: string;
   connectionsConfigFile?: string;
+  /** Explicit private catalog of additional workspaces; default remains workspace. */
+  projectsFile?: string;
   allocationControls?: boolean;
   port?: number;
   execute?: boolean;
@@ -112,21 +115,40 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const observationsFile = validateUniverseConsoleRoot(options.observationsFile);
   const quotaConfigFile = options.quotaConfigFile === undefined ? null : validateUniverseConsoleRoot(options.quotaConfigFile);
   const connectionsConfigFile = options.connectionsConfigFile === undefined ? null : validateUniverseConsoleRoot(options.connectionsConfigFile);
+  const projectsFile = options.projectsFile === undefined ? null : validateUniverseConsoleRoot(options.projectsFile);
   const requestedPort = options.port ?? 0;
   const maxParallel = options.maxParallel ?? 4;
   if (!Number.isSafeInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535 ||
     !Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 16 ||
     (options.execute !== undefined && typeof options.execute !== 'boolean') ||
     (options.allocationControls !== undefined && typeof options.allocationControls !== 'boolean') ||
-    (options.execute === true ? !options.workspace : options.workspace !== undefined || options.maxParallel !== undefined)) {
+    (options.execute === true ? !options.workspace : options.workspace !== undefined || options.maxParallel !== undefined || projectsFile !== null)) {
     throw new Error('Invalid resource console options');
   }
   const workspace = options.execute ? validateUniverseConsoleRoot(options.workspace) : null;
-  if (workspace && [root, poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? [quotaConfigFile] : []),
-    ...(connectionsConfigFile ? [connectionsConfigFile] : [])].some((target) => {
-    const nested = relative(workspace, target);
+  // Load and freeze explicit authority before readers, listeners or collectors.
+  // The supervisor pins directory identities and holds drifted historical roots.
+  const catalog = projectsFile ? readResourceJson(projectsFile, 256 * 1024) : undefined;
+  if (projectsFile && (!exact(catalog, ['schemaVersion', 'projects']) || catalog.schemaVersion !== 1)) {
+    throw new Error('Invalid resource console project catalog');
+  }
+  const projects = projectsFile ? validateResourceConsoleProjects((catalog as { projects: unknown }).projects) : undefined;
+  if (projects) { projects.forEach((project) => Object.freeze(project)); Object.freeze(projects); }
+  const configuredWorkspaces = workspace ? [workspace, ...(projects?.map((project) => project.workspace) ?? [])] : [];
+  const contains = (parent: string, target: string) => {
+    const nested = relative(parent, target);
     return nested === '' || nested !== '..' && !nested.startsWith(`..${sep}`) && !isAbsolute(nested);
-  })) throw new Error('Resource control files must remain outside the writable workspace');
+  };
+  const controlFiles = [poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? [quotaConfigFile] : []),
+    ...(connectionsConfigFile ? [connectionsConfigFile] : []), ...(projectsFile ? [projectsFile] : [])];
+  for (const selectedWorkspace of configuredWorkspaces) {
+    // Legacy scopes allowed a workspace below the store; catalog adoption is stricter.
+    if (contains(selectedWorkspace, root) || projects !== undefined && contains(root, selectedWorkspace) ||
+      controlFiles.some((file) => contains(selectedWorkspace, file))) {
+      throw new Error('Resource control files must remain outside the writable workspace');
+    }
+  }
+  if (new Set(configuredWorkspaces).size !== configuredWorkspaces.length) throw new Error('Duplicate resource project workspace');
   if (signal?.aborted) throw new Error('Resource console startup cancelled');
   const pool = validateResourcePool(readResourceJson(poolFile));
   const bindings = validateResourceBindings(readResourceJson(bindingsFile), pool);
@@ -260,8 +282,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         if (url.pathname === '/api/resources/tasks') {
           const historyField = input !== null && typeof input === 'object' && Object.hasOwn(input, 'retainHistory');
           const parentField = input !== null && typeof input === 'object' && Object.hasOwn(input, 'parent');
+          const projectField = input !== null && typeof input === 'object' && Object.hasOwn(input, 'projectId');
           if (!exact(input, ['id', 'prompt', 'allowedWorkerIds', 'mode', 'timeoutMs', 'maxOutputTokens',
-            ...(historyField ? ['retainHistory'] : []), ...(parentField ? ['parent'] : [])]) ||
+            ...(historyField ? ['retainHistory'] : []), ...(parentField ? ['parent'] : []), ...(projectField ? ['projectId'] : [])]) ||
+            projectField && (typeof input.projectId !== 'string' || !ID.test(input.projectId)) ||
             historyField && typeof input.retainHistory !== 'boolean' || parentField &&
             (!exact(input.parent, ['taskId', 'expectedTranscriptDigest']) ||
               typeof input.parent.taskId !== 'string' || !ID.test(input.parent.taskId) ||
@@ -428,11 +452,14 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
     }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
+      ...(projects === undefined ? {} : { projects }),
       readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
         return quotaRefresher ? quotaRefresher.readObservations(base) : base; },
       ...(quotaConfig ? { readUnavailableWorkerIds: () => quotaRefresher ? quotaRefresher.unavailableWorkerIds()
         : quotaConfig.workers.map((row) => row.workerId),
         readQuotaUnavailableWorkerIds: () => quotaRefresher?.quotaUnavailableWorkerIds() ?? [] } : {}), signal });
+    const publishedProjects = supervisor?.projects?.();
+    if (publishedProjects !== undefined) { scope.projects = publishedProjects; scope.defaultProjectId = 'default'; }
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     if (quotaConfig || connectionsConfig) {
       // Execution ownership and all startup preflight must succeed before the

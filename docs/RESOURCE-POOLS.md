@@ -132,10 +132,87 @@ Live output comes from the producing console session; opted-in transcripts can
 survive it. Neither is a token stream. A
 completed task does not establish independent acceptance of its changes.
 
-The current console pins one workspace at startup. Other projects need explicit
-enrollment; selecting an arbitrary path in the browser is not supported. The next
-operating-layer milestones are conversation grouping and compaction,
-multi-project dispatch retaining one shared account ledger, scoped file browsing,
+### Multiple registered projects, one account ledger
+
+An execution console can register additional projects through `--projects` while
+keeping `--workspace` as its explicit default. Use the existing resource root,
+pool, bindings and observations; **do not create another account ledger per
+project**. This remains one supervisor, queue and metadata collector.
+
+The optional private catalog is a JSON file outside all writable workspaces:
+
+```json
+{
+  "schemaVersion": 1,
+  "projects": [
+    { "id": "cortex", "label": "Ashlr Cortex", "workspace": "/projects/ashlr-cortex" }
+  ]
+}
+```
+
+Catalog IDs are stable, unique lowercase identifiers. `default` is reserved for
+`--workspace`; do not list it again. Up to 31 additional projects are supported.
+Labels are trimmed plain text, limited to 128 UTF-8 bytes. Paths must be explicit,
+canonical directories. The private catalog is owner-only, a regular single-link
+file, and bounded to 256 KiB. Registration neither creates directories nor repairs
+permissions. Duplicate roots and control-store overlap are refused. Explicit
+nested projects are allowed; working-directory selection is **not a filesystem
+sandbox** or a claim that a native worker cannot access another repository.
+
+After enrolling the exact directories you intend to permit, an execution-enabled
+startup uses the existing command with an additional option:
+
+```sh
+ashlr resources pool console \
+  --root /private/resource-store \
+  --pool /private/resource-config/pool.json \
+  --bindings /private/resource-config/bindings.json \
+  --observations /private/resource-config/observations.json \
+  --execute --workspace /projects/ashlr-hub \
+  --projects /private/resource-config/projects.json
+```
+
+This command can resume queued work and invoke enrolled workers; it is not a
+read-only inspection command. Configure account access, quotas and the intended
+working directories before starting. The browser receives registered IDs and
+paths, but sends only `projectId`; it cannot enroll an arbitrary path. The default
+selection and an omitted `projectId` normalize identically for legacy retries.
+Cross-project follow-ups are refused. Account task caps, concurrency, pauses and
+quota observations remain shared across all projects.
+
+The left rail switches projects. Drafts, attachment text, worker choices and
+follow-up pins stay separate for visited projects in current browser memory;
+reload/disconnect discards unsent drafts. Prior project reads are cancelled when
+switching. Receipts without a proven supervisor project binding remain in
+Resources instead of being guessed into a project's task list.
+
+The first explicit catalog adoption atomically upgrades supervisor state to
+schema 4. Existing schemas 1–3 keep their task, receipt and conversation digests.
+The legacy default pathname is preserved; its current directory identity is
+adopted at migration, not asserted retrospectively. Subsequent bindings pin the
+canonical path and directory device/inode, not modification times or Git HEAD.
+Ordinary source edits therefore remain valid. Older binaries cannot read schema
+4; do not downgrade against the upgraded store or erase it to bypass validation.
+
+Adding a new ID is supported. Reordering or relabeling does not change identity.
+Omitting a previously registered project disables new work without deleting its
+history or binding. Its queued work remains held; independent projects continue.
+Restart without `--projects` disables additional projects while preserving the
+default and historical records. Exact retries remain idempotent. Re-enabling the
+same ID and path requires the original pinned directory identity; rebinding an
+old ID to another path is refused. The registry's 32-identity capacity is not reset
+by omission. Automated rebinding and registry compaction are not implemented.
+
+Missing, replaced or symlinked registered directories hold affected work. Identity
+is rechecked before admission, under the ledger lock and before worker invocation.
+If the final check fails after reservation, the attempt records failure without
+calling the worker; the task allowance stays consumed and no provider usage is
+invented. This project-local failure does not establish a provider outage. These
+checks reduce replacement races; string-based process working directories do not
+eliminate every time-of-check/time-of-use race or provide confinement.
+
+The next operating-layer milestones are conversation grouping and compaction,
+scoped file browsing,
 owned PTY sessions, and an isolated browser bridge. The existing Tauri wrapper
 remains a source-only draft; this web surface is not a commissioned installer.
 

@@ -23,7 +23,7 @@ describe('private transcript interaction', () => {
     expect(screen.getByText(transcript.output.text)).toBeVisible();
     expect(view.container.querySelector('script, img')).toBeNull();
     expect(screen.getByText('Truncated to the local retention limit.')).toBeVisible();
-    expect(read).toHaveBeenCalledWith('task-a', expect.any(AbortSignal));
+    expect(read).toHaveBeenCalledWith('task-a', expect.any(AbortSignal), undefined);
   });
 
   it('does not invent a response for receipt-only recovered history', async () => {

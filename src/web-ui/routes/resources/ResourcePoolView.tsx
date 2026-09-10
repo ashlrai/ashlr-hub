@@ -176,7 +176,8 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   return <div className={styles.view} onFocusCapture={() => { focusVersion.current += 1; }}>
     <header className={styles.pageHeading}>
       <div><h1>{surface === 'workspace' ? 'Engineering workspace' : 'Resource dispatch desk'}</h1>
-        <p>{surface === 'workspace' ? 'Work in one pinned project with your enrolled intelligence fleet.' : 'Route work across your enrolled accounts and local models.'}</p></div>
+        <p>{surface === 'workspace' ? scope.projects ? 'Work across registered projects with one shared intelligence fleet.'
+          : 'Work in one pinned project with your enrolled intelligence fleet.' : 'Route work across your enrolled accounts and local models.'}</p></div>
       <div className={styles.headerActions}>
         <nav className={styles.tabs} aria-label="Operating surface">
           <button type="button" aria-pressed={surface === 'workspace'} onClick={() => switchSurface('workspace')}>Workspace</button>

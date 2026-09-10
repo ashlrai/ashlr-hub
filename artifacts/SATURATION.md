@@ -1,5 +1,21 @@
 # Firm build evidence — September 10, 2026
 
+## Project workspace continuation from b3ad1a26
+
+Three parallel builder/reviewer assignments plus parent integration delivered
+registered project selection over one existing account ledger. Schema 4 pins
+directory identities, preserves legacy receipts and histories, and isolates
+directory-drift holds. The workspace keeps separate session drafts and prevents
+cross-project conversation context. Registration is not filesystem confinement.
+
+The final broad resource suite passed 2,421 tests, including the legacy startup
+compatibility regression, after correcting two stale mock contracts.
+UI: 1,126 passed. Safety: 449 passed, five skips. Typecheck, build, lint, docs and
+real-I/O classification passed. Browser checks used an inert local fixture; real
+HTTP/native fixtures verified directory selection, accounting and restart behavior.
+No actual Hub provider job, account changes or live activation. Full goal remains
+active, with native desktop tools and commissioning still outstanding.
+
 ## Follow-up continuation from 75d7897e
 
 Three parallel implementation/review agents plus parent integration delivered

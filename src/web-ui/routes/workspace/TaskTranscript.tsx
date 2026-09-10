@@ -4,9 +4,10 @@ import { readResourceTaskHistory } from '../../data/resource-pool-queries.js';
 import styles from './WorkspaceView.module.css';
 
 /** Mounted with a host/session/task key. Private text never enters the query cache. */
-export function TaskTranscript({ id, canDelete, unlocked, onUnlock, onDelete, onFollowUp }: {
+export function TaskTranscript({ id, canDelete, unlocked, onUnlock, onDelete, onFollowUp, projectId }: {
   id: string; canDelete: boolean; unlocked: boolean; onUnlock(): void; onDelete(): Promise<boolean>;
   onFollowUp?(parent: { taskId: string; expectedTranscriptDigest: string }, turns: number): void;
+  projectId?: string;
 }) {
   const [transcript, setTranscript] = useState<ResourceConsoleTranscript | null>(null);
   const [loading, setLoading] = useState(false);
@@ -27,7 +28,7 @@ export function TaskTranscript({ id, canDelete, unlocked, onUnlock, onDelete, on
     const version = ++generation.current;
     setLoading(true); setError(null);
     try {
-      const value = await readResourceTaskHistory(id, controller.signal);
+      const value = await readResourceTaskHistory(id, controller.signal, projectId);
       if (alive.current && generation.current === version && !controller.signal.aborted) setTranscript(value);
     } catch {
       if (alive.current && generation.current === version && !controller.signal.aborted) {

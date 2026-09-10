@@ -21,7 +21,12 @@ export interface ResourceConsoleScope {
   /** Explicit capability to retain opt-in task text in the private local store. */
   historySupported?: boolean;
   followUpSupported?: boolean;
+  projects?: ResourceConsoleProject[];
+  defaultProjectId?: 'default';
 }
+
+export interface ResourceConsoleProjectInput { id: string; label: string; workspace: string }
+export interface ResourceConsoleProject extends ResourceConsoleProjectInput { enabled: boolean }
 
 export interface ResourceConsoleGroup {
   capacityKey: string;
@@ -68,6 +73,7 @@ export interface ResourceConsoleTaskInput {
   /** Consent is immutable for this task ID; omission and false are equivalent. */
   retainHistory?: boolean;
   parent?: ResourceConsoleParent;
+  projectId?: string;
 }
 
 export interface ResourceConsoleParent { taskId: string; expectedTranscriptDigest: string }
@@ -92,6 +98,7 @@ export interface ResourceSupervisorJob {
   outputAvailable: boolean;
   historyAvailable?: true;
   parent?: ResourceConsoleParent;
+  projectId?: string;
 }
 
 export interface ResourceSupervisorSnapshot {
@@ -164,4 +171,5 @@ export interface ResourceConsoleTranscript {
   transcriptDigest?: string;
   context?: ResourceConsoleContextTurn[];
   parent?: ResourceConsoleParent;
+  projectId?: string;
 }

@@ -1,5 +1,26 @@
 # Firm build notes
 
+## September 10: shared-ledger project continuation
+
+- Baseline `b3ad1a26`; three agents divided core, HTTP and independent acceptance.
+  Parent owned UI/query integration, documentation and final verification.
+- Reused the existing supervisor and ledger rather than one quota store per
+  project. Schema 4 adds directory identities without changing legacy digests.
+  New roots require a private startup catalog; historical bindings never rebind.
+- Cold review prompted a final post-reservation directory check and a narrow
+  accounting distinction: a veto has no worker execution or provider cooldown,
+  but does not erase its consumed reservation. Legacy startup compatibility is
+  preserved; the stronger inverse-overlap check requires explicit catalog mode.
+- Broad resource testing found three deterministic old fixture failures: two
+  mocked quota collectors omitted quotaUnavailableWorkerIds, already required
+  at baseline. Corrected the fixtures, not production behavior; final 2,421 passed
+  including the new legacy startup compatibility regression.
+- UI 1,126 passed; safety 449 passed with five existing skips. Browser verified
+  per-project draft recovery, filtered tasks and reload clearing in an inert
+  fixture. Real I/O tests verify selected cwd and shared concurrency/task caps.
+- User checkout and actual active KILL retained. No account migration, provider
+  job, remote publication or activation. Native tools and commissioning remain.
+
 ## September 10: follow-up conversation continuation
 
 - Baseline `75d7897e`; clean isolated `auto/p00`, original checkout preserved.

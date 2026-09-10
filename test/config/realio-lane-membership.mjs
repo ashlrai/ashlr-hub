@@ -86,6 +86,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-followup.test.ts', // context headroom and corrupted durable-state refusal
   'test/resource-console-followup-server.test.ts', // authenticated follow-up HTTP and shared quota accounting
   'test/resource-console-followup-acceptance.test.ts', // independent context deletion, replay and real local transport
+  'test/resource-console-projects-server.test.ts', // catalog HTTP boundaries and actual CLI bootstrap
+  'test/resource-console-projects-acceptance.test.ts', // independent project cwd, shared accounting and migration
+  'test/resource-console-project-state.test.ts', // pinned-directory drift at reservation and worker dispatch
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership
   'test/resource-worker.test.ts', // native worker fixtures and numeric-loopback model transport
