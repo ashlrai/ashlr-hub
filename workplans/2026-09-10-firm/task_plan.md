@@ -1,0 +1,33 @@
+# Executable firm: package graph
+
+## Goal
+Implement the user's firm specification as tested executable packages, preserving
+existing activation, provenance, evaluation and resource invariants.
+
+## Phases
+- [x] Read the supplied specification; isolate baseline PR #404.
+- [x] Inventory reused primitives and materialize P00–P47.
+- [x] Wave 1: control graph, signed traces, verifier contract, harness archive.
+- [x] Integrate and test a provider-free complete path in isolated CLI processes.
+- [ ] Subsequent waves: wire remaining packages in dependency order.
+- [x] Review, record actual package/test receipts and exact local-only delivery state.
+
+## Decisions
+- Four active-agent slots total: parent plus three bounded workers per wave.
+- Separate auto/package branches/worktrees, with parent as sole merger.
+- No GitHub Actions. No provider dispatch or account allocation changes here.
+- Keep compiled activation roots empty; no constitution or safety-test edits.
+- Control graph initially lists planned packages; only real artifacts create
+  digest-bearing edges. Never invent terminal states to satisfy a count.
+
+## Errors
+Independent review found graph serialization/ID limits, archive capacity races,
+signal starvation and an unsupported Windows native cancellation path. Fixed
+with new regression tests. Real-I/O graph tests use a realistic execution budget
+while separately checking persisted deadline exhaustion.
+
+## Status
+Eleven locally landed component artifacts; thirty-seven packages remain planned.
+Full north-star completion is not claimed. Actual host KILL is active and remains
+untouched. Local package, CLI, UI, release-contract and safety gates passed;
+the full north-star implementation and production activation remain unfinished.

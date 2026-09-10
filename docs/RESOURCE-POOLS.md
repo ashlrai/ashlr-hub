@@ -14,6 +14,15 @@ CLI/model pair needs an explicit authenticated canary with the enrolled account.
 Fixture-based tests use inert executables and loopback responses; they do not
 establish authenticated multi-account production acceptance.
 
+Workers now consult the existing global `~/.ashlr/KILL` policy immediately before
+transport and poll it every 50 ms during execution. Active or unreadable policy
+cancels through the original transport's cleanup path; the polling interval is
+not a hard real-time guarantee. Cancellation preserves reported usage, completed
+output and uncertain native-process cleanup. It does not refund a reservation or
+prove that no provider work occurred. Native Windows workers report
+`worker-kill-cancellation-unsupported` before launch because owned cancellation
+is not implemented there; the local HTTP worker remains supported.
+
 ## Resource semantics
 
 | Resource | Source | Admission behavior |
