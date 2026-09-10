@@ -23,7 +23,7 @@ stubs are review aids, not signed runtime evidence.
 
 | North-star function | State | Existing machinery and remaining gap |
 | --- | --- | --- |
-| Purpose and living end state | UNWIRED | `value-allocation.ts` now binds mission/spec evidence to the existing pure portfolio scorer; `value-allocation-store.ts` persists signed ID-bound receipts. A dispatcher consuming those receipts and leasing capacity is still missing. |
+| Purpose and living end state | UNWIRED | `value-allocation.ts` binds mission/spec evidence to the pure portfolio scorer; `value-allocation-store.ts` persists signed ID-bound receipts. `firm-resource-execution.ts` now consumes a selected receipt through explicit host enrollment and existing resource reservations. The resident planner/graph caller remains unwired. |
 | Competing plans and artifact graph | UNWIRED | New `src/core/universe/control-graph.ts` persists signed intent/settlement and artifact dependencies. Trusted callbacks are not a model execution backend. |
 | Worker identity, quotas and reserves | UNWIRED | `src/core/resources/pool-runtime.ts` and `native-profile.ts` already implement explicit bindings, admission and profile isolation. Actual account commissioning remains unverified here. |
 | Codex, Claude and local execution | UNWIRED | Existing resource generation calls the pool. Preserve personal-worker exclusion and configured reserve ceilings; do not interpret worker usage as account-wide spend. |
@@ -32,8 +32,8 @@ stubs are review aids, not signed runtime evidence.
 | Best-of-N worktree execution | UNWIRED | `src/cli/swarm.ts` dispatches existing swarms. The new firm graph does not yet dispatch these swarms or isolate their sessions. |
 | Cold rival verification | UNWIRED | `cold-verifier.ts` binds a minimal request to distinct enrolled execution IDs and a nonce. Physical isolation and evaluator quality belong to the transport; identity strings alone do not prove either. |
 | Signed decisions and conflicts | UNWIRED | `decision-trace.ts` signs with existing read-only provenance and preserves conflicts. The graph uses it; sandboxed engine, daemon and all other effects are not yet joined. |
-| Agent-first queries and MCP | UNWIRED | Pure trace queries and existing Universe graph queries exist. A signed-graph MCP resource is not wired in this wave. |
-| Integration and handoff | UNWIRED | Existing integration/evaluation/delivery/handoff commands are functional local primitives. New integrate/deliver graph kinds remain withheld until these gates are explicitly connected. |
+| Agent-first queries and MCP | UNWIRED | `firm graph` and `firm traces` inspect any persisted signed control graph with bounded filters and retained conflicts. Actual CLI processes are tested; a signed-graph MCP resource remains unwired. |
+| Integration and handoff | UNWIRED | Existing integration/evaluation/delivery/handoff commands are local primitives. Git publication now rechecks global KILL under its prepared ref lock; exact already-published intents can still settle receipts under KILL. New integrate/deliver graph kinds remain withheld until these gates are explicitly connected. |
 | Automatic branch advancement | MISSING | Existing delivery creates a new branch. Expected-old-commit CAS advancement must preserve unexpected human commits and exact evaluation evidence. |
 | Restart recovery | UNWIRED | Existing portfolio controller reconciles proven dispatch completion. New graph keeps unresolved intents held; it does not silently replay interrupted workers. |
 | Resident company ticks | MISSING | Active-goal `runConductor()` is one bounded pass. No resident caller of the Universe portfolio controller was found. A watch flag does not close this gap. |
@@ -51,8 +51,10 @@ stubs are review aids, not signed runtime evidence.
 ## Next executable milestones
 
 1. Exercise the signed graph demo, its lying-builder rejection and conflict query.
-2. Connect allocation receipts to existing resource reservations and owned worker
-   transports; verify current account exclusions without reading keys into prompts.
+2. Connect the tested `executeFirmResourceTask` host adapter to the graph caller,
+   with truthful execution traces and cumulative hypothesis accounting. Its current
+   receipt-scoped dispatch already reuses resource reservations and current policy;
+   real account commissioning and provider acceptance remain unverified.
 3. Wire existing integration/evaluation/delivery APIs into graph nodes, then add
    independently tested expected-old-commit branch advancement.
 4. Add durable tick production, overlap suppression and exact attempt receipts

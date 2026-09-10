@@ -1023,3 +1023,40 @@ For implementation and local regressions, see `src/core/resources/` and
 `test/resource-*.test.ts`. Run focused tests, backend/web typecheck, and lint
 locally. No GitHub Actions, provider credentials, or real model calls are needed
 for this feature's deterministic acceptance suite.
+## Firm allocation execution adapter
+
+The Universe SDK exports `executeFirmResourceTask(request, host, { signal })`.
+This is an explicit host API, not an always-on dispatcher or a new daemon
+activation path. It does not discover accounts or change allocation sliders.
+
+The request binds an allocation ID, exact receipt digest, original hypotheses and
+their digest, one selected hypothesis, a prompt, timeout, and output allowance.
+The trusted host separately supplies the private allocation root, candidate path,
+current constitution version/policy epoch, and an enrollment mapping from the
+selected execution identity to a pinned runtime, pool and worker. The allocation
+signature remains selection evidence; it does not grant execution authority or
+prove that a worker belongs to a particular account.
+
+The adapter rejects human-gated, irreversible, sharded, expired or unallocated
+work. It passes the runtime digest to the consuming runtime so changing the
+ledger path between validation and consumption cannot silently create a second
+execution. Existing pool reservations, current quota observations, worker access
+restrictions, reserve ceilings and owned transport cleanup remain in force.
+
+One fixed completion operation is identified by receipt digest and hypothesis
+ID. Aliases reuse that identity; changed prompts or task limits conflict in the
+same retained ledger. Replays never return recovered model output or dispatch a
+new worker. Hosts must retain enrollment/ledger custody. A newly issued receipt
+is a new scope: this adapter does **not** implement cumulative cross-receipt
+hypothesis accounting or enforce hard provider-wide token spending limits.
+Native output limits are checked after the provider response, not a prepaid cap.
+
+Inspect `completion.resource.dispatch` and `taskStatus` for actual admission and
+execution; `disposition: "attempted"` means the runtime was called, not that a
+provider ran. Every result retains `verifiedAccepted: false`. Response data still
+needs independent evaluation before it can count toward engineering yield.
+KILL, cancellation and the earlier of hypothesis deadline/inventory reset request
+cooperative cancellation; polling is bounded at 50 ms, not hard real-time.
+The absolute deadline is also rechecked synchronously under the resource ledger
+lock before new admission, so setup and capacity waiting cannot renew its window.
+Tests use inert HTTP/native fixtures, not live Codex, Claude or Grok accounts.

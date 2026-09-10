@@ -544,10 +544,12 @@
     {
       "id": "P03",
       "title": "Conflict-preserving trace query",
-      "state": "planned",
+      "state": "landed-local",
       "branch": "auto/p03",
-      "artifactDigest": null,
-      "receipt": null
+      "artifactDigest": "d2c1d11c4f8810143fa7807b51786ccb632d1ce799abe015b232245e81cf9539",
+      "receipt": "artifacts/merge-traces.json#merge:d6c6bf3a7c6452e5000b16a2be14d516a6af4622",
+      "commit": "d6c6bf3a7c6452e5000b16a2be14d516a6af4622",
+      "completionScope": "tested general graph CLI and SDK; MCP and live status remain separate"
     },
     {
       "id": "P04",
@@ -588,10 +590,12 @@
     {
       "id": "P08",
       "title": "Receipt-to-capacity dispatcher",
-      "state": "planned",
+      "state": "landed-local",
       "branch": "auto/p08",
-      "artifactDigest": null,
-      "receipt": null
+      "artifactDigest": "a6fb1bf9710d6ac27a33c9949d30c25a0dc4d4b21f35eff101ae28c8653b9022",
+      "receipt": "artifacts/merge-traces.json#merge:9d9e434b4cf71b1d040db9134155a0e5970c970d",
+      "commit": "9d9e434b4cf71b1d040db9134155a0e5970c970d",
+      "completionScope": "tested explicit host API with inert real transports; graph caller, cumulative budgets and live commissioning remain separate"
     },
     {
       "id": "P09",
@@ -921,10 +925,10 @@
   "edges": [],
   "note": "This is the parent-maintained build plan, not a forged runtime execution ledger. Requires are declared dependencies. Local artifact digests and signed post-integration attestations are recorded separately. The executable fixture has its own signed artifact-edge ledger in a test-owned root. No planned package is marked complete merely to meet a count.",
   "progress": {
-    "locallyLandedPackages": 11,
-    "codeAndTestPackages": 10,
+    "locallyLandedPackages": 13,
+    "codeAndTestPackages": 12,
     "inventoryPackages": 1,
-    "plannedPackages": 37,
+    "plannedPackages": 35,
     "fullyAutonomous": false,
     "hostExecution": "withheld-global-kill",
     "externalDelivery": "not-pushed"

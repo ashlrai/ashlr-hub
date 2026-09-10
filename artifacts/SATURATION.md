@@ -3,10 +3,10 @@
 ## Actual work, not simulated agent counts
 
 - Host limit: four concurrent agents including the parent.
-- Six distinct worker/reviewer identities participated across reused work waves;
-  three cold reviewers started without implementer conversation history.
-- Parent was the sole committer/integrator. Eleven package artifacts landed locally:
-  ten code-and-test packages plus one source inventory. Twelve signed merge
+- The initial wave used six worker/reviewer identities. This continuation used
+  seven worker/reviewer roles, including three cold reviewers without builder history.
+- Parent was the sole committer/integrator. Thirteen package artifacts landed locally:
+  twelve code-and-test packages plus one source inventory. Sixteen signed merge
   attestations include the separate CLI/SDK integration commit.
 - `auto/p00` is the integration branch. Package branches/worktrees use `auto/pNN`.
   P01 was initially produced as an independent inventory in P21's worktree and
@@ -22,8 +22,10 @@
 | P00 | Durable artifact-bearing graph, signed event chain, restart/stop behavior | 24 |
 | P01 | Source-backed autonomy gap inventory | Source/path validation, not code tests |
 | P02 | DecisionTraceV1 signing and conflict-preserving query | 48 |
+| P03 | General verified graph inspection, filtered conflicts and real CLI processes | 23 |
 | P06 | Evidence-pinned caller of the existing pure portfolio scorer | 22 |
 | P07 | Immutable signed allocation storage, conflict/replay and capacity admission | 18 |
+| P08 | Explicit receipt-to-resource enrollment, real inert transport and locked deadline | 39 |
 | P13 | Minimal bound cold-verification transport contract | 45 |
 | P21 | Frozen baseline/evaluator archive, protected-path refusal, retained failures | 38 |
 | P27 | Immutable daily memory and CAS-linked consolidation versions | 30 |
@@ -35,6 +37,9 @@ Additional integration coverage includes real CLI processes with test-owned
 provenance and the exact public-document distribution allowlist. Original
 package commits and their patch digests are in `merge-traces.json`; later P00
 fixes and shared wiring are in integration commit `307a55de`.
+This continuation integrates through `63d1c101`: consumed runtime pins, absolute
+admission deadlines, SDK exports and real-I/O membership. Additional signed
+attestations retain the exact package/follow-up patch digests and verification revision.
 
 ## Findings corrected during independent review
 
@@ -50,7 +55,14 @@ fixes and shared wiring are in integration commit `307a55de`.
 
 ## Acceptance boundary
 
-Integrated local gates: 317 feature/package/CLI tests passed; 1,005 UI tests
+Continuation: 179 affected resource/graph tests and 38 focused delivery tests
+passed, plus 201 graph/demo/allocation/pool/package/release tests across seven
+additional files: 418 distinct focused cases. A broader delivery/handoff run passed 113 tests and overlaps the focused
+run. H1–H8 rerun: 449 passed, five skipped. Full core/web typecheck, production
+build, quiet whole-repository ESLint, documentation and real-I/O checks passed.
+All 48 plan nodes validate and all 16 host-local merge signatures verify.
+
+Historical initial-wave gates: 317 feature/package/CLI tests passed; 1,005 UI tests
 passed; 67 existing release-artifact tests passed. Full core/web typecheck,
 build, documentation checks and real-I/O classification passed. Whole-repository
 lint passed with 105 existing warnings and no errors. The final H1–H8 invariant
@@ -73,10 +85,11 @@ Verified engineering yield delta is **unknown**: no accepted product change,
 model-token denominator, retention change or live autonomous run was measured.
 Tests and commits are not substitutes for that metric.
 
-The 48-package plan contains 11 locally landed component artifacts and 37 planned
+The 48-package plan contains 13 locally landed component artifacts and 35 planned
 packages. The requested 40 terminal packages and 20 tested packages are **not
-met**. Nor is the full autonomous firm complete. Main gaps are receipt-consuming
-resource dispatch, fresh confined model verification, integration/CAS advancement,
+met**. Nor is the full autonomous firm complete. Main gaps are connecting the
+receipt resource adapter to graph effects and cumulative hypothesis accounting,
+fresh confined model verification, integration/CAS advancement,
 resident ticks behind existing activation, real product acceptance, harness
 promotion and the operator/MCP projections. See `docs/AUTONOMY-GAP.md`.
 

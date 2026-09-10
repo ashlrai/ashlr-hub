@@ -9,6 +9,9 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Inventory reused primitives and materialize P00–P47.
 - [x] Wave 1: control graph, signed traces, verifier contract, harness archive.
 - [x] Integrate and test a provider-free complete path in isolated CLI processes.
+- [x] Connect selected allocation receipts to explicit resource runtime enrollment.
+- [x] Add general signed graph inspection and actual CLI-process coverage.
+- [x] Enforce KILL at Git publication and absolute deadlines at resource admission.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -27,7 +30,17 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
-Eleven locally landed component artifacts; thirty-seven packages remain planned.
+P03 and P08 are integrated; cold review also tightened publication KILL checks,
+runtime pinning and absolute admission deadlines. Allocation signatures remain
+selection evidence; separate trusted host enrollment invokes existing resource
+reservations. Real inert native/HTTP fixtures and CLI processes passed.
+
+Thirteen locally landed component artifacts; thirty-five packages remain planned.
 Full north-star completion is not claimed. Actual host KILL is active and remains
 untouched. Local package, CLI, UI, release-contract and safety gates passed;
 the full north-star implementation and production activation remain unfinished.
+
+Next: connect the host adapter to truthful graph execution traces and confined
+implementation/independent acceptance, then resident ticks through existing
+activation. Keep cumulative cross-receipt budget accounting explicit; current
+receipt bounds are not a firm-wide spend ledger.

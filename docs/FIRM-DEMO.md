@@ -50,6 +50,28 @@ proof that externally owned work is dead or safe to retry.
 
 ## Evidence boundary
 
+### Inspect any signed graph
+
+The fixture-specific `status` and `query` commands retain their original contract.
+Use `graph` and `traces` for any persisted control graph, including incomplete
+graphs. These commands neither dispatch work nor acquire execution ownership:
+
+```sh
+node bin/ashlr universe firm graph --root /absolute/private/firm-graph --json
+node bin/ashlr universe firm traces --root /absolute/private/firm-graph --action graph-settled --entity node:builder --limit 20 --json
+```
+
+Trace filters also accept inclusive `--since` and `--until` UTC ISO timestamps.
+The default page contains up to 100 traces in history order; the maximum is 256.
+Conflict links remain intact even when the other trace is outside the page.
+`status: "available"` describes verified evidence availability, not execution
+success. Consult `graph.status` or `graphStatus` for the recorded execution state.
+Missing or unverifiable history exits with code 1 and exposes no traces; invalid
+filters exit with code 2. No keys are created. Read-only inspection remains
+available under KILL, but it does not prove a worker is currently alive.
+
+### What signatures establish
+
 The trace uses the existing provenance HMAC. This is integrity under a host-local
 key, not process isolation, independent model judgment, anti-rollback protection,
 resource capacity or an activation permit. Distinct checker IDs are caller-enrolled

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P08",
+  "kind": "unsigned-review-stub",
+  "action": "implement-explicit-receipt-resource-adapter",
+  "provenanceSig": null,
+  "authority": "none",
+  "note": "Not runtime evidence. Parent merge attestations are stored separately."
+}
