@@ -96,6 +96,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Explore verified engineering outcome attribution and comparable quality measurement with three agents.
 - [x] Connect the highest-value missing learning-data seam using existing signed evaluation and resource receipts.
 - [x] Prove attribution, incomplete-evidence handling and no duplicate counting; expose useful operator/agent evidence.
+- [x] Explore successor planning, matched benchmarks and the frozen supervision queue with three agents.
+- [x] Implement bounded durable queue admission and host-enabled automatic prepare-to-queue policy.
+- [ ] Resolve the automatic-intake acceptance timing gate: actual two-objective delivery and browser/policy checks pass, but frozen restart/replay acceptance exceeds 120s.
+- [x] Document and build the connected automatic intake path; retain remaining North Star gaps.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -178,6 +182,16 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Current continuation from clean `6b7fb229fbf0d2a87b528e6bc9c23d8caee97897`:
+connect new prepared work to existing running supervision. User clarified that
+per-objective human launch must not be required. Optional startup policy enables
+automatic admission after immutable preparation; legacy profiles remain
+nonexecuting. Append-only admission shares the existing deadline, pause revision,
+attempt history and resource ledger. Core, UI and actual acceptance are separate
+agent-owned streams; parent owns HTTP/CLI, documentation and browser checks.
+
+### Previous quota-scope status
+
 Quota-scope continuation from `10f1909c3a1fbbf43976f96bbbe5473313b56283`:
 independent durable General/Spark reservations are implemented through locked
 admission, authenticated controls, cached-read projection and the operator UI.

@@ -6,7 +6,16 @@ export interface ResourceConsoleEngineeringSupervisionConfig {
   pollIntervalMs: number;
   maxConcurrent: number;
   maxAttemptsPerEnrollment: number;
+  /** Explicit lifetime enrollment cap. Absent keeps the original fixed queue. */
+  maxEnrollments?: number;
+  /** Host policy for the preparation caller; does not add another execution path. */
+  autoAdmitPrepared?: true;
   enrollments: Array<{ enrollmentId: string; expectedEnrollmentDigest: string }>;
+}
+
+export interface ResourceConsoleEngineeringSupervisionAdmission {
+  enrollments: Array<{ enrollmentId: string; expectedEnrollmentDigest: string }>;
+  expectedRevision: number;
 }
 
 export const ENGINEERING_SUPERVISION_REASONS = [
@@ -23,8 +32,9 @@ export interface ResourceConsoleEngineeringSupervisionSnapshot {
   state: 'idle' | 'running' | 'paused' | 'completed' | 'timed-out' | 'closed' | 'unavailable';
   deadlineAt: string;
   paused: boolean;
-  /** Pause-control revision only; task progress does not invalidate a pause form. */
+  /** Shared pause/admission revision; task progress does not invalidate controls. */
   revision: number;
+  admission?: { maxEnrollments: number; remainingEnrollments: number; autoAdmitPrepared: boolean };
   entries: Array<{ enrollmentId: string; enrollmentDigest: string;
     state: 'waiting' | 'running' | 'completed' | 'held' | 'stopped' | 'unavailable';
     reasons: ResourceConsoleEngineeringSupervisionReason[]; attempts: number }>;

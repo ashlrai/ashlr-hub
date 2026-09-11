@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { decodeEngineeringSupervision, pauseEngineeringSupervision, readEngineeringSupervision } from './engineering-supervision.js';
+import { admitEngineeringSupervision, decodeEngineeringSupervision, pauseEngineeringSupervision, readEngineeringSupervision } from './engineering-supervision.js';
 import { apiGet, apiPost, ApiError } from './client.js';
 import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-store.js';
 import type { ResourceConsoleEngineeringSupervisionSnapshot as Snapshot } from '../../core/resources/console-engineering-supervisor-types.js';
@@ -10,6 +10,56 @@ const fixture = (): Snapshot => ({ schemaVersion: 1, configId: 'fleet', configDi
   entries: [{ enrollmentId: 'hub', enrollmentDigest: 'b'.repeat(64), state: 'waiting', reasons: ['waiting-for-readiness'], attempts: 0 }] });
 beforeEach(() => { vi.resetAllMocks(); vi.mocked(getMutationToken).mockReturnValue('control'); });
 describe('engineering supervision public boundary', () => {
+  const dynamic = (): Snapshot => ({ ...fixture(), deadlineAt: new Date(Date.now() + 60_000).toISOString(), admission: { maxEnrollments: 3, remainingEnrollments: 2, autoAdmitPrepared: false } });
+  const addition = { enrollmentId: 'next', expectedEnrollmentDigest: 'd'.repeat(64) };
+  const admitted = (value: Snapshot): Snapshot => ({ ...value, revision: value.revision + 1, admission: { ...value.admission!, remainingEnrollments: 1 },
+    entries: [...value.entries, { enrollmentId: addition.enrollmentId, enrollmentDigest: addition.expectedEnrollmentDigest, state: 'waiting', reasons: ['waiting-for-readiness'], attempts: 0 }] });
+  it('accepts an explicitly opted-in empty queue and validates remaining capacity', () => {
+    expect(decodeEngineeringSupervision({ ...dynamic(), entries: [], admission: { maxEnrollments: 3, remainingEnrollments: 3, autoAdmitPrepared: true } }).entries).toEqual([]);
+    expect(() => decodeEngineeringSupervision({ ...dynamic(), admission: { maxEnrollments: 3, remainingEnrollments: 3, autoAdmitPrepared: false } })).toThrow('verified');
+  });
+  it.each([null, { maxEnrollments: 33, remainingEnrollments: 32, autoAdmitPrepared: false }, { maxEnrollments: 0, remainingEnrollments: 0, autoAdmitPrepared: false },
+    { maxEnrollments: 3, remainingEnrollments: 2 }, { maxEnrollments: 3, remainingEnrollments: 2, autoAdmitPrepared: true, extra: true }])('rejects invalid admission capability %j', admission => {
+    expect(() => decodeEngineeringSupervision({ ...dynamic(), admission })).toThrow('verified');
+  });
+  it('admits exact selected IDs with CAS without changing deadline or pause', async () => {
+    const value = { ...dynamic(), state: 'paused' as const, paused: true }; const result = admitted(value);
+    vi.mocked(apiPost).mockResolvedValue(result);
+    await expect(admitEngineeringSupervision(value, [addition])).resolves.toEqual(result);
+    expect(apiPost).toHaveBeenCalledExactlyOnceWith('/api/resources/engineering-supervision/admit', { enrollments: [addition], expectedRevision: 0 }, 'control', undefined);
+    expect(touchMutationHold).toHaveBeenCalledOnce();
+  });
+  it('permits exact idempotent receipt confirmation without a revision increment', async () => {
+    const value = dynamic(); vi.mocked(apiPost).mockResolvedValue(value);
+    await expect(admitEngineeringSupervision(value, [{ enrollmentId: 'hub', expectedEnrollmentDigest: 'b'.repeat(64) }])).resolves.toEqual(value);
+  });
+  it.each(['legacy', 'full', 'expired', 'closed', 'missing-token', 'duplicate', 'changed-digest'])('refuses unsafe %s admission before HTTP', async kind => {
+    const value = dynamic(); let rows = [addition];
+    if (kind === 'legacy') delete value.admission;
+    if (kind === 'full') value.admission = { maxEnrollments: 1, remainingEnrollments: 0, autoAdmitPrepared: false };
+    if (kind === 'expired') value.deadlineAt = '2020-01-01T00:00:00.000Z';
+    if (kind === 'closed') value.state = 'closed';
+    if (kind === 'missing-token') vi.mocked(getMutationToken).mockReturnValue(null);
+    if (kind === 'duplicate') rows = [addition, addition];
+    if (kind === 'changed-digest') rows = [{ enrollmentId: 'hub', expectedEnrollmentDigest: 'f'.repeat(64) }];
+    await expect(admitEngineeringSupervision(value, rows)).rejects.toThrow(); expect(apiPost).not.toHaveBeenCalled();
+  });
+  it.each(['revision', 'deadline', 'old-entry', 'new-entry', 'paused', 'policy'])('rejects mismatched admission response %s', async kind => {
+    const value = dynamic(); const result = admitted(value);
+    if (kind === 'revision') result.revision++;
+    if (kind === 'deadline') result.deadlineAt = '2099-01-01T00:00:00.000Z';
+    if (kind === 'old-entry') result.entries[0] = { ...result.entries[0]!, enrollmentDigest: 'f'.repeat(64) };
+    if (kind === 'new-entry') result.entries[1]!.enrollmentDigest = 'f'.repeat(64);
+    if (kind === 'paused') result.paused = true;
+    if (kind === 'policy') result.admission!.autoAdmitPrepared = true;
+    vi.mocked(apiPost).mockResolvedValue(result);
+    await expect(admitEngineeringSupervision(value, [addition])).rejects.toThrow('not confirmed'); expect(touchMutationHold).not.toHaveBeenCalled();
+  });
+  it('redacts failed admissions, never retries and clears rejected control authority', async () => {
+    vi.mocked(apiPost).mockRejectedValue(new ApiError('PRIVATE_TOKEN', 401, '/admit'));
+    await expect(admitEngineeringSupervision(dynamic(), [addition])).rejects.toThrow('not confirmed');
+    expect(apiPost).toHaveBeenCalledOnce(); expect(clearMutationToken).toHaveBeenCalledOnce();
+  });
   it('reads closed metadata without control authority or side effects', async () => {
     const value = fixture(); vi.mocked(apiGet).mockResolvedValue(value);
     await expect(readEngineeringSupervision()).resolves.toEqual(value);

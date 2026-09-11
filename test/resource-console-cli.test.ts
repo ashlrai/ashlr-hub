@@ -50,6 +50,8 @@ describe('explicit foreground resource console CLI', () => {
     expect(out.mock.calls[0]![0]).toContain('do not enable execution, reset quota, stop in-flight tasks or authorize overage');
     expect(out.mock.calls[0]![0]).toContain('--engineering-preparation requires --execute and --projects');
     expect(out.mock.calls[0]![0]).toContain('Run the prepared plan separately');
+    expect(out.mock.calls[0]![0]).toContain('autoAdmitPrepared');
+    expect(out.mock.calls[0]![0]).toContain('original deadline and retained queue capacity');
   });
   it.each([false, true])('passes explicit scope and emits one startup record (execute=%s)', async (execute) => {
     const handle = server(execute); backend.start.mockResolvedValue(handle);
@@ -110,14 +112,15 @@ describe('explicit foreground resource console CLI', () => {
     expect(await cmdResourceConsole([...args, ...extra, '--engineering-preparation', '/private/fixture/profiles.json'])).toBe(2);
     expect(backend.start).not.toHaveBeenCalled();
   });
-  it('passes explicit preparation profiles without a static engineering catalog', async () => {
+  it.each([false, true])('passes preparation profiles without a static catalog (supervision=%s)', async (automatic) => {
     backend.start.mockResolvedValue(server(true)); const before = process.listeners('SIGTERM');
     const running = cmdResourceConsole([...args, '--execute', '--workspace', '/private/fixture/workspace', '--projects', '/private/fixture/projects.json',
-      '--engineering-preparation', '/private/fixture/profiles.json', '--json']);
+      '--engineering-preparation', '/private/fixture/profiles.json', ...(automatic ? ['--engineering-supervision', '/private/fixture/supervision.json'] : []), '--json']);
     try {
       await vi.waitFor(() => expect(out).toHaveBeenCalledOnce());
       expect(backend.start.mock.calls[0]![0]).toMatchObject({ engineeringPreparationFile: '/private/fixture/profiles.json', execute: true });
       expect(backend.start.mock.calls[0]![0]).not.toHaveProperty('engineeringFile');
+      expect(backend.start.mock.calls[0]![0].engineeringSupervisionFile).toBe(automatic ? '/private/fixture/supervision.json' : undefined);
     } finally { signal('SIGTERM', before); await running; }
     expect(await running).toBe(0);
   });

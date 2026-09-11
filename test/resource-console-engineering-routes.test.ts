@@ -5,7 +5,11 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const owner = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), catalog: vi.fn(), snapshot: vi.fn(),
   readiness: vi.fn(), launch: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
-const automatic = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), start: vi.fn(), snapshot: vi.fn(), setPaused: vi.fn(), close: vi.fn() }));
+const automatic = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), start: vi.fn(), snapshot: vi.fn(), setPaused: vi.fn(), admit: vi.fn(), close: vi.fn() }));
+const preparation = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), profiles: vi.fn(), check: vi.fn(), prepare: vi.fn() }));
+vi.mock('../src/core/resources/console-engineering-preparation.js', () => ({
+  validateResourceConsoleEngineeringPreparationConfig: preparation.validate, createResourceConsoleEngineeringPreparation: preparation.create,
+}));
 vi.mock('../src/core/resources/console-engineering-supervisor.js', () => ({
   validateResourceConsoleEngineeringSupervisionConfig: automatic.validate, createResourceConsoleEngineeringSupervisor: automatic.create,
 }));
@@ -42,6 +46,7 @@ beforeEach(() => {
   automatic.validate.mockImplementation(value => value); automatic.create.mockReturnValue(automatic); automatic.close.mockResolvedValue(undefined);
   automatic.snapshot.mockReturnValue({ schemaVersion: 1, configId: 'automatic-fixture', paused: false, revision: 0 });
   automatic.setPaused.mockImplementation(paused => ({ schemaVersion: 1, configId: 'automatic-fixture', paused, revision: 1 }));
+  preparation.validate.mockImplementation(value => value); preparation.create.mockReturnValue(preparation);
 });
 
 describe('explicit engineering supervision HTTP boundary', () => {
@@ -73,6 +78,52 @@ describe('explicit engineering supervision HTTP boundary', () => {
     automatic.setPaused.mockImplementation(() => { throw new ResourceSupervisorError('CONFLICT', '/private/state'); });
     const conflict = await post(handle, route, { paused: false, expectedRevision: 0 });
     expect(conflict.status).toBe(409); expect(await conflict.text()).not.toContain('/private/state');
+  });
+  it('admits only through explicit control authority and delegates the unchanged request to the owner', async () => {
+    const handle = await supervised(); const request = { enrollments: [input], expectedRevision: 0 };
+    automatic.admit.mockReturnValue({ configId: 'automatic-fixture', revision: 1 });
+    expect((await post(handle, `${route}/admit`, request, { 'x-ashlr-token': handle.readToken, origin: handle.url })).status).toBe(401);
+    expect((await post(handle, `${route}/admit`, request, { 'x-ashlr-token': handle.controlToken! })).status).toBe(403);
+    expect((await post(handle, `${route}/admit`, request, { 'x-ashlr-token': handle.controlToken!, origin: 'http://other.invalid' })).status).toBe(403);
+    expect(automatic.admit).not.toHaveBeenCalled();
+    const response = await post(handle, `${route}/admit`, request);
+    expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(automatic.admit).toHaveBeenCalledExactlyOnceWith(request); expect(owner.launch).not.toHaveBeenCalled();
+    automatic.admit.mockImplementation(() => { throw new ResourceSupervisorError('CONFLICT', '/private/queue'); });
+    const conflict = await post(handle, `${route}/admit`, request);
+    expect(conflict.status).toBe(409); expect(await conflict.text()).not.toContain('/private/queue');
+    expect((await fetch(`${handle.url}${route}/admit`, { headers: { 'x-ashlr-token': handle.readToken } })).status).toBe(404);
+  });
+  it('refuses automatic preparation policy without profiles before creating owners', async () => {
+    const file = join(directory, 'automatic-policy.json');
+    save(file, { schemaVersion: 1, id: 'automatic-fixture', maxEnrollments: 2, autoAdmitPrepared: true });
+    await expect(start({ engineeringSupervisionFile: file })).rejects.toThrow('requires preparation profiles');
+    expect(owner.create).not.toHaveBeenCalled(); expect(automatic.create).not.toHaveBeenCalled();
+  });
+  it.each(['CAPACITY', 'UNAVAILABLE'] as const)('preserves prepared registration across %s admission failure and reconciles the exact retry', async code => {
+    const supervisionFile = join(directory, 'automatic-policy.json'); const preparationFile = join(directory, 'profiles.json');
+    save(supervisionFile, { schemaVersion: 1, id: 'automatic-fixture', maxEnrollments: 2, autoAdmitPrepared: true });
+    save(preparationFile, { schemaVersion: 1, profiles: [] });
+    const handle = await start({ engineeringPreparationFile: preparationFile, engineeringSupervisionFile: supervisionFile });
+    expect(handle.scope.engineeringPreparationAutoAdmission).toBe(true);
+    const request = { id: 'fix', profileId: 'fixture', name: 'Correction', objective: 'Bounded correction', expectedPlanDigest: 'b'.repeat(64) };
+    const plan = { id: 'fix', planDigest: request.expectedPlanDigest };
+    preparation.prepare.mockReturnValueOnce({ plan, enrollment, disposition: 'created' })
+      .mockReturnValueOnce({ plan, enrollment, disposition: 'replayed' });
+    automatic.admit.mockImplementationOnce(() => { throw new ResourceSupervisorError(code, '/private/sensitive-registration-details'); })
+      .mockReturnValueOnce({ schemaVersion: 1, configId: 'automatic-fixture', revision: 1 });
+    const first = await post(handle, '/api/resources/engineering/prepare', request);
+    expect(first.status).toBe(200); expect(first.headers.get('cache-control')).toBe('no-store');
+    const firstText = await first.text(); expect(firstText).not.toMatch(/private|sensitive-registration/);
+    expect(JSON.parse(firstText)).toEqual({ plan, enrollment, disposition: 'created',
+      automaticAdmission: { state: 'unavailable', supervisionId: 'automatic-fixture' } });
+    expect(preparation.prepare).toHaveBeenCalledExactlyOnceWith(request); expect(owner.launch).not.toHaveBeenCalled();
+    const second = await post(handle, '/api/resources/engineering/prepare', request);
+    expect(second.status).toBe(200); expect(await second.json()).toEqual({ plan, enrollment, disposition: 'replayed',
+      automaticAdmission: { state: 'admitted', supervisionId: 'automatic-fixture' } });
+    expect(preparation.prepare).toHaveBeenNthCalledWith(2, request);
+    expect(automatic.admit.mock.calls).toEqual([[{ expectedRevision: 0, enrollments: [input] }], [{ expectedRevision: 0, enrollments: [input] }]]);
+    expect(owner.launch).not.toHaveBeenCalled(); expect(automatic.start).toHaveBeenCalledOnce();
   });
   it('does not create or start a supervisor without the separate startup flag', async () => {
     const handle = await start(); expect(handle.scope.engineeringSupervisionSupported).toBeUndefined();

@@ -41,6 +41,32 @@ beforeEach(() => { setMutationToken(token); });
 afterEach(() => { act(() => clearMutationToken()); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('objective preparation composer', () => {
+  it.each(['admitted', 'unavailable'] as const)('discloses prepare-and-queue and preserves automatic admission %s', async state => {
+    const f = transport(); const original = f.request.getMockImplementation()!; const input = props();
+    f.request.mockImplementation(async (path, options) => {
+      const response = await original(path, options);
+      if (path !== '/api/resources/engineering/prepare') return response;
+      return json({ ...await response.json(), automaticAdmission: { state, supervisionId: 'fleet' } });
+    });
+    render(<EngineeringObjectiveComposer {...input} autoAdmission />); await fill();
+    fireEvent.click(screen.getByRole('button', { name: 'Check plan' }));
+    const button = await screen.findByRole('button', { name: 'Prepare and queue' }); await waitFor(() => expect(button).toBeEnabled());
+    expect(screen.getByText(/Preparing also queues this plan/)).toBeInTheDocument();
+    expect(screen.getByText(/This check is read-only/)).toHaveTextContent('Queued execution may create worktrees and a local delivery branch');
+    expect(screen.getByText(/This check is read-only/)).toHaveTextContent('no push, merge or remote deployment is requested');
+    expect(f.posts('/api/resources/engineering/prepare')).toHaveLength(0);
+    fireEvent.click(button); await waitFor(() => expect(input.onPrepared).toHaveBeenCalledOnce());
+    expect(screen.getByRole('status')).toHaveTextContent(state === 'admitted' ? 'Plan prepared and added to automatic work' : 'Registration is preserved');
+    expect(screen.queryByText(/Nothing has launched/)).not.toBeInTheDocument();
+    expect(f.posts('/api/resources/engineering/start')).toHaveLength(0);
+    expect(f.posts('/api/resources/engineering/prepare')).toHaveLength(1);
+  });
+  it('invalidates a checked manual plan when automatic admission mode changes', async () => {
+    transport(); const input = props(); const view = render(<EngineeringObjectiveComposer {...input} />); await fill(); await check();
+    view.rerender(<EngineeringObjectiveComposer {...input} autoAdmission />);
+    expect(screen.queryByRole('region', { name: 'Checked objective plan' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Prepare and queue' })).toBeDisabled();
+  });
   it('requires unlock before even loading profiles', () => {
     clearMutationToken(); const f = transport(); const input = props(); render(<EngineeringObjectiveComposer {...input} unlocked={false} />);
     expect(f.request).not.toHaveBeenCalled(); expect(screen.getByRole('button', { name: 'Check plan' })).toBeDisabled();
@@ -55,6 +81,7 @@ describe('objective preparation composer', () => {
   });
   it('requires explicit check then prepare and never launches or writes drafts to browser storage', async () => {
     const f = transport(); const input = props(); render(<EngineeringObjectiveComposer {...input} />); await fill(); await check();
+    expect(screen.getByText(/This check is read-only/)).toHaveTextContent('Preparation registers the plan without running it');
     expect(f.posts('/api/resources/engineering/prepare')).toHaveLength(0);
     const checked = JSON.parse(String(f.posts('/api/resources/engineering/prepare/check')[0]?.[1]?.body)) as Objective;
     expect(checked.id).toMatch(/^objective-[a-f0-9-]+$/); expect(Object.keys(checked).sort()).toEqual(['id', 'name', 'objective', 'profileId']);

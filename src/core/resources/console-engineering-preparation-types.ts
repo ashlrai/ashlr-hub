@@ -33,4 +33,6 @@ export interface ResourceConsoleEngineeringObjectivePrepared {
   plan: ResourceConsoleEngineeringObjectivePlan;
   enrollment: ResourceConsoleEngineeringEnrollment;
   disposition: 'created' | 'replayed';
+  /** Present only for the host-enabled prepare-to-queue policy; not proof of execution. */
+  automaticAdmission?: { state: 'admitted' | 'unavailable'; supervisionId: string };
 }

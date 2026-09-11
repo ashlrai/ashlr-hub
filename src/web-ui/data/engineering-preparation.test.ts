@@ -9,6 +9,17 @@ const request = vi.fn<typeof fetch>();
 beforeEach(() => { vi.clearAllMocks(); clearMutationToken(); vi.stubGlobal('fetch', request); });
 afterEach(() => { clearMutationToken(); vi.unstubAllGlobals(); });
 describe('engineering preparation control boundary', () => {
+  it.each(['admitted', 'unavailable'] as const)('accepts bounded automatic admission %s without another request', async state => {
+    setMutationToken(token); const value = { ...preparationResult(), automaticAdmission: { state, supervisionId: 'fleet' } };
+    request.mockResolvedValue(json(value));
+    await expect(prepareEngineeringObjective(preparationInput(), preparationProfile(), preparationPlan(), undefined, true)).resolves.toEqual(value);
+    expect(request).toHaveBeenCalledOnce();
+  });
+  it.each([undefined, null, { state: 'launched', supervisionId: 'fleet' }, { state: 'admitted', supervisionId: '../private' },
+    { state: 'unavailable', supervisionId: 'fleet', error: 'PRIVATE' }])('refuses missing or malformed expected automatic admission %j', async automaticAdmission => {
+    setMutationToken(token); request.mockResolvedValue(json({ ...preparationResult(), ...(automaticAdmission === undefined ? {} : { automaticAdmission }) }));
+    await expect(prepareEngineeringObjective(preparationInput(), preparationProfile(), preparationPlan(), undefined, true)).rejects.toThrow('verified');
+  });
   it('requires control authority even to read profiles', async () => {
     await expect(listEngineeringProfiles('default')).rejects.toThrow('Unlock'); expect(request).not.toHaveBeenCalled();
     setMutationToken(token); request.mockResolvedValue(json({ profiles: [preparationProfile()] }));

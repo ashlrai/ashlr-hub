@@ -5,7 +5,7 @@ import { checkEngineeringObjective, listEngineeringProfiles, prepareEngineeringO
 import { useMutationHold } from '../../data/hooks.js';
 import styles from './EngineeringObjectiveComposer.module.css';
 
-type Props = { projectId: string; available: boolean; unlocked: boolean; onUnlock(): void;
+type Props = { projectId: string; available: boolean; unlocked: boolean; autoAdmission?: boolean; onUnlock(): void;
   onPrepared(value: Prepared): void; onRefresh(): void };
 const newId = () => `objective-${crypto.randomUUID()}`;
 const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
@@ -14,7 +14,7 @@ const bytes = (value: string) => new TextEncoder().encode(value).byteLength;
 export function EngineeringObjectiveComposer(props: Props) {
   return <ObjectiveForm key={props.projectId} {...props} />;
 }
-function ObjectiveForm({ projectId, available, unlocked, onUnlock, onPrepared, onRefresh }: Props) {
+function ObjectiveForm({ projectId, available, unlocked, autoAdmission = false, onUnlock, onPrepared, onRefresh }: Props) {
   const hold = useMutationHold();
   const [id, setId] = useState(newId);
   const [name, setName] = useState(''); const [objective, setObjective] = useState('');
@@ -31,7 +31,9 @@ function ObjectiveForm({ projectId, available, unlocked, onUnlock, onPrepared, o
 
   useEffect(() => {
     epoch.current++; request.current?.abort(); setPlan(null); setProfiles(null); setBusy(null);
-    if (preparing.current) { preparing.current = false; setUncertain(true); setError('Preparation response was interrupted. Keep this objective ID and reconcile it; no launch was requested.'); }
+    if (preparing.current) { preparing.current = false; setUncertain(true); setError(autoAdmission
+      ? 'Preparation response was interrupted. Keep this objective ID and refresh supervision; the plan may already be queued or running.'
+      : 'Preparation response was interrupted. Keep this objective ID and reconcile it; no launch was requested.'); }
     if (!enabled) return;
     const abort = new AbortController(); request.current = abort; const captured = epoch.current;
     setBusy('profiles');
@@ -41,7 +43,7 @@ function ObjectiveForm({ projectId, available, unlocked, onUnlock, onPrepared, o
       if (!abort.signal.aborted && captured === epoch.current) setError('Profiles could not be read. Refresh after checking control access.');
     }).finally(() => { if (!abort.signal.aborted && captured === epoch.current) setBusy(null); });
     return () => { abort.abort(); request.current?.abort(); };
-  }, [projectId, enabled, hold.token, refresh]);
+  }, [projectId, enabled, hold.token, refresh, autoAdmission]);
 
   function edit(change: () => void) {
     if (busy || uncertain || prepared) return;
@@ -57,10 +59,14 @@ function ObjectiveForm({ projectId, available, unlocked, onUnlock, onPrepared, o
         const checked = await checkEngineeringObjective(input, selected, abort.signal);
         if (!abort.signal.aborted && captured === epoch.current) setPlan(checked);
       } else {
-        const result = await prepareEngineeringObjective(input, selected, plan!, abort.signal);
+        const result = await prepareEngineeringObjective(input, selected, plan!, abort.signal, autoAdmission);
         if (!abort.signal.aborted && captured === epoch.current) {
           setUncertain(false); setPrepared(true); setPlan(null);
-          setNotice('Plan prepared and selected below. Nothing has launched. Review local readiness, then use Run enrolled plan.');
+          setNotice(result.automaticAdmission?.state === 'admitted'
+            ? 'Plan prepared and added to automatic work. It may start under the existing supervision deadline; a paused queue stays paused.'
+            : result.automaticAdmission?.state === 'unavailable'
+              ? 'Plan prepared and registered, but automatic admission was not confirmed. Registration is preserved. Refresh supervision before adding or running it; do not create a duplicate objective.'
+              : 'Plan prepared and selected below. Nothing has launched. Review local readiness, then use Run enrolled plan.');
           onPrepared(result);
         }
       }
@@ -106,19 +112,21 @@ function ObjectiveForm({ projectId, available, unlocked, onUnlock, onPrepared, o
         <h5>Read-only context</h5>{selected.contextFiles.length ? <ul>{selected.contextFiles.map(file => <li key={file}>{file}</li>)}</ul> : <p>No additional context files.</p>}
         <h5>Enrolled workers</h5><ul>{selected.allowedWorkerIds.map(worker => <li key={worker}>{worker}</li>)}</ul>
       </> : <p>{profiles?.length === 0 ? 'No reviewed evaluation profile is configured for this project. Ask the host operator to enroll one; this form cannot invent acceptance criteria.' : 'Unlock and select a profile to inspect its fixed scope.'}</p>}
-      <p>Checks and preparation contact no worker or evaluator. A prepared plan is not accepted work or available provider capacity.</p>
+      <p>{autoAdmission ? 'Checking contacts no worker or evaluator. Preparing also queues this plan for automatic execution under the existing supervision deadline.' : 'Checks and preparation contact no worker or evaluator.'} A prepared plan is not accepted work or available provider capacity.</p>
     </aside></div>
     {plan ? <section className={styles.review} aria-label="Checked objective plan"><h4>Review before preparation</h4><p>{plan.name}</p><p>{plan.objective}</p>
-      <p>Local delivery branch: <code>{plan.branch}</code>. No checkout, merge or deployment is requested.</p>
+      <p>Local delivery branch: <code>{plan.branch}</code>. This check is read-only. {autoAdmission
+        ? 'Queued execution may create worktrees and a local delivery branch; no push, merge or remote deployment is requested.'
+        : 'Preparation registers the plan without running it. Later execution may create worktrees and a local delivery branch; no push, merge or remote deployment is requested.'}</p>
       <details><summary>Checked plan identity</summary><code>{plan.planDigest}</code><p>Profile digest: <code>{plan.profileDigest}</code></p></details>
-      <p>Prepare registers this exact plan. Running it remains a separate action; preparation does not add it to automatic supervision.</p></section> : null}
+      <p>{autoAdmission ? 'Prepare and queue registers this exact plan and admits it to automatic work. The original queue deadline, pause, account reserves and execution limits remain in force.' : 'Prepare registers this exact plan. Running it remains a separate action; preparation does not add it to automatic supervision.'}</p></section> : null}
     {error ? <p className={`${styles.feedback} ${styles.error}`} role="alert">{error}</p> : null}
-    {uncertain ? <p className={styles.feedback}>The preparation outcome is unknown. Keep the same objective ID. Refresh enrolled plans, check again if needed, then explicitly reconcile preparation. This never retries execution.</p> : null}
+    {uncertain ? <p className={styles.feedback}>The preparation outcome is unknown. Keep the same objective ID. Refresh enrolled plans, check again if needed, then explicitly reconcile preparation. {autoAdmission ? 'The plan may already be queued or running; reconciliation uses the same enrollment and does not create duplicate work.' : 'This never retries execution.'}</p> : null}
     {notice ? <p className={styles.feedback} role="status">{notice}</p> : null}
     {!available ? <p className={styles.feedback}>Fresh project and console evidence is required before checking or preparing.</p> : null}
     <div className={styles.actions}><button type="button" className={styles.button} disabled={!enabled || !!busy} onClick={refreshProfiles}>Refresh profiles and enrolled plans</button>
       <button type="button" className={styles.button} disabled={!enabled || !!busy || prepared || !validEngineeringObjective(input)} onClick={() => { void act('check'); }}>{busy === 'check' ? 'Checking plan…' : 'Check plan'}</button>
-      <button type="button" className={styles.primary} disabled={!enabled || !!busy || prepared || !plan} onClick={() => { void act('prepare'); }}>{busy === 'prepare' ? 'Preparing plan…' : uncertain ? 'Reconcile preparation' : 'Prepare plan'}</button>
+      <button type="button" className={styles.primary} disabled={!enabled || !!busy || prepared || !plan} onClick={() => { void act('prepare'); }}>{busy === 'prepare' ? autoAdmission ? 'Preparing and queuing…' : 'Preparing plan…' : uncertain ? 'Reconcile preparation' : autoAdmission ? 'Prepare and queue' : 'Prepare plan'}</button>
       {prepared ? <button type="button" className={styles.button} disabled={!!busy} onClick={() => { setId(newId()); setName(''); setObjective(''); setPlan(null); setPrepared(false); setNotice(null); setError(null); }}>Define another objective</button> : null}</div>
   </section>;
 }

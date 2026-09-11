@@ -1,5 +1,75 @@
 # Firm build notes
 
+## September 11: automatic intake into the existing fleet
+
+- Previous goal turn was verified progress: clean commit/build 6b7fb229, not
+  a blocked audit. Existing worktree and original checkout ownership rechecked;
+  Entire resume found no checkpoint. Reusing planning and established runtime.
+- Three independent explorations identified separate gaps: dynamic queue
+  admission, delivered-seed/strategy successors, and matched model benchmarks.
+  Existing campaigns already iterate with retained seed/latest feedback. The
+  immediate complete integration is new prepared objectives joining supervision
+  without restarting it; successor seeding and benchmark policy stay separate.
+- User clarified no per-objective human bottleneck. Selected optional
+  maxEnrollments plus autoAdmitPrepared host policy, preserving default fixed
+  queues. Empty opt-in queues can wait; completed queues can accept new work
+  within their original deadline. Completed entries never free retained cap.
+- Core agent owns queue admission/state/recovery; frontend agent owns operator
+  disclosure and response decoding; cold reviewer owns actual HTTP/local-worker
+  evaluation/delivery/restart acceptance. Parent owns API/CLI/scope, docs and
+  browser verification. No live account, KILL, service or external release changes.
+- Prepare remains immutable and independently replayable. Automatic admission
+  happens afterward under the captured host policy. A queue hold returns its
+  own unavailable result while preserving the prepared enrollment. Retrying the
+  same objective can reconcile admission; it cannot renew budgets or rerun a
+  completed graph. This enables agent-driven intake, not autonomous ideation.
+- Read-only discovery guessed console-engineering-supervision-types.ts,
+  console-engineering-inspection.ts and workspace-engineering-supervision.ts;
+  actual files use supervisor-types.ts and data/engineering-supervision.ts.
+- Review added fail-closed persisted-state verification before replay admission,
+  null-input and ambiguous-catalog tests, and HTTP partial-success/replay tests.
+  Final core and legacy boundaries: 76/76. Final CLI/HTTP: 83/83. Full frontend:
+  1,510/1,510 across 82 files, zero skips, 57.84s. A prior frontend invocation
+  crossed the last copy/test edits and failed five assertions against old module
+  transforms; the frozen rerun passed without weakening tests.
+- Existing real preparation/supervision acceptance: 9/9 across two files,
+  zero skips, 172.75s. Source/web typechecks, documentation and lane checks pass;
+  full lint reports zero errors and 107 existing warnings.
+- Browser verification exercised two check/prepare actions, the second after
+  the first completed; both automatically delivered without Run or admission
+  clicks. Independent filesystem/ledger checks confirmed two exact local refs,
+  each changing only value.json to 1; unchanged seed/worktree; two completed
+  receipts; four evaluations; two publications; no protocol errors. Fixture
+  allocation 70/revision 1 and spare-account pause/revision 1 stayed unchanged.
+  Queue revision 2 preserved its original deadline and one remaining slot.
+  The temporary fixture exited cleanly; test-only block/import, tab 13 and
+  viewport overrides were removed. Desktop 1280px and mobile 390px had no
+  document-width overflow. These are local fixture results, not real providers.
+- A final exhausted-capacity UI edge now says Admission limit reached instead
+  of waiting for impossible new admission. Final full web passes 1,512/1,512,
+  82 files, zero skips, 97.09s. Final CLI/HTTP passes 83/83 (5.19s).
+- The final new real acceptance rerun timed out its first automatic case at
+  the unchanged 120s bound (136.68s elapsed). Earlier 3/3 passed and browser
+  executed both objectives. Read-only follow-up found slow setup/reads and
+  real campaign progress, with host load 26.72/14.93/8.82; no proven sleep or
+  specific root cause. Its second explicit-admission case also exceeded the
+  unchanged 120s bound (127.90s elapsed). Do not count that rerun as green or
+  widen timeouts. Parent heavy gates finished before the requested one isolated
+  serial retry of the failed cases; no unrelated process was interrupted.
+- That rerun finished with one passing pause/restart/refusal case (73.40s),
+  two timeouts and 342.42s total duration. Exactly one isolated serial retest
+  of the two failed cases was authorized, without changing tests or timeouts.
+  Its automatic case also timed out (135.25s elapsed). Pre-timeout evidence
+  showed both completed receipts and both settled queue entries, revision 2;
+  the remaining phase was final assertions/close/restart/replay. No more
+  unchanged retries are planned; preserve the unresolved timing gate.
+- Final isolated explicit-admission case passed in 90.09s. That invocation
+  finished one pass, one automatic-case timeout, one intentionally unselected
+  pause case, 226.70s total. All test fixtures were cleaned. Read-only source
+  review found repeated full captures in startup restoration and prepare replay;
+  profile these before considering scoped reuse. No fixed close wait or obvious
+  drain cycle was found, and elapsed attribution remains unproven.
+
 ## September 11: engineering outcomes as learning data
 
 - Prior goal turn made verified progress: clean commit/build 3a803c69; no blocked

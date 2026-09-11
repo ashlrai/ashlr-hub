@@ -36,7 +36,7 @@ stubs are review aids, not signed runtime evidence.
 | Integration and handoff | UNWIRED | Existing integration/evaluation/delivery/handoff commands are local primitives. Git publication now rechecks global KILL under its prepared ref lock; exact already-published intents can still settle receipts under KILL. New integrate/deliver graph kinds remain withheld until these gates are explicitly connected. |
 | Automatic branch advancement | MISSING | Existing delivery creates a new branch. Expected-old-commit CAS advancement must preserve unexpected human commits and exact evaluation evidence. |
 | Restart recovery | UNWIRED | The engineering graph acknowledges proven completed dispatches only under its exact signed parent link and freshly verified delivery receipts. Default recovery is receipt-only. New enrollments can pin `allowPendingContinuation: true` to continue declared never-started campaigns under original deadlines, KILL and shared ownership. Explicit console-owned supervision now invokes this recovery after process restart, preserving its own deadline, pause and attempt state. Uncertain or held work stays unresolved. Actual-account commissioning remains unverified. See [recovery and continuation](FIRM-DEMO.md#continue-declared-pending-campaigns-after-recovery). |
-| Resident company ticks | UNWIRED | The resource console now has an explicit finite engineering-supervision queue calling the existing graph owner, with durable deadline/pause/attempt state and evidence-driven retry suppression. Real CLI crash/restart and local evaluator acceptance are tested. Dynamic ideation/enrollment, an OS resident service and actual-account commissioning remain unwired; this is not an activated company. |
+| Resident company ticks | UNWIRED | The resource console has a bounded engineering-supervision queue calling the existing graph owner, with durable deadline/pause/attempt state and evidence-driven retry suppression. Optional host-enabled admission accepts new plans while running; automatic preparation admission removes the separate Run action. Dynamic ideation, delivered-seed successor planning, an OS resident service and actual-account commissioning remain unwired; this is not an activated company. |
 | Enrollment of the ecosystem | UNWIRED | Existing enrollment machinery must be reused. Thirteen trusted product roots were not independently enumerated or enrolled in this run. |
 | Daily and consolidated memory | UNWIRED | `firm-memory.ts` stores immutable daily entries and CAS-linked master versions under an explicit private root. It does not modify real user memory or provide the full Markdown/wiki/genome projection yet. |
 | Harness archive and frozen evaluation | UNWIRED | `harness-archive.ts` stores baseline/evaluator bytes and successes/failures with strict mutable-path admission. No proposer or promotion effect is connected; supplied verifier linkage is not authenticated outcome evidence. |
@@ -68,21 +68,31 @@ These are implemented local paths, not proof of an operating company.
 
 The optional automatic-engineering panel now exposes console-wide supervision,
 durable pause/resume, original deadlines and per-enrollment invocation/hold
-evidence. Its status reads have no dispatch effect. Terminal/browser panels,
-conversation compaction and native desktop bootstrap remain separate gaps.
+evidence. Opt-in appendable admission lets new prepared objectives enter the
+existing loop without a restart. With host-configured `autoAdmitPrepared`,
+preparation automatically queues them without a per-plan human Run action.
+This is bounded intake, not autonomous ideation, budget renewal or successor
+seeding from a delivered branch. Its status reads have no dispatch effect.
+Terminal/browser panels, conversation compaction and native desktop bootstrap
+remain separate gaps.
 
 The [engineering preparation command](RESOURCE-POOLS.md#prepare-an-engineering-objective)
 now connects a reviewed objective, fixed evaluator, selected project and existing
 workers to initialized experiments/campaigns and linked console catalogs. It
 derives matching digests and preserves the existing account ledger. Preparation
-does not invent the objective or evaluator, start work or establish live capacity.
+through the standalone command does not invent the objective or evaluator,
+start work or establish live capacity.
 Host-configured preparation profiles now expose this path in the workspace:
 objective entry, read-only plan check, explicit preparation and receipt-backed
-same-console enrollment. Completed registrations reload on restart without
-launching; the existing engineering pane runs them through the shared owner.
+same-console enrollment. Registration reload itself does not launch work;
+the engineering pane and configured supervisor use the shared execution owner.
 This removes manual per-objective catalog assembly, not the requirement for a
 trusted evaluator matched to the requested work or for live account commissioning.
-Incomplete registration remains explicit; exact completed replay changes no state.
+Incomplete registration remains explicit; exact completed registration replay
+changes no registration state. With host-enabled `autoAdmitPrepared`, the console
+also admits that enrollment to its existing automatic queue. A replay can
+reconcile missing admission without duplicating work or renewing its deadline;
+preparation and admission results remain distinct.
 
 The [offline pool upgrade](RESOURCE-POOLS.md#upgrade-a-pool-without-resetting-history)
 removes the need to discard accounting or conversations when adding workers.

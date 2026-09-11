@@ -11,8 +11,12 @@
 .entries p { margin: var(--space-2) 0 0; }
 .scope { border-top: 1px solid var(--border-default); padding-top: var(--space-3); }
 .actions { justify-content: flex-end; }
-.actions button { min-height: 40px; padding: var(--space-2) var(--space-4); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-surface); font-size: var(--text-sm-size); }
-.actions button:disabled { opacity: .5; cursor: not-allowed; }
-.actions button:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
+.admission { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-4); border-top: 1px solid var(--border-default); padding-block: var(--space-4); }
+.admission > div { flex: 1 1 260px; min-width: 0; }
+.admission h4 { font-size: var(--text-sm-size); margin: 0; overflow-wrap: anywhere; }
+.actions button, .admission button { min-height: 40px; padding: var(--space-2) var(--space-4); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--bg-surface); font-size: var(--text-sm-size); }
+.admission button { color: var(--accent-contrast); background: var(--accent-600); border-color: var(--accent-600); }
+.actions button:disabled, .admission button:disabled { opacity: .5; cursor: not-allowed; }
+.actions button:focus-visible, .admission button:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
 @media (max-width: 720px) { .panel { margin-inline: var(--space-4); padding: var(--space-4); } .actions button { flex: 1; } }
 @media (pointer: coarse) { .actions button { min-height: 44px; } }

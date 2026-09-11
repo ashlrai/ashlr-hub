@@ -16,12 +16,13 @@ const label = (state: Job['state']) => state === 'completed' ? 'Recorded deliver
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Engineering evidence is unavailable.';
 
 /** Observation can poll; launch/cancel only come from explicit user events. */
-export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, preparationSupported, preparationAvailable, outcomesSupported }: {
+export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, preparationSupported, preparationAvailable, outcomesSupported, autoAdmission }: {
   projectId: string; projectName: string; available: boolean; canStart: boolean; canStop: boolean; unlocked: boolean; onUnlock(): void; startBlockedReason?: string;
   supervisionSupported?: boolean;
   preparationSupported?: boolean;
   preparationAvailable?: boolean;
   outcomesSupported?: boolean;
+  autoAdmission?: boolean;
 }) {
   const [catalog, setCatalog] = useState<Enrollment[] | null>(null);
   const [selection, setSelection] = useState('');
@@ -132,8 +133,8 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
     <header className={styles.header}><div><p className={styles.eyebrow}>ASHLRVERSE / ENGINEERING</p><h2>From objective to evidence.</h2>
       <p>{projectName} · Evaluated changes, explicit local delivery.</p></div>
       <button type="button" className={styles.button} disabled={!available || busy || loading} onClick={refresh}>Refresh evidence</button></header>
-    {supervisionSupported ? <EngineeringSupervision available={available} unlocked={unlocked} /> : null}
-    {preparationSupported ? <EngineeringObjectiveComposer projectId={projectId} available={available && preparationAvailable !== false} unlocked={unlocked}
+    {supervisionSupported ? <EngineeringSupervision available={available} unlocked={unlocked} selectedPlan={selected} onUnlock={onUnlock} /> : null}
+    {preparationSupported ? <EngineeringObjectiveComposer projectId={projectId} available={available && preparationAvailable !== false} unlocked={unlocked} autoAdmission={autoAdmission}
       onUnlock={onUnlock} onRefresh={refresh} onPrepared={({ enrollment }) => {
         setCatalog(rows => [...(rows ?? []).filter(row => row.id !== enrollment.id), enrollment]);
         setSelection(enrollment.id); setCatalogRevision(n => n + 1); setRevision(n => n + 1);
@@ -143,7 +144,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
     {catalogError ? <p role="alert" className={styles.error}>{catalogError}</p> : null}
     {catalog === null && !catalogError && available ? <p role="status" className={styles.empty}>Reading enrolled engineering plans…</p> : null}
     {catalog?.length === 0 ? <div className={styles.empty}><span className={styles.orbit} aria-hidden="true">◎</span><h3>No engineering plan enrolled for this project.</h3>
-      {preparationSupported ? <p>Define an objective above using a host-reviewed evaluation profile. Check and prepare it, then review local readiness before running. Ordinary chat tasks remain available.</p> : <>
+      {preparationSupported ? <p>Define an objective above using a host-reviewed evaluation profile. {autoAdmission ? 'Check it, then Prepare and queue admits it to automatic work under the existing supervision deadline.' : 'Check and prepare it, then review local readiness before running.'} Ordinary chat tasks remain available.</p> : <>
         <p>Prepare a reviewed objective with a fixed evaluator, allowed files, workers and budget. The preparation command creates linked campaign and startup catalogs without starting work.</p>
         <p><code>ashlr resources pool engineering prepare --help</code></p>
         <p>Use the returned console configuration to make the plan available here. Ordinary chat tasks remain available.</p></>}

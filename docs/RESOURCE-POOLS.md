@@ -133,7 +133,8 @@ console can prepare new objectives and enroll them without a restart. This
 requires `--execute`, `--workspace` and `--projects`; a pre-existing `--engineering`
 catalog is optional. Existing account policies, quota evidence and shared ledger
 are reused. Startup can resume ordinary queued tasks, just like any execution
-console, but preparing an engineering objective never launches it.
+console. By default, preparation does not launch engineering work. The optional
+host policy below can automatically admit prepared objectives to supervision.
 
 The private `0600` configuration follows
 [`ResourceConsoleEngineeringPreparationConfig`](../src/core/resources/console-engineering-preparation-types.ts):
@@ -164,11 +165,13 @@ projects. Do not place secrets in profiles, objective text or acceptance labels.
    the seed, file scope, budgets, delivery branch and checked plan digest.
 4. Select **Prepare plan** to create the bundle and immutable registration.
    The existing engineering pane selects the newly enrolled plan in the same
-   console. Preparation is not accepted engineering work and does not add the
-   plan to an existing automatic supervision queue.
-5. Inspect local launch checks, then use **Run enrolled plan** to authorize its
-   existing bounded worker/evaluator/delivery flow. Stop and evidence controls
-   are the same controls used for startup-enrolled plans.
+   console. With `autoAdmitPrepared: true`, this action is labelled **Prepare and
+   queue** and also admits the prepared plan to the existing automatic queue.
+   Preparation and queue admission are not accepted engineering work.
+5. In the default manual mode, inspect local launch checks, then use **Run
+   enrolled plan** to authorize its existing bounded worker/evaluator/delivery
+   flow. Stop and evidence controls are the same controls used for
+   startup-enrolled plans.
 
 Profiles, checks and preparation use control-authenticated POST requests with an
 explicit matching Origin. Profile listing (`/api/resources/engineering/profiles`,
@@ -177,6 +180,11 @@ body `{projectId}`) and checking (`/api/resources/engineering/prepare/check`, bo
 `/api/resources/engineering/prepare` adds `expectedPlanDigest` and returns the
 verified plan, enrollment and `created`/`replayed` disposition. No evaluator
 command or host output path is exposed through these projections.
+When automatic admission is configured, the response also contains
+`automaticAdmission: {state: "admitted" | "unavailable", supervisionId}`. This
+reports queue admission, not a worker launch or completed result. If admission
+is unavailable, the prepared registration is still durable. Reconcile the same
+objective after inspecting supervision; do not create a new ID to hide the hold.
 
 Completed registration survives restart through private
 `console-engineering-preparations` records in the existing resource root. Reload
@@ -195,10 +203,12 @@ and evidence before restarting.
 
 After an uncertain prepare response, retain the same objective ID and input.
 Refresh evidence and explicitly **Reconcile preparation**; exact completed replay
-verifies without rewriting records or consuming another request. Incomplete
-bundles/staging remain held for inspection, not deleted or repaired automatically.
+verifies without rewriting registration records. In automatic mode it also
+reconciles the same queue entry; an already admitted plan is not duplicated.
+Incomplete bundles/staging remain held for inspection, not deleted or repaired
+automatically.
 The combined static and prepared enrollment catalog is bounded to 32 entries.
-Dynamic ideation, automatic queue admission, accumulation into an existing
+Dynamic ideation, delivered-seed successor planning, accumulation into an existing
 integration branch and production deployment remain separate capabilities.
 
 ### Evaluated engineering runs
@@ -384,7 +394,8 @@ automatic routing, account allocation, execution, repair or promotion authority.
 
 The optional `--engineering-supervision /absolute/private/supervision.json`
 flag adds a finite unattended queue to the existing execution console. It requires
-`--engineering`, `--execute` and `--projects`. Starting this configured console
+`--execute`, `--projects` and either `--engineering` or
+`--engineering-preparation`. Starting this configured console
 can consume enrolled provider allowance and deliver local branches **without a
 browser click**. Keep this file private (`0600`), outside every writable project.
 It contains exact enrollment digests obtained from the engineering catalog API;
@@ -411,7 +422,55 @@ The accepted limits are 1–86,400,000 ms duration, 100–60,000 ms polling,
 1–4 concurrent graph invocations, 1–16 invocations per enrollment, and 1–32
 unique enrollments. Invocations are **not** model requests or account usage;
 the original campaign/resource ceilings still apply. Declaration order is
-preserved. No model can add plans, change evaluators or enlarge these settings.
+preserved. This default configuration fixes the queue. It cannot change
+evaluators or enlarge its own settings.
+
+#### Automatically admit new prepared work
+
+To let a running console take new objectives without a per-plan Run action,
+configure an appendable queue before its first start. For example, with the
+preparation profiles already configured:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "hub-objective-intake",
+  "maxDurationMs": 14400000,
+  "pollIntervalMs": 3000,
+  "maxConcurrent": 1,
+  "maxAttemptsPerEnrollment": 4,
+  "maxEnrollments": 12,
+  "autoAdmitPrepared": true,
+  "enrollments": []
+}
+```
+
+`maxEnrollments` enables append-only admission and bounds the total retained
+queue to 1–32 enrollments, including completed entries. Only this mode permits
+an empty initial queue. `autoAdmitPrepared: true` additionally requires
+preparation profiles: each authenticated successful prepare operation attempts
+queue admission automatically. A host-authorized agent can use the same
+profile/check/prepare protocol as the UI; it needs no separate human launch.
+Checks remain nonexecuting. The selected profile still fixes the evaluator,
+seed, file scope, allowed workers and per-campaign limits.
+
+Prepared work admitted while paused stays paused. An empty queue, or a queue
+whose current work is complete, waits for new admissions until the original
+deadline. Admission wakes that existing loop; it does not create another
+scheduler, renew time, clear stop records, release accounts or reset attempts.
+Completion does not free the lifetime enrollment cap. Changing policy under an
+existing supervision ID is refused rather than silently migrating its authority.
+
+Without `autoAdmitPrepared`, an appendable queue accepts explicit admission via
+**Add plan to automatic work** or the authenticated API below. A request contains
+`{enrollments: [{enrollmentId, expectedEnrollmentDigest}], expectedRevision}`.
+The entire batch must resolve to current host-owned enrollments. New entries
+are persisted atomically in request order before execution can begin, using the
+same revision as pause controls. Stale additions, conflicting digests, expired
+budgets and capacity overflow are refused. An exact all-existing retry is
+read-only and does not duplicate work; future revisions are never accepted.
+
+#### Retained execution and recovery
 
 Construction persists the original deadline, configuration digest, pause revision
 and per-plan invocation evidence under the shared resource root's
@@ -442,13 +501,14 @@ aborts and drains its automatic invocations before releasing their ownership.
 | --- | --- |
 | `GET /api/resources/engineering-supervision` | Bounded observation only; never launches or writes state |
 | `POST /api/resources/engineering-supervision` | Exact `{paused, expectedRevision}` control; stale revisions return conflict |
+| `POST /api/resources/engineering-supervision/admit` | Append ID/digest pairs under the current revision; requires the configured admission policy |
 
 Reads require the existing read session. Writes require the control token and
 exact Origin; responses are no-store. The hyphenated route deliberately preserves
 `/engineering/supervision` as a possible existing enrollment-detail route.
 
 This implements console-owned unattended execution, **not** an installed OS
-service, autonomous idea generation, dynamic enrollment, real-account
+service, autonomous idea generation, delivered-seed successor planning, real-account
 commissioning or public deployment. It does not make same-user storage
 tamper-proof or guarantee monotonic wall time across process restarts.
 

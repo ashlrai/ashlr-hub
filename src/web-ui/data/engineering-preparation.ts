@@ -80,16 +80,19 @@ export async function checkEngineeringObjective(input: Objective, selected: Prof
   if (!checkedPlan(value, captured, selected)) throw invalid();
   return value;
 }
-export async function prepareEngineeringObjective(input: Objective, selected: Profile, plan: Plan, signal?: AbortSignal): Promise<Prepared> {
+export async function prepareEngineeringObjective(input: Objective, selected: Profile, plan: Plan, signal?: AbortSignal, autoAdmission = false): Promise<Prepared> {
   if (!checkedPlan(plan, input, selected)) throw invalid();
   const expected = stable(plan);
   const value = await request('/api/resources/engineering/prepare', { ...input, expectedPlanDigest: plan.planDigest }, signal);
-  if (!object(value) || !exact(value, ['plan', 'enrollment', 'disposition']) || !['created', 'replayed'].includes(String(value.disposition)) ||
+  if (!object(value) || !exact(value, ['plan', 'enrollment', 'disposition', ...(Object.hasOwn(value, 'automaticAdmission') ? ['automaticAdmission'] : [])]) || !['created', 'replayed'].includes(String(value.disposition)) ||
     !checkedPlan(value.plan, input, selected) || stable(value.plan) !== expected || !validWorkspaceEngineeringEnrollment(value.enrollment) ||
     value.enrollment.id !== input.id || value.enrollment.projectId !== selected.projectId || value.enrollment.graphId !== input.id ||
     value.enrollment.campaigns.length !== 1 || value.enrollment.campaigns[0]?.branch !== plan.branch ||
     value.enrollment.campaigns[0]?.id !== plan.id || value.enrollment.campaigns[0]?.dependsOn.length !== 0 ||
     stable(value.enrollment.campaigns[0]?.budget) !== stable(plan.trialBudget) ||
     stable(value.enrollment.campaigns[0]?.campaignBudget) !== stable(plan.campaignBudget)) throw invalid();
+  if (autoAdmission && !Object.hasOwn(value, 'automaticAdmission') || Object.hasOwn(value, 'automaticAdmission') &&
+    (!object(value.automaticAdmission) || !exact(value.automaticAdmission, ['state', 'supervisionId']) ||
+      !['admitted', 'unavailable'].includes(String(value.automaticAdmission.state)) || !id(value.automaticAdmission.supervisionId))) throw invalid();
   return value as unknown as Prepared;
 }

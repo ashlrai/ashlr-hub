@@ -32,6 +32,8 @@ export interface ResourceConsoleScope {
   engineeringOutcomesSupported?: true;
   /** Host-pinned objective preparation and durable same-console enrollment. */
   engineeringPreparationSupported?: true;
+  /** Host policy automatically admits prepared plans to the existing bounded queue. */
+  engineeringPreparationAutoAdmission?: true;
   /** Explicit automatic queue in this console lifetime; not an OS service. */
   engineeringSupervisionSupported?: true;
 }

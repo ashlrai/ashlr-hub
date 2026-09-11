@@ -141,7 +141,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     (options.execute === true ? !options.workspace : options.workspace !== undefined || options.maxParallel !== undefined || projectsFile !== null) ||
     engineeringFile !== null && (options.execute !== true || projectsFile === null) ||
     engineeringPreparationFile !== null && (options.execute !== true || projectsFile === null) ||
-    engineeringSupervisionFile !== null && engineeringFile === null) {
+    engineeringSupervisionFile !== null && engineeringFile === null && engineeringPreparationFile === null) {
     throw new Error('Invalid resource console options');
   }
   const workspace = options.execute ? validateUniverseConsoleRoot(options.workspace) : null;
@@ -158,6 +158,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     validateResourceConsoleEngineeringPreparationConfig(readResourceJson(engineeringPreparationFile, 1024 * 1024)) : null;
   const engineeringSupervisionConfig = engineeringSupervisionFile ?
     validateResourceConsoleEngineeringSupervisionConfig(readResourceJson(engineeringSupervisionFile, 128 * 1024)) : null;
+  if (engineeringSupervisionConfig?.autoAdmitPrepared && !engineeringPreparationConfig) {
+    throw new Error('Automatic prepared-work admission requires preparation profiles');
+  }
   const configuredWorkspaces = workspace ? [workspace, ...(projects?.map((project) => project.workspace) ?? [])] : [];
   const contains = (parent: string, target: string) => {
     const nested = relative(parent, target);
@@ -332,7 +335,29 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
           const input = await body(req);
           if (closing) throw new RequestError(503, 'Console is closing');
-          sendSnapshot(res, url.pathname.endsWith('/check') ? engineeringPreparation.check(input) : engineeringPreparation.prepare(input)); return;
+          if (url.pathname.endsWith('/check')) { sendSnapshot(res, engineeringPreparation.check(input)); return; }
+          const prepared = engineeringPreparation.prepare(input);
+          if (!engineeringSupervisionConfig?.autoAdmitPrepared) { sendSnapshot(res, prepared); return; }
+          // Registration survives a queue hold. Repeating this exact preparation
+          // reconciles admission, never starts a second graph or renews a budget.
+          let state: 'admitted' | 'unavailable' = 'unavailable';
+          try {
+            if (engineeringSupervision && !closing) {
+              const current = engineeringSupervision.snapshot();
+              engineeringSupervision.admit({ expectedRevision: current.revision, enrollments: [{
+                enrollmentId: prepared.enrollment.id, expectedEnrollmentDigest: prepared.enrollment.enrollmentDigest,
+              }] });
+              state = 'admitted';
+            }
+          } catch { /* Preparation is durable; report admission uncertainty separately. */ }
+          sendSnapshot(res, { ...prepared, automaticAdmission: { state, supervisionId: engineeringSupervisionConfig.id } }); return;
+        }
+        if (url.pathname === '/api/resources/engineering-supervision/admit') {
+          if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
+          if (!engineeringSupervision) throw new RequestError(403, 'Engineering supervision is not configured');
+          const input = await body(req);
+          if (closing) throw new RequestError(503, 'Console is closing');
+          sendSnapshot(res, engineeringSupervision.admit(input)); return;
         }
         if (url.pathname === '/api/resources/engineering-supervision') {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
@@ -616,6 +641,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         engineeringSupervision = createResourceConsoleEngineeringSupervisor({ owner: engineering, root,
           config: engineeringSupervisionConfig, signal });
         scope.engineeringSupervisionSupported = true;
+        if (engineeringSupervisionConfig.autoAdmitPrepared) scope.engineeringPreparationAutoAdmission = true;
       }
     }
     if (signal?.aborted) throw new Error('Resource console startup cancelled');

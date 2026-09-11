@@ -10,8 +10,8 @@ import { fsyncDirectory } from '../util/durability.js';
 import { readResourceJson } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import type { ResourceConsoleEngineeringOwner } from './console-engineering.js';
-import type { ResourceConsoleEngineeringSupervisionConfig, ResourceConsoleEngineeringSupervisionSnapshot } from './console-engineering-supervisor-types.js';
-export type { ResourceConsoleEngineeringSupervisionConfig, ResourceConsoleEngineeringSupervisionSnapshot } from './console-engineering-supervisor-types.js';
+import type { ResourceConsoleEngineeringSupervisionConfig, ResourceConsoleEngineeringSupervisionSnapshot, ResourceConsoleEngineeringSupervisionAdmission } from './console-engineering-supervisor-types.js';
+export type { ResourceConsoleEngineeringSupervisionConfig, ResourceConsoleEngineeringSupervisionSnapshot, ResourceConsoleEngineeringSupervisionAdmission } from './console-engineering-supervisor-types.js';
 
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -27,11 +27,16 @@ function data<T>(value: unknown): T {
 }
 export function validateResourceConsoleEngineeringSupervisionConfig(value: unknown): ResourceConsoleEngineeringSupervisionConfig {
   const config = data<ResourceConsoleEngineeringSupervisionConfig>(value);
-  if (!exact(config, ['schemaVersion', 'id', 'maxDurationMs', 'pollIntervalMs', 'maxConcurrent', 'maxAttemptsPerEnrollment', 'enrollments']) ||
+  const admission = config !== null && typeof config === 'object' && Object.hasOwn(config, 'maxEnrollments');
+  const automatic = config !== null && typeof config === 'object' && Object.hasOwn(config, 'autoAdmitPrepared');
+  if (!exact(config, ['schemaVersion', 'id', 'maxDurationMs', 'pollIntervalMs', 'maxConcurrent', 'maxAttemptsPerEnrollment', 'enrollments',
+    ...(admission ? ['maxEnrollments'] : []), ...(automatic ? ['autoAdmitPrepared'] : [])]) ||
       config.schemaVersion !== 1 || typeof config.id !== 'string' || !ID.test(config.id) ||
       !integer(config.maxDurationMs, 1, 86_400_000) || !integer(config.pollIntervalMs, 100, 60_000) ||
       !integer(config.maxConcurrent, 1, 4) || !integer(config.maxAttemptsPerEnrollment, 1, 16) ||
-      !Array.isArray(config.enrollments) || config.enrollments.length < 1 || config.enrollments.length > 32 ||
+      !Array.isArray(config.enrollments) || config.enrollments.length < (admission ? 0 : 1) || config.enrollments.length > 32 ||
+      admission && (!integer(config.maxEnrollments, 1, 32) || config.maxEnrollments < config.enrollments.length) ||
+      automatic && (!admission || config.autoAdmitPrepared !== true) ||
       config.enrollments.some(row => !exact(row, ['enrollmentId', 'expectedEnrollmentDigest']) ||
         typeof row.enrollmentId !== 'string' || !ID.test(row.enrollmentId) ||
         typeof row.expectedEnrollmentDigest !== 'string' || !HASH.test(row.expectedEnrollmentDigest)) ||
@@ -50,6 +55,7 @@ interface DurableState {
 export interface ResourceConsoleEngineeringSupervisor {
   snapshot(): ResourceConsoleEngineeringSupervisionSnapshot;
   setPaused(paused: boolean, expectedRevision: number): ResourceConsoleEngineeringSupervisionSnapshot;
+  admit(input: unknown): ResourceConsoleEngineeringSupervisionSnapshot;
   start(): void;
   close(): Promise<void>;
 }
@@ -114,6 +120,12 @@ export function createResourceConsoleEngineeringSupervisor(options: ResourceCons
     try { own(); if (Date.now() < Date.parse(state.writtenAt)) { fault(); return true; } } catch { return true; }
     return false;
   };
+  function verifyPersistedState(): void {
+    own();
+    try {
+      if (!present(statePath) || digest(canonical(readResourceJson(statePath, MAX_STATE_BYTES))) !== persistedDigest) throw new Error();
+    } catch { fault(); fail('UNAVAILABLE', 'Engineering supervision state unavailable'); }
+  }
   function persist(next: DurableState): void {
     own(); const temporary = join(directory, `.state-${randomUUID()}.tmp`); let fd: number | undefined;
     try {
@@ -138,10 +150,13 @@ export function createResourceConsoleEngineeringSupervisor(options: ResourceCons
           source.schemaVersion !== 1 || source.configDigest !== configDigest || !timestamp(source.createdAt) || !timestamp(source.deadlineAt) ||
           !timestamp(source.writtenAt) || source.writtenAt < source.createdAt || Date.parse(source.deadlineAt) !== Date.parse(source.createdAt) + config.maxDurationMs ||
           typeof source.paused !== 'boolean' || !integer(source.revision, 0, Number.MAX_SAFE_INTEGER) || !Array.isArray(source.entries) ||
-          source.entries.length !== config.enrollments.length || source.entries.some((row, index) => {
-            const expected = config.enrollments[index]!;
+          source.entries.length < config.enrollments.length || source.entries.length > (config.maxEnrollments ?? config.enrollments.length) ||
+          new Set(source.entries.map(row => row.enrollmentId)).size !== source.entries.length || source.entries.some((row, index) => {
+            const expected = config.enrollments[index];
             return !exact(row, ['enrollmentId', 'enrollmentDigest', 'attempts', 'lastEvidenceDigest', 'lastOutcome']) ||
-              row.enrollmentId !== expected.enrollmentId || row.enrollmentDigest !== expected.expectedEnrollmentDigest ||
+              typeof row.enrollmentId !== 'string' || !ID.test(row.enrollmentId) || typeof row.enrollmentDigest !== 'string' || !HASH.test(row.enrollmentDigest) ||
+              expected !== undefined && (row.enrollmentId !== expected.enrollmentId || row.enrollmentDigest !== expected.expectedEnrollmentDigest) ||
+              !catalog.some(value => value.id === row.enrollmentId && value.enrollmentDigest === row.enrollmentDigest) ||
               !integer(row.attempts, 0, config.maxAttemptsPerEnrollment) ||
               (row.lastEvidenceDigest !== null && (typeof row.lastEvidenceDigest !== 'string' || !HASH.test(row.lastEvidenceDigest))) ||
               ![null, 'attempting', 'settled', 'unavailable'].includes(row.lastOutcome) ||
@@ -231,10 +246,14 @@ export function createResourceConsoleEngineeringSupervisor(options: ResourceCons
           if (!fingerprint || !HASH.test(fingerprint) || fingerprint === row.lastEvidenceDigest || stopped()) continue;
           launch(row.enrollmentId, fingerprint);
         }
-        if (state.entries.every(row => project(row).state === 'completed')) break;
+        const completed = state.entries.every(row => project(row).state === 'completed');
+        if (completed && config.maxEnrollments === undefined) break;
         if (stopped()) break;
         await new Promise<void>(resolveWake => {
-          const timer = setTimeout(() => { wake = undefined; resolveWake(); }, Math.max(1, Math.min(config.pollIntervalMs, deadlineMonotonic - performance.now())));
+          // Empty/completed opt-in queues sleep until admission/control/close or
+          // their original deadline. They do not repeatedly poll terminal work.
+          const delay = completed ? deadlineMonotonic - performance.now() : Math.min(config.pollIntervalMs, deadlineMonotonic - performance.now());
+          const timer = setTimeout(() => { wake = undefined; resolveWake(); }, Math.max(1, delay));
           wake = () => { clearTimeout(timer); wake = undefined; resolveWake(); };
         });
       }
@@ -252,9 +271,47 @@ export function createResourceConsoleEngineeringSupervisor(options: ResourceCons
       const entries = state.entries.map(row => unavailable ? { enrollmentId: row.enrollmentId, enrollmentDigest: row.enrollmentDigest,
         attempts: row.attempts, state: 'unavailable' as const, reasons: ['evidence-unavailable' as const] } : project(row));
       return { schemaVersion: 1, configId: config.id, configDigest, sourceState: unavailable ? 'degraded' : 'healthy',
-        state: unavailable ? 'unavailable' : closing ? 'closed' : entries.every(row => row.state === 'completed') ? 'completed' :
+        state: unavailable ? 'unavailable' : closing ? 'closed' : config.maxEnrollments === undefined && entries.every(row => row.state === 'completed') ? 'completed' :
           expired() ? 'timed-out' : state.paused ? 'paused' : started ? 'running' : 'idle',
-        deadlineAt: state.deadlineAt, paused: state.paused, revision: state.revision, entries };
+        deadlineAt: state.deadlineAt, paused: state.paused, revision: state.revision, entries,
+        ...(config.maxEnrollments === undefined ? {} : { admission: { maxEnrollments: config.maxEnrollments, remainingEnrollments: config.maxEnrollments - state.entries.length,
+          autoAdmitPrepared: config.autoAdmitPrepared === true } }) };
+    },
+    admit(input) {
+      const request = data<ResourceConsoleEngineeringSupervisionAdmission>(input);
+      if (!exact(request, ['enrollments', 'expectedRevision']) || !integer(request.expectedRevision, 0, Number.MAX_SAFE_INTEGER) ||
+          !Array.isArray(request.enrollments) || request.enrollments.length < 1 || request.enrollments.length > 32 ||
+          request.enrollments.some(row => !exact(row, ['enrollmentId', 'expectedEnrollmentDigest']) ||
+            typeof row.enrollmentId !== 'string' || !ID.test(row.enrollmentId) || typeof row.expectedEnrollmentDigest !== 'string' || !HASH.test(row.expectedEnrollmentDigest)) ||
+          new Set(request.enrollments.map(row => row.enrollmentId)).size !== request.enrollments.length) fail('INVALID_INPUT', 'Invalid engineering supervision admission');
+      if (config.maxEnrollments === undefined) fail('CONFLICT', 'Engineering supervision admission is not enabled');
+      if (closing || faulted || signal?.aborted) fail('UNAVAILABLE', 'Engineering supervision unavailable');
+      verifyPersistedState();
+      const currentCatalog = host.catalog();
+      const additions: DurableState['entries'] = [];
+      for (const row of request.enrollments) {
+        const matches = currentCatalog.filter(value => value.id === row.enrollmentId);
+        if (matches.length !== 1 || matches[0]!.enrollmentDigest !== row.expectedEnrollmentDigest) {
+          fail('CONFLICT', 'Engineering supervision enrollment changed');
+        }
+        const existing = state.entries.find(value => value.enrollmentId === row.enrollmentId);
+        if (existing && existing.enrollmentDigest !== row.expectedEnrollmentDigest) fail('CONFLICT', 'Engineering supervision enrollment changed');
+        if (!existing) additions.push({ enrollmentId: row.enrollmentId, enrollmentDigest: row.expectedEnrollmentDigest,
+          attempts: 0, lastEvidenceDigest: null, lastOutcome: null });
+      }
+      // A lost-response retry does not consume capacity, rewrite state or wake
+      // work. Only this exact all-existing case may ignore an old form revision.
+      if (!additions.length) {
+        if (request.expectedRevision > state.revision) fail('CONFLICT', 'Engineering supervision admission revision changed');
+        verifyPersistedState();
+        return supervisor.snapshot();
+      }
+      if (stopped()) fail('UNAVAILABLE', 'Engineering supervision admission deadline or ownership unavailable');
+      if (request.expectedRevision !== state.revision) fail('CONFLICT', 'Engineering supervision admission revision changed');
+      if (state.entries.length + additions.length > config.maxEnrollments) fail('CAPACITY', 'Engineering supervision enrollment capacity reached');
+      if (state.revision === Number.MAX_SAFE_INTEGER) fail('CAPACITY', 'Engineering supervision revision exhausted');
+      persist({ ...state, revision: state.revision + 1, writtenAt: new Date().toISOString(), entries: [...state.entries, ...additions] });
+      wake?.(); return supervisor.snapshot();
     },
     setPaused(paused, expectedRevision) {
       if (typeof paused !== 'boolean' || !integer(expectedRevision, 0, Number.MAX_SAFE_INTEGER)) fail('INVALID_INPUT', 'Invalid engineering supervision pause');

@@ -1,6 +1,82 @@
 # Verified local handoff
 
-## Current continuation: engineering outcome and resource attribution
+## Current continuation: automatic objective intake
+
+Baseline `6b7fb229fbf0d2a87b528e6bc9c23d8caee97897`, branch `auto/p00`, isolated
+worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents
+handled durable queue admission, frontend integration and independent actual
+execution acceptance. Parent integrated API/CLI/scope, reviewed the runtime,
+updated operator guidance and verified browser interactions.
+
+The user selected automatic operation without a separate per-objective human
+Run action. Optional host policy `maxEnrollments` enables durable admission to
+the existing supervision queue; `autoAdmitPrepared: true` additionally admits
+prepared objectives automatically. Agents can use the authenticated preparation
+API without requiring a browser click. The UI calls this **Prepare and queue**.
+Read-only checks remain nonexecuting. Legacy fixed queues and default manual
+preparation retain their prior behavior.
+
+An empty or all-completed appendable queue sleeps until new admission, a control
+change, closure or its original deadline. New entries preserve that deadline,
+pause, declared order, account reserves, attempts and shared capacity. Completed
+entries still consume the lifetime enrollment cap. Exact same-digest replay
+does not write, wake work or duplicate execution; altered/missing durable state,
+foreign enrollments, conflicts and new admission after expiry are refused.
+Preparation registration survives admission failure and reports that outcome
+separately. Repeating the same preparation can reconcile missing admission.
+
+Independent review added null-input, ambiguous-catalog and persisted-state
+replay guards plus HTTP partial-success/reconciliation tests. The UI distinguishes
+waiting supervision from active workers and discloses that automatic execution
+can create worktrees and local delivery branches, not remote deployments.
+
+Actual browser acceptance used compiled UI assets, source API/runtime and a
+test-owned loopback worker with a fixed evaluator and temporary Git repository.
+Two objectives were checked and prepared through the UI; the second was created
+after the first completed. Both reached recorded delivery without manual Run or
+admission actions. The queue returned to **Waiting for new plans**, revision 2,
+one remaining slot of three, with its original deadline unchanged. No alerts
+appeared. Desktop 1280px and mobile 390px both matched document scroll width.
+Independent filesystem checks confirmed each exact local branch changed only
+`value.json` to 1, with unchanged seed HEAD and working tree. The fixture recorded
+two completed resource receipts, four evaluator calls and two branch publications;
+allocation 70/revision 1 and the spare-account pause/revision 1 were unchanged.
+The temporary fixture exited cleanly and its source additions were removed.
+The browser tab and viewport override were closed/reset.
+
+Frozen verification so far: core admission and unchanged boundaries **76/76**;
+CLI/HTTP **83/83**; final frontend **1,512/1,512**, 82 files, zero skips, 97.09s;
+existing actual preparation/supervision acceptance **9/9**, two files, zero
+skips, 172.75s. Source/web and strict changed-test TypeScript checks pass.
+Full lint reports zero errors and 107 existing warnings; documentation and
+real-I/O lane checks pass. Local build and five compiled structural safety
+checks pass. The final new acceptance rerun timed out in its first two cases at
+their unchanged 120s limits (136.68s and 127.90s reported elapsed); this is not
+counted as a green suite. Its pause/restart/refusal case passed in 73.40s; total
+rerun duration was 342.42s. Earlier three-case acceptance and the two-objective browser flow
+passed. Follow-up checks found progressing work and slow setup/reads under high
+host load, not proof of a specific root cause. One isolated serial retry retained
+the same source and limits: the automatic case again timed out (135.25s elapsed).
+Pre-timeout evidence showed both resource receipts completed and both queue
+entries settled at revision 2; the test had reached final assertions, close,
+restart or replay checks. The exact delayed operation remains unproven. This
+is an unresolved repeatability/timing gate, not a passing full-release suite.
+The same isolated invocation passed explicit admission in 90.09s; its pause
+case was intentionally unselected after the passing full rerun. Final isolated
+result: one pass, one timeout, one unselected case, 226.70s total. No further
+retries or timeout changes were made. All temporary fixtures were cleaned up.
+Source review identified repeated full seed/evaluator/runtime capture during
+startup restoration and preparation replay as a profiling target, not a proven
+root cause. No caching or integrity-check relaxation was introduced.
+
+No real accounts, credentials, quota policies, KILL or services changed. No
+GitHub Actions, remote push, npm publication or production activation occurred.
+This removes a runtime intake bottleneck, not all remaining autonomy gaps:
+dynamic objective selection, successors seeded from delivered changes, matched
+model benchmarks, policy promotion and actual-account commissioning still need
+their own implementation and acceptance evidence.
+
+## Previous continuation: engineering outcome and resource attribution
 
 Baseline `3a803c695f75edc71f6a04165bcdb6726fad812b`, branch `auto/p00`, isolated
 worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents

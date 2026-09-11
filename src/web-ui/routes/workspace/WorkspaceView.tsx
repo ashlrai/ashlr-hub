@@ -263,6 +263,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         supervisionSupported={scope.engineeringSupervisionSupported === true}
         outcomesSupported={scope.engineeringOutcomesSupported === true}
         preparationSupported={scope.engineeringPreparationSupported === true} preparationAvailable={project?.enabled !== false}
+        autoAdmission={scope.engineeringPreparationAutoAdmission === true}
         canStart={canSend && !busy && snapshot.supervisor?.paused !== true} canStop={stopEnabled} unlocked={unlocked} onUnlock={onUnlock}
         startBlockedReason={project?.enabled === false ? 'This project is disabled. Recorded engineering evidence remains available.'
           : snapshot.supervisor?.paused ? 'The task queue is paused. New engineering launches are withheld; active engineering runs are not stopped.' : undefined} /> : null}

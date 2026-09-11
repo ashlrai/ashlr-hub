@@ -37,13 +37,19 @@ and delivery to an enrolled local branch, not merge, push or deployment.
 pins {schemaVersion:1,outputRoot,resourceRuntime,profiles:[{id,label,acceptance,recipe}]}.
 Profiles fix the project, seed commit, evaluator, files, workers and budgets.
 The workspace supplies only an objective ID, profile ID, name and objective text;
-delivery uses a new codex/<objective-id> branch. Check is read-only; prepare writes
-the bundle and immutable registration without starting it. Completed registrations
-reload on restart. Run the prepared plan separately; it is not added to an existing
-automatic supervision queue. Changed profiles or incomplete evidence remain held.
---engineering-supervision requires --engineering. Its private JSON pins a queue:
+delivery uses a new codex/<objective-id> branch. Check is read-only. By default,
+prepare writes the bundle and immutable registration without starting it. Completed registrations
+reload on restart. Run the prepared plan separately unless the host enables
+autoAdmitPrepared in its bounded supervision policy. That mode admits prepared
+objectives automatically without another Run action. Changed profiles or
+incomplete evidence remain held; queue admission is not execution success.
+--engineering-supervision requires --engineering or --engineering-preparation. Its private JSON pins a queue:
 {schemaVersion:1,id,maxDurationMs,pollIntervalMs,maxConcurrent,maxAttemptsPerEnrollment,
 enrollments:[{enrollmentId,expectedEnrollmentDigest}]}.
+Optional maxEnrollments (1..32) enables append-only admission and an empty initial
+queue. Optional autoAdmitPrepared:true also requires preparation profiles and
+maxEnrollments. New work consumes the original deadline and retained queue capacity;
+completed entries, pauses and attempts are never reset. Omit both fields for a fixed queue.
 It can launch or recover those plans without a browser click while this console
 runs. Original supervision and graph deadlines survive restart. Uncertain work
 is not replayed; unchanged unresolved evidence cannot cause repeated attempts.
@@ -101,8 +107,8 @@ function parse(args: string[]): Options {
   if ((values.has('--engineering') || values.has('--engineering-preparation')) && (!execute || !values.has('--projects'))) {
     throw new UsageError('Engineering requires --execute and an explicit --projects catalog');
   }
-  if (values.has('--engineering-supervision') && !values.has('--engineering')) {
-    throw new UsageError('Engineering supervision requires an explicit --engineering catalog');
+  if (values.has('--engineering-supervision') && !values.has('--engineering') && !values.has('--engineering-preparation')) {
+    throw new UsageError('Engineering supervision requires an explicit engineering catalog or preparation profiles');
   }
   const portText = values.get('--port') ?? '0'; const parallelText = values.get('--max-parallel') ?? '4';
   if (!/^(0|[1-9]\d{0,4})$/.test(portText) || Number(portText) > 65_535 ||
