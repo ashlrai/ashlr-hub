@@ -1,6 +1,66 @@
 # Verified local handoff
 
-## Current continuation: objective preparation inside the workspace
+## Current continuation: engineering outcome and resource attribution
+
+Baseline `3a803c695f75edc71f6a04165bcdb6726fad812b`, branch `auto/p00`, isolated
+worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents
+handled the evidence reader, frontend, and independent comparison/boundary
+review. Parent integrated the owner/API/capability, actual HTTP acceptance,
+canonical documentation and browser verification.
+
+The Engineering runs workspace now offers an explicit **Read outcome evidence**
+action for its selected enrollment. A bounded read-only endpoint joins exact
+campaign trials to historical shared-ledger worker receipts. It reports distinct
+evaluation, selection, strict-improvement and currently verified local-delivery
+stages, seed-relative candidate scores, all attempted generation usage, and
+terminal worker execution-time coverage. Tokens and timing have separate known
+subtotals and nullable totals. Repeated reads, missing evidence, interrupted
+work and changed branches do not grant execution or production acceptance.
+This remains cumulative campaign attribution, not graph-invocation cost or
+causal model credit. Raw task quality and acceptance fields are unchanged.
+
+Comparison controls now disclose and match configured seed measurement and
+observed seed-context regimes. Present context pins and receipts must agree;
+legacy absent context remains supported. Differing regimes suppress comparable
+score deltas rather than falsely implying matched benchmark conditions.
+
+Independent review caught overflow when summing individually valid token
+receipts; safe accumulation now reports unavailable instead of rounded usage.
+Actual browser verification caught mobile min-content expansion in the parent
+Resources grid. The corrected explicit track keeps a 390px viewport at 390px;
+580px tables scroll within 324px regions. Desktop 1280px also fits, and changing
+projects clears the old report. The inspector follows the existing control-room
+fonts/colors and exposes keyboard-labelled scroll regions and request status.
+
+Browser acceptance used compiled UI assets with source API/auth/runtime and a
+test-owned loopback worker, fixed evaluator and actual temporary Git branch.
+It rendered one trial/evaluation/pass/selection/local delivery, zero prior-parent
+strict improvements, seed score 0 to candidate 1, 30 reported tokens and 112.288ms
+summed worker execution. Read/refresh/project switching preserved fixture
+files, account policy, receipts, one request, two evaluations and one branch
+publication. Temporary browser fixtures, tabs and viewport overrides were
+removed. An initial fixture asset-root mistake was corrected before UI proof;
+this was not counted as passing browser verification.
+
+Final source verification: full web **1,457/1,457**, 82 files, zero skips, 58.52s;
+actual HTTP preparation/run/outcome/restart/drift acceptance **4/4**, zero skips,
+61.29s; reader + independent boundary review **29/29**, zero skips, 2.95s;
+comparison pure/CLI/reader/integration **146/146**, zero skips, 43.17s; retained
+seed-model context **14/14**, zero skips. Focused UI/client checks 83/83 and the
+later 12-test layout set overlap the full web suite; do not add these counts.
+Source/web and strict changed-core-test typechecks pass. Full lint has zero
+errors and 107 existing warnings. Documentation and real-I/O membership pass.
+Local build and all five compiled structural safety checks pass; final clean
+identity verification is recorded in the handoff.
+
+No real accounts, credentials, allocation policies, KILL or services changed.
+No GitHub Actions, remote push, npm publication or production activation occurred.
+The original checkout remains unchanged. Entire is enabled in manual-commit
+mode; resume found no checkpoint. Controlled benchmark-driven policy promotion,
+automatic ideation/queue expansion, integration-branch advancement, live account
+commissioning and the complete unattended North Star remain unfinished.
+
+## Previous continuation: objective preparation inside the workspace
 
 Baseline `244c508cf96febc0140017da6427985bffe9feca`, branch `auto/p00`, isolated
 worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three bounded

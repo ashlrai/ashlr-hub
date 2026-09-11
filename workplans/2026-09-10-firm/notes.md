@@ -1,5 +1,67 @@
 # Firm build notes
 
+## September 11: engineering outcomes as learning data
+
+- Prior goal turn made verified progress: clean commit/build 3a803c69; no blocked
+  audit. Continuing from the same owned worktree, original checkout preserved.
+- Three read-only agents map outcome/receipt linkage, operator projections and
+  independent attribution failure cases. Parent traces existing benchmark and
+  performance contracts before selecting an implementation, not a new router.
+- Planning/build-agent skills preserve the existing plan and non-eve runtime.
+  No account/provider/service changes or GitHub Actions in discovery.
+- Selected read-only enrollment outcome attribution: retain separate fixed
+  evaluations, selected artifacts, currently verified local deliveries and
+  exact shared-ledger usage. No production credit, causal model ranking or
+  automatic routing changes. Existing Resources performance stays unmatched.
+- Cold review found seed measurement/context missing from comparison controls;
+  implemented additive regime disclosure and matching without changing legacy
+  unpinned runs or scheduling. Main owns CLI rendering and final integration.
+- Design skill keeps the established ice #f5f7fc / white #ffffff / navy #172746 /
+  blue #526fe8 / border #dfe5f1 palette and Space Grotesk/IBM Plex Sans roles.
+  The new left-aligned outcome inspector sits beside existing engineering
+  evidence: campaign stages above worker coverage tables, with bounded table
+  scrolling on mobile. It loads explicitly; no background inventory or polling.
+  The design emphasizes evaluation versus delivery, not a decorative score.
+- Reader and tests owned by Explore next execution; UI/client owned by Explore
+  resources; seed-comparison correction and cold review by Graph semantics.
+  Parent owns enrollment/API wiring, real HTTP acceptance and documentation.
+- Read-only discovery guessed absent score.ts and universe-compare-cli.test.ts;
+  reusable paths are comparison.ts and universe-comparison-cli.test.ts.
+- Exact joins now include historical worker identity, terminal execution time
+  and all declared attempts; unknown usage remains separate from known subtotals.
+  Zero attempts has no measured total. Evidence coverage is not work completion.
+- Independent review found safe-integer overflow across individually valid
+  receipts. The report now fails unavailable with a fixed overflow reason and
+  never exposes a rounded subtotal. Controlled ledger tests cover the boundary.
+- Actual HTTP prepare/evaluate/deliver/restart acceptance initially passed 4/4.
+  New reader + independent review pass 29/29; comparison pure/CLI/read/integration
+  pass 146/146. Both groups have zero skips. Final integrated gates follow.
+- Browser used compiled assets with source API/runtime and test-owned loopback
+  response; no live model provider. The first fixture was restarted before UI
+  verification to correct its asset root to dist/core/web/public. Test logging
+  was buffered, so the fixture also wrote a private read-only connection file.
+- Mobile browser found the outer Resources implicit grid expanding to 630px at
+  a 390px viewport. Explicit minmax(0,1fr) plus min-width:0 children fixed it:
+  document width390, local evidence table viewport324/scroll580. Desktop1280
+  also fits. Project switching removes the prior outcome report. A structural
+  CSS regression complements, but does not replace, actual browser geometry.
+- Actual rendered fixture: one trial/evaluation/pass/selection/local delivery,
+  zero prior-parent strict improvements; seed0 to candidate1;30 reported tokens
+  and112.288ms summed worker execution. This is not a matched model benchmark.
+  Browser reads preserved exact fixture file/account/receipt state (apart from
+  explicit fixture release marker), one worker request, two evaluations and one
+  branch publication. Temporary blocks/tabs/listeners/directories removed.
+- React checklist drove explicit read lifecycle, stale-request cancellation,
+  clearing on session/project changes, labelled scroll regions and keyboard
+  focus. Documentation keeps local fixed-evaluator evidence separate from
+  production acceptance, routing and account authority.
+- Final full web 1,457/1,457 (82 files, zero skips, 58.52s); actual HTTP 4/4
+  (zero skips, 61.29s); comparison 146/146; outcomes/review 29/29; retained
+  seed-model context 14/14. Source/web and changed-test strict typechecks pass.
+  Full lint: zero errors,107 existing warnings. Docs, lane classification,
+  local build and five compiled structural safety checks pass. Original
+  checkout remains a01fc086 with prior untracked plans; KILL remains unchanged.
+
 ## September 11: next end-to-end operating workflow
 
 - Previous turn was verified progress: clean commit/build

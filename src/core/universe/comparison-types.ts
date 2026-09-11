@@ -26,6 +26,12 @@ export interface UniverseComparisonArm {
   fullyAttributed: boolean;
   nonempty: boolean;
   metric: UniverseManifest['metric'] | null;
+  seed: {
+    measureSeed: boolean | null;
+    observedContext: 'unobserved' | 'absent' | 'context-v1' | 'mixed' | 'invalid';
+    runs: { unpinned: number; pinnedV1: number };
+    receipts: number;
+  };
   feedback: {
     configured: boolean | null;
     observed: 'disabled' | 'legacy-v1' | 'search-v2' | 'mixed' | 'unobserved';
@@ -78,6 +84,7 @@ export interface UniverseCampaignComparison {
     /** Feedback is described separately, not included in this control comparison. */
     configuration: boolean;
     workload: boolean;
+    seedRegime: boolean;
     comparable: boolean;
     reasons: string[];
   };

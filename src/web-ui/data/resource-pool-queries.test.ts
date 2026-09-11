@@ -96,7 +96,7 @@ describe('explicit engineering supervision capability', () => {
   const projectScope = () => ({ ...resourceFixture().scope, defaultProjectId: 'default',
     projects: [{ id: 'default', label: 'Hub', workspace: '/private/project', enabled: true }] });
   it.each([{}, { engineeringSupported: true }, { engineeringSupported: true, engineeringSupervisionSupported: true },
-    { engineeringSupported: true, engineeringPreparationSupported: true }])(
+    { engineeringSupported: true, engineeringPreparationSupported: true }, { engineeringSupported: true, engineeringOutcomesSupported: true }])(
     'accepts absent or explicitly configured capability %# without effects', async (capability) => {
       read.mockResolvedValue({ ...projectScope(), ...capability });
       await expect(resourceConsoleScopeQuery.fetch()).resolves.toBeDefined();
@@ -116,6 +116,14 @@ describe('explicit engineering supervision capability', () => {
   });
   it('rejects preparation without engineering support', async () => {
     read.mockResolvedValue({ ...projectScope(), engineeringPreparationSupported: true });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each([false, null, 1, 'true', {}])('rejects nonliteral outcome flags %#', async (value) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringOutcomesSupported: value });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it('rejects outcomes without engineering support', async () => {
+    read.mockResolvedValue({ ...projectScope(), engineeringOutcomesSupported: true });
     await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
   });
 });

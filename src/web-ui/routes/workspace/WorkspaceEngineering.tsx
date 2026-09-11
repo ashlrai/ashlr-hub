@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { EngineeringSupervision } from './EngineeringSupervision.js';
 import { EngineeringObjectiveComposer } from './EngineeringObjectiveComposer.js';
+import { EngineeringOutcomes } from './EngineeringOutcomes.js';
 import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job,
   ResourceConsoleEngineeringReadiness as Readiness } from '../../../core/resources/console-engineering-types.js';
 import { StatusBadge, type Tone } from '../../components/primitives/StatusBadge.js';
@@ -15,11 +16,12 @@ const label = (state: Job['state']) => state === 'completed' ? 'Recorded deliver
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Engineering evidence is unavailable.';
 
 /** Observation can poll; launch/cancel only come from explicit user events. */
-export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, preparationSupported, preparationAvailable }: {
+export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, preparationSupported, preparationAvailable, outcomesSupported }: {
   projectId: string; projectName: string; available: boolean; canStart: boolean; canStop: boolean; unlocked: boolean; onUnlock(): void; startBlockedReason?: string;
   supervisionSupported?: boolean;
   preparationSupported?: boolean;
   preparationAvailable?: boolean;
+  outcomesSupported?: boolean;
 }) {
   const [catalog, setCatalog] = useState<Enrollment[] | null>(null);
   const [selection, setSelection] = useState('');
@@ -193,6 +195,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
         <p>{reconcile ? continuePending ? 'May start never-started campaigns using enrolled workers and shared quota after verifying completed work. Original deadlines and account reserves still apply; uncertain work stays held.' : 'Only exact completed-child proof can reconcile this graph, within its original deadline. Unfinished work stays held.' : 'Uses enrolled workers under existing quota and account-reserve policies. No accounts are connected by this action.'}</p></div>
         <div className={styles.actions}><button type="button" className={styles.button} disabled={!canStop || !currentJob?.cancellable || busy} onClick={() => { void act('cancel'); }}>{unlocked ? 'Stop engineering run' : 'Unlock to stop'}</button>
           <button type="button" className={styles.primary} disabled={!launchable} onClick={() => { void act('start'); }}>{busy ? 'Submitting…' : unlocked ? reconcile ? continuePending ? 'Continue pending work' : 'Reconcile completed work' : 'Run enrolled plan' : 'Unlock to run'}</button></div></footer>
+      {outcomesSupported ? <EngineeringOutcomes key={`${projectId}:${identity}`} enrollment={selected} available={available} /> : null}
       {loading ? <p role="status" className={styles.message}>Reading graph evidence…</p> : null}
       {readError || actionError ? <p role="alert" className={styles.error}>{actionError ?? readError}</p> : null}
       {notice ? <p role="status" className={styles.message}>{notice}</p> : null}

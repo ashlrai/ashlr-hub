@@ -50,6 +50,12 @@ stubs are review aids, not signed runtime evidence.
 
 ## Next executable milestones
 
+The local workspace now has a read-only [engineering outcome inspector](RESOURCE-POOLS.md#read-engineering-outcomes-and-resource-use)
+joining exact campaign evaluations and verified local deliveries to recorded
+worker tokens and execution time. Unknown coverage remains explicit; this is
+cumulative observation, not causal model ranking, automatic routing or proof of
+production acceptance. Controlled benchmark-driven policy promotion remains unwired.
+
 The local workspace now connects signed engineering graphs to resource-accounted
 confined changes, fixed evaluation, explicit branch delivery and exact completed
 receipt recovery. Its [local admission view](RESOURCE-POOLS.md#evaluated-engineering-runs)

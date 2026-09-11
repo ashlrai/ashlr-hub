@@ -1364,6 +1364,16 @@ fully attributed histories. Positive `directionAdjustedDelta` means the
 challenger's retained score is better under the declared metric, including a
 minimization metric. It is not a business-value estimate.
 
+`matching.seedRegime` additionally requires matching configured seed measurement
+and uniform observed seed-context conditions. Each arm's `seed` field reports
+whether `measureSeed` was configured, how many runs pinned context, and how many
+generation receipts carried it. Historical runs without seed context remain
+valid, but are not matched to runs whose workers received measured seed evidence.
+Mixed or invalid context evidence withholds comparison; a context pin must agree
+with the recorded seed evaluation and the corresponding generation receipt.
+This prevents extra baseline information from being mistaken for a model or
+feedback improvement. It does not change scheduling or acceptance.
+
 Counts distinguish passed trials, first niche admissions, strict retained
 improvements, and distinct selected artifact digests excluding the seed. A
 passing unchanged trial is not a new useful artifact. Final niche scores come

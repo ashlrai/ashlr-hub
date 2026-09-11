@@ -1,5 +1,7 @@
 import type { UniverseCampaignComparison, UniverseComparisonArm, UniverseComparisonArmSource } from './comparison-types.js';
 import type { UniverseRun, UniverseTrial } from './types.js';
+import { digest } from './artifacts.js';
+import { seedContextReceipt, validateUniverseSeedContext, validSeedContextReceipt } from './seed-context.js';
 
 const HASH = /^[a-f0-9]{64}$/;
 const MAX_RUNS = 10_000;
@@ -27,6 +29,7 @@ function empty(source: UniverseComparisonArmSource): UniverseComparisonArm {
   return { campaignId: source.campaignId, universeId: null, definitionDigest: null, manifestDigest: null,
     comparatorDigest: null, sourceState: source.sourceState, campaignState: null, reasons: [], completed: false,
     fresh: false, fullyAttributed: false, nonempty: false, metric: null,
+    seed: { measureSeed: null, observedContext: 'unobserved', runs: { unpinned: 0, pinnedV1: 0 }, receipts: 0 },
     feedback: { configured: null, observed: 'unobserved', runs: { disabled: 0, legacyV1: 0, searchV2: 0 },
       receipts: { modelTrials: 0, legacyFeedback: 0, searchContext: 0 } },
     counts: { attempts: 0, completedRuns: 0, interruptedRuns: 0, failedRuns: 0, passedTrials: 0,
@@ -57,6 +60,7 @@ function summarize(source: UniverseComparisonArmSource): UniverseComparisonArm {
   arm.comparatorDigest = campaign.comparatorDigest;
   arm.campaignState = campaign.state;
   arm.feedback.configured = campaign.definition.feedback;
+  arm.seed.measureSeed = campaign.definition.measureSeed === true;
   arm.metric = { name: universe.manifest.metric.name, direction: universe.manifest.metric.direction,
     minImprovement: universe.manifest.metric.minImprovement };
   if (source.sourceState !== 'healthy' || campaign.sourceState !== 'healthy' || universe.sourceState !== 'healthy') issue('source-evidence-degraded');
@@ -88,6 +92,9 @@ function summarize(source: UniverseComparisonArmSource): UniverseComparisonArm {
   const retained = new Map<string, UniverseComparisonArm['niches'][number]>();
   const occurrences = new Map<string, { run: UniverseRun; trial: UniverseTrial }>();
   const observed = new Set<'disabled' | 'legacy-v1' | 'search-v2'>();
+  const seedObserved = new Set<'absent' | 'context-v1'>();
+  let invalidSeed = false;
+  const seedIssue = (): void => { invalidSeed = true; issue('seed-context-evidence-mismatch'); };
   let usageComplete = true;
   for (const [index, step] of campaign.steps.entries()) {
     reservations.push(step.reservedModelRequests);
@@ -112,6 +119,26 @@ function summarize(source: UniverseComparisonArmSource): UniverseComparisonArm {
         run.trials.some((trial) => !step.variantIds.includes(trial.variantId)) ||
         (run.status === 'completed' && run.trials.length !== step.variantIds.length)) issue('run-attribution-mismatch');
     const protocol = !run.feedbackEnabled ? 'disabled' : run.feedbackVersion === 2 ? 'search-v2' : 'legacy-v1';
+    let expectedSeedReceipt: ReturnType<typeof seedContextReceipt> | undefined;
+    if (run.seedContext !== undefined) {
+      arm.seed.runs.pinnedV1++;
+      try {
+        const context = validateUniverseSeedContext(run.seedContext);
+        const seed = campaign.seedEvaluation;
+        if (!arm.seed.measureSeed || protocol !== 'search-v2' || !seed?.result || seed.result.status !== 'measured' ||
+            seed.result.measurement === null || seed.result.reason !== null || seed.result.processGroupSettlement !== 'group-exit-confirmed' ||
+            seed.result.intentDigest !== digest(canonical(seed.intent)) ||
+            seed.intent.definitionDigest !== campaign.definitionDigest || seed.intent.manifestDigest !== campaign.manifestDigest ||
+            seed.intent.comparatorDigest !== campaign.comparatorDigest || seed.intent.seedArtifactDigest !== source.seedDigest ||
+            !Number.isFinite(Date.parse(seed.result.finishedAt)) || Date.parse(seed.result.finishedAt) > Date.parse(run.startedAt) ||
+            canonical(context.source) !== canonical({ universeId: arm.universeId, campaignId: campaign.definition.id,
+              definitionDigest: campaign.definitionDigest, manifestDigest: campaign.manifestDigest, comparatorDigest: campaign.comparatorDigest,
+              seedArtifactDigest: source.seedDigest, intentDigest: digest(canonical(seed.intent)), resultDigest: digest(canonical(seed.result)) }) ||
+            canonical(context.measurement) !== canonical({ ...seed.result.measurement, diagnostics: seed.result.measurement.diagnostics ?? [] })) {
+          seedIssue();
+        } else expectedSeedReceipt = seedContextReceipt(context);
+      } catch { seedIssue(); }
+    } else arm.seed.runs.unpinned++;
     arm.feedback.runs[protocol === 'disabled' ? 'disabled' : protocol === 'search-v2' ? 'searchV2' : 'legacyV1']++;
     if (run.status === 'completed') arm.counts.completedRuns++;
     durations.push(run.durationMs);
@@ -121,12 +148,19 @@ function summarize(source: UniverseComparisonArmSource): UniverseComparisonArm {
       if (trial.status === 'passed') arm.counts.passedTrials++;
       if (trial.generation) {
         const receipt = trial.generation;
+        if (receipt.seedContext !== undefined) arm.seed.receipts++;
+        // A legacy unpinned run remains valid. A receipt cannot invent a pin,
+        // and preflight failures without a prompt cannot claim seed exposure.
+        if (receipt.promptDigest !== null && expectedSeedReceipt !== undefined) {
+          if (!validSeedContextReceipt(receipt.seedContext) || canonical(receipt.seedContext) !== canonical(expectedSeedReceipt)) seedIssue();
+        } else if (receipt.seedContext !== undefined) seedIssue();
         arm.feedback.receipts.modelTrials++;
         if (receipt.feedback) arm.feedback.receipts.legacyFeedback++;
         if (receipt.search) arm.feedback.receipts.searchContext++;
         if (receipt.requestStarted) {
           arm.counts.modelRequestsStarted++;
           observed.add(protocol);
+          seedObserved.add(expectedSeedReceipt === undefined ? 'absent' : 'context-v1');
           if ((protocol === 'search-v2') !== Boolean(receipt.search) || (protocol === 'disabled' && receipt.feedback)) issue('feedback-protocol-mismatch');
           if (receipt.usage.state === 'reported') {
             arm.counts.reportedModelRequests++;
@@ -148,6 +182,7 @@ function summarize(source: UniverseComparisonArmSource): UniverseComparisonArm {
     }
   }
   arm.feedback.observed = observed.size > 1 ? 'mixed' : [...observed][0] ?? 'unobserved';
+  arm.seed.observedContext = invalidSeed ? 'invalid' : seedObserved.size > 1 ? 'mixed' : [...seedObserved][0] ?? 'unobserved';
   arm.counts.distinctSelectedArtifacts = selected.size;
   arm.niches = [...retained.values()].sort((a, b) => a.niche.localeCompare(b.niche));
   arm.nonempty = scoped.some((run) => run.trials.length > 0);
@@ -255,20 +290,26 @@ export function buildUniverseCampaignComparison(baselineSource: UniverseComparis
   if (!workload) differences.push('executed-workloads-differ-or-unavailable');
   if (baseline.feedback.configured !== challenger.feedback.configured) differences.push('configured-feedback-differs');
   if (baseline.feedback.observed !== challenger.feedback.observed) differences.push('observed-feedback-protocols-differ');
+  const seedRegime = baseline.seed.measureSeed !== null && baseline.seed.measureSeed === challenger.seed.measureSeed &&
+    baseline.seed.observedContext === challenger.seed.observedContext &&
+    !['mixed', 'invalid'].includes(baseline.seed.observedContext);
+  if (baseline.seed.measureSeed !== challenger.seed.measureSeed) differences.push('configured-seed-measurement-differs');
+  if (baseline.seed.observedContext !== challenger.seed.observedContext) differences.push('observed-seed-context-regimes-differ');
   const distinct = baseline.campaignId !== challenger.campaignId && baseline.universeId !== null && challenger.universeId !== null && baseline.universeId !== challenger.universeId;
   const reasons: string[] = [];
   if (!distinct) reasons.push('distinct-campaigns-and-universes-required');
   if (!comparator) reasons.push('exact-comparator-match-required');
   if (!configuration) reasons.push('matching-configuration-required');
   if (!workload) reasons.push('equal-executed-work-required');
+  if (!seedRegime) reasons.push('matching-uniform-seed-regime-required');
   if (!eligible(baseline) || !eligible(challenger)) reasons.push('healthy-fresh-completed-attributed-nonempty-arms-required');
   if (baseline.feedback.observed === 'mixed' || challenger.feedback.observed === 'mixed') reasons.push('uniform-observed-feedback-protocols-required');
   const comparable = reasons.length === 0;
   let feedbackContrast: UniverseCampaignComparison['feedbackContrast'] = 'other-or-mixed';
   if (baseline.feedback.observed === 'unobserved' || challenger.feedback.observed === 'unobserved') feedbackContrast = 'unobserved';
-  else if (baseline.feedback.configured === false && baseline.feedback.observed === 'disabled' &&
+  else if (seedRegime && baseline.feedback.configured === false && baseline.feedback.observed === 'disabled' &&
       challenger.feedback.configured === true && challenger.feedback.observed === 'search-v2') feedbackContrast = 'feedback-bundle-v2';
-  else if (baseline.feedback.configured === challenger.feedback.configured && baseline.feedback.observed === challenger.feedback.observed &&
+  else if (seedRegime && baseline.feedback.configured === challenger.feedback.configured && baseline.feedback.observed === challenger.feedback.observed &&
       baseline.feedback.observed !== 'mixed') feedbackContrast = 'same-feedback-condition';
   const niches = unique([...baseline.niches, ...challenger.niches].map((item) => item.niche)).sort();
   const scoreDeltas = niches.map((niche) => {
@@ -282,5 +323,5 @@ export function buildUniverseCampaignComparison(baselineSource: UniverseComparis
     baseline.sourceState === 'healthy' && challenger.sourceState === 'healthy' ? 'healthy' : 'degraded';
   return { schemaVersion: 1, sampledAt, measurementScope: 'local-experiment', authority: 'observation-only', sourceState,
     reasons: sourceState === 'healthy' ? [] : ['comparison-source-evidence-unavailable-or-degraded'], baseline, challenger,
-    matching: { comparator, configuration, workload, comparable, reasons }, differences, feedbackContrast, scoreDeltas, acceptedChanges: null };
+    matching: { comparator, configuration, workload, seedRegime, comparable, reasons }, differences, feedbackContrast, scoreDeltas, acceptedChanges: null };
 }

@@ -425,6 +425,11 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');
         sendSnapshot(res, engineering.readiness(engineeringReadiness[1]!)); return;
       }
+      const engineeringOutcomes = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/outcomes$/.exec(url.pathname);
+      if (engineeringOutcomes) {
+        if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');
+        sendSnapshot(res, engineering.outcomes(engineeringOutcomes[1]!)); return;
+      }
       const engineeringStatus = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})$/.exec(url.pathname);
       if (url.pathname === '/api/resources/engineering' || engineeringStatus) {
         if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');
@@ -600,6 +605,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? { quotaConfigFile } : {}), signal,
         waitForResourceDrain: () => supervisor!.close() });
       scope.engineeringSupported = true;
+      scope.engineeringOutcomesSupported = true;
       if (engineeringPreparationConfig && engineeringPreparationFile && workspace && projectsFile) {
         engineeringPreparation = createResourceConsoleEngineeringPreparation({ config: engineeringPreparationConfig,
           configFile: engineeringPreparationFile, root, workspace, projectsFile, poolFile, bindingsFile, observationsFile,

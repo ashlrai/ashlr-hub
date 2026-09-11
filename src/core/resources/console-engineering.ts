@@ -14,6 +14,8 @@ import { createFirmEngineeringControlHandler, type FirmEngineeringControlHost } 
 import { readControlGraph, runControlGraph, validateControlGraph, type ControlGraphDefinition } from '../universe/control-graph.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { readResourceJson, resourcePoolStatus } from './pool-runtime.js';
+import { readResourceEngineeringOutcomes } from './engineering-outcomes.js';
+import type { ResourceEngineeringOutcomes } from './engineering-outcomes-types.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { matchesResourceConsoleProject, validateResourceConsoleProjectBindings, type ResourceConsoleProjectBinding } from './console-projects.js';
@@ -48,6 +50,7 @@ export interface ResourceConsoleEngineeringOwner {
   register(catalog: ResourceConsoleEngineeringCatalog): ResourceConsoleEngineeringEnrollment[];
   snapshot(id: string): ResourceConsoleEngineeringJob;
   readiness(id: string): ResourceConsoleEngineeringReadiness;
+  outcomes(id: string): ResourceEngineeringOutcomes;
   /** Host-only observational key. Null means incomplete/unstable evidence, never retry permission. */
   evidenceFingerprint(id: string): string | null;
   /** Await this owner's current invocation, including its existing cleanup. */
@@ -414,6 +417,26 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
     checkRegistration: (input) => snapshot([...prepareRegistration(input).values()].map(value => value.summary)),
     register(input) { enrolled = prepareRegistration(input); return owner.catalog(); },
     readiness: (id) => readiness(entry(id)),
+    outcomes(id) {
+      const value = entry(id);
+      const verify = () => {
+        if (closing) fail('UNAVAILABLE', 'Engineering owner is closing');
+        const current = supervisor.engineeringBinding(value.row.projectId);
+        const project = current.project;
+        if (current.root !== control.root || current.poolDigest !== poolDigest ||
+          canonical({ id: project.id, workspace: project.workspace, dev: project.dev, ino: project.ino }) !== canonical(value.projectIdentity) ||
+          !matchesResourceConsoleProject(project)) fail('UNAVAILABLE', 'Engineering outcome project changed');
+        if (canonical(createFirmEngineeringControlHandler(value.row.host).nodeInput) !== canonical(value.binding.nodeInput)) {
+          fail('UNAVAILABLE', 'Engineering outcome enrollment changed');
+        }
+      };
+      // Observation never calls admission, claims a lease, clears a stop, or
+      // attributes a different campaign to this enrollment after source drift.
+      verify();
+      const report = readResourceEngineeringOutcomes({ enrollment: value.summary, host: value.row.host,
+        root: control.root, poolFile: control.poolFile, bindingsFile: control.bindingsFile });
+      verify(); return report;
+    },
     evidenceFingerprint(id) {
       const value = entry(id);
       try {

@@ -312,6 +312,7 @@ control authority and an exact Origin. All responses are bounded and no-store:
 | `GET /api/resources/engineering` | Enrolled summaries, including project identity and digest |
 | `GET /api/resources/engineering/:id` | Recorded graph/ownership projection |
 | `GET /api/resources/engineering/:id/readiness` | Non-dispatching local admission sample; `ready`, `blocked` or `not-applicable` |
+| `GET /api/resources/engineering/:id/outcomes` | Read-only campaign evaluation, local delivery and exact worker-usage attribution |
 | `POST /api/resources/engineering/start` | `{enrollmentId, expectedEnrollmentDigest}` → owned job, HTTP 202 |
 | `POST /api/resources/engineering/:id/cancel` | Empty object → durable stop projection |
 
@@ -338,6 +339,46 @@ After graph execution, a clean close also requires a readable shared resource
 ledger with no reserved or uncertain attempts, checked after ordinary task drain.
 An unrelated unresolved attempt can conservatively withhold clean shutdown; the
 diagnosis does not claim that engineering created it.
+
+### Read engineering outcomes and resource use
+
+Select an enrolled plan in Workspace → **Engineering runs**, then choose
+**Read outcome evidence**. The inspector reads only on request; graph polling
+does not repeatedly load campaign evidence. **Refresh outcome evidence** samples
+again. Changing the project, enrollment or authenticated session discards the
+previous result. A failed refresh removes the old report rather than presenting
+it as current.
+
+The report connects each declared campaign trial to its exact shared-ledger
+resource receipt, including historical pool/worker identity. It shows separate
+counts for evaluated, passed, rejected, selected and strictly improved candidates,
+plus currently verified planned local deliveries. These stages overlap: they
+are not a funnel, a model ranking or proof of production acceptance. A first
+passing repair is not automatically a strict improvement over a prior trial.
+Seed score and direction-adjusted changes remain separate from parent-trial
+feedback. Scores are never aggregated across different comparators.
+
+Usage includes unsuccessful attempts, not just the final selected candidate.
+**Recorded token subtotal** preserves known input/output usage when another
+attempt is unknown; a complete total is `null` until all observed attempts have
+matching reported usage. No attempts means no measured total, not a zero-cost
+success. Execution time is the sum of matching terminal worker measurements,
+not elapsed campaign time, evaluator time, total company time or provider billing.
+Missing timing retains its own coverage count and a `null` total independently
+of token coverage. Worker rows show participation, not sole credit for an artifact.
+
+The authenticated read-token endpoint above resolves an enrollment ID through
+the host-owned project binding. It accepts no browser-supplied file paths and
+uses two bounded observations to detect changing evidence. Missing, mismatched
+or changing evidence yields an unavailable/degraded report; moved delivery
+branches lose their verified-delivery count. **Evidence coverage complete**
+describes the sampled evidence, not whether a campaign has finished.
+
+This is cumulative campaign attribution, not costs isolated to one graph
+invocation. Raw worker receipts remain `verifiedAccepted: false`; the existing
+resource performance report remains `quality: 'unmeasured'`. This separate
+fixed-evaluator/local-branch report creates neither production acceptance nor
+automatic routing, account allocation, execution, repair or promotion authority.
 
 ### Automatic engineering supervision
 

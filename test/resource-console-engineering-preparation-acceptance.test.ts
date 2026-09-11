@@ -11,6 +11,7 @@ import { resourcePoolStatus, setResourcePoolAllocation, setResourceWorkerAccess 
 import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
+import type { ResourceEngineeringOutcomes } from '../src/core/resources/engineering-outcomes-types.js';
 import { startResourceConsoleServer, type ResourceConsoleServerHandle } from '../src/core/web/resource-console-server.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import * as evaluator from '../src/core/universe/fixed-evaluator.js';
@@ -153,6 +154,15 @@ describe.runIf(process.platform === 'darwin')('same-console objective preparatio
     expect(inventory(homedir())).toEqual(home);
     const catalog = await jsonResponse<Array<{ id: string; enrollmentDigest: string }>>(await api(server, 'engineering', undefined, server.readToken));
     expect(catalog).toContainEqual(expect.objectContaining({ id: input.id, enrollmentDigest: prepared.enrollment.enrollmentDigest }));
+    const readOutcomes = (handle = server) => api(handle, `engineering/${input.id}/outcomes`, undefined, handle.readToken);
+    expect(await jsonResponse(await api(server, 'console', undefined, server.readToken))).toMatchObject({ engineeringOutcomesSupported: true });
+    const beforeOutcomes = inventory(f.base);
+    const empty = await jsonResponse<ResourceEngineeringOutcomes>(await readOutcomes());
+    expect(empty).toMatchObject({ enrollmentId: input.id, enrollmentDigest: prepared.enrollment.enrollmentDigest,
+      authority: 'observation-only', productionAccepted: null, routingChanged: false, usage: { attempts: 0, totalTokens: null } });
+    expect(inventory(f.base)).toEqual(beforeOutcomes); noExecution(f);
+    expect((await api(server, `engineering/${input.id}/outcomes`, undefined, '')).status).toBe(401);
+    expect((await api(server, 'engineering/foreign/outcomes', undefined, server.readToken)).status).toBe(404);
     expect((await api(server, 'engineering/start', { enrollmentId: input.id, expectedEnrollmentDigest: prepared.enrollment.enrollmentDigest })).status).toBe(202);
     await vi.waitFor(async () => {
       const job = await jsonResponse<{ state: string }>(await api(server, `engineering/${input.id}`, undefined, server.readToken));
@@ -164,15 +174,35 @@ describe.runIf(process.platform === 'darwin')('same-console objective preparatio
     expect(git(f.repo, 'show', `codex/${input.id}:value.json`)).toBe('1');
     expect(git(f.repo, 'diff', '--name-only', f.revision, `codex/${input.id}`)).toBe('value.json');
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.repo, 'status', '--porcelain=v1')).toBe('');
+    const measured = await jsonResponse<ResourceEngineeringOutcomes>(await readOutcomes());
+    expect(measured).toMatchObject({ sourceState: 'healthy', complete: true, enrollmentId: input.id,
+      usage: { attempts: 1, joinedAttempts: 1, reportedAttempts: 1, unknownAttempts: 0, recordedInputTokens: 20,
+        recordedOutputTokens: 10, totalTokens: 30, complete: true }, campaigns: [{ campaignId: input.id,
+        seed: { status: 'measured', score: 0, passed: false }, stages: { trials: 1, evaluated: 1, passed: 1,
+          rejected: 0, selected: 1, verifiedLocalDeliveries: 1 }, workers: [{ workerId: 'repair', provider: 'local', model: 'fixture' }] }] });
+    expect(measured.campaigns[0]!.niches[0]).toMatchObject({ score: 1, deltaFromSeed: 1 });
+    expect(measured.timing).toMatchObject({ scope: 'summed-worker-execution', attempts: 1,
+      measuredAttempts: 1, complete: true, totalDurationMs: expect.any(Number) });
+    expect(measured.timing.totalDurationMs).toBe(f.ledger().attempts[0]!.execution!.durationMs);
+    expect(measured.campaigns[0]!.timing).toEqual(measured.timing);
+    expect(measured.campaigns[0]!.workers[0]!.timing).toEqual(measured.timing);
+    expect(JSON.stringify(measured)).not.toContain(f.base);
     await server.close(); const receipts = f.ledger().attempts; const restarted = await start(f);
     expect(await jsonResponse(await api(restarted, 'engineering', undefined, restarted.readToken))).toContainEqual(expect.objectContaining({ id: input.id, enrollmentDigest: prepared.enrollment.enrollmentDigest }));
     expect(await jsonResponse(await api(restarted, `engineering/${input.id}`, undefined, restarted.readToken))).toMatchObject({ state: 'completed' });
     const beforeReplay = inventory(f.base);
+    const reloaded = await jsonResponse<ResourceEngineeringOutcomes>(await readOutcomes(restarted));
+    expect({ ...reloaded, sampledAt: measured.sampledAt }).toEqual(measured);
     expect(await jsonResponse(await api(restarted, 'engineering/prepare', { ...input, expectedPlanDigest: plan.planDigest }))).toMatchObject({ disposition: 'replayed', plan,
       enrollment: { enrollmentDigest: prepared.enrollment.enrollmentDigest } });
     expect(inventory(f.base)).toEqual(beforeReplay);
     expect((await api(restarted, 'engineering/start', { enrollmentId: input.id, expectedEnrollmentDigest: prepared.enrollment.enrollmentDigest })).status).toBe(202);
     expect(f.ledger().attempts).toEqual(receipts); expect(f.requests).toHaveLength(1); expect(f.evaluations).toHaveBeenCalledTimes(2); expect(f.publications()).toBe(1);
+    git(f.repo, 'update-ref', `refs/heads/codex/${input.id}`, f.revision);
+    const drifted = await jsonResponse<ResourceEngineeringOutcomes>(await readOutcomes(restarted));
+    expect(drifted.campaigns[0]!.stages.verifiedLocalDeliveries).toBeNull();
+    expect(drifted.complete).toBe(false);
+    expect(f.ledger().attempts).toEqual(receipts); expect(f.requests).toHaveLength(1); expect(f.evaluations).toHaveBeenCalledTimes(2);
   }, 75_000);
 
   it('rejects missing authority, cross-project overrides and extra recipe fields before any registration', async () => {

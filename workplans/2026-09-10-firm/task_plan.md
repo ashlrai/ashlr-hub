@@ -93,6 +93,9 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Explore the next commissioning/operator bottleneck across account setup, objective preparation and supervision.
 - [x] Implement the selected complete workflow with existing ledger, evidence and delivery primitives.
 - [x] Independently verify actual execution, interruption and operator interaction; update remaining gaps.
+- [x] Explore verified engineering outcome attribution and comparable quality measurement with three agents.
+- [x] Connect the highest-value missing learning-data seam using existing signed evaluation and resource receipts.
+- [x] Prove attribution, incomplete-evidence handling and no duplicate counting; expose useful operator/agent evidence.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
