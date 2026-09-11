@@ -196,6 +196,16 @@ describe('pinned console engineering preparation boundaries', () => {
     expect(() => manager.prepare({ ...request, expectedPlanDigest: plan.planDigest })).toThrow();
     expect(tree(f.base)).toEqual(before); expect(f.owner.catalog()).toEqual([]);
   });
+  it.each([null, false])('refuses a present invalid successor source %s in a real committed registration', async source => {
+    const f = await fixture(); const manager = f.create(); const plan = manager.check(request);
+    manager.prepare({ ...request, expectedPlanDigest: plan.planDigest });
+    const file = join(f.root, 'console-engineering-preparations', 'records', `${request.id}.json`);
+    const record = JSON.parse(readFileSync(file, 'utf8')); save(file, { ...record, source });
+    const restored = f.newOwner(); const before = tree(f.base);
+    expect(() => createResourceConsoleEngineeringPreparation({ ...f.options, owner: restored })).toThrow();
+    expect(() => manager.check(request)).toThrow(); expect(restored.catalog()).toEqual([]);
+    expect(tree(f.base)).toEqual(before);
+  });
   it.each(['missing-bundle', 'missing-receipt', 'changed-receipt', 'changed-registry'] as const)('refuses unproven historical registration %s without reconstruction writes', async kind => {
     const f = await fixture(); const manager = f.create(); const plan = manager.check(request); manager.prepare({ ...request, expectedPlanDigest: plan.planDigest });
     if (kind === 'missing-bundle') renameSync(f.bundle, `${f.bundle}-retained`);

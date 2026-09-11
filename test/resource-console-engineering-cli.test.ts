@@ -18,6 +18,9 @@ describe('explicit engineering console CLI capability', () => {
     ...['relative', '/', '/private/\u0085'].map((path) => [...base, ...execution, '--engineering', path]),
     [...base, ...execution, '--engineering', '/private/fixture/a.json', '--engineering', '/private/fixture/b.json'],
     [...base, ...execution, '--engineering-supervision', '/private/fixture/supervision.json'],
+    [...base, ...execution, '--engineering-successors', '/private/fixture/successors.json'],
+    [...base, ...execution, '--engineering-preparation', '/private/fixture/profiles.json', '--engineering-successors', '/private/fixture/successors.json'],
+    [...base, ...execution, '--engineering-supervision', '/private/fixture/supervision.json', '--engineering-successors', '/private/fixture/successors.json'],
     ...['relative', '/'].map(path => [...base, ...execution, '--engineering', '/private/fixture/engineering.json', '--engineering-supervision', path]),
   ])('refuses invalid enrollment authority before startup: %j', async (...args) => {
     expect(await cmdResourceConsole(args)).toBe(2); expect(backend.start).not.toHaveBeenCalled();
@@ -31,13 +34,15 @@ describe('explicit engineering console CLI capability', () => {
       scope: { schemaVersion: 1, mode: 'resource-pool', readOnly: false, engineeringSupported: true }, close });
     const before = process.listeners('SIGTERM');
     const pending = cmdResourceConsole([...base, ...execution, '--engineering', '/private/fixture/engineering.json',
+      '--engineering-preparation', '/private/fixture/profiles.json', '--engineering-successors', '/private/fixture/successors.json',
       '--engineering-supervision', '/private/fixture/supervision.json', '--json']);
     try {
       await vi.waitFor(() => expect(output).toHaveBeenCalledOnce());
       expect(backend.start.mock.calls[0]![0]).toMatchObject({ engineeringFile: '/private/fixture/engineering.json',
-        engineeringSupervisionFile: '/private/fixture/supervision.json', projectsFile: '/private/fixture/projects.json', execute: true });
+        engineeringSupervisionFile: '/private/fixture/supervision.json', engineeringPreparationFile: '/private/fixture/profiles.json',
+        engineeringSuccessorsFile: '/private/fixture/successors.json', projectsFile: '/private/fixture/projects.json', execute: true });
       const scope = JSON.parse(output.mock.calls[0]![0] as string);
-      expect(scope.engineeringSupported).toBe(true); expect(scope.engineeringFile).toBeUndefined();
+      expect(scope.engineeringSupported).toBe(true); expect(scope.engineeringFile).toBeUndefined(); expect(scope.engineeringSuccessorsFile).toBeUndefined();
       (process.listeners('SIGTERM').find((listener) => !before.includes(listener))! as () => void)();
       await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
       let done = false; void pending.then(() => { done = true; }); await Promise.resolve(); expect(done).toBe(false);

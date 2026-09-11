@@ -1,5 +1,136 @@
 # Firm build notes
 
+## September 11: verified-delivery successor loop
+
+- Fresh checkout is clean at be55c10e on auto/p00. Entire resume found no
+  checkpoint; previous goal turn was progress, not a wait or blocked audit.
+- Reusing planning/documentation skills and the established non-eve runtime.
+  Three independent explorations precede source ownership and implementation.
+- Target is a real autonomous chain: delivered campaign -> accounted proposal
+  -> durable exact proposal result -> successor prepared at delivered commit ->
+  current supervisor admission -> independently measured improvement/delivery.
+  A model's success claim must not substitute for source delivery evidence.
+- Current static preparation profile always pins its original seed. Existing
+  integration handoff has source guards but is typed to integration receipts;
+  campaign origins require their own typed binding. Initial-repair policy stays
+  restricted to failed measured seed; passing successors require actual strict
+  improvement rather than an invented seed parent.
+- Implemented three seams: typed campaign-delivery origin and shared successor
+  preparation, immutable accounted proposal coordinator, and private manager /
+  console / CLI adapter. Ordinary browser preparation cannot supply source pins.
+  Host policy names one profile, proposal workers, proposal bound and lifetime
+  successor count, all under the existing supervisor deadline and resource ledger.
+- Proposal context includes fixed acceptance, measured seed and delivered score,
+  and bounded declared file excerpts from the receipt-matching delivered artifact.
+  It never substitutes mutable checkout bytes or inherits source trial scores.
+  Private context is bounded to 8 KiB and excluded from status snapshots.
+- Real successor-preparation tests passed 6/6, 62.04s. Coordinator controlled
+  ledger/adapter with real private journal passed 23/23, 9.55s before subsequent
+  review fixes. Parent source TypeScript and CLI/HTTP passed 53/53, 4s before
+  the additional shared-drain regression. These are intermediate gates, not
+  final frozen-source acceptance.
+- Independent review identified and corrected: mutable adapter callback/options;
+  source drift during quota admission not covered by final dispatch check;
+  present invalid source field falling through legacy registration handling;
+  engineering shutdown checking shared ledger before successor proposal drain.
+  Final dispatch rereads source only after the pool lock releases; inside-lock
+  quota observation retains the cheap guard. Separate completed-result fact
+  persistence preserves paid output during pause/KILL/source drift, while fresh
+  guards still gate preparation and admission. Live states distinguish proposing,
+  capacity waiting, preparation and admission from unresolved response history.
+- Explicit live no-reservation capacity denial retries the same task within
+  original/proposal deadlines; restart of ambiguous intent does not redispatch.
+- Discovery errors: nonexistent console-server/firm-control-types/seed-type
+  guesses were corrected via source search. Initial coordinator Record alias
+  shadowed the built-in type and was renamed. Initial source fixture failed
+  upstream delivery before real-I/O lane registration; registered fixture passed.
+  First actual acceptance stopped during setup because a backdated observation
+  exceeded the existing five-minute TTL; fixture-only expiry corrected to 290s.
+  No production validators or existing test timeouts were widened.
+- Actual three-case manager/adapter/loopback acceptance is running as integration
+  feedback while review fixes land. Its loaded source predates some final fixes;
+  a frozen-source rerun is required. Tests use five model requests (four candidate
+  requests plus one proposer), six evaluations and two strict local deliveries.
+- Informative loaded-source actual acceptance completed 3/3 with no skips in
+  427.72s: automatic chain 232.784s, source-drift 105.654s, lost-output 88.032s.
+  A suspected post-registration stall was only elapsed time: both deliveries
+  ultimately passed. This run predates final review fixes and is not the final
+  frozen acceptance. Optional fixture-only phase timing will measure existing
+  source proof calls and preparation without adding proof reads or raising limits.
+- Final CLI/HTTP/adapter gate passed 65/65 across three files in 5.36s.
+  Supervisor/admission/owner gate has 78 passing tests across three files after
+  correcting a new fault fixture: whitespace is canonically equivalent, so the
+  drift test must alter the persisted revision. No production code was changed
+  for that assertion. The cheap stop guard proves no owner/ledger projection.
+- Expanded coordinator gate passed 26/26 before one additional review fix:
+  source proof may block the event loop, so the per-proposal timeout must also
+  be synchronously checked around final dispatch, not rely only on a timer.
+  That guard and a no-dispatch deadline regression are in progress.
+- Source/web typecheck, full lint (0 errors, 107 existing warnings), documentation
+  links and real-I/O membership passed. Canonical operator documentation now
+  explains autonomous successors, shared budgets, private source context,
+  deadline/restart semantics, and the absence of deployment or a dedicated UI.
+- Frozen legacy/preparation compatibility passed 95/95, no skips, four files,
+  120.34s, including the new null/false source-registration refusals. Parent
+  strict changed-test TypeScript also passes after adding fail-fast stubs for
+  legacy fixture methods outside its scope. Real KILL remains 19 bytes with
+  mtime 1788533266; original checkout remains a01fc086 with prior untracked plans.
+- Independent performance mapping found repeated full projections inside each
+  manager successorSource: committed bundle validation/report followed by source
+  campaign, delivery and context Universe projections. A future within-call
+  verified projection could share those data without a cross-request cache or
+  removing any final dispatch/publication fence. Terminal stop records also
+  re-enter read-only proof on each poll. No speculative optimization landed in
+  the current frozen acceptance wave.
+- The first reviewed-source actual rerun FAILED its happy case at 213.547s.
+  It correctly withheld a proposal whose 10s budget was consumed by redundant
+  synchronous proof: 8 source reads took 51.107s total; no proposal reached the
+  worker. The failed receipt reported worker-dispatch-precondition-failed with
+  unknown tokens, not a charged successful response. This is not accepted
+  operational behavior, and the failed gate remains recorded.
+- Response: retain the pre-clock source proof, immutable intent prepublication
+  proof and final post-reservation proof, but remove the duplicate preliminary
+  proof within the proposal clock. Pass each fresh queue row's exact enrollment
+  digest to the adapter, avoiding a second all-row projection in the same guard.
+  Manager source reads now use a shared verified metadata path that retains both
+  captures, receipt/intent/evidence checks and final source fences but omits the
+  unused commissioning report. Public check/create/replay reports are unchanged.
+  No deadline, quota policy, acceptance threshold or test limit was widened.
+- The optimized coordinator passed 29/29 with exact source-pin and call-count
+  regressions plus both synchronous timeout vetoes; strict TypeScript and lint
+  passed. Lower metadata drift tests and a new final actual run remain required.
+- Metadata tests passed 7/7, 25.52s: two fresh runtime captures, one enrollment
+  validation, zero commissioning report construction; the original full reader
+  still commissions once. Changed evidence and final delivered-source drift
+  refuse without writes. Optimized CLI/HTTP/adapter 65/65 and full source/web
+  TypeScript pass. Local build and five compiled structural safety checks pass.
+- Next operator increment is mapped, not implemented: optional successor scope
+  capability, strict read-only browser decoder, console-wide lineage/phase panel
+  beside EngineeringSupervision, and catalog refresh when an automatically
+  prepared/admitted ID appears. Reserved identity, queued enrollment and verified
+  delivery must remain separate labels; no new mutation routes are needed.
+- Optimized actual happy case PASSED in 197.141s under its unchanged 240s cap
+  and unchanged 10s proposal allowance. Exact five requests, six evaluations,
+  two branches and 150 fixture-reported tokens; original deadline, allocation,
+  spare-account pause and restart receipts preserved. Ten existing source reads
+  totalled 35.064s; source read average was 3.506s, versus 6.388s in the failed
+  prior version. These are phase observations from differing execution paths,
+  not a controlled model-quality or production-performance benchmark.
+  B preparation/registration took 66.322s; both-delivery wait 159.758s;
+  restart 21.019s. Negative cases are still running; no full-suite claim yet.
+- Final optimized actual suite completed 3/3, zero skips, 337.24s total:
+  happy 197.141s, source-drift 74.293s, lost-output 64.523s. Both negative cases
+  retained exactly one completed proposal without preparing B or redispatching.
+  All fixtures closed/cleaned; no live-provider work. Final selected coverage
+  totals 283 passing tests across 14 files, excluding duplicate gate runs.
+- Follow-on text-context edge found by read-only inspection and a Node check:
+  TextDecoder with stream:true silently buffers an incomplete UTF-8 trailer even
+  for a whole file below 1600 bytes, leaving truncated:false on the decoded
+  prefix. Use streaming only when the byte cap actually clips the file and add
+  valid/invalid/trailing-multibyte regressions. This concerns excerpt fidelity,
+  not artifact hashes, evaluated scores or delivery acceptance. Kept as a
+  declared next hardening item rather than changing frozen acceptance source.
+
 ## September 11: preparation and replay efficiency
 
 - Prior goal turn made verified progress at clean local commit 7d2c1da6;

@@ -1,6 +1,112 @@
 # Verified local handoff
 
-## Current continuation: preparation and replay efficiency
+## Current continuation: autonomous verified-delivery successors
+
+Baseline `be55c10ef4449cc07d9c03f22c6ca7516fc02d04`, branch `auto/p00`, isolated
+worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents own
+campaign-source preparation, the accounted successor coordinator, and independent
+actual execution acceptance. Parent integrates private console/CLI wiring,
+shutdown, documentation and final verification. The final optimized local
+acceptance, static checks and build pass; clean post-commit identity is checked
+at handoff.
+
+The user requested autonomous ideation and execution without a per-objective
+human bottleneck. Optional private `--engineering-successors` policy now connects
+verified campaign delivery to one accounted read-only proposal, a new objective
+seeded from the delivered commit, and admission into the existing automatic queue.
+The proposal gets the fixed acceptance text, seed/delivered measurements and
+bounded declared file excerpts from the verified artifact, not stale checkout
+bytes. The model chooses only a next objective or stop; the host retains the
+evaluator, project/file scope, worker policy, quota accounting and original
+supervision deadline. Passing successors still require strict improvement.
+
+Campaign-delivery provenance has a distinct manifest origin; existing integration
+origins and absent legacy records retain their meaning. Source proof is checked
+at registration publication and immediately before dispatch/preparation/admission.
+Immutable proposal intents/results preserve exact task identity and receipt
+attribution. A paid result survives later pause or source drift, but does not
+authorize the next effect. Missing paid output and partial preparation stay held;
+restart cannot dispatch a replacement proposal under another identity.
+
+The private authenticated status endpoint reports actual proposal/preparation/
+admission phases and holds without exposing code context or output. The existing
+pause, account allocations and General/Spark reservations remain authoritative.
+No dedicated successor UI or resident OS service is added. Shutdown drains this
+proposal owner alongside the ordinary and engineering owners before judging
+shared-ledger residue. Journal data is private local evidence, not encryption.
+
+Independent review corrected mutable host callback inputs, admission-time source
+drift, invalid optional source decoding, shared-ledger shutdown ordering and the
+need for a synchronous proposal deadline fence when proof checks delay timers.
+New regression tests target these boundaries. Canonical setup/recovery guidance
+is in [Resource pools](../../docs/RESOURCE-POOLS.md#automatic-successors-from-verified-deliveries).
+
+The informative actual loopback run passed **3/3, no skips**, in 427.72s:
+automatic chain 232.784s, branch drift 105.654s and lost output 88.032s. The happy
+case verified five requests, six evaluations and two strict local deliveries,
+retained seed contexts across two generations per campaign, and unchanged
+deadline/accounting after restart. It ran before final review fixes and is not
+the frozen-source acceptance. Its narrow 240s test-budget margin motivates
+phase instrumentation, not increased timeouts or relaxed checks.
+
+The next reviewed-source run **failed all three cases** in 542.42s. A stricter
+synchronous deadline correctly refused proposal dispatch: eight source reads
+cost 51.1–55.3s per case, and redundant checks consumed the 10s proposal window.
+No proposal worker was contacted; consequently the two fault cases did not
+reach their intended injections. Fixtures cleaned up normally. This exposed a
+real usability/performance defect and is not counted as acceptance evidence.
+
+The correction removes the duplicate preliminary proof inside the proposal
+window, passes the already validated queue row's exact enrollment digest to
+the adapter, and shares a verified metadata reader that omits unused
+commissioning-report construction. Both captures, enrollment/evidence/receipt
+checks and final source/publication/dispatch fences remain. Public reports and
+all budgets/timeouts remain unchanged. The new metadata suite passes 7/7 and
+the optimized coordinator passes 29/29, including drift, exact pins and slow
+synchronous deadline guards.
+
+The final isolated optimized actual suite passes **3/3, zero skipped**, in
+337.24s: automatic chain **197.141s**, source drift **74.293s**, lost output
+**64.523s**. Original case limits of 240/180/180 seconds and the 10s proposal
+allowance are unchanged. The happy case proves five accounted loopback requests,
+six fixed evaluations, two Git deliveries and 150 fixture-reported tokens.
+The successor's commit has the preceding delivery as its direct parent, its own
+seed measurement stays present across both generations, and the original
+checkout remains unchanged. Restart preserves deadline, receipts, allocation
+and spare-account pause with no proposal or implementation redispatch. Negative
+cases retain the completed proposal cost without preparing a successor or
+duplicating the proposal. Fixtures closed and cleaned up.
+
+Phase observations: ten source reads totalled 35.064s (3.506s mean), successor
+preparation/registration took 66.322s, both-delivery waiting 159.758s, and restart
+21.019s. These are elapsed phases on this host, not isolated CPU measurements,
+a controlled performance benchmark, model-quality evidence or a production SLO.
+
+The selected lower-level gates pass **280 tests across 13 files**, zero skips:
+101 legacy/preparation/successor tests across five files, 7 metadata tests,
+29 coordinator tests, 65 CLI/HTTP/adapter tests across three files, and
+78 supervisor/admission/owner tests across three files. The five-file gate was
+rerun after the metadata refactor. Including the actual suite, selected coverage is **283 passed
+tests across 14 files**, with no skips. This is not a full repository suite;
+unchanged frontend tests were not rerun, while frontend TypeScript was checked.
+Source/web typecheck, documentation links and real-I/O classification pass.
+Full lint has zero errors and 107 pre-existing warnings. Local build, compiled
+console help and all five structural safety checks pass; a clean post-commit
+build identity remains part of the final handoff. A changed legacy test
+fixture's missing typed owner methods were filled with fail-fast stubs; a drift
+fixture was corrected to change semantic revision rather than whitespace.
+
+No real accounts, credentials, quotas, KILL or persistent services changed.
+No GitHub Actions, remote push, npm publication or production activation occurred.
+The full North Star remains active; local fixtures do not establish production
+commissioning, indefinite operation or the quality of open-ended model ideation.
+
+Next: a read-only successor lineage/phase panel and automatic catalog refresh,
+then real Hub/account commissioning with the user's preserved resource policy.
+Preparation latency and an incomplete-UTF-8 excerpt flag edge remain follow-on
+hardening items; neither changes evaluator or Git-delivery authority.
+
+## Previous continuation: preparation and replay efficiency
 
 Baseline `7d2c1da663c3ca82dff79e5382a6bb45f2735d81`, branch `auto/p00`, isolated
 worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents

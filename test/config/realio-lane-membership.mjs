@@ -101,6 +101,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-engineering-registration.test.ts', // immutable same-owner dynamic enrollment with real private supervisor state
   'test/resource-console-engineering-preparation-boundaries.test.ts', // real pinned recipe files and immutable objective registration boundaries
   'test/resource-console-engineering-preparation-reuse.test.ts', // real committed bundle replay and call-local validation counts
+  'test/resource-engineering-successor-preparation.test.ts', // real upstream delivery and pinned downstream preparation
+  'test/resource-engineering-successor-acceptance.test.ts', // actual proposal-to-successor delivery and accounting
   'test/resource-console-engineering-preparation-acceptance.test.ts', // actual objective HTTP preparation, restart and evaluated delivery
   'test/resource-engineering-outcomes.test.ts', // exact receipt joins against real private resource history and ledger
   'test/resource-engineering-outcomes-review.test.ts', // independent overflow, changed-sample and incomplete-proof regressions
@@ -163,6 +165,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-supervisor-boundaries.test.ts', // independent supervisor ownership and restart boundary checks
   'test/resource-engineering-supervisor-acceptance.test.ts', // actual unattended console queue and local evaluated delivery
   'test/resource-engineering-preparation.test.ts', // private linked campaign preparation and replay
+  'test/resource-engineering-preparation-metadata.test.ts', // verified metadata reads and real source drift
   'test/resource-engineering-preparation-boundaries.test.ts', // independent private preparation boundary checks
   'test/resource-engineering-preparation-acceptance.test.ts', // actual prepared campaign to evaluated local delivery
   'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication

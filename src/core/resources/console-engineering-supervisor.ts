@@ -54,6 +54,8 @@ interface DurableState {
 }
 export interface ResourceConsoleEngineeringSupervisor {
   snapshot(): ResourceConsoleEngineeringSupervisionSnapshot;
+  /** Host-only final dispatch veto; no campaign, graph or pool reads. */
+  isExecutionStopped(): boolean;
   setPaused(paused: boolean, expectedRevision: number): ResourceConsoleEngineeringSupervisionSnapshot;
   admit(input: unknown): ResourceConsoleEngineeringSupervisionSnapshot;
   start(): void;
@@ -264,6 +266,10 @@ export function createResourceConsoleEngineeringSupervisor(options: ResourceCons
     }
   }
   const supervisor: ResourceConsoleEngineeringSupervisor = {
+    isExecutionStopped() {
+      if (!started || state.paused || stopped()) return true;
+      try { verifyPersistedState(); return false; } catch { return true; }
+    },
     snapshot() {
       // Observing ownership must not abort calls, schedule work, or persist state.
       let unavailable = faulted;

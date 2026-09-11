@@ -6,6 +6,7 @@ const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindi
        add --engineering ABS to expose explicitly enrolled evaluated engineering actions
        add --engineering-preparation ABS to prepare objectives from trusted work profiles
        add --engineering-supervision ABS to run a digest-confirmed engineering queue automatically
+       add --engineering-successors ABS to propose and prepare follow-up work from verified deliveries
        add --quota-config ABS to refresh explicitly pinned Codex account metadata
        add --connections-config ABS to monitor explicit Codex/Claude/Grok accounts
        add --allocation-controls for usage ceilings, whole-account pauses and General/Spark reservations
@@ -55,6 +56,14 @@ runs. Original supervision and graph deadlines survive restart. Uncertain work
 is not replayed; unchanged unresolved evidence cannot cause repeated attempts.
 Pause new launches through the console; pausing does not cancel active work.
 Omit the flag to disable the automatic caller. No OS service is installed.
+--engineering-successors requires preparation profiles and appendable supervision.
+Its private JSON pins {schemaVersion:1,supervisionId,profileId,allowedWorkerIds,
+maxOutputTokens,proposalTimeoutMs,maxSuccessors,pollIntervalMs}. It can consume
+allowance for read-only proposals after verified local delivery, then prepare and
+admit a new objective at that delivered commit. The profile retains its evaluator,
+file scope and campaign limits. Restart retains the original deadline and proposal
+identities; lost output is held rather than regenerated. Inspect authenticated
+GET /api/resources/engineering-successors for bounded metadata, not private prompts.
 Queued intents and pause state are durable; previously dispatching work is never
 silently replayed after restart. Ordinary output is bounded and session-only;
 opt-in transcripts persist locally until deleted. Accepted follow-ups freeze copied
@@ -72,7 +81,7 @@ Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid argumen
 `;
 class UsageError extends Error {}
 type Options = { help: true } | { help: false; root: string; poolFile: string; bindingsFile: string;
-  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; engineeringFile?: string; engineeringPreparationFile?: string; engineeringSupervisionFile?: string; allocationControls?: boolean;
+  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; engineeringFile?: string; engineeringPreparationFile?: string; engineeringSupervisionFile?: string; engineeringSuccessorsFile?: string; allocationControls?: boolean;
   port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
 
 function path(value: string): string {
@@ -82,7 +91,7 @@ function path(value: string): string {
   return resolve(value);
 }
 function parse(args: string[]): Options {
-  if (args.length > 30 || args.some((arg) => typeof arg !== 'string' || arg.length > 4_096 ||
+  if (args.length > 32 || args.some((arg) => typeof arg !== 'string' || arg.length > 4_096 ||
       [...arg].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159)) ||
     Buffer.byteLength(args.join('\0')) > 32 * 1024) throw new UsageError('Arguments exceed the bounded text contract');
   if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) return { help: true };
@@ -92,7 +101,7 @@ function parse(args: string[]): Options {
     if (flag === '--execute') { if (execute) throw new UsageError('Duplicate console option'); execute = true; continue; }
     if (flag === '--json') { if (json) throw new UsageError('Duplicate console option'); json = true; continue; }
     if (flag === '--allocation-controls') { if (allocationControls) throw new UsageError('Duplicate console option'); allocationControls = true; continue; }
-    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects', '--engineering', '--engineering-preparation', '--engineering-supervision'].includes(flag) || values.has(flag)) {
+    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects', '--engineering', '--engineering-preparation', '--engineering-supervision', '--engineering-successors'].includes(flag) || values.has(flag)) {
       throw new UsageError('Unknown or duplicate console option');
     }
     const value = args[++index];
@@ -110,6 +119,9 @@ function parse(args: string[]): Options {
   if (values.has('--engineering-supervision') && !values.has('--engineering') && !values.has('--engineering-preparation')) {
     throw new UsageError('Engineering supervision requires an explicit engineering catalog or preparation profiles');
   }
+  if (values.has('--engineering-successors') && (!values.has('--engineering-supervision') || !values.has('--engineering-preparation'))) {
+    throw new UsageError('Engineering successors require supervision and preparation profiles');
+  }
   const portText = values.get('--port') ?? '0'; const parallelText = values.get('--max-parallel') ?? '4';
   if (!/^(0|[1-9]\d{0,4})$/.test(portText) || Number(portText) > 65_535 ||
     !/^[1-9]\d?$/.test(parallelText) || Number(parallelText) > 16) throw new UsageError('Invalid port or parallel limit');
@@ -121,6 +133,7 @@ function parse(args: string[]): Options {
     ...(values.has('--engineering') ? { engineeringFile: path(values.get('--engineering')!) } : {}),
     ...(values.has('--engineering-preparation') ? { engineeringPreparationFile: path(values.get('--engineering-preparation')!) } : {}),
     ...(values.has('--engineering-supervision') ? { engineeringSupervisionFile: path(values.get('--engineering-supervision')!) } : {}),
+    ...(values.has('--engineering-successors') ? { engineeringSuccessorsFile: path(values.get('--engineering-successors')!) } : {}),
     ...(allocationControls ? { allocationControls: true } : {}),
     port: Number(portText), execute, ...(execute ? { workspace: path(values.get('--workspace')!), maxParallel: Number(parallelText) } : {}), json };
 }

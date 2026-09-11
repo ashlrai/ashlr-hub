@@ -7,6 +7,8 @@ const owner = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), catalog: v
   readiness: vi.fn(), launch: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
 const automatic = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), start: vi.fn(), snapshot: vi.fn(), setPaused: vi.fn(), admit: vi.fn(), close: vi.fn() }));
 const preparation = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), profiles: vi.fn(), check: vi.fn(), prepare: vi.fn() }));
+const successors = vi.hoisted(() => ({ create: vi.fn(), start: vi.fn(), snapshot: vi.fn(), close: vi.fn() }));
+vi.mock('../src/core/resources/console-engineering-successors.js', () => ({ createResourceConsoleEngineeringSuccessors: successors.create }));
 vi.mock('../src/core/resources/console-engineering-preparation.js', () => ({
   validateResourceConsoleEngineeringPreparationConfig: preparation.validate, createResourceConsoleEngineeringPreparation: preparation.create,
 }));
@@ -47,6 +49,64 @@ beforeEach(() => {
   automatic.snapshot.mockReturnValue({ schemaVersion: 1, configId: 'automatic-fixture', paused: false, revision: 0 });
   automatic.setPaused.mockImplementation(paused => ({ schemaVersion: 1, configId: 'automatic-fixture', paused, revision: 1 }));
   preparation.validate.mockImplementation(value => value); preparation.create.mockReturnValue(preparation);
+  successors.create.mockReturnValue(successors); successors.close.mockResolvedValue(undefined);
+  successors.snapshot.mockReturnValue({ schemaVersion: 1, supervisionId: 'automatic-fixture', profileId: 'evolve', state: 'running', entries: [] });
+});
+
+describe('host-configured engineering successor HTTP boundary', () => {
+  const route = '/api/resources/engineering-successors';
+  function config(overrides: Record<string, unknown> = {}) {
+    const preparationFile = join(directory, 'profiles.json'); const supervisionFile = join(directory, 'supervision.json');
+    const successorFile = join(directory, 'successors.json');
+    save(preparationFile, { schemaVersion: 1, profiles: [{ id: 'evolve', recipe: { projectId: 'default' } }] });
+    save(supervisionFile, { schemaVersion: 1, id: 'automatic-fixture', maxEnrollments: 4 });
+    save(successorFile, { schemaVersion: 1, supervisionId: 'automatic-fixture', profileId: 'evolve', allowedWorkerIds: ['local'],
+      maxOutputTokens: 256, proposalTimeoutMs: 10000, maxSuccessors: 2, pollIntervalMs: 1000, ...overrides });
+    return { engineeringPreparationFile: preparationFile, engineeringSupervisionFile: supervisionFile, engineeringSuccessorsFile: successorFile };
+  }
+  it('starts only configured successor work and exposes authenticated metadata without re-executing on reads', async () => {
+    const selected = config(); const handle = await start(selected);
+    expect(successors.create).toHaveBeenCalledOnce(); expect(successors.start).toHaveBeenCalledOnce();
+    expect(successors.create.mock.calls[0]![0]).toMatchObject({ configFile: selected.engineeringSuccessorsFile, projectId: 'default' });
+    expect((await fetch(`${handle.url}${route}`)).status).toBe(401);
+    for (let index = 0; index < 2; index++) {
+      const response = await fetch(`${handle.url}${route}`, { headers: { 'x-ashlr-token': handle.readToken } });
+      expect(response.status).toBe(200); expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toMatchObject({ supervisionId: 'automatic-fixture', entries: [] });
+    }
+    expect(successors.start).toHaveBeenCalledOnce(); expect(owner.launch).not.toHaveBeenCalled();
+    await handle.close(); expect(successors.close).toHaveBeenCalledOnce();
+  });
+  it('keeps unconfigured successor work absent and does not expose host config paths', async () => {
+    const handle = await start();
+    expect((await fetch(`${handle.url}${route}`, { headers: { 'x-ashlr-token': handle.readToken } })).status).toBe(403);
+    expect(successors.create).not.toHaveBeenCalled(); expect(successors.start).not.toHaveBeenCalled();
+    expect(JSON.stringify(handle.scope)).not.toContain('successors.json');
+  });
+  it('includes successor settlement in the engineering owner shared-ledger drain', async () => {
+    const handle = await start(config()); let finish!: () => void;
+    const pending = new Promise<void>(resolve => { finish = resolve; });
+    successors.close.mockReturnValue(pending);
+    const drain = owner.create.mock.calls[0]![0].waitForResourceDrain as () => Promise<void>;
+    let settled = false; const draining = drain().then(() => { settled = true; });
+    await Promise.resolve(); await Promise.resolve(); expect(settled).toBe(false);
+    expect(successors.close).toHaveBeenCalledOnce(); finish(); await draining; expect(settled).toBe(true);
+    await handle.close();
+  });
+  it.each([{ profileId: 'foreign' }, { supervisionId: 'foreign' }, { maxSuccessors: 5 }, { force: true }])(
+    'refuses mismatched or expanded successor policy before owner startup: %j', async override => {
+      await expect(start(config(override))).rejects.toThrow();
+      expect(successors.create).not.toHaveBeenCalled(); expect(owner.create).not.toHaveBeenCalled();
+    });
+  it('requires both preparation and supervision and keeps successor control outside projects', async () => {
+    const selected = config();
+    await expect(start({ engineeringSuccessorsFile: selected.engineeringSuccessorsFile })).rejects.toThrow('Invalid resource console options');
+    const unsafe = join(options.workspace!, 'successors.json');
+    save(unsafe, JSON.parse(JSON.stringify({ schemaVersion: 1, supervisionId: 'automatic-fixture', profileId: 'evolve', allowedWorkerIds: ['local'],
+      maxOutputTokens: 256, proposalTimeoutMs: 10000, maxSuccessors: 2, pollIntervalMs: 1000 })));
+    await expect(start({ ...selected, engineeringSuccessorsFile: unsafe })).rejects.toThrow('outside the writable workspace');
+    expect(successors.create).not.toHaveBeenCalled(); expect(owner.create).not.toHaveBeenCalled();
+  });
 });
 
 describe('explicit engineering supervision HTTP boundary', () => {

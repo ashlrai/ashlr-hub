@@ -208,8 +208,9 @@ reconciles the same queue entry; an already admitted plan is not duplicated.
 Incomplete bundles/staging remain held for inspection, not deleted or repaired
 automatically.
 The combined static and prepared enrollment catalog is bounded to 32 entries.
-Dynamic ideation, delivered-seed successor planning, accumulation into an existing
-integration branch and production deployment remain separate capabilities.
+For bounded, model-proposed follow-up work at a verified delivered commit, see
+[automatic successors](#automatic-successors-from-verified-deliveries). Accumulation
+into an existing integration branch and production deployment remain separate capabilities.
 
 ### Evaluated engineering runs
 
@@ -508,11 +509,103 @@ exact Origin; responses are no-store. The hyphenated route deliberately preserve
 `/engineering/supervision` as a possible existing enrollment-detail route.
 
 This implements console-owned unattended execution, **not** an installed OS
-service, autonomous idea generation, delivered-seed successor planning, real-account
-commissioning or public deployment. It does not make same-user storage
+service, real-account commissioning or public deployment. Optional automatic
+successors below add bounded ideation and delivered-seed preparation. Neither makes same-user storage
 tamper-proof or guarantee monotonic wall time across process restarts.
 
+#### Automatic successors from verified deliveries
+
+Add `--engineering-successors /absolute/private/successors.json` to an execution
+console that already has preparation profiles and appendable supervision.
+Starting with this policy authorizes **provider-consuming proposal work and local
+successor delivery without a per-objective human action**. Omit the flag to disable
+this capability. Keep the file private (`0600`) and outside writable projects.
+
+```json
+{
+  "schemaVersion": 1,
+  "supervisionId": "hub-objective-intake",
+  "profileId": "hub-quality",
+  "allowedWorkerIds": ["enrolled-proposer"],
+  "maxOutputTokens": 2048,
+  "proposalTimeoutMs": 60000,
+  "maxSuccessors": 8,
+  "pollIntervalMs": 3000
+}
+```
+
+Replace the example identifiers with an existing supervision ID, preparation
+profile and enrolled pool worker IDs. On first coordinator enrollment,
+`maxSuccessors` must fit the supervision's remaining enrollment slots;
+existing queue entries also consume its `maxEnrollments` lifetime capacity.
+Policy limits are 1–32 successor intents, 1–8192 output tokens per proposal,
+1–900,000 ms per proposal and 100–60,000 ms polling. The original supervision
+deadline and shared account/quota/allocation controls apply in addition. This
+configuration does not connect accounts or change their reservations.
+
+The coordinator follows this sequence:
+
+1. Select a completed, preparation-registered objective in the configured project and verify its
+   campaign, evaluation and local branch-delivery evidence.
+2. Persist a deterministic proposal intent, then use the existing resource ledger
+   for one read-only proposal task. Context includes the profile acceptance text,
+   seed and delivered scores, measured parent delta, and bounded text from the
+   **delivered artifact**, not the possibly older working checkout.
+3. Accept only strict JSON: `{"action":"stop"}` or
+   `{"action":"propose","name":"...","objective":"..."}`. The model supplies
+   intent, not paths, commands, evaluators, worker authority or a seed revision.
+4. Prepare a new objective with its seed pinned to the verified delivered commit,
+   retaining the selected profile's evaluator, file scope, worker allowlist and
+   campaign limits. Its manifest records the source campaign and delivery digests.
+5. Admit that exact enrollment to the existing supervision queue. Subsequent
+   execution still requires evaluated improvement and its planned local delivery.
+
+Passing the seed is not sufficient improvement. Each successor retains its seed
+measurement across its own campaign. The source branch is freshly verified before
+proposal dispatch, preparation and admission; once launched, the successor works
+from its immutable seed, not a branch that it continuously follows. No existing
+branch is advanced, and no push, merge or production promotion is implied.
+
+`GET /api/resources/engineering-successors` uses the existing read session and
+returns no-store metadata: original deadline, source/successor/task identities,
+live phase and held state. It returns 403 when unconfigured. Private context,
+source paths, prompts and raw model output are not in this response. There is no
+separate browser mutation endpoint or dedicated successor UI yet; pause automatic
+launches using the existing supervision control. Pausing does not cancel work
+already dispatched. Console shutdown aborts and drains owned proposal and
+   engineering work together.
+
+The private successor journal stores bounded source context and model output;
+it is local evidence, **not encrypted storage**. Treat it as source-sensitive.
+Explicit truncation/omission metadata accompanies bounded file excerpts. A
+completed result is retained even if a pause or source drift subsequently blocks
+the next action. `stop` ends follow-up for that source, not unrelated queued work.
+Every retained intent, including stopped or held proposals, consumes the successor
+cap. Restart does not replenish the cap or renew the deadline.
+
+An explicit no-reservation capacity denial may wait within the original deadline.
+Unknown ownership, invalid output, missing paid output, incomplete preparation,
+source drift and quota denial remain held. Restart reconciles exact persisted
+results and registrations; it never invents another proposal identity to recover
+lost paid output. Inspect the retained evidence and underlying quota/source issue;
+do not delete journals, reset counters or create new IDs to conceal uncertainty.
+This is bounded autonomous follow-up, not an unlimited resident company or an
+independently commissioned production fleet.
+
 #### Diagnose automatic intake latency
+
+The successor acceptance fixture uses temporary Git repositories, fixed evaluators
+and loopback workers, not your enrolled provider accounts. To print existing
+proof-call and preparation timings without adding extra validation reads:
+
+```sh
+ASHLR_ENGINEERING_SUCCESSOR_PHASE_TIMING=1 npx vitest run \
+  test/resource-engineering-successor-acceptance.test.ts \
+  --no-file-parallelism --reporter=verbose
+```
+
+This creates and cleans fixture-local branches and journals. Timings are one-host
+observations, not a model-quality benchmark or a production latency guarantee.
 
 On macOS, the local acceptance fixture can print bounded phase timings for preparation,
 completion, shutdown, startup restoration and exact replay:

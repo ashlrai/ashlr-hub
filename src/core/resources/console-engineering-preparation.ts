@@ -1,14 +1,19 @@
 /** Host-pinned objective preparation on the existing engineering owner. No execution or queue mutation. */
 import { isAbsolute, join, parse, resolve } from 'node:path';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
-import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
+import { canonical, digest, inspectPrivateDirectory, readArtifactSnapshot } from '../universe/artifacts.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import { readResourceJson } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import { validateResourceConsoleEngineeringCatalog, type ResourceConsoleEngineeringOwner } from './console-engineering.js';
-import { checkResourceEngineeringPreparation, prepareResourceEngineeringBundle, readPreparedResourceEngineeringBundle } from './engineering-preparation.js';
+import { checkResourceEngineeringPreparation, prepareResourceEngineeringBundle, readPreparedResourceEngineeringBundle, readPreparedResourceEngineeringMetadata } from './engineering-preparation.js';
 import type { ResourceEngineeringPreparationPlan } from './engineering-preparation-types.js';
+import type { ResourceEngineeringSuccessorSource } from './engineering-preparation-types.js';
+import { checkResourceEngineeringSuccessorPreparation, prepareResourceEngineeringSuccessorBundle, readResourceEngineeringSuccessorBundle, readResourceEngineeringSuccessorMetadata } from './engineering-successor-preparation.js';
+import { campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
+import { readCompletedCampaignDelivery } from '../universe/campaign-delivery-recovery.js';
+import { validateUniverseCampaignDeliverySource } from '../universe/campaign-handoff.js';
 import type { ResourceConsoleEngineeringObjective, ResourceConsoleEngineeringObjectivePlan, ResourceConsoleEngineeringObjectivePrepared,
   ResourceConsoleEngineeringPreparationConfig, ResourceConsoleEngineeringProfile } from './console-engineering-preparation-types.js';
 
@@ -49,13 +54,17 @@ export function validateResourceConsoleEngineeringObjective(input: unknown): Res
 interface Registration {
   schemaVersion: 1; configDigest: string; request: ResourceConsoleEngineeringObjective;
   planDigest: string; bundlePlanDigest: string; enrollmentDigest: string;
+  source?: ResourceEngineeringSuccessorSource;
 }
 function records(root: string): ImmutablePrivateRecordStoreConfig<Registration> {
   const decode = (value: unknown): Registration | null => {
     try {
-      if (!exact(value, ['schemaVersion', 'configDigest', 'request', 'planDigest', 'bundlePlanDigest', 'enrollmentDigest']) || value.schemaVersion !== 1 ||
+      if (!exact(value, ['schemaVersion', 'configDigest', 'request', 'planDigest', 'bundlePlanDigest', 'enrollmentDigest',
+        ...(Object.hasOwn(value ?? {}, 'source') ? ['source'] : [])]) || value.schemaVersion !== 1 ||
         ![value.configDigest, value.planDigest, value.bundlePlanDigest, value.enrollmentDigest].every(v => typeof v === 'string' && HASH.test(v))) return null;
-      validateResourceConsoleEngineeringObjective(value.request); return value as unknown as Registration;
+      validateResourceConsoleEngineeringObjective(value.request);
+      if (Object.hasOwn(value, 'source')) validateUniverseCampaignDeliverySource(value.source);
+      return value as unknown as Registration;
     } catch { return null; }
   };
   const codec = { parse: decode, serialize: (value: Registration) => canonical(value) + '\n', recordId: (value: Registration) => value.request.id,
@@ -69,6 +78,12 @@ export interface ResourceConsoleEngineeringPreparationOwner {
   profiles(projectId: string): ResourceConsoleEngineeringProfile[];
   check(input: unknown): ResourceConsoleEngineeringObjectivePlan;
   prepare(input: unknown): ResourceConsoleEngineeringObjectivePrepared;
+  /** Private host capability: derive lineage only from this owner's prepared, delivered enrollment. */
+  successorSource(id: string, expectedEnrollmentDigest: string): {
+    source: ResourceEngineeringSuccessorSource; projectId: string; commit: string; objective: string; context: string;
+  } | null;
+  /** Private host capability, never accepted by the ordinary browser preparation route. */
+  prepareSuccessor(input: ResourceConsoleEngineeringObjective & { source: ResourceEngineeringSuccessorSource }): Promise<ResourceConsoleEngineeringObjectivePrepared>;
 }
 export function createResourceConsoleEngineeringPreparation(input: {
   configFile: string; config: ResourceConsoleEngineeringPreparationConfig; root: string; workspace: string; projectsFile: string;
@@ -129,12 +144,23 @@ export function createResourceConsoleEngineeringPreparation(input: {
     const candidate = objective(input);
     return planned(candidate, checkResourceEngineeringPreparation(candidate.bundleOptions));
   }
-  function committed(row: Registration, input: unknown = row.request) {
+  function successorOptions(candidate: ReturnType<typeof objective>, source: ResourceEngineeringSuccessorSource) {
+    const { seedRevision: _seed, ...recipe } = candidate.recipe;
+    return { ...candidate.bundleOptions, recipe, source };
+  }
+  function committed(row: Registration, input: unknown = row.request, metadataOnly = false) {
     const source = objective(input);
     // Reuse only this call's verified bundle, never substitute a saved objective
     // for a different incoming request that happens to reuse its ID or digest.
     if (canonical(source.request) !== canonical(row.request)) fail('CONFLICT', 'Objective identity is already in use');
-    const report = readPreparedResourceEngineeringBundle({ ...source.bundleOptions, expectedPlanDigest: row.bundlePlanDigest });
+    // Source proof needs verified plan/enrollment metadata, not a separately
+    // constructed commissioning report. Both readers retain the same fresh
+    // captures, receipt checks and final source guard; public replay is unchanged.
+    const report = row.source
+      ? (metadataOnly ? readResourceEngineeringSuccessorMetadata : readResourceEngineeringSuccessorBundle)(
+        { ...successorOptions(source, row.source), expectedPlanDigest: row.bundlePlanDigest })
+      : (metadataOnly ? readPreparedResourceEngineeringMetadata : readPreparedResourceEngineeringBundle)(
+        { ...source.bundleOptions, expectedPlanDigest: row.bundlePlanDigest });
     const candidate = planned(source, report);
     if (candidate.plan.planDigest !== row.planDigest || candidate.bundlePlan.planDigest !== row.bundlePlanDigest) fail('CONFLICT', 'Prepared objective evidence changed');
     if (report.enrollmentDigest !== row.enrollmentDigest) fail('CONFLICT', 'Prepared objective enrollment changed');
@@ -147,6 +173,79 @@ export function createResourceConsoleEngineeringPreparation(input: {
   const restored = registrations().map(row => committed(row));
   if (restored.length) options.owner.register({ schemaVersion: 1, enrollments: restored.flatMap(row => row.catalog.enrollments) });
   return {
+    successorSource(id, expectedEnrollmentDigest) {
+      try {
+        const row = registrations().find(item => item.request.id === id && item.enrollmentDigest === expectedEnrollmentDigest);
+        if (!row || options.owner.snapshot(id).state !== 'completed') return null;
+        const verified = committed(row, row.request, true); const enrollment = verified.catalog.enrollments[0];
+        if (verified.catalog.enrollments.length !== 1 || !enrollment || enrollment.id !== id ||
+          enrollment.host.definition.tasks.length !== 1 || enrollment.host.deliveryPlan.deliveries.length !== 1) return null;
+        const campaignId = enrollment.host.definition.tasks[0]!.campaignId;
+        const target = enrollment.host.deliveryPlan.deliveries[0]!;
+        if (target.campaignId !== campaignId) return null;
+        const campaign = readUniverseCampaign(campaignId, { root: enrollment.host.root });
+        const receipt = readCompletedCampaignDelivery(campaign, target, { root: enrollment.host.root });
+        if (!receipt) return null;
+        const universe = campaignUniverse(campaign, { root: enrollment.host.root });
+        const trial = universe.runs.find(run => run.id === receipt.runId)?.trials.find(item => item.id === receipt.trialId);
+        if (universe.sourceState !== 'healthy' || !trial?.artifact || trial.artifact.digest !== receipt.artifactDigest) return null;
+        const artifact = readArtifactSnapshot(trial.artifact.path);
+        if (artifact.digest !== receipt.artifactDigest) return null;
+        // Stable measured evidence and declared source bytes, not the mutable
+        // project checkout or a volatile polling timestamp. Truncation is explicit.
+        const seed = campaign.seedEvaluation?.result?.measurement;
+        const observed = { metric: universe.manifest.metric, seed: seed ? { passed: seed.passed, score: seed.score } : null,
+          delivered: { score: trial.score, deltaFromParent: trial.delta, artifactDigest: receipt.artifactDigest },
+          files: [] as Array<{ path: string; text: string; truncated: boolean }>, omittedFiles: 0 };
+        const allowed = new Set([...verified.candidate.plan.files, ...verified.candidate.plan.contextFiles]);
+        for (const file of artifact.entries.filter(file => allowed.has(file.path))) {
+          if (observed.files.length >= 4) { observed.omittedFiles++; continue; }
+          try {
+            const value = new TextDecoder('utf-8', { fatal: true }).decode(file.data.subarray(0, 1600), { stream: true });
+            if (value.includes('\0')) throw new Error('Binary source');
+            const item = { path: file.path, text: value, truncated: file.data.length > 1600 };
+            if (Buffer.byteLength(canonical({ ...observed, files: [...observed.files, item] })) > 4096) { observed.omittedFiles++; continue; }
+            observed.files.push(item);
+          } catch { observed.omittedFiles++; }
+        }
+        const { campaignId: _campaign, ...delivery } = target;
+        return copy({ source: { root: enrollment.host.root, campaignId, expectedDefinitionDigest: campaign.definitionDigest,
+          expectedManifestDigest: campaign.manifestDigest, expectedComparatorDigest: campaign.comparatorDigest,
+          delivery, expectedDeliveryDigest: hash(receipt) }, projectId: enrollment.projectId,
+          commit: receipt.commit, objective: row.request.objective, context: canonical(observed) });
+      } catch { return null; }
+    },
+    async prepareSuccessor(input) {
+      const value = copy<ResourceConsoleEngineeringObjective & { source: ResourceEngineeringSuccessorSource }>(input);
+      if (!exact(value, ['id', 'profileId', 'name', 'objective', 'source'])) fail('INVALID_INPUT', 'Invalid successor objective');
+      const { source, ...request } = value;
+      const candidate = objective(request); const previous = registrations();
+      const existing = previous.find(row => row.request.id === candidate.request.id);
+      if (existing) {
+        if (!existing.source || canonical(existing.source) !== canonical(source)) fail('CONFLICT', 'Successor source changed');
+        const verified = committed(existing, request); currentConfig();
+        options.owner.checkRegistration(verified.catalog);
+        const enrollment = options.owner.register(verified.catalog).find(row => row.id === request.id && row.enrollmentDigest === verified.report.enrollmentDigest);
+        if (!enrollment) fail('UNAVAILABLE', 'Successor enrollment could not be confirmed');
+        return copy({ plan: verified.candidate.plan, enrollment, disposition: 'replayed' });
+      }
+      if (previous.length >= 32 || options.owner.catalog().length >= 32 || options.owner.catalog().some(row => row.id === request.id)) {
+        fail('CONFLICT', 'Successor identity or capacity unavailable');
+      }
+      const bundleOptions = successorOptions(candidate, source);
+      const plan = planned(candidate, checkResourceEngineeringSuccessorPreparation(bundleOptions));
+      const report = await prepareResourceEngineeringSuccessorBundle({ ...bundleOptions, expectedPlanDigest: plan.bundlePlan.planDigest });
+      const registration: Registration = { schemaVersion: 1, configDigest: contextDigest, request: plan.request,
+        planDigest: plan.plan.planDigest, bundlePlanDigest: report.planDigest, enrollmentDigest: report.enrollmentDigest, source };
+      const verified = committed(registration); currentConfig(); options.owner.checkRegistration(verified.catalog);
+      const written = writeImmutablePrivateRecord(store, registration, { prepublish: () => {
+        try { currentConfig(); options.owner.checkRegistration(committed(registration).catalog); return true; } catch { return false; }
+      } });
+      if (!['recorded', 'replayed'].includes(written)) fail('UNAVAILABLE', 'Successor registration incomplete; inspect retained output');
+      const enrollment = options.owner.register(verified.catalog).find(row => row.id === request.id && row.enrollmentDigest === report.enrollmentDigest);
+      if (!enrollment) fail('UNAVAILABLE', 'Successor enrollment could not be confirmed');
+      return copy({ plan: verified.candidate.plan, enrollment, disposition: report.disposition });
+    },
     profiles(projectId) {
       if (typeof projectId !== 'string' || !ID.test(projectId)) fail('INVALID_INPUT', 'Expected a registered project ID');
       currentConfig();

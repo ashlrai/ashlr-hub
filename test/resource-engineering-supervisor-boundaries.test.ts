@@ -1,5 +1,5 @@
 /** Inert owner callbacks with real private supervision state and leases. No provider execution. */
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -25,6 +25,9 @@ function fixture() {
     fingerprint: 'b'.repeat(64),
   };
   const owner = {
+    checkRegistration: vi.fn(() => { throw new Error('Registration is outside this fixture'); }),
+    register: vi.fn(() => { throw new Error('Registration is outside this fixture'); }),
+    outcomes: vi.fn(() => { throw new Error('Outcomes are outside this fixture'); }),
     catalog: vi.fn(() => [structuredClone(enrollment)]), snapshot: vi.fn(() => structuredClone(current.job)),
     readiness: vi.fn(() => structuredClone(current.readiness)), evidenceFingerprint: vi.fn(() => current.fingerprint),
     launch: vi.fn<ResourceConsoleEngineeringOwner['launch']>(() => structuredClone(current.job)),
@@ -47,6 +50,30 @@ const stateFile = () => join(root, 'engineering-supervision', 'boundary-queue', 
 async function ticks(ms = 350) { await vi.advanceTimersByTimeAsync(ms); }
 
 describe('finite engineering supervision boundaries', () => {
+  it('checks the dispatch veto without projecting owner evidence and preserves pause and shutdown', async () => {
+    vi.useFakeTimers(); const { owner } = fixture(); const supervisor = create(owner);
+    expect(supervisor.isExecutionStopped()).toBe(true);
+    supervisor.start(); await ticks();
+    owner.snapshot.mockClear(); owner.readiness.mockClear(); owner.evidenceFingerprint.mockClear();
+    const saved = readFileSync(stateFile(), 'utf8');
+    expect(supervisor.isExecutionStopped()).toBe(false);
+    expect(supervisor.isExecutionStopped()).toBe(false);
+    expect(owner.snapshot).not.toHaveBeenCalled(); expect(owner.readiness).not.toHaveBeenCalled();
+    expect(owner.evidenceFingerprint).not.toHaveBeenCalled(); expect(readFileSync(stateFile(), 'utf8')).toBe(saved);
+    const revision = supervisor.snapshot().revision;
+    supervisor.setPaused(true, revision); expect(supervisor.isExecutionStopped()).toBe(true);
+    supervisor.setPaused(false, revision + 1); expect(supervisor.isExecutionStopped()).toBe(false);
+    await supervisor.close(); expect(supervisor.isExecutionStopped()).toBe(true);
+  });
+  it('vetoes dispatch when persisted supervision state changes without reading the owner', async () => {
+    vi.useFakeTimers(); const { owner } = fixture(); const supervisor = create(owner);
+    supervisor.start(); await ticks(); owner.snapshot.mockClear(); owner.readiness.mockClear(); owner.evidenceFingerprint.mockClear();
+    const state = JSON.parse(readFileSync(stateFile(), 'utf8'));
+    writeFileSync(stateFile(), JSON.stringify({ ...state, revision: state.revision + 1 }), { mode: 0o600 });
+    expect(supervisor.isExecutionStopped()).toBe(true);
+    expect(owner.snapshot).not.toHaveBeenCalled(); expect(owner.readiness).not.toHaveBeenCalled();
+    expect(owner.evidenceFingerprint).not.toHaveBeenCalled();
+  });
   it.each([
     { schemaVersion: 2 }, { id: '../outside' }, { maxDurationMs: Infinity }, { maxDurationMs: 0 },
     { pollIntervalMs: 0 }, { maxConcurrent: 0 }, { maxAttemptsPerEnrollment: 0 }, { unexpected: true },

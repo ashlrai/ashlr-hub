@@ -1,10 +1,13 @@
 /** Trusted local registration bridge. No executor, scheduler, key creation or provider calls. */
 import { execFileSync } from 'node:child_process';
-import { closeSync, constants, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'node:fs';
+import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { canonical, digest, executable, inspectPrivateDirectory, pinSeed, MAX_ARTIFACT_BYTES, MAX_ARTIFACT_ENTRIES } from '../universe/artifacts.js';
-import { assertComparatorUnchanged, initUniverse, manifestRecord, universePath, validateUniverseManifest } from '../universe/store.js';
+import { assertComparatorUnchanged, initUniverse, initUniverseWithCampaignDeliveryOrigin, manifestRecord, universePath, validateUniverseManifest } from '../universe/store.js';
+import { readUniverseCampaignDeliverySource, validateUniverseCampaignDeliverySource } from '../universe/campaign-handoff.js';
+import type { UniverseCampaignDeliveryOrigin, UniverseCampaignDeliverySource } from '../universe/campaign-handoff-types.js';
+import { assertUniverseExecution, withUniverseExecution } from '../universe/execution.js';
 import { initUniverseCampaign, readUniverseCampaign, validateUniverseCampaignDefinition } from '../universe/campaign-store.js';
 import { validateUniverseCampaignDeliveryPlan } from '../universe/campaign-delivery.js';
 import { validateUniversePortfolioDefinition } from '../universe/portfolio-plan.js';
@@ -20,9 +23,11 @@ import { prepareResourceConsoleEngineeringEnrollments, type ResourceConsoleEngin
 import { checkResourceConsoleEngineering } from './console-engineering-check.js';
 import { validateResourceConsoleEngineeringSupervisionConfig } from './console-engineering-supervisor.js';
 import type { ResourceEngineeringPreparationOptions, ResourceEngineeringPreparationPlan, ResourceEngineeringPreparationReport,
-  ResourceEngineeringRecipe } from './engineering-preparation-types.js';
+  ResourceEngineeringRecipe, ResourceEngineeringSuccessorPreparationOptions, ResourceEngineeringSuccessorPreparationPlan,
+  ResourceEngineeringSuccessorPreparationReport, ResourceEngineeringPreparationMetadata,
+  ResourceEngineeringSuccessorPreparationMetadata } from './engineering-preparation-types.js';
 export type { ResourceEngineeringPreparationOptions, ResourceEngineeringPreparationPlan, ResourceEngineeringPreparationReport,
-  ResourceEngineeringRecipe } from './engineering-preparation-types.js';
+  ResourceEngineeringRecipe, ResourceEngineeringPreparationMetadata, ResourceEngineeringSuccessorPreparationMetadata } from './engineering-preparation-types.js';
 
 const HASH = /^[a-f0-9]{64}$/;
 function fail(code: 'INVALID_INPUT' | 'CONFLICT' | 'UNAVAILABLE', message: string): never { throw new ResourceSupervisorError(code, message); }
@@ -53,7 +58,13 @@ function git(repo: string, args: string[], maxBuffer = 8 * 1024 * 1024): Buffer 
     timeout: 30_000, maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
-function capture(input: ResourceEngineeringPreparationOptions) {
+interface SuccessorContext {
+  source: UniverseCampaignDeliverySource;
+  origin: UniverseCampaignDeliveryOrigin;
+  assertSource: () => void;
+}
+function capture(input: ResourceEngineeringPreparationOptions, successor?: SuccessorContext) {
+  successor?.assertSource();
   const options = data<ResourceEngineeringPreparationOptions>(input);
   if (!exact(options, ['recipe', 'output', 'resourceRuntime', 'workspace', 'projectsFile']) ||
       ![options.output, options.resourceRuntime, options.workspace, options.projectsFile].every(path)) fail('INVALID_INPUT', 'Invalid preparation options');
@@ -92,6 +103,9 @@ function capture(input: ResourceEngineeringPreparationOptions) {
     fail('INVALID_INPUT', 'Preparation output and controls must be outside projects and shared accounting');
   }
   const seed = pinSeed(project.workspace, recipe.seedRevision);
+  if (successor && (seed.repo !== successor.origin.repo || seed.revision !== successor.origin.commit ||
+      recipe.id === successor.origin.universeId || recipe.id === successor.origin.campaignId ||
+      overlaps(options.output, successor.source.root))) fail('CONFLICT', 'Successor project, identity or output differs from its source');
   const paths = { output: options.output, universeRoot: join(options.output, 'universe'), graphRoot: join(options.output, 'graph'),
     manifest: join(options.output, 'manifest.json'), campaign: join(options.output, 'campaign.json'),
     engineering: join(options.output, 'engineering.json'), supervision: join(options.output, 'supervision.json'), receipt: join(options.output, 'receipt.json') };
@@ -148,13 +162,16 @@ function capture(input: ResourceEngineeringPreparationOptions) {
   if (runtimeCheck.status !== 'valid') fail('UNAVAILABLE', 'Preparation resource runtime is invalid');
   const quotaDigest = runtime.quotaConfigPath ? sha(readResourceJson(runtime.quotaConfigPath)) : null;
   const pins = { schemaVersion: 1, options, runtimeDigest, poolDigest, projectsDigest: sha(projectsDocument), project,
-    quotaDigest, evaluatorPins, manifest, campaign, definition, deliveryPlan };
+    quotaDigest, evaluatorPins, manifest, campaign, definition, deliveryPlan,
+    ...(successor ? { campaignDeliveryOrigin: successor.origin } : {}) };
   const plan: ResourceEngineeringPreparationPlan = { schemaVersion: 1, status: 'planned', scope: 'local-preparation-only',
     planDigest: sha(pins), output: options.output, enrollmentDigest: null, projectId: recipe.projectId,
     projectRegistration: state?.projects?.some(row => row.id === project.id && row.workspace === project.workspace &&
       row.dev === project.dev && row.ino === project.ino) ? 'persisted' : 'would-register', executionStarted: false,
     providerContacted: false, paths, ids, seedRevision: seed.revision, runtimeDigest, poolDigest };
-  return { options, recipe, runtime, preview, paths, plan, manifest, campaign, definition, deliveryPlan, supervisionBase };
+  successor?.assertSource();
+  return { options, recipe, runtime, preview, paths, plan, manifest, campaign, definition, deliveryPlan, supervisionBase,
+    ...(successor ? { campaignDeliveryOrigin: successor.origin } : {}) };
 }
 
 /** All observations are nonexecuting. A matching digest is configuration confirmation, not launch authority. */
@@ -190,7 +207,8 @@ function evidence(current: ReturnType<typeof capture>, bundle: ReturnType<typeof
   const campaign = readUniverseCampaign(current.recipe.id, { root: current.paths.universeRoot });
   if (stored.manifestDigest !== sha(current.manifest) || campaign.sourceState !== 'healthy' ||
     campaign.definitionDigest !== sha(current.campaign) || campaign.manifestDigest !== stored.manifestDigest ||
-    campaign.comparatorDigest !== stored.comparatorDigest) fail('CONFLICT', 'Prepared experiment evidence changed');
+    campaign.comparatorDigest !== stored.comparatorDigest ||
+    canonical(stored.campaignDeliveryOrigin ?? null) !== canonical(current.campaignDeliveryOrigin ?? null)) fail('CONFLICT', 'Prepared experiment evidence changed');
   const files = { manifest: current.manifest, campaign: current.campaign, engineering: bundle.catalog, supervision: bundle.supervision };
   for (const [key, expected] of Object.entries(files)) {
     const file = current.paths[key as keyof typeof files];
@@ -198,7 +216,8 @@ function evidence(current: ReturnType<typeof capture>, bundle: ReturnType<typeof
   }
   return { schemaVersion: 1, planDigest: current.plan.planDigest, enrollmentDigest: bundle.enrollmentDigest,
     manifestDigest: stored.manifestDigest, comparatorDigest: stored.comparatorDigest, seedArtifactDigest: stored.seedArtifact.digest,
-    campaignDefinitionDigest: campaign.definitionDigest, files: Object.fromEntries(Object.entries(files).map(([key, value]) => [key, sha(value)])) };
+    campaignDefinitionDigest: campaign.definitionDigest, files: Object.fromEntries(Object.entries(files).map(([key, value]) => [key, sha(value)])),
+    ...(current.campaignDeliveryOrigin ? { campaignDeliveryOrigin: current.campaignDeliveryOrigin } : {}) };
 }
 function report(current: ReturnType<typeof capture>, bundle: ReturnType<typeof generated>, disposition: 'created' | 'replayed'): ResourceEngineeringPreparationReport {
   const commissioning = checkResourceConsoleEngineering({ ...bundle.controls, workspace: current.options.workspace,
@@ -215,11 +234,20 @@ function report(current: ReturnType<typeof capture>, bundle: ReturnType<typeof g
 
 /** Inspect only a fully committed bundle. Startup recovery must never enter the creator path. */
 export function readPreparedResourceEngineeringBundle(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }): ResourceEngineeringPreparationReport {
+  return readPreparedBundle(input);
+}
+function readPreparedBundle(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }, successor?: SuccessorContext): ResourceEngineeringPreparationReport {
+  const { current, bundle } = inspectPreparedBundle(input, successor);
+  const result = report(current, bundle, 'replayed'); successor?.assertSource(); return result;
+}
+/** One-call verification shared by full reporting and private source metadata reads.
+ * No positive proof is cached or accepted back as authority at another boundary. */
+function inspectPreparedBundle(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }, successor?: SuccessorContext) {
   const captured = data<ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }>(input);
   if (!exact(captured, ['recipe', 'output', 'resourceRuntime', 'workspace', 'projectsFile', 'expectedPlanDigest']) ||
     typeof captured.expectedPlanDigest !== 'string' || !HASH.test(captured.expectedPlanDigest)) fail('INVALID_INPUT', 'Preparation requires an exact plan digest');
   const { expectedPlanDigest, ...options } = captured;
-  const current = capture(options);
+  const current = capture(options, successor);
   if (current.plan.planDigest !== expectedPlanDigest || !present(options.output)) fail('CONFLICT', 'Prepared bundle is missing or changed');
   inspectPrivateDirectory(options.output);
   if (!present(current.paths.receipt)) fail('CONFLICT', 'Incomplete preparation output requires inspection; no automatic repair');
@@ -228,34 +256,127 @@ export function readPreparedResourceEngineeringBundle(input: ResourceEngineering
     canonical(readResourceJson(join(options.output, 'intent.json'))) !== canonical({ schemaVersion: 1, planDigest: expectedPlanDigest })) {
     fail('CONFLICT', 'Preparation receipt changed');
   }
-  if (capture(options).plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation inputs changed during inspection');
-  return report(current, bundle, 'replayed');
+  if (capture(options, successor).plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation inputs changed during inspection');
+  return { current, bundle };
+}
+function preparedMetadata(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }, successor?: SuccessorContext): ResourceEngineeringPreparationMetadata {
+  const { current, bundle } = inspectPreparedBundle(input, successor);
+  const result: ResourceEngineeringPreparationMetadata = { ...current.plan, status: 'prepared', disposition: 'replayed',
+    enrollmentDigest: bundle.enrollmentDigest };
+  successor?.assertSource(); return result;
+}
+/** Host-only source lookup. Same bundle/pin verification as full read, without
+ * computing unused commissioning diagnostics or console command suggestions. */
+export function readPreparedResourceEngineeringMetadata(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }): ResourceEngineeringPreparationMetadata {
+  return preparedMetadata(input);
 }
 
 /** Exclusive final-path registration: incomplete output is retained and never automatically repaired. */
 export function prepareResourceEngineeringBundle(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }): ResourceEngineeringPreparationReport {
+  return prepareBundle(input);
+}
+function prepareBundle(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }, successor?: SuccessorContext): ResourceEngineeringPreparationReport {
   const captured = data<ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }>(input);
   if (!exact(captured, ['recipe', 'output', 'resourceRuntime', 'workspace', 'projectsFile', 'expectedPlanDigest']) ||
     typeof captured.expectedPlanDigest !== 'string' || !HASH.test(captured.expectedPlanDigest)) fail('INVALID_INPUT', 'Preparation requires an exact plan digest');
   const { expectedPlanDigest, ...options } = captured;
-  let current = capture(options);
+  let current = capture(options, successor);
   if (current.plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation plan changed');
   if (present(options.output)) {
-    return readPreparedResourceEngineeringBundle(captured);
+    return readPreparedBundle(captured, successor);
   }
-  current = capture(options);
+  current = capture(options, successor);
   if (current.plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation plan changed before registration');
   mkdirSync(options.output, { mode: 0o700 }); fsyncDirectory(dirname(options.output));
   inspectPrivateDirectory(options.output);
   writePrivate(join(options.output, 'intent.json'), { schemaVersion: 1, planDigest: expectedPlanDigest });
   mkdirSync(current.paths.universeRoot, { mode: 0o700 }); mkdirSync(current.paths.graphRoot, { mode: 0o700 }); fsyncDirectory(options.output);
-  initUniverse(current.manifest, { root: current.paths.universeRoot });
+  if (successor) initUniverseWithCampaignDeliveryOrigin(current.manifest, successor.origin, successor.assertSource, { root: current.paths.universeRoot });
+  else initUniverse(current.manifest, { root: current.paths.universeRoot });
   initUniverseCampaign(current.campaign, { root: current.paths.universeRoot });
   const bundle = generated(current);
   writePrivate(current.paths.manifest, current.manifest); writePrivate(current.paths.campaign, current.campaign);
   writePrivate(current.paths.engineering, bundle.catalog); writePrivate(current.paths.supervision, bundle.supervision);
   const receipt = evidence(current, bundle);
-  if (capture(options).plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation inputs changed during registration');
-  writePrivate(current.paths.receipt, receipt);
-  return report(current, bundle, 'created');
+  if (capture(options, successor).plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation inputs changed during registration');
+  if (successor) {
+    // Source verification must follow staging, immediately before no-clobber
+    // publication. An interrupted stage is retained with the incomplete bundle.
+    const stage = join(options.output, '.receipt.stage'); writePrivate(stage, receipt);
+    const identity = lstatSync(stage, { bigint: true });
+    const sameStage = () => {
+      const currentStage = lstatSync(stage, { bigint: true });
+      return currentStage.isFile() && !currentStage.isSymbolicLink() && currentStage.nlink === 1n &&
+        currentStage.dev === identity.dev && currentStage.ino === identity.ino && currentStage.size === identity.size &&
+        currentStage.mtimeNs === identity.mtimeNs && currentStage.ctimeNs === identity.ctimeNs &&
+        canonical(readResourceJson(stage)) === canonical(receipt);
+    };
+    if (!sameStage()) fail('CONFLICT', 'Successor receipt stage changed');
+    successor.assertSource();
+    if (!sameStage()) fail('CONFLICT', 'Successor receipt stage changed during source verification');
+    linkSync(stage, current.paths.receipt);
+    const installed = lstatSync(current.paths.receipt, { bigint: true }); const linked = lstatSync(stage, { bigint: true });
+    if (!installed.isFile() || installed.dev !== identity.dev || installed.ino !== identity.ino || installed.nlink !== 2n ||
+        linked.dev !== identity.dev || linked.ino !== identity.ino) fail('CONFLICT', 'Successor receipt publication changed');
+    unlinkSync(stage); fsyncDirectory(options.output);
+  } else writePrivate(current.paths.receipt, receipt);
+  const result = report(current, bundle, 'created');
+  if (successor) {
+    successor.assertSource();
+    if (canonical(readResourceJson(current.paths.receipt)) !== canonical(receipt)) fail('CONFLICT', 'Successor receipt changed after publication');
+  }
+  return result;
+}
+
+function successorInput(input: unknown, expected: boolean) {
+  const value = data<ResourceEngineeringSuccessorPreparationOptions & { expectedPlanDigest?: string }>(input);
+  const keys = ['recipe', 'output', 'resourceRuntime', 'workspace', 'projectsFile', 'source', ...(expected ? ['expectedPlanDigest'] : [])];
+  if (!exact(value, keys) || expected && (typeof value.expectedPlanDigest !== 'string' || !HASH.test(value.expectedPlanDigest)) ||
+      !value.recipe || typeof value.recipe !== 'object' || Array.isArray(value.recipe) || Object.hasOwn(value.recipe, 'seedRevision')) {
+    fail('INVALID_INPUT', 'Invalid successor preparation request');
+  }
+  const source = validateUniverseCampaignDeliverySource(value.source);
+  const { expectedPlanDigest, ...request } = value;
+  const requestDigest = sha({ domain: 'resource-engineering-successor-v1', request: { ...request, source } });
+  const origin = readUniverseCampaignDeliverySource(source, requestDigest);
+  const assertSource = () => {
+    if (canonical(readUniverseCampaignDeliverySource(source, requestDigest)) !== canonical(origin)) fail('CONFLICT', 'Successor source changed');
+  };
+  const options: ResourceEngineeringPreparationOptions = { recipe: { ...value.recipe, seedRevision: origin.commit }, output: value.output,
+    resourceRuntime: value.resourceRuntime, workspace: value.workspace, projectsFile: value.projectsFile };
+  return { options, expectedPlanDigest, context: { source, origin, assertSource } satisfies SuccessorContext };
+}
+
+export function checkResourceEngineeringSuccessorPreparation(input: ResourceEngineeringSuccessorPreparationOptions): ResourceEngineeringSuccessorPreparationPlan {
+  const { options, context } = successorInput(input, false);
+  const first = capture(options, context); const final = capture(options, context);
+  if (first.plan.planDigest !== final.plan.planDigest) fail('CONFLICT', 'Successor inputs changed while inspecting');
+  return { ...final.plan, campaignDeliveryOrigin: context.origin };
+}
+
+export function readResourceEngineeringSuccessorBundle(input: ResourceEngineeringSuccessorPreparationOptions & { expectedPlanDigest: string }): ResourceEngineeringSuccessorPreparationReport {
+  const { options, context, expectedPlanDigest } = successorInput(input, true);
+  return { ...readPreparedBundle({ ...options, expectedPlanDigest: expectedPlanDigest! }, context), campaignDeliveryOrigin: context.origin };
+}
+/** Read-only source lookup; source proof is freshly checked again before return. */
+export function readResourceEngineeringSuccessorMetadata(input: ResourceEngineeringSuccessorPreparationOptions & { expectedPlanDigest: string }): ResourceEngineeringSuccessorPreparationMetadata {
+  const { options, context, expectedPlanDigest } = successorInput(input, true);
+  return { ...preparedMetadata({ ...options, expectedPlanDigest: expectedPlanDigest! }, context), campaignDeliveryOrigin: context.origin };
+}
+
+export async function prepareResourceEngineeringSuccessorBundle(input: ResourceEngineeringSuccessorPreparationOptions & { expectedPlanDigest: string }): Promise<ResourceEngineeringSuccessorPreparationReport> {
+  const { options, context, expectedPlanDigest } = successorInput(input, true);
+  // Completed replay is a pure inspection, including source and destination ownership files.
+  if (present(options.output)) return { ...readPreparedBundle({ ...options, expectedPlanDigest: expectedPlanDigest! }, context), campaignDeliveryOrigin: context.origin };
+  const current = capture(options, context);
+  if (current.plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Successor plan changed');
+  return withUniverseExecution(context.origin.universeId, { root: context.source.root }, async lock => {
+    const guard = () => {
+      assertUniverseExecution(universePath(context.source.root, context.origin.universeId), lock);
+      context.assertSource();
+      assertUniverseExecution(universePath(context.source.root, context.origin.universeId), lock);
+    };
+    const result = prepareBundle({ ...options, expectedPlanDigest: expectedPlanDigest! }, { ...context, assertSource: guard });
+    return { ...result, campaignDeliveryOrigin: context.origin };
+  });
 }

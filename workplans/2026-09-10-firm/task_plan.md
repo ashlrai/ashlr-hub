@@ -103,6 +103,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Remove redundant manager-layer validation while retaining fresh bundle and publication integrity checks.
 - [x] Independently verify drift refusal, unchanged receipts and actual automatic intake timing.
 - [x] Document and build the connected automatic intake path; retain remaining North Star gaps.
+- [x] Map and bind verified campaign delivery to successor preparation and existing accounted proposal execution.
+- [x] Implement the successor loop with durable intent/results, original supervision limits and no duplicate restart effects; independent acceptance follows.
+- [x] Verify an actual delivered change produces and delivers improved successor work without a per-objective human action (final optimized actual3 passed at unchanged limits).
+- [x] Independently review lineage, drift, unknown outcomes and operator evidence; record exact implementation and remaining gaps (283 selected tests passed; local-only handoff).
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -185,6 +189,17 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Successor continuation from clean `be55c10ef4449cc07d9c03f22c6ca7516fc02d04`.
+The previous turn made verified progress: intake/replay optimization and 194
+selected passing tests, not North Star completion. Three agents explore
+campaign-origin preparation, accounted proposal recovery and actual acceptance.
+Parent owns integration and operator documentation. Reuse the existing runtime,
+queue and ledger rather than add a parallel scheduler or unaccounted planner.
+No real provider, account policy, KILL, persistent service or external publication
+changes are part of this implementation/fixture acceptance wave.
+
+### Previous preparation-efficiency status
+
 Current continuation from clean `7d2c1da663c3ca82dff79e5382a6bb45f2735d81`:
 measure and reduce automatic intake/replay validation overhead without changing
 timeouts, publication checks or resource policy. Existing check and preparation

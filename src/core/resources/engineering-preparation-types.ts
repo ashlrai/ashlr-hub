@@ -1,5 +1,6 @@
 import type { UniverseManifest } from '../universe/types.js';
 import type { UniverseCampaignDefinition } from '../universe/types.js';
+import type { UniverseCampaignDeliveryOrigin, UniverseCampaignDeliverySource } from '../universe/campaign-handoff-types.js';
 
 export interface ResourceEngineeringRecipe {
   schemaVersion: 1; id: string; name: string; objective: string; projectId: string; seedRevision: string;
@@ -27,4 +28,23 @@ export interface ResourceEngineeringPreparationReport extends Omit<ResourceEngin
   status: 'prepared'; disposition: 'created' | 'replayed'; enrollmentDigest: string;
   commissioning: { status: 'configured' | 'held' | 'unavailable'; reasons: string[] };
   consoleArguments: { manual: string[]; automatic: string[] };
+}
+/** Private host inspection only: verified bundle identity, not commissioning or admission. */
+export type ResourceEngineeringPreparationMetadata = Omit<ResourceEngineeringPreparationReport, 'commissioning' | 'consoleArguments'>;
+
+export type ResourceEngineeringSuccessorSource = UniverseCampaignDeliverySource;
+export type ResourceEngineeringSuccessorRecipe = Omit<ResourceEngineeringRecipe, 'seedRevision'>;
+export interface ResourceEngineeringSuccessorPreparationOptions extends ResourceEngineeringPreparationOptions {
+  /** A closed ResourceEngineeringSuccessorRecipe; seedRevision is host-derived from source proof. */
+  recipe: unknown;
+  source: ResourceEngineeringSuccessorSource;
+}
+export interface ResourceEngineeringSuccessorPreparationPlan extends ResourceEngineeringPreparationPlan {
+  campaignDeliveryOrigin: UniverseCampaignDeliveryOrigin;
+}
+export interface ResourceEngineeringSuccessorPreparationReport extends ResourceEngineeringPreparationReport {
+  campaignDeliveryOrigin: UniverseCampaignDeliveryOrigin;
+}
+export interface ResourceEngineeringSuccessorPreparationMetadata extends ResourceEngineeringPreparationMetadata {
+  campaignDeliveryOrigin: UniverseCampaignDeliveryOrigin;
 }
