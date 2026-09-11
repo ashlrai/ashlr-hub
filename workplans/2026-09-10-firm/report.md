@@ -1,6 +1,60 @@
 # Verified local handoff
 
-## Current continuation: reserve General independently from Spark
+## Current continuation: objective preparation inside the workspace
+
+Baseline `244c508cf96febc0140017da6427985bffe9feca`, branch `auto/p00`, isolated
+worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three bounded
+agents handled registration, frontend and independent runtime acceptance;
+parent integrated the preparation manager, CLI/HTTP, documentation and browser QA.
+
+The workspace can now turn an objective into a checked, prepared engineering
+plan without hand-assembling catalogs or restarting the console. Host-reviewed
+profiles pin the evaluator, project, seed, mutable files, workers and budgets.
+Checking is read-only; preparation publishes an immutable enrollment; the
+existing Run enrolled plan action launches the bounded evaluated delivery flow.
+Completed preparations reload without creating missing output or replaying work.
+Uncertain responses support explicit same-ID reconciliation. Profile changes,
+incomplete receipts and accounting drift remain visible failures, not silent
+replacement histories. Constructor options are captured so later caller mutation
+cannot redirect a checked plan to another context.
+
+Browser acceptance exercised the compiled UI with source API/auth/runtime and
+an unchanged static-serving function pointed at compiled assets. The first
+source-only fixture returned HTML 404; this was a fixture asset-path error, not
+a passing browser check. Desktop 1280px and mobile 390px checks then passed
+without horizontal overflow. The checked objective was prepared, survived loss
+of the browser tab, reappeared as Not started, and was explicitly run once.
+The UI showed Recorded delivery and a completed signed graph node. Git confirmed
+the new local branch contained value.json=1 while the source checkout stayed
+clean. The shared fixture ledger recorded one completed worker attempt with
+20 input/10 output tokens; its 70% ceiling and spare-account pause stayed at
+revision 1. These are fixture-reported usage values, not real provider billing.
+The temporary test block, browser tab, viewport override, listener and fixture
+directory were removed. One agent hit a usage limit after its code/tests were
+complete; parent finished browser evidence and cleanup without replaying work.
+
+Verification: full web **1,399/1,399**, 80 files, zero skips, 60.85s. Focused
+frontend **117/117**; manager boundaries **24/24**; existing preparation
+regressions **34/34**; registration/new+existing **61/61**; final CLI plus
+registration **56/56**. Groups overlap and are not a full core-suite claim.
+Final actual HTTP acceptance **4/4**, zero skips, 45.24s, covers same-console prepare/run/restart, read-only replay,
+profile drift and unauthorized requests. Source/web typechecks, scoped ESLint,
+docs, real-I/O membership, local build and five compiled safety checks pass.
+Full lint has zero errors and 107 existing warnings.
+The seed-context decision was reverified in **14/14** model-context tests:
+original bounded seed evidence remains beside newer parent/latest trial feedback,
+without scheduling or acceptance changes.
+
+Design guidance kept the existing Space Grotesk/IBM Plex control-room vocabulary,
+paired the objective with fixed acceptance scope, and made Check, Prepare and Run
+distinct. Documentation spells out the real configuration and recovery contract.
+No real accounts, provider credentials, quota policies, KILL or services changed.
+No GitHub Actions, remote push, npm publication or production activation occurred.
+Automatic ideation/queue expansion, advancing an existing integration branch,
+matched quality benchmarks and live multi-account commissioning remain incomplete.
+The North Star goal remains active; this is a verified local operating increment.
+
+## Previous continuation: reserve General independently from Spark
 
 Baseline `10f1909c3a1fbbf43976f96bbbe5473313b56283`, branch `auto/p00`, isolated
 worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three bounded

@@ -213,6 +213,25 @@ function report(current: ReturnType<typeof capture>, bundle: ReturnType<typeof g
     consoleArguments: { manual, automatic: [...manual, '--engineering-supervision', current.paths.supervision] } };
 }
 
+/** Inspect only a fully committed bundle. Startup recovery must never enter the creator path. */
+export function readPreparedResourceEngineeringBundle(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }): ResourceEngineeringPreparationReport {
+  const captured = data<ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }>(input);
+  if (!exact(captured, ['recipe', 'output', 'resourceRuntime', 'workspace', 'projectsFile', 'expectedPlanDigest']) ||
+    typeof captured.expectedPlanDigest !== 'string' || !HASH.test(captured.expectedPlanDigest)) fail('INVALID_INPUT', 'Preparation requires an exact plan digest');
+  const { expectedPlanDigest, ...options } = captured;
+  const current = capture(options);
+  if (current.plan.planDigest !== expectedPlanDigest || !present(options.output)) fail('CONFLICT', 'Prepared bundle is missing or changed');
+  inspectPrivateDirectory(options.output);
+  if (!present(current.paths.receipt)) fail('CONFLICT', 'Incomplete preparation output requires inspection; no automatic repair');
+  const bundle = generated(current); const expected = evidence(current, bundle);
+  if (canonical(readResourceJson(current.paths.receipt)) !== canonical(expected) ||
+    canonical(readResourceJson(join(options.output, 'intent.json'))) !== canonical({ schemaVersion: 1, planDigest: expectedPlanDigest })) {
+    fail('CONFLICT', 'Preparation receipt changed');
+  }
+  if (capture(options).plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation inputs changed during inspection');
+  return report(current, bundle, 'replayed');
+}
+
 /** Exclusive final-path registration: incomplete output is retained and never automatically repaired. */
 export function prepareResourceEngineeringBundle(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }): ResourceEngineeringPreparationReport {
   const captured = data<ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }>(input);
@@ -222,15 +241,7 @@ export function prepareResourceEngineeringBundle(input: ResourceEngineeringPrepa
   let current = capture(options);
   if (current.plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation plan changed');
   if (present(options.output)) {
-    inspectPrivateDirectory(options.output);
-    if (!present(current.paths.receipt)) fail('CONFLICT', 'Incomplete preparation output requires inspection; no automatic repair');
-    const bundle = generated(current); const expected = evidence(current, bundle);
-    if (canonical(readResourceJson(current.paths.receipt)) !== canonical(expected) ||
-      canonical(readResourceJson(join(options.output, 'intent.json'))) !== canonical({ schemaVersion: 1, planDigest: expectedPlanDigest })) {
-      fail('CONFLICT', 'Preparation receipt changed');
-    }
-    if (capture(options).plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation inputs changed during replay');
-    return report(current, bundle, 'replayed');
+    return readPreparedResourceEngineeringBundle(captured);
   }
   current = capture(options);
   if (current.plan.planDigest !== expectedPlanDigest) fail('CONFLICT', 'Preparation plan changed before registration');

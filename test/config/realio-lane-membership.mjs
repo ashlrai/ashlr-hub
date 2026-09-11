@@ -98,6 +98,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-files-acceptance.test.ts', // independent real file-to-task snapshot acceptance
   'test/resource-console-engineering-acceptance.test.ts', // actual HTTP, shared quota, Git evaluation and delivery
   'test/resource-console-engineering-core.test.ts', // signed graph attribution and durable console launch/cancel ownership
+  'test/resource-console-engineering-registration.test.ts', // immutable same-owner dynamic enrollment with real private supervisor state
+  'test/resource-console-engineering-preparation-boundaries.test.ts', // real pinned recipe files and immutable objective registration boundaries
+  'test/resource-console-engineering-preparation-acceptance.test.ts', // actual objective HTTP preparation, restart and evaluated delivery
   'test/resource-console-engineering-inspect.test.ts', // read-only commissioning through real CLI, Git and history fixtures
   'test/resource-console-state-inspection.test.ts', // strict persisted-state decoding and pinned-directory previews
   'test/universe-backlog-marker-evaluator.test.ts', // real bounded Node evaluator processes over fixed source cases

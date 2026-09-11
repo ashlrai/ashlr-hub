@@ -16,7 +16,7 @@ import { validateResourceGenerationRuntime } from '../universe/resource-generati
 import { readResourceJson, resourcePoolStatus } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
-import { validateResourceConsoleProjectBindings, type ResourceConsoleProjectBinding } from './console-projects.js';
+import { matchesResourceConsoleProject, validateResourceConsoleProjectBindings, type ResourceConsoleProjectBinding } from './console-projects.js';
 import type { ResourceConsoleProject } from './console-types.js';
 import { ResourceSupervisorError, type ResourcePoolSupervisor } from './pool-supervisor.js';
 import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob, ResourceConsoleEngineeringLaunch,
@@ -27,7 +27,9 @@ export interface ResourceConsoleEngineeringCatalog {
   enrollments: Array<{ id: string; projectId: string; graphId: string; graphRoot: string; host: FirmEngineeringControlHost }>;
 }
 export interface ResourceConsoleEngineeringOwnerOptions {
-  catalog: ResourceConsoleEngineeringCatalog;
+  catalog?: ResourceConsoleEngineeringCatalog;
+  /** Host-only enrollment insertion; never enables launch or automatic supervision. */
+  registrationEnabled?: true;
   supervisor: ResourcePoolSupervisor;
   root: string;
   poolFile: string;
@@ -40,6 +42,10 @@ export interface ResourceConsoleEngineeringOwnerOptions {
 }
 export interface ResourceConsoleEngineeringOwner {
   catalog(): ResourceConsoleEngineeringEnrollment[];
+  /** Validate the combined catalog before the caller publishes its durable receipt. */
+  checkRegistration(catalog: ResourceConsoleEngineeringCatalog): ResourceConsoleEngineeringEnrollment[];
+  /** Host-only, nonexecuting registration after the caller's durable preparation receipt. */
+  register(catalog: ResourceConsoleEngineeringCatalog): ResourceConsoleEngineeringEnrollment[];
   snapshot(id: string): ResourceConsoleEngineeringJob;
   readiness(id: string): ResourceConsoleEngineeringReadiness;
   /** Host-only observational key. Null means incomplete/unstable evidence, never retry permission. */
@@ -207,6 +213,18 @@ export function prepareResourceConsoleEngineeringEnrollments(options: {
 
 /** Construction/status never write graph roots or dispatch. Only explicit launch/cancel does. */
 export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEngineeringOwnerOptions): ResourceConsoleEngineeringOwner {
+  const registrationProperty = Object.getOwnPropertyDescriptor(options, 'registrationEnabled');
+  if (registrationProperty && (!Object.hasOwn(registrationProperty, 'value') || registrationProperty.value !== true) ||
+    !registrationProperty && 'registrationEnabled' in options) fail('INVALID_INPUT', 'Invalid engineering registration capability');
+  const registrationEnabled = registrationProperty?.value === true;
+  const catalogProperty = Object.getOwnPropertyDescriptor(options, 'catalog');
+  if (catalogProperty && !Object.hasOwn(catalogProperty, 'value') || !catalogProperty && 'catalog' in options) {
+    fail('INVALID_INPUT', 'Invalid engineering catalog');
+  }
+  const startupCatalog = catalogProperty?.value === undefined ? undefined : snapshot<ResourceConsoleEngineeringCatalog>(catalogProperty.value);
+  const emptyCatalog = startupCatalog === undefined || exact(startupCatalog, ['schemaVersion', 'enrollments']) &&
+    startupCatalog.schemaVersion === 1 && Array.isArray(startupCatalog.enrollments) && startupCatalog.enrollments.length === 0;
+  if (emptyCatalog && !registrationEnabled) fail('INVALID_INPUT', 'Engineering catalog required without registration capability');
   const drainProperty = Object.getOwnPropertyDescriptor(options, 'waitForResourceDrain');
   if (drainProperty && (!Object.hasOwn(drainProperty, 'value') ||
       drainProperty.value !== undefined && typeof drainProperty.value !== 'function') ||
@@ -231,9 +249,9 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
     if (scope.root !== control.root || scope.poolDigest !== poolDigest) fail('CONFLICT', 'Engineering accounting scope changed');
     return scope.project;
   });
-  const prepared = prepareResourceConsoleEngineeringEnrollments({ ...control, catalog: options.catalog, projects, projectBindings });
+  const prepared = emptyCatalog ? [] : prepareResourceConsoleEngineeringEnrollments({ ...control, catalog: startupCatalog!, projects, projectBindings });
   if (prepared.some((row) => row.accountingPoolDigest !== poolDigest)) fail('CONFLICT', 'Engineering accounting scope changed');
-  const enrolled = new Map(prepared.map((value) => [value.row.id, value] as const));
+  let enrolled = new Map(prepared.map((value) => [value.row.id, value] as const));
   type Entry = NonNullable<ReturnType<typeof enrolled.get>>;
   const entry = (id: string): Entry => {
     if (typeof id !== 'string' || !ID.test(id)) fail('INVALID_INPUT', 'Invalid engineering enrollment');
@@ -352,8 +370,49 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
     const written = writeImmutablePrivateRecord(records(value.row.graphRoot), record, prepublish ? { prepublish } : {});
     if (!['recorded', 'replayed'].includes(written)) fail('UNAVAILABLE', 'Engineering ownership publication unavailable');
   };
+  const prepareRegistration = (input: ResourceConsoleEngineeringCatalog) => {
+      if (!registrationEnabled) fail('UNAVAILABLE', 'Engineering registration is disabled');
+      if (closing || signal?.aborted) fail('UNAVAILABLE', 'Engineering owner is closing');
+      const incoming = validateResourceConsoleEngineeringCatalog(input);
+      const combined = [...enrolled.values()].map(value => value.row);
+      for (const row of incoming.enrollments) {
+        const existing = enrolled.get(row.id);
+        if (existing) {
+          if (canonical(existing.row) !== canonical(row)) fail('CONFLICT', 'Engineering enrollment identity changed');
+        } else {
+          if (combined.some(value => value.graphId === row.graphId)) fail('CONFLICT', 'Engineering graph identity is already enrolled');
+          combined.push(row);
+        }
+      }
+      if (combined.length > 32) fail('CAPACITY', 'Engineering enrollment capacity reached');
+      const currentProjects = supervisor.projects();
+      if (!currentProjects) fail('UNAVAILABLE', 'Register engineering projects first');
+      const currentBindings = currentProjects.map(project => {
+        const current = supervisor.engineeringBinding(project.id);
+        if (current.root !== control.root || current.poolDigest !== poolDigest) fail('CONFLICT', 'Engineering accounting scope changed');
+        if (combined.some(row => row.projectId === project.id) && !matchesResourceConsoleProject(current.project)) {
+          fail('CONFLICT', 'Engineering project identity changed');
+        }
+        return current.project;
+      });
+      const checked = prepareResourceConsoleEngineeringEnrollments({ ...control, catalog: { schemaVersion: 1, enrollments: combined },
+        projects: currentProjects, projectBindings: currentBindings });
+      for (const value of checked) {
+        const previous = enrolled.get(value.row.id);
+        if (value.accountingPoolDigest !== poolDigest || previous &&
+          (value.summary.enrollmentDigest !== previous.summary.enrollmentDigest || value.definitionDigest !== previous.definitionDigest)) {
+          fail('CONFLICT', 'Engineering enrollment pins changed');
+        }
+      }
+      if (closing || signal?.aborted) fail('UNAVAILABLE', 'Engineering owner is closing');
+      // Preserve active invocation objects; publish the complete validated map
+      // once. The caller owns persistence, and no automatic queue is amended.
+      return new Map(checked.map(value => [value.row.id, enrolled.get(value.row.id) ?? value]));
+  };
   const owner: ResourceConsoleEngineeringOwner = {
     catalog: () => snapshot([...enrolled.values()].map((value) => value.summary)),
+    checkRegistration: (input) => snapshot([...prepareRegistration(input).values()].map(value => value.summary)),
+    register(input) { enrolled = prepareRegistration(input); return owner.catalog(); },
     readiness: (id) => readiness(entry(id)),
     evidenceFingerprint(id) {
       const value = entry(id);

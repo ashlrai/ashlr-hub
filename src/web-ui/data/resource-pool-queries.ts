@@ -189,6 +189,7 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       scope.workspaceFilesSupported !== undefined && (typeof scope.workspaceFilesSupported !== 'boolean' ||
         scope.workspaceFilesSupported && (scope.readOnly || !scope.projects)) ||
       scope.engineeringSupported !== undefined && (scope.engineeringSupported !== true || scope.readOnly || !scope.projects) ||
+      scope.engineeringPreparationSupported !== undefined && (scope.engineeringPreparationSupported !== true || scope.engineeringSupported !== true) ||
       scope.engineeringSupervisionSupported !== undefined && (scope.engineeringSupervisionSupported !== true || scope.engineeringSupported !== true)) {
       throw new Error('The server did not establish an explicit resource-pool scope.');
     }

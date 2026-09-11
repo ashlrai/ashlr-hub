@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { EngineeringSupervision } from './EngineeringSupervision.js';
+import { EngineeringObjectiveComposer } from './EngineeringObjectiveComposer.js';
 import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job,
   ResourceConsoleEngineeringReadiness as Readiness } from '../../../core/resources/console-engineering-types.js';
 import { StatusBadge, type Tone } from '../../components/primitives/StatusBadge.js';
@@ -14,9 +15,11 @@ const label = (state: Job['state']) => state === 'completed' ? 'Recorded deliver
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Engineering evidence is unavailable.';
 
 /** Observation can poll; launch/cancel only come from explicit user events. */
-export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported }: {
+export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, preparationSupported, preparationAvailable }: {
   projectId: string; projectName: string; available: boolean; canStart: boolean; canStop: boolean; unlocked: boolean; onUnlock(): void; startBlockedReason?: string;
   supervisionSupported?: boolean;
+  preparationSupported?: boolean;
+  preparationAvailable?: boolean;
 }) {
   const [catalog, setCatalog] = useState<Enrollment[] | null>(null);
   const [selection, setSelection] = useState('');
@@ -128,14 +131,20 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
       <p>{projectName} · Evaluated changes, explicit local delivery.</p></div>
       <button type="button" className={styles.button} disabled={!available || busy || loading} onClick={refresh}>Refresh evidence</button></header>
     {supervisionSupported ? <EngineeringSupervision available={available} unlocked={unlocked} /> : null}
+    {preparationSupported ? <EngineeringObjectiveComposer projectId={projectId} available={available && preparationAvailable !== false} unlocked={unlocked}
+      onUnlock={onUnlock} onRefresh={refresh} onPrepared={({ enrollment }) => {
+        setCatalog(rows => [...(rows ?? []).filter(row => row.id !== enrollment.id), enrollment]);
+        setSelection(enrollment.id); setCatalogRevision(n => n + 1); setRevision(n => n + 1);
+      }} /> : null}
     {!available ? <p className={styles.warning}>Connection evidence is unavailable. New engineering launches are withheld. Previously recorded status may be stale.</p> : null}
     {startBlockedReason ? <p className={styles.warning}>{startBlockedReason}</p> : null}
     {catalogError ? <p role="alert" className={styles.error}>{catalogError}</p> : null}
     {catalog === null && !catalogError && available ? <p role="status" className={styles.empty}>Reading enrolled engineering plans…</p> : null}
     {catalog?.length === 0 ? <div className={styles.empty}><span className={styles.orbit} aria-hidden="true">◎</span><h3>No engineering plan enrolled for this project.</h3>
-      <p>Prepare a reviewed objective with a fixed evaluator, allowed files, workers and budget. The preparation command creates linked campaign and startup catalogs without starting work.</p>
-      <p><code>ashlr resources pool engineering prepare --help</code></p>
-      <p>Use the returned console configuration to make the plan available here. Ordinary chat tasks remain available.</p>
+      {preparationSupported ? <p>Define an objective above using a host-reviewed evaluation profile. Check and prepare it, then review local readiness before running. Ordinary chat tasks remain available.</p> : <>
+        <p>Prepare a reviewed objective with a fixed evaluator, allowed files, workers and budget. The preparation command creates linked campaign and startup catalogs without starting work.</p>
+        <p><code>ashlr resources pool engineering prepare --help</code></p>
+        <p>Use the returned console configuration to make the plan available here. Ordinary chat tasks remain available.</p></>}
       <p>Opening this panel never invents an objective, enrolls an account or starts a worker.</p></div> : null}
     {selected ? <>
       <div className={styles.selection}><label>Enrolled engineering plan<select aria-label="Enrolled engineering plan" value={selected.id} disabled={busy}

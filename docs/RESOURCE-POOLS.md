@@ -126,6 +126,81 @@ is required. This bridge prepares one project/objective with multiple variants;
 dynamic idea generation, cross-project dependencies and integrating delivered
 branches into your working checkout remain separate capabilities.
 
+### Prepare and run objectives in the workspace
+
+With `--engineering-preparation /absolute/private/profiles.json`, an execution
+console can prepare new objectives and enroll them without a restart. This
+requires `--execute`, `--workspace` and `--projects`; a pre-existing `--engineering`
+catalog is optional. Existing account policies, quota evidence and shared ledger
+are reused. Startup can resume ordinary queued tasks, just like any execution
+console, but preparing an engineering objective never launches it.
+
+The private `0600` configuration follows
+[`ResourceConsoleEngineeringPreparationConfig`](../src/core/resources/console-engineering-preparation-types.ts):
+
+- `schemaVersion: 1`;
+- `outputRoot`: an existing private `0700` directory for new bundles, outside
+  writable projects, transport workspaces and shared accounting;
+- `resourceRuntime`: the existing runtime using this console's exact ledger,
+  pool, bindings, observations and optional shared collector configuration;
+- `profiles`: up to 16 unique entries containing `id`, `label`, `acceptance`
+  and a complete reviewed `recipe` from the preceding section.
+
+Each profile fixes the project, full seed commit, evaluator, metric, permitted
+files, read-only context, hypotheses, workers and budgets. Its `acceptance` text
+explains what the fixed evaluator actually measures; it is not itself a passing
+result. The recipe's identity/name/objective are template defaults. A submitted
+objective overrides those three fields; delivery always uses the new local
+`codex/<objective-id>` branch. Browser requests cannot provide commands, paths,
+account settings or wider permissions. Keep the configuration outside writable
+projects. Do not place secrets in profiles, objective text or acceptance labels.
+
+1. In **Workspace**, select the intended project and open **Engineering runs**.
+2. Unlock controls, select an evaluation profile and inspect its fixed scope.
+   Enter an objective that this evaluator can measure. A name is limited to
+   120 UTF-8 bytes and objective text to 4,000 bytes.
+3. Select **Check plan**. This only reads local configuration and evidence;
+   it does not create output, reserve quota or run workers/evaluators. Review
+   the seed, file scope, budgets, delivery branch and checked plan digest.
+4. Select **Prepare plan** to create the bundle and immutable registration.
+   The existing engineering pane selects the newly enrolled plan in the same
+   console. Preparation is not accepted engineering work and does not add the
+   plan to an existing automatic supervision queue.
+5. Inspect local launch checks, then use **Run enrolled plan** to authorize its
+   existing bounded worker/evaluator/delivery flow. Stop and evidence controls
+   are the same controls used for startup-enrolled plans.
+
+Profiles, checks and preparation use control-authenticated POST requests with an
+explicit matching Origin. Profile listing (`/api/resources/engineering/profiles`,
+body `{projectId}`) and checking (`/api/resources/engineering/prepare/check`, body
+`{id,profileId,name,objective}`) remain read-only. Preparation at
+`/api/resources/engineering/prepare` adds `expectedPlanDigest` and returns the
+verified plan, enrollment and `created`/`replayed` disposition. No evaluator
+command or host output path is exposed through these projections.
+
+Completed registration survives restart through private
+`console-engineering-preparations` records in the existing resource root. Reload
+verifies the exact profile, accounting/project context and completed bundle
+before enrolling it; it never initializes missing output or starts a graph.
+Unrelated profiles may be added on restart without invalidating existing
+objectives. Removing/changing a profile already used by a saved objective, moving
+output or changing its accounting context requires inspection; do not discard
+history to make startup pass. Existing console instances refuse changed profile
+files until restarted with the intended configuration.
+Startup validates every configured profile and saved registration as one set.
+A disabled/drifted project or invalid historical bundle blocks this
+preparation-enabled console from starting; it is not silently hidden while the
+remaining profiles launch work. Restore or review the affected configuration
+and evidence before restarting.
+
+After an uncertain prepare response, retain the same objective ID and input.
+Refresh evidence and explicitly **Reconcile preparation**; exact completed replay
+verifies without rewriting records or consuming another request. Incomplete
+bundles/staging remain held for inspection, not deleted or repaired automatically.
+The combined static and prepared enrollment catalog is bounded to 32 entries.
+Dynamic ideation, automatic queue admission, accumulation into an existing
+integration branch and production deployment remain separate capabilities.
+
 ### Evaluated engineering runs
 
 The optional **Engineering runs** pane is separate from ordinary chat. It runs an

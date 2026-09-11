@@ -1,5 +1,73 @@
 # Firm build notes
 
+## September 11: next end-to-end operating workflow
+
+- Previous turn was verified progress: clean commit/build
+  `244c508cf96febc0140017da6427985bffe9feca`. No blocked audit.
+  Entire resume on auto/p00 finds no checkpoint; original checkout preserved.
+- Three bounded Explore assignments compare real scoped-account commissioning,
+  workspace objective preparation and resident graph operation. No credentials,
+  provider calls, account mutation or service activation during exploration.
+- Planning skill reuses this existing plan/notes/report; build-agents guidance
+  keeps the established Hub runtime instead of introducing a second framework.
+- Actual read-only account inventory: three existing workers, no Spark alias;
+  personal account remains paused, ceiling 75%, three historical attempts. No
+  authentication, quota collection or state mutation occurred. Existing code
+  supports scoped migration; guided commissioning remains an operator gap.
+- Selected the complete same-console objective workflow over a disconnected
+  commissioning planner. Host profiles fix evaluator/project/seed/files/workers/
+  budgets; browser supplies bounded identity/name/objective only. Preparation
+  checks, creates a verified bundle and publishes immutable registration; only
+  the existing explicit launch starts work. Automatic queue expansion is not
+  inferred. Expected-old-commit branch advancement remains a separate milestone.
+- Frontend design plan reuses Space Grotesk/IBM Plex Sans and the established
+  ice #f5f7fc, white #ffffff, navy #172746, blue #526fe8, border #dfe5f1 tokens.
+  A left-aligned objective form and fixed acceptance/scope summary share one
+  workspace surface; Check then Prepare encode the actual sequence. On narrow
+  screens they stack. No unrelated decoration, provider logos or animation.
+- Independent review identified whole-config pins blocking unrelated future
+  profile additions; persisted registrations now pin context plus their exact
+  selected profile. Live file changes still require restart; unrelated profile
+  additions on restart must preserve old objectives. Exact completed replay
+  skips record-writer lock/staging, rather than calling a mutating writer again.
+- Startup sequencing review: supervisor schedules with a zero-delay timer;
+  synchronous preparation validation and failure cleanup microtasks run first.
+  No queued-worker launch gap found. Do not add an await there without an
+  admission barrier. Startup may still reconcile existing supervisor state.
+- Early integration checks: wrong immutable-writer return shape corrected;
+  checkRegistration needed to validate before immutable publication; lint's
+  control-character regex rule replaced with explicit code-point checks. New
+  CLI test's empty-array it.each arguments were corrected to object cases.
+  Profile listing uses a control-authenticated POST with a read-only body;
+  same-origin GET does not reliably send Origin and queries remain prohibited.
+- Read-only exploration guessed absent styles/tokens.css and an Engineering*
+  glob; actual paths are design/tokens.css and routes/workspace. A malformed
+  sed range yielded no content and was corrected. No state changed by them.
+- Constructor review caught caller-owned option mutation potentially redirecting
+  later materialization under an earlier context digest. Options now reject
+  accessors/extra fields and capture scalar paths and owner references once;
+  configuration is separately deep-copied. Four real-file regressions prove it.
+- Seed-context choice reverified: 14 model-context tests pass, including original
+  measurement retained alongside newer parent/latest trial feedback. No changes
+  to seed context, scheduling or acceptance were necessary.
+- Final full web suite: 1,399/1,399 across 80 files, zero skips, 60.85s.
+  Focused frontend 117/117; manager boundaries 24/24; preparation regressions
+  34/34; registration/new+existing 61/61; actual HTTP acceptance 4/4. These
+  focused groups overlap and are not a whole-core test claim.
+- Initial browser fixture imported the source server, which served API routes
+  but returned 404 for compiled HTML assets. The embedded browser reported
+  ERR_BLOCKED_BY_CLIENT. Fixture setup is being corrected; no runtime auth or
+  server production behavior was weakened to make browser acceptance pass.
+- Browser acceptance completed using built UI assets plus source API/runtime,
+  with the unchanged static function pointed at the build directory. 1280px
+  desktop and 390px mobile had no horizontal overflow. Prepared objective
+  survived tab loss, then explicit launch produced one recorded delivery branch
+  and one worker receipt (fixture-reported 20 input/10 output tokens). Source
+  checkout and fixture account policy stayed unchanged. A child hit its usage
+  limit after test/code completion; parent finished verification and cleanup.
+  Temporary manual test, listener, viewport override, tab and fixture directory
+  were removed. Real account state and global KILL remained untouched.
+
 ## September 10: independent quota-scope reservations
 
 - Final CLI help review found the capability description omitted new scope

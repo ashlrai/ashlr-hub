@@ -21,6 +21,8 @@ import { listResourceConsoleFiles, readResourceConsoleFile, ResourceConsoleFileE
 import { createResourceConnectionMonitor, validateResourceConnectionConfig, type ResourceConnectionMonitor } from '../resources/connection-monitor.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from '../resources/metadata-coordinator.js';
 import type { ResourceConsoleScope, ResourceConsoleTaskInput, ResourceConsoleSnapshot } from '../resources/console-types.js';
+import { createResourceConsoleEngineeringPreparation, validateResourceConsoleEngineeringPreparationConfig,
+  type ResourceConsoleEngineeringPreparationOwner } from '../resources/console-engineering-preparation.js';
 import { createResourceConsoleReader, withholdResourceConsoleWorkers, withholdResourceConsoleQuotaScopeWorkers } from './resource-console-reads.js';
 import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
 import { validateUniverseConsoleRoot } from './universe-console-reads.js';
@@ -38,6 +40,7 @@ export interface ResourceConsoleServerOptions {
   projectsFile?: string;
   /** Explicit private evaluated-engineering enrollment; never browser configuration. */
   engineeringFile?: string;
+  engineeringPreparationFile?: string;
   /** Explicit digest-pinned automatic engineering queue; absent means no auto-launch. */
   engineeringSupervisionFile?: string;
   allocationControls?: boolean;
@@ -127,6 +130,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const connectionsConfigFile = options.connectionsConfigFile === undefined ? null : validateUniverseConsoleRoot(options.connectionsConfigFile);
   const projectsFile = options.projectsFile === undefined ? null : validateUniverseConsoleRoot(options.projectsFile);
   const engineeringFile = options.engineeringFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringFile);
+  const engineeringPreparationFile = options.engineeringPreparationFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringPreparationFile);
   const engineeringSupervisionFile = options.engineeringSupervisionFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringSupervisionFile);
   const requestedPort = options.port ?? 0;
   const maxParallel = options.maxParallel ?? 4;
@@ -136,6 +140,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     (options.allocationControls !== undefined && typeof options.allocationControls !== 'boolean') ||
     (options.execute === true ? !options.workspace : options.workspace !== undefined || options.maxParallel !== undefined || projectsFile !== null) ||
     engineeringFile !== null && (options.execute !== true || projectsFile === null) ||
+    engineeringPreparationFile !== null && (options.execute !== true || projectsFile === null) ||
     engineeringSupervisionFile !== null && engineeringFile === null) {
     throw new Error('Invalid resource console options');
   }
@@ -149,6 +154,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const projects = projectsFile ? validateResourceConsoleProjects((catalog as { projects: unknown }).projects) : undefined;
   if (projects) { projects.forEach((project) => Object.freeze(project)); Object.freeze(projects); }
   const engineeringCatalog = engineeringFile ? validateResourceConsoleEngineeringCatalog(readResourceJson(engineeringFile, 1024 * 1024)) : null;
+  const engineeringPreparationConfig = engineeringPreparationFile ?
+    validateResourceConsoleEngineeringPreparationConfig(readResourceJson(engineeringPreparationFile, 1024 * 1024)) : null;
   const engineeringSupervisionConfig = engineeringSupervisionFile ?
     validateResourceConsoleEngineeringSupervisionConfig(readResourceJson(engineeringSupervisionFile, 128 * 1024)) : null;
   const configuredWorkspaces = workspace ? [workspace, ...(projects?.map((project) => project.workspace) ?? [])] : [];
@@ -158,7 +165,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   };
   const controlFiles = [poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? [quotaConfigFile] : []),
     ...(connectionsConfigFile ? [connectionsConfigFile] : []), ...(projectsFile ? [projectsFile] : []),
-    ...(engineeringFile ? [engineeringFile] : []), ...(engineeringSupervisionFile ? [engineeringSupervisionFile] : [])];
+    ...(engineeringFile ? [engineeringFile] : []), ...(engineeringSupervisionFile ? [engineeringSupervisionFile] : []),
+    ...(engineeringPreparationFile ? [engineeringPreparationFile] : [])];
   for (const selectedWorkspace of configuredWorkspaces) {
     // Legacy scopes allowed a workspace below the store; catalog adoption is stricter.
     if (contains(selectedWorkspace, root) || projects !== undefined && contains(root, selectedWorkspace) ||
@@ -185,6 +193,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let engineering: ResourceConsoleEngineeringOwner | null = null;
+  let engineeringPreparation: ResourceConsoleEngineeringPreparationOwner | null = null;
   let engineeringSupervision: ResourceConsoleEngineeringSupervisor | null = null;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
   let quotaLease: ResourceQuotaRefreshLease | null = null;
@@ -311,6 +320,20 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         }
         if (!supervisor || !controlToken) throw new RequestError(403, 'Execution is disabled for this console');
         if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
+        if (url.pathname === '/api/resources/engineering/profiles') {
+          if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
+          if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
+          const input = await body(req);
+          if (!exact(input, ['projectId']) || typeof input.projectId !== 'string') throw new RequestError(400, 'Expected one project ID');
+          sendSnapshot(res, { profiles: engineeringPreparation.profiles(input.projectId) }); return;
+        }
+        if (url.pathname === '/api/resources/engineering/prepare/check' || url.pathname === '/api/resources/engineering/prepare') {
+          if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
+          if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
+          const input = await body(req);
+          if (closing) throw new RequestError(503, 'Console is closing');
+          sendSnapshot(res, url.pathname.endsWith('/check') ? engineeringPreparation.check(input) : engineeringPreparation.prepare(input)); return;
+        }
         if (url.pathname === '/api/resources/engineering-supervision') {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineeringSupervision) throw new RequestError(403, 'Engineering supervision is not configured');
@@ -571,11 +594,18 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     const publishedProjects = supervisor?.projects?.();
     if (publishedProjects !== undefined) { scope.projects = publishedProjects; scope.defaultProjectId = 'default'; }
     if (publishedProjects !== undefined && typeof supervisor?.projectFileBinding === 'function') scope.workspaceFilesSupported = true;
-    if (engineeringCatalog && supervisor) {
-      engineering = createResourceConsoleEngineeringOwner({ catalog: engineeringCatalog, supervisor, root,
+    if ((engineeringCatalog || engineeringPreparationConfig) && supervisor) {
+      engineering = createResourceConsoleEngineeringOwner({ ...(engineeringCatalog ? { catalog: engineeringCatalog } : {}),
+        ...(engineeringPreparationConfig ? { registrationEnabled: true } : {}), supervisor, root,
         poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? { quotaConfigFile } : {}), signal,
         waitForResourceDrain: () => supervisor!.close() });
       scope.engineeringSupported = true;
+      if (engineeringPreparationConfig && engineeringPreparationFile && workspace && projectsFile) {
+        engineeringPreparation = createResourceConsoleEngineeringPreparation({ config: engineeringPreparationConfig,
+          configFile: engineeringPreparationFile, root, workspace, projectsFile, poolFile, bindingsFile, observationsFile,
+          ...(quotaConfigFile ? { quotaConfigFile } : {}), owner: engineering });
+        scope.engineeringPreparationSupported = true;
+      }
       if (engineeringSupervisionConfig) {
         engineeringSupervision = createResourceConsoleEngineeringSupervisor({ owner: engineering, root,
           config: engineeringSupervisionConfig, signal });

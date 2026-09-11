@@ -90,6 +90,9 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Add independent revision-checked General/Spark reservations without changing account pauses or observations.
 - [x] Connect authenticated controls, effective availability and operator guidance.
 - [x] Verify real isolated admission, restart/evolution and responsive interaction; record remaining activation gaps.
+- [x] Explore the next commissioning/operator bottleneck across account setup, objective preparation and supervision.
+- [x] Implement the selected complete workflow with existing ledger, evidence and delivery primitives.
+- [x] Independently verify actual execution, interruption and operator interaction; update remaining gaps.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 

@@ -38,7 +38,7 @@ export const engineeringReadinessReasons: Record<ReadinessReason, string> = {
 };
 
 /** Validate response identity before a displayed digest can become launch input. */
-function enrollment(v: unknown): v is Enrollment {
+export function validWorkspaceEngineeringEnrollment(v: unknown): v is Enrollment {
   if (!object(v) || !exact(v, ['id', 'projectId', 'graphId', 'enrollmentDigest', 'objective', 'campaigns', 'budget', 'acceptanceScope',
     ...(Object.hasOwn(v, 'allowPendingContinuation') ? ['allowPendingContinuation'] : [])]) ||
     Object.hasOwn(v, 'allowPendingContinuation') && v.allowPendingContinuation !== true ||
@@ -65,6 +65,7 @@ function enrollment(v: unknown): v is Enrollment {
   for (let i = 0; i < campaigns.length; i++) for (const c of campaigns) if (c.dependsOn.every((dep) => visited.has(dep))) visited.add(c.id);
   return visited.size === known.size;
 }
+const enrollment = validWorkspaceEngineeringEnrollment;
 
 export async function listWorkspaceEngineering(signal?: AbortSignal): Promise<Enrollment[]> {
   const value = await apiGet<unknown>('/api/resources/engineering', signal);

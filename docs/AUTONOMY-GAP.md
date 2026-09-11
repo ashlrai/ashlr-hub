@@ -70,6 +70,12 @@ now connects a reviewed objective, fixed evaluator, selected project and existin
 workers to initialized experiments/campaigns and linked console catalogs. It
 derives matching digests and preserves the existing account ledger. Preparation
 does not invent the objective or evaluator, start work or establish live capacity.
+Host-configured preparation profiles now expose this path in the workspace:
+objective entry, read-only plan check, explicit preparation and receipt-backed
+same-console enrollment. Completed registrations reload on restart without
+launching; the existing engineering pane runs them through the shared owner.
+This removes manual per-objective catalog assembly, not the requirement for a
+trusted evaluator matched to the requested work or for live account commissioning.
 Incomplete registration remains explicit; exact completed replay changes no state.
 
 The [offline pool upgrade](RESOURCE-POOLS.md#upgrade-a-pool-without-resetting-history)

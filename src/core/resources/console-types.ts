@@ -28,6 +28,8 @@ export interface ResourceConsoleScope {
   workspaceFilesSupported?: true;
   /** Explicit host-enrolled evaluated engineering; separate from ordinary task completion. */
   engineeringSupported?: true;
+  /** Host-pinned objective preparation and durable same-console enrollment. */
+  engineeringPreparationSupported?: true;
   /** Explicit automatic queue in this console lifetime; not an OS service. */
   engineeringSupervisionSupported?: true;
 }

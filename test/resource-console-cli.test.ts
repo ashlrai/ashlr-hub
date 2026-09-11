@@ -48,6 +48,8 @@ describe('explicit foreground resource console CLI', () => {
     expect(out.mock.calls[0]![0]).toContain('Whole-account pauses\nstill block both General and Spark');
     expect(out.mock.calls[0]![0]).toContain('does not grant access to the other scope');
     expect(out.mock.calls[0]![0]).toContain('do not enable execution, reset quota, stop in-flight tasks or authorize overage');
+    expect(out.mock.calls[0]![0]).toContain('--engineering-preparation requires --execute and --projects');
+    expect(out.mock.calls[0]![0]).toContain('Run the prepared plan separately');
   });
   it.each([false, true])('passes explicit scope and emits one startup record (execute=%s)', async (execute) => {
     const handle = server(execute); backend.start.mockResolvedValue(handle);
@@ -103,5 +105,20 @@ describe('explicit foreground resource console CLI', () => {
   });
   it.each(['relative', '/', '/private/\u0085'])('refuses invalid quota configuration path %j', async (path) => {
     expect(await cmdResourceConsole([...args, '--quota-config', path])).toBe(2); expect(backend.start).not.toHaveBeenCalled();
+  });
+  it.each([{ extra: [] }, { extra: ['--execute', '--workspace', '/private/fixture/workspace'] }])('requires registered execution projects for preparation %#', async ({ extra }) => {
+    expect(await cmdResourceConsole([...args, ...extra, '--engineering-preparation', '/private/fixture/profiles.json'])).toBe(2);
+    expect(backend.start).not.toHaveBeenCalled();
+  });
+  it('passes explicit preparation profiles without a static engineering catalog', async () => {
+    backend.start.mockResolvedValue(server(true)); const before = process.listeners('SIGTERM');
+    const running = cmdResourceConsole([...args, '--execute', '--workspace', '/private/fixture/workspace', '--projects', '/private/fixture/projects.json',
+      '--engineering-preparation', '/private/fixture/profiles.json', '--json']);
+    try {
+      await vi.waitFor(() => expect(out).toHaveBeenCalledOnce());
+      expect(backend.start.mock.calls[0]![0]).toMatchObject({ engineeringPreparationFile: '/private/fixture/profiles.json', execute: true });
+      expect(backend.start.mock.calls[0]![0]).not.toHaveProperty('engineeringFile');
+    } finally { signal('SIGTERM', before); await running; }
+    expect(await running).toBe(0);
   });
 });
