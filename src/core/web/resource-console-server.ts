@@ -4,7 +4,8 @@ import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
 import { readResourceJson, resourcePoolStatus, readResourcePoolAllocation, setResourcePoolAllocation,
-  readResourceWorkerAccess, setResourceWorkerAccess } from '../resources/pool-runtime.js';
+  readResourceWorkerAccess, setResourceWorkerAccess, readResourceQuotaScopeAccess, setResourceQuotaScopeAccess } from '../resources/pool-runtime.js';
+import { validateResourceQuotaScopeExclusions, excludedResourceQuotaScopeWorkerIds } from '../resources/quota-scope-access.js';
 import { validateResourceBindings } from '../resources/worker.js';
 import { createResourcePoolSupervisor, ResourceSupervisorError } from '../resources/pool-supervisor.js';
 import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, type ResourceQuotaRefresher } from '../resources/quota-refresh.js';
@@ -20,7 +21,7 @@ import { listResourceConsoleFiles, readResourceConsoleFile, ResourceConsoleFileE
 import { createResourceConnectionMonitor, validateResourceConnectionConfig, type ResourceConnectionMonitor } from '../resources/connection-monitor.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from '../resources/metadata-coordinator.js';
 import type { ResourceConsoleScope, ResourceConsoleTaskInput, ResourceConsoleSnapshot } from '../resources/console-types.js';
-import { createResourceConsoleReader, withholdResourceConsoleWorkers } from './resource-console-reads.js';
+import { createResourceConsoleReader, withholdResourceConsoleWorkers, withholdResourceConsoleQuotaScopeWorkers } from './resource-console-reads.js';
 import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
 import { validateUniverseConsoleRoot } from './universe-console-reads.js';
 import { serveStatic } from './static.js';
@@ -256,6 +257,25 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (sessions.handleSession(req, res, url)) return;
     if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
       if (method === 'POST') {
+        if (url.pathname === '/api/resources/quota-scope-access') {
+          if (!options.allocationControls || !controlToken) throw new RequestError(403, 'Quota scope controls are disabled');
+          if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Matching Origin required');
+          if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
+          const input = await body(req);
+          if (!exact(input, ['exclusions', 'expectedRevision']) || !Number.isSafeInteger(input.expectedRevision) ||
+            Number(input.expectedRevision) < 0 || Number(input.expectedRevision) >= Number.MAX_SAFE_INTEGER) {
+            throw new RequestError(400, 'Expected enrolled quota scopes and a current revision');
+          }
+          let exclusions: ReturnType<typeof validateResourceQuotaScopeExclusions>;
+          try { exclusions = validateResourceQuotaScopeExclusions(input.exclusions, pool, bindings); }
+          catch { throw new RequestError(400, 'Expected enrolled quota scopes and a current revision'); }
+          if (closing) throw new RequestError(503, 'Console is closing');
+          try {
+            const quotaScopeAccess = setResourceQuotaScopeAccess(root, pool, bindings, exclusions, Number(input.expectedRevision));
+            sendJson(res, 200, { quotaScopeAccess });
+          } catch { throw new RequestError(409, 'Quota scope reservations changed or are unavailable; refresh before saving'); }
+          return;
+        }
         if (url.pathname === '/api/resources/worker-access') {
           if (!options.allocationControls || !controlToken) throw new RequestError(403, 'Fleet access controls are disabled');
           if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
@@ -391,11 +411,13 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         for (let attempt = 0; attempt < 2; attempt++) {
           const allocation = readResourcePoolAllocation(root, pool, bindings);
           const workerAccess = readResourceWorkerAccess(root, pool, bindings);
+          const quotaScopeAccess = readResourceQuotaScopeAccess(root, pool, bindings);
           const managed = managedQuotaEvidence();
           let evidence = await reader.snapshot(managed);
           if (closing) throw new RequestError(503, 'Console is closing');
           if (JSON.stringify(allocation) !== JSON.stringify(readResourcePoolAllocation(root, pool, bindings))) continue;
           if (JSON.stringify(workerAccess) !== JSON.stringify(readResourceWorkerAccess(root, pool, bindings))) continue;
+          if (JSON.stringify(quotaScopeAccess) !== JSON.stringify(readResourceQuotaScopeAccess(root, pool, bindings))) continue;
           if (quotaConfig) {
             const current = managedQuotaEvidence()!;
             // Both successful refresh and failure can race the worker read.
@@ -407,6 +429,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           // A deduplicated worker read can predate this request's policy read.
           // Reapply current pauses so a cached projection cannot show readiness.
           evidence = withholdResourceConsoleWorkers(evidence, workerAccess.pausedWorkerIds);
+          evidence = withholdResourceConsoleQuotaScopeWorkers(evidence,
+            excludedResourceQuotaScopeWorkerIds(pool, bindings, quotaScopeAccess.exclusions));
           const ceiling = allocation.ceilingPercent;
           if (ceiling !== null && ceiling < 100) {
             const now = Date.now();
@@ -429,7 +453,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             ...(metadataCollector ? { metadataCollector: collectorLifecycle() } : {}),
             ...(quotaRefresher ? { quotaRefresh: quotaRefresher.snapshot() } : {}),
             ...(connectionMonitor ? { connections: connectionMonitor.snapshot() } : {}),
-            allocation, workerAccess }); return;
+            allocation, workerAccess, quotaScopeAccess }); return;
         }
         throw new RequestError(503, 'Resource quota or allocation evidence changed during this read');
       }

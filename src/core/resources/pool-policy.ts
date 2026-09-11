@@ -43,6 +43,8 @@ export interface ResourceAssignmentInput {
   activeCounts: Record<string, number>;
   taskReservationCounts: Record<string, ResourceTaskReservationCount>;
   nowMs: number;
+  /** Operator-only veto; never interpreted as provider quota evidence. */
+  quotaScopeExcludedWorkerIds?: string[];
 }
 export type ResourceExclusionReason =
   | 'worker-not-allowed'
@@ -56,7 +58,8 @@ export type ResourceExclusionReason =
   | 'quota-window-reset-passed'
   | 'quota-reserve-reached'
   | 'concurrency-exhausted'
-  | 'operator-task-cap-reached';
+  | 'operator-task-cap-reached'
+  | 'operator-quota-scope-excluded';
 export interface ResourceAssignmentCandidate {
   workerId: string;
   provider: ResourceWorker['provider'];
@@ -227,7 +230,7 @@ function validateCounts(value: unknown, known: Set<string>, reservations: boolea
  * fresh quota. Known exhaustion/unavailability cannot be erased by stale data.
  */
 export function planResourceAssignment(input: ResourceAssignmentInput): ResourceAssignmentPlan {
-  if (!object(input) || !exact(input, ['pool', 'observations', 'allowedWorkerIds', 'activeCounts', 'taskReservationCounts', 'nowMs']) ||
+  if (!object(input) || !exact(input, ['pool', 'observations', 'allowedWorkerIds', 'activeCounts', 'taskReservationCounts', 'nowMs'], ['quotaScopeExcludedWorkerIds']) ||
       !integer(input.nowMs, 0, Date.parse('9999-12-31T23:59:59.999Z'))) {
     throw new Error('Invalid resource assignment: exact snapshot and bounded current time required');
   }
@@ -239,6 +242,9 @@ export function planResourceAssignment(input: ResourceAssignmentInput): Resource
     throw new Error('Invalid resource assignment: unique enrolled allowed worker identities required');
   }
   const active = validateCounts(input.activeCounts, known, false);
+  const scopeExcluded = input.quotaScopeExcludedWorkerIds === undefined ? [] : input.quotaScopeExcludedWorkerIds;
+  if (!array(scopeExcluded, 0, MAX_RESOURCE_POOL_WORKERS) || scopeExcluded.some(id => typeof id !== 'string' || !known.has(id)) ||
+    new Set(scopeExcluded).size !== scopeExcluded.length) throw new Error('Invalid resource quota scope excluded workers');
   const reservations = validateCounts(input.taskReservationCounts, known, true);
   const allowed = new Set(input.allowedWorkerIds); const byId = new Map(observations.map((row) => [row.workerId, row]));
   const candidates: ResourceAssignmentCandidate[] = []; const exclusions: ResourceAssignmentExclusion[] = [];
@@ -249,6 +255,7 @@ export function planResourceAssignment(input: ResourceAssignmentInput): Resource
       exclusions.push({ workerId: worker.id, reasons: ['worker-not-allowed'], nextEligibleAt: null }); continue;
     }
     const observed = byId.get(worker.id); const count = active[worker.id] ?? 0;
+    if (scopeExcluded.includes(worker.id)) reasons.add('operator-quota-scope-excluded');
     const tasks = reservations[worker.id] ?? { count: 0, nextEligibleAt: null };
     if (count >= worker.maxConcurrent) reasons.add('concurrency-exhausted');
     if (tasks.count >= worker.maxTasksPerWindow) {
@@ -281,7 +288,8 @@ export function planResourceAssignment(input: ResourceAssignmentInput): Resource
       if (!unknown && observed) usedPercent = Math.max(...observed.windows.map((window) => window.usedPercent!));
     }
     if (reasons.size) {
-      exclusions.push({ workerId: worker.id, reasons: [...reasons], nextEligibleAt: retry.sort()[0] ?? null }); continue;
+      exclusions.push({ workerId: worker.id, reasons: [...reasons],
+        nextEligibleAt: scopeExcluded.includes(worker.id) ? null : retry.sort()[0] ?? null }); continue;
     }
     const pressure = Math.max(count / worker.maxConcurrent, tasks.count / worker.maxTasksPerWindow,
       usedPercent === null ? 0 : usedPercent / (100 - worker.reservePercent));

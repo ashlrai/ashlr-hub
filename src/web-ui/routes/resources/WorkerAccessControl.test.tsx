@@ -14,6 +14,12 @@ const checkbox = (id = 'codex-a') => screen.getByRole('checkbox', { name: `Allow
 const saveButton = () => screen.getByRole('button', { name: 'Save account access' });
 
 describe('fleet account access control', () => {
+  it('shows shared-account pauses even when an alias checkbox has no explicit pause', () => {
+    render(<WorkerAccessControl workers={workers} policy={PAUSED} writable quotaReservationsAvailable onSave={vi.fn()} />);
+    expect(checkbox('codex-alias')).toBeChecked();
+    expect(screen.getAllByText('Whole account paused — all models sharing codex-account')).toHaveLength(2);
+    expect(screen.getByText(/save its quota reservation below before releasing the whole-account pause/)).toBeVisible();
+  });
   it('omits legacy snapshots with no worker access contract', () => {
     const { container } = render(<WorkerAccessControl workers={workers} policy={undefined} writable onSave={vi.fn()} />);
     expect(container).toBeEmptyDOMElement();

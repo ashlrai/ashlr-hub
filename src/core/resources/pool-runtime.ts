@@ -1,6 +1,9 @@
 /** Foreground, explicitly enrolled resource tasks. No daemon or Universe authority is inferred. */
 import { randomUUID } from 'node:crypto';
 import { expandResourceQuotaDenials, sharesResourceQuota } from './quota-scope.js';
+import { excludedResourceQuotaScopeWorkerIds, validateResourceQuotaScopeExclusions,
+  type ResourceQuotaScopeAccess, type ResourceQuotaScopeExclusion } from './quota-scope-access.js';
+export type { ResourceQuotaScopeAccess, ResourceQuotaScopeExclusion } from './quota-scope-access.js';
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
   readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
@@ -57,6 +60,7 @@ export interface ResourcePoolState {
   attempts: ResourceTaskReceipt[];
   allocation?: ResourcePoolAllocation;
   workerAccess?: ResourceWorkerAccess;
+  quotaScopeAccess?: ResourceQuotaScopeAccess;
   /** Exact historical configurations; active configuration is the final snapshot. */
   configurationHistory?: ResourcePoolConfigSnapshot[];
   /** Explicit migration barrier: ordinary readers and writers must refuse it. */
@@ -79,6 +83,14 @@ function checkedWorkerAccess(value: unknown, pool: ResourcePool): value is Resou
 function workerAccess(state: Pick<PoolState, 'workerAccess'>): ResourceWorkerAccess {
   return state.workerAccess ? { ...state.workerAccess, pausedWorkerIds: [...state.workerAccess.pausedWorkerIds] }
     : { pausedWorkerIds: [], revision: 0, updatedAt: null };
+}
+function checkedQuotaScopeAccess(value: unknown, pool: ResourcePool, bindings: ResourceBinding[]): value is ResourceQuotaScopeAccess {
+  if (!object(value) || !exact(value, ['exclusions', 'revision', 'updatedAt']) || !count(value.revision) || value.revision < 1 || !iso(value.updatedAt)) return false;
+  try { validateResourceQuotaScopeExclusions(value.exclusions, pool, bindings); return true; } catch { return false; }
+}
+function quotaScopeAccess(state: Pick<PoolState, 'quotaScopeAccess'>): ResourceQuotaScopeAccess {
+  return state.quotaScopeAccess ? { ...state.quotaScopeAccess, exclusions: state.quotaScopeAccess.exclusions.map(row => ({ ...row })) }
+    : { exclusions: [], revision: 0, updatedAt: null };
 }
 
 export interface ResourcePoolAllocation {
@@ -227,11 +239,13 @@ export function decodeResourcePoolState(value: unknown, pool: ResourcePool, bind
   if (!object(value) || !exact(value, ['schemaVersion', 'poolDigest', 'observations', 'attempts',
     ...(Object.hasOwn(value, 'allocation') ? ['allocation'] : []),
     ...(Object.hasOwn(value, 'workerAccess') ? ['workerAccess'] : []),
+    ...(Object.hasOwn(value, 'quotaScopeAccess') ? ['quotaScopeAccess'] : []),
     ...(value.schemaVersion === 2 ? ['configurationHistory'] : []),
     ...(value.schemaVersion === 2 && Object.hasOwn(value, 'pendingEvolution') ? ['pendingEvolution'] : [])]) ||
     value.schemaVersion !== 1 && value.schemaVersion !== 2 || value.poolDigest !== poolDigest || !Array.isArray(value.attempts) ||
     Object.hasOwn(value, 'allocation') && !checkedAllocation(value.allocation) ||
     Object.hasOwn(value, 'workerAccess') && !checkedWorkerAccess(value.workerAccess, pool) ||
+    Object.hasOwn(value, 'quotaScopeAccess') && !checkedQuotaScopeAccess(value.quotaScopeAccess, pool, bindings) ||
     value.attempts.length > MAX_ATTEMPTS || !value.attempts.every((row) => {
       const origin = object(row) ? history.find(snapshot => snapshot.poolDigest === row.poolDigest) : undefined;
       return origin !== undefined && checkedReceipt(row, origin.poolDigest, origin.bindings, origin.pool);
@@ -244,6 +258,7 @@ export function decodeResourcePoolState(value: unknown, pool: ResourcePool, bind
     attempts: value.attempts as ResourceTaskReceipt[],
     ...(Object.hasOwn(value, 'allocation') ? { allocation: value.allocation as ResourcePoolAllocation } : {}),
     ...(Object.hasOwn(value, 'workerAccess') ? { workerAccess: value.workerAccess as ResourceWorkerAccess } : {}),
+    ...(Object.hasOwn(value, 'quotaScopeAccess') ? { quotaScopeAccess: value.quotaScopeAccess as ResourceQuotaScopeAccess } : {}),
     ...(value.schemaVersion === 2 ? { configurationHistory: history } : {}),
     ...(value.pendingEvolution === undefined ? {} : { pendingEvolution: value.pendingEvolution as { planDigest: string } }) };
 }
@@ -433,7 +448,8 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
   }
   // The synthetic health veto exists only in this planning clone. The returned
   // evidence and persisted ledger retain the actual captured observations.
-  return planResourceAssignment({ pool, observations, allowedWorkerIds, activeCounts, taskReservationCounts, nowMs });
+  return planResourceAssignment({ pool, observations, allowedWorkerIds, activeCounts, taskReservationCounts, nowMs,
+    quotaScopeExcludedWorkerIds: excludedResourceQuotaScopeWorkerIds(pool, bindings, quotaScopeAccess(state).exclusions) });
 }
 
 function scope(poolValue: ResourcePool, bindingsValue: ResourceBinding[]): { pool: ResourcePool; bindings: ResourceBinding[]; poolDigest: string } {
@@ -454,7 +470,28 @@ export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindin
   return { schemaVersion: 1 as const, sourceState: exists ? 'healthy' as const : 'missing' as const,
     poolId: pool.id, plan: plan(state, pool, bindings, pool.workers.map((row) => row.id), Date.now(), unavailable, quotaUnavailable),
     ...(state.schemaVersion === 2 ? { configurationDigests: state.configurationHistory!.map(row => row.poolDigest) } : {}),
-    observations: state.observations, attempts: state.attempts, allocation: allocation(state), workerAccess: workerAccess(state) };
+    observations: state.observations, attempts: state.attempts, allocation: allocation(state), workerAccess: workerAccess(state),
+    quotaScopeAccess: quotaScopeAccess(state) };
+}
+
+/** Missing policy is not permission to bypass account-wide health, pauses, or reserves. */
+export function readResourceQuotaScopeAccess(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[]): ResourceQuotaScopeAccess {
+  const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
+  return inspectRoot(root, false) ? quotaScopeAccess(loadState(root, pool, bindings, poolDigest)) : quotaScopeAccess({});
+}
+
+/** Restrict future reservations under the existing account ledger lock; never cancel accepted work. */
+export function setResourceQuotaScopeAccess(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[],
+  exclusions: ResourceQuotaScopeExclusion[], expectedRevision: number): ResourceQuotaScopeAccess {
+  if (!count(expectedRevision) || expectedRevision >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid resource quota scope access policy');
+  const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
+  const checked = validateResourceQuotaScopeExclusions(exclusions, pool, bindings);
+  return transaction(root, pool, bindings, poolDigest, (state) => {
+    if (quotaScopeAccess(state).revision !== expectedRevision) throw new Error('Resource quota scope access revision conflict');
+    state.quotaScopeAccess = { exclusions: checked, revision: expectedRevision + 1, updatedAt: new Date().toISOString() };
+    requireResourcePoolSettlementHeadroom(state, pool);
+    return quotaScopeAccess(state);
+  });
 }
 
 /** Read-only: a missing policy means no explicit pauses, not permission to skip other admission gates. */
@@ -580,7 +617,7 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
       const currentPlan = plan({ ...state, observations }, pool, bindings, task.allowedWorkerIds, Date.now(), currentGates, currentQuotaGates);
       for (const exclusion of currentPlan.exclusions) {
         if (exclusion.reasons.some((reason) => !['worker-not-allowed', 'concurrency-exhausted',
-          'operator-task-cap-reached'].includes(reason))) currentQuotaUnavailable.add(exclusion.workerId);
+          'operator-task-cap-reached', 'operator-quota-scope-excluded'].includes(reason))) currentQuotaUnavailable.add(exclusion.workerId);
       }
       state.observations = mergeResourceObservations(state.observations, observations);
       if (signal?.aborted) throw new Error('Resource task cancelled before reservation');

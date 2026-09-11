@@ -22,6 +22,7 @@ function source(attempts: ResourceTaskReceipt[] = []): ReturnType<typeof resourc
   return { schemaVersion: 1, sourceState: 'healthy', poolId: pool.id, attempts, observations: [],
     allocation: { ceilingPercent: null, revision: 0, updatedAt: null },
     workerAccess: { pausedWorkerIds: [], revision: 0, updatedAt: null },
+    quotaScopeAccess: { exclusions: [], revision: 0, updatedAt: null },
     plan: planResourceAssignment({ pool, observations: [], allowedWorkerIds: pool.workers.map((row) => row.id),
       activeCounts: {}, taskReservationCounts: {}, nowMs: NOW }) };
 }

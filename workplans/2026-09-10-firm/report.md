@@ -1,6 +1,57 @@
 # Verified local handoff
 
-## Current continuation: expand resources without resetting history
+## Current continuation: reserve General independently from Spark
+
+Baseline `10f1909c3a1fbbf43976f96bbbe5473313b56283`, branch `auto/p00`, isolated
+worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three bounded
+agents handled runtime, interface and independent boundary acceptance. Parent
+integrated HTTP/read projections, actionable diagnostics, docs and browser QA.
+
+New durable scope reservations let an operator reserve General for personal work
+while leaving explicitly enrolled Spark available. They have their own revision
+and never clear account-wide pauses or change usage ceilings. Unmapped aliases
+remain withheld; they cannot incorrectly spread a scope-only reservation into
+Spark. Existing health, quota freshness, capacity and task limits still apply.
+Authenticated controls refuse stale revisions, invalid scopes and missing Origin.
+Cached console reads reapply current restrictions without inventing fresh quota.
+
+Actual browser acceptance used synthetic accounts with execution disabled:
+General reservation saved at revision 1, both workers stayed account-paused;
+separate account release advanced account revision to 2, leaving General reserved
+and Spark eligible. State retained zero task attempts and no allocation changes.
+Desktop 1280px and mobile 390px panels fit without horizontal overflow. The
+temporary browser tab, viewport override and foreground fixture were cleaned up.
+Design guidance preserved the existing control-room styling and differentiated
+saved scope policy from effective account availability.
+
+Final full web: **1,347/1,347 tests, 78 files, zero skips**, serial workers.
+Focused frontend: **349/349**. Backend groups: **161/161** core/new+legacy,
+**23/23** independent native/HTTP boundaries, **118/118** IPC/public, and
+**136/136** checker/HTTP/evolution. Groups overlap; this is not a full core-suite
+claim. Console help coverage also passes **36/36** after documenting the new
+capability. Source/web and strict imported-test typechecks pass; lint has zero errors
+and 107 existing warnings. Docs and real-I/O registration checks pass.
+One earlier parallel web run had an existing unlock-flow timeout; unchanged
+isolated/serial runs pass. Earlier broader core reliability failures remain
+documented below, not explained away or counted as passing.
+
+The user's seed-context retention choice is already implemented and freshly
+verified: **72 focused tests** plus one selected real-loopback three-generation
+test pass (one unrelated case unselected). Every worker retains the original
+bounded measurement beside newer feedback; trial scores advance 1→2→3 without
+altering scheduling or acceptance rules. Replay adds no requests or attempts.
+
+No real account policy, credential, provider enrollment, KILL or service changed.
+No remote push, GitHub Actions, npm publish or production activation occurred.
+Personal Spark still needs explicit live enrollment/commissioning using this
+policy; the complete autonomous North Star is not yet delivered. The original
+checkout remains at `a01fc08663baab3039c4f1c084538de732a4fd0e` with its existing
+untracked workplans. Entire is enabled/manual-commit and resume found no checkpoint.
+The local production build, compiled console help and all five compiled
+structural safety checks pass. A clean post-commit build identity is verified
+separately at handoff; these checks do not establish live provider acceptance.
+
+## Previous continuation: expand resources without resetting history
 
 Baseline `0a43f52f298511bf812b1161a141ed33ad4040f7`, branch `auto/p00`, isolated
 worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three bounded

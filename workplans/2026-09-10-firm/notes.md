@@ -1,5 +1,74 @@
 # Firm build notes
 
+## September 10: independent quota-scope reservations
+
+- Final CLI help review found the capability description omitted new scope
+  reservations. Updated only help and existing help assertions; 36/36 CLI tests,
+  scoped lint and diff check pass. Final source and actual web typechecks pass.
+  Compiled structural verify-safety passes all five checks. KILL and original
+  checkout were rechecked unchanged; Entire remains enabled/manual-commit.
+- September 11 rendered acceptance passed against this build with fictional
+  accounts, synthetic quota and execution disabled. Saved General reservation
+  advanced only scope revision to 1 and left both workers account-paused. A
+  separate account release advanced only account revision to 2: General remained
+  reserved and Spark became eligible. Private state has zero attempts and no
+  allocation changes. Desktop 1280px and mobile 390px screenshots were inspected;
+  document width matched viewport width. Temporary viewport reset, fixture tab
+  closed and foreground server stopped. No real account or provider involved.
+- Final frontend focused 349/349 across five files and serial full web
+  1,347/1,347 across 78 files pass, zero skips. A prior parallel full-web run
+  passed 1,346 with one existing unlock-flow timeout; identical isolated and
+  serial tests pass without assertion/timeout edits. Contention is not proven.
+- Renewed seed-retention answer: independent read-only review found no gap.
+  Focused existing context/model/reconstruction tests 72/72 pass; selected real
+  loopback three-generation test passes (one unrelated test unselected). Fixed
+  seed score 0 remains alongside advancing parent/feedback and trial scores
+  1,2,3. Replay produces no requests, attempts or new runs. No seed edits needed.
+- Source/web typechecks and strict imported test checks pass. Full lint has
+  zero errors and 107 existing warnings. Lane registry: 304 real-I/O/666 unit.
+  Documentation verifies 111 local links/31 source references/36 external URLs
+  without external requests. Dirty-source production build passed before UI QA.
+- Browser setup initially lacked the fixture read token; server was restarted
+  to expose its synthetic token locally. Browser IDs changed after CUA reset;
+  fresh inventory resolved the existing fixture tab. A read-only workplan lookup
+  used the original checkout instead of the integration worktree and was corrected.
+  One guessed bin/ashlr.js path was absent; compiled CLI is dist/cli/index.js.
+  A redundant final web typecheck guessed tsconfig.web.json; rerun uses the
+  package's actual typecheck:web script and src/web-ui/tsconfig.json.
+- September 11 final backend checks: core/new+legacy 161/161 across four files;
+  independent boundaries 23/23, including real inert native and HTTP admission;
+  parent IPC/public 118/118; runtime/checker/HTTP/evolution 136/136 across five
+  files. No skips in these groups. They overlap and are not the full core suite.
+- Initial parent gates found a missing closed CLI next-check label (added), a
+  new assertion assuming a different candidate ordering (corrected to preserve
+  the original filtered order), and a scoped test observation with a legacy
+  window ID (corrected to its exact General bucket). Strict tests also found
+  missing policy defaults and an existing tuple-union spy typing issue; fixed
+  fixture types and explicit forbidden-provider spies. No admission weakened.
+- New source reason `operator-quota-scope-excluded` remains separate from
+  observed health and produces no timed release hint. Runtime inspection reports
+  `quota-scope-reserved` / `review-quota-scope-reservation`, not quota refresh.
+- React review keeps direct module imports, derived scope/account state and
+  event-driven draft saves, native labeled controls, revision-conflict handling,
+  focus styling and narrow-layout rows. Real rendered acceptance passed above.
+
+- Prior turn was progress: committed/built clean `10f1909c3a1fbbf43976f96bbbe5473313b56283`.
+  Current status clean; Entire resume found no checkpoint. No blocked audit.
+- Three Explore agents mapped current account-wide worker pauses, scope quota
+  propagation, HTTP CAS controls and raw-checkbox versus effective-access UX.
+- Selected separate optional `quotaScopeAccess` with `exclusions` keyed by
+  capacity and exact quota scope, its own CAS revision/time. Existing account
+  pauses and allocation setters remain unchanged. Save a General reservation
+  before explicitly clearing an account pause; never auto-clear existing pauses.
+- Unmapped aliases on the selected capacity are conservatively withheld. This
+  policy must not be re-expanded as collector health/quota evidence, which would
+  wrongly spill its denial into independently scoped Spark. Add a distinct
+  operator policy reason and retain observed health and historical receipts.
+- Build skill keeps the established runtime; planning skill tracks this complete
+  admission-to-UI increment. Frontend design reuses the technical-control-room
+  typography, palette and account grouping, with subordinate scope controls and
+  explicit saved-versus-effective state, not a decorative new dashboard.
+
 ## September 10: next operating bottleneck exploration
 
 - Final targeted seed acceptance passed: one selected real-loopback

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, apiGet, apiPost } from './client.js';
 import { clearMutationToken, getMutationToken, setMutationToken } from './auth-store.js';
-import { resourceConsoleScopeQuery, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceWorkerAccessControl } from './resource-pool-queries.js';
+import { resourceConsoleScopeQuery, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceWorkerAccessControl, setResourceQuotaScopeAccess } from './resource-pool-queries.js';
 import { resourceFixture } from '../routes/resources/fixtures.test-support.js';
 import { RESOURCE_COLLECTOR_RECOVERY_REASONS, RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS } from '../../core/resources/console-types.js';
 
@@ -22,6 +22,75 @@ async function query(value?: unknown) {
   return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
 }
 beforeEach(() => { vi.clearAllMocks(); clearMutationToken(); });
+
+describe('quota reservation response and mutation boundary', () => {
+  const general = { capacityKey: 'codex-account', quotaScope: 'codex-general-v1' } as const;
+  const spark = { capacityKey: 'codex-account', quotaScope: 'codex-spark-v1' } as const;
+  async function snapshotWith(value: unknown) {
+    const { snapshot } = resourceFixture();
+    Object.assign(snapshot.pool.workers[0]!, { quotaScope: general.quotaScope, model: 'gpt-6-astra' });
+    Object.assign(snapshot.pool.workers[1]!, { quotaScope: spark.quotaScope, model: 'gpt-5.3-codex-spark' });
+    read.mockResolvedValue({ ...snapshot, quotaScopeAccess: value });
+    return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
+  }
+  it.each([undefined, { exclusions: [], revision: 0, updatedAt: null },
+    { exclusions: [general], revision: 1, updatedAt: NOW }, { exclusions: [spark, general], revision: 2, updatedAt: NOW }])(
+    'accepts legacy absence or exact explicitly enrolled scope %#', async (value) => {
+      await expect(snapshotWith(value)).resolves.toBeDefined(); expect(write).not.toHaveBeenCalled();
+    });
+  it.each([null, {}, { exclusions: [general], revision: 0, updatedAt: null },
+    { exclusions: [], revision: 1, updatedAt: null }, { exclusions: [], revision: -1, updatedAt: NOW },
+    { exclusions: [general, general], revision: 1, updatedAt: NOW },
+    { exclusions: [{ ...general, capacityKey: 'unknown' }], revision: 1, updatedAt: NOW },
+    { exclusions: [{ ...general, quotaScope: 'inferred' }], revision: 1, updatedAt: NOW },
+    { exclusions: [{ ...general, raw: 'PRIVATE' }], revision: 1, updatedAt: NOW },
+    { exclusions: [], revision: 1, updatedAt: NOW, raw: 'PRIVATE' }])('rejects malformed or unregistered snapshots %#', async (value) => {
+    await expect(snapshotWith(value)).rejects.toThrow('selected pool');
+  });
+  it('does not infer a pin from a model name', async () => {
+    const { snapshot } = resourceFixture(); snapshot.pool.workers[0]!.model = 'gpt-6-astra';
+    read.mockResolvedValue({ ...snapshot, quotaScopeAccess: { exclusions: [general], revision: 1, updatedAt: NOW } });
+    await expect(resourceConsoleSnapshotQuery(snapshot.pool.id).fetch()).rejects.toThrow('selected pool');
+  });
+  it('requires control unlock and sends only the exact independent scope revision', async () => {
+    await expect(setResourceQuotaScopeAccess([general], 0)).rejects.toThrow('Unlock controls'); expect(write).not.toHaveBeenCalled();
+    setMutationToken('a'.repeat(64));
+    write.mockResolvedValue({ quotaScopeAccess: { exclusions: [general], revision: 1, updatedAt: NOW } });
+    await expect(setResourceQuotaScopeAccess([general], 0)).resolves.toHaveProperty('quotaScopeAccess.revision', 1);
+    expect(write).toHaveBeenCalledExactlyOnceWith('/api/resources/quota-scope-access', { exclusions: [general], expectedRevision: 0 }, 'a'.repeat(64));
+  });
+  it('accepts reordered selectors without mutating the caller', async () => {
+    setMutationToken('a'.repeat(64)); const requested = [spark, general];
+    write.mockResolvedValue({ quotaScopeAccess: { exclusions: [general, spark], revision: 4, updatedAt: NOW } });
+    await expect(setResourceQuotaScopeAccess(requested, 3)).resolves.toBeDefined(); expect(requested).toEqual([spark, general]);
+  });
+  it.each([{ exclusions: [general, general], revision: 0 }, { exclusions: new Array(1), revision: 0 },
+    { exclusions: [{ ...general, capacityKey: '../secret' }], revision: 0 },
+    { exclusions: [{ ...general, quotaScope: 'inferred' }], revision: 0 },
+    { exclusions: [{ ...general, extra: true }], revision: 0 },
+    { exclusions: Array.from({ length: 65 }, (_, i) => ({ ...general, capacityKey: `account-${i}` })), revision: 0 },
+    { exclusions: [], revision: -1 }, { exclusions: [], revision: 0.5 }, { exclusions: [], revision: Number.MAX_SAFE_INTEGER }])(
+    'rejects invalid requests before contact %#', async ({ exclusions, revision }) => {
+      setMutationToken('a'.repeat(64));
+      await expect(setResourceQuotaScopeAccess(exclusions as Parameters<typeof setResourceQuotaScopeAccess>[0], revision)).rejects.toThrow('Invalid quota reservation');
+      expect(write).not.toHaveBeenCalled();
+    });
+  it.each([{}, { quotaScopeAccess: null }, { quotaScopeAccess: { exclusions: [spark], revision: 1, updatedAt: NOW } },
+    { quotaScopeAccess: { exclusions: [general], revision: 2, updatedAt: NOW } },
+    { quotaScopeAccess: { exclusions: [general], revision: 1, updatedAt: null } },
+    { quotaScopeAccess: { exclusions: [general, general], revision: 1, updatedAt: NOW } },
+    { quotaScopeAccess: { exclusions: [general], revision: 1, updatedAt: NOW }, raw: 'PRIVATE' }])('refuses unverifiable acknowledgments %#', async (value) => {
+    setMutationToken('a'.repeat(64)); write.mockResolvedValue(value);
+    await expect(setResourceQuotaScopeAccess([general], 0)).rejects.toThrow('could not be verified');
+  });
+  it.each([401, 403, 409, 500])('redacts status %i without resubmitting', async (status) => {
+    setMutationToken('a'.repeat(64)); write.mockRejectedValue(new ApiError('PRIVATE_DETAIL', status, '/api/resources/quota-scope-access'));
+    const error = await setResourceQuotaScopeAccess([general], 0).catch((value: Error) => value);
+    expect(error).toBeInstanceOf(Error); expect((error as Error).message).not.toContain('PRIVATE_DETAIL'); expect(write).toHaveBeenCalledOnce();
+    if (status === 409) expect(error).toMatchObject({ status: 409 });
+    if (status === 401) expect(getMutationToken()).toBeNull();
+  });
+});
 
 describe('explicit engineering supervision capability', () => {
   const projectScope = () => ({ ...resourceFixture().scope, defaultProjectId: 'default',

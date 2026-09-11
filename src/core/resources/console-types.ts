@@ -4,6 +4,7 @@ import type { ResourceTaskReceipt } from './pool-runtime.js';
 import type { ResourcePerformanceReport } from './performance.js';
 import type { ResourceQuotaRefreshSnapshot } from './quota-refresh.js';
 import type { ResourceConnectionsSnapshot } from './connection-types.js';
+import type { ResourceQuotaScopeAccess } from './quota-scope-access.js';
 
 export interface ResourceConsoleScope {
   schemaVersion: 1;
@@ -161,6 +162,8 @@ export interface ResourceConsoleSnapshot extends ResourceConsoleEvidence {
   connections?: ResourceConnectionsSnapshot | null;
   allocation?: { ceilingPercent: number | null; revision: number; updatedAt: string | null };
   workerAccess?: { pausedWorkerIds: string[]; revision: number; updatedAt: string | null };
+  /** Independent operator reservations; not provider health or available quota. */
+  quotaScopeAccess?: ResourceQuotaScopeAccess;
 }
 
 export interface ResourceConsoleOutput {

@@ -6,7 +6,7 @@ import styles from './WorkerAccessControl.module.css';
 export type WorkerAccessSnapshot = NonNullable<ResourceConsoleSnapshot['workerAccess']>;
 
 export function WorkerAccessControl({ workers, policy, writable, disabled = false, historical = false, busy = false,
-  error, notice, onSave }: {
+  error, notice, onSave, quotaReservationsAvailable = false }: {
   workers: ResourceConsoleSnapshot['pool']['workers'];
   policy: WorkerAccessSnapshot | undefined;
   writable: boolean;
@@ -15,6 +15,7 @@ export function WorkerAccessControl({ workers, policy, writable, disabled = fals
   busy?: boolean;
   error?: string | null;
   notice?: string | null;
+  quotaReservationsAvailable?: boolean;
   onSave: (pausedWorkerIds: string[], expectedRevision: number) => Promise<boolean>;
 }) {
   const descriptionId = useId();
@@ -25,6 +26,7 @@ export function WorkerAccessControl({ workers, policy, writable, disabled = fals
   const unsaved = draft !== null && (paused.length !== policy.pausedWorkerIds.length ||
     paused.some((id) => !policy.pausedWorkerIds.includes(id)));
   const blocked = !writable || disabled || historical || busy;
+  const pausedAccounts = new Set(workers.filter((worker) => policy.pausedWorkerIds.includes(worker.id)).map((worker) => worker.capacityKey));
 
   function change(workerId: string, allowed: boolean) {
     if (!policy || blocked || conflict) return;
@@ -49,8 +51,9 @@ export function WorkerAccessControl({ workers, policy, writable, disabled = fals
         <input type="checkbox" checked={!paused.includes(worker.id)} disabled={blocked || conflict}
           aria-label={`Allow ${worker.id} for fleet work`} onChange={(event) => change(worker.id, event.target.checked)} />
         <span className={styles.identity}><strong>{worker.id}</strong><small>{worker.provider} / {worker.model}</small></span>
-        <span className={styles.state}>{historical ? 'Last reported: ' : 'Saved: '}
+        <span className={styles.state}><span>{historical ? 'Last reported: ' : 'Saved: '}
           {policy.pausedWorkerIds.includes(worker.id) ? 'Paused for fleet' : 'Allowed by this setting'}</span>
+          {pausedAccounts.has(worker.capacityKey) ? <strong className={styles.effective}>Whole account paused — all models sharing {worker.capacityKey}</strong> : null}</span>
       </label>)}
     </div>
     <div className={styles.actions}><span className={styles.note}>{unsaved ? 'Unsaved access changes' : 'No unsaved access changes'}</span>
@@ -64,5 +67,7 @@ export function WorkerAccessControl({ workers, policy, writable, disabled = fals
     {!writable ? <p className={styles.note}>Account access changes are not enabled for this console.</p> : null}
     <p id={descriptionId} className={styles.note}>Uncheck an account and save to pause new fleet tasks. Running tasks are not stopped.
       {' '}This does not sign you out, change your usage ceiling, or hide connection and usage data. Other admission rules and shared-capacity pauses still apply.</p>
+    <p className={styles.note}>Checkboxes show explicit saved pauses. Pausing any worker pauses every model sharing its account, including General and Spark.
+      {quotaReservationsAvailable ? ' To reserve General only, save its quota reservation below before releasing the whole-account pause.' : ''} No pause is cleared automatically.</p>
   </section>;
 }

@@ -161,6 +161,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures
   'test/resource-console-pool-evolution.test.ts', // pinned console origins across private ledger epochs
   'test/resource-pool-evolution-engineering.test.ts', // evolved account ledger through campaign preparation and evaluated delivery
+  'test/resource-quota-scope-access.test.ts', // durable private scope policy and locked admission
+  'test/resource-quota-scope-access-boundaries.test.ts', // independent scope policy HTTP and native fixture acceptance
   'test/universe-graph-controller-reconciliation.test.ts', // immutable settlement guards and terminal graph preservation
   'test/universe-campaign-dispatch.test.ts', // exact dispatch recovery with actual private measured-seed records
   'test/universe-controller-contention-integration.test.ts', // native execution-lock contention, bounded waiting and cancellation

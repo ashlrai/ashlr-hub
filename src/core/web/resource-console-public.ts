@@ -15,7 +15,8 @@ const ACTIVE = new Set(['reserved', 'uncertain']);
 const STATUSES = ['reserved', 'completed', 'failed', 'timed-out', 'cancelled', 'uncertain'];
 const EXCLUSIONS = ['worker-not-allowed', 'worker-unavailable', 'provider-retry-after', 'observation-missing',
   'observation-future', 'observation-stale', 'quota-windows-missing', 'quota-window-unknown',
-  'quota-window-reset-passed', 'quota-reserve-reached', 'concurrency-exhausted', 'operator-task-cap-reached'];
+  'quota-window-reset-passed', 'quota-reserve-reached', 'concurrency-exhausted', 'operator-task-cap-reached',
+  'operator-quota-scope-excluded'];
 type Status = ReturnType<typeof resourcePoolStatus>;
 type JsonObject = Record<string, unknown>;
 

@@ -147,12 +147,29 @@ export function withholdResourceConsoleWorkers(evidence: ResourceConsoleEvidence
   const capacities = new Set(evidence.pool.workers.filter((worker) => selected.has(worker.id)).map((worker) => worker.capacityKey));
   const blocked = new Set(evidence.pool.workers.filter((worker) => capacities.has(worker.capacityKey)).map((worker) => worker.id));
   for (const id of quotaUnavailableWorkerIds) blocked.add(id);
+  return withholdExactWorkers(evidence, blocked, 'worker-unavailable');
+}
+
+/** Operator scope reservations are direct vetoes, never account/quota evidence
+ * to re-expand through an unscoped alias. Preserve the captured observations.
+ */
+export function withholdResourceConsoleQuotaScopeWorkers(evidence: ResourceConsoleEvidence, excludedWorkerIds: string[]): ResourceConsoleEvidence {
+  if (!workerIds(excludedWorkerIds, evidence.pool.workers.map(worker => worker.id))) {
+    throw new ReadProjectionError('Invalid operator quota scope gate', 'READ_PROJECTION_INVALID_REQUEST');
+  }
+  if (!evidence.plan || excludedWorkerIds.length === 0) return evidence;
+  return withholdExactWorkers(evidence, new Set(excludedWorkerIds), 'operator-quota-scope-excluded');
+}
+
+function withholdExactWorkers(evidence: ResourceConsoleEvidence, blocked: Set<string>,
+  reason: 'worker-unavailable' | 'operator-quota-scope-excluded'): ResourceConsoleEvidence {
+  if (!evidence.plan) return evidence;
   const candidates = evidence.plan.candidates.filter((candidate) => !blocked.has(candidate.workerId));
   const exclusions: ResourceAssignmentExclusion[] = evidence.pool.workers.flatMap((worker) => {
     const prior = evidence.plan!.exclusions.find((row) => row.workerId === worker.id);
     if (!blocked.has(worker.id)) return prior ? [prior] : [];
-    return [{ workerId: worker.id, reasons: prior?.reasons.includes('worker-unavailable')
-      ? prior.reasons : [...prior?.reasons ?? [], 'worker-unavailable'], nextEligibleAt: null }];
+    return [{ workerId: worker.id, reasons: prior?.reasons.includes(reason)
+      ? prior.reasons : [...prior?.reasons ?? [], reason], nextEligibleAt: null }];
   });
   const nextEligibleAt = exclusions.flatMap((row) => row.nextEligibleAt ? [row.nextEligibleAt] : []).sort()[0] ?? null;
   return { ...evidence, plan: { ...evidence.plan, candidates, exclusions, selectedWorkerId: candidates[0]?.workerId ?? null, nextEligibleAt } };

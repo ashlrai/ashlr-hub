@@ -86,6 +86,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Implement the selected complete operating workflow using existing authority and accounting primitives.
 - [x] Independently verify real-process acceptance, unchanged user state and operator recovery.
 - [x] Update canonical guidance and validate the local build and targeted acceptance; broader gate failures remain documented.
+- [x] Explore durable account scope reservations, admission evidence and current control UX with three agents.
+- [x] Add independent revision-checked General/Spark reservations without changing account pauses or observations.
+- [x] Connect authenticated controls, effective availability and operator guidance.
+- [x] Verify real isolated admission, restart/evolution and responsive interaction; record remaining activation gaps.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -168,6 +172,22 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Quota-scope continuation from `10f1909c3a1fbbf43976f96bbbe5473313b56283`:
+independent durable General/Spark reservations are implemented through locked
+admission, authenticated controls, cached-read projection and the operator UI.
+Account-wide pauses remain dominant and must be released separately. Three
+parallel agents completed implementation and independent acceptance. Final full
+web gate passes 1,347/1,347 with serial workers; focused backend gates pass.
+Actual browser acceptance proves General reserved/Spark eligible after explicit
+account release, zero dispatched tasks, and no horizontal overflow at 1280/390px.
+The user's seed-retention choice is freshly verified in three generations with
+unchanged scheduling/acceptance. No real account, KILL or service was changed.
+The local build and five compiled structural safety checks pass; clean-build
+identity is verified at handoff. Live commissioning and the North Star remain
+unfinished. Earlier broader core failures are not erased by focused gates.
+
+### Previous continuation status
+
 Pool-evolution continuation from `0a43f52f298511bf812b1161a141ed33ad4040f7`:
 additive stopped-console migration, historical receipt/conversation identity,
 mixed-epoch metrics and new engineering preparation are implemented. Independent

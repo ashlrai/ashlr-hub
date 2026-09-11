@@ -667,9 +667,10 @@ is interchangeable with Sonnet or a local Qwen model. See the
 **Upgrade existing pools explicitly.** Pool/binding digests pin historical
 receipts. Use the [offline evolution command](#upgrade-a-pool-without-resetting-history)
 instead of editing active enrollment or selecting an empty ledger. A saved
-account pause still blocks Spark aliases after an upgrade. Reserving only one
-account's General scope while allowing its Spark scope still needs a distinct
-persisted scope exclusion; task-level `allowedWorkerIds` is not a durable reserve.
+account pause still blocks Spark aliases after an upgrade. The separate
+[quota reservation controls](#reserve-general-or-spark-independently) can reserve
+one account's General scope while permitting its Spark scope under the other
+admission checks; task-level `allowedWorkerIds` is not a durable reserve.
 
 ### Upgrade a pool without resetting history
 
@@ -1429,6 +1430,48 @@ does not alter the percentage ceiling. Both changes use the reservation lock and
 reject stale revisions; refresh before deliberately replacing another edit.
 An allowed worker is not necessarily ready or running. The pause is durable
 across restart but applies only to this pool's ledger, not arbitrary other apps.
+
+### Reserve General or Spark independently
+
+The **Quota reservations** control is separate from account access and the usage
+ceiling. It requires a current console snapshot, an unlocked control token and
+the existing `--allocation-controls` capability. Only explicitly enrolled
+account/scope pairs are offered. Reserving General does not reserve an explicitly
+pinned Spark bucket on the same account. An unscoped alias on that account is
+withheld conservatively, without turning its policy hold into a Spark quota denial.
+
+To keep General for your own work while permitting Spark:
+
+1. Enroll both exact quota scopes using the existing reviewed pool configuration
+   and, for an existing ledger, the history-preserving upgrade above.
+2. Select General in **Quota reservations** and save. This is a durable local
+   admission-policy write, not account login or provider quota collection.
+3. Verify the saved reservation before explicitly releasing any whole-account
+   pause in account access. Existing account pauses are never cleared by saving
+   scope reservations; they always block both scopes.
+4. Check current eligibility and quota evidence. Permitted Spark can still be
+   withheld by provider health/retry, stale readings, allocation limits, KILL,
+   shared concurrency or task caps. No new provider allowance is created.
+
+Saved reservations apply to subsequent reservations, not tasks already reserved
+or running. They persist through restart and additive pool upgrades, including
+new matching aliases. Receipt history, observations, account access and allocation
+revisions are unchanged. Releasing a scope reservation is an explicit save; it
+does not resume an account or start a task. No such changes are made automatically
+to existing user accounts.
+
+For an authorized local integration, `POST /api/resources/quota-scope-access`
+accepts exactly `{exclusions, expectedRevision}`; each exclusion is
+`{capacityKey, quotaScope}` using `codex-general-v1` or `codex-spark-v1` and an
+enrolled matching worker. The request needs the control token and explicit
+matching Origin. The response is `{quotaScopeAccess}` with detached exclusions,
+its independent incremented revision and update time. Stale revisions return
+409; malformed selectors return 400. GET `/api/resources` reports the current
+policy and reapplies its holds to cached eligibility without changing captured
+provider observations. Use the current binary: old readers reject policy-bearing
+ledgers they cannot interpret.
+
+### Interpret the fleet usage ceiling
 
 - **75%** stops admitting new subscription tasks once any required reported quota
   window reaches 75% used, targeting 25% headroom for other work.

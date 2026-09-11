@@ -36,6 +36,20 @@ function validWorkerAccess(value: unknown): value is NonNullable<ResourceConsole
     new Set(value.pausedWorkerIds).size !== value.pausedWorkerIds.length || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0) return false;
   return value.revision === 0 ? value.updatedAt === null && value.pausedWorkerIds.length === 0 : timestamp(value.updatedAt);
 }
+type ScopeExclusion = NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']>['exclusions'][number];
+const scopeKey = (row: ScopeExclusion) => `${row.capacityKey}/${row.quotaScope}`;
+function validScopeExclusions(value: unknown): value is ScopeExclusion[] {
+  return Array.isArray(value) && value.length <= 64 && Object.keys(value).length === value.length &&
+    Array.from(value).every((row) => record(row) && exact(row, ['capacityKey', 'quotaScope']) &&
+      typeof row.capacityKey === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(row.capacityKey) &&
+      (row.quotaScope === 'codex-general-v1' || row.quotaScope === 'codex-spark-v1')) &&
+    new Set((value as ScopeExclusion[]).map(scopeKey)).size === value.length;
+}
+function validQuotaScopeAccess(value: unknown): value is NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']> {
+  if (!record(value) || !exact(value, ['exclusions', 'revision', 'updatedAt']) || !validScopeExclusions(value.exclusions) ||
+    !Number.isSafeInteger(value.revision) || Number(value.revision) < 0) return false;
+  return value.revision === 0 ? value.updatedAt === null && value.exclusions.length === 0 : timestamp(value.updatedAt);
+}
 const QUOTA_REASONS = new Set(['managed-allocation-unavailable', ...['pending', 'refreshing', 'observed', 'failed', 'timed-out', 'cancelled', 'uncertain',
   'expired', 'closed', 'future', 'unavailable', 'unknown', 'reserve-reached'].map((reason) => `managed-quota-${reason}`)]);
 function record(value: unknown): value is Record<string, unknown> {
@@ -195,7 +209,10 @@ export function resourceConsoleSnapshotQuery(poolId: string): QueryDef<ResourceC
         !validQuotaRefresh(snapshot.quotaRefresh, snapshot.pool.workers) || !validConnections(snapshot.connections) || !validMetadataCollector(snapshot.metadataCollector) ||
         snapshot.allocation !== undefined && !validAllocation(snapshot.allocation) ||
         snapshot.workerAccess !== undefined && (!validWorkerAccess(snapshot.workerAccess) ||
-          snapshot.workerAccess.pausedWorkerIds.some((id) => !snapshot.pool.workers.some((worker) => worker.id === id)))) {
+          snapshot.workerAccess.pausedWorkerIds.some((id) => !snapshot.pool.workers.some((worker) => worker.id === id))) ||
+        snapshot.quotaScopeAccess !== undefined && (!validQuotaScopeAccess(snapshot.quotaScopeAccess) ||
+          snapshot.quotaScopeAccess.exclusions.some((row) => !snapshot.pool.workers.some((worker) =>
+            worker.capacityKey === row.capacityKey && worker.quotaScope === row.quotaScope)))) {
         throw new Error('The resource response did not match the selected pool.');
       }
       return snapshot;
@@ -265,6 +282,31 @@ export async function setResourceWorkerAccessControl(pausedWorkerIds: string[], 
     response.workerAccess.revision !== expectedRevision + 1 ||
     [...response.workerAccess.pausedWorkerIds].sort().join('\0') !== [...pausedWorkerIds].sort().join('\0')) {
     throw new Error('Fleet access response could not be verified. Refresh before trying again.');
+  }
+  return response;
+}
+
+export async function setResourceQuotaScopeAccess(exclusions: ScopeExclusion[], expectedRevision: number): Promise<{
+  quotaScopeAccess: NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']>;
+}> {
+  if (!validScopeExclusions(exclusions) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 ||
+    expectedRevision >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid quota reservation change.');
+  // Capture the operator's selection before awaiting a response; never mutate caller state.
+  const requested = exclusions.map((row) => ({ ...row }));
+  let response: { quotaScopeAccess: NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']> };
+  try {
+    response = await control('/api/resources/quota-scope-access', { exclusions: requested, expectedRevision }, 'Quota reservation changes are disabled for this console.');
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) throw new ApiError('Quota reservations changed elsewhere. Refresh before saving again.', 409, '/api/resources/quota-scope-access');
+    if (error instanceof Error && ['Unlock controls with this console’s control token first.',
+      'Control token rejected. Unlock with the token printed by this console.',
+      'Quota reservation changes are disabled for this console.'].includes(error.message)) throw error;
+    throw new Error('Quota reservations could not be saved. Refresh before trying again.');
+  }
+  if (!record(response) || !exact(response, ['quotaScopeAccess']) || !validQuotaScopeAccess(response.quotaScopeAccess) ||
+    response.quotaScopeAccess.revision !== expectedRevision + 1 ||
+    response.quotaScopeAccess.exclusions.map(scopeKey).sort().join('\n') !== requested.map(scopeKey).sort().join('\n')) {
+    throw new Error('Quota reservation response could not be verified. Refresh before trying again.');
   }
   return response;
 }

@@ -7,7 +7,7 @@ const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindi
        add --engineering-supervision ABS to run a digest-confirmed engineering queue automatically
        add --quota-config ABS to refresh explicitly pinned Codex account metadata
        add --connections-config ABS to monitor explicit Codex/Claude/Grok accounts
-       add --allocation-controls to adjust this pool's usage ceiling and worker access
+       add --allocation-controls for usage ceilings, whole-account pauses and General/Spark reservations
 
 The dedicated resource desk runs on 127.0.0.1, with an explicit pool and store.
 Read-only by default; startup never discovers accounts, logs in, or installs a service.
@@ -46,8 +46,11 @@ opt-in transcripts persist locally until deleted. Accepted follow-ups freeze cop
 context independently of later deletion of their source transcripts.
 --port accepts 0..65535, default 0. --max-parallel accepts 1..16, default 4.
 Connections are informational native metadata only, separate from worker admission.
-Policy controls persist revision-checked usage ceilings and worker pauses for new tasks;
-they do not enable execution, reset quota, stop in-flight tasks or authorize overage.
+Policy controls persist revision-checked usage ceilings, whole-account pauses and
+per-account General/Spark reservations for new tasks. A reservation excludes its
+quota scope; it does not grant access to the other scope. Whole-account pauses
+still block both General and Spark, and all existing quota and capacity limits apply.
+Controls do not enable execution, reset quota, stop in-flight tasks or authorize overage.
 Private read and control tokens are printed once, never placed in URLs.
 SIGINT/SIGTERM abort and await owned work before closing. No resident fleet activation.
 Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid arguments.

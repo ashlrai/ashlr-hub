@@ -7,7 +7,7 @@ import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { runQuery } from '../../data/cache.js';
 import { ApiError } from '../../data/client.js';
 import { useMutationHold, useQuery } from '../../data/hooks.js';
-import { cancelResourceTask, deleteResourceTaskHistory, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceQueuePaused, setResourceWorkerAccessControl, submitResourceTask } from '../../data/resource-pool-queries.js';
+import { cancelResourceTask, deleteResourceTaskHistory, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceQueuePaused, setResourceWorkerAccessControl, setResourceQuotaScopeAccess, submitResourceTask } from '../../data/resource-pool-queries.js';
 import { CapacityBoard, resourceNumber, resourceTime, WorkerInspector } from './CapacityBoard.js';
 import { TaskComposer } from './TaskComposer.js';
 import { PerformancePanel } from './PerformancePanel.js';
@@ -15,6 +15,7 @@ import { QuotaRefreshPanel } from './QuotaRefreshPanel.js';
 import { AccountConnections } from './AccountConnections.js';
 import { AllocationControl } from './AllocationControl.js';
 import { WorkerAccessControl } from './WorkerAccessControl.js';
+import { QuotaScopeAccessControl, type QuotaScopeAccessSnapshot } from './QuotaScopeAccessControl.js';
 import { TaskInspector, taskOwnership, taskState, taskTone } from './TaskInspector.js';
 import { FleetMap } from './FleetMap.js';
 import { buildResourceFleet } from './fleet-model.js';
@@ -32,6 +33,9 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   const [workerAccessBusy, setWorkerAccessBusy] = useState(false);
   const [workerAccessError, setWorkerAccessError] = useState<string | null>(null);
   const [workerAccessNotice, setWorkerAccessNotice] = useState<string | null>(null);
+  const [quotaScopeBusy, setQuotaScopeBusy] = useState(false);
+  const [quotaScopeError, setQuotaScopeError] = useState<string | null>(null);
+  const [quotaScopeNotice, setQuotaScopeNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [selection, setSelection] = useState<{ kind: 'worker' | 'task'; id: string } | null>(null);
@@ -64,6 +68,8 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     snapshot.sourceState !== 'degraded' && !historical && query.status !== 'loading';
   const workerAccessEnabled = scope.allocationWritable === true && !!snapshot?.workerAccess &&
     snapshot.sourceState !== 'degraded' && !historical && query.status !== 'loading';
+  const quotaScopeEnabled = scope.allocationWritable === true && !!snapshot?.quotaScopeAccess &&
+    snapshot.sourceState !== 'degraded' && !historical && query.status !== 'loading';
 
   useEffect(() => {
     const navigate = () => {
@@ -95,6 +101,22 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
       if (error instanceof ApiError && error.status === 409) await refresh();
       return false;
     } finally { setWorkerAccessBusy(false); }
+  }
+
+  async function saveQuotaScopeAccess(exclusions: QuotaScopeAccessSnapshot['exclusions'], expectedRevision: number): Promise<boolean> {
+    if (!quotaScopeEnabled || quotaScopeBusy) return false;
+    if (!hold.hasHold) { setUnlockOpen(true); return false; }
+    setQuotaScopeBusy(true); setQuotaScopeError(null); setQuotaScopeNotice(null);
+    try {
+      await setResourceQuotaScopeAccess(exclusions, expectedRevision);
+      setQuotaScopeNotice('Quota reservations saved. Account pauses, running tasks and your usage ceiling are unchanged.');
+      await refresh();
+      return true;
+    } catch (error) {
+      setQuotaScopeError(error instanceof Error ? error.message : 'Quota reservations could not be saved. Refresh before trying again.');
+      if (error instanceof ApiError && error.status === 409) await refresh();
+      return false;
+    } finally { setQuotaScopeBusy(false); }
   }
 
   async function saveAllocation(ceilingPercent: number, expectedRevision: number): Promise<boolean> {
@@ -277,7 +299,10 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
           <p>Set your usage reserve and inspect the evidence behind each routing decision.</p></div>
         <WorkerAccessControl workers={snapshot.pool.workers} policy={snapshot.workerAccess} writable={scope.allocationWritable === true}
           disabled={!workerAccessEnabled && scope.allocationWritable === true} historical={historical} busy={workerAccessBusy}
-          error={workerAccessError} notice={workerAccessNotice} onSave={saveWorkerAccess} />
+          error={workerAccessError} notice={workerAccessNotice} onSave={saveWorkerAccess} quotaReservationsAvailable={snapshot.quotaScopeAccess !== undefined} />
+        <QuotaScopeAccessControl workers={snapshot.pool.workers} policy={snapshot.quotaScopeAccess} accountPolicy={snapshot.workerAccess}
+          writable={scope.allocationWritable === true} disabled={!quotaScopeEnabled && scope.allocationWritable === true}
+          historical={historical} busy={quotaScopeBusy} error={quotaScopeError} notice={quotaScopeNotice} onSave={saveQuotaScopeAccess} />
         <AllocationControl allocation={snapshot.allocation} writable={scope.allocationWritable === true}
           disabled={!allocationEnabled && scope.allocationWritable === true} busy={allocationBusy} onSave={saveAllocation} />
         <AccountConnections connections={snapshot.connections} historical={historical} ceilingPercent={snapshot.allocation?.ceilingPercent} />
@@ -297,7 +322,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
     </> : null}
     {unlockOpen ? <MutationTokenDialog open onClose={() => setUnlockOpen(false)} tokenLabel="Control token"
       tokenHelp="the control token this resource console printed" reason={scope.readOnly
-        ? `This console’s separate control token enables ${snapshot?.workerAccess ? 'allocation and fleet account access' : 'allocation'} changes only. Task execution remains disabled.`
-        : `This console’s separate control token enables configured ${snapshot?.workerAccess ? 'account access, ' : ''}allocation, queue, submit, and owned-task cancellation actions.${scope.workspaceFilesSupported ? ' It also permits explicit project file previews.' : ''} Read access alone cannot dispatch work.`} /> : null}
+        ? `This console’s separate control token enables ${snapshot?.workerAccess ? 'allocation and fleet account access' : 'allocation'} changes only. Task execution remains disabled.${snapshot?.quotaScopeAccess ? ' It also enables quota reservations, without clearing account pauses.' : ''}`
+        : `This console’s separate control token enables configured ${snapshot?.workerAccess ? 'account access, ' : ''}${snapshot?.quotaScopeAccess ? 'quota reservations, ' : ''}allocation, queue, submit, and owned-task cancellation actions.${scope.workspaceFilesSupported ? ' It also permits explicit project file previews.' : ''} Read access alone cannot dispatch work.`} /> : null}
   </div>;
 }

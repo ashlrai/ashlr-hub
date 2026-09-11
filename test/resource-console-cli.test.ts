@@ -43,6 +43,11 @@ describe('explicit foreground resource console CLI', () => {
     expect(await cmdResourceConsole([flag])).toBe(0); expect(backend.start).not.toHaveBeenCalled();
     expect(out.mock.calls[0]![0]).toContain('Read-only by default');
     expect(out.mock.calls[0]![0]).toContain('previously dispatching work is never');
+    expect(out.mock.calls[0]![0]).toContain('--allocation-controls for usage ceilings, whole-account pauses and General/Spark reservations');
+    expect(out.mock.calls[0]![0]).toContain('per-account General/Spark reservations for new tasks');
+    expect(out.mock.calls[0]![0]).toContain('Whole-account pauses\nstill block both General and Spark');
+    expect(out.mock.calls[0]![0]).toContain('does not grant access to the other scope');
+    expect(out.mock.calls[0]![0]).toContain('do not enable execution, reset quota, stop in-flight tasks or authorize overage');
   });
   it.each([false, true])('passes explicit scope and emits one startup record (execute=%s)', async (execute) => {
     const handle = server(execute); backend.start.mockResolvedValue(handle);
