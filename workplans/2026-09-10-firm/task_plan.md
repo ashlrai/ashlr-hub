@@ -82,6 +82,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Implement the missing actionable setup bridge using existing experiment, evaluation and enrollment primitives.
 - [x] Verify an operator can prepare an executable campaign without hand-assembling inconsistent catalogs.
 - [x] Review independent acceptance, current activation gaps and local release evidence.
+- [x] Explore the next real operator bottleneck: recipe preparation versus history-preserving resource enrollment.
+- [x] Implement the selected complete operating workflow using existing authority and accounting primitives.
+- [x] Independently verify real-process acceptance, unchanged user state and operator recovery.
+- [x] Update canonical guidance and validate the local build and targeted acceptance; broader gate failures remain documented.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
 
@@ -164,6 +168,18 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Pool-evolution continuation from `0a43f52f298511bf812b1161a141ed33ad4040f7`:
+additive stopped-console migration, historical receipt/conversation identity,
+mixed-epoch metrics and new engineering preparation are implemented. Independent
+actual CLI-to-local-delivery acceptance passes in isolation. Full source/web
+typechecks, lint and documentation pass; broader regressions still have
+intermittent private-storage adapter failures and timeouts. Do not claim a clean
+full-suite or production commissioning result. The renewed seed-context choice
+is already implemented, with scheduling and acceptance unchanged. Build and local
+handoff verification follow. No actual account migration or activation occurred.
+
+### Historical continuation notes
+
 Seed-feedback continuation from clean `5b8af0aecc1fc32f0f7ad7bcfacd05430697e665`:
 user selected retaining seed evidence throughout the campaign, alongside latest
 trial feedback. Three agents mapped runtime/transport, independent projection

@@ -1,5 +1,86 @@
 # Firm build notes
 
+## September 10: next operating bottleneck exploration
+
+- Final targeted seed acceptance passed: one selected real-loopback
+  three-generation case, one unrelated test excluded (17.33 s). Every request
+  retained identical seed evidence while parent/latest feedback advanced; replay
+  added no requests or accounting entries. Production build and compiled evolve
+  help pass; compiled verify-safety returns all five structural checks true.
+  This does not erase the broader gate failures recorded below.
+
+- Final isolated engineering acceptance passed 1/1, no skips (31.34 s), without
+  changing production or fixture budgets: actual evolve CLI check/apply/replay,
+  schema-5 preparation/check, two total worker calls (one old, one new), two
+  fixed evaluations and one new local delivery branch. Existing history,
+  allocation revision and receipt remained unchanged; completed replay wrote
+  nothing. Strict test/import typecheck, scoped lint and diff check pass.
+- Final independent boundary gate passed 25/25, no skips (50.28 s). Previous
+  console compatibility gate passed 129/129 across nine files. Source/web
+  typechecks, full lint (zero errors, 107 existing warnings), docs (zero external
+  requests) and lane check (302 real-I/O, 666 unit files) pass.
+- Parent combined regression passed 189/191 across nine files; failures were
+  immutable evidence read/write unavailable in preparation and seed fixtures.
+  Follow-up passed 74/76 across four files, failing at different fixtures; one
+  concretely reported exact-private-storage `adapter-failed` on its isolated
+  provenance key. Other failures' precise causes remain unproven. Neither run
+  is a clean gate. No assertions, budgets, private-storage checks or real host
+  permissions were weakened. Avoid further blind retries.
+- Final read-only checks: original checkout retains its prior untracked files;
+  host KILL remains the September 4 mode-0600 marker. Entire is enabled in
+  manual-commit mode and resume found no checkpoint. No live provider effects.
+
+- Renewed user answer explicitly retains seed context across the campaign.
+  Exploration confirms this is already implemented by `49206a87`; do not add a
+  duplicate path or alter scheduling/acceptance. Rechecking focused seed suites
+  alongside the current pool-evolution integration.
+- Final core migration rerun: 16/16 passed, no skips (8.47 s). Final parent CLI,
+  performance and public projection: 114/114 passed, no skips (830 ms), including
+  bounded typed hold errors; strict imported-test TypeScript also passed.
+- Additional web attempts remained inconclusive: 1,293 passed and two failed,
+  followed by targeted 53 passed and one timeout with a 921-second test elapsed
+  time. Scoped caffeinate did not prevent observed maintenance sleep. Do not
+  count these as a clean full-web gate or widen timeouts to hide them.
+- Real evolved engineering acceptance reached completed old/new worker receipts
+  and fixed seed/candidate evaluation, but delivery/controller completion is
+  still under investigation. No successful whole-flow claim yet. Independent
+  migration rerun hit one ownership guard failure; unchanged isolated case
+  passed. Final rerun and concrete diagnostics are pending.
+
+- Previous turn was progress: preparation bridge committed as
+  `0a43f52f298511bf812b1161a141ed33ad4040f7`, clean build and source verified.
+  Fresh status remains clean before these tracking edits. Entire resume found
+  no checkpoint. No blocked audit applies.
+- Three bounded Explore assignments compare workspace recipe preparation,
+  history-preserving pool evolution and actual operator acceptance. Parent is
+  mapping existing configuration/account migration and console ownership paths.
+  No provider calls, account edits, history resets or live activation are inferred.
+- Selected pool evolution: more recipe UI cannot enroll its output into the
+  current immutable engineering catalog, whereas pool identity blocks actual
+  resource expansion. Add an explicit stopped-console additive upgrade with
+  preserved receipt/transcript origin identity, ledger policy, account capacity
+  and queued scope. Existing engineering pins are not rewritten or authorized.
+- Work ownership: runtime/epoch/migration bridge, console origin compatibility,
+  and independent acceptance/boundary tests. Parent CLI/docs/integration.
+- Initial source searches guessed nonexistent pool-store/collector filenames;
+  corrected using the actual file inventory. No effects from those failed reads.
+- Independent and parent review found shadow transcript copies in the initial
+  migration journal. The recovery design is being changed to no-text console
+  hashes/identity proofs, so deleteHistory cannot leave plaintext staging copies.
+  Filesystem-level deletion evidence is required before final acceptance.
+- Parent strict checks caught an existing public test fixture missing allocation
+  and workerAccess fields plus ES2022-incompatible toSorted in the new assertion;
+  corrected the fixture and used a copied array sort. Early CLI tests ran before
+  the backend module existed; once present all 110 CLI/performance/public tests
+  passed. Scoped strict tests subsequently passed.
+- Web validation encountered process-start timeouts: first attempt had six failed
+  tests and seven worker errors; bounded two-worker retry passed 1,291 tests but
+  failed to start JournalView. That unchanged four-test suite passed alone.
+  Read-only pmset logs confirm repeated Maintenance Sleep/DarkWake cycles during
+  these runs, including a 357-second sleep from 16:45:07 to 16:51:04. Use a scoped
+  caffeinate assertion for final checks; no power settings or test deadlines are
+  changed. Failed runs are not counted as clean full-suite passes.
+
 ## September 10: objective-to-campaign commissioning exploration
 
 - Delivered one reviewed recipe to initialized experiment/campaign, matching

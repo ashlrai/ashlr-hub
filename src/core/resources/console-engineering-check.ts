@@ -12,7 +12,7 @@ import { checkResourceGenerationRuntime, type ResourceGenerationRuntimeCheck } f
 import { prepareResourceConsoleEngineeringEnrollments, validateResourceConsoleEngineeringCatalog } from './console-engineering.js';
 import { matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
 import { decodeResourceConsoleState, previewResourceConsoleProjects } from './pool-supervisor.js';
-import { readResourceJson, resourcePoolStatus } from './pool-runtime.js';
+import { readResourceJson, resourcePoolStatus, readResourcePoolHistory } from './pool-runtime.js';
 import { validateResourcePool, validateResourceObservations } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 
@@ -80,9 +80,10 @@ export function checkResourceConsoleEngineering(input: ResourceConsoleEngineerin
     });
     const inspected = stage('supervisor', () => {
       const value = read(join(options.root, 'resource-console-state.json'), 4 * 1024 * 1024, true);
-      const state = value === undefined ? undefined : decodeResourceConsoleState(value, { pool, bindings, workspace: options.workspace });
-      const preview = previewResourceConsoleProjects({ workspace: options.workspace, projects, state });
       read(join(options.root, 'pool-state.json'), 4 * 1024 * 1024, true);
+      const state = value === undefined ? undefined : decodeResourceConsoleState(value, { pool, bindings, workspace: options.workspace,
+        configHistory: readResourcePoolHistory(options.root, pool, bindings) });
+      const preview = previewResourceConsoleProjects({ workspace: options.workspace, projects, state });
       resourcePoolStatus(options.root, pool, bindings, []);
       if (!preview.bindings || !preview.projects) throw new Error();
       return { state, preview };

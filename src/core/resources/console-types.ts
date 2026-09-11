@@ -53,6 +53,8 @@ export interface ResourceConsoleEvidence {
   sampledAt: string;
   sourceState: 'missing' | 'healthy' | 'degraded';
   reasons: string[];
+  /** Present only for a verified evolved ledger. Digests, never private binding locators. */
+  configurationDigests?: string[];
   pool: { id: string; workers: Array<ResourceWorker & { capacityKey: string }> };
   groups: ResourceConsoleGroup[];
   plan: ResourceAssignmentPlan | null;

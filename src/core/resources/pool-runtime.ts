@@ -14,6 +14,10 @@ import { MAX_RESOURCE_OBSERVATION_WINDOWS, RESOURCE_OBSERVATION_OVERFLOW, planRe
 import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask, type ResourceWorkerResult } from './worker.js';
 import { resourceUsageScopeForProvider, validResourceExecutionDuration, validResourceExecutionMeasurement, type ResourceExecutionMeasurement } from './performance.js';
 import { RESOURCE_NATIVE_PROCESS_SIGNALS, validResourceNativeProcessForReceipt, type ResourceNativeProcessDiagnostic } from './native-diagnostics.js';
+import { resourcePoolConfigSnapshot, validateResourcePoolConfigHistory } from './pool-evolution-policy.js';
+import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
+import type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
+export type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
 
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_ATTEMPTS = 4_096;
@@ -46,14 +50,19 @@ export interface ResourceTaskReceipt {
   /** Optional native invocation facts. Legacy receipts are never reconstructed from current host state. */
   nativeProcess?: ResourceNativeProcessDiagnostic;
 }
-interface PoolState {
-  schemaVersion: 1;
+export interface ResourcePoolState {
+  schemaVersion: 1 | 2;
   poolDigest: string;
   observations: ResourceObservation[];
   attempts: ResourceTaskReceipt[];
   allocation?: ResourcePoolAllocation;
   workerAccess?: ResourceWorkerAccess;
+  /** Exact historical configurations; active configuration is the final snapshot. */
+  configurationHistory?: ResourcePoolConfigSnapshot[];
+  /** Explicit migration barrier: ordinary readers and writers must refuse it. */
+  pendingEvolution?: { planDigest: string };
 }
+type PoolState = ResourcePoolState;
 
 export interface ResourceWorkerAccess {
   /** Explicit task-admission pauses, not account health or provider quota. */
@@ -204,22 +213,51 @@ function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceB
   return value.finishedAt !== null && (value.status !== 'completed' || value.outputDigest !== null);
 }
 
+/** Pure strict epoch-aware decoder. Only the explicit offline migrator reads a pending barrier. */
+export function decodeResourcePoolState(value: unknown, pool: ResourcePool, bindings: ResourceBinding[], allowPendingEvolution = false): ResourcePoolState {
+  const serialized = canonicalEvidencePackJsonV3(value);
+  if (serialized === null || Buffer.byteLength(serialized) + 1 > MAX_STATE_BYTES) throw new Error('Invalid bounded resource ledger');
+  value = JSON.parse(serialized) as unknown;
+  const active = resourcePoolConfigSnapshot(pool, bindings); const poolDigest = active.poolDigest;
+  let history: ResourcePoolConfigSnapshot[] = [active];
+  if (object(value) && value.schemaVersion === 2) {
+    history = validateResourcePoolConfigHistory(value.configurationHistory);
+    if (history.at(-1)!.poolDigest !== poolDigest) throw new Error('Resource ledger active configuration changed');
+  }
+  if (!object(value) || !exact(value, ['schemaVersion', 'poolDigest', 'observations', 'attempts',
+    ...(Object.hasOwn(value, 'allocation') ? ['allocation'] : []),
+    ...(Object.hasOwn(value, 'workerAccess') ? ['workerAccess'] : []),
+    ...(value.schemaVersion === 2 ? ['configurationHistory'] : []),
+    ...(value.schemaVersion === 2 && Object.hasOwn(value, 'pendingEvolution') ? ['pendingEvolution'] : [])]) ||
+    value.schemaVersion !== 1 && value.schemaVersion !== 2 || value.poolDigest !== poolDigest || !Array.isArray(value.attempts) ||
+    Object.hasOwn(value, 'allocation') && !checkedAllocation(value.allocation) ||
+    Object.hasOwn(value, 'workerAccess') && !checkedWorkerAccess(value.workerAccess, pool) ||
+    value.attempts.length > MAX_ATTEMPTS || !value.attempts.every((row) => {
+      const origin = object(row) ? history.find(snapshot => snapshot.poolDigest === row.poolDigest) : undefined;
+      return origin !== undefined && checkedReceipt(row, origin.poolDigest, origin.bindings, origin.pool);
+    }) ||
+    new Set(value.attempts.map((row) => row.id)).size !== value.attempts.length) throw new Error('Resource ledger invalid or configuration changed');
+  if (Object.hasOwn(value, 'pendingEvolution') && (!object(value.pendingEvolution) || !exact(value.pendingEvolution, ['planDigest']) ||
+    typeof value.pendingEvolution.planDigest !== 'string' || !HASH.test(value.pendingEvolution.planDigest))) throw new Error('Resource migration barrier invalid');
+  if (value.pendingEvolution !== undefined && !allowPendingEvolution) throw new Error('Resource pool evolution is pending; explicit resume required');
+  return { schemaVersion: value.schemaVersion as 1 | 2, poolDigest, observations: validateResourceObservations(value.observations, pool),
+    attempts: value.attempts as ResourceTaskReceipt[],
+    ...(Object.hasOwn(value, 'allocation') ? { allocation: value.allocation as ResourcePoolAllocation } : {}),
+    ...(Object.hasOwn(value, 'workerAccess') ? { workerAccess: value.workerAccess as ResourceWorkerAccess } : {}),
+    ...(value.schemaVersion === 2 ? { configurationHistory: history } : {}),
+    ...(value.pendingEvolution === undefined ? {} : { pendingEvolution: value.pendingEvolution as { planDigest: string } }) };
+}
 function loadState(root: string, pool: ResourcePool, bindings: ResourceBinding[], poolDigest: string): PoolState {
   const file = join(root, 'pool-state.json');
   if (!existsSync(file)) return { schemaVersion: 1, poolDigest, observations: [], attempts: [] };
-  const value = readResourceJson(file, MAX_STATE_BYTES);
-  if (!object(value) || !exact(value, ['schemaVersion', 'poolDigest', 'observations', 'attempts',
-    ...(Object.hasOwn(value, 'allocation') ? ['allocation'] : []),
-    ...(Object.hasOwn(value, 'workerAccess') ? ['workerAccess'] : [])]) ||
-    value.schemaVersion !== 1 || value.poolDigest !== poolDigest || !Array.isArray(value.attempts) ||
-    Object.hasOwn(value, 'allocation') && !checkedAllocation(value.allocation) ||
-    Object.hasOwn(value, 'workerAccess') && !checkedWorkerAccess(value.workerAccess, pool) ||
-    value.attempts.length > MAX_ATTEMPTS || !value.attempts.every((row) => checkedReceipt(row, poolDigest, bindings, pool)) ||
-    new Set(value.attempts.map((row) => row.id)).size !== value.attempts.length) throw new Error('Resource ledger invalid or configuration changed');
-  return { schemaVersion: 1, poolDigest, observations: validateResourceObservations(value.observations, pool),
-    attempts: value.attempts as ResourceTaskReceipt[],
-    ...(Object.hasOwn(value, 'allocation') ? { allocation: value.allocation as ResourcePoolAllocation } : {}),
-    ...(Object.hasOwn(value, 'workerAccess') ? { workerAccess: value.workerAccess as ResourceWorkerAccess } : {}) };
+  return decodeResourcePoolState(readResourceJson(file, MAX_STATE_BYTES), pool, bindings);
+}
+/** Read-only verified snapshots; never returns execution authority or repairs an interrupted upgrade. */
+export function readResourcePoolHistory(root: string, pool: ResourcePool, bindings: ResourceBinding[]): ResourcePoolConfigSnapshot[] {
+  const active = resourcePoolConfigSnapshot(pool, bindings);
+  if (!inspectRoot(root, false)) return [active];
+  const state = loadState(root, active.pool, active.bindings, active.poolDigest);
+  return structuredClone(state.configurationHistory ?? [active]);
 }
 
 function writeState(root: string, state: PoolState): void {
@@ -246,7 +284,7 @@ function writeState(root: string, state: PoolState): void {
 }
 
 /** Budget future evidence before contact; never turn settlement into another admission gate. */
-function requireSettlementHeadroom(state: PoolState, pool: ResourcePool): void {
+export function requireResourcePoolSettlementHeadroom(state: ResourcePoolState, pool: ResourcePool): void {
   // A nonnegative IEEE-754 value can need 17 significant digits plus the seven
   // characters preceding them at the smallest non-exponential decimal scale.
   // This actual valid sample has that maximal JSON width (24 characters).
@@ -415,6 +453,7 @@ export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindin
   state.observations = mergeResourceObservations(state.observations, observed);
   return { schemaVersion: 1 as const, sourceState: exists ? 'healthy' as const : 'missing' as const,
     poolId: pool.id, plan: plan(state, pool, bindings, pool.workers.map((row) => row.id), Date.now(), unavailable, quotaUnavailable),
+    ...(state.schemaVersion === 2 ? { configurationDigests: state.configurationHistory!.map(row => row.poolDigest) } : {}),
     observations: state.observations, attempts: state.attempts, allocation: allocation(state), workerAccess: workerAccess(state) };
 }
 
@@ -436,7 +475,7 @@ export function setResourceWorkerAccess(root: string, poolValue: ResourcePool, b
     const before = workerAccess(state);
     if (before.revision !== expectedRevision) throw new Error('Resource worker access revision conflict');
     state.workerAccess = { pausedWorkerIds: paused, revision: before.revision + 1, updatedAt: new Date().toISOString() };
-    requireSettlementHeadroom(state, pool);
+    requireResourcePoolSettlementHeadroom(state, pool);
     return workerAccess(state);
   });
 }
@@ -554,7 +593,7 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
       workerId: binding.workerId, capacityKey: binding.capacityKey, status: 'reserved', startedAt: new Date().toISOString(),
       finishedAt: null, outputDigest: null, inputTokens: null, outputTokens: null, reason: 'task-reserved', verifiedAccepted: false };
     state.attempts.push(receipt);
-    requireSettlementHeadroom(state, pool);
+    requireResourcePoolSettlementHeadroom(state, pool);
     return { receipt, plan: assignment, replayed: false };
   });
   if (!admission.receipt || admission.replayed) return { ...admission, output: null };

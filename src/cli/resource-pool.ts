@@ -7,6 +7,7 @@ const USAGE = `usage: ashlr resources pool status --root ABS --pool ABS --bindin
        ashlr resources pool console --help
        ashlr resources pool engineering --help
        ashlr resources pool engineering prepare --help
+       ashlr resources pool evolve --help
        ashlr resources pool benchmark --help
        ashlr resources pool probe --help
 
@@ -139,6 +140,10 @@ function outputMetadata(reservation: OutputReservation | undefined) {
 
 /** Parse scope before importing execution, and keep transient worker text out of CLI metadata. */
 export async function cmdResourcePool(args: string[]): Promise<number> {
+  if (args[0] === 'evolve') {
+    const { cmdResourcePoolEvolution } = await import('./resource-pool-evolution.js');
+    return cmdResourcePoolEvolution(args.slice(1));
+  }
   if (args[0] === 'probe') {
     const { cmdResourceProbe } = await import('./resource-probe.js');
     return cmdResourceProbe(args.slice(1));

@@ -18,6 +18,16 @@ const measure = (durationMs: number | null) => ({ schemaVersion: 1 as const, sco
 const build = (rows: ResourceTaskReceipt[]) => buildResourcePerformance(pool, rows);
 
 describe('descriptive resource performance', () => {
+  it('combines verified additive ledger epochs only when explicitly supplied', () => {
+    const rows = [receipt('old'), receipt('new', { poolDigest: 'd'.repeat(64) })];
+    expect(() => buildResourcePerformance(pool, rows)).toThrow();
+    const result = buildResourcePerformance(pool, rows, ['b'.repeat(64), 'd'.repeat(64)]);
+    expect(result.workers[0]?.usage).toMatchObject({ reportedInputTokens: 20, reportedOutputTokens: 4 });
+    expect(result).toMatchObject({ comparability: 'unmatched-tasks', quality: 'unmeasured', attempts: 2 });
+    for (const ids of [[], ['b'.repeat(64)], ['b'.repeat(64), 'b'.repeat(64)], ['nope'], Array(17).fill('b'.repeat(64))]) {
+      expect(() => buildResourcePerformance(pool, rows, ids)).toThrow();
+    }
+  });
   it('reports empty enrolled workers with unknown quantiles and no quality claim', () => {
     const report = build([]);
     expect(report).toMatchObject({ attempts: 0, quality: 'unmeasured', comparability: 'unmatched-tasks' });

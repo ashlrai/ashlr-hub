@@ -20,6 +20,8 @@ function attempt(id: string, status: ResourceTaskReceipt['status'] = 'completed'
 }
 function source(attempts: ResourceTaskReceipt[] = []): ReturnType<typeof resourcePoolStatus> {
   return { schemaVersion: 1, sourceState: 'healthy', poolId: pool.id, attempts, observations: [],
+    allocation: { ceilingPercent: null, revision: 0, updatedAt: null },
+    workerAccess: { pausedWorkerIds: [], revision: 0, updatedAt: null },
     plan: planResourceAssignment({ pool, observations: [], allowedWorkerIds: pool.workers.map((row) => row.id),
       activeCounts: {}, taskReservationCounts: {}, nowMs: NOW }) };
 }
@@ -29,6 +31,19 @@ const nativeProcess = () => ({ schemaVersion: 1 as const, scope: 'native-process
   signal: null, stderrPresent: true, outputTruncated: false });
 
 describe('native process diagnostic public boundary', () => {
+  it('preserves mixed epoch receipts through projection without exposing config snapshots', () => {
+    const old = attempt('old'); const next = { ...attempt('next'), poolDigest: 'd'.repeat(64) };
+    const status = { ...source([old, next]), configurationDigests: [old.poolDigest, next.poolDigest] };
+    const value = projectResourceConsoleEvidence(pool, bindings, status);
+    expect(parse(value)).toEqual(value); expect(value.counts.total).toBe(2);
+    expect(value.configurationDigests).toEqual(status.configurationDigests);
+    expect(value.recentAttempts.map(row => row.poolDigest).sort()).toEqual([...status.configurationDigests].sort());
+    expect(value.performance?.attempts).toBe(2);
+    expect(JSON.stringify(value)).not.toContain('command');
+    expect(() => parse({ ...value, configurationDigests: [old.poolDigest] })).toThrow();
+    expect(() => parse({ ...value, configurationDigests: [...status.configurationDigests, old.poolDigest] })).toThrow();
+    expect(() => parse({ ...value, configurationDigests: undefined })).toThrow();
+  });
   it('round trips only bounded metadata without reinterpreting failure as accepted work', () => {
     const row = { ...attempt('native-failure', 'failed'), nativeProcess: nativeProcess(), reason: 'worker-exit-failed',
       inputTokens: null, outputTokens: null, stderr: 'PRIVATE_PROVIDER_DIAGNOSTIC', command: '/private/native' };

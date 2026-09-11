@@ -1,6 +1,64 @@
 # Verified local handoff
 
-## Current continuation: prepare an evaluated engineering objective
+## Current continuation: expand resources without resetting history
+
+Baseline `0a43f52f298511bf812b1161a141ed33ad4040f7`, branch `auto/p00`, isolated
+worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three bounded
+agents implemented/reviewed migration, console compatibility and independent
+acceptance; parent integrated CLI, public metrics, preparation/checker support
+and operator guidance. This report covers local source and fixtures, not rollout.
+
+`ashlr resources pool evolve check|apply` now supports digest-pinned, offline
+additive upgrades. Existing receipts and conversation identities retain their
+original configuration; policy, pauses and shared capacity are preserved. New
+work uses the new pool, while old queued work remains explicitly held. A staged
+admission barrier and exact-input resume preserve interrupted state. The journal
+contains pool snapshots and non-content console proofs, not transcript copies.
+Verified historical epochs feed usage/performance views and new engineering
+preparation without rewriting old campaign pins.
+
+Actual CLI-to-engineering acceptance passed **1/1, no skips, 31.34 s** in isolation:
+check/apply/replay, old conversation retained, new project-bound preparation,
+automatic repair, two fixed evaluations and one local Git branch. The shared
+ledger retained its old receipt and allocation revision. Replay performed no
+additional requests or writes. All model transport was fixture-owned loopback.
+
+Final core migration **16/16**, independent boundaries **25/25**, parent
+CLI/performance/public projection **114/114** passed without skips. Console
+compatibility previously passed **129/129 across nine files**. These groups are
+focused evidence, not a complete core-suite claim. Source/web and new test/import
+typechecks pass; lint has zero errors and 107 existing warnings. Documentation
+and real-I/O registration checks pass.
+
+Broader verification is **not clean**: a nine-file run passed 189/191, and a
+four-file follow-up passed 74/76, with private-storage/evidence failures at
+different fixtures. One specifically reported `adapter-failed`; intermittent
+ownership failures also occurred before a passing isolated/full boundary rerun.
+Full-web attempts had worker/timeouts, including sleep-extended elapsed times.
+These are retained as unresolved host-load/storage-adapter reliability evidence,
+not silently dismissed or converted to passing counts. No timeouts, assertions,
+ownership checks or account controls were weakened.
+
+The user's renewed seed-context choice is already implemented: eligible workers
+retain the fixed bounded seed score and diagnostics beside current parent/latest
+trial feedback across generations. No scheduling or acceptance changes were
+needed. Existing real three-generation coverage establishes the intended shape;
+fresh broader reconstruction checks have the limitations above. The targeted
+real-loopback three-generation acceptance passed on final source (17.33 s,
+one selected test passed; one unrelated test excluded). Identical seed evidence
+accompanied advancing parent/feedback scores, and replay added no requests or
+accounting entries.
+
+No actual account was enrolled or migrated, no provider quota was consumed, and
+personal General remains reserved. Spark still needs explicit scope-only policy
+and live commissioning. KILL, services, credentials, original checkout, GitHub
+Actions, remote branches and npm were not changed. Production activation and the
+full autonomous North Star remain unfinished. Entire is enabled/manual-commit;
+resume found no checkpoint. Production build, compiled evolve help and all five
+compiled structural safety checks pass. This local milestone is not a clean
+full-regression or production-activation claim.
+
+## Previous continuation: prepare an evaluated engineering objective
 
 Baseline `c19d586a5fbf3aab475780e65174dde7a51a8af5`, isolated `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three parallel agents

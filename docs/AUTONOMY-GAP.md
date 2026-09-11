@@ -25,7 +25,7 @@ stubs are review aids, not signed runtime evidence.
 | --- | --- | --- |
 | Purpose and living end state | UNWIRED | `value-allocation.ts` binds mission/spec evidence to the pure portfolio scorer; `value-allocation-store.ts` persists signed ID-bound receipts. `firm-resource-execution.ts` now consumes a selected receipt through explicit host enrollment and existing resource reservations. The resident planner/graph caller remains unwired. |
 | Competing plans and artifact graph | UNWIRED | `control-graph.ts` persists signed intent/settlement and artifact dependencies. `firm-resource-control-handler.ts` connects enrolled response generation. The engineering adapter and CLI connect explicit host enrollment to resource-accounted confined file operations, fixed evaluation and strict-improvement local branch delivery. The optional resource-console Engineering runs pane adds project-pinned ID/digest launch, durable stop and recorded graph inspection on that same engine. Exact completed-child receipts can reconcile interrupted graph settlement; resident planning, unfinished child recovery and live commissioning remain unwired. |
-| Worker identity, quotas and reserves | UNWIRED | `src/core/resources/pool-runtime.ts` and `native-profile.ts` already implement explicit bindings, admission and profile isolation. Actual account commissioning remains unverified here. |
+| Worker identity, quotas and reserves | UNWIRED | `src/core/resources/pool-runtime.ts` and `native-profile.ts` implement explicit bindings, admission and profile isolation. Offline additive pool evolution preserves old receipts, conversation origins, allocation and account-wide pauses while admitting new configuration epochs. Scope-only operator exclusions and actual account commissioning remain unfinished. |
 | Codex, Claude and local execution | UNWIRED | Existing resource generation calls the pool. Personal general Codex remains reserved; personal Spark is permitted by user intent but needs explicit quota-scoped enrollment and safe policy/ledger migration. Preserve configured ceilings; do not interpret worker usage as account-wide spend. |
 | Grok execution | MISSING | Account connection/display is distinct from the core pool provider enum, which supports Codex, Claude and local workers. |
 | Learned routing | UNWIRED | `src/core/run/router.ts` and daemon already call learned routing. New accepted-work receipts still need an evidence-backed feedback connection. |
@@ -71,6 +71,12 @@ workers to initialized experiments/campaigns and linked console catalogs. It
 derives matching digests and preserves the existing account ledger. Preparation
 does not invent the objective or evaluator, start work or establish live capacity.
 Incomplete registration remains explicit; exact completed replay changes no state.
+
+The [offline pool upgrade](RESOURCE-POOLS.md#upgrade-a-pool-without-resetting-history)
+removes the need to discard accounting or conversations when adding workers.
+Its explicit digest-pinned transition preserves prior identity and has a held
+interruption/resume path. It is not live account commissioning: existing personal
+account pauses still span Spark aliases, and new quota evidence is required.
 
 1. Apply the standalone check to the intended Hub enrollment and resolve its
    actual configuration/ownership findings without resetting shared accounting.

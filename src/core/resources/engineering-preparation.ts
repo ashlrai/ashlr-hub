@@ -11,7 +11,7 @@ import { validateUniversePortfolioDefinition } from '../universe/portfolio-plan.
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { checkResourceGenerationRuntime } from '../universe/resource-runtime-check.js';
 import { fsyncDirectory } from '../util/durability.js';
-import { readResourceJson } from './pool-runtime.js';
+import { readResourceJson, readResourcePoolHistory } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
@@ -79,7 +79,7 @@ function capture(input: ResourceEngineeringPreparationOptions) {
   const projects = validateResourceConsoleProjects(projectsDocument.projects);
   const stateFile = join(runtime.root, 'resource-console-state.json');
   const state = present(stateFile) ? decodeResourceConsoleState(readResourceJson(stateFile, 4 * 1024 * 1024), {
-    pool, bindings, workspace: options.workspace }) : undefined;
+    pool, bindings, workspace: options.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) }) : undefined;
   const preview = previewResourceConsoleProjects({ workspace: options.workspace, projects, state });
   const project = preview.bindings?.find(row => row.id === recipe.projectId);
   if (!project || !preview.projects?.find(row => row.id === recipe.projectId)?.enabled || !matchesResourceConsoleProject(project)) {
@@ -151,7 +151,7 @@ function capture(input: ResourceEngineeringPreparationOptions) {
     quotaDigest, evaluatorPins, manifest, campaign, definition, deliveryPlan };
   const plan: ResourceEngineeringPreparationPlan = { schemaVersion: 1, status: 'planned', scope: 'local-preparation-only',
     planDigest: sha(pins), output: options.output, enrollmentDigest: null, projectId: recipe.projectId,
-    projectRegistration: state?.schemaVersion === 4 && state.projects?.some(row => row.id === project.id && row.workspace === project.workspace &&
+    projectRegistration: state?.projects?.some(row => row.id === project.id && row.workspace === project.workspace &&
       row.dev === project.dev && row.ino === project.ino) ? 'persisted' : 'would-register', executionStarted: false,
     providerContacted: false, paths, ids, seedRevision: seed.revision, runtimeDigest, poolDigest };
   return { options, recipe, runtime, preview, paths, plan, manifest, campaign, definition, deliveryPlan, supervisionBase };

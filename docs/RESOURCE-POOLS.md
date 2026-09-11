@@ -664,13 +664,95 @@ describes Spark as a fast, text-only coding model; that is not evidence that it
 is interchangeable with Sonnet or a local Qwen model. See the
 [official model documentation](https://learn.chatgpt.com/docs/models).
 
-**Existing-pool migration remains separate.** Pool/binding digests pin historical
-receipts. Do not edit an active ledger's enrollment in place, rewrite prior
-receipts, or select an empty ledger to reset usage history. This increment does
-not migrate enrollment or change account policy. A saved account pause still
-blocks Spark aliases. Reserving only one account's General scope while allowing
-its Spark scope needs a distinct persisted scope exclusion and a recoverable
-enrollment transition; task-level `allowedWorkerIds` is not a durable reservation.
+**Upgrade existing pools explicitly.** Pool/binding digests pin historical
+receipts. Use the [offline evolution command](#upgrade-a-pool-without-resetting-history)
+instead of editing active enrollment or selecting an empty ledger. A saved
+account pause still blocks Spark aliases after an upgrade. Reserving only one
+account's General scope while allowing its Spark scope still needs a distinct
+persisted scope exclusion; task-level `allowedWorkerIds` is not a durable reserve.
+
+### Upgrade a pool without resetting history
+
+`ashlr resources pool evolve` adds workers or supported quota annotations while
+preserving the shared ledger. It does not connect an account or refresh quota.
+Use a current built checkout: older binaries reject the upgraded ledger schema.
+Keep the original pool and binding documents alongside the reviewed next versions;
+the command reads but never rewrites those input files.
+
+Supported evolution is additive. Existing worker IDs, model/provider, transport
+bindings, policy and capacity keys cannot be removed or remapped. An unscoped
+worker may receive its supported exact quota annotation. A new alias of an
+existing account must use the same launcher/endpoint, capacity key, concurrency
+and rolling task limits, without weakening its reserve or unknown-quota policy.
+Reusing a known launcher under a new capacity key is refused. An operator still
+owns the truth of a genuinely new account binding; arbitrary wrappers are not
+independent proof of account identity.
+
+1. Stop the console and quota collector and settle reserved/uncertain work.
+   Existing ownership or ambiguous collector markers must be inspected, not
+   deleted to force an upgrade. Keep KILL and account policy as configured.
+2. Inspect the exact existing store and proposed configuration without writes:
+
+   ```sh
+   node bin/ashlr resources pool evolve check \
+     --root /absolute/private/shared-ledger \
+     --workspace /absolute/projects/ashlr-hub \
+     --pool /absolute/private/pool-before.json \
+     --bindings /absolute/private/bindings-before.json \
+     --next-pool /absolute/private/pool-next.json \
+     --next-bindings /absolute/private/bindings-next.json --json
+   ```
+
+   Review the plan digest, added/annotated workers, preserved receipt/job counts
+   and `heldQueuedIds`. `--workspace` is the existing console's default workspace.
+   Queued tasks keep their original routing; they remain held for explicit
+   cancellation and re-enrollment, never automatically gain new workers.
+3. **Apply the local store migration** with the same arguments, replacing
+   `check` with `apply` and adding `--expected-plan-digest` with that exact digest.
+   This acquires local ownership, writes private pool snapshots and non-content
+   console identity proofs, installs an admission barrier, upgrades console
+   origin metadata, then publishes the
+   active ledger. It does not launch tasks, change input configs or reset policy.
+4. Start the console explicitly with the reviewed next pool/bindings and matching
+   collector configuration. Prior receipts retain their old pool digest and
+   transcript hashes remain stable. New conversations use the active epoch;
+   new follow-ups can reference retained old transcripts. Deleted text stays
+   deleted. Whole-ledger metrics include verified old and new epochs, without
+   turning unmatched tasks into a model-quality benchmark.
+
+Allocation ceilings/revisions, account-wide pauses and capacity task counts
+survive. Adding Spark alone therefore does not bypass a personal account pause.
+When a quota annotation changes, the old combined reading is retained in the
+private migration snapshot; its active windows are invalidated and availability
+is withheld until fresh exact-scope evidence arrives. This is evidence
+invalidation, not a new provider failure observation. Capture times and retry
+denials are not renewed or erased. New workers receive no invented observation;
+old shared collector evidence cannot certify the new pool/configuration.
+
+Once published, an interrupted upgrade's admission barrier keeps work blocked. Inspect its private
+`pool-evolution/` journal and rerun **the same apply inputs and original digest**
+to resume an exactly staged transition. Unrecognized, partial or changed state
+is refused, not automatically repaired. Partial staging before barrier publication
+leaves the old ledger intact but still requires inspection. Do not delete journals, rewrite old
+receipts, downgrade the binary or use an empty ledger as recovery. Exact completed
+replay is read-only and must not overwrite later work, deletion or cancellation.
+The ledger supports at most 16 configuration epochs within its existing byte
+and task-identity bounds; this is not automatic archival or compaction.
+
+The journal does not archive conversation text. Console recovery uses hashes and
+immutable job identities. Explicit resume can remove only its exact, complete,
+private temporary console file; partial, changed or multiply linked files remain
+held for inspection. This is not a secure-erasure guarantee for operating-system
+backups or other copies outside this store.
+
+CLI JSON failures expose bounded hold codes when known: `ownership-present`,
+`uncertain-work`, `incomplete-journal` or `state-conflict`. Other failures are
+reported generically without exposing private input or filesystem contents.
+None of these codes authorizes deleting ownership or history records.
+
+Existing Universe runtime, campaign, graph and engineering-enrollment pins remain
+unchanged. Prepare/review new work against the next configuration; an upgrade
+does not silently migrate or authorize old engineering campaigns.
 
 ## Enroll explicit workers
 
