@@ -66,6 +66,10 @@ describe('host-configured engineering successor HTTP boundary', () => {
   }
   it('starts only configured successor work and exposes authenticated metadata without re-executing on reads', async () => {
     const selected = config(); const handle = await start(selected);
+    const scopeResponse = await fetch(`${handle.url}/api/resources/console`, { headers: { 'x-ashlr-token': handle.readToken } });
+    expect(scopeResponse.status).toBe(200); expect(scopeResponse.headers.get('cache-control')).toBe('no-store');
+    expect(await scopeResponse.json()).toMatchObject({ engineeringSuccessorsSupported: true,
+      engineeringPreparationSupported: true, engineeringSupervisionSupported: true, engineeringSupported: true });
     expect(successors.create).toHaveBeenCalledOnce(); expect(successors.start).toHaveBeenCalledOnce();
     expect(successors.create.mock.calls[0]![0]).toMatchObject({ configFile: selected.engineeringSuccessorsFile, projectId: 'default' });
     expect((await fetch(`${handle.url}${route}`)).status).toBe(401);
@@ -79,6 +83,8 @@ describe('host-configured engineering successor HTTP boundary', () => {
   });
   it('keeps unconfigured successor work absent and does not expose host config paths', async () => {
     const handle = await start();
+    const scopeResponse = await fetch(`${handle.url}/api/resources/console`, { headers: { 'x-ashlr-token': handle.readToken } });
+    expect(scopeResponse.status).toBe(200); expect(await scopeResponse.json()).not.toHaveProperty('engineeringSuccessorsSupported');
     expect((await fetch(`${handle.url}${route}`, { headers: { 'x-ashlr-token': handle.readToken } })).status).toBe(403);
     expect(successors.create).not.toHaveBeenCalled(); expect(successors.start).not.toHaveBeenCalled();
     expect(JSON.stringify(handle.scope)).not.toContain('successors.json');

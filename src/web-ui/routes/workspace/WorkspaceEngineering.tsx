@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { EngineeringSupervision } from './EngineeringSupervision.js';
+import { EngineeringSuccessors } from './EngineeringSuccessors.js';
 import { EngineeringObjectiveComposer } from './EngineeringObjectiveComposer.js';
 import { EngineeringOutcomes } from './EngineeringOutcomes.js';
 import type { ResourceConsoleEngineeringEnrollment as Enrollment, ResourceConsoleEngineeringJob as Job,
@@ -16,15 +17,19 @@ const label = (state: Job['state']) => state === 'completed' ? 'Recorded deliver
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Engineering evidence is unavailable.';
 
 /** Observation can poll; launch/cancel only come from explicit user events. */
-export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, preparationSupported, preparationAvailable, outcomesSupported, autoAdmission }: {
+export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, successorsSupported, preparationSupported, preparationAvailable, outcomesSupported, autoAdmission }: {
   projectId: string; projectName: string; available: boolean; canStart: boolean; canStop: boolean; unlocked: boolean; onUnlock(): void; startBlockedReason?: string;
   supervisionSupported?: boolean;
+  successorsSupported?: boolean;
   preparationSupported?: boolean;
   preparationAvailable?: boolean;
   outcomesSupported?: boolean;
   autoAdmission?: boolean;
 }) {
-  const [catalog, setCatalog] = useState<Enrollment[] | null>(null);
+  const [allEnrollments, setCatalog] = useState<Enrollment[] | null>(null);
+  const catalog = allEnrollments?.filter(row => row.projectId === projectId) ?? null;
+  const catalogRef = useRef(allEnrollments); catalogRef.current = allEnrollments;
+  const requestedEnrollments = useRef(new Set<string>());
   const [selection, setSelection] = useState('');
   const [job, setJob] = useState<Job | null>(null);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
@@ -48,10 +53,27 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
     if (!available) return;
     const abort = new AbortController(); setCatalogError(null);
     void listWorkspaceEngineering(abort.signal).then((rows) => {
-      if (!abort.signal.aborted) setCatalog(rows.filter((row) => row.projectId === projectId));
+      if (!abort.signal.aborted) {
+        setCatalog(rows);
+        // Keep the initial selected plan stable when automatic descendants arrive.
+        setSelection(current => current || rows.find(row => row.projectId === projectId)?.id || '');
+      }
     }).catch((cause: unknown) => { if (!abort.signal.aborted) { setCatalog(null); setCatalogError(errorText(cause)); } });
     return () => abort.abort();
   }, [projectId, available, catalogRevision]);
+
+  const refreshRegisteredEnrollments = useCallback((ids: string[]) => {
+    let missing = false;
+    for (const id of ids) {
+      if (requestedEnrollments.current.has(id)) continue;
+      requestedEnrollments.current.add(id);
+      if (!catalogRef.current?.some(row => row.id === id)) missing = true;
+    }
+    // One observation-triggered read per newly registered identity, including
+    // foreign-project rows. A failed read remains explicit and manually retryable.
+    if (missing) setCatalogRevision(value => value + 1);
+  }, []);
+  const refreshSelectedEvidence = useCallback(() => setRevision(value => value + 1), []);
 
   useEffect(() => {
     setJob(null); setReadiness(null); setReadinessError(null); setReadError(null); setActionError(null); setNotice(null);
@@ -133,7 +155,12 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
     <header className={styles.header}><div><p className={styles.eyebrow}>ASHLRVERSE / ENGINEERING</p><h2>From objective to evidence.</h2>
       <p>{projectName} · Evaluated changes, explicit local delivery.</p></div>
       <button type="button" className={styles.button} disabled={!available || busy || loading} onClick={refresh}>Refresh evidence</button></header>
-    {supervisionSupported ? <EngineeringSupervision available={available} unlocked={unlocked} selectedPlan={selected} onUnlock={onUnlock} /> : null}
+    {supervisionSupported ? <EngineeringSupervision available={available} unlocked={unlocked} selectedPlan={selected} onUnlock={onUnlock}
+      onSelectedEvidenceChange={refreshSelectedEvidence} /> : null}
+    {successorsSupported ? <EngineeringSuccessors available={available} projectId={projectId} catalog={allEnrollments}
+      onRegisteredEnrollments={refreshRegisteredEnrollments} onInspectEnrollment={id => {
+        if (available && catalog?.some(row => row.id === id)) setSelection(id);
+      }} /> : null}
     {preparationSupported ? <EngineeringObjectiveComposer projectId={projectId} available={available && preparationAvailable !== false} unlocked={unlocked} autoAdmission={autoAdmission}
       onUnlock={onUnlock} onRefresh={refresh} onPrepared={({ enrollment }) => {
         setCatalog(rows => [...(rows ?? []).filter(row => row.id !== enrollment.id), enrollment]);

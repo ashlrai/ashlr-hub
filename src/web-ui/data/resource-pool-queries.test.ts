@@ -137,6 +137,25 @@ describe('explicit engineering supervision capability', () => {
       engineeringSupervisionSupported: true, engineeringPreparationAutoAdmission: true, [capability]: undefined });
     await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
   });
+  const successorCapabilities = { engineeringSupported: true, engineeringPreparationSupported: true,
+    engineeringSupervisionSupported: true, engineeringSuccessorsSupported: true };
+  it('accepts successor observation without automatic preparation admission or control access', async () => {
+    read.mockResolvedValue({ ...projectScope(), ...successorCapabilities });
+    await expect(resourceConsoleScopeQuery.fetch()).resolves.toMatchObject({ engineeringSuccessorsSupported: true });
+    expect(write).not.toHaveBeenCalled();
+  });
+  it.each([false, null, 1, 'true', {}])('rejects nonliteral successor flags %#', async value => {
+    read.mockResolvedValue({ ...projectScope(), ...successorCapabilities, engineeringSuccessorsSupported: value });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each(['engineeringSupported', 'engineeringPreparationSupported', 'engineeringSupervisionSupported'])('requires %s for successor observation', async capability => {
+    read.mockResolvedValue({ ...projectScope(), ...successorCapabilities, [capability]: undefined });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each([{ readOnly: true }, { projects: undefined }, { defaultProjectId: undefined }])('rejects successor observation outside an execution project scope %#', async override => {
+    read.mockResolvedValue({ ...projectScope(), ...successorCapabilities, ...override });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
 });
 
 describe('configured metadata collector lifecycle', () => {

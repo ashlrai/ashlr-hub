@@ -4,6 +4,7 @@ import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { canonical, digest, inspectPrivateDirectory, readArtifactSnapshot } from '../universe/artifacts.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
+import { decodeUtf8Excerpt } from '../util/utf8-excerpt.js';
 import { readResourceJson } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import { validateResourceConsoleEngineeringCatalog, type ResourceConsoleEngineeringOwner } from './console-engineering.js';
@@ -201,9 +202,10 @@ export function createResourceConsoleEngineeringPreparation(input: {
         for (const file of artifact.entries.filter(file => allowed.has(file.path))) {
           if (observed.files.length >= 4) { observed.omittedFiles++; continue; }
           try {
-            const value = new TextDecoder('utf-8', { fatal: true }).decode(file.data.subarray(0, 1600), { stream: true });
+            const excerpt = decodeUtf8Excerpt(file.data, 1600);
+            const value = excerpt.text;
             if (value.includes('\0')) throw new Error('Binary source');
-            const item = { path: file.path, text: value, truncated: file.data.length > 1600 };
+            const item = { path: file.path, ...excerpt };
             if (Buffer.byteLength(canonical({ ...observed, files: [...observed.files, item] })) > 4096) { observed.omittedFiles++; continue; }
             observed.files.push(item);
           } catch { observed.omittedFiles++; }

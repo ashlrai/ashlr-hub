@@ -36,6 +36,8 @@ export interface ResourceConsoleScope {
   engineeringPreparationAutoAdmission?: true;
   /** Explicit automatic queue in this console lifetime; not an OS service. */
   engineeringSupervisionSupported?: true;
+  /** Metadata-only observation of host-configured successor planning. */
+  engineeringSuccessorsSupported?: true;
 }
 
 export interface ResourceConsoleProjectInput { id: string; label: string; workspace: string }

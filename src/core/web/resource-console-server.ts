@@ -681,6 +681,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
               unavailableWorkerIds: quotaRefresher ? quotaRefresher.unavailableWorkerIds() : quotaConfig?.workers.map(row => row.workerId) ?? [],
               quotaUnavailableWorkerIds: quotaRefresher?.quotaUnavailableWorkerIds() ?? [] };
           } });
+        scope.engineeringSuccessorsSupported = true;
       }
     }
     if (signal?.aborted) throw new Error('Resource console startup cancelled');

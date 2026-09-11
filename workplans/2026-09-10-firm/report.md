@@ -1,6 +1,79 @@
 # Verified local handoff
 
-## Current continuation: autonomous verified-delivery successors
+## Current continuation: successor observability and source fidelity
+
+Baseline `5fb3b4c0891a9ada58d524744a5c65c9b01d53d7`, branch `auto/p00`, same
+isolated worktree. Three agents independently mapped and implemented the strict
+browser projection, responsive lineage panel and UTF-8 correction. Parent wired
+the capability, project catalog/evidence refresh and canonical guidance. Cold
+review found no blocking issue. No account, provider, persistent service or
+public-release action was performed.
+
+Configured consoles now expose Successor planning alongside automatic engineering.
+It shows console-wide source-to-successor relationships, current phase, fixed
+profile, original deadline and consumed intent capacity. Reserved IDs are not
+presented as existing plans; Queued explicitly does not mean executed, evaluated
+or delivered. Inspection resolves an existing plan in the selected project.
+Abortable reads never overlap; failed samples retain visibly stale evidence,
+disable inspection and recover by read only. A changed coordinator identity is
+latched until the console reloads. The closed decoder rejects unknown/private
+fields rather than exposing raw response data.
+
+New registered successor identities refresh the catalog once without changing
+selection. The full catalog is retained for deduplication; only selected-project
+plans appear in the selector. Automatic supervision state changes refresh the
+selected plan's evidence, closing the ready-to-running observation gap. No UI
+effect dispatches work. Catalog-read failures remain visible and explicitly
+retryable with Refresh evidence.
+
+Bounded source excerpts now preserve UTF-8 BOM and reject incomplete code points
+at actual EOF. Streaming is used only when the byte limit really cuts a longer
+file. Existing binary omission, four-file, 1,600-byte excerpt and 4,096-byte
+context bounds are unchanged. Manager regression uses real private registration
+stores and controlled formatting witnesses, not provider/evaluator execution.
+
+Validation on the integrated source:
+
+- Complete web suite: **1,604 tests / 85 files passed**, zero skips, 54.15s.
+- Selected helper/manager/adapter/CLI backend suites: **50 tests / 4 files
+  passed**, zero skips, 38.29s. Frozen HTTP scope suite: **41 tests passed**,
+  zero skips, 3.85s. Combined non-overlapping gate: 1,695 tests / 90 files.
+- Full source and web TypeScript, documentation links and real-I/O lane checks
+  passed. Full lint: zero errors, 107 pre-existing warnings.
+- Production-format local build and all five compiled structural safety checks
+  passed. This is a local build, not a production deployment.
+
+Actual browser verification used the compiled UI with source server/auth and a
+controlled nine-phase projection, not a live autonomous campaign. At 1440px and
+320px, document scroll width equaled viewport width; mobile panel overflow was
+zero and lineage stacked to one column. Space Grotesk loaded for headings. Light
+and dark themes, read-only plan inspection, all nine phase labels and the Queued
+disclaimer were observed. Invalid controlled metadata retained nine stale rows,
+disabled inspection, and did not expose the injected private-output sentinel.
+Restoring the original projection recovered inspection automatically. No browser
+console errors were observed. Theme and viewport were restored and the temporary
+tab closed; the bounded fixture is stopped and its temporary launcher removed
+before the final commit.
+
+The temporary browser fixture passed 1/1 in 216.37s (41 unrelated tests filtered).
+It asserted zero owner launches, cancellations and queue admissions. Its exact
+temporary directory was removed by test cleanup; the loopback listener was
+verified closed. The permanent routes diff retains only six scope assertions.
+
+Frontend-design informed the existing-token lineage layout; the React review
+focused on abort cleanup, callback identity and non-overlapping reads.
+Documentation now describes this implemented surface without equating it to an
+activated company. Entire resume found no checkpoint. The original checkout
+remains at `a01fc08663baab3039c4f1c084538de732a4fd0e` with its pre-existing
+untracked workplans, and real KILL remains 19 bytes / mtime 1788533266.
+
+Remaining North Star work includes actual-account commissioning, resident service
+activation through the established path, meaningful repeated engineering-yield
+measurement, terminal/browser tool integration and production release. This
+increment makes the bounded autonomous loop observable, not an indefinitely
+self-improving or deployed engineering company.
+
+## Previous continuation: autonomous verified-delivery successors
 
 Baseline `be55c10ef4449cc07d9c03f22c6ca7516fc02d04`, branch `auto/p00`, isolated
 worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents own

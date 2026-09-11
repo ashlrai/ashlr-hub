@@ -16,8 +16,9 @@ const reasons: Record<Snapshot['entries'][number]['reasons'][number], string> = 
 };
 const message = (cause: unknown) => cause instanceof Error ? cause.message : 'Supervision is unavailable.';
 
-export function EngineeringSupervision({ available, unlocked, selectedPlan, onUnlock }: {
+export function EngineeringSupervision({ available, unlocked, selectedPlan, onUnlock, onSelectedEvidenceChange }: {
   available: boolean; unlocked: boolean; selectedPlan?: Enrollment | null; onUnlock?(): void;
+  onSelectedEvidenceChange?(): void;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +30,14 @@ export function EngineeringSupervision({ available, unlocked, selectedPlan, onUn
   const epoch = useRef(0);
   const mutating = useRef(false);
   const identity = selectedPlan ? `${selectedPlan.projectId}:${selectedPlan.id}:${selectedPlan.enrollmentDigest}` : '';
+  const onEvidence = useRef(onSelectedEvidenceChange); onEvidence.current = onSelectedEvidenceChange;
+  const selectedEntry = snapshot?.entries.find(row => row.enrollmentId === selectedPlan?.id && row.enrollmentDigest === selectedPlan?.enrollmentDigest);
+  const evidenceKey = selectedEntry ? JSON.stringify([identity, selectedEntry.state, selectedEntry.attempts, selectedEntry.reasons]) : '';
+  useEffect(() => {
+    // Observe automatic starts/settlement even when the selected plan was last
+    // seen as ready. Never dispatch or retry work from this notification.
+    if (available && !error && evidenceKey) onEvidence.current?.();
+  }, [available, error, evidenceKey]);
   useEffect(() => {
     epoch.current++; mutation.current?.abort(); mutating.current = false; setBusy(false); setAdmissionError(null); setNotice(null);
   }, [identity]);

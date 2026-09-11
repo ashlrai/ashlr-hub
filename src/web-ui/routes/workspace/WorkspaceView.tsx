@@ -261,6 +261,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
       {active && mobilePane !== 'tasks' ? <WorkspaceEngineering key={`${session}:${project?.id ?? 'default'}`} projectId={project?.id ?? 'default'}
         projectName={projectName} available={!historical && snapshot.sourceState === 'healthy'}
         supervisionSupported={scope.engineeringSupervisionSupported === true}
+        successorsSupported={scope.engineeringSuccessorsSupported === true}
         outcomesSupported={scope.engineeringOutcomesSupported === true}
         preparationSupported={scope.engineeringPreparationSupported === true} preparationAvailable={project?.enabled !== false}
         autoAdmission={scope.engineeringPreparationAutoAdmission === true}

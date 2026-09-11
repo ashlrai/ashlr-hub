@@ -569,15 +569,32 @@ branch is advanced, and no push, merge or production promotion is implied.
 `GET /api/resources/engineering-successors` uses the existing read session and
 returns no-store metadata: original deadline, source/successor/task identities,
 live phase and held state. It returns 403 when unconfigured. Private context,
-source paths, prompts and raw model output are not in this response. There is no
-separate browser mutation endpoint or dedicated successor UI yet; pause automatic
-launches using the existing supervision control. Pausing does not cancel work
+source paths, prompts and raw model output are not in this response. Configured
+consoles advertise `engineeringSuccessorsSupported: true` and show **Successor
+planning** in the Engineering workspace. The read-only lineage panel shows the
+profile, original deadline, consumed intent slots, source enrollment, proposal
+task and reserved successor identity. It refreshes status every three seconds
+after the previous read settles; disconnected or failed samples stay visibly
+stale. A changed coordinator identity requires reloading the console.
+
+**Queued means admitted, not executed or delivered.** Inspection is available
+only for plans resolved in the current project's catalog. Newly prepared or
+queued identities request one catalog refresh without changing the selected
+plan; foreign-project plans do not appear in that project's selector. If the
+catalog refresh fails, use **Refresh evidence** to retry the read. Existing
+supervision status also refreshes selected-plan evidence when automatic work
+starts or settles. None of these observation effects launches a worker.
+
+There is no separate successor mutation endpoint; pause automatic launches
+using the existing supervision control. Pausing does not cancel work
 already dispatched. Console shutdown aborts and drains owned proposal and
-   engineering work together.
+engineering work together.
 
 The private successor journal stores bounded source context and model output;
 it is local evidence, **not encrypted storage**. Treat it as source-sensitive.
-Explicit truncation/omission metadata accompanies bounded file excerpts. A
+Explicit truncation/omission metadata accompanies bounded file excerpts. Valid
+UTF-8 excerpts preserve BOM and line endings; invalid complete files are omitted,
+and an incomplete code point is dropped only at a genuinely truncated prefix. A
 completed result is retained even if a pause or source drift subsequently blocks
 the next action. `stop` ends follow-up for that source, not unrelated queued work.
 Every retained intent, including stopped or held proposals, consumes the successor

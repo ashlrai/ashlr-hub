@@ -1,5 +1,39 @@
 # Executable firm: package graph
 
+## Current increment — successor observability (baseline 5fb3b4c0)
+
+- [x] Three independent explorations mapped UI, strict public projection and UTF-8 fidelity.
+- [x] Publish an optional successor-observation capability and strict read-only browser client.
+- [x] Build console-wide lineage with project-resolved inspection and bounded catalog refresh.
+- [x] Correct bounded source excerpts without weakening evidence or size limits.
+- [x] Verify component lifecycle, real HTTP scope, responsive browser interaction and local build.
+- [x] Independent review and canonical operator handoff; no provider or service activation.
+
+Design plan, reviewed against the approved technical-control-room direction:
+reuse the existing Space Grotesk headings, IBM Plex Sans body and monospace IDs.
+Palette: midnight canvas #0e1730, navy surface #111e3a, ice text #edf3ff,
+slate secondary #b2c0da, signal blue #8babff, measured green #5fd6a0;
+use semantic tokens so the existing light theme remains supported.
+An ordered lineage rail, not decorative charts, exposes actual source and reserved
+successor identities. Queued is not delivered. No private proposal text is exposed.
+
+```text
+Successor planning                         coordinator state
+Profile · original deadline · consumed intent slots
+Source enrollment ── proposal phase ── successor identity [Inspect]
+                     reason / evidence freshness
+```
+
+Principles: readable evidence hierarchy; source-to-successor relationship first;
+retained snapshots visibly stale; explicit labels in addition to color; 320px
+stacking, visible keyboard focus, reduced motion. The panel only observes:
+existing automatic supervision owns execution and pause controls. React review
+will check abort cleanup, non-overlapping polls and stable callback identities.
+
+Ownership: parent scope/server, workspace integration and documentation;
+explore_next_execution new panel/styles/tests; explore_agent_resources browser
+decoder/tests; cold_graph_semantics UTF-8 helper/call site/tests then cold review.
+
 ## Goal
 Implement the user's firm specification as tested executable packages, preserving
 existing activation, provenance, evaluation and resource invariants.

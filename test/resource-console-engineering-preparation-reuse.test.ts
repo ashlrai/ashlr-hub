@@ -14,6 +14,10 @@ import { createResourceConsoleEngineeringOwner, type ResourceConsoleEngineeringO
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import * as preparation from '../src/core/resources/engineering-preparation.js';
+import * as artifacts from '../src/core/universe/artifacts.js';
+import * as campaigns from '../src/core/universe/campaign-store.js';
+import * as deliveryRecovery from '../src/core/universe/campaign-delivery-recovery.js';
+import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
 
 const roots: string[] = []; const owners: ResourceConsoleEngineeringOwner[] = []; const supervisors: ResourcePoolSupervisor[] = [];
 afterEach(async () => {
@@ -74,6 +78,50 @@ async function fixture() {
 }
 
 describe('call-local console preparation validation reuse', () => {
+  it('omits malformed complete source while preserving BOM and truthful prefix truncation in successor evidence', async () => {
+    // Real registration and fresh bundle validation; controlled delivery/run witnesses isolate
+    // evidence formatting here. This does not assert evaluator or delivery-proof correctness.
+    const f = await fixture();
+    const originalSnapshot = f.owner.snapshot.bind(f.owner);
+    vi.spyOn(f.owner, 'snapshot').mockImplementation(id => ({ ...originalSnapshot(id), state: 'completed' }));
+    const manager = f.create(); const plan = manager.check(request);
+    const prepared = manager.prepare({ ...request, expectedPlanDigest: plan.planDigest });
+    const universeRoot = join(f.bundle, 'universe');
+    const campaign = campaigns.readUniverseCampaign(request.id, { root: universeRoot });
+    const universe = campaigns.campaignUniverse(campaign, { root: universeRoot });
+    const artifactPath = join(f.base, 'controlled-artifact'); const artifactDigest = 'a'.repeat(64);
+    const receipt: UniverseDeliveryReceipt = { schemaVersion: 1, id: 'delivery', universeId: universe.manifest.id,
+      trialId: 'trial', runId: 'run', niche: 'value', manifestDigest: campaign.manifestDigest,
+      comparatorDigest: campaign.comparatorDigest, artifactDigest, repo: f.workspace, branch: 'codex/objective',
+      baseCommit: f.recipe.seedRevision, commit: 'b'.repeat(40), tree: 'c'.repeat(40), changedFiles: ['value.json'],
+      status: 'delivered', createdAt: '2026-01-01T00:00:00.000Z', completedAt: '2026-01-01T00:00:01.000Z' };
+    vi.spyOn(deliveryRecovery, 'readCompletedCampaignDelivery').mockReturnValue(receipt);
+    vi.spyOn(campaigns, 'campaignUniverse').mockReturnValue({ ...universe, runs: [{ id: 'run', universeId: universe.manifest.id,
+      generation: 1, manifestDigest: campaign.manifestDigest, comparatorDigest: campaign.comparatorDigest,
+      startedAt: receipt.createdAt, finishedAt: receipt.completedAt, status: 'completed', durationMs: 1000, tokensUsed: null, costUsd: null,
+      trials: [{ id: 'trial', variantId: 'repair', niche: 'value', parentTrialId: null, status: 'passed', score: 2, metrics: {},
+        artifact: { path: artifactPath, digest: artifactDigest, revision: receipt.commit }, durationMs: 1000, delta: 1, selected: true }] }] });
+    let sourceBytes = Buffer.from([0x61, 0xe2, 0x82]);
+    const originalArtifact = artifacts.readArtifactSnapshot;
+    vi.spyOn(artifacts, 'readArtifactSnapshot').mockImplementation(path => path === artifactPath ? { digest: artifactDigest,
+      entries: [{ path: 'value.json', data: sourceBytes, executable: false },
+        { path: 'evaluate.mjs', data: Buffer.from('\ufeffvalid\r\n'), executable: false }] } : originalArtifact(path));
+    const before = tree(f.base);
+    const context = () => {
+      const source = manager.successorSource(request.id, prepared.enrollment.enrollmentDigest);
+      expect(source).not.toBeNull();
+      return JSON.parse(source!.context) as { files: Array<{ path: string; text: string; truncated: boolean }>; omittedFiles: number };
+    };
+    expect(context()).toMatchObject({ files: [{ path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 1 });
+    sourceBytes = Buffer.from('a'.repeat(1599) + '💡tail');
+    expect(context()).toMatchObject({ files: [{ path: 'value.json', text: 'a'.repeat(1599), truncated: true },
+      { path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 0 });
+    sourceBytes = Buffer.from('binary\0source');
+    expect(context()).toMatchObject({ files: [{ path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 1 });
+    expect(tree(f.base)).toEqual(before); expect(originalSnapshot(request.id).launched).toBe(false);
+    expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
+  });
+
   it('checks and replays an existing objective using one fresh committed read per call without writes', async () => {
     const f = await fixture(); const manager = f.create(); const plan = manager.check(request);
     const prepared = manager.prepare({ ...request, expectedPlanDigest: plan.planDigest });

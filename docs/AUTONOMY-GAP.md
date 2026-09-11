@@ -77,7 +77,11 @@ measurements. The host pins a new objective to the verified commit and retains
 the selected evaluator, file scope and original resource/deadline limits. Lost
 paid output remains held rather than regenerated. This is not budget renewal,
 an installed resident service or proof of useful open-ended ideation. Status
-reads have no dispatch effect; dedicated successor UI remains a separate gap.
+reads have no dispatch effect. The configured Engineering workspace now exposes
+read-only successor lineage, intent capacity, original deadline and held reasons.
+New prepared/queued plans refresh the project catalog without changing selection;
+queued status is explicitly distinct from executed or delivered work. This
+observability does not commission accounts or install a resident service.
 Terminal/browser panels, conversation compaction and native desktop bootstrap
 remain separate gaps.
 

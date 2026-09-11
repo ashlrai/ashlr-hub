@@ -25,6 +25,29 @@ beforeEach(() => {
 });
 afterEach(() => { act(() => clearMutationToken()); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('automatic engineering operating panel', () => {
+  it('notifies selected evidence changes once without launching work or reacting to foreign rows', async () => {
+    vi.useFakeTimers();
+    try {
+      const selected = engineeringEnrollment(); const changed = vi.fn();
+      value.entries = [{ enrollmentId: selected.id, enrollmentDigest: selected.enrollmentDigest, state: 'waiting', reasons: ['not-started'], attempts: 0 }];
+      const view = render(<EngineeringSupervision available unlocked selectedPlan={selected} onSelectedEvidenceChange={changed} />);
+      await act(async () => {}); expect(changed).toHaveBeenCalledOnce();
+      await act(async () => vi.advanceTimersByTimeAsync(3000)); expect(changed).toHaveBeenCalledOnce();
+      value.entries[0] = { ...value.entries[0]!, state: 'running', reasons: ['running'], attempts: 1 };
+      await act(async () => vi.advanceTimersByTimeAsync(3000)); expect(changed).toHaveBeenCalledTimes(2);
+      value.entries.push({ enrollmentId: 'foreign', enrollmentDigest: 'f'.repeat(64), state: 'completed', reasons: ['completed'], attempts: 1 });
+      await act(async () => vi.advanceTimersByTimeAsync(3000)); expect(changed).toHaveBeenCalledTimes(2);
+      value.entries[0] = { ...value.entries[0]!, state: 'completed', reasons: ['completed'] };
+      await act(async () => vi.advanceTimersByTimeAsync(3000)); expect(changed).toHaveBeenCalledTimes(3);
+      expect(writes).toHaveLength(0); view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+  it('never refreshes a selected plan from a same-ID different-digest queue entry', async () => {
+    const selected = engineeringEnrollment(); const changed = vi.fn();
+    value.entries = [{ enrollmentId: selected.id, enrollmentDigest: 'f'.repeat(64), state: 'running', reasons: ['running'], attempts: 1 }];
+    render(<EngineeringSupervision available unlocked selectedPlan={selected} onSelectedEvidenceChange={changed} />);
+    await screen.findByText(selected.id); expect(changed).not.toHaveBeenCalled(); expect(writes).toHaveLength(0);
+  });
   const dynamic = () => { value.deadlineAt = new Date(Date.now() + 60_000).toISOString(); value.admission = { maxEnrollments: 3, remainingEnrollments: 2, autoAdmitPrepared: false }; };
   it('admits the selected plan only on click and preserves a paused queue', async () => {
     dynamic(); value.paused = true; value.state = 'paused'; const selected = engineeringEnrollment();

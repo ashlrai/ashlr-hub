@@ -1,5 +1,38 @@
 # Firm build notes
 
+## September 11: successor observability and UTF-8 evidence
+
+- Resumed clean 5fb3b4c0 on auto/p00, no Entire checkpoint. Three independent
+  Explore assignments preceded disjoint implementation ownership.
+- Existing scope contract lacked successor support; project catalog was fetched
+  only on explicit refresh and selected job polling stopped at ready. Reused the
+  existing authenticated read session, supervisor observations, project selector
+  and design tokens rather than adding another execution path.
+- New strict metadata decoder and abortable panel refuse coordinator identity
+  changes, private fields and unverifiable status. Newly registered identities
+  request one catalog read; foreign-project rows prevent duplicate refreshes but
+  never enter the selected project's selector. Selection stays stable.
+- Source decoder used streaming at actual EOF and stripped BOM. New pure helper
+  preserves BOM and allows partial code points only at genuine prefix truncation.
+  Existing context and omission limits remain binding.
+- Integrated full web suite: 1604/85 passed, no skips, 54.15s. Selected backend
+  helper/manager/adapter/CLI: 50/4 passed, no skips, 38.29s. TypeScript, lint
+  (0 errors / 107 existing warnings), docs, real-I/O classification and local
+  build passed. Five compiled structural safety checks passed.
+- Browser acceptance used source server/auth plus compiled UI and controlled
+  nine-phase data, not real account work. 1440/light/dark and 320px layouts have
+  no horizontal overflow; mobile panel overflow 0. Inspect preserved selection.
+  Malformed projection produced sanitized stale state and disabled inspection,
+  hid private-output sentinel, then recovered from the exact restored projection.
+  Browser errors: none. Temporary viewport/theme restored and tab closed.
+- Cold reviewer found no blocking UI/data issue. Full North Star remains active:
+  no provider contact, account policy changes, real KILL removal, daemon install,
+  remote push, npm publication or production activation in this increment.
+- Frozen HTTP scope suite passed 41/41, no skips, 3.85s; combined selected gate
+  is 1,695 tests / 90 files. Temporary browser test passed 1/1 in 216.37s with
+  zero launch/cancel/admit effects. Its private fixture tree and launcher block
+  were removed; loopback listener closed. No temporary browser harness retained.
+
 ## September 11: verified-delivery successor loop
 
 - Fresh checkout is clean at be55c10e on auto/p00. Entire resume found no
