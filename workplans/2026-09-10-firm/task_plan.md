@@ -1,6 +1,35 @@
 # Executable firm: package graph
 
-## Current increment — successor observability (baseline 5fb3b4c0)
+## Current increment — coherent autonomous startup (baseline f543e362)
+
+- [x] Explore commissioning, restart semantics and current useful Hub acceptance with three agents.
+- [x] Define and implement one offline recipe/policy setup using the real preparation registry.
+- [x] Wire CLI check/setup and return an unmodified startable console argument vector.
+- [x] Prove CLI setup to actual loopback A -> proposal -> B delivery and exact restart (one bounded observational reconnection allowed).
+- [x] Specify a current graded Hub benchmark with independent correctness checks (proposal only, not a frozen evaluator).
+- [x] Review, validate and document the complete local increment; commit/build identity recorded at handoff.
+
+The setup must preserve shared resource history and existing reserves. Checking
+has no writes; preparation creates only explicitly selected private artifacts and
+initial registration. Execution starts only through the existing console path.
+Do not simulate an execution owner to make offline setup pass: reuse extracted
+owner-independent preparation/registration primitives. Exact completed replay is
+read-only, incomplete or changed output stays explicit, and startup retains its
+original deadline after restart. No accounts, services or real KILL changes.
+
+Exploration found two critical practical gaps: standalone prepare creates a
+static enrollment that successorSource cannot discover as a manager registration;
+the only committed real-Hub evaluator targets an already-solved binary defect.
+The new setup bridges the first gap. A separately pinned graded benchmark is
+needed to prove ongoing useful improvement; synthetic value increments do not.
+
+Ownership: resource agent core setup/registry; execution agent independent actual
+CLI-to-runtime acceptance; cold reviewer benchmark design; parent CLI, contracts,
+integration, documentation and final review. One worker initially hit a usage
+limit without edits. A fresh read-only usage check reported an available window;
+the same bounded task resumed, with no reset purchase/redemption or account switch.
+
+## Previous increment — successor observability (baseline 5fb3b4c0)
 
 - [x] Three independent explorations mapped UI, strict public projection and UTF-8 fidelity.
 - [x] Publish an optional successor-observation capability and strict read-only browser client.

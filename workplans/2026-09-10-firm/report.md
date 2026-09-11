@@ -1,6 +1,80 @@
 # Verified local handoff
 
-## Current continuation: successor observability and source fidelity
+## Current continuation: coherent autonomous startup
+
+Baseline `f543e3627adbbe979c5b4a826d5e1036ab745edb`, isolated branch `auto/p00`.
+Three agents handled core implementation, independent actual-process acceptance
+and cold review/registry tests. Parent owns CLI integration, canonical docs and
+release verification. Entire resume found no checkpoint. The original checkout,
+real KILL and account policies remain untouched; no provider or public release
+action is included.
+
+`resources pool engineering setup` connects a reviewed recipe and bounded policy
+to one real initial preparation registration, compatible profiles, appendable
+supervision and successor configuration. The returned argument vector targets
+the existing foreground console; setup does not execute it. Initial objective
+registration fixes the gap where a standalone static catalog could not seed the
+successor planner. Evaluators, file scope, accounting and original deadlines are
+not replaced by a parallel runtime.
+
+The owner-independent registry preserves legacy context/plan digest formulas,
+canonical registration bytes, whole-history startup validation and every live
+owner publication check. Its private captured configuration is deeply immutable.
+Setup requires valid existing accounting and stopped/resolved console, resource
+and collector state, acquiring the established locks in order for publication.
+Files are exclusively created and synced; incomplete output remains held. Exact
+completed replay verifies all evidence without writes or acquiring locks, even
+while existing ownership leases are present. It cannot reset history, substitute
+an unrelated preparation context, or replenish the queue budget.
+
+Validation on the integrated source:
+
+- Full web: 1,604 tests / 85 files passed, zero skips (11.03s).
+- Legacy backend and CLI integration: 258 / 8 passed, zero skips (138.71s).
+- Extended setup: 12 / 1 passed, zero skips (40.00s), including immutable replay
+  under three existing locks and no-write rejection of altered setup evidence.
+- Independent registry: 2 / 1 passed, zero skips (7.60s), including independently
+  recomputed legacy digests, exact bytes and foreign-context publication refusal.
+- Actual CLI setup/foreground console acceptance: 1 / 1 passed, zero skips
+  (207.63s). Combined non-overlapping gate: **1,877 tests / 96 files**, zero skips.
+- Source/web TypeScript, full lint (zero errors, 107 existing warnings), docs,
+  lane classification, local production-format build, compiled help and five
+  structural safety checks passed. The final handoff records the committed build
+  identity separately; none of these local gates is production activation.
+
+The first actual CLI fixture exceeded the
+existing maximum quota-observation lifetime and was corrected before setup ran;
+the next run completed A and its successor proposal but a status connection reset
+before B was observed. The diagnostic rerun proved the child stayed alive with
+empty stderr; a fresh read returned 200 after the original read waited 73,098ms
+and reset. The acceptance harness now permits one bounded read-only reconnection
+for that exact failure class, not another action/model request. The final run
+passed under this allowance; its exact recovery count was not retained in the
+passing reporter output. Execution deadlines, model-request caps, evaluators and
+workflow/accounting/delivery/restart assertions are unchanged. Long synchronous
+verification blocking HTTP responsiveness remains unfinished performance work.
+
+The passing run used the setup CLI's emitted configuration argv unchanged, adding
+only JSON startup output and an ephemeral port. It proved four confined generation
+requests and one accounted proposal, six durable evaluations (two seeds and four
+trials), two verified local delivery refs, and 150 fixture-reported tokens in five
+exact terminal receipts. B started from A's delivered commit and retained its own
+measured seed context. The checkout remained on its original clean seed. Restart
+preserved the deadline, attempts, receipts, allocation and spare-worker pause,
+with no new worker request. Post-execution setup replay changed no fixture tree.
+These are isolated local synthetic fixtures, not real-account or useful-Hub-yield
+acceptance. No production timeout or worker retry policy was changed.
+The acceptance's child processes, loopback listener and private fixture trees
+were cleaned. Real KILL remained 19 bytes with mtime 1788533266; the original
+checkout remained at a01fc086 with its pre-existing untracked workplans.
+
+The graded Hub verification benchmark artifact is a proposal, not a frozen
+evaluator or proof of useful self-improvement. Its two selected baseline tests
+do not establish total subprocess cost. Actual account commissioning, a meaningful
+graded Hub evaluator and resident operation remain separate unfinished work.
+See [operator setup](../../docs/RESOURCE-POOLS.md#set-up-an-autonomous-engineering-loop).
+
+## Previous continuation: successor observability and source fidelity
 
 Baseline `5fb3b4c0891a9ada58d524744a5c65c9b01d53d7`, branch `auto/p00`, same
 isolated worktree. Three agents independently mapped and implemented the strict

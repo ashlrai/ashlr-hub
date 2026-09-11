@@ -126,6 +126,91 @@ is required. This bridge prepares one project/objective with multiple variants;
 dynamic idea generation, cross-project dependencies and integrating delivered
 branches into your working checkout remain separate capabilities.
 
+### Set up an autonomous engineering loop
+
+Use `ashlr resources pool engineering setup` when you want a registered initial
+objective and compatible profile, appendable queue and successor policies in one
+setup. This is different from the single-objective `prepare` command above:
+its static enrollment alone is not a preparation-manager registration and cannot
+seed the automatic successor path simply by adding a successor flag.
+
+Prerequisites are an existing shared resource ledger, registered or explicitly
+selected project catalog, a pinned recipe with a fixed evaluator, and an existing
+empty private output directory outside both projects and accounting. The initial
+recipe's delivery branch must be `codex/<recipe.id>`; setup refuses a different
+branch rather than silently substituting one. The ledger must contain valid
+persisted accounting; an empty replacement directory is not accepted. Stop the
+owning console, direct resource work and quota collector normally before setup.
+Unresolved dispatches or collector state must be investigated. Existing objective
+registration history requires its original preparation context, not a second
+setup with new configuration. Do not remove locks or reset accounting to proceed.
+
+The private policy selects the bounded operating window's queue/profile identity
+and proposal resources. It does not contain credentials or change account reserves:
+
+```json
+{
+  "schemaVersion": 1,
+  "id": "hub-improvement",
+  "profileId": "hub-fixed-checks",
+  "label": "Hub verification improvement",
+  "acceptance": "Preserve the fixed correctness checks and improve the declared metric.",
+  "maxEnrollments": 4,
+  "maxConcurrent": 1,
+  "autoAdmitPrepared": true,
+  "successors": {
+    "allowedWorkerIds": ["enrolled-worker"],
+    "maxOutputTokens": 1024,
+    "proposalTimeoutMs": 120000,
+    "maxSuccessors": 3,
+    "pollIntervalMs": 3000
+  }
+}
+```
+
+Replace the example worker ID with an already-enrolled worker. Queue timing and
+attempt limits come from the recipe's `supervision` section; `maxSuccessors` must
+leave room for the initial objective within `maxEnrollments`. Optional
+`autoAdmitPrepared` also lets subsequent ordinary preparation enter this queue;
+the successor coordinator uses its own explicitly configured admission path.
+
+From the built source checkout, inspect the exact proposed setup without writes:
+
+```sh
+node bin/ashlr resources pool engineering setup \
+  --recipe /absolute/private/recipe.json \
+  --policy /absolute/private/autonomous-policy.json \
+  --output /absolute/private/empty-setup-directory \
+  --resource-runtime /absolute/private/runtime.json \
+  --workspace /absolute/project \
+  --projects /absolute/private/projects.json \
+  --check --json
+```
+
+The result includes a `planDigest` and known local holds. It does not attest live
+provider capacity or start the queue deadline. To create the explicitly selected
+setup, rerun those same inputs without `--check`, adding
+`--expected-plan-digest <the-returned-SHA256>`. This writes the initial bundle and
+its real immutable preparation registration, matching `profiles.json`,
+`supervision.json`, `successors.json`, and setup intent/receipt evidence. Existing
+accounting is retained. Exact completed replay verifies without rewriting;
+partial or changed setup remains held for inspection, not erased and retried.
+
+The prepared result returns `consoleArguments`, an argument vector for the
+existing foreground console. **Setup does not execute it.** Starting that console
+is an effectful action: it may resume ordinary queued tasks, run the initial
+objective, consume permitted resources and deliver local branches. Once the
+initial delivery is verified, the configured successor loop can propose, prepare
+and queue another objective without a per-objective human action. The original
+deadline begins at first console startup and is preserved on restart.
+
+KILL, pauses, uncertainty holds and account reserves remain authoritative. This
+command does not authenticate accounts, install a service, renew allowance or
+deploy production. A usable evaluator must offer meaningful additional headroom:
+an already-passing binary test cannot prove repeated strict improvement. The
+[Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md)
+records a candidate graded metric and its still-unfinished evaluator requirements.
+
 ### Prepare and run objectives in the workspace
 
 With `--engineering-preparation /absolute/private/profiles.json`, an execution

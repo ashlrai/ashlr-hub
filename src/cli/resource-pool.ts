@@ -7,6 +7,7 @@ const USAGE = `usage: ashlr resources pool status --root ABS --pool ABS --bindin
        ashlr resources pool console --help
        ashlr resources pool engineering --help
        ashlr resources pool engineering prepare --help
+       ashlr resources pool engineering setup --help
        ashlr resources pool evolve --help
        ashlr resources pool benchmark --help
        ashlr resources pool probe --help
@@ -157,6 +158,10 @@ export async function cmdResourcePool(args: string[]): Promise<number> {
     return cmdResourceConsole(args.slice(1));
   }
   if (args[0] === 'engineering') {
+    if (args[1] === 'setup') {
+      const { cmdResourceEngineeringSetup } = await import('./resource-engineering-setup.js');
+      return cmdResourceEngineeringSetup(args.slice(2));
+    }
     if (args[1] === 'prepare') {
       const { cmdResourceEngineeringPrepare } = await import('./resource-engineering-prepare.js');
       return cmdResourceEngineeringPrepare(args.slice(2));

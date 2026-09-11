@@ -1,5 +1,59 @@
 # Firm build notes
 
+## September 11: coherent offline autonomous startup (in progress)
+
+- Baseline f543e362, isolated auto/p00; Entire resume found no checkpoint.
+  Three parallel streams cover core registry/setup, actual CLI acceptance and
+  independent cold review; parent integrates CLI, documentation and validation.
+- Standalone static preparation did not register its initial objective with the
+  successor manager. New setup connects the existing real preparation registry,
+  bounded profile/supervision/successor configuration and foreground console argv.
+  It never constructs a substitute execution owner or starts provider work.
+- Initial CLI integration run: 20 passed / 7 failed while the imported core
+  module had not yet landed. Repeating after the module was present passed all
+  27 tests; no test weakening or retry policy changes were needed.
+- Cold review found mutable returned configuration aliases; the shared registry
+  now freezes its private captured configuration. Publication context and pool/
+  quota ownership findings were corrected: exact context is checked before any
+  publication callback; existing persisted accounting is required, unresolved
+  jobs/collector state refused, and the existing console/pool/quota lock order
+  guards publication. No new stale-lock repair policy was introduced.
+- Hardened core smoke passed 12/12 (19.93s); independent registry tests passed
+  2/2 (7.60s), preserving independently recomputed legacy digests, canonical bytes,
+  immutable output aliases and write-free replay. Legacy backend gate passed
+  258/258 across eight files (138.71s). Full web passed 1,604/85 (11.03s).
+  TypeScript, full lint (zero errors, 107 existing warnings), docs and local build
+  passed; compiled help and all five structural safety checks passed.
+- Actual setup acceptance first refused an invalid 600-second fixture observation
+  lifetime before setup ran. Corrected to the existing allowed 290-second fixture
+  lifetime without changing execution deadlines. The next run reached two real A
+  generations and an accounted proposal but failed at 127.13s on a status fetch
+  ECONNRESET, before B was observed. Child-exit diagnostics are being added to
+  distinguish console failure from transport failure; this run is not a pass.
+- Diagnostic rerun failed at 149.70s: the original status GET waited 73,098ms,
+  then ECONNRESET; the child remained alive, stderr was empty and no output cap
+  fired. One fresh unpooled read returned 200 immediately. The test still failed
+  deliberately. Acceptance now permits at most one bounded fresh read-only GET
+  recovery for that exact failure class, never a model/action retry. Workflow,
+  delivery, accounting, restart assertions and execution deadlines stay fixed.
+  Long synchronous source proof remains a responsiveness gap, not a solved
+  performance issue or evidence that the HTTP connection stayed uninterrupted.
+- Final actual CLI acceptance passed 1/1, zero skips, 207.63s. Emitted setup argv
+  was used unchanged except JSON/ephemeral-port flags. Four generation requests,
+  one proposal, six durable evaluations, two local refs and five terminal receipts
+  accounting for 150 fixture tokens were verified. Restart preserved deadline,
+  account policy, receipts and source context without repeated worker requests;
+  completed setup replay after execution was write-free. The passing reporter
+  did not retain the actual recovery count; the gate allows at most one exact
+  read-only reset recovery. No action retry or production timeout was changed.
+- Extended setup assertions passed 12/12 in 40.00s, including replay under all
+  existing ownership locks without new acquisition and no-write refusal of
+  altered receipt/configuration. Combined selected gate: 1,877 tests / 96 files,
+  no skips. This proves the local synthetic loop, not useful live Hub improvement.
+- The graded Hub verification benchmark is a design artifact only. Its baseline
+  checked two existing cases (ten deliberately unselected), not a runnable new
+  evaluator, measured subprocess improvement or actual useful self-improvement.
+
 ## September 11: successor observability and UTF-8 evidence
 
 - Resumed clean 5fb3b4c0 on auto/p00, no Entire checkpoint. Three independent

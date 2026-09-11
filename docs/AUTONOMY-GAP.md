@@ -103,6 +103,25 @@ also admits that enrollment to its existing automatic queue. A replay can
 reconcile missing admission without duplicating work or renewing its deadline;
 preparation and admission results remain distinct.
 
+The [offline autonomous setup](RESOURCE-POOLS.md#set-up-an-autonomous-engineering-loop)
+joins these pieces for a first registered objective: one recipe and bounded
+policy produce matching preparation profiles, appendable supervision, successor
+configuration and the foreground console argument vector. Check mode is read-only;
+setup publishes private artifacts and a real initial preparation registration,
+without constructing an execution owner or starting work. This closes the static
+catalog-to-successor registration gap. Exact completed replay does not rewrite
+account history or renew deadlines; changed or incomplete setup is held.
+The generated command still needs actual account capacity and an appropriate
+fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md)
+is not yet a frozen, executable evaluator or evidence of useful self-improvement.
+Actual-process setup testing also exposed a responsiveness gap: a status GET
+reset after waiting about 73 seconds during successor preparation, while the
+console remained alive and a fresh connection returned 200. Source inspection
+identifies synchronous source-proof work on the console's event loop as a
+plausible contributor; the request wait is not a direct CPU-time measurement.
+Read reconnection is not a latency fix; keeping status and stop
+handling responsive during that work needs its own measured improvement.
+
 The [offline pool upgrade](RESOURCE-POOLS.md#upgrade-a-pool-without-resetting-history)
 removes the need to discard accounting or conversations when adding workers.
 Its explicit digest-pinned transition preserves prior identity and has a held
@@ -114,9 +133,10 @@ transition automatically or establish live Spark entitlement.
 
 1. Apply the standalone check to the intended Hub enrollment and resolve its
    actual configuration/ownership findings without resetting shared accounting.
-2. Prepare a meaningful pinned Hub evaluator and reviewed recipe using the
-   preparation command, with explicit mutable files, allowed workers, budgets
-   and local delivery targets. Commission the real
+2. Prepare a meaningful pinned Hub evaluator and reviewed recipe. Use autonomous
+   setup for a registered initial objective and matching successor/queue policy,
+   with explicit mutable files, allowed workers, budgets and local delivery
+   targets. Commission the real
    accounts separately: personal Spark must preserve General reservation, shared
    account capacity, existing account-wide pauses and prior ledger history. A
    fresh empty ledger is not an acceptable migration shortcut.

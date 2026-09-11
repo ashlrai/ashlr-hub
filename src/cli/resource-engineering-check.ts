@@ -6,6 +6,8 @@ const USAGE = `usage: ashlr resources pool engineering check --root ABS --pool A
 
 To create an experiment/campaign and linked catalogs from a reviewed objective,
 use: ashlr resources pool engineering prepare --help
+For a coherent registered initial objective plus automatic successor startup,
+use: ashlr resources pool engineering setup --help
 
 Checks explicit engineering enrollment, projects and shared resource accounting
 using existing local evidence. No default configuration is discovered. All paths

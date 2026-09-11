@@ -168,6 +168,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-preparation-metadata.test.ts', // verified metadata reads and real source drift
   'test/resource-engineering-preparation-boundaries.test.ts', // independent private preparation boundary checks
   'test/resource-engineering-preparation-acceptance.test.ts', // actual prepared campaign to evaluated local delivery
+  'test/resource-engineering-setup-acceptance.test.ts', // actual setup CLI and emitted autonomous A-to-B startup
+  'test/resource-engineering-autonomous-setup.test.ts', // private Git fixtures and offline registration publication
+  'test/resource-engineering-preparation-registry.test.ts', // immutable configuration and legacy registration identity
   'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication
   'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures
   'test/resource-console-pool-evolution.test.ts', // pinned console origins across private ledger epochs
