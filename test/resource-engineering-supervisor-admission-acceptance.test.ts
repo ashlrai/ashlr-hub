@@ -20,7 +20,22 @@ import type { ResourceConsoleEngineeringPreparationConfig, ResourceConsoleEngine
   ResourceConsoleEngineeringObjectivePlan, ResourceConsoleEngineeringObjectivePrepared } from '../src/core/resources/console-engineering-preparation-types.js';
 
 const cleanups: Array<() => Promise<void>> = [];
-afterEach(async () => { try { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); } finally { vi.restoreAllMocks(); } });
+const phaseTiming = process.env.ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING === '1';
+let phaseSequence = 0;
+/** Optional bounded diagnostics: phase names/timing only, never fixture data or tokens. */
+function phase<T>(name: string, work: () => T): T {
+  if (!phaseTiming) return work();
+  const id = ++phaseSequence; const started = performance.now();
+  console.log('ADMISSION_PHASE ' + JSON.stringify({ id, name, event: 'start', monotonicMs: started }));
+  const ended = () => console.log('ADMISSION_PHASE ' + JSON.stringify({ id, name, event: 'end',
+    monotonicMs: performance.now(), durationMs: performance.now() - started }));
+  try {
+    const result = work();
+    if (result instanceof Promise) return result.finally(ended) as T;
+    ended(); return result;
+  } catch (error) { ended(); throw error; }
+}
+afterEach(async () => { try { for (const [index, cleanup] of cleanups.splice(0).reverse().entries()) await phase(`cleanup.${index}`, cleanup); } finally { vi.restoreAllMocks(); } });
 const save = (file: string, value: unknown) => writeFileSync(file, canonical(value) + '\n', { mode: 0o600 });
 function git(repo: string, ...args: string[]) {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
@@ -147,8 +162,8 @@ const member = (prepared: ResourceConsoleEngineeringObjectivePrepared) => ({
 });
 async function prepare(server: ResourceConsoleServerHandle, id: string) {
   const input = objective(id);
-  const plan = await jsonResponse<ResourceConsoleEngineeringObjectivePlan>(await api(server, 'engineering/prepare/check', input));
-  return jsonResponse<ResourceConsoleEngineeringObjectivePrepared>(await api(server, 'engineering/prepare', { ...input, expectedPlanDigest: plan.planDigest }));
+  const plan = await phase(`${id}.check`, async () => jsonResponse<ResourceConsoleEngineeringObjectivePlan>(await api(server, 'engineering/prepare/check', input)));
+  return phase(`${id}.prepare`, async () => jsonResponse<ResourceConsoleEngineeringObjectivePrepared>(await api(server, 'engineering/prepare', { ...input, expectedPlanDigest: plan.planDigest })));
 }
 async function completed(server: ResourceConsoleServerHandle, id: string) {
   await vi.waitFor(async () => {
@@ -164,29 +179,31 @@ function delivered(f: Fixture, id: string) {
 
 describe.runIf(process.platform === 'darwin')('dynamic resident engineering admission over the actual console', () => {
   it('automatically admits newly prepared objectives under the host policy without a per-objective Run or admission request', async () => {
-    const f = await configured(true); const server = await start(f); const initial = await readSupervision(server);
-    expect(await jsonResponse(await api(server, 'console', undefined, server.readToken))).toMatchObject({ engineeringPreparationAutoAdmission: true });
+    const f = await phase('fixture.configure', () => configured(true));
+    const server = await phase('console.start', () => start(f));
+    const initial = await phase('supervision.initial', () => readSupervision(server));
+    expect(await phase('console.scope', async () => jsonResponse(await api(server, 'console', undefined, server.readToken)))).toMatchObject({ engineeringPreparationAutoAdmission: true });
     const input = objective('automatic-first');
-    const plan = await jsonResponse<ResourceConsoleEngineeringObjectivePlan>(await api(server, 'engineering/prepare/check', input));
-    noExecution(f); expect((await readSupervision(server)).entries).toEqual([]);
-    const first = await jsonResponse<ResourceConsoleEngineeringObjectivePrepared & { automaticAdmission: { state: string; supervisionId: string } }>(
-      await api(server, 'engineering/prepare', { ...input, expectedPlanDigest: plan.planDigest }));
+    const plan = await phase('first.check', async () => jsonResponse<ResourceConsoleEngineeringObjectivePlan>(await api(server, 'engineering/prepare/check', input)));
+    phase('first.no-execution', () => noExecution(f)); expect((await phase('supervision.empty', () => readSupervision(server))).entries).toEqual([]);
+    const first = await phase('first.prepare', async () => jsonResponse<ResourceConsoleEngineeringObjectivePrepared & { automaticAdmission: { state: string; supervisionId: string } }>(
+      await api(server, 'engineering/prepare', { ...input, expectedPlanDigest: plan.planDigest })));
     expect(first.automaticAdmission).toEqual({ state: 'admitted', supervisionId: 'resident-queue' });
-    await completed(server, first.enrollment.id); delivered(f, first.enrollment.id);
+    await phase('first.await-completed', () => completed(server, first.enrollment.id)); phase('first.verify-delivery', () => delivered(f, first.enrollment.id));
     const second = await prepare(server, 'automatic-second');
     expect(second).toMatchObject({ automaticAdmission: { state: 'admitted', supervisionId: 'resident-queue' } });
-    await completed(server, second.enrollment.id); delivered(f, second.enrollment.id);
+    await phase('second.await-completed', () => completed(server, second.enrollment.id)); phase('second.verify-delivery', () => delivered(f, second.enrollment.id));
     expect(f.requests).toHaveLength(2); expect(f.evaluations).toHaveBeenCalledTimes(4); expect(f.publications()).toBe(2);
     expect(f.protocolErrors).toEqual([]);
-    const final = await readSupervision(server); const receipts = f.ledger().attempts;
+    const final = await phase('supervision.completed', () => readSupervision(server)); const receipts = phase('ledger.completed', () => f.ledger().attempts);
     expect(final).toMatchObject({ deadlineAt: initial.deadlineAt, admission: { maxEnrollments: 3, remainingEnrollments: 1 } });
     expect(final.entries.every(row => row.state === 'completed' && row.attempts === 1)).toBe(true);
-    await server.close(); const restarted = await start(f);
-    expect(await readSupervision(restarted)).toMatchObject({ deadlineAt: initial.deadlineAt, entries: final.entries, revision: final.revision });
-    expect(await prepare(restarted, input.id)).toMatchObject({ disposition: 'replayed', automaticAdmission: { state: 'admitted', supervisionId: 'resident-queue' } });
-    await new Promise(resolve => setTimeout(resolve, 300));
-    expect(f.ledger().attempts).toEqual(receipts); expect(f.requests).toHaveLength(2); expect(f.evaluations).toHaveBeenCalledTimes(4); expect(f.publications()).toBe(2);
-    expect(f.ledger()).toMatchObject({ allocation: f.allocation, workerAccess: f.workerAccess });
+    await phase('console.close', () => server.close()); const restarted = await phase('console.restart', () => start(f));
+    expect(await phase('supervision.restarted', () => readSupervision(restarted))).toMatchObject({ deadlineAt: initial.deadlineAt, entries: final.entries, revision: final.revision });
+    expect(await phase('replay.sequence', () => prepare(restarted, input.id))).toMatchObject({ disposition: 'replayed', automaticAdmission: { state: 'admitted', supervisionId: 'resident-queue' } });
+    await phase('replay.quiet-window', () => new Promise(resolve => setTimeout(resolve, 300)));
+    expect(phase('ledger.replayed', () => f.ledger().attempts)).toEqual(receipts); expect(f.requests).toHaveLength(2); expect(f.evaluations).toHaveBeenCalledTimes(4); expect(f.publications()).toBe(2);
+    expect(phase('ledger.policy', () => f.ledger())).toMatchObject({ allocation: f.allocation, workerAccess: f.workerAccess });
   }, 120_000);
 
   it('waits empty, executes only admitted prepared objectives, wakes after completion, and preserves replay/restart accounting', async () => {

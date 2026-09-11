@@ -512,6 +512,36 @@ service, autonomous idea generation, delivered-seed successor planning, real-acc
 commissioning or public deployment. It does not make same-user storage
 tamper-proof or guarantee monotonic wall time across process restarts.
 
+#### Diagnose automatic intake latency
+
+On macOS, the local acceptance fixture can print bounded phase timings for preparation,
+completion, shutdown, startup restoration and exact replay:
+
+```sh
+ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING=1 npx vitest run \
+  test/resource-engineering-supervisor-admission-acceptance.test.ts \
+  --no-file-parallelism --reporter=verbose \
+  -t 'automatically admits newly prepared objectives'
+```
+
+Run from the repository with its development dependencies installed. This test
+creates disposable private files, Git repositories and a loopback worker; it
+does not use connected provider accounts. It retains the existing test and
+campaign time limits. Unselected cases are not evidence of coverage.
+
+`ADMISSION_PHASE` records contain fixed fixture phase names and monotonic times,
+not prompts, account tokens or paths. Timings are off by default. HTTP preparation
+includes event-loop interleaving with automatic execution, and the replay
+aggregate contains its named child phases; do not add nested durations twice or
+treat these numbers as provider latency. Compare the same test under controlled
+host load before attributing a timeout or speedup to a particular change.
+
+Committed-objective checks and replay derive their public plan from a freshly
+verified bundle report. They do not reuse a previous request's filesystem
+evidence. The reader's before/after captures and the registration writer's final
+publication checks remain required, including when observations change during
+the call. Missing receipts and changed inputs are refused, not reconstructed.
+
 ### Check engineering configuration without starting the fleet
 
 From a built source checkout, inspect the exact private files intended for console

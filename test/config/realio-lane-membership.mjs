@@ -100,6 +100,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-engineering-core.test.ts', // signed graph attribution and durable console launch/cancel ownership
   'test/resource-console-engineering-registration.test.ts', // immutable same-owner dynamic enrollment with real private supervisor state
   'test/resource-console-engineering-preparation-boundaries.test.ts', // real pinned recipe files and immutable objective registration boundaries
+  'test/resource-console-engineering-preparation-reuse.test.ts', // real committed bundle replay and call-local validation counts
   'test/resource-console-engineering-preparation-acceptance.test.ts', // actual objective HTTP preparation, restart and evaluated delivery
   'test/resource-engineering-outcomes.test.ts', // exact receipt joins against real private resource history and ledger
   'test/resource-engineering-outcomes-review.test.ts', // independent overflow, changed-sample and incomplete-proof regressions

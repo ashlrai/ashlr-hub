@@ -1,7 +1,7 @@
 /** Real private Git, preparation, supervisor, and owner boundaries. No evaluator,
  * native client, account, or worker is invoked. */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,9 +14,11 @@ import { createResourcePoolSupervisor, type ResourcePoolSupervisor } from '../sr
 import { createResourceConsoleEngineeringOwner, type ResourceConsoleEngineeringOwner } from '../src/core/resources/console-engineering.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
+import * as privateFiles from '../src/core/util/private-file-write.js';
 
 const roots: string[] = []; const owners: ResourceConsoleEngineeringOwner[] = []; const supervisors: ResourcePoolSupervisor[] = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   await Promise.allSettled(owners.splice(0).map(owner => owner.close()));
   await Promise.allSettled(supervisors.splice(0).map(owner => owner.close()));
   const writable = (file: string): void => { if (!lstatSync(file).isDirectory()) return; chmodSync(file, 0o700); for (const name of readdirSync(file)) writable(join(file, name)); };
@@ -139,6 +141,55 @@ describe('pinned console engineering preparation boundaries', () => {
     f.recipe.generation.hypotheses[0]!.hypothesis = 'Changed host hypothesis'; save(f.configFile, f.config); const changed = tree(f.base);
     expect(() => manager.check(request)).toThrow('profiles changed'); expect(() => f.create()).toThrow(); expect(tree(f.base)).toEqual(changed);
   });
+  it('does not substitute a saved request when a prepare replay changes the objective', async () => {
+    const f = await fixture(); const manager = f.create(); const plan = manager.check(request);
+    manager.prepare({ ...request, expectedPlanDigest: plan.planDigest });
+    const before = tree(f.base); const catalog = f.owner.catalog();
+    expect(() => manager.prepare({ ...request, objective: 'A different objective must not reuse the original plan.',
+      expectedPlanDigest: plan.planDigest })).toThrow();
+    expect(tree(f.base)).toEqual(before); expect(f.owner.catalog()).toEqual(catalog);
+    expect(manager.prepare({ ...request, expectedPlanDigest: plan.planDigest }).disposition).toBe('replayed');
+    expect(tree(f.base)).toEqual(before);
+  });
+  it.each(['profile', 'runtime', 'comparator', 'receipt', 'project-directory'] as const)(
+    'refuses %s drift after the real registration stage is written, before publication', async kind => {
+      const f = await fixture(); const manager = f.create(); const plan = manager.check(request);
+      const supervisorBefore = readFileSync(join(f.root, 'resource-console-state.json'));
+      const headsBefore = git(f.workspace, 'show-ref', '--heads');
+      const register = vi.spyOn(f.owner, 'register');
+      const originalWrite = privateFiles.writePrivateFileAtomically;
+      const registrationRoot = join(f.root, 'console-engineering-preparations');
+      let changes = 0;
+      vi.spyOn(privateFiles, 'writePrivateFileAtomically').mockImplementation((...args) => {
+        const result = originalWrite(...args);
+        if (!changes && args[1].startsWith(join(registrationRoot, 'staging') + '/')) {
+          // Inject only after real stage durability, not before the earlier
+          // validation callbacks. The actual writer must still veto its link.
+          expect(existsSync(args[1])).toBe(true); changes++;
+          if (kind === 'profile') {
+            f.config.profiles[0]!.acceptance = 'Changed host acceptance'; save(f.configFile, f.config);
+          } else if (kind === 'runtime') save(f.resourceRuntime, { ...f.runtime, capacityWaitMs: 1000 });
+          else if (kind === 'comparator') {
+            const evaluator = join(f.bundle, 'universe', 'universes', request.id, 'seed', 'evaluate.mjs');
+            chmodSync(evaluator, 0o600); writeFileSync(evaluator, 'throw Error("Changed frozen comparator");\n');
+          } else if (kind === 'receipt') {
+            const receipt = join(f.bundle, 'receipt.json');
+            save(receipt, { ...JSON.parse(readFileSync(receipt, 'utf8')), enrollmentDigest: 'f'.repeat(64) });
+          } else {
+            const retained = join(f.base, 'retained-project'); renameSync(f.workspace, retained);
+            cpSync(retained, f.workspace, { recursive: true });
+          }
+        }
+        return result;
+      });
+      expect(() => manager.prepare({ ...request, expectedPlanDigest: plan.planDigest })).toThrow();
+      expect(changes).toBe(1); expect(register).not.toHaveBeenCalled(); expect(f.owner.catalog()).toEqual([]);
+      expect(existsSync(join(registrationRoot, 'records', `${request.id}.json`))).toBe(false);
+      expect(existsSync(join(f.bundle, 'receipt.json'))).toBe(true);
+      expect(readFileSync(join(f.root, 'resource-console-state.json'))).toEqual(supervisorBefore);
+      expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
+      expect(git(f.workspace, 'show-ref', '--heads')).toBe(headsBefore);
+    });
   it('preserves incomplete output instead of repairing or registering it', async () => {
     const f = await fixture(); const manager = f.create(); const plan = manager.check(request);
     mkdirSync(f.bundle, { mode: 0o700 }); writeFileSync(join(f.bundle, 'partial'), 'do not delete', { mode: 0o600 }); const before = tree(f.base);

@@ -1,6 +1,82 @@
 # Verified local handoff
 
-## Current continuation: automatic objective intake
+## Current continuation: preparation and replay efficiency
+
+Baseline `7d2c1da663c3ca82dff79e5382a6bb45f2735d81`, branch `auto/p00`, isolated
+worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents
+handled manager implementation, independent fault injection/cold review, and
+isolated actual-execution timing. Parent integrates and verifies the handoff.
+
+Existing objective checks and exact preparation replay now each use one fresh
+verified bundle read, deriving public plan pins from that reader's validated
+capture instead of repeating manager-level preparation checks. Startup still
+validates every profile and durable registration. There is no cross-request
+cache. Lower-level before/after captures, comparator and receipt validation,
+exact incoming request equality, owner checks, and final registration
+publication checks remain enforced. Missing evidence cannot be recreated by
+startup or replay. No scheduling, acceptance, account policy or timeout changed.
+
+The regression suite proves one fresh reader call per existing check/replay
+and no standalone preparation check or creator call. The inspected call graph
+therefore falls from 16 to 4 full captures for check plus replay, and from 10
+to 6 for startup with one profile and two registrations. These are structural
+counts, not a promise of equivalent elapsed-time savings.
+
+New reuse tests pass **4/4**; independent manager boundaries pass **30/30**,
+including changed-request refusal and real post-staging profile, runtime,
+comparator, receipt and project-directory replacement faults. Faults prevent
+registration publication and owner exposure without changing accounting or Git
+references. Cold review found no bypass of fields previously bound to acceptance.
+Strict changed-test TypeScript, source/web TypeScript, documentation and
+real-I/O lane checks pass. The serial compatibility gate passes **157/157** in
+eight files (74.69s), covering lower-level preparation/reader boundaries,
+actual manual console preparation, supervision/admission, HTTP and CLI.
+Combined selected coverage is **194 tests across 11 files, zero skips**,
+excluding repeated baseline/candidate measurements. Full lint has zero errors
+and 107 pre-existing warnings. This is not a full repository test run; unchanged
+frontend tests were not rerun, while frontend TypeScript was checked.
+Local build and all five compiled structural safety checks pass. Entire is
+enabled in manual-commit mode; resume found no checkpoint for this continuation.
+The parent will verify clean post-commit build identity at final handoff.
+
+Optional `ASHLR_ENGINEERING_ADMISSION_PHASE_TIMING=1` instruments only the local
+acceptance fixture, quietly disabled by default. It emits fixed phase labels
+and monotonic durations, not account data or fixture contents. The unchanged
+baseline automatic case passed in 114.885s with its original 120s timeout;
+restart plus replay accounted for 30.548s. Preparation HTTP latency includes
+execution/event-loop interleaving and must not be labeled validation CPU time.
+Historical timeout failures remain documented below.
+
+The isolated candidate passed in **104.676s**, versus baseline **114.885s**,
+under the same 120s limit (one pass, two intentionally filter-unselected cases
+in each run). Exact replay fell from **18.594s to 12.782s**; restart fell from
+11.954s to 11.418s. This is one same-host serial before/after observation, not a
+statistical benchmark or a proven explanation for all historical timeouts.
+Both candidate deliveries were verified with exactly two loopback requests,
+four evaluations and two local branches. Restart/replay preserved the original
+deadline, receipts, allocation and spare-account pause without duplicate work.
+
+The subsequent frozen full acceptance suite passed **3/3, zero skipped** in
+247.62s: automatic preparation/admission 105.206s, explicit admission/restart/
+replay 84.478s, and pause/auth/stale/expired boundaries 56.449s. Original
+120s/120s/100s case limits were unchanged. Fixtures closed and cleaned up.
+This passes the previously failing selected acceptance gate; it does not prove
+all host-load conditions, a full-repository suite, or real-provider operation.
+
+The next mapped autonomy integration is a bounded successor coordinator:
+verified campaign delivery -> accounted proposal -> distinct objective seeded
+from the delivered commit -> existing queue admission. Current preparation
+profiles still pin a static seed. Integration handoff has a reusable origin
+pattern, but campaign delivery needs its own typed evidence; the separate
+daemon planner is not wired to this resource ledger. Acceptance must prove
+strict improvement over passing delivered code, durable proposal cost/identity,
+and restart without duplicate proposal or execution. This remains planned,
+not implemented or commissioned by the present increment.
+
+No real accounts, credentials, quotas, KILL or services changed. No GitHub
+Actions, remote push, npm publication or production activation occurred.
+
+## Previous continuation: automatic objective intake
 
 Baseline `6b7fb229fbf0d2a87b528e6bc9c23d8caee97897`, branch `auto/p00`, isolated
 worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents

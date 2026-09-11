@@ -8,6 +8,7 @@ import { readResourceJson } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import { validateResourceConsoleEngineeringCatalog, type ResourceConsoleEngineeringOwner } from './console-engineering.js';
 import { checkResourceEngineeringPreparation, prepareResourceEngineeringBundle, readPreparedResourceEngineeringBundle } from './engineering-preparation.js';
+import type { ResourceEngineeringPreparationPlan } from './engineering-preparation-types.js';
 import type { ResourceConsoleEngineeringObjective, ResourceConsoleEngineeringObjectivePlan, ResourceConsoleEngineeringObjectivePrepared,
   ResourceConsoleEngineeringPreparationConfig, ResourceConsoleEngineeringProfile } from './console-engineering-preparation-types.js';
 
@@ -105,7 +106,7 @@ export function createResourceConsoleEngineeringPreparation(input: {
     if (result.records.some(row => row.configDigest !== contextDigest)) fail('CONFLICT', 'Objective registration context changed');
     return result.records;
   }
-  function materialize(input: unknown) {
+  function objective(input: unknown) {
     currentConfig(); const request = validateResourceConsoleEngineeringObjective(input);
     const profile = config.profiles.find(row => row.id === request.profileId);
     if (!profile) fail('NOT_FOUND', 'Engineering preparation profile was not found');
@@ -113,7 +114,10 @@ export function createResourceConsoleEngineeringPreparation(input: {
       delivery: { ...profile.recipe.delivery, branch: `codex/${request.id}` } };
     const bundleOptions = { recipe, output: join(config.outputRoot, request.id), resourceRuntime: config.resourceRuntime,
       workspace: options.workspace, projectsFile: options.projectsFile };
-    const bundlePlan = checkResourceEngineeringPreparation(bundleOptions);
+    return { request, profile, recipe, bundleOptions };
+  }
+  function planned(candidate: ReturnType<typeof objective>, bundlePlan: Pick<ResourceEngineeringPreparationPlan, 'planDigest' | 'seedRevision'>) {
+    const { request, profile, recipe, bundleOptions } = candidate;
     const plan: ResourceConsoleEngineeringObjectivePlan = { schemaVersion: 1, status: 'planned', ...request,
       profileDigest: hash(profile), projectId: recipe.projectId, seedRevision: bundlePlan.seedRevision, branch: recipe.delivery.branch,
       acceptance: profile.acceptance, metric: recipe.metric, files: recipe.generation.files, contextFiles: recipe.generation.contextFiles,
@@ -121,10 +125,18 @@ export function createResourceConsoleEngineeringPreparation(input: {
       planDigest: hash({ contextDigest, profileDigest: hash(profile), request, bundlePlanDigest: bundlePlan.planDigest }), executionStarted: false, providerContacted: false };
     return { request, plan, bundleOptions, bundlePlan };
   }
-  function committed(row: Registration) {
-    const candidate = materialize(row.request);
+  function materialize(input: unknown) {
+    const candidate = objective(input);
+    return planned(candidate, checkResourceEngineeringPreparation(candidate.bundleOptions));
+  }
+  function committed(row: Registration, input: unknown = row.request) {
+    const source = objective(input);
+    // Reuse only this call's verified bundle, never substitute a saved objective
+    // for a different incoming request that happens to reuse its ID or digest.
+    if (canonical(source.request) !== canonical(row.request)) fail('CONFLICT', 'Objective identity is already in use');
+    const report = readPreparedResourceEngineeringBundle({ ...source.bundleOptions, expectedPlanDigest: row.bundlePlanDigest });
+    const candidate = planned(source, report);
     if (candidate.plan.planDigest !== row.planDigest || candidate.bundlePlan.planDigest !== row.bundlePlanDigest) fail('CONFLICT', 'Prepared objective evidence changed');
-    const report = readPreparedResourceEngineeringBundle({ ...candidate.bundleOptions, expectedPlanDigest: row.bundlePlanDigest });
     if (report.enrollmentDigest !== row.enrollmentDigest) fail('CONFLICT', 'Prepared objective enrollment changed');
     const catalog = validateResourceConsoleEngineeringCatalog(readResourceJson(report.paths.engineering));
     return { candidate, report, catalog };
@@ -132,7 +144,7 @@ export function createResourceConsoleEngineeringPreparation(input: {
   // Validate all profiles without initializing output, contacting workers or reading credentials.
   for (const profile of config.profiles) materialize({ id: profile.recipe.id, profileId: profile.id, name: profile.recipe.name, objective: profile.recipe.objective });
   // Validate the whole durable set before exposing any reconstructed enrollment.
-  const restored = registrations().map(committed);
+  const restored = registrations().map(row => committed(row));
   if (restored.length) options.owner.register({ schemaVersion: 1, enrollments: restored.flatMap(row => row.catalog.enrollments) });
   return {
     profiles(projectId) {
@@ -144,37 +156,48 @@ export function createResourceConsoleEngineeringPreparation(input: {
         trialBudget: row.recipe.trialBudget, campaignBudget: row.recipe.campaignBudget })));
     },
     check(input) {
-      const candidate = materialize(input); const saved = registrations().find(row => row.request.id === candidate.request.id);
-      if (saved && saved.planDigest !== candidate.plan.planDigest || !saved && options.owner.catalog().some(row => row.id === candidate.request.id)) fail('CONFLICT', 'Objective identity is already in use');
-      if (saved) committed(saved);
+      const request = validateResourceConsoleEngineeringObjective(input);
+      const saved = registrations().find(row => row.request.id === request.id);
+      if (saved) return copy(committed(saved, request).candidate.plan);
+      const candidate = materialize(request);
+      if (options.owner.catalog().some(row => row.id === request.id)) fail('CONFLICT', 'Objective identity is already in use');
       return copy(candidate.plan);
     },
     prepare(input) {
       const value = copy<Record<string, unknown>>(input);
       if (!exact(value, ['id', 'profileId', 'name', 'objective', 'expectedPlanDigest']) || typeof value.expectedPlanDigest !== 'string' || !HASH.test(value.expectedPlanDigest)) fail('INVALID_INPUT', 'Expected a checked objective digest');
       const { expectedPlanDigest, ...request } = value;
-      const candidate = materialize(request);
+      const incoming = validateResourceConsoleEngineeringObjective(request);
+      const prior = registrations(); const existing = prior.find(row => row.request.id === incoming.id);
+      if (existing) {
+        // The bundle reader still performs both fresh pin captures and receipt
+        // verification. Do not cache this result across calls or publication gates.
+        const verified = committed(existing, incoming);
+        if (expectedPlanDigest !== verified.candidate.plan.planDigest) fail('CONFLICT', 'Objective plan changed; check it again');
+        currentConfig(); options.owner.checkRegistration(verified.catalog);
+        const registered = options.owner.register(verified.catalog);
+        const enrollment = registered.find(row => row.id === incoming.id && row.enrollmentDigest === verified.report.enrollmentDigest);
+        if (!enrollment) fail('UNAVAILABLE', 'Objective enrollment could not be confirmed');
+        return copy({ plan: verified.candidate.plan, enrollment, disposition: 'replayed' });
+      }
+      const candidate = materialize(incoming);
       if (expectedPlanDigest !== candidate.plan.planDigest) fail('CONFLICT', 'Objective plan changed; check it again');
-      const prior = registrations(); const existing = prior.find(row => row.request.id === candidate.request.id);
-      if (existing && existing.planDigest !== expectedPlanDigest || !existing && options.owner.catalog().some(row => row.id === candidate.request.id)) fail('CONFLICT', 'Objective identity is already in use');
-      if (!existing && (prior.length >= 32 || options.owner.catalog().length >= 32)) fail('CONFLICT', 'Engineering enrollment capacity reached');
-      const report = existing ? committed(existing).report : prepareResourceEngineeringBundle({ ...candidate.bundleOptions, expectedPlanDigest: candidate.bundlePlan.planDigest });
+      if (options.owner.catalog().some(row => row.id === candidate.request.id)) fail('CONFLICT', 'Objective identity is already in use');
+      if (prior.length >= 32 || options.owner.catalog().length >= 32) fail('CONFLICT', 'Engineering enrollment capacity reached');
+      const report = prepareResourceEngineeringBundle({ ...candidate.bundleOptions, expectedPlanDigest: candidate.bundlePlan.planDigest });
       const registration: Registration = { schemaVersion: 1, configDigest: contextDigest, request: candidate.request, planDigest: expectedPlanDigest,
         bundlePlanDigest: candidate.bundlePlan.planDigest, enrollmentDigest: report.enrollmentDigest };
       const verified = committed(registration); currentConfig();
       options.owner.checkRegistration(verified.catalog);
-      // Exact completed replay is read-only, including the record store's lock/staging.
-      if (!existing) {
-        const written = writeImmutablePrivateRecord(store, registration, { prepublish: () => {
-          try { currentConfig(); options.owner.checkRegistration(committed(registration).catalog); return true; }
-          catch { return false; }
-        } });
-        if (!['recorded', 'replayed'].includes(written)) fail('UNAVAILABLE', 'Objective registration incomplete; inspect retained output before retrying');
-      }
+      const written = writeImmutablePrivateRecord(store, registration, { prepublish: () => {
+        try { currentConfig(); options.owner.checkRegistration(committed(registration).catalog); return true; }
+        catch { return false; }
+      } });
+      if (!['recorded', 'replayed'].includes(written)) fail('UNAVAILABLE', 'Objective registration incomplete; inspect retained output before retrying');
       const registered = options.owner.register(verified.catalog);
       const enrollment = registered.find(row => row.id === candidate.request.id && row.enrollmentDigest === report.enrollmentDigest);
       if (!enrollment) fail('UNAVAILABLE', 'Objective enrollment could not be confirmed');
-      return copy({ plan: candidate.plan, enrollment, disposition: existing ? 'replayed' : report.disposition });
+      return copy({ plan: candidate.plan, enrollment, disposition: report.disposition });
     },
   };
 }

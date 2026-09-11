@@ -1,5 +1,82 @@
 # Firm build notes
 
+## September 11: preparation and replay efficiency
+
+- Prior goal turn made verified progress at clean local commit 7d2c1da6;
+  it did not achieve the full North Star. A final automatic acceptance timing
+  gate remains unresolved, despite two settled jobs and passing browser flow.
+  Current checkout is clean; Entire resume found no checkpoint.
+- Three agents map manager validation, measure baseline phases, and independently
+  review identity/drift defenses. Parent integrates and maintains evidence.
+- Proposed narrow optimization: derive objective plans from the already verified
+  bundle report instead of repeating full preparation checks inside committed
+  registration reads. Keep lower-level before/after captures and registry
+  prepublish revalidation. No filesystem cache or cross-request trust reuse.
+- Baseline timing runs alone; no account, service, KILL or publication changes.
+- Reader-backed manager plan derivation can reduce existing check+prepare replay
+  from 16 full captures to 4, and one-profile/two-registration startup from 10
+  to 6. Counts describe the inspected call graph, not measured time savings.
+  Exact request equality must precede existing-registration reuse so changed
+  objective text/profile/name cannot be ignored by replaying the old request.
+- Independent tests inject drift after private staging but before publication:
+  profile, runtime, comparator, receipt and same-path project inode replacement.
+  No publication, owner exposure or ledger changes may occur after such drift.
+- Discovery initially named a nonexistent console preparation unit test;
+  actual fixtures live in resource-console-engineering-preparation-boundaries.
+- Instrumented baseline on unchanged 7d2 manager passed the automatic case
+  in 114.885s under its existing 120s limit (116.28s Vitest total, two other
+  cases filter-unselected). First/second prepare HTTP latency was 18.291/23.657s;
+  completion waits 19.574/20.860s. Close was 22.5ms, restart 11.954s, and exact
+  replay check/prepare 4.499/14.095s. These are one run's end-to-end phase times,
+  not isolated manager CPU or causal measurements. No fixed shutdown wait was
+  observed. Candidate measurement follows identical source test and limits.
+- Frozen reuse tests pass 4/4 (36.50s total); independent manager boundaries
+  pass 30/30 (81.13s), including six new cases. Strict changed-test TypeScript,
+  scoped ESLint and diff checks pass. Source/web TypeScript, documentation and
+  real-I/O lane checks pass (312 real-I/O files, 666 unit files).
+- Independent cold source review found no acceptance-field bypass: reader
+  planDigest/seedRevision are fresh capture outputs, not trusted receipt JSON.
+  Profile/context/request/bundle digests still cover evaluator, budgets, files,
+  workers and seed; before/after reader captures and prepublish checks remain.
+- Next-work read-only exploration identifies a bounded successor coordinator,
+  not another scheduler: verified campaign delivery -> one shared-ledger-accounted
+  bounded proposal -> durable proposal identity/result -> new objective seeded
+  from that exact delivered commit -> existing supervisor admission. Preserve
+  the original deadline, pause, retained enrollment cap and account reservations.
+  Existing integration-handoff/store initialization provides an origin and final
+  source-recheck pattern, but accepts integration delivery, not campaign delivery;
+  a typed campaign-delivery origin is required rather than relabeling evidence.
+  Static preparation profiles and the separate daemon planner are not this seam.
+  Existing initial-repair policy requires a failed measured seed; the first
+  successor slice should prove two-generation strict improvement on passing
+  delivered code, not fabricate a parent or silently broaden repair acceptance.
+  No successor implementation or provider request was performed this increment.
+- Same isolated candidate automatic test passed in 104.676s (106.05s total),
+  one pass/two filter-unselected under unchanged 120s. Baseline 114.885s ->
+  candidate 104.676s is a single-run 10.209s/8.9% difference, not a stable
+  performance claim. Replay aggregate 18.594 -> 12.782s (check 4.499 -> 3.964s,
+  prepare 14.095 -> 8.818s), restart 11.954 -> 11.418s. Exact two requests,
+  four evaluations/two verified deliveries, unchanged deadline/receipts/
+  allocation/pause and no duplicate replay all passed. Full three-case gate
+  starts serially afterward with source, timing flag and timeouts unchanged.
+- Frozen full acceptance passed 3/3, no skips, 247.62s total/246.13s tests:
+  automatic 105.206s, explicit 84.478s, pause/auth/stale/expired 56.449s.
+  Original case limits 120s/120s/100s unchanged; fixture processes exited and
+  cleanup completed. Second candidate automatic pass corroborates the measured
+  local improvement without proving all host-load behavior. Parent serial
+  lower-level/manual compatibility gate starts only after this process exits.
+- Serial compatibility passed 157/157 in eight files, 74.69s total/71.08s tests:
+  preparation, reader boundaries, real manual console preparation, supervision,
+  admission, HTTP and CLI. Selected total is 194 distinct tests/11 files, no
+  skips; repeated automatic before/after runs are not counted again. Final
+  source/web typechecks, docs and real-I/O lane checks pass. Full lint retains
+  107 existing warnings and no errors. No complete repository or unchanged
+  frontend suite was rerun this increment. Original checkout and real KILL
+  remain unchanged; Entire is enabled in manual-commit mode on auto/p00.
+- Local build and five compiled structural safety checks pass on the reviewed
+  candidate. Parent commits only the owned implementation/tests/docs; final
+  post-commit rebuild will verify a clean source identity. No remote push.
+
 ## September 11: automatic intake into the existing fleet
 
 - Previous goal turn was verified progress: clean commit/build 6b7fb229, not

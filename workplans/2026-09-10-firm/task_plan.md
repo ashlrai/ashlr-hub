@@ -98,7 +98,10 @@ existing activation, provenance, evaluation and resource invariants.
 - [x] Prove attribution, incomplete-evidence handling and no duplicate counting; expose useful operator/agent evidence.
 - [x] Explore successor planning, matched benchmarks and the frozen supervision queue with three agents.
 - [x] Implement bounded durable queue admission and host-enabled automatic prepare-to-queue policy.
-- [ ] Resolve the automatic-intake acceptance timing gate: actual two-objective delivery and browser/policy checks pass, but frozen restart/replay acceptance exceeds 120s.
+- [x] Pass the previously failing automatic-intake acceptance gate at unchanged limits; retain historical timeouts and avoid claiming universal latency guarantees.
+- [x] Measure preparation, execution, close, restore and replay phases without increasing acceptance budgets.
+- [x] Remove redundant manager-layer validation while retaining fresh bundle and publication integrity checks.
+- [x] Independently verify drift refusal, unchanged receipts and actual automatic intake timing.
 - [x] Document and build the connected automatic intake path; retain remaining North Star gaps.
 - [ ] Subsequent waves: wire remaining packages in dependency order.
 - [x] Review, record actual package/test receipts and exact local-only delivery state.
@@ -182,6 +185,22 @@ with new regression tests. Real-I/O graph tests use a realistic execution budget
 while separately checking persisted deadline exhaustion.
 
 ## Status
+Current continuation from clean `7d2c1da663c3ca82dff79e5382a6bb45f2735d81`:
+measure and reduce automatic intake/replay validation overhead without changing
+timeouts, publication checks or resource policy. Existing check and preparation
+replay each use one fresh verified bundle read; startup still validates every
+profile and registration. Four new reuse tests and all 30 independent boundary
+tests pass. Cold review found no bypass: returned bundle plan pins come from
+fresh capture, not unverified receipt fields. Isolated automatic acceptance fell
+from 114.885s to 104.676s; the full three-case acceptance gate passed 3/3 at
+unchanged limits. Compatibility passed 157/157: selected total 194 tests in 11
+files, zero skips. Source/web TypeScript, lint (zero errors/107 existing
+warnings), docs, lane, build and five compiled safety checks pass. Local commit
+and clean post-commit artifact verification follow. No real account,
+service, KILL or external publication changes are included.
+
+### Previous automatic-intake status
+
 Current continuation from clean `6b7fb229fbf0d2a87b528e6bc9c23d8caee97897`:
 connect new prepared work to existing running supervision. User clarified that
 per-objective human launch must not be required. Optional startup policy enables
