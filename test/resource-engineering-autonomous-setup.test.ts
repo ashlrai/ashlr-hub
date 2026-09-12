@@ -72,6 +72,23 @@ function evidence(directory: string): string {
   visit(directory); return JSON.stringify(rows);
 }
 describe('offline autonomous setup', () => {
+  it('withholds new publication on a host veto without touching the setup or accounting', () => {
+    const f = fixture(); const expectedPlanDigest = check(f.options).planDigest; const before = evidence(f.base);
+    expect(() => prepare({ ...f.options, expectedPlanDigest }, { isExecutionStopped: () => true })).toThrow('Host setup publication stopped');
+    expect(evidence(f.base)).toBe(before);
+  });
+  it('checks the host at owned registration publication and retains incomplete output after refusal', () => {
+    const f = fixture(); const expectedPlanDigest = check(f.options).planDigest;
+    const accounting = readFileSync(join(f.ledger, 'pool-state.json'));
+    const beforePublication = vi.fn((locks: readonly ownership.LocalStoreLock[]) => {
+      expect(locks).toHaveLength(3); expect(locks.every(lock => ownership.ownsLocalStoreLock(lock))).toBe(true);
+      throw Error('host publication refused');
+    });
+    expect(() => prepare({ ...f.options, expectedPlanDigest }, { beforePublication })).toThrow('host publication refused');
+    expect(beforePublication).toHaveBeenCalled(); expect(existsSync(join(f.options.output, 'setup-receipt.json'))).toBe(false);
+    expect(readFileSync(join(f.ledger, 'pool-state.json'))).toEqual(accounting);
+    expect(['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock'].some(name => existsSync(join(f.ledger, name)))).toBe(false);
+  });
   it('prepares explicitly separate histories against one unchanged ledger and replays each original setup', () => {
     const f = fixture(); const accounting = readFileSync(join(f.ledger, 'pool-state.json'));
     f.policy.registrationScope = 'mission-first';

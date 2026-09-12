@@ -101,6 +101,10 @@ describe('resource console HTTP fences', () => {
     const controller = new AbortController(); controller.abort(); await expect(start({ signal: controller.signal })).rejects.toThrow(/cancelled/);
     expect(existsSync(options.root)).toBe(false); const handle = await start(); await handle.close(); await handle.close();
   });
+  it('a host stop refuses startup before creating state', async () => {
+    await expect(start({ isExecutionStopped: () => true })).rejects.toThrow(/execution stopped/);
+    expect(existsSync(options.root)).toBe(false);
+  });
 });
 
 /** Transport doubles exercise the server await boundary without native/provider contact. */
@@ -210,6 +214,18 @@ describe('managed quota server lifecycle and coherent reads', () => {
     });
     await expect(start({ execute: true, workspace, signal: controller.signal })).rejects.toThrow(/cancelled/);
     expect(f.created).not.toHaveBeenCalled(); expect(existsSync(f.marker)).toBe(false);
+  });
+  it('a synchronous host veto during execution preflight prevents collector startup and releases ownership', async () => {
+    const f = managedFixture(); const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
+    let stopped = false; const original = supervisors.createResourcePoolSupervisor;
+    vi.spyOn(supervisors, 'createResourcePoolSupervisor').mockImplementation(async (input) => {
+      expect(input.isExecutionStopped?.()).toBe(false);
+      const supervisor = await original(input); stopped = true; return supervisor;
+    });
+    await expect(start({ execute: true, workspace, isExecutionStopped: () => stopped })).rejects.toThrow(/cancelled/);
+    expect(f.created).not.toHaveBeenCalled(); expect(existsSync(f.marker)).toBe(false);
+    expect(existsSync(join(options.root, '.resource-quota-refresh.lock'))).toBe(false);
+    expect(existsSync(join(options.root, '.resource-console.lock'))).toBe(false);
   });
 
   it.each(['invalid-json', 'wrong-pool'])('rejects existing %s ledger before metadata contact', async (mode) => {

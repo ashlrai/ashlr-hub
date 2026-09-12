@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createResourcePoolSupervisor, ResourceSupervisorError, type ResourcePoolSupervisor,
   type ResourcePoolSupervisorOptions } from '../src/core/resources/pool-supervisor.js';
 import { runResourceTask } from '../src/core/resources/pool-runtime.js';
+import * as runtime from '../src/core/resources/pool-runtime.js';
 import type { ResourceConsoleTaskInput } from '../src/core/resources/console-types.js';
 import type { ResourceObservation, ResourcePool, ResourceWorker } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
@@ -102,6 +103,27 @@ async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reser
 }
 
 describe.skipIf(process.platform === 'win32')('durable foreground resource supervisor', () => {
+  it('withholds queued mission work while retaining observation, cancellation and recovery', async () => {
+    const f = await fixture(); let stop = false;
+    const supervisor = await f.start({ projects: [], isExecutionStopped: () => stop });
+    supervisor.setPaused(true); supervisor.submit(f.task()); stop = true; supervisor.setPaused(false);
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    expect(f.requests).toHaveLength(0);
+    expect(supervisor.projectFileBinding('default').workspace).toBe(f.workspace);
+    expect(() => supervisor.projectExecutionBinding('default')).toThrow('Host execution stopped');
+    expect(() => supervisor.submit(f.task('new'))).toThrow();
+    expect(supervisor.cancel('task-a').state).toBe('cancelled');
+    stop = false; supervisor.submit(f.task('resumed')); await settled(supervisor, 'resumed'); expect(f.requests).toHaveLength(1);
+  });
+  it('rechecks the mission veto after a real reservation and before transport dispatch', async () => {
+    const f = await fixture(); let stop = false; const actual = runtime.runResourceTask;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation(options => actual({ ...options, beforeWorkerDispatch: () => {
+      stop = true; return options.beforeWorkerDispatch?.() ?? true;
+    } }));
+    const supervisor = await f.start({ isExecutionStopped: () => stop }); supervisor.submit(f.task());
+    await settled(supervisor); expect(f.requests).toHaveLength(0);
+    expect(f.ledger().attempts).toHaveLength(1); expect(f.ledger().attempts[0].status).toBe('failed');
+  });
   it('queues gated aliases, uses independent capacity, and recovers without durable quota poisoning', async () => {
     const f = await fixture({ workers: [worker('one'), worker('two'), worker('three')] });
     f.bindings[0]!.capacityKey = 'shared'; f.bindings[1]!.capacityKey = 'shared';

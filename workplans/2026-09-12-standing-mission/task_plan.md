@@ -104,3 +104,41 @@ gates are terminal. Full autonomous mission execution remains active work.
 ### Worker availability
 
 Two workers saved implementation and independent tests, then reached their provider usage limit. Parent integrates and verifies saved work locally; no retries, account changes or quota bypass. The third worker completed a read-only mission-owner design using the existing console server.
+
+## Continuation: actual mission ownership
+
+Previous turn was verified progress: clean source 4a448852, 142 tests and build.
+Parent now implements the existing-console mission consumer. Workers remain
+quota-limited; prior Explore mappings are used, with current source rechecked.
+
+- [x] Carry a synchronous host execution veto through ordinary and engineering dispatch and setup publication.
+- [x] Persist mission identity, original absolute deadline, scope reservations and exact proposal/results.
+- [x] Implement automatic existing-console scope execution, drain, proof and delivered-tip rollover in source; full acceptance is still running.
+- [x] Test fresh and restarted operation with isolated accounting and local workers: actual two-scope acceptance passed in 465.89s.
+- [ ] Integrate CLI/operator documentation and verify local build.
+
+No new execution engine or provider SDK. Use explicit mission limits, the same
+resource runtime/ledger, deterministic identities, retained proposal history and
+existing stop semantics. Owner shutdown and historical completion are distinct.
+
+### Current verification and errors
+
+- Recovered worktree status on continuation; previous PTY handles were unavailable
+  and no corresponding processes remained. Their truncated results are not counted.
+- Fresh five-file gate passed 186 tests. After strict journal validation and
+  startup veto changes, three files passed 93 tests; with bounded observation
+  recovery, four files passed 109 tests. These groups overlap, not additive totals.
+- Fresh TypeScript and targeted ESLint checks pass.
+- Full mission acceptance first stopped after one generation with
+  `mission-console-request-refused`: evidence publication made a snapshot
+  temporarily unavailable. Added observation-only HTTP 503 waiting within the
+  original deadline; writes/authentication/quota refusals are not retried.
+- Initial fixture observation expiry exceeded the product five-minute maximum;
+  corrected fixture-owned local health refresh, not product limits.
+- Several exploratory file reads used wrong paths/globs; corrected using source
+  inventories. No user/provider configuration was read or changed by those errors.
+- Two delegated workers remain usage-limited; no retries or account switching.
+- Consolidated focused gate: 303 tests in nine files; separate engineering-owner
+  gate: 45 tests. Actual mission acceptance: one passing test. Total 349 distinct
+  tests across eleven files, with no real-account traffic. An additional assertion
+  for completed-chain replay under a pre-aborted signal is pending the final rerun.

@@ -2,7 +2,7 @@
 import { closeSync, constants, fsyncSync, lstatSync, openSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { canonicalEvidencePackJsonV3, loadExistingProvenanceKeyReadOnly } from '../foundry/provenance.js';
-import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { readKillSwitch } from '../sandbox/policy.js';
 import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
 import { fsyncDirectory } from '../util/durability.js';
@@ -20,6 +20,7 @@ import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResou
 import { readResourceJson, readResourcePoolHistory, resourcePoolStatus } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
+import { captureResourceExecutionVeto } from './execution-veto.js';
 import type { ResourceEngineeringAutonomousSetupOptions as Options, ResourceEngineeringAutonomousSetupPolicy as Policy,
   ResourceEngineeringAutonomousSetupPlan as Plan, ResourceEngineeringAutonomousSetupReport as Report } from './engineering-autonomous-setup-types.js';
 export type * from './engineering-autonomous-setup-types.js';
@@ -195,7 +196,13 @@ function writePrivate(file: string, value: unknown, guard: () => void): void {
   try { writeFileSync(fd, canonical(value) + '\n'); fsyncSync(fd); } finally { closeSync(fd); }
   fsyncDirectory(dirname(file)); guard();
 }
-export function prepareResourceEngineeringAutonomousSetup(input: Options & { expectedPlanDigest: string }): Report {
+export function prepareResourceEngineeringAutonomousSetup(input: Options & { expectedPlanDigest: string },
+  host: { isExecutionStopped?: () => boolean; beforePublication?: (locks: readonly LocalStoreLock[]) => void } = {}): Report {
+  const hostStopped = captureResourceExecutionVeto(host);
+  const publication = Object.getOwnPropertyDescriptor(host, 'beforePublication');
+  if (publication && (!Object.hasOwn(publication, 'value') || typeof publication.value !== 'function') ||
+      !publication && 'beforePublication' in host) fail('Invalid host publication guard');
+  const beforeHostPublication = publication?.value as ((locks: readonly LocalStoreLock[]) => unknown) | undefined;
   const supplied = data<Options & { expectedPlanDigest: string }>(input);
   if (!exact(supplied, ['recipe', 'policy', 'output', 'resourceRuntime', 'workspace', 'projectsFile', 'expectedPlanDigest']) ||
     typeof supplied.expectedPlanDigest !== 'string' || !HASH.test(supplied.expectedPlanDigest)) fail('Setup requires a checked plan digest');
@@ -203,6 +210,7 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
   const current = capture(options);
   if (current.plan.planDigest !== expectedPlanDigest) fail('Setup plan changed');
   if (current.completed) return report(current, verified(current).initialEnrollmentDigest, 'replayed');
+  if (hostStopped()) fail('Host setup publication stopped');
   const acquired = acquireLocalStoreLockWithOutcome(current.lockPath, 0, { anchorPath: current.runtime.root, exactPrivateStorage: true });
   if (acquired.state !== 'acquired') fail('Console is owned or unavailable');
   const locks = [acquired.lock];
@@ -216,9 +224,11 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
       locks.push(next.lock);
     }
     const guard = () => {
+      if (hostStopped()) fail('Host setup publication stopped');
       if (locks.some(lock => !ownsLocalStoreLock(lock)) || !matchesResourceConsoleProject(current.outputBinding)) fail('Setup ownership changed');
       const fresh = capture(options, true);
       if (fresh.plan.planDigest !== expectedPlanDigest || fresh.plan.holds.some(reason => reason.endsWith('-work-unresolved'))) fail('Setup inputs or resource ownership changed');
+      if (hostStopped()) fail('Host setup publication stopped');
     };
     guard();
     if (readdirSync(options.output).length || readResourceEngineeringPreparationRegistrations(current.runtime.root, current.policy.registrationScope).length) fail('Setup target changed before publication');
@@ -235,6 +245,9 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
         bindingsFile: current.runtime.bindingsPath, observationsFile: current.runtime.observationsPath,
         ...(current.runtime.quotaConfigPath ? { quotaConfigFile: current.runtime.quotaConfigPath } : {}), catalog,
         projects: fresh.preview.projects!, projectBindings: fresh.preview.bindings! });
+      const result = beforeHostPublication?.(Object.freeze([...locks]));
+      if (result instanceof Promise) void result.catch(() => {});
+      if (result !== undefined) fail('Host publication guard must be synchronous');
       guard();
     };
     const prepared = entries.prepare({ ...request, expectedPlanDigest: checked.plan.planDigest }, {

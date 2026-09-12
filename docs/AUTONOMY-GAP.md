@@ -121,8 +121,14 @@ joins the finished queue, scoped registrations, graph and evaluated-delivery
 proofs, generation/proposal receipts, successor lineage and evaluator custody.
 It identifies a unique delivered tip and preserves explicit stop responses.
 This is historical evidence, not an atomic publication seal or authority to
-create another operating window. The standing-mission owner and action-time
-rollover remain separate implementation work.
+create another operating window. The new foreground
+[standing-mission runner](RESOURCE-POOLS.md#run-a-bounded-standing-mission)
+composes existing console ownership with durable scope reservations, verified
+delivered-tip rollover and accounted next-objective proposals. It pins one original
+mission deadline and fixed per-scope evaluator/resource policy, honors host stop
+at dispatch/publication, and reconciles retained results rather than issuing new
+proposal identities. This source integration is not an installed resident service,
+an unlimited-history scheduler, or actual-account commissioning evidence.
 The generated command still needs actual account capacity and an appropriate
 fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md#installed-builtin-measurement-route)
 now has a closed installed `preparation-measurement-v1` launch route on

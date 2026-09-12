@@ -276,8 +276,8 @@ locks or repair history. Exit codes are `0` verified, `1` held/unavailable, and
 grants execution permission. `executionAuthorized` and `effectsExecuted` remain
 `false`. Unknown token or timing measurements remain unknown; a missing worker
 receipt cannot be treated as completed accounting. Evidence is sampled twice,
-not atomically sealed against another process. A future standing-mission owner
-must revalidate it at publication and apply its own retained limits, account
+not atomically sealed against another process. The standing-mission owner below
+revalidates it at publication and applies its retained limits, account
 reserves, stop state, and project policy. This command does not renew a finite
 queue, create the next setup, start a service, or deploy a branch.
 The current implementation performs synchronous private-file and Git proof
@@ -291,6 +291,64 @@ The second sample reconstructs those facts independently; nothing is cached
 across calls or campaigns. The ordinary setup check and completed setup replay
 remain independent of delivery: a prepared-but-unrun setup is valid setup
 evidence, not proof of completed engineering work.
+
+### Run a bounded standing mission
+
+The foreground mission runner composes the existing console: execute a scope,
+drain its workers, verify the delivered chain, request an accounted next objective,
+and prepare a new scope from the verified commit. It needs no per-objective **Run**
+action. The evaluator, permitted files, workers, account reserves and per-scope
+budgets remain fixed; model output supplies only a name/objective or a stop request.
+
+Create a private JSON configuration matching
+[`ResourceEngineeringMissionConfig`](../src/core/resources/engineering-mission-store.ts).
+`initial.setup` contains the **recipe and policy objects**, plus the absolute
+`output`, `resourceRuntime`, `workspace` and `projectsFile` paths used for an
+already prepared setup. Pin its retained `expectedPlanDigest`. Select an existing
+private `root` outside project and resource-control directories, one original
+ISO `deadlineAt`, `maxScopes` (1–64, including the initial scope), and
+`pollIntervalMs` (100–60000). The configuration has `schemaVersion: 1` and a
+stable `id`. It contains no credentials or console tokens.
+
+From the repository root, check the selected configuration without starting work:
+
+```sh
+node bin/ashlr resources pool engineering mission check \
+  --config /absolute/private/mission.json --json
+```
+
+The result includes `configDigest` and initial setup holds. A checked configuration
+does not prove live capacity. After selecting the account/work scope and resolving
+its holds, the following **effectful** command starts configured collectors and
+workers, consumes allowed resources, evaluates changes and creates local delivery
+branches. Replace `CHECKED_SHA256` with the exact check result:
+
+```sh
+node bin/ashlr resources pool engineering mission run \
+  --config /absolute/private/mission.json \
+  --expected-config-digest CHECKED_SHA256 --execute --json
+```
+
+Progress events go to stderr, including the current scope and loopback console
+URL; the final report goes to stdout. Exit `0` means checked or the configured
+mission finished, `1` means held/stopped/unavailable, and `2` means invalid arguments.
+Finished does not mean the broader product vision or production deployment is complete.
+
+SIGINT/SIGTERM, global KILL, deadline expiry, lost ownership or a `STOP` entry in
+the mission root prevent further execution and drain owned work. Existing account
+and queue pauses are not cleared. Immutable `mission-events` retain reservations,
+setup pins, original queue deadlines, completion proofs and exact proposal results.
+Rerun the same command/configuration to reconcile proven work; changing the deadline
+or scope cap is not a restart. A lost or uncertain proposal is not regenerated under
+a new identity. Temporary HTTP 503 **snapshot reads** wait within the original
+deadline; mutation failures, authentication refusals and quota denials do not use
+that retry path. Preserve incomplete setup or unresolved records for inspection.
+
+This is a foreground implementation, not an installed resident service or a
+commissioned account fleet. It retains existing finite history limits, performs
+synchronous offline proof checks between owners, and does not advance existing
+branches, push Git, publish packages, or deploy applications. Long-running native
+acceptance and provider-specific qualification remain separate release gates.
 
 ### Prepare and run objectives in the workspace
 

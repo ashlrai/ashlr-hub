@@ -163,6 +163,17 @@ function recordUnresolvedConsoleFixture(graphRoot: string): void {
   writeFileSync(join(directory, '00000001.json'), canonical({ ...body, trace }) + '\n', { mode: 0o600, flag: 'wx' });
 }
 describe('owned console engineering evidence', () => {
+  it('honors a changing host execution veto without disabling catalog reads or consuming launch identity', async () => {
+    const f = await ownerFixture(); let stopped = true;
+    const owner = createResourceConsoleEngineeringOwner({ ...f.options, isExecutionStopped: () => stopped });
+    try {
+      const request = { enrollmentId: 'engineering', expectedEnrollmentDigest: owner.catalog()[0]!.enrollmentDigest };
+      expect(() => owner.launch(request)).toThrow('Host engineering execution stopped');
+      expect(owner.snapshot('engineering').launched).toBe(false); expect(readdirSync(f.graphRoot)).toEqual([]);
+      expect(f.run).not.toHaveBeenCalled(); stopped = false;
+      expect(owner.launch(request).state).toBe('running'); owner.cancel('engineering');
+    } finally { await owner.close(); await f.supervisor.close(); }
+  });
   it.each([false, true])('projects continuation policy %s and observes its owned unresolved action without dispatch', async enabled => {
     const f = await ownerFixture();
     if (enabled) f.options.catalog.enrollments[0]!.host.allowPendingContinuation = true;

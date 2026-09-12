@@ -32,8 +32,11 @@ import { createEngineeringBackground } from '../resources/engineering-background
 import type { EngineeringBackground } from '../resources/engineering-background-types.js';
 import { createResourceEngineeringAutomaticAdmission } from '../resources/engineering-automatic-admission.js';
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from '../resources/engineering-successor-coordinator.js';
+import { captureResourceExecutionVeto } from '../resources/execution-veto.js';
 
 export interface ResourceConsoleServerOptions {
+  /** Host-only mission veto, never exposed as browser-configurable policy. */
+  isExecutionStopped?: () => boolean;
   root: string;
   poolFile: string;
   bindingsFile: string;
@@ -128,6 +131,8 @@ function sendSnapshot(res: ServerResponse, value: unknown, status = 200): void {
 
 /** One fixed pool; independent read and control capabilities. No default dashboard imports. */
 export async function startResourceConsoleServer(options: ResourceConsoleServerOptions): Promise<ResourceConsoleServerHandle> {
+  const hostStopped = captureResourceExecutionVeto(options);
+  if (hostStopped()) throw new Error('Host console execution stopped');
   const signal = options.signal;
   const root = validateUniverseConsoleRoot(options.root);
   const poolFile = validateUniverseConsoleRoot(options.poolFile);
@@ -195,7 +200,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     }
   }
   if (new Set(configuredWorkspaces).size !== configuredWorkspaces.length) throw new Error('Duplicate resource project workspace');
-  if (signal?.aborted) throw new Error('Resource console startup cancelled');
+  if (signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
   const pool = validateResourcePool(readResourceJson(poolFile));
   const bindings = validateResourceBindings(readResourceJson(bindingsFile), pool);
   if (engineeringSuccessorsConfig?.allowedWorkerIds.some(id => !pool.workers.some(worker => worker.id === id))) {
@@ -627,7 +632,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Resource console address unavailable');
     port = address.port; origin = `http://127.0.0.1:${port}`;
-    if (signal?.aborted) throw new Error('Resource console startup cancelled');
+    if (signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     if (quotaConfig || connectionsConfig) {
       // Only explicit quota collection creates this private control root. No
       // provider is contacted before configuration, ownership and bind succeed.
@@ -637,7 +642,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       } catch (error) {
         // Only a typed, cleanly released acquisition refusal may degrade into
         // observation mode. Cancellation and uncertain cleanup still fail startup.
-        if (signal?.aborted || !(error instanceof ResourceQuotaRefreshLeaseError) || !error.safeReadOnlyFallback ||
+        if (signal?.aborted || hostStopped() || !(error instanceof ResourceQuotaRefreshLeaseError) || !error.safeReadOnlyFallback ||
           error.code !== 'collector-owned' && error.code !== 'reconciliation-required' && error.code !== 'collector-unavailable') throw error;
         metadataCollector = { state: 'blocked', reasonCode: error.code,
           sampledAt: new Date().toISOString(),
@@ -645,6 +650,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
     }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
+      ...(Object.hasOwn(options, 'isExecutionStopped') ? { isExecutionStopped: hostStopped } : {}),
       ...(projects === undefined ? {} : { projects }),
       readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
         return quotaRefresher ? quotaRefresher.readObservations(base) : base; },
@@ -656,6 +662,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (publishedProjects !== undefined && typeof supervisor?.projectFileBinding === 'function') scope.workspaceFilesSupported = true;
     if ((engineeringCatalog || engineeringPreparationConfig) && supervisor) {
       engineering = createResourceConsoleEngineeringOwner({ ...(engineeringCatalog ? { catalog: engineeringCatalog } : {}),
+        isExecutionStopped: hostStopped,
         ...(engineeringPreparationConfig ? { registrationEnabled: true } : {}), supervisor, root,
         poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? { quotaConfigFile } : {}), signal,
         waitForResourceDrain: async () => {
@@ -674,7 +681,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           // Main-thread owner callbacks never synchronously wait on that worker;
           // HTTP controls and the durable queue keep their original ownership.
           engineeringBackground = await createEngineeringBackground({ preparation: preparationOptions,
-            owner: engineering, supervisor, isClosing: () => closing !== null, signal,
+            owner: engineering, supervisor, isClosing: () => closing !== null || hostStopped(), signal,
             onFault: () => { void close().catch(() => {}); } });
           engineeringPreparation = engineeringBackground;
         } else engineeringPreparation = createResourceConsoleEngineeringPreparation({ ...preparationOptions, owner: engineering });
@@ -688,7 +695,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
       if (engineeringSupervisionConfig?.autoAdmitPrepared && engineeringPreparation && engineeringSupervision) {
         automaticAdmission = createResourceEngineeringAutomaticAdmission({ preparation: engineeringPreparation,
-          supervision: engineeringSupervision, isClosing: () => closing !== null, onFatal: () => { void close().catch(() => {}); } });
+          supervision: engineeringSupervision, isClosing: () => closing !== null || hostStopped(), onFatal: () => { void close().catch(() => {}); } });
       }
       if (engineeringSuccessorsConfig && engineeringSuccessorsFile && successorProfile && engineeringBackground && engineeringSupervision) {
         await engineeringBackground.configureSuccessors({ root, configFile: engineeringSuccessorsFile,
@@ -703,7 +710,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         scope.engineeringSuccessorsSupported = true;
       }
     }
-    if (signal?.aborted) throw new Error('Resource console startup cancelled');
+    if (signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     if (quotaConfig || connectionsConfig) {
       // Execution ownership and all startup preflight must succeed before the
       // collector can schedule native metadata. Until then its workers are gated.
@@ -724,12 +731,12 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     }
     if (connectionsConfig && quotaLease) connectionMonitor = createResourceConnectionMonitor({ config: connectionsConfig, cwd: root,
       signal, assertOwnership: quotaLease!.assertOwnership, coordinator: metadataCoordinator! });
-    if (signal?.aborted) throw new Error('Resource console startup cancelled');
+    if (signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     signal?.addEventListener('abort', aborted, { once: true }); ready = true;
     engineeringSupervision?.start();
     automaticAdmission?.start();
     await engineeringSuccessors?.start();
-    if (closing || signal?.aborted) throw new Error('Resource console startup cancelled');
+    if (closing || signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
       scope: { ...scope }, close };
   } catch (error) { await close(); throw error; }

@@ -21,6 +21,7 @@ import { validateResourceBindings } from './worker.js';
 import { matchesResourceConsoleProject, validateResourceConsoleProjectBindings, type ResourceConsoleProjectBinding } from './console-projects.js';
 import type { ResourceConsoleProject } from './console-types.js';
 import { ResourceSupervisorError, type ResourcePoolSupervisor } from './pool-supervisor.js';
+import { captureResourceExecutionVeto } from './execution-veto.js';
 import type { ResourceConsoleEngineeringEnrollment, ResourceConsoleEngineeringJob, ResourceConsoleEngineeringLaunch,
   ResourceConsoleEngineeringReadiness, ResourceConsoleEngineeringReadinessReason } from './console-engineering-types.js';
 
@@ -29,6 +30,8 @@ export interface ResourceConsoleEngineeringCatalog {
   enrollments: Array<{ id: string; projectId: string; graphId: string; graphRoot: string; host: FirmEngineeringControlHost }>;
 }
 export interface ResourceConsoleEngineeringOwnerOptions {
+  /** Synchronous mission ownership/deadline veto, including already running work. */
+  isExecutionStopped?: () => boolean;
   catalog?: ResourceConsoleEngineeringCatalog;
   /** Host-only enrollment insertion; never enables launch or automatic supervision. */
   registrationEnabled?: true;
@@ -267,6 +270,7 @@ export function prepareResourceConsoleEngineeringEnrollments(options: {
 
 /** Construction/status never write graph roots or dispatch. Only explicit launch/cancel does. */
 export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEngineeringOwnerOptions): ResourceConsoleEngineeringOwner {
+  const hostStopped = captureResourceExecutionVeto(options);
   const registrationProperty = Object.getOwnPropertyDescriptor(options, 'registrationEnabled');
   if (registrationProperty && (!Object.hasOwn(registrationProperty, 'value') || registrationProperty.value !== true) ||
     !registrationProperty && 'registrationEnabled' in options) fail('INVALID_INPUT', 'Invalid engineering registration capability');
@@ -313,6 +317,7 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
   };
   const ownership = readEngineeringOwnership;
   const admit = (value: Entry, running = false) => {
+    if (hostStopped()) fail('UNAVAILABLE', 'Host engineering execution stopped');
     if (closing || signal?.aborted) fail('UNAVAILABLE', 'Engineering owner is closing');
     // Queue pause gates new launches, not work already running. Explicit cancel
     // is the durable stop operation; closing/ownership/project loss still veto.

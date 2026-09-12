@@ -19,6 +19,7 @@ import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResou
   validateResourceConsoleProjects, type ResourceConsoleProjectBinding } from './console-projects.js';
 import type { ResourceConsoleContextTurn, ResourceConsoleOutput, ResourceConsoleTaskInput, ResourceConsoleTranscript,
   ResourceConsoleProject, ResourceConsoleProjectInput, ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
+import { captureResourceExecutionVeto } from './execution-veto.js';
 
 export class ResourceSupervisorError extends Error {
   constructor(readonly code: 'INVALID_INPUT' | 'CONFLICT' | 'CAPACITY' | 'UNAVAILABLE' | 'NOT_FOUND', message: string) {
@@ -56,6 +57,8 @@ export interface ResourceConsoleDurableState {
 }
 type DurableState = ResourceConsoleDurableState;
 export interface ResourcePoolSupervisorOptions {
+  /** Host mission ownership/deadline veto; false is the only permitting result. */
+  isExecutionStopped?: () => boolean;
   root: string; pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
   projects?: ResourceConsoleProjectInput[];
   readObservations(): ResourceObservation[];
@@ -410,6 +413,8 @@ export function previewResourceConsoleProjects(options: {
 
 /** Scope is explicit and immutable; no input callback can alter the chosen worker bindings. */
 export async function createResourcePoolSupervisor(options: ResourcePoolSupervisorOptions): Promise<ResourcePoolSupervisor> {
+  const hostStopped = captureResourceExecutionVeto(options);
+  const hasHostVeto = Object.hasOwn(options, 'isExecutionStopped');
   let pool: ResourcePool; let bindings: ResourceBinding[];
   const root = options.root; const workspace = options.workspace;
   const configuredCatalogValue = options.projects;
@@ -610,7 +615,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
   function start(job: DurableJob, observations: ResourceObservation[], unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]): void {
     if (!job.input) throw new Error('Queued task input unavailable');
-    const initialProjectHold = projectHold(job.projectId);
+    const initialProjectHold = hostStopped() ? 'host-execution-stopped' : projectHold(job.projectId);
     if (initialProjectHold) { if (job.reason !== initialProjectHold) update(job.id, { reason: initialProjectHold }); return; }
     update(job.id, { state: 'dispatching', reason: 'dispatch-requested', workerId: null });
     // Publish the supervisor's irreversible intent before entering the runtime.
@@ -623,8 +628,8 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     let admissionProjectHold: string | null = null;
     owned.promise = runResourceTask({ root, pool, bindings, observations, task: input, signal: controller.signal,
       unavailableWorkerIds, quotaUnavailableWorkerIds,
-      ...(projectBindings ? { beforeWorkerDispatch: () => projectHold(job.projectId) === null, readAdmissionEvidence: () => {
-        admissionProjectHold = projectHold(job.projectId);
+      ...(projectBindings || hasHostVeto ? { beforeWorkerDispatch: () => !hostStopped() && projectHold(job.projectId) === null, readAdmissionEvidence: () => {
+        admissionProjectHold = hostStopped() ? 'host-execution-stopped' : projectHold(job.projectId);
         return { observations, unavailableWorkerIds: admissionProjectHold ? [...workerIds] : unavailableWorkerIds, quotaUnavailableWorkerIds };
       } } : {}) }).then((result) => {
       if (result.replayed || !result.receipt) dispatched.delete(job.id);
@@ -724,6 +729,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     },
     projectExecutionBinding(projectId) {
       ensureAvailable();
+      if (hostStopped()) throw new ResourceSupervisorError('UNAVAILABLE', 'Host execution stopped');
       if (state.paused) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor is paused');
       return supervisor.projectFileBinding(projectId);
     },
@@ -773,7 +779,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         }
         return publicJob(previous);
       }
-      const projectReason = projectHold(input.projectId);
+      const projectReason = hostStopped() ? 'host-execution-stopped' : projectHold(input.projectId);
       if (projectReason) throw new ResourceSupervisorError('UNAVAILABLE', projectReason);
       if (state.jobs.length >= MAX_RESOURCE_SUPERVISOR_JOBS || state.jobs.filter((job) => job.state === 'queued').length >= maxQueued) {
         throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor history or queue capacity reached');

@@ -146,3 +146,48 @@ A guessed acceptance filename was absent; actual file discovered with `rg` is
 `test/resource-engineering-setup-acceptance.test.ts`. No source change resulted.
 The continuation initially replaced prior tracked workplan content; parent
 restored the full HEAD text and appended this continuation, preserving history.
+
+## Standing-mission implementation continuation
+
+The Explore recommendation is now implemented in source: one foreground owner
+composes the existing console, with no second worker runtime or provider SDK.
+Immutable mission records retain the original configuration, reservations,
+prepared setup pins, queue deadlines, completion proofs and accounted proposal
+results. The CLI requires a checked configuration digest and explicit execution.
+
+Host-only synchronous vetoes now reach setup publication, ordinary admission and
+last-moment worker dispatch, engineering admission, background preparation and
+console startup. Only synchronous false permits execution; throwing/async or
+inherited/accessor callbacks cannot grant it. Historical reads and owned cleanup
+remain available. Setup publication receives actual in-process acquired lock
+capabilities, not serialized lock claims, for the fresh predecessor check.
+
+Restart journal payloads now validate their own shape and semantic limits before
+being accepted. Record order alone is insufficient. The runner additionally
+reconstructs deterministic setups/tasks and rereads delivered proof and exact
+proposal receipts before proceeding. Reconciliation of an already completed chain
+does not need an active execution clock; creating new intent or scope does.
+
+The first full fixture exposed a transient snapshot HTTP 503 after generation.
+The mission now retries only 503 observation reads within its original clock.
+It does not retry failed writes, 401/403, 429, malformed output or oversized output.
+Transport tests cover cancellation and deadline exhaustion during repeated reads.
+
+Current verification: 303 tests across nine files plus 45 distinct engineering
+owner tests pass (348 focused tests). TypeScript, targeted ESLint and source-mode
+documentation checks pass. Full fixture execution is still being observed; its
+first scope, restarted accounted proposal, owned-lock publication checks and
+second scope preparation/start have occurred. This is not yet a terminal gate.
+Proof verification between scopes is materially slower than fixture inference;
+retain this as a performance limitation, not a reason to skip proof checks.
+
+No actual account, quota allocation, provider, service, installer, remote Git,
+package publication or hosted-site state was changed. Existing agent quota
+failures were not retried or bypassed. All new worker traffic is test-owned
+loopback traffic with an isolated home and temporary Git repositories.
+
+The full mission gate (session 64689) terminated successfully: one test,
+465.89s test time. It verifies three generations, two within-scope proposals and
+one mission-level proposal, six completed receipts, exact delivered-tip seed
+lineage, unchanged account allocation/exclusions, and released owner locks.
+The subsequent completed-chain replay assertion is pending a fresh built rerun.

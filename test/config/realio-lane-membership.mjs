@@ -43,6 +43,8 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/resource-engineering-mission-store.test.ts', // private immutable mission records and configuration replay
+  'test/resource-engineering-mission-acceptance.test.ts', // two actual mission scopes, local transport, delivery and restart
   'test/resource-engineering-setup-evidence.test.ts', // private Git setup receipts and fresh metadata reconstruction
   'test/universe-seed-batch.test.ts', // real SHA1/SHA256 seed materialization and bounded blob batches
   'test/resource-quota-scopes.test.ts', // scoped quota collection, native fixtures and console IPC

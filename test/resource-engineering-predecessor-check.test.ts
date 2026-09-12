@@ -253,4 +253,10 @@ describe('predecessor completion joins over mocked host evidence', () => {
     const input = Object.defineProperty({ ...f.options }, 'setup', { enumerable: true, get: getter });
     held(input, 'inputs'); expect(getter).not.toHaveBeenCalled(); expect(hooks.setup).not.toHaveBeenCalled();
   });
+  it('does not recognize JSON-shaped lock tokens as acquired host ownership', () => {
+    const f = fixture();
+    const result = checkResourceEngineeringPredecessor(f.options, [{ path: '/fixture/ledger/.pool.lock', token: 'forged', dev: 1n, ino: 2n }]);
+    expect(result).toMatchObject({ status: 'held', reasons: ['inputs-evidence-unavailable'], executionAuthorized: false });
+    expect(hooks.setup).not.toHaveBeenCalled();
+  });
 });

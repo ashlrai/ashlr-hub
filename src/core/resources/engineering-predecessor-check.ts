@@ -2,6 +2,7 @@
 import { lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
+import { ownsLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { canonical, digest } from '../universe/artifacts.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { assertCampaignSeedEvaluatorsSettled, campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
@@ -46,7 +47,8 @@ function absent(file: string): void {
 /** A bounded, double-read join, NOT an atomic seal or dispatch permission. A mission
  * must still own its execution scope and revalidate at successor publication.
  * Global stops and quota policy remain enforced by the existing action-time gates. */
-export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPredecessorCheckOptions): ResourceEngineeringPredecessorCheck {
+export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPredecessorCheckOptions,
+  ownedResourceLocks: readonly LocalStoreLock[] = []): ResourceEngineeringPredecessorCheck {
   const report: ResourceEngineeringPredecessorCheck = { schemaVersion: 1, scope: 'predecessor-completion-evidence-only',
     status: 'held', reasons: [], sampledAt: new Date().toISOString(), executionAuthorized: false,
     effectsExecuted: false, providerContacted: false, evidenceDigest: null, tip: null, continuation: null };
@@ -55,6 +57,10 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
     const json = canonicalEvidencePackJsonV3(input);
     requireEvidence(json !== null && Buffer.byteLength(json) <= 256 * 1024);
     const options = JSON.parse(json) as ResourceEngineeringPredecessorCheckOptions;
+    // Only in-process acquired capabilities are recognized by the lock module's
+    // private registry. JSON-shaped copies and locks on unrelated scopes fail.
+    requireEvidence(Array.isArray(ownedResourceLocks) && ownedResourceLocks.length <= 3 && ownedResourceLocks.every(lock => ownsLocalStoreLock(lock)));
+    const locks = [...ownedResourceLocks];
     requireEvidence(options && Object.keys(options).sort().join(',') === 'expectedDeadlineAt,expectedPlanDigest,setup' &&
       typeof options.expectedPlanDigest === 'string' && /^[a-f0-9]{64}$/.test(options.expectedPlanDigest) &&
       typeof options.expectedDeadlineAt === 'string' && Number.isFinite(Date.parse(options.expectedDeadlineAt)) &&
@@ -64,12 +70,18 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       const setupEvidence = readResourceEngineeringAutonomousSetupEvidence(options.setup);
       const plan = setupEvidence.plan;
       requireEvidence(plan.planDigest === options.expectedPlanDigest && plan.initialEnrollmentDigest);
+      const runtime = validateResourceGenerationRuntime(readResourceJson(options.setup.resourceRuntime));
+      const permittedLocks = ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock'].map(name => join(runtime.root, name));
+      requireEvidence(new Set(locks.map(lock => lock.path)).size === locks.length &&
+        locks.every(lock => permittedLocks.includes(lock.path) && ownsLocalStoreLock(lock)));
+      const owned = (name: string) => locks.some(lock => lock.path === join(runtime.root, name) && ownsLocalStoreLock(lock));
       // A global kill or exhausted allowance does not erase historical completion.
       // Outstanding work and ownership, however, cannot establish a settled predecessor.
-      requireEvidence(!plan.holds.some(reason => reason.endsWith('-ownership-present') || reason.endsWith('-work-unresolved') ||
-        reason === 'console-work-unresolved' || reason === 'ordinary-queued-work-retained'));
+      const ownedHolds = new Set([...(owned('.resource-console.lock') ? ['console-ownership-present'] : []),
+        ...(owned('.pool.lock') ? ['pool-ownership-present'] : []), ...(owned('.resource-quota-refresh.lock') ? ['quota-ownership-present'] : [])]);
+      requireEvidence(!plan.holds.some(reason => !ownedHolds.has(reason) && (reason.endsWith('-ownership-present') || reason.endsWith('-work-unresolved') ||
+        reason === 'console-work-unresolved' || reason === 'ordinary-queued-work-retained')));
       stage = 'configuration';
-      const runtime = validateResourceGenerationRuntime(readResourceJson(options.setup.resourceRuntime));
       const pool = validateResourcePool(readResourceJson(runtime.poolPath));
       const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
       const poolDigest = hash({ pool, bindings });
@@ -140,7 +152,9 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
         return { graph, source, outcomes };
       });
       stage = 'custody';
-      for (const name of ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock', '.resource-quota-refresh-pending.json']) absent(join(runtime.root, name));
+      for (const name of ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock', '.resource-quota-refresh-pending.json']) {
+        if (!owned(name)) absent(join(runtime.root, name));
+      }
       absent(join(runtime.root, 'engineering-supervision', supervision.id, '.execution.lock'));
       absent(join(runtime.root, 'engineering-successors', successor.supervisionId, '.execution.lock'));
       const accounting = resourcePoolStatus(runtime.root, pool, bindings, []);
@@ -200,7 +214,7 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
         continuation: stopped.has(tipId) ? 'stop-requested' as const : 'eligible' as const };
     };
     const first = sample(); const second = sample();
-    stage = 'stability'; requireEvidence(hash(first) === hash(second));
+    stage = 'stability'; requireEvidence(hash(first) === hash(second) && locks.every(lock => ownsLocalStoreLock(lock)));
     report.evidenceDigest = hash(second); report.tip = second.tip; report.continuation = second.continuation; report.status = 'verified';
   } catch { report.reasons = [`${stage}-evidence-unavailable`]; }
   return report;
