@@ -9,7 +9,7 @@ const io = vi.hoisted(() => ({
   readSync: vi.fn<(fd: number, buffer: Buffer, offset: number, length: number, position: number) => number>(),
 }));
 vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), ...io }));
-import { cmdUniversePreparationMeasurement } from '../src/cli/universe-preparation-measurement.js';
+import { cmdUniversePreparationMeasurement, readPreparationEvidenceFile } from '../src/cli/universe-preparation-measurement.js';
 
 const input = '/fixture/report.json', limit = 24 * 1024;
 function complete() {
@@ -42,6 +42,18 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('read-only preparation measurement CLI', () => {
+  it('reuses the bounded reader for a larger calibration descriptor without changing report limits', () => {
+    bytes = Buffer.alloc(2 * 1024 * 1024, 32);
+    expect(readPreparationEvidenceFile(input, 2 * 1024 * 1024)).toHaveLength(2 * 1024 * 1024);
+    expect(io.readSync.mock.calls.at(-1)![4]).toBe(2 * 1024 * 1024);
+    expect(io.closeSync).toHaveBeenCalledExactlyOnceWith(7);
+  });
+
+  it.each([0, -1, Number.NaN, 2 * 1024 * 1024 + 1])('rejects unsupported evidence byte cap %j before I/O', maximum => {
+    expect(() => readPreparationEvidenceFile(input, maximum)).toThrow('Invalid evidence limit');
+    for (const mock of Object.values(io)) expect(mock).not.toHaveBeenCalled();
+  });
+
   it.each([
     [], ['--json'], ['report.json'], ['--input'], ['--input', '--json'], ['--input', 'relative.json'], ['--input', '/'],
     ['--input', '/fixture/../report.json'], ['--input', '/fixture/\nreport'], ['--input', `/${'x'.repeat(4096)}`],

@@ -2626,6 +2626,81 @@ and 2 for invalid arguments. `--report` can emit valid failed or held diagnostic
 bytes while returning 1. If no valid report is retained, stdout stays empty and
 a fixed error goes to stderr. A nonzero exit never authorizes replaying the work.
 
+### Calibrate and compare retained preparation evidence
+
+Use this read-only path to determine whether a captured preparation-source change
+reduced broker processes without hiding a per-region regression. It does not run
+captures, select an elite, install a scoring evaluator, or deliver code.
+
+Prerequisites are three distinct, completed baseline capture IDs in one private
+Universe, its unchanged frozen seed, and the expected SHA-256 of
+`src/core/resources/engineering-preparation.ts`. Each capture must retain an
+identity-verified, group-exit-confirmed, full passing report. The three captures
+must agree on artifact, revision, evaluator, manifest, comparator and all fifteen
+measurement regions. Replaying one capture three times is not three attempts;
+identical report hashes across distinct attempts are expected for deterministic
+counts.
+
+```sh
+ashlr universe preparation-measurement-calibrate hub-baseline \
+  --root /absolute/private/universe \
+  --capture baseline-001 --capture baseline-002 --capture baseline-003 \
+  --expected-source-digest <64-lowercase-hex-sha256> --json
+```
+
+Replace the digest placeholder before running. JSON stdout is a deterministic
+calibration descriptor containing the baseline file inventory, workload and native
+tool identities, capture provenance hashes, scenario vector and process total.
+Saving stdout to a file is a separate caller-owned write; the command itself
+does not create files. The descriptor omits private capture and bundle directories
+and report prose, but retains native executable paths and repository-relative
+inventory. Keep it private if those names reveal sensitive project structure.
+
+Register and capture an explicitly chosen candidate as a separate Universe seed
+using the existing registration and capture procedures. This comparison command
+does not prepare that candidate or request new execution:
+
+```sh
+ashlr universe preparation-measurement-compare hub-candidate \
+  --root /absolute/private/universe --capture candidate-001 \
+  --calibration /absolute/private/baseline-calibration.json --json
+```
+
+The supplied calibration file must be regular, nonsymlink UTF-8 JSON at a normalized
+absolute path, bounded to 2 MiB. Comparison verifies retained candidate custody,
+matching workload implementation and native identities, and the current seed
+inventory against its recorded artifact. Only preparation-source content may
+differ from the baseline: added, removed, executable-mode-changed, or unrelated
+modified files make the candidate non-comparable. Candidate and baseline may use
+different Universe manifests; matching workload and bounded artifact scope, not
+matching experiment names, govern this diagnostic comparison.
+
+The process total adds four leaf and eleven workflow request regions once. Blob
+counts are subsets and fixture-owned process groups are separate. Any increase in
+a region's process **or** blob count is `regressed`, even if the aggregate improves.
+`improved` requires a strictly lower total and no region regression; equal totals
+without regressions are `unchanged`. Failed or partial reports are never promoted
+to an improvement. JSON retains exact region deltas; positive means more processes.
+
+Exit status is 0 for emitted calibration or an improved/unchanged comparison,
+1 for regressed, non-comparable or unavailable evidence, and 2 for invalid options.
+Failures use fixed reason codes, never retry work, and never disclose raw exception
+messages. Verify the indicated evidence or mismatch rather than treating a failure
+as permission to run another capture.
+
+Both SDK APIs are exported from `@ashlr/hub/universe`:
+`calibratePreparationMeasurements` and `compareCapturedPreparationMeasurement`.
+The pure `comparePreparationMeasurements` and `comparePreparationScenarioVectors`
+helpers perform arithmetic only; they do not establish capture provenance.
+
+**Trust boundary:** a caller-supplied descriptor is diagnostic input, not installed
+acceptance authority. Parsing validates structure and internal consistency, not
+authorship. Historical capture identity is not current provider health. These
+commands do not yet qualify arbitrary candidates for autonomous scoring: installed
+baseline pins, candidate-linked during-call mutation controls, and a commissioned
+end-to-end acceptance run remain necessary. The existing campaign and delivery
+rules are unchanged.
+
 ### Built-in trial shutdown custody
 
 New ordinary trials using the installed builtin also retain a private dispatch

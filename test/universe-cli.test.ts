@@ -6,10 +6,14 @@ const core = vi.hoisted(() => ({
 }));
 const demo = vi.hoisted(() => ({ runUniverseDemo: vi.fn() }));
 const measurement = vi.hoisted(() => ({ cmdUniversePreparationMeasurement: vi.fn() }));
+const calibration = vi.hoisted(() => ({ cmdUniversePreparationMeasurementCalibrate: vi.fn() }));
+const candidateComparison = vi.hoisted(() => ({ cmdUniversePreparationMeasurementCompare: vi.fn() }));
 const files = vi.hoisted(() => ({ readFileSync: vi.fn() }));
 vi.mock('../src/core/universe/index.js', () => core);
 vi.mock('../src/cli/universe-demo.js', () => demo);
 vi.mock('../src/cli/universe-preparation-measurement.js', () => measurement);
+vi.mock('../src/cli/universe-preparation-measurement-calibrate.js', () => calibration);
+vi.mock('../src/cli/universe-preparation-measurement-compare.js', () => candidateComparison);
 vi.mock('node:fs', () => files);
 import { cmdUniverse } from '../src/cli/universe.js';
 
@@ -71,6 +75,18 @@ describe('Universe CLI', () => {
     expect(measurement.cmdUniversePreparationMeasurement).toHaveBeenCalledExactlyOnceWith(['--help']);
     for (const mock of Object.values(core)) expect(mock).not.toHaveBeenCalled();
     expect(files.readFileSync).not.toHaveBeenCalled(); expect(output).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1, 2])('routes calibration and captured comparison before generic parsing: %i', async code => {
+    const args = ['specific', '--root', '/private', '--capture', 'one', '--json'];
+    calibration.cmdUniversePreparationMeasurementCalibrate.mockResolvedValue(code);
+    candidateComparison.cmdUniversePreparationMeasurementCompare.mockResolvedValue(code);
+    expect(await cmdUniverse(['preparation-measurement-calibrate', ...args])).toBe(code);
+    expect(await cmdUniverse(['preparation-measurement-compare', ...args])).toBe(code);
+    expect(calibration.cmdUniversePreparationMeasurementCalibrate).toHaveBeenCalledExactlyOnceWith(args);
+    expect(candidateComparison.cmdUniversePreparationMeasurementCompare).toHaveBeenCalledExactlyOnceWith(args);
+    for (const mock of Object.values(core)) expect(mock).not.toHaveBeenCalled();
+    expect(files.readFileSync).not.toHaveBeenCalled(); expect(demo.runUniverseDemo).not.toHaveBeenCalled();
   });
 
   it('reports missing requested experiments, rather than a misleading empty success', async () => {

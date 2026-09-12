@@ -77,3 +77,11 @@ export type * from './integration-handoff-types.js';
 export { buildUniverseCampaignComparison } from './comparison.js';
 export { readUniverseCampaignComparison } from './comparison-reader.js';
 export type * from './comparison-types.js';
+export { calibratePreparationMeasurements, parsePreparationMeasurementCalibration,
+  MAX_PREPARATION_CALIBRATION_BYTES } from './preparation-measurement-calibration.js';
+export type { PreparationMeasurementCalibration, PreparationMeasurementCalibrationRequest } from './preparation-measurement-calibration.js';
+export { comparePreparationMeasurements, comparePreparationScenarioVectors,
+  extractPreparationScenarioVector } from './preparation-measurement-comparison.js';
+export type { PreparationMeasurementComparison, PreparationScenarioCount, PreparationScenarioDelta } from './preparation-measurement-comparison.js';
+export { compareCapturedPreparationMeasurement } from './preparation-measurement-candidate-comparison.js';
+export type { CapturedPreparationMeasurementComparison, CapturedPreparationMeasurementComparisonRequest } from './preparation-measurement-candidate-comparison.js';

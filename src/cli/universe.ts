@@ -33,6 +33,10 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
                                Inspect diagnostic measurements (read-only; no score)
   preparation-measurement-capture <id> --root <absolute> --capture <safe id>
                                Run and retain one installed diagnostic (no score)
+  preparation-measurement-calibrate <id> --root <absolute> --capture <id1> --capture <id2> --capture <id3> --expected-source-digest <sha256>
+                               Calibrate three retained captures (read-only; no score)
+  preparation-measurement-compare <id> --root <absolute> --capture <id> --calibration <absolute JSON>
+                               Compare a captured candidate (read-only; no acceptance)
   help                         Show this help
 
 Candidate and evaluator commands run with network access denied. An optional
@@ -164,6 +168,14 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'preparation-measurement-calibrate') {
+    const { cmdUniversePreparationMeasurementCalibrate } = await import('./universe-preparation-measurement-calibrate.js');
+    return cmdUniversePreparationMeasurementCalibrate(args.slice(1));
+  }
+  if (args[0] === 'preparation-measurement-compare') {
+    const { cmdUniversePreparationMeasurementCompare } = await import('./universe-preparation-measurement-compare.js');
+    return cmdUniversePreparationMeasurementCompare(args.slice(1));
+  }
   if (args[0] === 'preparation-measurement-capture') {
     const { cmdUniversePreparationMeasurementCapture } = await import('./universe-preparation-measurement-capture.js');
     return cmdUniversePreparationMeasurementCapture(args.slice(1));

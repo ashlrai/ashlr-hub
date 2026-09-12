@@ -42,21 +42,22 @@ function sameFile(before: Stats, after: Stats): boolean {
 }
 
 /** Descriptor reads are bounded independently of the initial size observation. */
-function readReport(file: string): string {
+export function readPreparationEvidenceFile(file: string, limit = LIMIT): string {
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 2 * 1024 * 1024) throw new Error('Invalid evidence limit');
   let fd: number | undefined;
   try {
     const before = lstatSync(file);
-    if (!before.isFile() || before.isSymbolicLink() || !Number.isSafeInteger(before.size) || before.size < 1 || before.size > LIMIT) throw new Error();
+    if (!before.isFile() || before.isSymbolicLink() || !Number.isSafeInteger(before.size) || before.size < 1 || before.size > limit) throw new Error();
     fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
     if (!sameFile(before, fstatSync(fd))) throw new Error();
-    const bytes = Buffer.alloc(LIMIT + 1); let length = 0;
+    const bytes = Buffer.alloc(limit + 1); let length = 0;
     while (length < bytes.length) {
       const count = readSync(fd, bytes, length, bytes.length - length, length);
       if (!Number.isSafeInteger(count) || count < 0 || count > bytes.length - length) throw new Error();
       if (count === 0) break;
       length += count;
     }
-    if (length > LIMIT || length !== before.size || !sameFile(before, fstatSync(fd)) || !sameFile(before, lstatSync(file))) throw new Error();
+    if (length > limit || length !== before.size || !sameFile(before, fstatSync(fd)) || !sameFile(before, lstatSync(file))) throw new Error();
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, length));
   } finally { if (fd !== undefined) closeSync(fd); }
 }
@@ -90,7 +91,7 @@ export async function cmdUniversePreparationMeasurement(args: string[]): Promise
   }
   if (selected.help) { console.log(USAGE); return 0; }
   try {
-    const summary = summarizePreparationMeasurementReport(parsePreparationMeasurementReport(readReport(selected.input!)));
+    const summary = summarizePreparationMeasurementReport(parsePreparationMeasurementReport(readPreparationEvidenceFile(selected.input!)));
     console.log(selected.json ? JSON.stringify({ schemaVersion: 1, kind: 'preparation-measurement-summary', scope: 'diagnostic-only', ...summary }) : human(summary));
     return summary.reportedChecksSatisfied ? 0 : 1;
   } catch {

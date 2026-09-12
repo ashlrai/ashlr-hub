@@ -81,6 +81,18 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: '{schemaVersion:1,kind:"preparation-measurement-summary",scope:"diagnostic-only",...PreparationMeasurementSummary}',
   },
   {
+    usage: 'ashlr universe preparation-measurement-calibrate <id> --root <absolute> --capture <id1> --capture <id2> --capture <id3> --expected-source-digest <sha256> --json',
+    description: 'Read three settled captures and their frozen seed to emit a repeatable diagnostic calibration. No execution, installed scoring authority or acceptance.',
+    safety: 'read',
+    jsonShape: 'PreparationMeasurementCalibration',
+  },
+  {
+    usage: 'ashlr universe preparation-measurement-compare <id> --root <absolute> --capture <id> --calibration <absolute-json> --json',
+    description: 'Compare retained candidate evidence to caller-supplied calibration after workload and full artifact scope checks. No scoring, selection, execution or delivery.',
+    safety: 'read',
+    jsonShape: 'CapturedPreparationMeasurementComparison',
+  },
+  {
     usage: 'ashlr universe portfolio plan --manifest <file.json> [--root <path>] --json',
     description: 'Read explicit campaign dependencies, ordering frontier, blocker roots, structural layers and downstream impact without execution. Observation only; not worker or delivery readiness, and declared priority is unchanged.',
     safety: 'read',
@@ -531,6 +543,8 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'universe campaign check <id> --root <absolute> [--json]', desc: 'Read recorded recovery evidence only; exit 0 can include held or terminal snapshots and never grants permission to resume.', topic: 'autonomy' },
   { cmd: 'universe resources check --resource-runtime <private-absolute.json> [--json]', desc: 'Check explicit local resource configuration without provider contact; validity is not authentication, quota or campaign admission.', topic: 'autonomy' },
   { cmd: 'universe preparation-measurement --input <absolute-report.json> [--json]', desc: 'Read reported preparation checks and counts from one explicit file; diagnostic only, not a score or acceptance evidence. No store discovery, execution or provider calls.', topic: 'autonomy' },
+  { cmd: 'universe preparation-measurement-calibrate <id> --root <absolute> --capture <id1> --capture <id2> --capture <id3> --expected-source-digest <sha256> [--json]', desc: 'Calibrate three retained diagnostic captures against their frozen seed; no execution or acceptance.', topic: 'autonomy' },
+  { cmd: 'universe preparation-measurement-compare <id> --root <absolute> --capture <id> --calibration <absolute-json> [--json]', desc: 'Compare a captured candidate with full artifact scope and region regression checks; diagnostic only.', topic: 'autonomy' },
   { cmd: 'universe campaign supervise <id> [id ...] --root <absolute> --max-duration-ms <N> [--delivery-plan <private-absolute.json>]', desc: 'Bounded foreground supervision of a fixed queue; optional plan reconciles completed local branch deliveries without rerunning workers.', topic: 'autonomy' },
   { cmd: 'universe deliver <id> --trial <elite-trial-id> --branch codex/<name>', desc: 'Explicitly write the exact current elite to a local branch; no checkout change, merge, push or deployment.', topic: 'autonomy' },
   { cmd: 'universe deliveries <id> [--root <path>] [--json]', desc: 'Read local delivery receipts; pending/degraded evidence is not completed or verified delivery.', topic: 'autonomy' },
