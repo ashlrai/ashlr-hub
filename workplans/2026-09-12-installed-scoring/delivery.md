@@ -2,6 +2,14 @@
 
 ## Implemented, not commissioned
 
+Final local integration result:clean primary build at e732a824passed; all nine
+evaluator assets retain qualified25d57874 identity. Combined account/runtime
+regression passed360tests andUI regression421tests, with no skips. Web types,
+docs and lane checks passed. The native handles below are terminal. See
+`../2026-09-12-account-integration/integration-verification.json`. Global stop
+and legacy collector custody remain activation blockers; no provider or fleet
+was started. Earlier pending-build wording below is retained chronology only.
+
 Current integration update:primary native73003finished489tests/17files/zero skips
 in3042.59seconds; separate current/stale packaged controls3245passed4cases with
 one explicitly filtered full-workload case. Exact receipts are in

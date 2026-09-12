@@ -14,7 +14,7 @@ identify the shortest real path to account operation.
 - [x] Fix isolated native test evidence retention and independently review it.
 - [x] Run the four missing same-call native stale-result controls against the frozen bundle.
 - [x] Integrate Spark, inspection and cleanup changes after the gate terminates.
-- [ ] Run combined local acceptance and retain exact remaining activation blockers.
+- [x] Run combined local acceptance and retain exact remaining activation blockers.
 
 ## Decisions
 
@@ -27,6 +27,9 @@ identify the shortest real path to account operation.
 
 - Entire resume found no checkpoint on codex/spark-enrollment-preparation.
 - A discovery command used a nonexistent shell glob; rerun with rg file discovery.
+- Stop-policy discovery repeated the glob error; corrected using file discovery.
+- A documentation patch used out-of-order hunks and was rejected without changes;
+  reread the file and reapplied in source order.
 - A source inspection preceded new agent file publication; missing helper paths
   were informational, then reviewed after publication.
 - Full isolated build42583 completed TypeScript, assets, builtin and257-module web
@@ -40,6 +43,15 @@ identify the shortest real path to account operation.
   registry request or validator relaxation.
 
 ## Status
+
+Complete local integration at e732a824. Primary build73726passed with a clean Git
+identity and unchanged nine-file evaluator25d57874. Account regression64003passed
+360tests/16files/zero skips46.58s; web21852passed421tests/4files/zero skips5.01s;
+web types1687, docs, lane and independent integration review passed. See
+integration-verification.json. No native handles remain live. The global stop
+and legacy v1 pending marker remain present on a fresh read-only inspection;
+no ledger migration, account policy change, provider work or deployment occurred.
+Earlier live/pending integration notes below are retained chronology only.
 
 Current:primary73003is terminal0 with489tests/17files/zero skips3042.59s.
 Primary3245is terminal0 with4passed/1filtered362.58s. Source commits were then

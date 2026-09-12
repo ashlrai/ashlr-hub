@@ -3,8 +3,11 @@
 The Spark preparation, passive collector inspection and test cleanup fix are
 integrated locally on primary throughcfbbd491. The original native acceptance
 finished before integration:489tests/17files/zero skips3042.59s on73003. The
-four separate stale-result controls passed on3245. Primary rebuild and focused
-combined acceptance are the remaining local integration steps.
+four separate stale-result controls passed on3245. The clean primary rebuild at
+e732a824passed on73726 and retained all nine qualified evaluator asset hashes.
+Combined primary acceptance passed360account/runtime tests and421UI tests, with
+zero skips. Web types, docs, lane and independent review passed. Exact evidence
+is in`integration-verification.json`; source integration is complete locally.
 
 Fixed one independently identified native test cleanup defect: each actual
 invocation now owns a cleanup ticket. Missing settlement, thrown dispatch and
@@ -36,6 +39,10 @@ These tests and the build do not prove real calibration, quota freshness, accoun
 commissioning, accepted engineering work or production deployment.
 
 ## Operational path
+
+Fresh read-only inspection at2026-09-12T10:52:31.575Z confirmed the global stop
+healthy/active and the collector record pending/v1/legacy-owner-evidence-missing.
+No automatic recovery was attempted. There are no live native validation handles.
 
 Use the existing [pool migration procedure](../../docs/RESOURCE-POOLS.md) and
 quota-scope access API; no new scheduler is needed. Resolve collector custody,

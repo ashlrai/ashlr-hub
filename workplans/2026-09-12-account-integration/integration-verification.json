@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "scope": "integrated-local-source-not-activated",
+  "checkout": "/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00",
+  "branch": "auto/p00",
+  "sourceCommit": "e732a82459df41022771b0ae5ac928f863b94f5c",
+  "build": { "session": 73726, "exitCode": 0, "recordedRevision": "e732a82459df41022771b0ae5ac928f863b94f5c", "dirty": false, "webModules": 257 },
+  "evaluator": { "digest": "25d5787412e177238745216d259a9167768ca6460bfed126cc453eb714d0f953", "allNineQualifiedAssetHashesUnchanged": true },
+  "accountRegression": { "session": 64003, "exitCode": 0, "files": 16, "passed": 360, "skipped": 0, "durationSeconds": 46.58 },
+  "webRegression": { "session": 21852, "exitCode": 0, "files": 4, "passed": 421, "skipped": 0, "durationSeconds": 5.01 },
+  "webTypes": { "session": 1687, "exitCode": 0 },
+  "documentationCheck": "passed",
+  "laneCheck": { "realIoFiles": 347, "unitFiles": 708, "unclassified": 0 },
+  "independentIntegrationReview": "no-concrete-findings",
+  "observedRuntime": {
+    "sampledAt": "2026-09-12T10:52:31.575Z",
+    "globalStop": { "state": "active", "sourceState": "healthy" },
+    "collector": { "state": "pending", "markerVersion": 1, "reasonCode": "legacy-owner-evidence-missing", "recoveryAttempted": false }
+  },
+  "effects": { "ledgerMigrated": false, "accountPolicyChanged": false, "providersContacted": false, "serviceActivated": false, "remotePublished": false },
+  "exclusions": ["genuine scoring calibration", "accepted autonomous engineering work", "live quota readiness", "account commissioning", "production deployment"]
+}
