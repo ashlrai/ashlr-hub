@@ -10,6 +10,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { artifactDigest, copyArtifact, freezeArtifact } from '../src/core/universe/artifacts.js';
 import { initUniverse, manifestRecord, parseEvaluation, universePath, validateUniverseManifest, type ManifestRecord } from '../src/core/universe/store.js';
 import { runFixedUniverseEvaluator } from '../src/core/universe/fixed-evaluator.js';
+import { parsePreparationMeasurementReport, type PreparationMeasurementReport } from '../src/core/universe/preparation-measurement-report.js';
+import { extractPreparationScenarioVector, PREPARATION_SCENARIO_KEYS } from '../src/core/universe/preparation-measurement-comparison.js';
 import type { UniverseManifest } from '../src/core/universe/types.js';
 import * as registry from '../src/core/universe/builtin-evaluator-registry.js';
 import * as verify from '../src/core/run/verify-commands.js';
@@ -17,23 +19,21 @@ import * as verify from '../src/core/run/verify-commands.js';
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const target = 'src/core/resources/engineering-preparation.ts';
 const supported = process.platform === 'darwin' && Number(process.versions.node.split('.')[0]) >= 24;
-const EVALUATION_TIMEOUT = 900000;
+const EVALUATION_TIMEOUT = 1_800_000;
+const TRIAL_TIMEOUT = 900_000;
+const EVALUATION_TEST_TIMEOUT = EVALUATION_TIMEOUT + 60_000;
 let root: string, repo: string, universe: string, revision: string, record: ManifestRecord;
 let preserveRoot = false;
 const source = readFileSync(join(repository, target), 'utf8');
-interface Workflow { name: 'manager' | 'successor'; processes: number; blobProcesses: number;
-  requests: Array<{ id: number; method: string; processes: number; blobProcesses: number }> }
-interface Measurement { schemaVersion: 1; kind: 'preparation-verification-measurement'; checksPassed: boolean;
-  workload: 'preparation-workflows-v1'; workflows: Workflow[];
-  metrics: Record<string, number>; diagnostics: Array<{ code: string; message: string }> }
+type Measurement = PreparationMeasurementReport;
 function measurement(output: string): Measurement {
   expect(Buffer.byteLength(output)).toBeLessThan(24 * 1024);
-  const value = JSON.parse(output) as Measurement;
-  expect(Object.keys(value).sort()).toEqual(['checksPassed', 'diagnostics', 'kind', 'metrics', 'schemaVersion', 'workflows', 'workload']);
+  const value = parsePreparationMeasurementReport(output);
+  expect(Object.keys(value).sort()).toEqual(['checksPassed', 'diagnostics', 'kind', 'metrics', 'qualifications', 'schemaVersion', 'workflows', 'workload']);
   expect(value.schemaVersion).toBe(1); expect(value.kind).toBe('preparation-verification-measurement');
   expect(typeof value.checksPassed).toBe('boolean');
-  expect(Object.values(value.metrics).every(number => Number.isSafeInteger(number) && number >= 0)).toBe(true);
-  expect(value.workload).toBe('preparation-workflows-v1'); expect(Array.isArray(value.workflows)).toBe(true);
+  expect(Object.values(value.metrics).every(number => number !== undefined && Number.isSafeInteger(number) && number >= 0)).toBe(true);
+  expect(value.workload).toBe('preparation-workflows-v2'); expect(Array.isArray(value.workflows)).toBe(true);
   expect(value.workflows.length).toBeLessThanOrEqual(2);
   expect(new Set(value.workflows.map(row => row.name)).size).toBe(value.workflows.length);
   for (const row of value.workflows) {
@@ -61,7 +61,7 @@ const git = (...args: string[]): string => execFileSync('git', ['-c', 'core.hook
 function manifest(id = 'builtin'): UniverseManifest {
   return { schemaVersion: 1, id, name: 'Installed preparation measurement', objective: 'Measure unchanged preparation behavior',
     seed: { repo, revision }, metric: { name: 'verification_processes', direction: 'minimize', minImprovement: 1 },
-    budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: EVALUATION_TIMEOUT, trialTimeoutMs: EVALUATION_TIMEOUT },
+    budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: EVALUATION_TIMEOUT, trialTimeoutMs: TRIAL_TIMEOUT },
     evaluation: { builtin: 'preparation-measurement-v1', timeoutMs: EVALUATION_TIMEOUT },
     variants: [{ id: 'fixture', niche: 'verification', hypothesis: 'Preserve the fixed checks', command: [process.execPath, '-e', 'process.exit(0)'] }] };
 }
@@ -115,7 +115,7 @@ function groupAbsent(pgid: number): boolean {
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
 }
 function completeWorkload(value: Measurement): void {
-  expect(value.checksPassed).toBe(true); expect(value.metrics.correctness_checks).toBe(19);
+  expect(value.checksPassed).toBe(true); expect(value.metrics.correctness_checks).toBe(23);
   expect(value.diagnostics).toEqual([]);
   expect(value.workflows.map(row => row.name)).toEqual(['manager', 'successor']);
   expect(value.workflows[0]!.requests.map(row => row.method)).toEqual([
@@ -129,11 +129,27 @@ function completeWorkload(value: Measurement): void {
   }
   expect(value.metrics.workflow_processes).toBe(value.workflows.reduce((sum, row) => sum + row.processes, 0));
   expect(value.metrics.workflow_blob_processes).toBe(value.workflows.reduce((sum, row) => sum + row.blobProcesses, 0));
+  const qualifications = value.qualifications!;
+  expect(qualifications.map(row => row.name)).toEqual(['runtime-drift', 'source-drift']);
+  qualifications.forEach((row, index) => {
+    expect(row.injections).toBe(1);
+    const method = index === 0 ? 'metadata' : 'successor-metadata';
+    expect(row.requests.map(request => [request.id, request.method])).toEqual([[1, method], [2, method]]);
+    for (const request of row.requests) expect(request.processes).toBeGreaterThan(0);
+    expect(row.processes).toBe(row.requests.reduce((sum, request) => sum + request.processes, 0));
+    expect(row.blobProcesses).toBe(row.requests.reduce((sum, request) => sum + request.blobProcesses, 0));
+  });
+  expect(value.metrics.qualification_processes).toBe(qualifications.reduce((sum, row) => sum + row.processes, 0));
+  expect(value.metrics.qualification_blob_processes).toBe(qualifications.reduce((sum, row) => sum + row.blobProcesses, 0));
+  const vector = extractPreparationScenarioVector(JSON.stringify(value));
+  expect(vector.map(row => row.key)).toEqual(PREPARATION_SCENARIO_KEYS);
+  expect(vector).toHaveLength(15);
+  expect(vector.reduce((sum, row) => sum + row.processes, 0)).toBe(value.metrics.verification_processes! + value.metrics.workflow_processes!);
   // Preserve the original leaf metric; workflow and fixture setup counts must
   // not silently change the meaning of verification_processes.
   expect(value.metrics.verification_processes).toBe(Object.entries(value.metrics)
     .filter(([key]) => key.startsWith('files_') && key.endsWith('_processes') && !key.endsWith('_blob_processes'))
-    .reduce((sum, [, count]) => sum + count, 0));
+    .reduce((sum, [, count]) => sum + count!, 0));
   expect(value.metrics.verification_processes).toBeGreaterThan(0);
   expect(value.metrics.fixture_owned_process_groups).toBeGreaterThan(0);
 }
@@ -153,6 +169,7 @@ function completeActivities(directory: string): void {
 describe.runIf(supported)('installed builtin preparation measurement', () => {
   it('registers explicit builtin identity and preserves exact immutable registration replay', () => {
     expect(record.manifest.evaluation).toEqual({ builtin: 'preparation-measurement-v1', timeoutMs: EVALUATION_TIMEOUT });
+    expect(record.manifest.budget.trialTimeoutMs).toBe(TRIAL_TIMEOUT);
     const before = artifactDigest(record.seedArtifact.path);
     expect(initUniverse(manifest(), { root: universe })).toEqual(record.manifest);
     expect(manifestRecord(universePath(universe, 'builtin'))).toEqual(record);
@@ -179,7 +196,9 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     }
     expect(results[1]!.metrics).toEqual(results[0]!.metrics);
     expect(results[1]!.workflows).toEqual(results[0]!.workflows);
-  }, 1860000);
+    expect(results[1]!.qualifications).toEqual(results[0]!.qualifications);
+    expect(extractPreparationScenarioVector(JSON.stringify(results[1]))).toEqual(extractPreparationScenarioVector(JSON.stringify(results[0])));
+  }, EVALUATION_TIMEOUT * 2 + 60_000);
 
   it('rejects a candidate that preserves leaf reads but poisons the installed manager restoration path', async () => {
     const anchor = 'return readPreparedBundle(input);';
@@ -199,8 +218,9 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     expect(value.checksPassed).toBe(false); expect(value.metrics.correctness_checks).toBe(8);
     expect(value.diagnostics.map(row => row.code)).toEqual(['WORKFLOW_CANDIDATE_BEHAVIOR_FAILED']);
     expect(value.workflows).toEqual([]);
+    expect(value.qualifications).toEqual([]);
     expect(artifactDigest(candidate)).toBe(expected); completeActivities(context.directory);
-  }, 960000);
+  }, EVALUATION_TEST_TIMEOUT);
 
   it.each([
     { builtin: 'unknown', timeoutMs: 1000 },
@@ -272,7 +292,7 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
       context.directory, EVALUATION_TIMEOUT, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: pinned.seedArtifact.path }, true)).rejects.toThrow();
     expect(run).toHaveBeenCalledOnce(); expect(settled).toBe(true);
     completeActivities(context.directory);
-  }, 960000);
+  }, EVALUATION_TEST_TIMEOUT);
 
   it('cancels after a real candidate registration without converting incomplete custody into accepted output', async () => {
     const context = scratch(); const abort = new AbortController();
