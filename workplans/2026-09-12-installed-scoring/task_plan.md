@@ -266,3 +266,47 @@ Main native10612 still qualifies only frozen3a711953... bytes. Do not cherry-pic
 these corrections into main or rebuild it while that handle is live. After its
 terminal result, commit/preserve exact evidence, integrate corrected source and
 recheck resulting measured identities. No calibration or provider activation yet.
+
+## Primary integration — September12 continuation
+
+Previous goal turn made progress: committed source-provenance corrections and
+passing regression/package gates. Fresh ownership inspection confirmed clean
+scoring3cc61869, isolated8e448d83 and primaryb3abe997. Native10612 remained live
+on its original handle; no restart occurred.
+
+Read-only dependency review proved native10612 reads only firm-scoring and its
+own private fixture repositories; primary src/scripts/dist/dependencies are
+distinct real directories. Parent therefore integrated source into primary while
+leaving scoring runtime untouched. This replaces unnecessary serialization, not
+the original test's byte/deadline/custody requirements.
+
+Primary is now f16acb0708a1a3b7016c069fab8abbbb21b4b38b after nine ordered local
+cherry-picks. Existing patch-equivalent commits were skipped; original primary
+qualification notes are preserved. The src/scripts/test/package diff from
+scoring3cc61869 exactly matches the isolated600c099c..8e448d83 correction
+(both diff SHA256 c4604dfa234ee92995032b6aeed06ae6aca57930be4d473087c745df5b8f0d6d).
+Full primary build1924 passed. Source/web types, full lint (0errors/107warnings),
+docs and lane checks96804 passed (344real-IO/705unit). Corrected diagnostic bundle
+aggregate25d5787412e177238745216d259a9167768ca6460bfed126cc453eb714d0f953 is distinct
+from3a711953... and cannot inherit its complete qualification claim.
+
+Primary gate73003 is live. The selection included
+universe-builtin-preparation-evaluator.test.ts rather than the lightweight
+registry suite: it performs two full repeatability executions, a poisoned
+candidate check, a further real post-settlement drift run and cancellation
+control in addition to ordinary regressions. This is an extended native gate,
+not the earlier fast397-test gate. Its confirmed live work is being retained;
+do not start duplicate baseline/native acceptance or rebuild primary while it
+runs. Do not call it passed until terminal evidence arrives.
+
+Strict rebased candidate46217 is terminal0,1/1passed,0skips,76.95s. The exact
+8e448d83 comparison report is retained in rebased-candidate-comparison.json.
+This is private diagnostic comparison, not score/campaign acceptance. A new
+full-project compiler test binds real HEAD inventory, while keeping its scoring
+numbers explicitly synthetic; commit all primary tracked inputs before running.
+
+Read-only activation checks: neither explicitly known console port57294 nor56322
+has a listener. The compiled global stop reader still reports healthy/active.
+Tracked instructions contain placeholder resource paths, not enough evidence to
+select real account/runtime configuration. No broader home/credential scan,
+quota refresh, provider call, KILL override or service activation was performed.

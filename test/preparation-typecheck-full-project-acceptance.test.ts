@@ -14,6 +14,7 @@ import { buildPreparationScoreBundle } from '../scripts/build-preparation-score.
 import { createBuiltinActivityTracker, initializeBuiltinActivity, inspectBuiltinActivity } from '../scripts/evaluators/preparation-verification-activity.mjs';
 import { runVerifySubprocessAsync } from '../src/core/run/verify-commands.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
+import { deliveryGit } from '../src/core/universe/delivery-git.js';
 import { inspectBuiltinEvaluatorBundle, inspectPreparationScoreBundle } from '../src/core/universe/builtin-evaluator-registry.js';
 import { preparationCalibrationWorkload, type PreparationMeasurementCalibration } from '../src/core/universe/preparation-measurement-calibration.js';
 import { PREPARATION_SCENARIO_KEYS } from '../src/core/universe/preparation-measurement-comparison.js';
@@ -28,19 +29,35 @@ const measurements: Array<Record<string, unknown>> = [];
 beforeAll(async () => {
   if (!supported) return;
   root = realpathSync(mkdtempSync(join(tmpdir(), 'preparation-full-project-typecheck-')));
-  source = readFileSync(join(repository, PREPARATION_TYPECHECK_TARGET), 'utf8'); sourceDigest = digest(source);
+  // Real immutable checkout inventory, not invented calibration scope. Run only
+  // after committing this test and other tracked changes: authoring must refuse
+  // a checkout that differs from the pinned HEAD, even outside compiler roots.
+  const git = deliveryGit(repository);
+  const sourceRevision = git.oid(['rev-parse', '--verify', 'HEAD^{commit}']);
+  const sourceTree = git.oid(['rev-parse', '--verify', `${sourceRevision}^{tree}`]);
+  const entries = git.readEntries(git.entries(sourceRevision));
+  const expectedFiles = entries.map(entry => ({ path: entry.path, executable: entry.executable,
+    bytes: entry.data.length, sha256: digest(entry.data) })).sort((a, b) => a.path.localeCompare(b.path));
+  const inventoryDigest = digest(canonical(expectedFiles.map(file => ({ path: file.path, executable: file.executable,
+    size: file.bytes, digest: file.sha256 }))));
+  const target = entries.find(entry => entry.path === PREPARATION_TYPECHECK_TARGET);
+  expect(target).toBeDefined();
+  const workingSource = readFileSync(join(repository, PREPARATION_TYPECHECK_TARGET));
+  expect(workingSource.equals(target!.data)).toBe(true);
+  source = workingSource.toString('utf8'); sourceDigest = digest(workingSource);
+  expect(digest(source)).toBe(sourceDigest);
   const authorStart = performance.now();
-  const project = await authorPreparationTypecheckProject({ repository, expectedSourceSha256: sourceDigest });
+  const project = await authorPreparationTypecheckProject({ repository, expectedSourceSha256: sourceDigest, expectedFiles });
   const authorMs = performance.now() - authorStart;
+  expect(git.oid(['rev-parse', '--verify', 'HEAD^{commit}'])).toBe(sourceRevision);
   // Read the parent's already-frozen installation. The real builder copies its
   // bytes to the private fixture; it never rebuilds or writes the shared bundle.
   const measurementDirectory = join(repository, 'dist/core/universe/builtins/preparation');
   const observed = inspectBuiltinEvaluatorBundle(measurementDirectory);
   const calibration: PreparationMeasurementCalibration = { schemaVersion: 1, kind: 'preparation-measurement-calibration',
     scope: 'diagnostic-only', universeId: 'synthetic-compiler-only', manifestDigest: '1'.repeat(64), comparatorDigest: '2'.repeat(64),
-    baseline: { revision: 'a'.repeat(40), source: { path: PREPARATION_TYPECHECK_TARGET, sha256: sourceDigest },
-      files: [{ path: PREPARATION_TYPECHECK_TARGET, executable: false, bytes: Buffer.byteLength(source), sha256: sourceDigest }],
-      artifactDigest: digest(canonical([{ path: PREPARATION_TYPECHECK_TARGET, executable: false, size: Buffer.byteLength(source), digest: sourceDigest }])) },
+    baseline: { revision: sourceRevision, source: { path: PREPARATION_TYPECHECK_TARGET, sha256: sourceDigest },
+      files: expectedFiles, artifactDigest: inventoryDigest },
     workload: preparationCalibrationWorkload(observed, 'preparation-workflows-v2'),
     provenance: [1, 2, 3].map(index => ({ captureId: `synthetic-${index}`, intentDigest: String(index).repeat(64),
       receiptDigest: String(index + 3).repeat(64), reportDigest: '9'.repeat(64), reportBytes: 100,
@@ -56,9 +73,13 @@ beforeAll(async () => {
   childDigest = digest(readFileSync(join(output, 'preparation-typecheck.mjs')));
   expect(inspectBuiltinEvaluatorBundle(measurementDirectory)).toEqual(observed);
   expect(inspectBuiltinEvaluatorBundle(join(output, 'measurement')).digest).toBe(observed.digest);
+  expect(git.oid(['rev-parse', '--verify', 'HEAD^{commit}'])).toBe(sourceRevision);
+  expect(git.treeDigest(sourceTree)).toBe(inventoryDigest);
   measurements.push({ phase: 'author-and-package', authorMs: Math.round(authorMs), packageMs: Math.round(performance.now() - buildStart),
     roots: project.rootNames.length, files: project.files.length, projectBytes: Buffer.byteLength(JSON.stringify(project)),
     compilerVersion: project.compilerVersion, packageDigest, projectDigest, childDigest, sourceDigest,
+    sourceRevision, sourceTree, inventoryOrigin: 'pinned-head', expectedFilesBound: true, pinnedInventoryFiles: expectedFiles.length,
+    pinnedInventoryBytes: expectedFiles.reduce((sum, file) => sum + file.bytes, 0), pinnedInventoryDigest: inventoryDigest,
     syntheticCalibration: true, concurrentWorkloadTiming: 'uncontrolled' });
 }, 120_000);
 

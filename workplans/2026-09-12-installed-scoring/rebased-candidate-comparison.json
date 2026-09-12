@@ -1,0 +1,118 @@
+{
+  "schemaVersion": 1,
+  "kind": "retained-preparation-batch-comparison-evidence",
+  "scope": "diagnostic/private-comparison-only",
+  "limitations": [
+    "This records the selected-candidate comparison in the isolated tested checkout, not a test of the primary checkout.",
+    "improvementAccepted is the comparison test's numerical outcome, not scoring admission, full installed workload acceptance, calibration, archive promotion, or delivery.",
+    "Native launch counts are owned broker measurements, not an exhaustive operating-system process census.",
+    "The terminal output records successful test completion and zero-launch close requests; it does not include separate raw process-group settlement receipts.",
+    "Wall-clock durations describe this run only and do not establish an end-to-end performance improvement."
+  ],
+  "testedSource": {
+    "checkout": "/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-builtin-recipes",
+    "commit": "8e448d831c7ed1cfbac9ec5b477a087a0147d74f",
+    "target": "src/core/resources/engineering-preparation.ts",
+    "targetBlob": "c0fa8821cc81e73ef9cc03d006cbffc08f8c6933",
+    "gitStatusPorcelainBefore": "",
+    "gitStatusPorcelainAfter": ""
+  },
+  "gate": {
+    "terminalSessionId": 46217,
+    "command": "PATH=/opt/homebrew/opt/node@24/bin:$PATH ASHLR_REQUIRE_BATCH_IMPROVEMENT=1 ASHLR_PREPARATION_BATCH_REPORT=1 npx --no-install vitest run test/preparation-batch-candidate-acceptance.test.ts --no-file-parallelism --reporter=verbose",
+    "invocations": 1,
+    "exitCode": 0,
+    "vitestVersion": "4.1.11",
+    "testName": "selected batching candidate native diagnostic comparison > preserves exact behavior and drift refusal while reporting whether batching improves work",
+    "filesPassed": 1,
+    "filesTotal": 1,
+    "testsPassed": 1,
+    "testsTotal": 1,
+    "testsSkipped": 0,
+    "durationSeconds": 76.95,
+    "testCaseDurationMs": 69338,
+    "reportedTestsIncludingHooksSeconds": 75.43
+  },
+  "countInterpretation": {
+    "sampleOrder": ["one-file check", "four-file check", "four-file metadata"],
+    "samples": "Healthy comparison calls only; each sample contains processes and blobProcesses.",
+    "ledgers": "Complete per-session broker counts, including the additional during-call drift metadata request and close; not merely the sum of the three healthy samples.",
+    "transport": "All six observed candidate batches exited with status 0, null signal/error, and empty stderr."
+  },
+  "terminalRecords": {
+    "PREPARATION_BATCH_TRANSPORT": [
+      { "kind": "baseline", "batches": [] },
+      {
+        "kind": "candidate",
+        "batches": [
+          { "id": 46, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 },
+          { "id": 64, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 },
+          { "id": 82, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 },
+          { "id": 175, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 },
+          { "id": 193, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 },
+          { "id": 286, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 }
+        ]
+      }
+    ],
+    "PREPARATION_BATCH_COMPARISON": {
+      "baselineBlob": "c0fa8821cc81e73ef9cc03d006cbffc08f8c6933",
+      "candidateDigest": "e0781f818bf3c34d51c21a358c1204a11b9242ceff0015c24ef898c2dc5041b7",
+      "patchDigest": "ab53b036e471081ea638a200b7b336724fc116b09135fe634e6b53f7e83ed615",
+      "gitPin": {
+        "path": "/Library/Developer/CommandLineTools/usr/bin/git",
+        "digest": "74b90b9f97ec79bfe7886a4fc6132533b3e1014ef4195d28abd1ca9bf321f34a"
+      },
+      "improvementAccepted": true,
+      "samples": {
+        "baseline": [
+          { "processes": 36, "blobProcesses": 2 },
+          { "processes": 42, "blobProcesses": 8 },
+          { "processes": 117, "blobProcesses": 8 }
+        ],
+        "candidate": [
+          { "processes": 36, "blobProcesses": 2 },
+          { "processes": 36, "blobProcesses": 2 },
+          { "processes": 111, "blobProcesses": 2 }
+        ]
+      },
+      "healthyBatches": {
+        "baseline": [[], [], []],
+        "candidate": [
+          [],
+          [
+            { "id": 46, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 },
+            { "id": 64, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 }
+          ],
+          [
+            { "id": 82, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 },
+            { "id": 175, "status": 0, "signal": null, "error": null, "stderr": "", "stderrBytes": 0, "inputBytes": 164, "stdoutBytes": 482 }
+          ]
+        ]
+      },
+      "ledgers": {
+        "baseline": {
+          "processes": 312,
+          "blobProcesses": 26,
+          "requests": [
+            { "id": 1, "method": "check", "processes": 36, "blobProcesses": 2 },
+            { "id": 2, "method": "check", "processes": 42, "blobProcesses": 8 },
+            { "id": 3, "method": "metadata", "processes": 117, "blobProcesses": 8 },
+            { "id": 4, "method": "metadata", "processes": 117, "blobProcesses": 8 },
+            { "id": 5, "method": "close", "processes": 0, "blobProcesses": 0 }
+          ]
+        },
+        "candidate": {
+          "processes": 294,
+          "blobProcesses": 8,
+          "requests": [
+            { "id": 1, "method": "check", "processes": 36, "blobProcesses": 2 },
+            { "id": 2, "method": "check", "processes": 36, "blobProcesses": 2 },
+            { "id": 3, "method": "metadata", "processes": 111, "blobProcesses": 2 },
+            { "id": 4, "method": "metadata", "processes": 111, "blobProcesses": 2 },
+            { "id": 5, "method": "close", "processes": 0, "blobProcesses": 0 }
+          ]
+        }
+      }
+    }
+  }
+}

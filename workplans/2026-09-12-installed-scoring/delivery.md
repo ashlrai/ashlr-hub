@@ -2,6 +2,23 @@
 
 ## Implemented, not commissioned
 
+Primary integration update: the tested source corrections are now integrated
+locally on `auto/p00` at `f16acb0708a1a3b7016c069fab8abbbb21b4b38b`, preserving
+the previous primary qualification notes. The full build and source/web types,
+full lint (zero errors;107warnings), docs and lane checks pass. Primary runtime
+identity is `25d5787412e177238745216d259a9167768ca6460bfed126cc453eb714d0f953`.
+Extended native/regression gate73003 is still live; it includes actual repeated
+workloads and post-settlement drift/cancellation controls, not just fast unit
+tests. Primary source and dist must remain frozen until that handle settles.
+
+The latest strict optimization comparison passed independently on the matching
+isolated target; exact records are in `rebased-candidate-comparison.json`.
+Neither this source integration nor its diagnostic comparison commissions the
+scorer or fleet. The older console ports57294/56322 are not listening; a fresh
+compiled stop check remains healthy/active. Real configuration paths still need
+to be established. The following sections preserve earlier checkpoint evidence
+and must not be read as a claim that older build identities qualify this one.
+
 The candidate branch `codex/preparation-scoring-runtime` now contains the closed
 calibrated scoring route, fixed installed owner, explicit authoring package,
 regional nonregression/scope checks and optional separate worker budget. The
