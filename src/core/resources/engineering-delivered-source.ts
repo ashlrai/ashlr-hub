@@ -4,7 +4,7 @@ import { canonical, digest, readArtifactSnapshot } from '../universe/artifacts.j
 import { campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
 import { readCompletedCampaignDelivery } from '../universe/campaign-delivery-recovery.js';
 import { decodeUtf8Excerpt } from '../util/utf8-excerpt.js';
-import type { createResourceEngineeringPreparationRegistry } from './engineering-preparation-registry.js';
+import type { createResourceEngineeringPreparationRegistry, ResourceEngineeringPreparationRegistration } from './engineering-preparation-registry.js';
 import type { ResourceEngineeringSuccessorSource } from './engineering-preparation-types.js';
 
 export interface ResourceEngineeringDeliveredSource {
@@ -15,19 +15,42 @@ export interface ResourceEngineeringDeliveredSource {
   context: string;
 }
 
+type Registry = ReturnType<typeof createResourceEngineeringPreparationRegistry>;
+export interface ResourceEngineeringDeliveredRegistration {
+  registration: ResourceEngineeringPreparationRegistration;
+  verified: ReturnType<Registry['committed']>;
+  source: ResourceEngineeringDeliveredSource | null;
+}
+
+/** Internal host composition: metadata and source share this invocation's proof.
+ * No supplied metadata, callback or prior result is accepted as evidence. The
+ * result is observational data, not authority reusable at a later boundary. */
+export function readResourceEngineeringDeliveredRegistration(
+  registry: Registry, id: string, expectedEnrollmentDigest: string,
+): ResourceEngineeringDeliveredRegistration {
+  const registration = registry.registrations().find(item => item.request.id === id && item.enrollmentDigest === expectedEnrollmentDigest);
+  if (!registration) throw new Error('Engineering registration evidence unavailable');
+  const verified = registry.committed(registration, registration.request, true);
+  return { registration, verified, source: deliveredSource(registration, verified) };
+}
+
 /** The registry is the existing host-created capability, never caller-supplied proof callbacks.
  * Each call reconstructs the scoped registration and committed metadata. Callers
  * independently establish completed graph/ownership/settlement before using this
  * source; a verified local delivery alone does not establish those conditions. */
 export function readResourceEngineeringDeliveredSource(
-  registry: ReturnType<typeof createResourceEngineeringPreparationRegistry>,
+  registry: Registry,
   id: string,
   expectedEnrollmentDigest: string,
 ): ResourceEngineeringDeliveredSource | null {
+  try { return readResourceEngineeringDeliveredRegistration(registry, id, expectedEnrollmentDigest).source; }
+  catch { return null; }
+}
+
+function deliveredSource(row: ResourceEngineeringPreparationRegistration,
+  verified: ResourceEngineeringDeliveredRegistration['verified']): ResourceEngineeringDeliveredSource | null {
   try {
-    const row = registry.registrations().find(item => item.request.id === id && item.enrollmentDigest === expectedEnrollmentDigest);
-    if (!row) return null;
-    const verified = registry.committed(row, row.request, true); const enrollment = verified.catalog.enrollments[0];
+    const id = row.request.id; const enrollment = verified.catalog.enrollments[0];
     if (verified.catalog.enrollments.length !== 1 || !enrollment || enrollment.id !== id ||
         enrollment.host.definition.tasks.length !== 1 || enrollment.host.deliveryPlan.deliveries.length !== 1) return null;
     const campaignId = enrollment.host.definition.tasks[0]!.campaignId;

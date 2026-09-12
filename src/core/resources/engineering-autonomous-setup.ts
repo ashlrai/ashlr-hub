@@ -14,6 +14,7 @@ import { createResourceEngineeringPreparationRegistry, readResourceEngineeringPr
 import { validateResourceConsoleEngineeringSupervisionConfig } from './console-engineering-supervisor.js';
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from './engineering-successor-coordinator.js';
 import { prepareResourceConsoleEngineeringEnrollments, type ResourceConsoleEngineeringCatalog } from './console-engineering.js';
+import { readResourceEngineeringDeliveredRegistration, type ResourceEngineeringDeliveredRegistration } from './engineering-delivered-source.js';
 import { decodeResourceConsoleState, previewResourceConsoleProjects, ResourceSupervisorError } from './pool-supervisor.js';
 import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
 import { readResourceJson, readResourcePoolHistory, resourcePoolStatus } from './pool-runtime.js';
@@ -133,7 +134,7 @@ function registry(current: ReturnType<typeof capture>) {
     bindingsFile: current.runtime.bindingsPath, observationsFile: current.runtime.observationsPath,
     ...(current.runtime.quotaConfigPath ? { quotaConfigFile: current.runtime.quotaConfigPath } : {}) });
 }
-function verified(current: ReturnType<typeof capture>) {
+function verified(current: ReturnType<typeof capture>, includeDeliveredSources = false) {
   const saved = readResourceJson(current.paths.receipt, 64 * 1024);
   if (!exact(saved, ['schemaVersion', 'planDigest', 'initialEnrollmentDigest', 'registrationDigest', 'files']) || saved.schemaVersion !== 1 ||
     saved.planDigest !== current.plan.planDigest || typeof saved.initialEnrollmentDigest !== 'string' || !HASH.test(saved.initialEnrollmentDigest) ||
@@ -147,14 +148,38 @@ function verified(current: ReturnType<typeof capture>) {
   const entries = registry(current); const rows = entries.registrations();
   const initial = rows.find(row => row.request.id === current.recipe.id);
   if (!initial || hash(initial) !== saved.registrationDigest || initial.enrollmentDigest !== saved.initialEnrollmentDigest) fail('Initial preparation registration changed');
-  for (const row of rows) entries.committed(row, row.request, true);
+  const verifiedEntries: ResourceEngineeringDeliveredRegistration[] = rows.map(row => {
+    if (!includeDeliveredSources) return { registration: row, verified: entries.committed(row, row.request, true), source: null };
+    const result = readResourceEngineeringDeliveredRegistration(entries, row.request.id, row.enrollmentDigest);
+    if (canonical(result.registration) !== canonical(row)) fail('Preparation registration changed during read');
+    return result;
+  });
   if (capture(current.options, true).plan.planDigest !== current.plan.planDigest) fail('Setup changed during read');
-  return saved.initialEnrollmentDigest;
+  return { initialEnrollmentDigest: saved.initialEnrollmentDigest, registry: entries, entries: verifiedEntries };
 }
 export function checkResourceEngineeringAutonomousSetup(options: Options): Plan {
   const current = capture(options);
-  if (current.completed) current.plan.initialEnrollmentDigest = verified(current);
+  if (current.completed) current.plan.initialEnrollmentDigest = verified(current).initialEnrollmentDigest;
   return current.plan;
+}
+
+export interface ResourceEngineeringAutonomousSetupEvidence {
+  plan: Plan;
+  registry: ReturnType<typeof createResourceEngineeringPreparationRegistry>;
+  entries: ResourceEngineeringDeliveredRegistration[];
+}
+
+/** One private read-only sample of a completed setup. Each registration's full
+ * metadata verification feeds its catalog and delivered-source projection once.
+ * No proof is cached across invocations; consumers must take their independent
+ * second sample and retain publication/custody guards. A null source is not a
+ * completed delivery, and these facts alone do not authorize continuation. */
+export function readResourceEngineeringAutonomousSetupEvidence(options: Options): ResourceEngineeringAutonomousSetupEvidence {
+  const current = capture(options);
+  if (!current.completed) fail('Completed setup evidence is required');
+  const result = verified(current, true);
+  current.plan.initialEnrollmentDigest = result.initialEnrollmentDigest;
+  return { plan: current.plan, registry: result.registry, entries: result.entries };
 }
 function report(current: ReturnType<typeof capture>, enrollmentDigest: string, disposition: Report['disposition']): Report {
   const runtime = current.runtime;
@@ -177,7 +202,7 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
   const { expectedPlanDigest, ...options } = supplied;
   const current = capture(options);
   if (current.plan.planDigest !== expectedPlanDigest) fail('Setup plan changed');
-  if (current.completed) return report(current, verified(current), 'replayed');
+  if (current.completed) return report(current, verified(current).initialEnrollmentDigest, 'replayed');
   const acquired = acquireLocalStoreLockWithOutcome(current.lockPath, 0, { anchorPath: current.runtime.root, exactPrivateStorage: true });
   if (acquired.state !== 'acquired') fail('Console is owned or unavailable');
   const locks = [acquired.lock];
@@ -221,7 +246,7 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
       registrationDigest: hash(registration), files: { profiles: hash(current.profileConfig), supervision: hash(current.supervision(prepared.enrollmentDigest)), successors: hash(current.successorConfig) } };
     beforePublication(prepared.catalog);
     writePrivate(current.paths.receipt, receipt, guard);
-    result = report(current, verified(current), 'created');
+    result = report(current, verified(current).initialEnrollmentDigest, 'created');
   } finally {
     let released = true;
     for (const lock of locks.reverse()) if (!releaseLocalStoreLock(lock)) released = false;

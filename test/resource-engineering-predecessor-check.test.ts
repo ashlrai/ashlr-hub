@@ -7,10 +7,9 @@ const hooks = vi.hoisted(() => ({ stat: vi.fn(), setup: vi.fn(), json: vi.fn(), 
   graph: vi.fn(), source: vi.fn(), queue: vi.fn(), preview: vi.fn(), console: vi.fn(), project: vi.fn(),
   accounting: vi.fn(), history: vi.fn(), journal: vi.fn(), campaign: vi.fn(), universe: vi.fn(), outcomes: vi.fn(), seed: vi.fn(), capture: vi.fn(), builtin: vi.fn() }));
 vi.mock('node:fs', async original => ({ ...await original<object>(), lstatSync: hooks.stat }));
-vi.mock('../src/core/resources/engineering-autonomous-setup.js', async original => ({ ...await original<object>(), checkResourceEngineeringAutonomousSetup: hooks.setup }));
+vi.mock('../src/core/resources/engineering-autonomous-setup.js', async original => ({ ...await original<object>(), readResourceEngineeringAutonomousSetupEvidence: hooks.setup }));
 vi.mock('../src/core/resources/engineering-preparation-registry.js', async original => ({ ...await original<object>(), createResourceEngineeringPreparationRegistry: hooks.registry }));
 vi.mock('../src/core/resources/console-engineering.js', async original => ({ ...await original<object>(), prepareResourceConsoleEngineeringEnrollments: hooks.prepared, readResourceConsoleEngineeringGraphCompletion: hooks.graph }));
-vi.mock('../src/core/resources/engineering-delivered-source.js', () => ({ readResourceEngineeringDeliveredSource: hooks.source }));
 vi.mock('../src/core/resources/engineering-outcomes.js', () => ({ readResourceEngineeringOutcomes: hooks.outcomes }));
 vi.mock('../src/core/resources/console-engineering-supervision-state.js', async original => ({ ...await original<object>(), readResourceConsoleEngineeringSupervisionState: hooks.queue }));
 vi.mock('../src/core/resources/console-projects.js', async original => ({ ...await original<object>(), pinResourceConsoleProject: hooks.project }));
@@ -76,12 +75,15 @@ function fixture() {
     [plan.paths.profiles, config], [plan.paths.supervision, supervision], [plan.paths.successors, successor],
     ['/fixture/projects.json', { schemaVersion: 1, projects: [] }], ['/fixture/ledger/resource-console-state.json', {}]]);
   hooks.stat.mockImplementation(() => { throw Object.assign(new Error('absent'), { code: 'ENOENT' }); });
-  hooks.setup.mockImplementation(() => structuredClone(plan));
   hooks.json.mockImplementation((path: string) => { if (!documents.has(path)) throw Error('Unexpected read'); return structuredClone(documents.get(path)); });
   const catalogRow = (id: string) => ({ id, graphRoot: '/fixture/graph-' + id, host: { root: '/fixture/universe-' + id,
     definition: { id: 'controller-' + id, tasks: [{ campaignId: 'campaign-' + id }] } } });
   hooks.registry.mockReturnValue({ registrations: () => structuredClone(registrations),
     committed: (row: Registration) => ({ catalog: { enrollments: [catalogRow(row.request.id)] } }) });
+  hooks.setup.mockImplementation(() => ({ plan: structuredClone(plan), registry: hooks.registry(),
+    entries: registrations.map(row => ({ registration: structuredClone(row),
+      verified: { catalog: { enrollments: [catalogRow(row.request.id)] } },
+      source: hooks.source(null, row.request.id, row.enrollmentDigest) })) }));
   hooks.prepared.mockImplementation(() => registrations.map(row => ({ summary: { id: row.request.id, enrollmentDigest: row.enrollmentDigest,
     campaigns: [{ id: 'campaign-' + row.request.id }] }, row: catalogRow(row.request.id) })));
   hooks.graph.mockImplementation((enrollment: { summary: { id: string; enrollmentDigest: string } }) => ({ enrollmentId: enrollment.summary.id, enrollmentDigest: enrollment.summary.enrollmentDigest, graphDigest: h(enrollment.summary.id) }));
@@ -235,6 +237,16 @@ describe('predecessor completion joins over mocked host evidence', () => {
     const f = fixture(); let calls = 0;
     hooks.queue.mockImplementation(() => ({ ...structuredClone(f.queue), stateDigest: h('sample-' + ++calls) }));
     held(f.options, 'stability'); expect(hooks.setup).toHaveBeenCalledTimes(2);
+  });
+  it('reconstructs delivered sources for the second sample rather than retaining the first projection', () => {
+    const f = fixture(); let reads = 0;
+    hooks.source.mockImplementation((_registry: unknown, id: string) => {
+      const source = structuredClone(f.sources.get(id));
+      if (++reads > f.registrations.length && id === 'initial') source!.commit = 'f'.repeat(40);
+      return source;
+    });
+    held(f.options, 'successors'); expect(hooks.setup).toHaveBeenCalledTimes(2);
+    expect(hooks.source).toHaveBeenCalledTimes(4);
   });
   it('rejects accessors before calling any host reader', () => {
     const f = fixture(); const getter = vi.fn(() => f.options.setup);

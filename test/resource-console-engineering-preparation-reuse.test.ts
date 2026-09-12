@@ -19,7 +19,7 @@ import * as campaigns from '../src/core/universe/campaign-store.js';
 import * as deliveryRecovery from '../src/core/universe/campaign-delivery-recovery.js';
 import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
 import { createResourceEngineeringPreparationRegistry } from '../src/core/resources/engineering-preparation-registry.js';
-import { readResourceEngineeringDeliveredSource } from '../src/core/resources/engineering-delivered-source.js';
+import { readResourceEngineeringDeliveredSource, readResourceEngineeringDeliveredRegistration } from '../src/core/resources/engineering-delivered-source.js';
 
 const roots: string[] = []; const owners: ResourceConsoleEngineeringOwner[] = []; const supervisors: ResourcePoolSupervisor[] = [];
 afterEach(async () => {
@@ -115,7 +115,11 @@ describe('call-local console preparation validation reuse', () => {
     const context = () => {
       const source = manager.successorSource(request.id, prepared.enrollment.enrollmentDigest);
       expect(source).not.toBeNull();
-      expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).toEqual(source);
+      const combined = readResourceEngineeringDeliveredRegistration(registry, request.id, prepared.enrollment.enrollmentDigest);
+      expect(combined.source).toEqual(source);
+      expect(combined.registration.enrollmentDigest).toBe(prepared.enrollment.enrollmentDigest);
+      expect(combined.verified.candidate.plan).toEqual(plan);
+      expect(combined.verified.catalog.enrollments.map(row => row.id)).toEqual([request.id]);
       return JSON.parse(source!.context) as { files: Array<{ path: string; text: string; truncated: boolean }>; omittedFiles: number };
     };
     expect(context()).toMatchObject({ files: [{ path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 1 });

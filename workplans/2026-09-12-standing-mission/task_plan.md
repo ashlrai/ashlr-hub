@@ -56,3 +56,50 @@ Source694b568e is committed and built cleanly (64056).186distincttests passed
 across12files; all gates are terminal, including actualscopedCLI42535.
 The full autonomous-fleet goal remains active. Next: predecessor-settlement
 reader/mission caller and retained shared-ledger history, then commissioning.
+
+---
+
+## Continuation: call-local predecessor evidence
+
+# Standing mission integration
+
+## Goal
+
+Move Ashlrverse toward the complete autonomous engineering operating system:
+reduce repeated proof latency and connect finite, verified campaign scopes to
+a durable mission owner without manual per-objective queue actions. The full
+active goal is not redefined as this increment.
+
+## Phases
+
+- [x] Confirm clean1b5a308c and prior verification limitations.
+- [x] Reuse call-local verified setup evidence; preserve fresh independent samples.
+- [x] Verify scope/source/receipt freshness and measure real inspection latency.
+- [ ] Implement the smallest useful standing-mission integration using existing execution ownership.
+- [ ] Independently review, test, build and record remaining autonomy/activation gaps.
+
+## Ownership
+
+Agent1 owns setup/delivered-source evidence reuse. Agent2 independently tests
+the new evidence boundary. Agent3 explores actual existing session/CLI mission
+integration. Parent owns predecessor composition, its tests, integration and
+commits. No live account, reserve, provider, collector-recovery, global-stop,
+service, registry, site or remote-Git changes are part of this implementation pass.
+
+## Verification constraints
+
+Prior311 focused tests passed. Actual source CLI and retained-fixture controls
+passed separately; the encompassing Vitest run ended143 and remains incomplete.
+Current clean build af624cc4 has a changed builtin bundle and no transferred
+native qualification. All previous process handles are terminal.
+
+## Status
+
+Call-local evidence integration, focused verification and the encompassing
+scoped acceptance test are complete: 142 distinct tests pass across six files.
+Mission-owner design is recorded; its actual rollover implementation remains
+next, not complete. Local commit/build is the remaining gate for this increment.
+
+### Worker availability
+
+Two workers saved implementation and independent tests, then reached their provider usage limit. Parent integrates and verifies saved work locally; no retries, account changes or quota bypass. The third worker completed a read-only mission-owner design using the existing console server.

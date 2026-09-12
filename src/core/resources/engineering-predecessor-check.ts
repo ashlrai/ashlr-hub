@@ -9,9 +9,8 @@ import { assertPreparationMeasurementsSettled } from '../universe/preparation-me
 import { assertBuiltinTrialEvaluatorsSettled } from '../universe/builtin-trial-custody.js';
 import { universePath } from '../universe/store.js';
 import { portfolioControllerDirectory } from '../universe/portfolio-controller-store.js';
-import { checkResourceEngineeringAutonomousSetup, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
-import { createResourceEngineeringPreparationRegistry, validateResourceConsoleEngineeringPreparationConfig } from './engineering-preparation-registry.js';
-import { readResourceEngineeringDeliveredSource } from './engineering-delivered-source.js';
+import { readResourceEngineeringAutonomousSetupEvidence, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
+import { validateResourceConsoleEngineeringPreparationConfig } from './engineering-preparation-registry.js';
 import { readResourceEngineeringOutcomes } from './engineering-outcomes.js';
 import { prepareResourceConsoleEngineeringEnrollments, readResourceConsoleEngineeringGraphCompletion } from './console-engineering.js';
 import { readResourceConsoleEngineeringSupervisionState, validateResourceConsoleEngineeringSupervisionConfig } from './console-engineering-supervision-state.js';
@@ -62,7 +61,8 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       new Date(options.expectedDeadlineAt).toISOString() === options.expectedDeadlineAt);
     const sample = () => {
       stage = 'setup';
-      const plan = checkResourceEngineeringAutonomousSetup(options.setup);
+      const setupEvidence = readResourceEngineeringAutonomousSetupEvidence(options.setup);
+      const plan = setupEvidence.plan;
       requireEvidence(plan.planDigest === options.expectedPlanDigest && plan.initialEnrollmentDigest);
       // A global kill or exhausted allowance does not erase historical completion.
       // Outstanding work and ownership, however, cannot establish a settled predecessor.
@@ -79,13 +79,9 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       requireEvidence(successor.supervisionId === supervision.id);
       const profile = config.profiles.find(row => row.id === successor.profileId);
       requireEvidence(profile);
-      const registry = createResourceEngineeringPreparationRegistry({ configFile: plan.paths.profiles, config, root: runtime.root,
-        workspace: options.setup.workspace, projectsFile: options.setup.projectsFile, poolFile: runtime.poolPath,
-        bindingsFile: runtime.bindingsPath, observationsFile: runtime.observationsPath,
-        ...(runtime.quotaConfigPath ? { quotaConfigFile: runtime.quotaConfigPath } : {}) });
-      const registrations = registry.registrations();
+      const registrations = setupEvidence.entries.map(row => row.registration);
       requireEvidence(registrations.length > 0 && registrations.length <= 32);
-      const catalog = { schemaVersion: 1 as const, enrollments: registrations.flatMap(row => registry.committed(row, row.request, true).catalog.enrollments) };
+      const catalog = { schemaVersion: 1 as const, enrollments: setupEvidence.entries.flatMap(row => row.verified.catalog.enrollments) };
       requireEvidence(catalog.enrollments.length === registrations.length);
       stage = 'projects';
       const projectsDocument = readResourceJson(options.setup.projectsFile, 256 * 1024) as { schemaVersion: unknown; projects: unknown };
@@ -110,7 +106,8 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       const completed = enrollments.map(enrollment => {
         stage = 'completion';
         const graph = readResourceConsoleEngineeringGraphCompletion(enrollment);
-        const source = readResourceEngineeringDeliveredSource(registry, enrollment.summary.id, enrollment.summary.enrollmentDigest);
+        const source = setupEvidence.entries.find(row => row.registration.request.id === enrollment.summary.id &&
+          row.registration.enrollmentDigest === enrollment.summary.enrollmentDigest)?.source;
         requireEvidence(graph && source && source.projectId === plan.projectId);
         const measured = readResourceEngineeringOutcomes({ enrollment: enrollment.summary, host: enrollment.row.host,
           root: runtime.root, poolFile: runtime.poolPath, bindingsFile: runtime.bindingsPath });

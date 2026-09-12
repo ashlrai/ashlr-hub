@@ -285,6 +285,13 @@ reads. Use it as an offline inspection after normal console shutdown, not as a
 high-frequency UI poll or inside a live owner's event loop. It does not pause
 the original deadline while inspecting evidence.
 
+Within each sample, setup verification reconstructs each registration's committed
+metadata once and uses it for both its catalog and delivered-source projection.
+The second sample reconstructs those facts independently; nothing is cached
+across calls or campaigns. The ordinary setup check and completed setup replay
+remain independent of delivery: a prepared-but-unrun setup is valid setup
+evidence, not proof of completed engineering work.
+
 ### Prepare and run objectives in the workspace
 
 With `--engineering-preparation /absolute/private/profiles.json`, an execution

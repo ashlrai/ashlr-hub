@@ -71,3 +71,78 @@ the unique delivered descendant tip, not a timestamp-selected branch. Finally,
 retain existing seed/measurement/builtin-trial settlement guards and shared ledger
 reserved/uncertain refusal, await all actual owners' close, then re-read. None of
 these completion proofs may be inferred just from owner disappearance.
+
+---
+
+## Continuation: call-local predecessor evidence
+
+# Current findings
+
+Prior goal turn made verified progress: local code, regression tests, real
+retained-fixture receipt controls and clean build. Full autonomy remains open.
+Measured direct inspection98.074s; isolated CLI114.041s on two completed
+enrollments. Static duplication: three committed metadata reconstructions per
+enrollment per sample (setup verification, catalog, source helper).
+
+Preserve existing public readers' fresh behavior. New host-only call-local
+evidence may reuse already-verified metadata, but the second complete sample,
+source/evaluator guards, graph and custody proofs, and exact receipt joins remain.
+No persisted memoization, new dispatch authority, deadline renewal or relaxed
+account policy follows from a faster reader.
+
+### Worker availability
+
+Two workers saved implementation and independent tests, then reached their provider usage limit. Parent integrates and verifies saved work locally; no retries, account changes or quota bypass. The third worker completed a read-only mission-owner design using the existing console server.
+
+### Verified reuse and measurement
+
+Parent integrated the new setup evidence reader into both predecessor samples.
+The default setup check/replay still do not derive a delivered source. Source
+derivation and catalog assembly share one committed metadata reconstruction per
+registration per sample, with no saved proof cache or caller-provided metadata.
+
+Focused run 40187 passed 100 tests in four files (100.20s). TypeScript, targeted
+ESLint and lane classification completed successfully in 81687. The subsequent
+second-source-sample regression and CLI tests passed in 12342 (104 tests,
+1.54s); the combined runs cover 141 distinct tests in five files. Final
+TypeScript/targeted ESLint passed in 51702. Documentation check 326058 passed
+with 119 local links, 31 source links and zero external requests.
+
+Read-only retained-fixture CLI run 10965 passed in 53.317s, compared with the
+previous 114.041s CLI sample. These are separate single-run observations, not a
+controlled benchmark or general speed guarantee. Evidence digest remained
+`7fa51230a881fde2f34892a0aac92826d63f7d68ca12511d2de571c8f36084f2` and tip remained
+`f9291b5b40a80ecfd7c911e3954e83f8681850d4`. Before/after snapshots found all 240
+fixture entries and four isolated test-home entries unchanged. No providers,
+evaluators, account mutations or workers were executed by this read.
+
+Full scoped acceptance rerun 81952 passed: one selected test, one legacy case
+filtered, 417.95s total. Actual local fixture execution, restart/replay, source
+CLI, missing-generation receipt and exact restoration all passed together.
+This closes the previously interrupted encompassing scoped acceptance gate;
+it does not claim that its filtered legacy case ran. Combined with the focused
+gates, this pass has 142 distinct passing tests across six files.
+
+### Next execution integration
+
+Use `startResourceConsoleServer` in-process, its exact loopback origin and
+in-memory tokens. Persist mission identity, original deadline, scope reservation
+and proposal identity before effects using existing private immutable records
+and local-store ownership. Observe existing supervision/successor/admission
+routes; drain `close()` before predecessor verification. A quota wait does not
+justify a new scope or renewed allowance. A verified stop ends continuation.
+
+An eligible tip can feed one accounted, deterministic proposal through the same
+resource runtime. Reuse its exact retained receipt/output after restart or hold;
+never invent a replacement task when outcome is uncertain. New setup must retain
+the shared ledger, reserve its scope allowance before publication, and recheck
+mission ownership, original deadline, stop state and predecessor identity at
+publication. Setup currently lacks that host publication guard. A new scope
+alone is not a persistent autonomous mission owner.
+
+### Current errors
+
+A guessed acceptance filename was absent; actual file discovered with `rg` is
+`test/resource-engineering-setup-acceptance.test.ts`. No source change resulted.
+The continuation initially replaced prior tracked workplan content; parent
+restored the full HEAD text and appended this continuation, preserving history.

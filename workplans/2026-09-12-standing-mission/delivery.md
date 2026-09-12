@@ -63,3 +63,45 @@ global stop and a pending v1 collector record with legacy owner evidence missing
 Documentation was updated in the existing resource guide and CLI help rather
 than adding a competing operating contract. It distinguishes explicit history
 selection from budget renewal and unfinished-work recovery.
+
+## Continuation: faster fresh predecessor evidence
+
+Parent integrated saved implementation and independent tests from two workers;
+both subsequently reached their provider usage limit. They were not retried,
+and no account was switched or policy changed. The third worker delivered a
+source-backed design for an in-process mission owner using the existing console.
+
+The predecessor checker now reconstructs each registration's committed metadata
+once per sample, sharing it with catalog and delivered-source derivation. It
+still takes two independent complete samples. Tests reject caller proof fields,
+changed configuration/receipts/runtime, mutated returned objects and second-read
+source drift. Ordinary setup check/replay still do not require delivery.
+
+| Gate | Result | Handle |
+|---|---|---|
+| Setup evidence, public replay, source reuse and predecessor join | 100 tests passed | 40187 |
+| Final predecessor join and CLI | 104 tests passed; overlaps 63 above | 12342 |
+| Actual scoped CLI, execution, restart and receipt controls | 1 passed, 1 filtered; 417.95s | 81952 |
+| TypeScript and targeted ESLint | Passed | 51702 |
+| Real-IO lane classification | Passed | 81687 |
+| Documentation links | Passed; no external requests | 326058 |
+
+Total: 142 distinct tests across six files, not 205. The complete scoped
+acceptance now passes in one run, replacing the earlier interrupted-run gap.
+No product execution deadline was extended by this optimization.
+
+A read-only CLI check of the retained two-campaign fixture took 53.317s versus
+the prior separate 114.041s observation. Both yielded the exact same evidence
+digest and delivered commit. All 240 fixture and four isolated home entries
+were unchanged. This is a single-fixture comparison, not a general benchmark.
+
+The standing-mission owner is still not implemented. It must persist scope
+reservations and original deadlines, obtain one deterministic accounted proposal,
+recheck predecessor evidence at publication and preserve stop decisions and
+shared account reserves. Foreground console close already drains its existing
+owners; a second execution runtime is unnecessary. See [notes](notes.md).
+
+This continuation does not activate providers, recover collector custody,
+unpause queues, change personal/Spark allocations, install a service, publish to
+npm, push remote Git or deploy a public site. Entire remains enabled with
+manual commits on `auto/p00`; prior resume found no checkpoint.

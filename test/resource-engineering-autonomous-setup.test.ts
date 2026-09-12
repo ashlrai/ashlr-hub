@@ -14,6 +14,7 @@ import { createResourceEngineeringPreparationRegistry, readResourceEngineeringPr
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import * as ownership from '../src/core/fleet/local-store-lock.js';
 import * as bundle from '../src/core/resources/engineering-preparation.js';
+import * as deliveredSource from '../src/core/resources/engineering-delivered-source.js';
 import { setResourcePoolAllocation, readResourceJson } from '../src/core/resources/pool-runtime.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
@@ -110,6 +111,9 @@ describe('offline autonomous setup', () => {
     expect(existsSync(resourceEngineeringPreparationRegistrationRoot(f.ledger, 'mission-next'))).toBe(false);
   });
   it('checks without effects, registers the exact manager row, and replays without any writes', () => {
+    const sourceRead = vi.spyOn(deliveredSource, 'readResourceEngineeringDeliveredRegistration').mockImplementation(() => {
+      throw new Error('Ordinary setup must not add delivered-source verification');
+    });
     const f = fixture(); const before = evidence(f.base);
     const accounting = readFileSync(join(f.ledger, 'pool-state.json'), 'utf8');
     const plan = check(f.options);
@@ -129,6 +133,7 @@ describe('offline autonomous setup', () => {
     expect(check(f.options).initialEnrollmentDigest).toBe(result.initialEnrollmentDigest);
     expect(prepare({ ...f.options, expectedPlanDigest: plan.planDigest }).disposition).toBe('replayed');
     expect(evidence(f.base)).toBe(completed);
+    expect(sourceRead).not.toHaveBeenCalled();
     const config = JSON.parse(readFileSync(result.paths.profiles, 'utf8'));
     const runtime = JSON.parse(readFileSync(f.options.resourceRuntime, 'utf8'));
     const registry = createResourceEngineeringPreparationRegistry({ config, configFile: result.paths.profiles, root: f.ledger, workspace: f.options.workspace,
