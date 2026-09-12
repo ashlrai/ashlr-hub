@@ -71,8 +71,19 @@ B commit f9291b5b40a80ecfd7c911e3954e83f8681850d4 and evidence digest
 All240 fixture entries and4 original private HOME entries were unchanged.
 The original HOME was verified by successfully reading both signed completed
 graph journals under its existing key; no key was generated or printed.
-Supplemental missing-generation/restoration controls remain in progress. These
-standalone assertions do not convert interrupted78819 into a passing Vitest run.
+Supplemental control31390 passed: missing a generation receipt returned held
+with completion-evidence-unavailable in36.982s. Exact original ledger bytes were
+restored (SHA256349249de2aca16e77ae4f9e0bfd627fe2b989d7d71465be58e3ad8765795b7ec);
+the restored check verified the same evidence digest/tip in109.219s. Only ledger
+mtime/ctime changed from the deliberate write/restore; other fixture files and
+HOME remained unchanged. Child33231 exited0, signal/error null, empty stderr,
+146.871s total. These standalone assertions do not convert interrupted78819
+into a passing Vitest run.
+
+Build99271 passed on clean af624cc4f4f4df9875a254a4b110a8352f22970f;
+257 web modules built and compiled CLI help passed. Installed nine-file builtin
+digest06fe700ea4a3e34bbe578c645bc3232251b2ed9811edf7a4f6eb4d2b8c110c7d
+is not covered by older native qualification. No native activation was attempted.
 
 No provider, service, account, global
 stop, collector recovery, public site, registry or remote Git mutation occurred.

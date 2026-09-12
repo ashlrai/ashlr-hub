@@ -11,8 +11,12 @@ alone. The full autonomous-fleet goal remains open.
 - [x] Inspect clean primary8d4368c8 and prior completed gates.
 - [x] Map state/delivery/journal joins with three agents.
 - [x] Extract shared read-only supervision and delivered-source readers.
-- [x] Integrate a bounded predecessor check; actual evidence tests in progress.
-- [ ] Independently review, verify and document remaining mission activation work.
+- [x] Integrate the predecessor check and verify retained-fixture CLI/refusal behavior.
+- [x] Independently review, build and document remaining mission activation work.
+
+See delivery.md:311 focused tests passed; retained-fixture controls passed;
+the encompassing source-CLI acceptance run was interrupted and is not counted
+as passed. Full fleet autonomy and production activation remain unfinished.
 
 ## Ownership
 
