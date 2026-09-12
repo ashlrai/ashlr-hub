@@ -138,3 +138,62 @@ One lint run rejected unqualified setTimeout/clearTimeout in the owner; explicit
 node:timers imports corrected it and the scoped lint rerun passed. One earlier
 atomic patch failed to match a commented lane entry and was reapplied with exact
 context; no partial changes or cleanup followed that failed patch.
+
+## Full-project packaged compiler acceptance
+
+On September12,2026, the new real-IO acceptance test passed2/2, zero skipped,
+25.47seconds. Real authoring captured725roots/1082files/22,452,362JSON bytes;
+authoring took11171ms and packaging873ms. The actual fixed compiler process ran
+the full baseline in5900ms with no diagnostics and rejected an added type error
+in5926ms with TS2322. Both ran with the production60-second deadline and1-GiB
+V8 heap ceiling, exit0, no stderr/truncation, confirmed group exit, independently
+absent PGID and exactly one completed activity receipt. Timings are uncontrolled
+and concurrent with native qualification, not a comparative benchmark.
+
+Project SHA17683d884cac81f3871b2aa7f58df412e61a658dd2c848a3633982bdd566cf53;
+compiler SHAa76c7b5608fdb8015af84e3b4dcd3f0b9f289541f80c5ad2307c34f8867cb1f5.
+The package's calibration input is explicitly synthetic and is used only to
+exercise real compiler packaging: no score, native preparation workload, genuine
+capture or default installed score package was produced. Review moved cleanup
+after independent process-absence proof; unresolved custody retains its fixture.
+
+Broader audit found two practical integration gaps: recipes accepted only command
+evaluators, and the retained calibration driver seeded only a private one-file
+repository. The first is being implemented in isolatedfirm-builtin-recipes from
+d44c9911; the second is getting an explicit source-repository mode using the
+existing full-tree materialization and ordinary local delivery. Neither bypasses
+the real global stop, currently observed healthy/active by the existing helper.
+The current tracked Hub seed is2722regular entries/50,792,185bytes, below existing
+8192entry/64-MiB limits. Fresh full-tree calibration is required; old one-file
+calibration cannot be retargeted. Native15864 remains live at the frozen4937844f...
+identity; source-runtime edits and rebuilds remain prohibited in firm-scoring.
+
+## Rebuilt native full case passed; controls still running
+
+At09:34:45UTC, native15864 reported a passing full case against4937844f...:
+23checks/two qualifications/15regions/4828benchmark processes. Evaluator936564ms,
+test942004ms; exit0, no signal/error/stderr/timeout/cancellation/truncation and
+group-exit-confirmed. Report1993bytes SHA
+2d88050128e908dff438f368d7214815ad870f4c6131bc97407b34eb11022230.
+This exactly matches the earlier qualified report. Runtime qualification222/4
+processes/blobs; source qualification1518/13; each injected one change. Four
+current/stale controls remain live, so do not mark the five-case gate complete.
+
+## Full-source driver verified in isolation
+
+Closed optional `--seed source-repository` uses the actual pinned Hub repository
+as manifest.seed.repo, preserving normal local branch delivery into that repo.
+The default remains a private one-file seed. Source mode uses raw stage-zero
+index tuples and bounded descriptor reads, verifies Git blob IDs/modes/identities,
+and independently compares the materialized seed before any capture. It avoids
+working-tree Git filters, refuses replacement and promisor/partial-clone state,
+and inspects effective config including worktree overrides. Core Git lookup uses
+the pinned PATH, restored on exit; HOME and real stop settings are unchanged.
+
+The final driver VM suite passed58/58, including source/index/identity drift,
+SHA1/SHA256, worktree config, deadline and materialization refusal cases. These
+are isolated substitutes, not genuine capture receipts. Review found and fixed
+filter execution through Git diff and omission of config.worktree. No actual
+driver invocation was performed. Parent broader Node24 regression passed299tests
+across7files, zero skipped,11.57seconds. This overlaps earlier focused results;
+do not add their counts as distinct cases.

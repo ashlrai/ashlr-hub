@@ -168,3 +168,50 @@ Rebuilt diagnostic aggregate4937844f46bbd3965694fa9deef6b18132899b09b8025d31a16b
 is NOT qualified yet. Next: exact-byte native qualification and full-project
 packaged compiler budget acceptance, followed by real-stop resolution and genuine
 calibration. No remote push, activation or public release is claimed.
+
+## Runtime acceptance continuation
+
+Previous goal turn: progress (compiler implementation committed atd44c9911,
+241 focused tests and full local build passed). Branch was clean on entry;
+Entire resume found no checkpoint. No goal completion or activation is claimed.
+
+- [ ] Parent: run all five native qualification cases against exact rebuilt
+  aggregate4937844f46bbd3965694fa9deef6b18132899b09b8025d31a16b79764bd531f1.
+  Live terminal handle15864; do not restart while live or on observation timeout.
+- [x] Acceptance agent: real full-project packaged compiler baseline/refusal
+  under the production60-second/1-GiB heap bounds; private synthetic fixture only.
+- [ ] Two independent agents: audit commissioning route and broader useful-work
+  loop, including actual-stop preconditions, without provider or service actions.
+
+Runtime src/scripts/dist are frozen during native qualification. New tests and
+evidence notes may be added, but no shared rebuild, capture driver execution,
+global-stop override, provider call or remote action is part of this gate.
+
+Full-project acceptance passed2/2, zero skipped,25.47seconds; baseline5900ms and
+ill-typed refusal5926ms, within the existing60-second/1-GiB heap envelope. Exact
+child/project identities and custody evidence are summarized in notes.md.
+
+To connect this to useful unattended Hub work, an isolated worktree
+`firm-builtin-recipes` implements closed scoring-builtin recipe enrollment with
+existing prepare/admit/supervise/successor machinery. Main worktree gets only an
+explicit full-source-repository mode in the retained capture driver plus tests;
+it does not execute captures or alter the frozen runtime. Actual commissioning
+still requires clean pinned source, fresh three full-tree captures and resolution
+of the authoritative active global stop.
+
+Isolated recipe implementation is committed at600c099c (branch
+codex/preparation-builtin-recipes): closed scorer selection, complete protected
+seed inventory, installed identity freshness and legacy command compatibility.
+New/legacy preparation gates passed65tests/4suites; source/web types and lint
+passed. Historical batching candidate was explicitly rebased, full-project
+typechecked and passed33pure tests; its native result remains pending. Parent
+removed only the temporary development dependency symlink after committing;
+actual shared dependencies remain intact and the isolated worktree is clean.
+Do not integrate or rebuild firm-scoring until live native15864 is terminal.
+
+Full-source driver final review is closed;58 isolated cases passed. Parent
+combined compiler/scorer/driver gate passed299tests/7files/zero skipped11.57s.
+Full-project packaged compiler remains separately proven by2 real cases. Runtime
+current/stale native controls passed33865/28417ms; source controls remain live.
+Fresh compiled policy read still reports healthy/active global stop. No actual
+calibration driver, provider, model, or resident-fleet operation has started.

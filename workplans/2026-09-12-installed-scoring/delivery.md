@@ -64,15 +64,30 @@ and fixture asset; the old result does not qualify a new build identity.
    tests exercise real tiny-project compiler subprocesses, not the full native
    workload. Actual full-project authoring/closed compilation passed separately.
 2. Qualify the exact rebuilt diagnostic bytes, then retain the result separately
-   from the older qualified bundle. Full-project packaged child performance under
-   its 60-second/1-GiB ceiling still needs an explicit commissioning check.
+   from the older qualified bundle. Native handle15864 is live. Full-project
+   packaged compiler acceptance has now passed2/2: baseline5900ms and TS2322
+   refusal5926ms within60seconds and a1-GiB V8 heap, with independently confirmed
+   process absence. This test packages synthetic calibration solely to exercise
+   the compiler; it does not produce a genuine score or usable calibration.
 3. Resolve the real global stop through the operator; never bypass it. The latest
    read-only check found healthy/active/present. The prior attempt retained only
    a preflight failure, not usable capture data.
-4. Run the prepared `run-calibration.mjs` only against an explicitly empty private
+4. Integrate the locally verified closed scoring-builtin recipe connection
+   (600c099c) and explicit full-source capture mode before collecting a
+   Hub-deliverable calibration. The changed target and import graph need their
+   own combined-build qualification; this turn's4937844f... result cannot qualify
+   that future build. A private one-file calibration cannot be reused for a full
+   Hub seed. After resolving the real stop, run
+   `run-calibration.mjs` only against an explicitly empty private
    evidence root and a fixed original deadline. It has NOT been executed. It
    obtains three distinct matching v2 captures in one Universe, retains failures,
    and only then calls the existing calibration API. No automatic retries.
+   For Hub delivery use the explicit trailing `--seed source-repository` option.
+   It selects only this checkout at its pinned HEAD, requires matching raw tracked
+   bytes/index and safe effective Git configuration, and proves the materialized
+   full seed before capture. It never recursively snapshots the live checkout or
+   invokes working-tree clean/process filters. Omission preserves the private
+   one-file diagnostic mode. Evidence must be outside the source repository.
 5. Author the calibrated package from those genuine captures; prove a native
    baseline, target-only accepted improvement, and integrated delivery.
 

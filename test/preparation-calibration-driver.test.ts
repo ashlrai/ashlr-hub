@@ -52,6 +52,8 @@ interface Options {
   kill?: { sourceState: string; state: string }; env?: Record<string, string>;
   onGit?: (state: { stop(): void; expire(): void; kill(): void }) => void;
   refuseDirectoryFsync?: boolean;
+  sourceFixture?: { refuse?: 'staged' | 'unstaged' | 'head' | 'tree' | 'identity' | 'canonical' | 'symlink' | 'mode' | 'deadline' | 'growth' | 'oversized' | 'unmerged' | 'replacement' | 'promisor' | 'partial-clone' | 'worktree-promisor' | 'worktree-partial-clone'; late?: boolean;
+    algorithm?: 'sha1' | 'sha256'; materializedWrong?: boolean };
 }
 async function run(options: Options = {}) {
   let now = NOW, kill = options.kill ?? { sourceState: 'healthy', state: 'inactive' };
@@ -63,30 +65,74 @@ async function run(options: Options = {}) {
     env, execPath: '/fixed/node', version: 'v24.18.0', exitCode: undefined as number | undefined,
     getuid: () => 501, once: vi.fn((event: string, callback: () => void) => listeners.set(event, callback)),
     removeListener: vi.fn((event: string) => listeners.delete(event)) };
+  let sourceWasRead = false, repositoryVisits = 0, headReads = 0, treeReads = 0;
+  const refuseSource = (kind: NonNullable<Options['sourceFixture']>['refuse']) => options.sourceFixture?.refuse === kind &&
+    (!options.sourceFixture?.late || sourceWasRead);
+  const sourceBytes = Buffer.from('export const unchanged = true;\n');
+  const sourceOid = createHash(options.sourceFixture?.algorithm ?? 'sha1').update(`blob ${sourceBytes.length}\0`).update(sourceBytes).digest('hex');
+  const targetPath = `${REPOSITORY}/src/core/resources/engineering-preparation.ts`;
   const stat = { dev: 1, ino: 2, mode: options.mode ?? 0o40700, uid: options.uid ?? 501,
     isDirectory: () => true, isSymbolicLink: () => options.symlink ?? false };
   const files = new Map<string, string>(), descriptors = new Map<number, string>();
   const events: string[] = []; let nextFd = 10;
+  const fileStat = () => ({ dev: 1n, ino: 3n, mode: refuseSource('mode') ? 0o100755n : 0o100644n, uid: 501n, gid: 20n,
+    nlink: 1n, size: refuseSource('oversized') ? 64n * 1024n * 1024n + 1n : BigInt(sourceBytes.length), mtimeNs: 1n, ctimeNs: 1n,
+    isFile: () => true, isSymbolicLink: () => refuseSource('symlink') });
   const fs = {
-    constants: { O_RDONLY: 0, O_NOFOLLOW: 256 },
-    realpathSync: vi.fn((name: string) => name === ROOT ? options.canonical ?? name : name),
-    lstatSync: vi.fn(() => stat), readdirSync: vi.fn(() => options.entries ?? []),
+    constants: { O_RDONLY: 0, O_NOFOLLOW: 256, O_NONBLOCK: 4 },
+    realpathSync: vi.fn((name: string) => name === ROOT ? options.canonical ?? name :
+      name === REPOSITORY && repositoryVisits > 1 && refuseSource('canonical') ? '/replaced/repository' : name),
+    lstatSync: vi.fn((name: string) => name === targetPath ? fileStat() : name === REPOSITORY && ++repositoryVisits > 1 && refuseSource('identity') ?
+      { ...stat, ino: 99 } : stat), readdirSync: vi.fn((_name: string) => options.entries ?? []),
     openSync: vi.fn((name: string, flags: string | number, mode?: number) => {
-      if (name !== ROOT) { assert.equal(flags, 'wx'); assert.equal(mode, 0o600); assert.equal(path.dirname(name), ROOT); assert.ok(!files.has(name)); }
+      if (name === targetPath) assert.equal(flags, 260);
+      else if (name !== ROOT) { assert.equal(flags, 'wx'); assert.equal(mode, 0o600); assert.equal(path.dirname(name), ROOT); assert.ok(!files.has(name)); }
       else assert.equal(flags, 256);
       const fd = nextFd++; descriptors.set(fd, name); events.push(`open:${name}`); return fd;
     }),
     writeFileSync: vi.fn((fd: number, bytes: string) => { assert.ok(descriptors.has(fd)); files.set(descriptors.get(fd)!, bytes); }),
     fsyncSync: vi.fn((fd: number) => { events.push(`fsync:${descriptors.get(fd)}`);
       if (options.refuseDirectoryFsync && descriptors.get(fd) === ROOT) throw new Error('fixture fsync refusal'); }),
-    fstatSync: vi.fn(() => stat), closeSync: vi.fn((fd: number) => { descriptors.delete(fd); }),
+    fstatSync: vi.fn((fd: number) => descriptors.get(fd) === targetPath ? fileStat() : stat), closeSync: vi.fn((fd: number) => { descriptors.delete(fd); }),
     mkdirSync: vi.fn(() => { throw new Error('Unexpected fixture creation'); }),
-    readFileSync: vi.fn(() => { throw new Error('Unexpected file read'); }),
+    readFileSync: vi.fn((name: string) => {
+      if (options.sourceFixture && name === `${REPOSITORY}/src/core/resources/engineering-preparation.ts`) {
+        sourceWasRead = true; return sourceBytes;
+      }
+      throw new Error('Unexpected file read');
+    }),
     readlinkSync: vi.fn(() => { throw new Error('Unexpected link read'); }),
+    readSync: vi.fn((fd: number, buffer: Buffer, offset: number, length: number, position: number) => {
+      assert.equal(descriptors.get(fd), targetPath);
+      const bytes = refuseSource('unstaged') ? Buffer.alloc(sourceBytes.length, 'x') :
+        refuseSource('growth') ? Buffer.concat([sourceBytes, Buffer.from('x')]) : sourceBytes;
+      const count = bytes.copy(buffer, offset, position, Math.min(bytes.length, position + length));
+      if (refuseSource('deadline')) now += 60_000;
+      return count;
+    }),
   };
   const logs: string[] = [], errors: string[] = [];
   const timer = vi.fn(() => 1), clear = vi.fn();
-  const git = vi.fn(() => {
+  const git = vi.fn((_executable: string, args: string[]) => {
+    if (options.sourceFixture) {
+      const command = args.slice(args.indexOf('-C') + 2);
+      if (command[0] === 'ls-tree') return `100644 blob ${sourceOid}\tsrc/core/resources/engineering-preparation.ts\0`;
+      if (command[0] === 'ls-files') return `100644 ${refuseSource('staged') ? 'd'.repeat(40) : sourceOid} ${refuseSource('unmerged') ? 2 : 0}\tsrc/core/resources/engineering-preparation.ts\0`;
+      if (command[0] === 'for-each-ref') return refuseSource('replacement') ? 'refs/replace/fixed\n' : '';
+      if (command[0] === 'config') {
+        // Model the real distinction: --local does not reveal config.worktree.
+        const worktree = !command.includes('--local');
+        if (worktree && refuseSource('worktree-promisor')) return 'extensions.worktreeConfig\ntrue\0remote.origin.promisor\ntrue\0';
+        if (worktree && refuseSource('worktree-partial-clone')) return 'extensions.worktreeConfig\ntrue\0extensions.partialClone\norigin\0';
+        return refuseSource('promisor') ? 'remote.origin.promisor\ntrue\0' :
+          refuseSource('partial-clone') ? 'extensions.partialClone\norigin\0' : 'filter.fixture.clean\nnever-execute-this\0filter.fixture.process\nnever-execute-this-either\0';
+      }
+      if (command.join(' ') === 'rev-parse HEAD') return ++headReads > 1 && refuseSource('head') ? 'd'.repeat(40) : 'a'.repeat(40);
+      if (command[0] === 'rev-parse' && command[1]?.endsWith('^{tree}')) return ++treeReads > 1 && refuseSource('tree') ? 'd'.repeat(40) : 'b'.repeat(40);
+      if (command[0] === 'rev-parse' && command[1]?.includes(':')) return sourceOid;
+      if (command.join(' ') === `cat-file blob ${sourceOid}`) return sourceBytes.toString();
+      throw new Error('Unexpected source fixture Git command');
+    }
     options.onGit?.({ stop: () => listeners.get('SIGTERM')?.(), expire: () => { now += 60_000; },
       kill: () => { kill = { sourceState: 'healthy', state: 'active' }; } });
     // End the normal preflight before source reads/setup; stop variants return
@@ -96,7 +142,14 @@ async function run(options: Options = {}) {
   });
   const resolve = vi.fn(() => ({ git: { path: '/fixed/git', digest: 'a'.repeat(64) } }));
   const capture = vi.fn(() => { throw new Error('Capture must never run in preflight tests'); });
-  const init = vi.fn(() => { throw new Error('Initialization must never run in preflight tests'); });
+  const coreEnvironments: Record<string, string>[] = [];
+  const init = vi.fn(() => {
+    coreEnvironments.push({ ...env });
+    if (options.sourceFixture?.materializedWrong) return;
+    throw new Error('Initialization must never run in preflight tests');
+  });
+  const artifactRead = vi.fn(() => ({ digest: 'fixture-artifact', entries: [{ path: 'src/core/resources/engineering-preparation.ts',
+    executable: false, data: Buffer.from('wrong materialized bytes') }] }));
   const modules: Record<string, unknown> = {
     'node:assert/strict': { default: assert }, 'node:buffer': { Buffer },
     'node:console': { default: { log: (text: string) => logs.push(text), error: (text: string) => errors.push(text) } },
@@ -108,17 +161,21 @@ async function run(options: Options = {}) {
     assert.ok(href.startsWith(`file://${REPOSITORY}/`));
     if (href.endsWith('/core/sandbox/policy.js')) return { readKillSwitch: () => kill };
     if (href.endsWith('/core/universe/builtin-evaluator-registry.js')) return { resolveBuiltinEvaluator: resolve };
-    if (href.endsWith('/core/universe/store.js')) return { initUniverse: init };
+    if (href.endsWith('/core/universe/store.js')) return { initUniverse: init, universePath: () => `${ROOT}/universe/fixture`, readRecords: () => [],
+      manifestRecord: () => ({ manifest: { seed: { repo: REPOSITORY, revision: 'a'.repeat(40) } },
+        seedArtifact: { path: `${ROOT}/frozen-seed`, revision: 'a'.repeat(40), digest: 'fixture-artifact' } }) };
+    if (href.endsWith('/core/universe/artifacts.js')) return { readArtifactSnapshot: artifactRead, MAX_ARTIFACT_BYTES: 64 * 1024 * 1024, MAX_ARTIFACT_ENTRIES: 8192 };
     if (href.endsWith('/core/universe/preparation-measurement-capture.js')) return { captureUniversePreparationMeasurement: capture };
     return {};
   });
   class Clock extends Date { static override now() { return now; } }
   await invoke((name: string) => { assert.ok(Object.hasOwn(modules, name)); return modules[name]; }, load,
     { url: url.pathToFileURL(entry).href }, { AbortController }, Clock);
-  expect(env).toEqual(originalEnv); expect(init).not.toHaveBeenCalled(); expect(capture).not.toHaveBeenCalled();
+  expect(env).toEqual(originalEnv); expect(capture).not.toHaveBeenCalled();
+  if (!options.sourceFixture || options.sourceFixture.refuse) expect(init).not.toHaveBeenCalled();
   expect(descriptors.size).toBe(0); expect(listeners.size).toBe(0);
   if (timer.mock.calls.length) expect(clear).toHaveBeenCalledExactlyOnceWith(1);
-  return { process, fs, git, load, resolve, logs, errors, files, events, timer, clear };
+  return { process, fs, git, load, resolve, logs, errors, files, events, timer, clear, init, coreEnvironments, artifactRead };
 }
 
 describe('retained calibration driver isolated safety preflight', () => {
@@ -129,6 +186,11 @@ describe('retained calibration driver isolated safety preflight', () => {
     ['/fixed/node', entry, '--evidence-root', ROOT, '--deadline', new Date(NOW + 6_000_001).toISOString()],
     ['/fixed/node', entry, '--evidence-root', 'relative', '--deadline', new Date(NOW + 1000).toISOString()],
     ['/fixed/node', entry, '--evidence-root', '/', '--deadline', new Date(NOW + 1000).toISOString()],
+    ['/fixed/node', entry, '--evidence-root', ROOT, '--deadline', new Date(NOW + 1000).toISOString(), '--seed', '/arbitrary/repository'],
+    ['/fixed/node', entry, '--evidence-root', ROOT, '--deadline', new Date(NOW + 1000).toISOString(), '--repo', REPOSITORY],
+    ['/fixed/node', entry, '--evidence-root', ROOT, '--deadline', new Date(NOW + 1000).toISOString(), '--seed', 'private-one-file'],
+    ['/fixed/node', entry, '--evidence-root', `${REPOSITORY}/evidence`, '--deadline', new Date(NOW + 1000).toISOString()],
+    ['/fixed/node', entry, '--evidence-root', '/fixed', '--deadline', new Date(NOW + 1000).toISOString()],
   ].map(argv => ({ argv })))('refuses invalid arguments before runtime import or mutation: %j', async ({ argv }) => {
     const r = await run({ argv }); expect(r.process.exitCode).toBe(1); expect(r.load).not.toHaveBeenCalled();
     expect(r.git).not.toHaveBeenCalled(); expect(r.fs.openSync).not.toHaveBeenCalled();
@@ -152,7 +214,8 @@ describe('retained calibration driver isolated safety preflight', () => {
     const [executable, args, options] = r.git.mock.calls[0] as unknown as [string, string[], { env: Record<string, string>; timeout: number }];
     expect(executable).toBe('/fixed/git'); expect(args.slice(-4)).toEqual(['-C', REPOSITORY, 'rev-parse', 'HEAD']);
     expect(Object.fromEntries(Object.entries(options.env).filter(([key]) => key.startsWith('GIT_')))).toEqual({
-      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0' });
+      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0',
+      GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', GIT_ALLOW_PROTOCOL: '', GIT_PROTOCOL_FROM_USER: '0' });
     expect(options.env).toMatchObject({ HOME: '/untouched/home', ASHLR_HOME: '/untouched/ashlr', PATH: '/fixed:/fixed:/usr/bin:/bin' });
     expect(options.timeout).toBe(10_000); expect(r.process.exitCode).toBe(1);
   });
@@ -165,6 +228,48 @@ describe('retained calibration driver isolated safety preflight', () => {
     const r = await run({ kill: { sourceState: 'healthy', state: 'active' }, refuseDirectoryFsync: true });
     expect(r.files.size).toBe(1); expect(r.fs.writeFileSync).toHaveBeenCalledTimes(1); expect(r.process.exitCode).toBe(1);
     expect(r.logs.some(text => JSON.parse(text).phase === 'calibrated-and-retained')).toBe(false);
+  });
+});
+
+describe('calibration driver closed source-repository mode (synthetic pre-initialization fixture)', () => {
+  const argv = ['/fixed/node', entry, '--evidence-root', ROOT, '--deadline', new Date(NOW + 60_000).toISOString(), '--seed', 'source-repository'];
+  it.each(['sha1', 'sha256'] as const)('passes the actual source repository and %s blob proof to init without filters, cloning or checkout traversal', async algorithm => {
+    const r = await run({ argv, sourceFixture: { algorithm }, env: { PATH: '/ambient/untrusted' } });
+    expect(r.init).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ seed: { repo: REPOSITORY, revision: 'a'.repeat(40) },
+      evaluation: { builtin: 'preparation-measurement-v1', timeoutMs: 1_800_000 },
+      budget: expect.objectContaining({ trialTimeoutMs: 900_000 }) }), { root: `${ROOT}/universe` });
+    expect(JSON.parse(r.files.get(`${ROOT}/source-origin.json`)!)).toMatchObject({ seedScope: 'source-repository', sourceTree: 'b'.repeat(40) });
+    expect(JSON.parse(r.files.get(`${ROOT}/invocation.json`)!)).toMatchObject({ seedScope: 'source-repository', sourceTree: 'b'.repeat(40) });
+    expect(r.fs.mkdirSync).not.toHaveBeenCalled();
+    expect(r.fs.readdirSync.mock.calls.every(([name]) => name === ROOT)).toBe(true);
+    expect(r.fs.readFileSync.mock.calls.every(([name]) => name === `${REPOSITORY}/src/core/resources/engineering-preparation.ts`)).toBe(true);
+    expect(r.git.mock.calls.some(([, args]) => args.includes('init') || args.includes('add') || args.includes('commit'))).toBe(false);
+    expect(r.git.mock.calls.every(([, args]) => ['rev-parse', 'ls-tree', 'ls-files', 'cat-file', 'for-each-ref', 'config'].includes(args[args.indexOf('-C') + 2]!))).toBe(true);
+    expect(r.git.mock.calls.filter(([, args]) => args[args.indexOf('-C') + 2] === 'config')
+      .every(([, args]) => args.slice(args.indexOf('-C') + 2).join(' ') === 'config --includes --null --list')).toBe(true);
+    expect(r.fs.readSync).toHaveBeenCalled();
+    expect(r.coreEnvironments).toEqual([expect.objectContaining({ PATH: '/fixed:/fixed:/usr/bin:/bin', HOME: '/untouched/home', ASHLR_HOME: '/untouched/ashlr' })]);
+    expect(r.process.env).toMatchObject({ PATH: '/ambient/untrusted' });
+    // init is an intentional throwing boundary; this is not a genuine capture.
+    expect(r.process.exitCode).toBe(1);
+  });
+  it.each(['staged', 'unstaged', 'head', 'tree', 'identity', 'canonical', 'symlink', 'mode', 'deadline', 'growth', 'oversized', 'unmerged', 'replacement', 'promisor', 'partial-clone', 'worktree-promisor', 'worktree-partial-clone'] as const)('refuses initial %s mismatch before initialization', async refuse => {
+    const r = await run({ argv, sourceFixture: { refuse } });
+    expect(r.process.exitCode).toBe(1); expect(r.init).not.toHaveBeenCalled();
+    expect(r.files.has(`${ROOT}/manifest.json`)).toBe(false);
+    if (refuse === 'oversized') expect(r.fs.readSync).not.toHaveBeenCalled();
+    if (refuse === 'growth') expect(r.fs.readSync).toHaveBeenCalledTimes(1);
+  });
+  it.each(['staged', 'unstaged', 'head', 'tree', 'identity', 'canonical', 'symlink', 'mode', 'deadline'] as const)('fresh guard refuses later %s drift before initialization', async refuse => {
+    const r = await run({ argv, sourceFixture: { refuse, late: true } });
+    expect(r.fs.readFileSync).toHaveBeenCalled(); expect(r.process.exitCode).toBe(1);
+    expect(r.init).not.toHaveBeenCalled(); expect(r.files.has(`${ROOT}/manifest.json`)).toBe(false);
+  });
+  it('refuses an independently mismatched materialized seed before any capture', async () => {
+    const r = await run({ argv, sourceFixture: { materializedWrong: true } });
+    expect(r.init).toHaveBeenCalledTimes(1); expect(r.artifactRead).toHaveBeenCalledExactlyOnceWith(`${ROOT}/frozen-seed`);
+    expect(r.process.exitCode).toBe(1); expect(r.files.has(`${ROOT}/baseline-v2-1-capture.json`)).toBe(false);
+    expect(r.process.env).not.toHaveProperty('PATH');
   });
 });
 
@@ -189,6 +294,7 @@ const finalPhase = compileFunction(`
     fstatSync, fsyncSync, writeFileSync, constants, process, join, controller, performance,
     deadlineAt, deadlineMonotonicMs, readKillSwitch, resolveBuiltinEvaluator, installed,
     git, repository, sourceHead, readFileSync, target, source, descriptor, announce } = fixture;
+  const seedScope = 'private-one-file';
   let code = 'CALIBRATION_NOT_CONFIRMED'; const abort = () => controller.abort();
   ${['assertRoot', 'save', 'saveJson', 'timeGuard'].map(name => declaration(name).getText(source)).join('\n')}
   ${declaration('guard', finalStatements).getText(source)}
