@@ -99,8 +99,13 @@ This removes manual per-objective catalog assembly, not the requirement for a
 trusted evaluator matched to the requested work or for live account commissioning.
 Incomplete registration remains explicit; exact completed registration replay
 changes no registration state. With host-enabled `autoAdmitPrepared`, the console
-also admits that enrollment to its existing automatic queue. A replay can
-reconcile missing admission without duplicating work or renewing its deadline;
+records the ordinary objective's original queue binding and attempts admission.
+The host retries missing admission for those durably marked registrations,
+including after restart, without a second prepare request. Recovery preserves
+the original deadline, lifetime cap and pause; unmarked or incomplete
+registration is not adopted. An uncertain response may mean registration never
+completed, while durably registered automatic work may proceed before explicit
+reconciliation. Exact replay remains available without duplicating work;
 preparation and admission results remain distinct.
 
 The [offline autonomous setup](RESOURCE-POOLS.md#set-up-an-autonomous-engineering-loop)

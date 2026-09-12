@@ -1,5 +1,5 @@
 import { createResourceEngineeringPreparationRegistry, validateResourceConsoleEngineeringObjective,
-  type ResourceEngineeringPreparationRegistration } from './engineering-preparation-registry.js';
+  validateResourceEngineeringAutomaticAdmission, type ResourceEngineeringAutomaticAdmission, type ResourceEngineeringAutomaticAdmissionCandidate, type ResourceEngineeringPreparationRegistration } from './engineering-preparation-registry.js';
 export { validateResourceConsoleEngineeringObjective, validateResourceConsoleEngineeringPreparationConfig } from './engineering-preparation-registry.js';
 /** Host-pinned objective preparation on the existing engineering owner. No execution or queue mutation. */
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
@@ -24,11 +24,18 @@ function copy<T>(input: unknown): T {
 const exact = (value: unknown, keys: string[]): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const hash = (value: unknown) => digest(canonical(value));
+export class ResourceEngineeringAutomaticAdmissionOwnershipError extends Error {
+  constructor() { super('Automatic admission owner unavailable'); }
+}
 
 export interface ResourceConsoleEngineeringPreparationOwner {
   profiles(projectId: string): ResourceConsoleEngineeringProfile[];
   check(input: unknown): ResourceConsoleEngineeringObjectivePlan;
   prepare(input: unknown): ResourceConsoleEngineeringObjectivePrepared;
+  /** Host-only authorization, never taken from an objective HTTP body. */
+  prepareAutomatically(input: unknown, binding: ResourceEngineeringAutomaticAdmission): ResourceConsoleEngineeringObjectivePrepared;
+  pendingAutomaticAdmissions(binding: ResourceEngineeringAutomaticAdmission,
+    admitted: Array<{ enrollmentId: string; enrollmentDigest: string }>, preferredEnrollmentId?: string): ResourceEngineeringAutomaticAdmissionCandidate[];
   /** Private host capability: derive lineage only from this owner's prepared, delivered enrollment. */
   successorSource(id: string, expectedEnrollmentDigest: string): {
     source: ResourceEngineeringSuccessorSource; projectId: string; commit: string; objective: string; context: string;
@@ -56,9 +63,67 @@ export function createResourceConsoleEngineeringPreparation(input: {
   // Validate all profiles without initializing output, contacting workers or reading credentials.
   for (const profile of config.profiles) materialize({ id: profile.recipe.id, profileId: profile.id, name: profile.recipe.name, objective: profile.recipe.objective });
   // Validate the whole durable set before exposing any reconstructed enrollment.
-  const restored = registrations().map(row => committed(row));
+  const restored = registrations().flatMap(row => {
+    try { return [committed(row)]; }
+    catch (error) {
+      // Only explicitly obligated ordinary rows may remain held outside the map.
+      // Configured/already-admitted queue entries still require a catalog member.
+      if (row.automaticAdmission && !row.source) return [];
+      throw error;
+    }
+  });
   if (restored.length) options.owner.register({ schemaVersion: 1, enrollments: restored.flatMap(row => row.catalog.enrollments) });
+  let automaticCursor = '';
+  function prepare(input: unknown, binding?: ResourceEngineeringAutomaticAdmission) {
+    const prepared = registry.prepare(input, {
+      beforeNew(id) {
+        if (options.owner.catalog().some(row => row.id === id)) fail('CONFLICT', 'Objective identity is already in use');
+        if (options.owner.catalog().length >= 32) fail('CONFLICT', 'Engineering enrollment capacity reached');
+      },
+      beforePublication: catalog => { options.owner.checkRegistration(catalog); },
+    }, binding);
+    const enrollment = options.owner.register(prepared.catalog).find(row =>
+      row.id === prepared.plan.id && row.enrollmentDigest === prepared.enrollmentDigest);
+    if (!enrollment) fail('UNAVAILABLE', 'Objective enrollment could not be confirmed');
+    return copy<ResourceConsoleEngineeringObjectivePrepared>({ plan: prepared.plan, enrollment, disposition: prepared.disposition });
+  }
   return {
+    prepare,
+    prepareAutomatically(input, binding) { return prepare(input, validateResourceEngineeringAutomaticAdmission(binding)); },
+    pendingAutomaticAdmissions(input, admittedInput, preferredEnrollmentId) {
+      const binding = validateResourceEngineeringAutomaticAdmission(input);
+      const admitted = copy<typeof admittedInput>(admittedInput);
+      if (preferredEnrollmentId !== undefined && (typeof preferredEnrollmentId !== 'string' || !ID.test(preferredEnrollmentId))) fail('INVALID_INPUT', 'Invalid preferred automatic enrollment');
+      if (!Array.isArray(admitted) || admitted.length > 32 || admitted.some(row => !exact(row, ['enrollmentId', 'enrollmentDigest']) ||
+          typeof row.enrollmentId !== 'string' || !ID.test(row.enrollmentId) || typeof row.enrollmentDigest !== 'string' || !/^[a-f0-9]{64}$/.test(row.enrollmentDigest)) ||
+          new Set(admitted.map(row => row.enrollmentId)).size !== admitted.length) fail('INVALID_INPUT', 'Invalid admitted enrollment evidence');
+      currentConfig();
+      const rows = registrations().filter(row => row.automaticAdmission?.supervisionId === binding.supervisionId).sort((a, b) => a.request.id.localeCompare(b.request.id));
+      const eligible = rows.filter(row => canonical(row.automaticAdmission) === canonical(binding) && !admitted.some(item => item.enrollmentId === row.request.id));
+      const selected = eligible.find(row => row.request.id === preferredEnrollmentId) ?? eligible.find(row => row.request.id.localeCompare(automaticCursor) > 0) ?? eligible[0];
+      // One fresh proof per pass; a stale first row cannot monopolize retries.
+      if (selected) automaticCursor = selected.request.id;
+      return rows.flatMap((row): ResourceEngineeringAutomaticAdmissionCandidate[] => {
+        const candidate = { enrollmentId: row.request.id, expectedEnrollmentDigest: row.enrollmentDigest };
+        if (canonical(row.automaticAdmission) !== canonical(binding)) return [{ ...candidate, reason: 'binding-changed' }];
+        const existing = admitted.find(item => item.enrollmentId === row.request.id);
+        if (existing) {
+          if (existing.enrollmentDigest !== row.enrollmentDigest) return [{ ...candidate, reason: 'binding-changed' }];
+          return [];
+        }
+        if (row !== selected) return [{ ...candidate, reason: 'verification-pending' }];
+        let verified: ReturnType<typeof committed>;
+        try { verified = committed(row, row.request, true); }
+        catch { return [{ ...candidate, reason: 'evidence-unavailable' }]; }
+        // An ownership/transport fault is not a stale bundle and must not retry.
+        try {
+          const catalog = options.owner.catalog();
+          if (!catalog.some(item => item.id === row.request.id && item.enrollmentDigest === row.enrollmentDigest)) options.owner.register(verified.catalog);
+        }
+        catch { throw new ResourceEngineeringAutomaticAdmissionOwnershipError(); }
+        return [{ ...candidate, reason: null }];
+      });
+    },
     successorSource(id, expectedEnrollmentDigest) {
       try {
         const row = registrations().find(item => item.request.id === id && item.enrollmentDigest === expectedEnrollmentDigest);
@@ -144,19 +209,6 @@ export function createResourceConsoleEngineeringPreparation(input: {
       const candidate = materialize(request);
       if (options.owner.catalog().some(row => row.id === request.id)) fail('CONFLICT', 'Objective identity is already in use');
       return copy(candidate.plan);
-    },
-    prepare(input) {
-      const prepared = registry.prepare(input, {
-        beforeNew(id) {
-          if (options.owner.catalog().some(row => row.id === id)) fail('CONFLICT', 'Objective identity is already in use');
-          if (options.owner.catalog().length >= 32) fail('CONFLICT', 'Engineering enrollment capacity reached');
-        },
-        beforePublication: catalog => { options.owner.checkRegistration(catalog); },
-      });
-      const enrollment = options.owner.register(prepared.catalog).find(row =>
-        row.id === prepared.plan.id && row.enrollmentDigest === prepared.enrollmentDigest);
-      if (!enrollment) fail('UNAVAILABLE', 'Objective enrollment could not be confirmed');
-      return copy({ plan: prepared.plan, enrollment, disposition: prepared.disposition });
     },
   };
 }

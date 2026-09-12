@@ -29,6 +29,7 @@ import { validateUniverseConsoleRoot } from './universe-console-reads.js';
 import { serveStatic } from './static.js';
 import { createEngineeringBackground } from '../resources/engineering-background.js';
 import type { EngineeringBackground } from '../resources/engineering-background-types.js';
+import { createResourceEngineeringAutomaticAdmission } from '../resources/engineering-automatic-admission.js';
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from '../resources/engineering-successor-coordinator.js';
 
 export interface ResourceConsoleServerOptions {
@@ -214,8 +215,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let engineering: ResourceConsoleEngineeringOwner | null = null;
-  let engineeringPreparation: Pick<ResourceConsoleEngineeringPreparationOwner, 'profiles' | 'check' | 'prepare'> |
-    Pick<EngineeringBackground, 'profiles' | 'check' | 'prepare'> | null = null;
+  let engineeringPreparation: Pick<ResourceConsoleEngineeringPreparationOwner, 'profiles' | 'check' | 'prepare' | 'prepareAutomatically' | 'pendingAutomaticAdmissions'> |
+    Pick<EngineeringBackground, 'profiles' | 'check' | 'prepare' | 'prepareAutomatically' | 'pendingAutomaticAdmissions'> | null = null;
+  let automaticAdmission: ReturnType<typeof createResourceEngineeringAutomaticAdmission> | null = null;
   let engineeringSupervision: ResourceConsoleEngineeringSupervisor | null = null;
   let engineeringBackground: EngineeringBackground | null = null;
   let engineeringSuccessors: Pick<EngineeringBackground, 'snapshot' | 'start' | 'close'> | null = null;
@@ -357,21 +359,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           const input = await body(req);
           if (closing) throw new RequestError(503, 'Console is closing');
           if (url.pathname.endsWith('/check')) { sendSnapshot(res, await engineeringPreparation.check(input)); return; }
-          const prepared = await engineeringPreparation.prepare(input);
-          if (!engineeringSupervisionConfig?.autoAdmitPrepared) { sendSnapshot(res, prepared); return; }
-          // Registration survives a queue hold. Repeating this exact preparation
-          // reconciles admission, never starts a second graph or renews a budget.
-          let state: 'admitted' | 'unavailable' = 'unavailable';
-          try {
-            if (engineeringSupervision && !closing) {
-              const current = engineeringSupervision.snapshot();
-              engineeringSupervision.admit({ expectedRevision: current.revision, enrollments: [{
-                enrollmentId: prepared.enrollment.id, expectedEnrollmentDigest: prepared.enrollment.enrollmentDigest,
-              }] });
-              state = 'admitted';
-            }
-          } catch { /* Preparation is durable; report admission uncertainty separately. */ }
-          sendSnapshot(res, { ...prepared, automaticAdmission: { state, supervisionId: engineeringSupervisionConfig.id } }); return;
+          sendSnapshot(res, automaticAdmission ? await automaticAdmission.prepare(input) : await engineeringPreparation.prepare(input)); return;
         }
         if (url.pathname === '/api/resources/engineering-supervision/admit') {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
@@ -465,6 +453,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       if (url.pathname === '/api/resources/engineering-supervision') {
         if (!engineeringSupervision) throw new RequestError(403, 'Engineering supervision is not configured');
         sendSnapshot(res, engineeringSupervision.snapshot()); return;
+      }
+      if (url.pathname === '/api/resources/engineering/automatic-admission') {
+        if (!automaticAdmission) throw new RequestError(403, 'Automatic admission is not configured');
+        sendSnapshot(res, automaticAdmission.snapshot()); return;
       }
       if (url.pathname === '/api/resources/engineering-successors') {
         if (!engineeringSuccessors) throw new RequestError(403, 'Engineering successors are not configured');
@@ -583,10 +575,16 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (closing) return closing;
     ready = false; sessions.clear(); signal?.removeEventListener('abort', aborted);
     closing = (async () => {
+      // Fence worker RPC before a pending recovery read reaches registration.
+      // The existing worker close still drains queued work before termination;
+      // the actual parent owners remain held until recovery has also drained.
+      const backgroundClosing = engineeringBackground?.close();
+      void backgroundClosing?.catch(() => {}); // Retained below in executionResults.
+      await automaticAdmission?.close();
       // Keep the paired collector alive while owned execution settles. Closing
       // invalidates requests immediately, not the evidence required by teardown.
       const executionResults = await Promise.allSettled([
-        Promise.resolve().then(() => engineeringBackground?.close()),
+        Promise.resolve().then(() => backgroundClosing),
         Promise.resolve().then(() => engineeringSupervision?.close()),
         Promise.resolve().then(() => engineering?.close()),
         Promise.resolve().then(() => supervisor?.close()),
@@ -665,7 +663,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         const preparationOptions = { config: engineeringPreparationConfig,
           configFile: engineeringPreparationFile, root, workspace, projectsFile, poolFile, bindingsFile, observationsFile,
           ...(quotaConfigFile ? { quotaConfigFile } : {}) };
-        if (engineeringSuccessorsConfig) {
+        if (engineeringSuccessorsConfig || engineeringSupervisionConfig?.autoAdmitPrepared) {
           // The worker creates and retains its own preparation/coordinator leases.
           // Main-thread owner callbacks never synchronously wait on that worker;
           // HTTP controls and the durable queue keep their original ownership.
@@ -681,6 +679,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           config: engineeringSupervisionConfig, signal });
         scope.engineeringSupervisionSupported = true;
         if (engineeringSupervisionConfig.autoAdmitPrepared) scope.engineeringPreparationAutoAdmission = true;
+      }
+      if (engineeringSupervisionConfig?.autoAdmitPrepared && engineeringPreparation && engineeringSupervision) {
+        automaticAdmission = createResourceEngineeringAutomaticAdmission({ preparation: engineeringPreparation,
+          supervision: engineeringSupervision, isClosing: () => closing !== null, onFatal: () => { void close().catch(() => {}); } });
       }
       if (engineeringSuccessorsConfig && engineeringSuccessorsFile && successorProfile && engineeringBackground && engineeringSupervision) {
         await engineeringBackground.configureSuccessors({ root, configFile: engineeringSuccessorsFile,
@@ -719,6 +721,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     signal?.addEventListener('abort', aborted, { once: true }); ready = true;
     engineeringSupervision?.start();
+    automaticAdmission?.start();
     await engineeringSuccessors?.start();
     if (closing || signal?.aborted) throw new Error('Resource console startup cancelled');
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,

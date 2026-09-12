@@ -136,6 +136,8 @@ export async function createEngineeringBackground(input: {
   }
   const background: EngineeringBackground = {
     profiles: projectId => command('profiles', projectId), check: value => command('check', value), prepare: value => command('prepare', value),
+    prepareAutomatically: (input, binding) => command('prepare-automatically', { input, binding }),
+    pendingAutomaticAdmissions: (binding, admitted, preferred) => command('pending-automatic-admissions', { binding, admitted, preferred: preferred ?? null }),
     async configureSuccessors(value, supervision, readAdmissionEvidence) {
       assertOpen(); if (configured) throw unavailable();
       if (typeof readAdmissionEvidence !== 'function') throw unavailable();

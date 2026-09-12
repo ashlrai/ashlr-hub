@@ -65,6 +65,20 @@ function lifecycle(sequence = 1) {
 }
 
 describe('engineering background ownership and drain protocol', () => {
+  it('carries automatic preparation and pending reads without enabling a successor coordinator', async () => {
+    const background = await createEngineeringBackground(input()); const worker = fixture.workers[0]!;
+    const binding = { schemaVersion: 1 as const, supervisionId: 'automatic', configDigest: 'a'.repeat(64), deadlineAt: '2099-01-01T00:00:00.000Z' };
+    const request = { id: 'first' }; const original = { ...binding };
+    const prepared = background.prepareAutomatically(request, binding); binding.configDigest = 'b'.repeat(64); request.id = 'mutated';
+    expect(worker.messages.at(-1)).toMatchObject({ kind: 'prepare-automatically', input: { input: { id: 'first' }, binding: original } });
+    reply(worker, 'prepare-automatically', { disposition: 'created' }); await prepared;
+    const read = background.pendingAutomaticAdmissions(original, [], 'first');
+    expect(worker.messages.at(-1)).toMatchObject({ kind: 'pending-automatic-admissions', input: { binding: original, admitted: [], preferred: 'first' } });
+    reply(worker, 'pending-automatic-admissions', []); expect(await read).toEqual([]);
+    expect(worker.messages.some(message => message.kind === 'configure-successors' || message.kind === 'start')).toBe(false);
+    const closing = background.close(); reply(worker, 'close'); await closing;
+    await expect(background.pendingAutomaticAdmissions(original, [])).rejects.toThrow('unavailable');
+  });
   it('pins pre-configuration lifecycle and keeps report time separate from fresh journal reads', async () => {
     const options = input(); const background = await createEngineeringBackground(options); const worker = fixture.workers[0]!;
     await configure(background, undefined, lifecycle());
@@ -114,6 +128,20 @@ describe('engineering background ownership and drain protocol', () => {
     expect(worker.terminate).not.toHaveBeenCalled(); expect(background.close()).toBe(close);
     await expect(background.check({})).rejects.toThrow('unavailable');
     reply(worker, 'close'); await close; expect(worker.terminate).toHaveBeenCalledTimes(1);
+  });
+  it('fences registration before a pending recovery read drains, without claiming an uncertain mutation', async () => {
+    const options = input(); const background = await createEngineeringBackground(options); const worker = fixture.workers[0]!;
+    const binding = { schemaVersion: 1 as const, supervisionId: 'automatic', configDigest: 'a'.repeat(64), deadlineAt: '2099-01-01T00:00:00.000Z' };
+    const read = background.pendingAutomaticAdmissions(binding, []); const readFailed = expect(read).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    const closing = background.close();
+    const response = new SharedArrayBuffer(16 + 4096); const header = new Int32Array(response, 0, 4); header[2] = 1;
+    worker.emit('message', { type: 'engineering-host-call', id: 1, method: 'owner.register', inputJson: JSON.stringify([{ schemaVersion: 1, enrollments: [] }]), response });
+    const refused = JSON.parse(new TextDecoder().decode(new Uint8Array(response, 16, Atomics.load(header, 1))));
+    expect(refused).toEqual({ ok: false, code: 'CLOSED', uncertain: false });
+    expect(options.owner.register).not.toHaveBeenCalled(); expect(options.onFault).not.toHaveBeenCalled(); expect(worker.terminate).not.toHaveBeenCalled();
+    const message = worker.messages.find(value => value.kind === 'pending-automatic-admissions')!;
+    worker.emit('message', { type: 'engineering-result', id: message.id, ok: false, code: 'UNAVAILABLE' }); await readFailed;
+    reply(worker, 'close'); await closing; expect(worker.terminate).toHaveBeenCalledOnce(); expect(options.onFault).not.toHaveBeenCalled();
   });
   it('drains a live protocol-faulted worker and preserves uncertainty after cleanup', async () => {
     const options = input(); const background = await createEngineeringBackground(options); const worker = fixture.workers[0]!;

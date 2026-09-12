@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const owner = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), catalog: vi.fn(), snapshot: vi.fn(),
   readiness: vi.fn(), launch: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
 const automatic = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), start: vi.fn(), snapshot: vi.fn(), setPaused: vi.fn(), admit: vi.fn(), close: vi.fn() }));
-const preparation = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), profiles: vi.fn(), check: vi.fn(), prepare: vi.fn() }));
+const preparation = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), profiles: vi.fn(), check: vi.fn(), prepare: vi.fn(),
+  prepareAutomatically: vi.fn(), pendingAutomaticAdmissions: vi.fn() }));
 const successors = vi.hoisted(() => ({ create: vi.fn(), start: vi.fn(), snapshot: vi.fn(), close: vi.fn() }));
 const background = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock('../src/core/resources/engineering-background.js', () => ({ createEngineeringBackground: background.create }));
@@ -50,9 +51,11 @@ beforeEach(() => {
   automatic.snapshot.mockReturnValue({ schemaVersion: 1, configId: 'automatic-fixture', paused: false, revision: 0 });
   automatic.setPaused.mockImplementation(paused => ({ schemaVersion: 1, configId: 'automatic-fixture', paused, revision: 1 }));
   preparation.validate.mockImplementation(value => value); preparation.create.mockReturnValue(preparation);
+  preparation.pendingAutomaticAdmissions.mockResolvedValue([]);
   successors.create.mockReturnValue(successors); successors.close.mockResolvedValue(undefined);
   successors.snapshot.mockReturnValue({ schemaVersion: 1, supervisionId: 'automatic-fixture', profileId: 'evolve', state: 'running', entries: [] });
   background.create.mockImplementation(async () => ({ profiles: preparation.profiles, check: preparation.check, prepare: preparation.prepare,
+    prepareAutomatically: preparation.prepareAutomatically, pendingAutomaticAdmissions: preparation.pendingAutomaticAdmissions,
     configureSuccessors: successors.create, start: successors.start, snapshot: successors.snapshot, close: successors.close }));
 });
 
@@ -196,24 +199,43 @@ describe('explicit engineering supervision HTTP boundary', () => {
     const supervisionFile = join(directory, 'automatic-policy.json'); const preparationFile = join(directory, 'profiles.json');
     save(supervisionFile, { schemaVersion: 1, id: 'automatic-fixture', maxEnrollments: 2, autoAdmitPrepared: true });
     save(preparationFile, { schemaVersion: 1, profiles: [] });
+    const binding = { schemaVersion: 1, supervisionId: 'automatic-fixture', configDigest: 'c'.repeat(64), deadlineAt: new Date(Date.now() + 60000).toISOString() };
+    const state = { schemaVersion: 1, configId: binding.supervisionId, configDigest: binding.configDigest, deadlineAt: binding.deadlineAt,
+      sourceState: 'healthy', state: 'running', revision: 0, entries: [] as Array<{ enrollmentId: string; enrollmentDigest: string }>,
+      admission: { autoAdmitPrepared: true, remainingEnrollments: 2, maxEnrollments: 2 } };
+    automatic.snapshot.mockImplementation(() => structuredClone(state));
     const handle = await start({ engineeringPreparationFile: preparationFile, engineeringSupervisionFile: supervisionFile });
     expect(handle.scope.engineeringPreparationAutoAdmission).toBe(true);
     const request = { id: 'fix', profileId: 'fixture', name: 'Correction', objective: 'Bounded correction', expectedPlanDigest: 'b'.repeat(64) };
     const plan = { id: 'fix', planDigest: request.expectedPlanDigest };
-    preparation.prepare.mockReturnValueOnce({ plan, enrollment, disposition: 'created' })
+    let prepared = false;
+    preparation.pendingAutomaticAdmissions.mockImplementation(async () => prepared && !state.entries.length
+      ? [{ enrollmentId: enrollment.id, expectedEnrollmentDigest: enrollment.enrollmentDigest, reason: null }] : []);
+    preparation.prepareAutomatically.mockImplementationOnce(() => { prepared = true; return { plan, enrollment, disposition: 'created' }; })
       .mockReturnValueOnce({ plan, enrollment, disposition: 'replayed' });
     automatic.admit.mockImplementationOnce(() => { throw new ResourceSupervisorError(code, '/private/sensitive-registration-details'); })
-      .mockReturnValueOnce({ schemaVersion: 1, configId: 'automatic-fixture', revision: 1 });
+      .mockImplementationOnce(() => { state.entries.push({ enrollmentId: enrollment.id, enrollmentDigest: enrollment.enrollmentDigest }); state.revision++; return state; });
     const first = await post(handle, '/api/resources/engineering/prepare', request);
     expect(first.status).toBe(200); expect(first.headers.get('cache-control')).toBe('no-store');
     const firstText = await first.text(); expect(firstText).not.toMatch(/private|sensitive-registration/);
     expect(JSON.parse(firstText)).toEqual({ plan, enrollment, disposition: 'created',
       automaticAdmission: { state: 'unavailable', supervisionId: 'automatic-fixture' } });
-    expect(preparation.prepare).toHaveBeenCalledExactlyOnceWith(request); expect(owner.launch).not.toHaveBeenCalled();
+    expect(preparation.prepareAutomatically).toHaveBeenCalledExactlyOnceWith(request, binding); expect(owner.launch).not.toHaveBeenCalled();
+    expect(preparation.prepare).not.toHaveBeenCalled(); expect(background.create).toHaveBeenCalledOnce();
+    const readRoute = `${handle.url}/api/resources/engineering/automatic-admission`;
+    expect((await fetch(readRoute)).status).toBe(401);
+    const observed = await fetch(readRoute, { headers: { 'x-ashlr-token': handle.readToken } });
+    expect(observed.status).toBe(200); expect(observed.headers.get('cache-control')).toBe('no-store');
+    expect(await observed.json()).toMatchObject({ state: 'held', pending: [{ enrollmentId: 'fix' }] });
+    const callsBeforeReads = automatic.admit.mock.calls.length;
+    expect((await fetch(readRoute, { headers: { 'x-ashlr-token': handle.readToken, origin: 'http://foreign.invalid' } })).status).toBe(403);
+    expect((await fetch(`${readRoute}?refresh=true`, { headers: { 'x-ashlr-token': handle.readToken } })).status).toBe(400);
+    expect((await fetch(readRoute, { headers: { 'x-ashlr-token': handle.readToken } })).status).toBe(200);
+    expect(automatic.admit).toHaveBeenCalledTimes(callsBeforeReads);
     const second = await post(handle, '/api/resources/engineering/prepare', request);
     expect(second.status).toBe(200); expect(await second.json()).toEqual({ plan, enrollment, disposition: 'replayed',
       automaticAdmission: { state: 'admitted', supervisionId: 'automatic-fixture' } });
-    expect(preparation.prepare).toHaveBeenNthCalledWith(2, request);
+    expect(preparation.prepareAutomatically).toHaveBeenNthCalledWith(2, request, binding);
     expect(automatic.admit.mock.calls).toEqual([[{ expectedRevision: 0, enrollments: [input] }], [{ expectedRevision: 0, enrollments: [input] }]]);
     expect(owner.launch).not.toHaveBeenCalled(); expect(automatic.start).toHaveBeenCalledOnce();
   });

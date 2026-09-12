@@ -51,14 +51,35 @@ export interface ResourceEngineeringPreparationRegistration {
   schemaVersion: 1; configDigest: string; request: ResourceConsoleEngineeringObjective;
   planDigest: string; bundlePlanDigest: string; enrollmentDigest: string;
   source?: ResourceEngineeringSuccessorSource;
+  automaticAdmission?: ResourceEngineeringAutomaticAdmission;
+}
+export interface ResourceEngineeringAutomaticAdmission {
+  schemaVersion: 1; supervisionId: string; configDigest: string; deadlineAt: string;
+}
+export interface ResourceEngineeringAutomaticAdmissionCandidate {
+  enrollmentId: string; expectedEnrollmentDigest: string;
+  reason: 'binding-changed' | 'evidence-unavailable' | 'verification-pending' | null;
+}
+export function validateResourceEngineeringAutomaticAdmission(input: unknown): ResourceEngineeringAutomaticAdmission {
+  const value = copy<ResourceEngineeringAutomaticAdmission>(input);
+  if (!exact(value, ['schemaVersion', 'supervisionId', 'configDigest', 'deadlineAt']) || value.schemaVersion !== 1 ||
+      typeof value.supervisionId !== 'string' || !ID.test(value.supervisionId) || typeof value.configDigest !== 'string' || !HASH.test(value.configDigest) ||
+      typeof value.deadlineAt !== 'string' || !Number.isFinite(Date.parse(value.deadlineAt)) || new Date(value.deadlineAt).toISOString() !== value.deadlineAt) {
+    fail('INVALID_INPUT', 'Invalid automatic admission binding');
+  }
+  return value;
 }
 function decodeRegistration(value: unknown): ResourceEngineeringPreparationRegistration | null {
     try {
       if (!exact(value, ['schemaVersion', 'configDigest', 'request', 'planDigest', 'bundlePlanDigest', 'enrollmentDigest',
-        ...(Object.hasOwn(value ?? {}, 'source') ? ['source'] : [])]) || value.schemaVersion !== 1 ||
+        ...(Object.hasOwn(value ?? {}, 'source') ? ['source'] : []), ...(Object.hasOwn(value ?? {}, 'automaticAdmission') ? ['automaticAdmission'] : [])]) || value.schemaVersion !== 1 ||
         ![value.configDigest, value.planDigest, value.bundlePlanDigest, value.enrollmentDigest].every(v => typeof v === 'string' && HASH.test(v))) return null;
       validateResourceConsoleEngineeringObjective(value.request);
       if (Object.hasOwn(value, 'source')) validateUniverseCampaignDeliverySource(value.source);
+      if (Object.hasOwn(value, 'automaticAdmission')) {
+        if (Object.hasOwn(value, 'source')) return null;
+        validateResourceEngineeringAutomaticAdmission(value.automaticAdmission);
+      }
       return value as unknown as ResourceEngineeringPreparationRegistration;
     } catch { return null; }
 }
@@ -174,13 +195,15 @@ export function createResourceEngineeringPreparationRegistry(input: {
     return verified;
   }
   return { config, contextDigest, currentConfig, registrations, objective, planned, materialize, successorOptions, committed, publish,
-    prepare(input: unknown, guards: { beforeNew(id: string, priorCount: number): void; beforePublication(catalog: ResourceConsoleEngineeringCatalog): void }) {
+    prepare(input: unknown, guards: { beforeNew(id: string, priorCount: number): void; beforePublication(catalog: ResourceConsoleEngineeringCatalog): void }, automaticAdmission?: ResourceEngineeringAutomaticAdmission) {
+      const admission = automaticAdmission === undefined ? undefined : validateResourceEngineeringAutomaticAdmission(automaticAdmission);
       const value = copy<Record<string, unknown>>(input);
       if (!exact(value, ['id', 'profileId', 'name', 'objective', 'expectedPlanDigest']) || typeof value.expectedPlanDigest !== 'string' || !HASH.test(value.expectedPlanDigest)) fail('INVALID_INPUT', 'Expected a checked objective digest');
       const { expectedPlanDigest, ...request } = value;
       const incoming = validateResourceConsoleEngineeringObjective(request);
       const prior = registrations(); const existing = prior.find(row => row.request.id === incoming.id);
       if (existing) {
+        if (admission && existing.automaticAdmission && canonical(admission) !== canonical(existing.automaticAdmission)) fail('CONFLICT', 'Automatic admission belongs to another supervision budget');
         // The bundle reader still performs both fresh pin captures and receipt
         // verification. Do not cache this result across calls or publication gates.
         const verified = committed(existing, incoming);
@@ -194,7 +217,8 @@ export function createResourceEngineeringPreparationRegistry(input: {
       guards.beforeNew(candidate.request.id, prior.length);
       const report = prepareResourceEngineeringBundle({ ...candidate.bundleOptions, expectedPlanDigest: candidate.bundlePlan.planDigest });
       const registration: ResourceEngineeringPreparationRegistration = { schemaVersion: 1, configDigest: contextDigest, request: candidate.request, planDigest: expectedPlanDigest,
-        bundlePlanDigest: candidate.bundlePlan.planDigest, enrollmentDigest: report.enrollmentDigest };
+        bundlePlanDigest: candidate.bundlePlan.planDigest, enrollmentDigest: report.enrollmentDigest,
+        ...(admission ? { automaticAdmission: admission } : {}) };
       const verified = publish(registration, guards.beforePublication);
       return { plan: candidate.plan, catalog: verified.catalog, enrollmentDigest: report.enrollmentDigest, disposition: report.disposition };
     },

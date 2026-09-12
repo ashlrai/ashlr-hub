@@ -57,6 +57,12 @@ describe('objective preparation composer', () => {
     expect(f.posts('/api/resources/engineering/prepare')).toHaveLength(0);
     fireEvent.click(button); await waitFor(() => expect(input.onPrepared).toHaveBeenCalledOnce());
     expect(screen.getByRole('status')).toHaveTextContent(state === 'admitted' ? 'Plan prepared and added to automatic work' : 'Registration is preserved');
+    if (state === 'unavailable') {
+      expect(screen.getByRole('status')).toHaveTextContent('If this plan was durably registered for automatic admission, the host retries within the original deadline and enrollment cap');
+      expect(screen.getByRole('status')).toHaveTextContent('Unmarked registrations are not automatically queued');
+      expect(screen.getByRole('status')).toHaveTextContent('a paused queue stays paused');
+      expect(screen.getByRole('status')).not.toHaveTextContent('before adding or running it');
+    }
     expect(screen.queryByText(/Nothing has launched/)).not.toBeInTheDocument();
     expect(f.posts('/api/resources/engineering/start')).toHaveLength(0);
     expect(f.posts('/api/resources/engineering/prepare')).toHaveLength(1);
@@ -113,6 +119,22 @@ describe('objective preparation composer', () => {
     expect(f.posts('/api/resources/engineering/prepare')).toHaveLength(1);
     fireEvent.click(screen.getByRole('button', { name: 'Reconcile preparation' })); await screen.findByText(/Plan prepared and selected below/);
     const bodies = f.posts('/api/resources/engineering/prepare').map(([, init]) => init?.body); expect(bodies[0]).toBe(bodies[1]);
+    expect(f.posts('/api/resources/engineering/start')).toHaveLength(0);
+  });
+  it('distinguishes uncertain registration from automatic recovery without reposting preparation', async () => {
+    const f = transport(); const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (path, options) => path === '/api/resources/engineering/prepare'
+      ? json({ error: 'PRIVATE_DETAIL' }, 503) : original(path, options));
+    render(<EngineeringObjectiveComposer {...props()} autoAdmission />); await fill();
+    fireEvent.click(screen.getByRole('button', { name: 'Check plan' }));
+    await screen.findByRole('region', { name: 'Checked objective plan' });
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare and queue' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare and queue' }));
+    await screen.findByRole('button', { name: 'Reconcile preparation' });
+    expect(screen.getByText(/Registration may not have completed/)).toHaveTextContent('the host may recover admission and run it before reconciliation');
+    expect(screen.getByText(/Registration may not have completed/)).toHaveTextContent('within the original deadline and cap; a paused queue stays paused');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('PRIVATE_DETAIL');
+    expect(f.posts('/api/resources/engineering/prepare')).toHaveLength(1);
     expect(f.posts('/api/resources/engineering/start')).toHaveLength(0);
   });
   it.each(['control', 'project', 'connection'] as const)('invalidates check across %s changes', async mode => {

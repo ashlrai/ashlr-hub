@@ -65,7 +65,7 @@ function ObjectiveForm({ projectId, available, unlocked, autoAdmission = false, 
           setNotice(result.automaticAdmission?.state === 'admitted'
             ? 'Plan prepared and added to automatic work. It may start under the existing supervision deadline; a paused queue stays paused.'
             : result.automaticAdmission?.state === 'unavailable'
-              ? 'Plan prepared and registered, but automatic admission was not confirmed. Registration is preserved. Refresh supervision before adding or running it; do not create a duplicate objective.'
+              ? 'Plan prepared and registered, but automatic admission was not confirmed. Registration is preserved. If this plan was durably registered for automatic admission, the host retries within the original deadline and enrollment cap; a paused queue stays paused. Unmarked registrations are not automatically queued. Refresh supervision; do not create a duplicate objective.'
               : 'Plan prepared and selected below. Nothing has launched. Review local readiness, then use Run enrolled plan.');
           onPrepared(result);
         }
@@ -121,7 +121,7 @@ function ObjectiveForm({ projectId, available, unlocked, autoAdmission = false, 
       <details><summary>Checked plan identity</summary><code>{plan.planDigest}</code><p>Profile digest: <code>{plan.profileDigest}</code></p></details>
       <p>{autoAdmission ? 'Prepare and queue registers this exact plan and admits it to automatic work. The original queue deadline, pause, account reserves and execution limits remain in force.' : 'Prepare registers this exact plan. Running it remains a separate action; preparation does not add it to automatic supervision.'}</p></section> : null}
     {error ? <p className={`${styles.feedback} ${styles.error}`} role="alert">{error}</p> : null}
-    {uncertain ? <p className={styles.feedback}>The preparation outcome is unknown. Keep the same objective ID. Refresh enrolled plans, check again if needed, then explicitly reconcile preparation. {autoAdmission ? 'The plan may already be queued or running; reconciliation uses the same enrollment and does not create duplicate work.' : 'This never retries execution.'}</p> : null}
+    {uncertain ? <p className={styles.feedback}>The preparation outcome is unknown. Keep the same objective ID. Refresh enrolled plans, check again if needed, then explicitly reconcile preparation. {autoAdmission ? 'Registration may not have completed. If automatic work was durably registered, the host may recover admission and run it before reconciliation, within the original deadline and cap; a paused queue stays paused. Reconciliation uses the same enrollment and does not create duplicate work.' : 'This never retries execution.'}</p> : null}
     {notice ? <p className={styles.feedback} role="status">{notice}</p> : null}
     {!available ? <p className={styles.feedback}>Fresh project and console evidence is required before checking or preparing.</p> : null}
     <div className={styles.actions}><button type="button" className={styles.button} disabled={!enabled || !!busy} onClick={refreshProfiles}>Refresh profiles and enrolled plans</button>

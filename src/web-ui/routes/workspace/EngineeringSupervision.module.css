@@ -10,6 +10,12 @@
 .entries strong { font-size: var(--text-sm-size); overflow-wrap: anywhere; }
 .entries p { margin: var(--space-2) 0 0; }
 .scope { border-top: 1px solid var(--border-default); padding-top: var(--space-3); }
+.recovery { min-width: 0; margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--border-default); }
+.recovery h4 { margin: 0; font-family: var(--font-display); font-size: var(--text-base-size); overflow-wrap: anywhere; }
+.recovery .heading { justify-content: flex-start; }
+.recovery dd { overflow-wrap: anywhere; }
+.recoveryDetails summary { padding-block: var(--space-3); font-size: var(--text-sm-size); cursor: pointer; overflow-wrap: anywhere; }
+.recoveryDetails summary:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
 .actions { justify-content: flex-end; }
 .admission { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-4); border-top: 1px solid var(--border-default); padding-block: var(--space-4); }
 .admission > div { flex: 1 1 260px; min-width: 0; }

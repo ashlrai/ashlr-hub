@@ -277,8 +277,44 @@ command or host output path is exposed through these projections.
 When automatic admission is configured, the response also contains
 `automaticAdmission: {state: "admitted" | "unavailable", supervisionId}`. This
 reports queue admission, not a worker launch or completed result. If admission
-is unavailable, the prepared registration is still durable. Reconcile the same
-objective after inspecting supervision; do not create a new ID to hide the hold.
+is unavailable, the prepared registration is still durable. The host retries
+admission for ordinary objectives carrying the durable automatic-admission
+marker, including after restart with the same queue identity. It rechecks saved
+evidence and preserves the original deadline, lifetime enrollment cap and pause;
+it does not invent a replacement objective. Inspect supervision rather than
+creating a new ID to hide the hold. Registration without this marker is not
+automatically adopted by recovery.
+
+With automatic admission configured, an authenticated read session can inspect
+`GET /api/resources/engineering/automatic-admission`. This returns the original
+queue identity and deadline, sampling time, recovery state, and bounded pending
+enrollment IDs/digests with hold reasons. Reading it does not prepare, admit or
+launch work. An unconfigured console returns 403. `ready` means the last pass
+had no pending holds, not that a worker ran or delivered a result; inspect
+supervision and outcome receipts for those facts.
+
+| Hold reason | Meaning and next action |
+| --- | --- |
+| `verification-pending` | Another marked obligation received this pass's proof check; allow a later bounded pass. |
+| `evidence-unavailable` | Saved evidence could not be verified; inspect the original preparation without inventing a new objective ID. |
+| `binding-changed` | The registration belongs to a different original queue binding; recovery does not migrate it. |
+| `capacity` | Admission is full; completed entries still count against the lifetime cap. |
+| `admission-unavailable` | Admission or its budget is unavailable; check supervision health, the original deadline and current ownership. This is not a promise that retry will succeed. |
+
+Pending rows describe the last reconciliation, not a continuously verified
+inventory. Check `sampledAt`; a full queue skips fresh proof reconstruction and
+may retain prior pending reasons. Paused queues can accept verified entries but
+remain paused. Recovery never renews the deadline or increases the cap.
+
+The workspace's **Automatic engineering** panel displays this same queue-bound
+report when automatic preparation admission is enabled. Expand **Review pending
+registrations** to inspect holds. The sample time comes from the host, not the
+browser's last refresh. Disconnected, failed or superseded reads leave retained
+details explicitly historical; a clear recovery pass is not a running worker or
+completed delivery. Recovery reads share supervision's polling cycle and have
+a five-second deadline, without adding execution controls. A failed recovery
+read does not disable pause when supervision's own evidence and control access
+remain valid.
 
 Completed registration survives restart through private
 `console-engineering-preparations` records in the existing resource root. Reload
@@ -296,9 +332,12 @@ remaining profiles launch work. Restore or review the affected configuration
 and evidence before restarting.
 
 After an uncertain prepare response, retain the same objective ID and input.
-Refresh evidence and explicitly **Reconcile preparation**; exact completed replay
-verifies without rewriting registration records. In automatic mode it also
-reconciles the same queue entry; an already admitted plan is not duplicated.
+Registration may not have completed. Refresh evidence and explicitly
+**Reconcile preparation**; exact completed replay verifies without rewriting
+registration records. If automatic work was durably registered, the host may
+recover admission and run it before this reconciliation, within the original
+deadline and cap; a paused queue stays paused. Reconciliation uses the same
+queue entry, so an already admitted plan is not duplicated.
 Incomplete bundles/staging remain held for inspection, not deleted or repaired
 automatically.
 The combined static and prepared enrollment catalog is bounded to 32 entries.
@@ -543,8 +582,11 @@ preparation profiles already configured:
 `maxEnrollments` enables append-only admission and bounds the total retained
 queue to 1–32 enrollments, including completed entries. Only this mode permits
 an empty initial queue. `autoAdmitPrepared: true` additionally requires
-preparation profiles: each authenticated successful prepare operation attempts
-queue admission automatically. A host-authorized agent can use the same
+preparation profiles: each authenticated successful prepare operation records
+its original queue binding and attempts admission automatically. Startup and
+bounded, non-overlapping background passes recover pending marked ordinary
+registrations under that same binding; failed or incomplete preparation is not
+silently completed. A host-authorized agent can use the same
 profile/check/prepare protocol as the UI; it needs no separate human launch.
 Checks remain nonexecuting. The selected profile still fixes the evaluator,
 seed, file scope, allowed workers and per-campaign limits.

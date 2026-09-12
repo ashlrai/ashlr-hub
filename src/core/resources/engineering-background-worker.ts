@@ -1,7 +1,7 @@
 /** Fixed, effectful engineering entrypoint. All acquired locks stay in this isolate. */
 import { parentPort, workerData } from 'node:worker_threads';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
-import { createResourceConsoleEngineeringPreparation, type ResourceConsoleEngineeringPreparationOwner } from './console-engineering-preparation.js';
+import { createResourceConsoleEngineeringPreparation, ResourceEngineeringAutomaticAdmissionOwnershipError, type ResourceConsoleEngineeringPreparationOwner } from './console-engineering-preparation.js';
 import { createResourceConsoleEngineeringSuccessors } from './console-engineering-successors.js';
 import type { ResourceConsoleEngineeringOwner } from './console-engineering.js';
 import type { ResourcePoolSupervisor } from './pool-supervisor.js';
@@ -71,6 +71,17 @@ async function execute(kind: string, input: unknown): Promise<unknown> {
     case 'profiles': return preparation.profiles(input as string);
     case 'check': return preparation.check(input);
     case 'prepare': return preparation.prepare(input);
+    case 'prepare-automatically': {
+      const value = data<{ input: unknown; binding: Parameters<ResourceConsoleEngineeringPreparationOwner['prepareAutomatically']>[1] }>(input);
+      if (!value || Object.keys(value).length !== 2 || !Object.hasOwn(value, 'input') || !Object.hasOwn(value, 'binding')) throw new Error('Invalid automatic preparation');
+      return preparation.prepareAutomatically(value.input, value.binding);
+    }
+    case 'pending-automatic-admissions': {
+      const value = data<{ binding: Parameters<ResourceConsoleEngineeringPreparationOwner['pendingAutomaticAdmissions']>[0]; admitted: Parameters<ResourceConsoleEngineeringPreparationOwner['pendingAutomaticAdmissions']>[1]; preferred: string | null }>(input);
+      if (!value || Object.keys(value).length !== 3 || !Object.hasOwn(value, 'binding') || !Object.hasOwn(value, 'admitted') ||
+          !Object.hasOwn(value, 'preferred') || value.preferred !== null && typeof value.preferred !== 'string') throw new Error('Invalid automatic admission read');
+      return preparation.pendingAutomaticAdmissions(value.binding, value.admitted, value.preferred ?? undefined);
+    }
     case 'configure-successors': {
       if (successors) throw new Error('Engineering successor coordinator already initialized');
       successors = createResourceConsoleEngineeringSuccessors({ ...data<EngineeringBackgroundSuccessors>(input), preparation,
@@ -102,7 +113,7 @@ port.on('message', (message: unknown) => {
   if (!message || typeof message !== 'object' || Array.isArray(message)) { port.postMessage({ type: 'engineering-fault' }); return; }
   const value = message as Record<string, unknown>;
   if (value.type !== 'engineering-command' || !Number.isSafeInteger(value.id) || (value.id as number) <= sequence ||
-      typeof value.kind !== 'string' || !['initialize', 'profiles', 'check', 'prepare', 'configure-successors', 'start', 'snapshot', 'close'].includes(value.kind) ||
+      typeof value.kind !== 'string' || !['initialize', 'profiles', 'check', 'prepare', 'prepare-automatically', 'pending-automatic-admissions', 'configure-successors', 'start', 'snapshot', 'close'].includes(value.kind) ||
       Object.keys(value).length !== 4 || !Object.hasOwn(value, 'input') || pending >= 8 && value.kind !== 'close') {
     port.postMessage({ type: 'engineering-fault' }); return;
   }
@@ -113,6 +124,13 @@ port.on('message', (message: unknown) => {
   queue = queue.then(async () => {
     try { const result = data(await execute(kind, input)); port.postMessage({ type: 'engineering-result', id, ok: true, value: result }); }
     catch (error) {
+      if (error instanceof ResourceEngineeringAutomaticAdmissionOwnershipError) {
+        // The parent intentionally refuses registration while a pending read
+        // drains during shutdown. That known refusal is not a new transport fault.
+        if (!rpc.isClosed()) {
+          Atomics.store(closeFlag, 0, 1); Atomics.notify(closeFlag, 0); abort.abort(); port.postMessage({ type: 'engineering-fault' });
+        }
+      }
       const code = error && typeof error === 'object' && 'code' in error &&
         ['INVALID_INPUT', 'NOT_FOUND', 'CONFLICT', 'CAPACITY', 'UNAVAILABLE'].includes(String(error.code)) ? String(error.code) : 'UNAVAILABLE';
       port.postMessage({ type: 'engineering-result', id, ok: false, code });

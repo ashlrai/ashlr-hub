@@ -4,6 +4,7 @@ import { EngineeringSupervision } from './EngineeringSupervision.js';
 import { clearMutationToken, setMutationToken } from '../../data/auth-store.js';
 import type { ResourceConsoleEngineeringSupervisionSnapshot as Snapshot } from '../../../core/resources/console-engineering-supervisor-types.js';
 import { engineeringEnrollment } from './engineering-fixture.test-support.js';
+import type { ResourceEngineeringAutomaticAdmissionStatus as Recovery } from '../../../core/resources/engineering-automatic-admission.js';
 let value: Snapshot;
 let writes: RequestInit[];
 beforeEach(() => {
@@ -22,6 +23,146 @@ beforeEach(() => {
     }
     return new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } });
   }));
+});
+
+describe('automatic admission recovery observation', () => {
+  function setup() {
+    value.deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    value.admission = { maxEnrollments: 3, remainingEnrollments: 2, autoAdmitPrepared: true };
+    const report: Recovery = { schemaVersion: 1, supervisionId: value.configId, configDigest: value.configDigest,
+      deadlineAt: value.deadlineAt, sampledAt: new Date(Date.now() - 10_000).toISOString(), state: 'held', reason: null,
+      pending: [{ enrollmentId: 'pending-plan', enrollmentDigest: 'd'.repeat(64), reason: 'verification-pending' }] };
+    const ordinaryFetch = globalThis.fetch;
+    const recoveryRead = vi.fn<() => Promise<Response>>().mockImplementation(async () => new Response(JSON.stringify(report)));
+    const signals: AbortSignal[] = [];
+    vi.stubGlobal('fetch', vi.fn((url: string, init?: RequestInit) => {
+      if (url.endsWith('/automatic-admission')) { signals.push(init!.signal!); return recoveryRead(); }
+      return ordinaryFetch(url, init);
+    }));
+    return { report, recoveryRead, signals };
+  }
+  it('does not request recovery when automatic preparation admission is not enabled', async () => {
+    render(<EngineeringSupervision available unlocked />);
+    await screen.findByText('hub-repair');
+    expect(screen.queryByRole('region', { name: 'Automatic admission recovery' })).not.toBeInTheDocument();
+    expect(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/automatic-admission'))).toBe(false);
+    expect(writes).toHaveLength(0);
+  });
+  it('renders bounded hold descriptions and original sample without implying worker health or execution', async () => {
+    const { report } = setup();
+    report.pending = ['binding-changed', 'evidence-unavailable', 'verification-pending', 'capacity', 'admission-unavailable'].map((reason, index) => ({
+      enrollmentId: `pending-${index}`, enrollmentDigest: 'd'.repeat(64), reason: reason as Recovery['pending'][number]['reason'],
+    }));
+    render(<EngineeringSupervision available unlocked />);
+    await screen.findByText('Recovery held');
+    const disclosure = screen.getByText('Review 5 pending registrations');
+    expect(disclosure.closest('details')).not.toHaveAttribute('open');
+    fireEvent.click(disclosure); expect(disclosure.closest('details')).toHaveAttribute('open');
+    for (const text of ['Original queue binding changed.', 'Registration evidence unavailable.', 'Awaiting fresh verification.', 'Lifetime enrollment cap reached.', 'Queue admission was not confirmed.']) expect(screen.getByText(text)).toBeInTheDocument();
+    expect(screen.getByText('Last recovery sample').nextElementSibling?.querySelector('time')).toHaveAttribute('dateTime', report.sampledAt);
+    expect(screen.getByText(/This report is not worker health/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Pause automatic launches' })).toBeEnabled(); expect(writes).toHaveLength(0);
+  });
+  it('publishes supervision before a slow recovery read and rejects its late reply after pause', async () => {
+    const { report, recoveryRead } = setup(); let resolve!: (response: Response) => void;
+    recoveryRead.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    render(<EngineeringSupervision available unlocked />);
+    const pause = await screen.findByRole('button', { name: 'Pause automatic launches' });
+    await waitFor(() => expect(pause).toBeEnabled());
+    expect(screen.getByText('Reading recovery report')).toBeInTheDocument();
+    fireEvent.click(pause); await screen.findByRole('button', { name: 'Resume automatic launches' });
+    await act(async () => resolve(new Response(JSON.stringify(report))));
+    expect(screen.queryByText('pending-plan')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Resume automatic launches' })).toBeEnabled(); expect(writes).toHaveLength(1);
+  });
+  it('keeps pause usable and redacts recovery failures', async () => {
+    const { recoveryRead } = setup(); recoveryRead.mockRejectedValue(new Error('/private/SECRET recovery failed'));
+    render(<EngineeringSupervision available unlocked />);
+    await screen.findByText('Recovery unavailable');
+    expect(screen.getByRole('button', { name: 'Pause automatic launches' })).toBeEnabled();
+    expect(screen.getByText(/Automatic admission recovery could not be verified/)).toBeInTheDocument();
+    expect(screen.queryByText(/SECRET/)).not.toBeInTheDocument(); expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(writes).toHaveLength(0);
+  });
+  it('uses the same non-overlapping poll and retains historical details through failure, then recovers', async () => {
+    vi.useFakeTimers();
+    try {
+      const { report, recoveryRead } = setup();
+      const view = render(<EngineeringSupervision available unlocked />);
+      await act(async () => {}); expect(recoveryRead).toHaveBeenCalledTimes(1);
+      recoveryRead.mockRejectedValueOnce(new Error('private failure'));
+      await act(async () => vi.advanceTimersByTimeAsync(3000));
+      expect(recoveryRead).toHaveBeenCalledTimes(2); expect(screen.getByText('Historical recovery report')).toBeInTheDocument();
+      expect(screen.getByText('pending-plan')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Pause automatic launches' })).toBeEnabled();
+      report.state = 'ready'; report.pending = [];
+      await act(async () => vi.advanceTimersByTimeAsync(3000));
+      expect(recoveryRead).toHaveBeenCalledTimes(3); expect(screen.getByText('Last pass clear')).toBeInTheDocument();
+      expect(screen.queryByText('pending-plan')).not.toBeInTheDocument(); expect(screen.queryByText(/could not be verified/)).not.toBeInTheDocument();
+      expect(writes).toHaveLength(0); view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+  it('aborts and clears recovery across selected project changes and disconnect', async () => {
+    const { report, recoveryRead, signals } = setup(); const selected = engineeringEnrollment();
+    let resolve!: (response: Response) => void;
+    recoveryRead.mockImplementationOnce(() => new Promise(done => { resolve = done; }));
+    const view = render(<EngineeringSupervision available unlocked selectedPlan={selected} />);
+    await waitFor(() => expect(recoveryRead).toHaveBeenCalledOnce());
+    recoveryRead.mockResolvedValue(new Response(JSON.stringify({ ...report, pending: [], state: 'idle', sampledAt: null })));
+    view.rerender(<EngineeringSupervision available unlocked selectedPlan={{ ...selected, projectId: 'another-project' }} />);
+    await screen.findByText('Not sampled'); expect(signals[0]!.aborted).toBe(true);
+    await act(async () => resolve(new Response(JSON.stringify(report))));
+    expect(screen.queryByText('pending-plan')).not.toBeInTheDocument();
+    view.rerender(<EngineeringSupervision available={false} unlocked selectedPlan={{ ...selected, projectId: 'another-project' }} />);
+    expect(screen.getByText('Historical recovery report')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Pause automatic launches' })).toBeDisabled();
+    view.unmount(); expect(writes).toHaveLength(0);
+  });
+  it('removes foreign queue details before waiting for its new bound report', async () => {
+    vi.useFakeTimers();
+    try {
+      const { recoveryRead } = setup();
+      const view = render(<EngineeringSupervision available unlocked />); await act(async () => {});
+      expect(screen.getByText('pending-plan')).toBeInTheDocument();
+      value = { ...value, configId: 'another-queue', configDigest: 'e'.repeat(64) };
+      recoveryRead.mockImplementationOnce(() => new Promise(() => {}));
+      await act(async () => vi.advanceTimersByTimeAsync(3000));
+      expect(screen.queryByText('pending-plan')).not.toBeInTheDocument(); expect(screen.getByText('Reading recovery report')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Pause automatic launches' })).toBeEnabled();
+      view.unmount();
+    } finally { vi.useRealTimers(); }
+  });
+  it('does not interpret an empty capacity report as no pending work and identifies retained reconciling samples', async () => {
+    const { report } = setup(); report.pending = []; report.reason = 'capacity'; report.state = 'reconciling';
+    const view = render(<EngineeringSupervision available unlocked />);
+    await screen.findByText('Checking pending registrations');
+    expect(screen.getByText(/its sample and holds are from the preceding report/)).toBeInTheDocument();
+    expect(screen.getByText(/does not establish that no registrations remain pending/)).toBeInTheDocument();
+    view.rerender(<EngineeringSupervision available={false} unlocked />);
+    expect(screen.getByText('Historical recovery report')).toBeInTheDocument();
+    expect(screen.getByText(/The last report recorded a recovery pass in progress/)).toBeInTheDocument();
+    expect(writes).toHaveLength(0);
+  });
+  it('bounds a hung recovery read without overlapping polls, and aborts on unmount', async () => {
+    vi.useFakeTimers();
+    try {
+      const { recoveryRead, signals } = setup();
+      recoveryRead.mockImplementation(() => new Promise(() => {}));
+      const view = render(<EngineeringSupervision available unlocked />); await act(async () => {});
+      expect(recoveryRead).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('button', { name: 'Pause automatic launches' })).toBeEnabled();
+      await act(async () => vi.advanceTimersByTimeAsync(4999));
+      expect(recoveryRead).toHaveBeenCalledTimes(1);
+      await act(async () => vi.advanceTimersByTimeAsync(1));
+      expect(signals[0]!.aborted).toBe(true); expect(screen.getByText('Recovery unavailable')).toBeInTheDocument();
+      await act(async () => vi.advanceTimersByTimeAsync(3000));
+      expect(recoveryRead).toHaveBeenCalledTimes(2);
+      expect(screen.getByRole('button', { name: 'Pause automatic launches' })).toBeEnabled();
+      view.unmount(); expect(signals[1]!.aborted).toBe(true);
+      await act(async () => vi.advanceTimersByTimeAsync(10_000));
+      expect(recoveryRead).toHaveBeenCalledTimes(2); expect(writes).toHaveLength(0);
+    } finally { vi.useRealTimers(); }
+  });
 });
 afterEach(() => { act(() => clearMutationToken()); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 describe('automatic engineering operating panel', () => {

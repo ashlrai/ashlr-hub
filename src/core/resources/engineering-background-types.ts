@@ -17,6 +17,8 @@ export interface EngineeringBackground {
   profiles(projectId: string): Promise<ReturnType<ResourceConsoleEngineeringPreparationOwner['profiles']>>;
   check(input: unknown): Promise<ReturnType<ResourceConsoleEngineeringPreparationOwner['check']>>;
   prepare(input: unknown): Promise<ReturnType<ResourceConsoleEngineeringPreparationOwner['prepare']>>;
+  prepareAutomatically(...args: Parameters<ResourceConsoleEngineeringPreparationOwner['prepareAutomatically']>): Promise<ReturnType<ResourceConsoleEngineeringPreparationOwner['prepareAutomatically']>>;
+  pendingAutomaticAdmissions(...args: Parameters<ResourceConsoleEngineeringPreparationOwner['pendingAutomaticAdmissions']>): Promise<ReturnType<ResourceConsoleEngineeringPreparationOwner['pendingAutomaticAdmissions']>>;
   configureSuccessors(input: EngineeringBackgroundSuccessors, supervision: ResourceConsoleEngineeringSupervisor,
     readAdmissionEvidence: Parameters<typeof createResourceConsoleEngineeringSuccessors>[0]['readAdmissionEvidence']): Promise<void>;
   start(): Promise<void>;
