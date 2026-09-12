@@ -135,6 +135,17 @@ substitute for proving responsive controls: the candidate still took about
 gate. Default correctness-test success
 must not be reported as passing this separate gate or as always-on readiness.
 
+The worker-isolation continuation (based on `82b2c881`) moves existing preparation
+and coordinator proofs off the HTTP thread without removing ACL or publication
+checks. Its final corrected-source actual-CLI run accepted pause in 71 ms,
+returned health in about 1 ms and withheld B entirely, with original accounting
+intact. It still failed the same gate: successor-status requests queued for
+6.0–52.3 seconds. An initial parent supervision read also took 2.161 seconds
+(outside the seven fixed assertions). Uninterrupted two-delivery/restart
+acceptance passed separately with exact accounting and zero read recoveries.
+Independent status projection and expensive parent owner checks remain open;
+these local results do not establish always-on or production readiness.
+
 The [offline pool upgrade](RESOURCE-POOLS.md#upgrade-a-pool-without-resetting-history)
 removes the need to discard accounting or conversations when adding workers.
 Its explicit digest-pinned transition preserves prior identity and has a held

@@ -1,6 +1,75 @@
 # Verified local handoff
 
-## Current continuation: verified efficiency and control responsiveness
+## Current continuation: isolated autonomous verification
+
+Baseline `82b2c88128d9decd1032558ec579700baf5e59dc`, branch `auto/p00`,
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agent streams
+profiled actual execution, implemented worker isolation and independently reviewed
+the host-call protocol. The parent owns HTTP integration and canonical evidence.
+Entire resume found no checkpoint. No account, real KILL, provider execution,
+persistent service, remote push or public release is part of this increment.
+
+Automatic-successor consoles now run their existing preparation manager and
+coordinator in a fixed worker thread. The worker acquires and retains its own
+original leases, executes the same fresh source and ACL checks, and preserves
+immutable staging/publication. HTTP, account collection, engineering ownership
+and durable queue CAS remain on the main thread. Bounded worker-only waits
+delegate a closed set of host calls; there is no serialized lease, arbitrary
+entrypoint, new proof cache or alternate account scheduler.
+
+Automatic admission checks parent stop/pause before forwarding the exact queue
+revision. Explicit manual admission while paused is unchanged. Protocol faults
+and uncertain mutating calls stop the worker path before retry loops; close
+drains original ownership before terminating the thread. Unexpected exit or
+ambiguous cleanup remains an error, never permission to replace an owner or
+delete retained records. The existing binary build includes a fixed worker shim.
+
+The final corrected-source actual-CLI measurement showed meaningful control improvement:
+
+| Measured request | Final worker-hosted run |
+| --- | ---: |
+| Health at three verification phases | 0.819–1.095ms |
+| Authenticated pause | 71.056ms, HTTP200 |
+| Successor status at three phases | 6.030s / 52.342s / 35.954s |
+
+Pause held the original one-entry queue: two generations, one model-fixture
+proposal, no B admission or execution. The same unchanged performance gate still
+failed its three status-latency assertions: one failed test, zero skips, 109.08s
+total. Initial parent supervision status took 2.161s outside those assertions.
+Close took 501.05ms, exit zero/no stderr; no read retries or threshold changes.
+The first run and profiling details remain in the chronological notes.
+
+Profiling, not speculation, identified synchronous macOS ACL subprocesses as
+the dominant cost (about 79% of sampled runtime). Permission checks remain intact.
+Independent status projection and expensive parent projections remain required
+before claiming responsive unattended operation. The queued worker status API is
+not relabeled as a fresh cached display to satisfy the test.
+
+Focused validation: 116 tests/four files (8.32s), seven background-client
+tests (1.06s), three packaging tests (0.183s), all zero skips. Source and focused
+test typechecks/scoped lint passed; independent final source review found no new
+actionable issue. Actual Bun bootstrap/close smoke loaded the bundled worker and
+exited cleanly without initializing a campaign; this is not full native autonomous
+acceptance.
+
+Corrected-source unchanged setup/delivery/restart acceptance passed: one test,
+zero skips, 198.99s total. Five model-fixture requests, six evaluations, two local
+delivery refs and 150 reported tokens were exact; seed context, original deadlines,
+account policies, restart and read-only setup replay remained intact. Phase logging
+retained the full observation stream: zero read recoveries or transport failures.
+The final unchanged responsiveness gate failed separately as reported above.
+Full web verification passed 1,604 tests / 85 files, zero skips, in 10.74s.
+An additional 40 successor adapter/coordinator regressions passed across two
+files in 14.95s. Combined non-overlapping correctness coverage is **1,771 tests /
+94 files**, zero skips, plus the explicitly failing responsiveness gate above.
+Full source/web typechecks, the local production-format build, compiled setup
+help, five structural safety checks and documentation links passed. Full lint
+passed with zero errors and 107 existing warnings; real-IO classification passed
+with 320 real-IO / 672 unit files and no unclassified markers. Final
+build/source identity is recorded at handoff. Useful graded Hub yield, account
+commissioning and resident operation remain separate unfinished North Star work.
+
+## Previous continuation: verified efficiency and control responsiveness
 
 Baseline `104650e8fee836fdc4ecdf21ac1a9b8ea2edd9a9`, isolated `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agent streams

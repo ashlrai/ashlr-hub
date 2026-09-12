@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { createSeaCompileArgs, createSeaWorkerShim } from '../scripts/build-sea.mjs';
+import { createSeaCompileArgs, createSeaWorkerShim, createSeaEngineeringWorkerShim } from '../scripts/build-sea.mjs';
 
 describe('Bun sidecar read-worker packaging', () => {
   it('explicitly compiles the sibling worker entry alongside the CLI shim', () => {
@@ -21,5 +21,18 @@ describe('Bun sidecar read-worker packaging', () => {
     expect(shim).toContain("await import('../dist/core/web/read-projection-worker.js');");
     expect(shim.indexOf('Reflect.set(')).toBeLessThan(shim.indexOf('await import('));
     expect(shim).not.toContain('process.env');
+  });
+  it('embeds the fixed engineering worker as a sibling with the same trusted build identity', () => {
+    const identity = JSON.stringify({ schemaVersion: 1, revision: 'b'.repeat(40) });
+    const shim = createSeaEngineeringWorkerShim({ buildIdentityJson: identity });
+    expect(shim).toContain(JSON.stringify(identity));
+    expect(shim).toContain("await import('../dist/core/resources/engineering-background-worker.js');");
+    expect(shim.indexOf('Reflect.set(')).toBeLessThan(shim.indexOf('await import('));
+    expect(shim).not.toContain('process.env');
+    expect(createSeaCompileArgs({ entry: '/owned/_entry.js', workerEntry: '/owned/read-projection-worker.js',
+      engineeringWorkerEntry: '/owned/engineering-background-worker.js', outBin: '/owned/ashlr' })).toEqual([
+      'build', '--compile', '/owned/_entry.js', '/owned/read-projection-worker.js', '/owned/engineering-background-worker.js',
+      '--outfile', '/owned/ashlr',
+    ]);
   });
 });

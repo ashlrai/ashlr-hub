@@ -1,5 +1,97 @@
 # Firm build notes
 
+## September 11: isolated autonomous verification (baseline 82b2c881)
+
+- Previous turn made verified progress, but both baseline and candidate failed
+  the frozen two-second pause/status gate. Clean auto/p00 HEAD revalidated as
+  82b2c881; Entire resume still found no checkpoint. Three agents cover profiling,
+  effectful-worker implementation and independent RPC/control review.
+- Actual-process CPU profiling attributes about 79% of sampled runtime to
+  synchronous child_process.spawnSync, almost all under the macOS private-storage
+  ACL assurance path (`/bin/ls -lde`). This is not evidence that Git/hash CPU is
+  dominant. Native call counters were capped, so their totals are lower bounds;
+  the uncapped CPU profile supplies the attribution. No ACL checks are removed.
+- Selected worker-hosted existing preparation/coordinator over new cached
+  read-set authorization. Original guards, branded leases, staging, source
+  verification and publication stay together in that isolate. Parent HTTP,
+  engineering owner and durable supervision retain their existing custody.
+  Closed synchronous worker-to-parent callbacks use bounded fresh shared buffers;
+  only the worker waits. Parent callbacks cannot reenter the worker. Automatic
+  admission checks parent stop/pause immediately before the unchanged CAS call;
+  explicit manual admission while paused retains its existing contract.
+- Effectful workers cannot use the reader's terminate/restart-on-timeout policy.
+  Close sets a shared stop flag, drains the original coordinator and only then
+  terminates the isolate. Unexpected transport failure must retain uncertainty
+  and still attempt local drain; no abandoned-file deletion or automatic restart.
+- Scoped HTTP routing tests passed 43/43, zero skips, 4.07s, including control
+  availability while preparation awaits and cleanup after configuration failure.
+  Independent actual-worker RPC tests passed 22/22, zero skips, 0.909s. These
+  narrow checks do not establish full responsiveness acceptance.
+- First unchanged worker-hosted benchmark: one failed, zero skips, 118.15s.
+  Health was 1.17/0.91/1.16ms; pause was 200 in 74.13ms. Two generations, one
+  proposal, one enrolled campaign, paused=true: B was not admitted or executed.
+  Three successor-status reads still waited 6.275/58.502/41.008s; initial parent
+  supervision read was 2.572s outside the seven fixed assertions. Clean close
+  501.95ms, child exit zero, no stderr. No retry or threshold change.
+- Review found two lifecycle defects before final integration: an already-faulted
+  worker exiting during cleanup could strand a new pending close request; and
+  swallowed uncertain mutating host calls could let the coordinator keep polling.
+  Builder/cold reviewer own explicit exit rejection and a tested fatal-uncertainty
+  latch. Measurement above predates those targeted error-path corrections.
+- Profiling artifacts: /tmp/ashlr-sync-profile-buxSiS. Uncapped CPU profile totals
+  146.64s, with 115.316s spawnSync self and 114.020s ACL assurance inclusive.
+  Inclusive stage totals overlap: projectUniverse83.941s, seed-context66.825s,
+  source-delivery 49.107s, successorSource 36.804s, prepareSuccessor 61.568s and
+  registry.publish 36.393s. Parent checkRegistration had four roughly 1.7s windows.
+  Instrumentation adds overhead; these are attribution, not uninstrumented SLA.
+- Error fixes landed before final source freeze. Central host-call policy faults
+  protocol/timeouts and uncertain registration/admission before subordinate
+  catches can retry. Expected read closure remains a normal drain condition.
+  Terminal worker exit rejects cleanup waiters even after an earlier fault.
+- Combined parent regression: 116 tests / four files, zero skips, 8.32s (HTTP,
+  unchanged manual queue admission, error policy, actual-worker RPC). Background
+  lifecycle/admission tests: 7/7, 1.06s. SEA shim packaging: 3/3, 0.183s. An
+  actual compiled Bun smoke loaded the fixed engineering worker and acknowledged
+  close in 0.70s, exit zero, without initializing metadata or running providers.
+  Full autonomous Bun/native acceptance remains separate from this load smoke.
+- Frozen corrected-source setup acceptance passed 1/1, zero skips, 198.99s:
+  five requests, six evaluations, two refs and 150 tokens exact; retained seed
+  context, deadline/account policies, restart and read-only setup replay intact.
+  Full phase output retained zero read-recovery events or transport failures.
+  Delivery completed at155.44s, restart took19.57s; children/fixtures cleaned.
+  The final unchanged responsiveness run is separate and fails as recorded below.
+- Final corrected-source responsiveness: one failed, zero skips, 109.08s total
+  (107.88s test). Health 1.095/0.819/0.984ms; authenticated pause HTTP200 in
+  71.056ms. Successor status 6030.261/52342.242/35954.411ms: three failures
+  against unchanged two-second limits. Initial supervision status 2161ms lies
+  outside the seven target assertions. Two generations, one proposal, one
+  enrolled campaign, paused=true; B neither admitted nor executed. Close
+  501.05ms, exit zero, empty stderr, fixtures cleaned. No retry or test edits.
+- Full web verification: 1,604 tests / 85 files, zero skips, 10.74s.
+- Additional unchanged successor adapter/coordinator regressions: 40 tests /
+  two files, zero skips, 14.95s. Combined correctness coverage: 1,771 tests /
+  94 files, zero skips, plus the separately failing responsiveness gate. Full
+  source/web typechecks, local build, compiled setup help and five structural
+  safety checks passed; documentation checker passed without network requests.
+- Final full lint passed: zero errors, 107 existing warnings, none in the new
+  background/RPC or modified packaging files. Real-IO membership passed with
+  320 real-IO / 672 unit files and no unclassified markers. Original checkout
+  remains at a01fc086 with its pre-existing untracked workplans; real KILL
+  remains 19 bytes with mtime1788533266. No account or service was changed.
+- One report-edit tool call used a nonexistent placeholder anchor and was refused
+  before any write; corrected immediately to the real acceptance paragraph.
+- Next implementation map (proposal, not shipped): extract the coordinator's
+  strict journal codec and full attribution fold into one shared read-only store;
+  have a separate bounded/prewarmed reader inspect that journal during execution.
+  Preserve original config/deadline/task/result/prepared/admitted linkage and
+  distinguish durable recorded stage from timestamped last-reported activity.
+  The reader must never construct a coordinator, acquire/reclaim a lease, expose
+  source/model text, or treat activity as dispatch authority. Test journal drift,
+  incomplete staging, same-PID worker exit, timeout, privacy and zero read effects.
+- Lookup corrections: console implementation lives in core/web, not resources;
+  route tests are resource-console-engineering-routes.test.ts, not a nonexistent
+  engineering-server test. Unmatched shell globs were replaced with rg file lists.
+
 ## September 11: responsiveness investigation (baseline 104650e8)
 
 - Three independent explorers identified synchronous repeated source checks,

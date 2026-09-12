@@ -40,6 +40,7 @@ const distBin = join(repoRoot, 'dist-bin');
 const distWeb = join(repoRoot, 'dist', 'core', 'web', 'public');
 const entry   = join(distBin, '_entry.js');
 const workerEntry = join(distBin, 'read-projection-worker.js');
+const engineeringWorkerEntry = join(distBin, 'engineering-background-worker.js');
 const outBin  = join(distBin, process.platform === 'win32' ? 'ashlr.exe' : 'ashlr');
 const pubDest = join(distBin, 'public');
 const buildIdentityPath = join(repoRoot, 'dist', 'build-identity.json');
@@ -81,10 +82,17 @@ await import('../dist/core/web/read-projection-worker.js');
 `;
 }
 
-export function createSeaCompileArgs({ entry, workerEntry, outBin }) {
-  // Bun does not discover Worker URLs automatically. Both shims must be
+export function createSeaEngineeringWorkerShim({ buildIdentityJson }) {
+  return `// Fixed effectful engineering worker; never an arbitrary entrypoint.
+Reflect.set(globalThis, Symbol.for('ashlr.build-identity.v1'), ${javascriptStringLiteral(buildIdentityJson)});
+await import('../dist/core/resources/engineering-background-worker.js');
+`;
+}
+
+export function createSeaCompileArgs({ entry, workerEntry, engineeringWorkerEntry, outBin }) {
+  // Bun does not discover Worker URLs automatically. All shims must be
   // siblings: bundled import.meta.url resolves relative to the main entry.
-  return ['build', '--compile', entry, workerEntry, '--outfile', outBin];
+  return ['build', '--compile', entry, workerEntry, ...(engineeringWorkerEntry ? [engineeringWorkerEntry] : []), '--outfile', outBin];
 }
 
 async function main() {
@@ -142,6 +150,7 @@ const shimSrc = createSeaShim({ pkgVersion, buildIdentityJson });
 
 writeFileSync(entry, shimSrc, 'utf8');
 writeFileSync(workerEntry, createSeaWorkerShim({ buildIdentityJson }), 'utf8');
+writeFileSync(engineeringWorkerEntry, createSeaEngineeringWorkerShim({ buildIdentityJson }), 'utf8');
 console.log(`[build-sea] Wrote shim entry: ${entry}`);
 
 // ── 3. bun build --compile ───────────────────────────────────────────────────
@@ -151,7 +160,7 @@ if (existsSync(outBin)) rmSync(outBin);
 console.log(`[build-sea] Compiling → ${outBin} …`);
 const result = spawnSync(
   BUN,
-  createSeaCompileArgs({ entry, workerEntry, outBin }),
+  createSeaCompileArgs({ entry, workerEntry, engineeringWorkerEntry, outBin }),
   { cwd: repoRoot, encoding: 'utf8' },
 );
 if (result.stdout) process.stdout.write(result.stdout);

@@ -172,6 +172,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-setup-acceptance.test.ts', // actual setup CLI and emitted autonomous A-to-B startup
   'test/resource-engineering-autonomous-setup.test.ts', // private Git fixtures and offline registration publication
   'test/resource-engineering-preparation-registry.test.ts', // immutable configuration and legacy registration identity
+  'test/resource-engineering-worker-rpc.test.ts', // actual worker-thread authority calls and timeout/close races
   'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication
   'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures
   'test/resource-console-pool-evolution.test.ts', // pinned console origins across private ledger epochs

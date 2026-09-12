@@ -27,7 +27,8 @@ import { createResourceConsoleReader, withholdResourceConsoleWorkers, withholdRe
 import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
 import { validateUniverseConsoleRoot } from './universe-console-reads.js';
 import { serveStatic } from './static.js';
-import { createResourceConsoleEngineeringSuccessors } from '../resources/console-engineering-successors.js';
+import { createEngineeringBackground } from '../resources/engineering-background.js';
+import type { EngineeringBackground } from '../resources/engineering-background-types.js';
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from '../resources/engineering-successor-coordinator.js';
 
 export interface ResourceConsoleServerOptions {
@@ -213,9 +214,11 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let engineering: ResourceConsoleEngineeringOwner | null = null;
-  let engineeringPreparation: ResourceConsoleEngineeringPreparationOwner | null = null;
+  let engineeringPreparation: Pick<ResourceConsoleEngineeringPreparationOwner, 'profiles' | 'check' | 'prepare'> |
+    Pick<EngineeringBackground, 'profiles' | 'check' | 'prepare'> | null = null;
   let engineeringSupervision: ResourceConsoleEngineeringSupervisor | null = null;
-  let engineeringSuccessors: ReturnType<typeof createResourceConsoleEngineeringSuccessors> | null = null;
+  let engineeringBackground: EngineeringBackground | null = null;
+  let engineeringSuccessors: Pick<EngineeringBackground, 'snapshot' | 'start' | 'close'> | null = null;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
   let quotaLease: ResourceQuotaRefreshLease | null = null;
   let connectionMonitor: ResourceConnectionMonitor | null = null;
@@ -346,15 +349,15 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
           const input = await body(req);
           if (!exact(input, ['projectId']) || typeof input.projectId !== 'string') throw new RequestError(400, 'Expected one project ID');
-          sendSnapshot(res, { profiles: engineeringPreparation.profiles(input.projectId) }); return;
+          sendSnapshot(res, { profiles: await engineeringPreparation.profiles(input.projectId) }); return;
         }
         if (url.pathname === '/api/resources/engineering/prepare/check' || url.pathname === '/api/resources/engineering/prepare') {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
           const input = await body(req);
           if (closing) throw new RequestError(503, 'Console is closing');
-          if (url.pathname.endsWith('/check')) { sendSnapshot(res, engineeringPreparation.check(input)); return; }
-          const prepared = engineeringPreparation.prepare(input);
+          if (url.pathname.endsWith('/check')) { sendSnapshot(res, await engineeringPreparation.check(input)); return; }
+          const prepared = await engineeringPreparation.prepare(input);
           if (!engineeringSupervisionConfig?.autoAdmitPrepared) { sendSnapshot(res, prepared); return; }
           // Registration survives a queue hold. Repeating this exact preparation
           // reconciles admission, never starts a second graph or renews a budget.
@@ -465,7 +468,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
       if (url.pathname === '/api/resources/engineering-successors') {
         if (!engineeringSuccessors) throw new RequestError(403, 'Engineering successors are not configured');
-        sendSnapshot(res, engineeringSuccessors.snapshot()); return;
+        sendSnapshot(res, await engineeringSuccessors.snapshot()); return;
       }
       const engineeringReadiness = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/readiness$/.exec(url.pathname);
       if (engineeringReadiness) {
@@ -583,7 +586,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       // Keep the paired collector alive while owned execution settles. Closing
       // invalidates requests immediately, not the evidence required by teardown.
       const executionResults = await Promise.allSettled([
-        Promise.resolve().then(() => engineeringSuccessors?.close()),
+        Promise.resolve().then(() => engineeringBackground?.close()),
         Promise.resolve().then(() => engineeringSupervision?.close()),
         Promise.resolve().then(() => engineering?.close()),
         Promise.resolve().then(() => supervisor?.close()),
@@ -654,14 +657,23 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         waitForResourceDrain: async () => {
           // Both peers share this ledger. Their own idempotent close paths must
           // settle before the graph owner judges remaining reserved receipts.
-          await Promise.all([supervisor!.close(), engineeringSuccessors?.close()]);
+          await Promise.all([supervisor!.close(), engineeringBackground?.close()]);
         } });
       scope.engineeringSupported = true;
       scope.engineeringOutcomesSupported = true;
       if (engineeringPreparationConfig && engineeringPreparationFile && workspace && projectsFile) {
-        engineeringPreparation = createResourceConsoleEngineeringPreparation({ config: engineeringPreparationConfig,
+        const preparationOptions = { config: engineeringPreparationConfig,
           configFile: engineeringPreparationFile, root, workspace, projectsFile, poolFile, bindingsFile, observationsFile,
-          ...(quotaConfigFile ? { quotaConfigFile } : {}), owner: engineering });
+          ...(quotaConfigFile ? { quotaConfigFile } : {}) };
+        if (engineeringSuccessorsConfig) {
+          // The worker creates and retains its own preparation/coordinator leases.
+          // Main-thread owner callbacks never synchronously wait on that worker;
+          // HTTP controls and the durable queue keep their original ownership.
+          engineeringBackground = await createEngineeringBackground({ preparation: preparationOptions,
+            owner: engineering, supervisor, isClosing: () => closing !== null, signal,
+            onFault: () => { void close().catch(() => {}); } });
+          engineeringPreparation = engineeringBackground;
+        } else engineeringPreparation = createResourceConsoleEngineeringPreparation({ ...preparationOptions, owner: engineering });
         scope.engineeringPreparationSupported = true;
       }
       if (engineeringSupervisionConfig) {
@@ -670,17 +682,16 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         scope.engineeringSupervisionSupported = true;
         if (engineeringSupervisionConfig.autoAdmitPrepared) scope.engineeringPreparationAutoAdmission = true;
       }
-      if (engineeringSuccessorsConfig && engineeringSuccessorsFile && successorProfile && engineeringPreparation && engineeringSupervision) {
-        engineeringSuccessors = createResourceConsoleEngineeringSuccessors({ root, configFile: engineeringSuccessorsFile,
+      if (engineeringSuccessorsConfig && engineeringSuccessorsFile && successorProfile && engineeringBackground && engineeringSupervision) {
+        await engineeringBackground.configureSuccessors({ root, configFile: engineeringSuccessorsFile,
           config: engineeringSuccessorsConfig, projectId: successorProfile.recipe.projectId, acceptance: successorProfile.acceptance,
-          preparation: engineeringPreparation, supervision: engineeringSupervision, supervisor, pool, bindings,
-          isClosing: () => closing !== null, signal,
-          readAdmissionEvidence: () => {
+          pool, bindings }, engineeringSupervision, () => {
             const base = validateResourceObservations(readResourceJson(observationsFile), pool);
             return { observations: quotaRefresher ? quotaRefresher.readObservations(base) : base,
               unavailableWorkerIds: quotaRefresher ? quotaRefresher.unavailableWorkerIds() : quotaConfig?.workers.map(row => row.workerId) ?? [],
               quotaUnavailableWorkerIds: quotaRefresher?.quotaUnavailableWorkerIds() ?? [] };
-          } });
+          });
+        engineeringSuccessors = engineeringBackground;
         scope.engineeringSuccessorsSupported = true;
       }
     }
@@ -708,7 +719,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (signal?.aborted) throw new Error('Resource console startup cancelled');
     signal?.addEventListener('abort', aborted, { once: true }); ready = true;
     engineeringSupervision?.start();
-    engineeringSuccessors?.start();
+    await engineeringSuccessors?.start();
+    if (closing || signal?.aborted) throw new Error('Resource console startup cancelled');
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
       scope: { ...scope }, close };
   } catch (error) { await close(); throw error; }

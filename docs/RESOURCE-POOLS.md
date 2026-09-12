@@ -705,6 +705,27 @@ independently commissioned production fleet.
 
 #### Diagnose automatic intake latency
 
+Consoles configured with automatic successors run preparation and successor
+coordination in a dedicated local worker thread. That thread retains the original
+fresh verification, staging and locally acquired locks; it does not receive
+serialized leases or cached proof authority. The main thread keeps the HTTP
+listener, engineering owner, account collector and durable supervision queue.
+Internal calls back to those owners are bounded and revision-checked. Ordinary
+explicit admission while paused remains supported; autonomous successor admission
+is withheld when the parent observes pause, close or the original deadline.
+
+Closing requests drain rather than killing an effectful thread on a timer. An
+ambiguous mutating call or unexpected worker failure stops the background path;
+it must not automatically replay with a new revision or replace the worker.
+Inspect retained evidence if shutdown reports uncertainty. The API, private
+configuration and account-reserve settings are unchanged.
+
+This isolation does not yet make every status read responsive. Successor status
+still asks the same worker for its current projection and can queue behind a
+long proof. Parent-owned projections can also be expensive. Do not substitute
+an old display snapshot for fresh execution authority or claim full latency
+acceptance from a fast health or pause response alone.
+
 Run the independent control-room responsiveness gate on macOS from the repository:
 
 ```sh

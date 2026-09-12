@@ -8,7 +8,8 @@ const owner = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), catalog: v
 const automatic = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), start: vi.fn(), snapshot: vi.fn(), setPaused: vi.fn(), admit: vi.fn(), close: vi.fn() }));
 const preparation = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), profiles: vi.fn(), check: vi.fn(), prepare: vi.fn() }));
 const successors = vi.hoisted(() => ({ create: vi.fn(), start: vi.fn(), snapshot: vi.fn(), close: vi.fn() }));
-vi.mock('../src/core/resources/console-engineering-successors.js', () => ({ createResourceConsoleEngineeringSuccessors: successors.create }));
+const background = vi.hoisted(() => ({ create: vi.fn() }));
+vi.mock('../src/core/resources/engineering-background.js', () => ({ createEngineeringBackground: background.create }));
 vi.mock('../src/core/resources/console-engineering-preparation.js', () => ({
   validateResourceConsoleEngineeringPreparationConfig: preparation.validate, createResourceConsoleEngineeringPreparation: preparation.create,
 }));
@@ -51,6 +52,8 @@ beforeEach(() => {
   preparation.validate.mockImplementation(value => value); preparation.create.mockReturnValue(preparation);
   successors.create.mockReturnValue(successors); successors.close.mockResolvedValue(undefined);
   successors.snapshot.mockReturnValue({ schemaVersion: 1, supervisionId: 'automatic-fixture', profileId: 'evolve', state: 'running', entries: [] });
+  background.create.mockImplementation(async () => ({ profiles: preparation.profiles, check: preparation.check, prepare: preparation.prepare,
+    configureSuccessors: successors.create, start: successors.start, snapshot: successors.snapshot, close: successors.close }));
 });
 
 describe('host-configured engineering successor HTTP boundary', () => {
@@ -71,6 +74,7 @@ describe('host-configured engineering successor HTTP boundary', () => {
     expect(await scopeResponse.json()).toMatchObject({ engineeringSuccessorsSupported: true,
       engineeringPreparationSupported: true, engineeringSupervisionSupported: true, engineeringSupported: true });
     expect(successors.create).toHaveBeenCalledOnce(); expect(successors.start).toHaveBeenCalledOnce();
+    expect(background.create).toHaveBeenCalledOnce(); expect(preparation.create).not.toHaveBeenCalled();
     expect(successors.create.mock.calls[0]![0]).toMatchObject({ configFile: selected.engineeringSuccessorsFile, projectId: 'default' });
     expect((await fetch(`${handle.url}${route}`)).status).toBe(401);
     for (let index = 0; index < 2; index++) {
@@ -80,6 +84,28 @@ describe('host-configured engineering successor HTTP boundary', () => {
     }
     expect(successors.start).toHaveBeenCalledOnce(); expect(owner.launch).not.toHaveBeenCalled();
     await handle.close(); expect(successors.close).toHaveBeenCalledOnce();
+  });
+  it('serves health and authenticated pause while background preparation is pending', async () => {
+    const handle = await start(config());
+    let finish!: (value: unknown) => void;
+    let entered!: () => void;
+    const pending = new Promise<void>(resolve => { entered = resolve; });
+    preparation.prepare.mockImplementation(() => { entered(); return new Promise(resolve => { finish = resolve; }); });
+    const response = post(handle, '/api/resources/engineering/prepare', { id: 'next' });
+    await pending;
+    try {
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+      const pause = await post(handle, '/api/resources/engineering-supervision', { paused: true, expectedRevision: 0 });
+      expect(pause.status).toBe(200); expect(await pause.json()).toMatchObject({ paused: true, revision: 1 });
+      expect(automatic.setPaused).toHaveBeenCalledExactlyOnceWith(true, 0);
+      expect(automatic.admit).not.toHaveBeenCalled();
+    } finally { finish({ plan: { id: 'next' }, enrollment, disposition: 'created' }); }
+    expect((await response).status).toBe(200);
+  });
+  it('drains the background owner on successor configuration failure', async () => {
+    successors.create.mockRejectedValue(new Error('Configuration refused'));
+    await expect(start(config())).rejects.toThrow('Configuration refused');
+    expect(successors.start).not.toHaveBeenCalled(); expect(successors.close).toHaveBeenCalledOnce();
   });
   it('keeps unconfigured successor work absent and does not expose host config paths', async () => {
     const handle = await start();

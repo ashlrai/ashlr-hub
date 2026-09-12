@@ -1,6 +1,35 @@
 # Executable firm: package graph
 
-## Current increment — responsive autonomous verification (baseline 104650e8)
+## Current increment — nonblocking autonomous control (baseline 82b2c881)
+
+- [x] Revalidate the committed build, ownership and previous progress.
+- [x] Attribute individual blocking costs with isolated actual-process profiling.
+- [x] Map asynchronous verification and control ownership with three agents.
+- [x] Isolate autonomous preparation/coordinator work, preserving freshness, leases and pause CAS.
+- [ ] Make successor-status and remaining parent projections independently responsive.
+- [x] Independently exercise latency, accepted pause, drift and restart contracts.
+- [x] Record exact results and remaining North Star requirements.
+
+Previous turn made concrete progress: batched seed materialization, narrower
+diagnostic construction, 1,713 passing correctness tests and a frozen failing
+responsiveness gate. This turn targets the remaining actual control starvation.
+Fresh status and authenticated pause must meet the existing two-second target;
+pause must prevent automatic downstream admission. Manual admission while paused
+is an existing separate contract and must not silently change. Source/configuration
+proofs remain fresh at each publication. No provider/account/service changes.
+
+Ownership: execution agent isolated profiling and independent acceptance; resource
+agent asynchronous proof architecture; cold agent control protocol and review;
+parent HTTP/supervisor integration and canonical plan. No speculative transfer
+of privately branded leases or positive-proof cache across calls.
+
+Final real worker-hosted measurement accepted pause in 71ms and withheld B,
+but the frozen gate still fails three queued successor-status reads (6–52.3s).
+These are separate outcomes, not full latency acceptance. Final error-fenced
+source passed unchanged delivery/restart verification with exact accounting and
+zero read recoveries; full web verification passed 1,604 tests without skips.
+
+## Previous increment — responsive autonomous verification (baseline 104650e8)
 
 - [x] Trace the synchronous proof path with three independent exploration streams.
 - [x] Freeze independent no-retry HTTP probes with a two-second status/pause target.
