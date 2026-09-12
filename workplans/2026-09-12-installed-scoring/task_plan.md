@@ -311,6 +311,26 @@ Tracked instructions contain placeholder resource paths, not enough evidence to
 select real account/runtime configuration. No broader home/credential scan,
 quota refresh, provider call, KILL override or service activation was performed.
 
+### Isolated Spark preparation follow-through
+
+While native73003 remains live, the separate branch
+codex/spark-enrollment-preparation at
+af5d02bd8e5f58996ac174bce78504d622e7f9df implements the private Spark proposal
+workflow. Checkout: /Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-spark-enrollment.
+Combined gate87908 passed151/151 tests in6files,0skips,20.97s; source and strict
+test types, scoped lint, docs/lane checks and isolated TypeScript emission passed.
+No primary source, tests, dependencies or build were changed by that work.
+
+Actual saved account configuration produced a private proposal at
+/Users/masonwyatt/.codex/artifacts/ashlr-spark-enrollment.ndJdDt/proposal.
+Existing-ledger evolve check then refused uncertain-work; the legacy v1 quota
+collector pending record is retained. No migration/apply, quota-scope policy
+change, personal unpause, provider refresh or service activation occurred.
+Detailed safe metadata and operator procedure are in that branch's
+workplans/2026-09-12-spark-enrollment/ and docs/RESOURCE-POOLS.md.
+Integrate only after preserving terminal evidence from the current native gate;
+do not poll any of the completed isolated handles again.
+
 ### Acceptance and account discovery results
 
 Old scoring gate10612 is now TERMINAL exit0:5/5passed,0skips,1268.67s. Retained
