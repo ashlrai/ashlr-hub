@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { resolvePreparationGit, assertPreparationGit, type PreparationGitPin } from '../../../scripts/evaluators/preparation-verification-native.mjs';
 import { parsePreparationMeasurementCalibration, preparationCalibrationWorkload } from './preparation-measurement-calibration.js';
 import { canonical } from './artifacts.js';
+import { parsePreparationTypecheckProject } from './preparation-typecheck-project.js';
 
 export const PREPARATION_MEASUREMENT_BUILTIN = 'preparation-measurement-v1' as const;
 export const PREPARATION_PROCESS_SCORE_BUILTIN = 'preparation-process-score-v1' as const;
@@ -15,7 +16,8 @@ const FILES = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs'
   'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification-native.mjs', 'preparation-verification-protocol.mjs',
   'preparation-verification-tool.mjs', 'preparation-verification.mjs'] as const;
 const HASH = /^[a-f0-9]{64}$/;
-export const PREPARATION_SCORE_FILES = Object.freeze(['preparation-score.mjs', 'calibration.json', 'measurement/manifest.json',
+export const PREPARATION_SCORE_FILES = Object.freeze(['preparation-score.mjs', 'preparation-typecheck.mjs',
+  'preparation-typecheck-project.json', 'calibration.json', 'measurement/manifest.json',
   ...FILES.map(name => `measurement/${name}`)]);
 const TOOLS = ['/bin/ls', '/bin/ps', '/usr/bin/sandbox-exec'] as const;
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
@@ -138,7 +140,8 @@ export function inspectPreparationScoreBundle(directory: string): InstalledBuilt
   try {
     const anchor = lstatSync(directory, { bigint: true });
     if (!anchor.isDirectory() || anchor.isSymbolicLink() || (anchor.mode & 0o022n) !== 0n || realpathSync(directory) !== directory ||
-        canonical(readdirSync(directory).sort()) !== canonical(['calibration.json', 'manifest.json', 'measurement', 'preparation-score.mjs'])) throw unavailable();
+        canonical(readdirSync(directory).sort()) !== canonical(['calibration.json', 'manifest.json', 'measurement',
+          'preparation-score.mjs', 'preparation-typecheck-project.json', 'preparation-typecheck.mjs'])) throw unavailable();
     const nestedPath = join(directory, 'measurement');
     const nestedAnchor = lstatSync(nestedPath, { bigint: true });
     const nested = inspectBuiltinEvaluatorBundle(nestedPath);
@@ -160,6 +163,9 @@ export function inspectPreparationScoreBundle(directory: string): InstalledBuilt
     const calibration = parsePreparationMeasurementCalibration(decoder.decode(captured.find(file => file.name === 'calibration.json')!.bytes));
     if (calibration.workload.id !== 'preparation-workflows-v2' ||
         canonical(calibration.workload) !== canonical(preparationCalibrationWorkload(nested, 'preparation-workflows-v2'))) throw unavailable();
+    const typecheckProject = parsePreparationTypecheckProject(decoder.decode(
+      captured.find(file => file.name === 'preparation-typecheck-project.json')!.bytes));
+    if (typecheckProject.baselineSourceSha256 !== calibration.baseline.source.sha256) throw unavailable();
     if (canonical(inspectBuiltinEvaluatorBundle(nestedPath)) !== canonical(nested)) throw unavailable();
     for (const file of [...captured, { path: manifestPath, stat: manifestFile.stat }]) {
       if (!same(file.stat, lstatSync(file.path, { bigint: true }))) throw unavailable();

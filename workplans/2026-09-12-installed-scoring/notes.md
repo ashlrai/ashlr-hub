@@ -116,3 +116,25 @@ Existing repair and ordinary delivery regressions passed33tests/2files, zero
 skipped,99.08seconds. New passed-seed pure proof plus old proof115tests passed.
 Synthetic scored transport with real Git branch/recovery passed9cases on Node22;
 parent Node24 rerun and actual worker/evaluator acceptance are now underway.
+
+## Compiler gate continuation
+
+The preceding running-state notes are historical: native87267 finished all five
+cases successfully; scoring/delivery source was checkpointed at3ba66add.
+The current uncommitted packet adds a fixed compiler child and pinned whole-project
+snapshot before scoring. Parent Node24 checker/authoring gate passed49tests/2files,
+zero skipped,1.33seconds. Actual read-only authoring passed725roots/1082files,
+22,452,362 serialized JSON bytes; no snapshot was installed. Source/web types,
+documentation links and lane classification passed (342 real-IO,704 unit files).
+
+Independent review found and addressed compiler deadline renewal across durable
+reservation work and UTF-8 BOM stripping at the selected-source boundary. The
+owner now retains wall and monotonic compiler deadlines and an outer abort timer,
+and preserves exact decoded source bytes. Package review required exact compiler
+dependency closure and source/compiler byte continuity during asynchronous builds.
+Focused regression and compiled-package verification remain in progress.
+
+One lint run rejected unqualified setTimeout/clearTimeout in the owner; explicit
+node:timers imports corrected it and the scoped lint rerun passed. One earlier
+atomic patch failed to match a commented lane entry and was reapplied with exact
+context; no partial changes or cleanup followed that failed patch.

@@ -2774,6 +2774,15 @@ An unchanged baseline artifact must reproduce the entire calibrated vector;
 different counts are baseline drift, not credit for an improvement without a
 source change.
 
+Before the native workload starts, a separately tracked compiler process checks
+the selected source against the complete pinned TypeScript project, including
+reverse consumers. Its virtual filesystem resolves only packaged sources,
+declarations and package metadata; it never imports candidate code or falls back
+to the live checkout. Compiler errors, suppression directives, changed identities,
+timeouts and unconfirmed process settlement refuse the evaluation. This phase has
+a 60-second ceiling within the original evaluation deadline, a 1-GiB V8 heap
+ceiling and bounded output. It does not replace the native behavioral checks.
+
 The manifest must use metric `preparation_processes`, direction `minimize`, and
 an integer `minImprovement` of at least one. Its optional `budget.workerTimeoutMs`
 allows an explicit worker phase of at most 900,000 ms within a whole trial of at
@@ -2791,12 +2800,15 @@ explicit frozen `measurementDirectory` and the existing calibration request
 captures. This operation writes a private fixed package under
 `dist/core/universe/builtins/preparation-score`; it refuses a nonempty destination
 instead of overwriting it. It copies the original nine measurement files and their
-manifest verbatim, then separately pins the score entry and calibration. Finish
+manifest verbatim, then separately pins the score entry, compiler child, full
+compiler-project snapshot and calibration. Authoring must compile the unchanged
+baseline successfully using the closed project before publication. Finish
 all workload-affecting code before collecting the matching captures. Retain the
 original bundle and evidence for rollback; do not substitute newly rebuilt bytes.
 
 The lower-level `buildPreparationScoreBundle` is a test/release-authoring helper;
-accepting a supplied descriptor there does not prove capture provenance. The SDK
+accepting a supplied descriptor and compiler project there does not prove capture
+provenance. The SDK
 `scorePreparationProcesses` and inventory helpers are pure policy utilities, not
 authority to publish a score. A packaged native baseline, improved candidate and
 end-to-end delivery still require their own acceptance evidence. No calibrated

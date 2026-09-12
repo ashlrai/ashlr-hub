@@ -8,6 +8,9 @@ import { performance } from 'node:perf_hooks';
 import { readArtifactSnapshot } from '../../src/core/universe/artifacts.ts';
 import { parsePreparationMeasurementCalibration, preparationCalibrationWorkload } from '../../src/core/universe/preparation-measurement-calibration.ts';
 import { scorePreparationProcesses, summarizePreparationProcessArtifact, assertPreparationProcessScope } from '../../src/core/universe/preparation-process-score.ts';
+import { parsePreparationTypecheckProject, PREPARATION_TYPECHECK_TARGET } from '../../src/core/universe/preparation-typecheck-project.ts';
+import { runVerifySubprocessAsync } from '../../src/core/run/verify-commands.ts';
+import { setTimeout, clearTimeout } from 'node:timers';
 import { createBuiltinActivityTracker } from './measurement/preparation-verification-activity.mjs';
 import { assertPreparationGit } from './measurement/preparation-verification-native.mjs';
 
@@ -15,7 +18,8 @@ const ID = 'preparation-process-score-v1';
 const MEASUREMENT_FILES = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs', 'preparation-verification-child.mjs',
   'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification-native.mjs',
   'preparation-verification-protocol.mjs', 'preparation-verification-tool.mjs', 'preparation-verification.mjs'];
-const SCORE_FILES = ['preparation-score.mjs', 'calibration.json', 'measurement/manifest.json',
+const SCORE_FILES = ['preparation-score.mjs', 'preparation-typecheck.mjs', 'preparation-typecheck-project.json',
+  'calibration.json', 'measurement/manifest.json',
   ...MEASUREMENT_FILES.map(name => `measurement/${name}`)];
 const TOOL_PATHS = ['/bin/ls', '/bin/ps', '/usr/bin/sandbox-exec'];
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -64,16 +68,19 @@ function manifest(file, id, names, files) {
 /** Reconstruct the same fixed aggregate as the host registry, never trust a
  * descriptor supplied by the candidate. Both owners check it independently. */
 export function inspectPreparationScoreIdentity(directoryPath) {
-  const root = directory(directoryPath, ['preparation-score.mjs', 'calibration.json', 'measurement', 'manifest.json']);
+  const root = directory(directoryPath, ['preparation-score.mjs', 'preparation-typecheck.mjs', 'preparation-typecheck-project.json',
+    'calibration.json', 'measurement', 'manifest.json']);
   const nested = directory(join(directoryPath, 'measurement'), [...MEASUREMENT_FILES, 'manifest.json']);
   const outerManifest = readPinnedFile(join(directoryPath, 'manifest.json'), 16 * 1024);
   const files = SCORE_FILES.map(name => ({ name, ...readPinnedFile(join(directoryPath, name), name === 'calibration.json' ? 2 * 1024 * 1024 : undefined) }));
   manifest(outerManifest, ID, SCORE_FILES, files);
-  const measurementManifest = files[2];
-  const measurementFiles = files.slice(3).map((file, index) => ({ ...file, name: MEASUREMENT_FILES[index] }));
+  const measurementManifest = files[4];
+  const measurementFiles = files.slice(5).map((file, index) => ({ ...file, name: MEASUREMENT_FILES[index] }));
   manifest(measurementManifest, 'preparation-measurement-v1', MEASUREMENT_FILES, measurementFiles);
-  const calibrationJson = new globalThis.TextDecoder('utf-8', { fatal: true }).decode(files[1].bytes);
+  const calibrationJson = new globalThis.TextDecoder('utf-8', { fatal: true }).decode(files[3].bytes);
   const calibration = parsePreparationMeasurementCalibration(calibrationJson);
+  const project = parsePreparationTypecheckProject(new globalThis.TextDecoder('utf-8', { fatal: true }).decode(files[2].bytes));
+  if (project.baselineSourceSha256 !== calibration.baseline.source.sha256) fail();
   if (calibration.workload.id !== 'preparation-workflows-v2' || calibration.workload.node.path !== process.execPath) fail();
   const executable = readPinnedFile(process.execPath, 256 * 1024 * 1024);
   const git = { path: calibration.workload.git.path, digest: calibration.workload.git.sha256 };
@@ -92,7 +99,8 @@ export function inspectPreparationScoreIdentity(directoryPath) {
     if (!same(row.stat, fs.lstatSync(row.path, { bigint: true }))) fail();
   }
   assertPreparationGit(git);
-  return { digest: aggregate(ID, outerManifest.digest, files), calibrationJson, workload, git };
+  return { digest: aggregate(ID, outerManifest.digest, files), calibrationJson, workload, git,
+    typecheckProjectSha256: files[2].digest };
 }
 
 export async function runPreparationScore() {
@@ -118,8 +126,60 @@ export async function runPreparationScore() {
         process.env.ASHLR_UNIVERSE_BUILTIN_GIT !== JSON.stringify(identity.git)) fail();
     guard(); failureCode = 'PREPARATION_SCORE_SCOPE_FAILED';
     const candidateRoot = process.env.ASHLR_UNIVERSE_CANDIDATE;
-    const before = summarizePreparationProcessArtifact(readArtifactSnapshot(candidateRoot));
+    const beforeSnapshot = readArtifactSnapshot(candidateRoot);
+    const before = summarizePreparationProcessArtifact(beforeSnapshot);
     assertPreparationProcessScope(identity.calibrationJson, before);
+    guard(); failureCode = 'PREPARATION_SCORE_TYPECHECK_FAILED';
+    const selected = beforeSnapshot.entries.find(entry => entry.path === PREPARATION_TYPECHECK_TARGET);
+    if (!selected) fail();
+    const source = new globalThis.TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(selected.data);
+    const sourceSha256 = sha(selected.data);
+    const input = JSON.stringify({ schemaVersion: 1, source, sourceSha256, projectSha256: identity.typecheckProjectSha256 });
+    if (Buffer.byteLength(input) > 1024 * 1024) fail();
+    // Compiler input is text only. Its pinned virtual host cannot resolve from
+    // the live checkout; this separately owned child never imports a candidate.
+    const compilerArgs = [process.execPath, '--max-old-space-size=1024', join(base, 'preparation-typecheck.mjs'),
+      join(base, 'preparation-typecheck-project.json')];
+    const compilerWallDeadline = Math.min(deadlineAt, Date.now() + 60_000);
+    const compilerMonoDeadline = Math.min(deadlineMonotonicMs, performance.now() + 60_000);
+    const compilerGuard = () => {
+      guard();
+      if (Date.now() >= compilerWallDeadline || performance.now() >= compilerMonoDeadline) {
+        throw new Error('PREPARATION_SCORE_TYPECHECK_EXPIRED');
+      }
+    };
+    const compilerLifecycle = activity.lifecycle('tool');
+    const lifecycle = { prepare() {
+      compilerGuard();
+      const prepared = compilerLifecycle.prepare();
+      // Durable reservation work consumes the original allowance too. A refusal
+      // here precedes spawn, so retain an explicit not-started child receipt.
+      try { compilerGuard(); } catch (error) { prepared.settled('not-started'); throw error; }
+      return prepared;
+    } };
+    const compilerTimeout = Math.floor(Math.min(compilerWallDeadline - Date.now(), compilerMonoDeadline - performance.now()));
+    compilerGuard(); if (compilerTimeout <= 0) fail();
+    // The subprocess timer starts after preparation. This outer timer keeps
+    // reservation/setup latency inside the original allowance as well.
+    const compilerDeadline = setTimeout(() => stop.abort(), compilerTimeout);
+    let compiled;
+    try {
+      compiled = await runVerifySubprocessAsync(compilerArgs, { cwd: process.env.HOME,
+        env: { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: process.env.HOME, TMPDIR: process.env.HOME,
+          LANG: 'C', LC_ALL: 'C' }, input, timeoutMs: compilerTimeout, maxOutputChars: 8192,
+        signal: stop.signal, requireProcessGroupExit: true, processGroupLifecycle: lifecycle });
+    } finally { clearTimeout(compilerDeadline); }
+    compilerGuard();
+    if (compiled.exitCode !== 0 || compiled.signal !== null || compiled.error !== undefined || compiled.stderr ||
+        compiled.timedOut || compiled.cancelled || compiled.outputTruncated || compiled.processGroupSettlement !== 'group-exit-confirmed') fail();
+    const checked = JSON.parse(compiled.stdout);
+    if (!exact(checked, ['schemaVersion', 'kind', 'passed', 'sourceSha256', 'projectSha256', 'diagnosticCodes']) ||
+        checked.schemaVersion !== 1 || checked.kind !== 'preparation-typecheck-result' || checked.passed !== true ||
+        checked.sourceSha256 !== sourceSha256 || checked.projectSha256 !== identity.typecheckProjectSha256 ||
+        !Array.isArray(checked.diagnosticCodes) || checked.diagnosticCodes.length !== 0) fail();
+    guard();
+    if (JSON.stringify(inspectPreparationScoreIdentity(base)) !== JSON.stringify(identity)) fail();
+    if (JSON.stringify(summarizePreparationProcessArtifact(readArtifactSnapshot(candidateRoot))) !== JSON.stringify(before)) fail();
     guard(); failureCode = 'PREPARATION_SCORE_WORKLOAD_FAILED';
     const { runPreparationWorkload } = await import('./measurement/preparation-verification.mjs');
     guard();

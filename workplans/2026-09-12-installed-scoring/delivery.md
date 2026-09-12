@@ -8,15 +8,17 @@ regional nonregression/scope checks and optional separate worker budget. The
 workspace inspector displays that budget. Ordinary builds do not install the
 scoring package, and no real calibration or accepted improvement is claimed.
 
-Implementation remains uncommitted in this isolated worktree while the native
-gate uses frozen assets. Primary `auto/p00` remains at `b3abe997` with its earlier
+The scoring and first-candidate delivery increment is committed locally at
+`3ba66add`; the subsequent compiler gate has passed local verification in this isolated
+worktree. Primary `auto/p00` remains at `b3abe997` with its earlier
 qualification increment. Neither checkout has been pushed or deployed here.
 
 Current source: `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-scoring`,
-HEAD `4c665469cd81bcb8992a3fb7fd31a761f2f506b3`, dirty with the owned scoring
-packet and subsequent passed-seed delivery integration. The latter changes
-campaign-improvement, campaign-delivery and campaign-delivery-recovery only;
-installed assets remain at the separately recorded frozen identity.
+Compiler verification was built from that checkpoint plus the owned compiler
+packet. Passed-seed delivery integration is in that checkpoint. The rebuild now
+has diagnostic identity `4937844f46bbd3965694fa9deef6b18132899b09b8025d31a16b79764bd531f1`;
+it has not yet passed native qualification. The old qualified bundle remains
+verified at `/Users/masonwyatt/.codex/artifacts/ashlr-preparation-qualified-backup.O0qP0h/preparation`.
 
 ## Verification
 
@@ -39,7 +41,7 @@ installed assets remain at the separately recorded frozen identity.
   passed33tests/2files/zero skipped,99.08seconds. Source/web types, docs and lane
   checks passed. Lane inventory is now341 real-IO and703 unit files.
 
-## Active native acceptance
+## Completed native acceptance
 
 Session `87267` is TERMINAL exit0: all five cases passed, zero skipped,
 1258.55seconds, observed September12 at09:02:56UTC. The full workload
@@ -56,10 +58,14 @@ and fixture asset; the old result does not qualify a new build identity.
 
 ## Remaining commissioning sequence
 
-1. Add selected-source compiler verification. The current workload strips types;
-   runtime correctness alone can accept a source change that breaks the build.
-   A pinned full-project compiler child must run before accepting any score.
-2. Freeze/review the resulting candidate, build, and qualify its exact new bytes.
+1. Compiler source/package verification is complete: parent Node24 gate passed
+   241 tests across six files, zero skipped,11.19seconds. Full local build passed;
+   source/web types, scoped lint, docs and lane classification passed. The package
+   tests exercise real tiny-project compiler subprocesses, not the full native
+   workload. Actual full-project authoring/closed compilation passed separately.
+2. Qualify the exact rebuilt diagnostic bytes, then retain the result separately
+   from the older qualified bundle. Full-project packaged child performance under
+   its 60-second/1-GiB ceiling still needs an explicit commissioning check.
 3. Resolve the real global stop through the operator; never bypass it. The latest
    read-only check found healthy/active/present. The prior attempt retained only
    a preflight failure, not usable capture data.
