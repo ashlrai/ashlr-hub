@@ -63,6 +63,8 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-showcase-cli.test.ts', // private demo source/export custody and CLI subprocesses
   'test/universe-campaign-delivery.test.ts', // actual campaign evaluation and local Git branch delivery
   'test/universe-campaign-initial-repair-delivery.test.ts', // measured failed seed, local repair branch and custody/recovery checks
+  'test/universe-calibrated-campaign.test.ts', // synthetic score transport with real seed records, local branch delivery and replay
+  'test/universe-campaign-passed-seed-acceptance.test.ts', // real command worker/evaluator from passing seed to one-generation local branch
   'test/m11.stream-file-sink.test.ts', // thousands of real sink writes and reads across secret boundaries
   'test/m442.runtime-release-launch-revalidation.test.ts', // large dependency fixtures, permissions and recursive cleanup
   'test/m444.external-skill-audit.test.ts', // large real audit trees and recursive cleanup
@@ -190,6 +192,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-preparation-measurement-files.test.ts', // actual bounded descriptor reads through the public diagnostic CLI route
   'test/universe-preparation-measurement-candidate-comparison.test.ts', // real private journals and calibration-to-comparison CLI; synthetic measurement contents
   'test/preparation-qualified-workload-acceptance.test.ts', // installed v2 workload and fixed packaged same-call stale-guard controls
+  'test/preparation-score-packaging.test.ts', // private package fixtures, real esbuild/import and pinned native identity reads; no candidate dispatch
   'test/preparation-verification-child.test.ts', // actual OS-confined persistent candidate processes and deadline settlement
   'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication
   'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures

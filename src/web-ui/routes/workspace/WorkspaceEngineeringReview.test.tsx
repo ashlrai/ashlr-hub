@@ -41,6 +41,21 @@ beforeEach(() => { setMutationToken(token); });
 afterEach(() => { act(() => clearMutationToken()); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('independent engineering UI authority review', () => {
+  it('shows the explicit worker ceiling separately from the whole trial without dispatching', async () => {
+    const selected = structuredClone(enrollment);
+    selected.campaigns[0]!.budget = { ...selected.campaigns[0]!.budget, trialTimeoutMs: 2_700_000, workerTimeoutMs: 300_000 };
+    const fetcher = vi.fn(async (path: string, init?: RequestInit) => {
+      expect(init?.method).not.toBe('POST');
+      if (path === '/api/resources/engineering') return json([selected]);
+      if (path.endsWith('/readiness')) return json(engineeringReadiness(selected));
+      return json(job());
+    });
+    vi.stubGlobal('fetch', fetcher);
+    render(<WorkspaceEngineering {...props()} />);
+    expect(await screen.findByText('Worker timeout (within trial)')).toBeInTheDocument();
+    expect(screen.getByText('5m')).toBeInTheDocument();
+    expect(screen.getByText('45m')).toBeInTheDocument();
+  });
   it('gives an actionable preparation entry point without registering or launching from the empty state', async () => {
     const fetcher = vi.fn(async (_path: string) => json([])); vi.stubGlobal('fetch', fetcher);
     render(<WorkspaceEngineering {...props()} />);

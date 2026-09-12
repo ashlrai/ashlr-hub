@@ -207,6 +207,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
               <div><dt>Reported token limit</dt><dd>{campaign.campaignBudget.maxReportedTokens?.toLocaleString() ?? 'Not configured'}</dd></div>
               <div><dt>Campaign time</dt><dd>{duration(campaign.campaignBudget.maxDurationMs)}</dd></div><div><dt>Stagnation limit</dt><dd>{campaign.campaignBudget.maxStagnantGenerations} generations</dd></div>
               <div><dt>Trials per generation</dt><dd>{campaign.budget.maxTrials}</dd></div><div><dt>Trial timeout</dt><dd>{duration(campaign.budget.trialTimeoutMs)}</dd></div>
+              {campaign.budget.workerTimeoutMs !== undefined ? <div><dt>Worker timeout (within trial)</dt><dd>{duration(campaign.budget.workerTimeoutMs)}</dd></div> : null}
             </dl><p>These are ceilings, not available account balance. Shared quota, reserves and concurrency are checked at dispatch.</p></details>
           </div></li>)}</ol></section>
         <aside className={styles.inspector} aria-label="Engineering evidence inspector"><h3>Execution evidence</h3>

@@ -1135,8 +1135,10 @@ Only a passing, retained artifact with strictly positive measured improvement
 and changed bytes is eligible for a new branch. Each configured outcome adds a
 `delivery` field: `delivered` includes the evidence-bound receipt; `withheld`
 explains cancellation, incomplete work, an unattempted handoff or no strict improvement; `failed`
-requires inspection. By default an initial admission is not a delivered
-improvement; unchanged passing trials never qualify. A plan target may opt in
+requires inspection. An initial admission without a verified measured-seed
+comparison is not a delivered improvement; unchanged passing trials never
+qualify. A passing measured seed can establish a first-candidate improvement
+as described below. Separately, a plan target may opt in
 with `allowInitialRepair: true`: the campaign must contain a valid failed
 evaluation of the byte-identical pinned seed, either from an earlier completed
 step in the same niche or from its opt-in seed measurement described below.
@@ -1169,7 +1171,22 @@ generation zero.
 
 A valid measured result may be passing or failing. A failed finite measurement
 can support `allowInitialRepair: true` for a changed, passing first candidate
-that meets the fixed improvement threshold. A completed seed measurement is
+that meets the fixed improvement threshold. A passing measured seed supports a
+distinct first-candidate improvement: with an explicit delivery target, the
+selected candidate must have changed bytes and improve the seed score in the
+declared direction by a positive amount meeting `minImprovement`. No repair
+opt-in or preliminary no-op generation is needed for this passed-seed path.
+Delivery and recovery verify the exact seed intent/result, campaign linkage,
+original timing, settled evaluation and current artifact bytes. Equal, worse,
+below-threshold or unchanged candidates remain ineligible.
+
+This comparison does not invent an archive parent: the first trial retains
+`parentTrialId: null` and `delta: null`. Archive admission/improvement counters
+keep their existing meaning; successful seed-based delivery is recorded in the
+separate delivery receipt. Failed-seed repair still requires its original
+`allowInitialRepair: true` opt-in, including recovery.
+
+A completed seed measurement is
 reused after verifying its pins and bytes. When the campaign also enables
 `feedback: true`, each newly started generation receives that measurement in a
 separate `seedContext`, including generations editing an already retained elite.
@@ -1180,8 +1197,8 @@ The context contains the finite score, passing status, declared numeric metrics
 and bounded evaluator diagnostics. It is limited to 16 KiB of UTF-8 canonical
 data, with at most 32 metrics and 16 diagnostics under the existing diagnostic
 limits. Diagnostic text is evidence, not instructions or permission to edit a
-file. No extra model request is made. Scheduling, archive selection, evaluation,
-request limits and delivery rules are unchanged.
+file. Supplying this context makes no extra model request and does not change
+scheduling, archive selection, evaluation, request limits or delivery policy.
 
 The durable run pins the full context to the campaign definition, manifest,
 comparator, seed artifact and exact measurement records. Both local and
@@ -2734,7 +2751,56 @@ commands do not themselves authorize autonomous scoring. V2 supplies the fixed
 candidate-linked during-call checks, but installed scoring-baseline pins and a
 commissioned end-to-end optimization acceptance run remain necessary. These two
 mutation cases are not universal correctness or hostile-code security proof.
-The existing campaign and delivery rules are unchanged.
+This diagnostic comparison alone does not change campaign or delivery rules.
+
+### Calibrated preparation scoring
+
+The separate closed evaluator `preparation-process-score-v1` connects the fixed
+qualified workload to ordinary Universe evaluation. It is unavailable until an
+explicit local authoring operation installs a matching calibrated package.
+Ordinary builds do not invent a baseline or install this package. The measurement
+evaluator remains diagnostic-only.
+
+The score is the integer total of the original fifteen process regions. A full
+v2 report, both during-call qualifications, unchanged runtime/native identities,
+and an unchanged before/after candidate inventory are required. Only the content
+of `src/core/resources/engineering-preparation.ts` may differ from calibration;
+extra, missing, mode-changed or unrelated modified files are refused before the
+workload starts. A process or blob-count regression in any region fails even when
+the aggregate improves. Equality passes with no improvement; setup and qualification
+counts do not enter the score. The outer owner alone completes process custody
+and emits evaluation output after final identity and deadline checks.
+An unchanged baseline artifact must reproduce the entire calibrated vector;
+different counts are baseline drift, not credit for an improvement without a
+source change.
+
+The manifest must use metric `preparation_processes`, direction `minimize`, and
+an integer `minImprovement` of at least one. Its optional `budget.workerTimeoutMs`
+allows an explicit worker phase of at most 900,000 ms within a whole trial of at
+most 2,700,000 ms; evaluation remains at most 1,800,000 ms. Each phase cap must fit
+the whole trial. Setup and final checks consume that allowance, and the original
+campaign deadline can shorten it. Omission preserves the legacy shared 900,000-ms
+trial ceiling. Other evaluators cannot use the split-budget field. The workspace
+inspector shows the worker ceiling separately when configured.
+
+Trusted local authoring from a source checkout with development dependencies uses
+`buildPreparationScoringBuiltin` from `scripts/build-preparation-score.mjs` after
+compiling the core. This builder is not included in the runtime npm package. It requires an
+explicit frozen `measurementDirectory` and the existing calibration request
+`{root, universeId, captureIds, expectedSourceDigest}` with three genuine retained
+captures. This operation writes a private fixed package under
+`dist/core/universe/builtins/preparation-score`; it refuses a nonempty destination
+instead of overwriting it. It copies the original nine measurement files and their
+manifest verbatim, then separately pins the score entry and calibration. Finish
+all workload-affecting code before collecting the matching captures. Retain the
+original bundle and evidence for rollback; do not substitute newly rebuilt bytes.
+
+The lower-level `buildPreparationScoreBundle` is a test/release-authoring helper;
+accepting a supplied descriptor there does not prove capture provenance. The SDK
+`scorePreparationProcesses` and inventory helpers are pure policy utilities, not
+authority to publish a score. A packaged native baseline, improved candidate and
+end-to-end delivery still require their own acceptance evidence. No calibrated
+package or live autonomous optimization is claimed by source support alone.
 
 ### Built-in trial shutdown custody
 

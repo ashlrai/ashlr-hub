@@ -1,5 +1,5 @@
 import { campaignUniverse } from './campaign-store.js';
-import { hasVerifiedInitialCampaignRepair, type UniverseCampaignDeliveryTarget } from './campaign-delivery.js';
+import { hasVerifiedInitialCampaignRepair, hasVerifiedInitialCampaignSeedImprovement, type UniverseCampaignDeliveryTarget } from './campaign-delivery.js';
 import { readUniverseDeliveries, type UniverseDeliveryReceipt } from './delivery.js';
 import { manifestRecord, universePath } from './store.js';
 import type { UniverseCampaignSummary } from './types.js';
@@ -31,7 +31,8 @@ export function readCompletedCampaignDelivery(campaign: UniverseCampaignSummary,
     if (!trial?.selected || trial.status !== 'passed' || trial.score === null ||
         !trial.artifact || trial.artifact.digest !== receipt.artifactDigest || trial.artifact.digest === seedDigest) return null;
     const strictImprovement = trial.delta !== null && trial.delta > 0 && parent?.artifact && parent.artifact.digest !== trial.artifact.digest;
-    if (!strictImprovement && !(repairOption?.value === true && hasVerifiedInitialCampaignRepair(universe, campaign, trial, seedDigest, options))) return null;
+    if (!strictImprovement && !hasVerifiedInitialCampaignSeedImprovement(universe, campaign, trial, seedDigest, options) &&
+        !(repairOption?.value === true && hasVerifiedInitialCampaignRepair(universe, campaign, trial, seedDigest, options))) return null;
     return receipt;
   } catch { return null; }
 }

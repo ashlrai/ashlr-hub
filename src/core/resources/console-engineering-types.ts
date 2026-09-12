@@ -8,7 +8,7 @@ export interface ResourceConsoleEngineeringEnrollment {
   campaigns: Array<{ id: string; dependsOn: string[]; objective: string; branch: string;
     campaignBudget: { maxGenerations: number; maxDurationMs: number; maxModelRequests: number;
       maxStagnantGenerations: number; maxReportedTokens: number | null };
-    budget: { maxTrials: number; maxDurationMs: number; trialTimeoutMs: number; maxParallel: number } }>;
+    budget: { maxTrials: number; maxDurationMs: number; trialTimeoutMs: number; maxParallel: number; workerTimeoutMs?: number } }>;
   budget: { maxParallel: number; maxDurationMs: number };
   allowPendingContinuation?: true;
   acceptanceScope: 'fixed-evaluator-and-local-branch-only';

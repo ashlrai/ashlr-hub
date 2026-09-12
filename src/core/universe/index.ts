@@ -85,3 +85,6 @@ export { comparePreparationMeasurements, comparePreparationScenarioVectors,
 export type { PreparationMeasurementComparison, PreparationScenarioCount, PreparationScenarioDelta } from './preparation-measurement-comparison.js';
 export { compareCapturedPreparationMeasurement } from './preparation-measurement-candidate-comparison.js';
 export type { CapturedPreparationMeasurementComparison, CapturedPreparationMeasurementComparisonRequest } from './preparation-measurement-candidate-comparison.js';
+export { scorePreparationProcesses, assertPreparationProcessScope, summarizePreparationProcessArtifact,
+  validatePreparationProcessInventory } from './preparation-process-score.js';
+export type { PreparationProcessInventory, PreparationProcessInventoryFile, PreparationProcessEvaluation } from './preparation-process-score.js';

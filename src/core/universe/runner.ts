@@ -127,7 +127,12 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     if (copiedDigest !== source.digest) throw new Error('Parent artifact changed during copy');
     const phaseExpired = (): boolean => performance.now() - started >= record.manifest.budget.trialTimeoutMs || Date.now() >= deadline;
     const remaining = (): number => Math.max(1, Math.min(record.manifest.budget.trialTimeoutMs - (performance.now() - started), deadline - Date.now()));
-    if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before worker'; return trial; }
+    // The opt-in worker cap never renews the whole trial or campaign deadline.
+    // Omitted manifests retain their original shared worker/evaluator allowance.
+    const workerLimit = record.manifest.budget.workerTimeoutMs ?? record.manifest.budget.trialTimeoutMs;
+    const workerExpired = (): boolean => phaseExpired() || performance.now() - started >= workerLimit;
+    const workerRemaining = (): number => Math.max(1, Math.min(workerLimit - (performance.now() - started), remaining()));
+    if (workerExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before worker'; return trial; }
     // Reserve room for the full receipt before spending a model request. Large
     // evaluator measurements are rejected intact below, never silently trimmed.
     // Also reserve the longest fixed phase diagnostic before model contact.
@@ -151,21 +156,23 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       };
       contextCurrent();
       const generationStopped = (): boolean => {
-        if (isExecutionStopped?.()) return true;
+        if (isExecutionStopped?.() || signal.aborted || workerExpired()) return true;
         contextCurrent();
         // Synchronous custody checks can outlast an outer deadline or a stop
         // change; do not carry an earlier admission decision across that work.
-        return isExecutionStopped?.() ?? false;
+        return Boolean(isExecutionStopped?.() || signal.aborted || workerExpired());
       };
+      if (workerExpired()) { trial.status = 'timed-out'; trial.error = 'Worker budget exhausted before generation'; return trial; }
       // The broker receives only declared text and file state. Model output is
       // operation data, never a tool call; the fixed evaluator is unchanged.
       trial.generation = await generateModelCandidate(variant.generation, {
         candidatePath: candidate, objective: record.manifest.objective, hypothesis: variant.hypothesis,
-        generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(remaining())), signal,
+        generation: run.generation, parentTrialId: parent?.trialId ?? null, timeoutMs: Math.max(1, Math.floor(workerRemaining())), signal,
         ...(variant.generation.kind === 'resource-pool' ? { resourceRuntime, expectedResourceRuntimeDigest, resourceUniverseRoot: root,
           resourceIdentity: { universeId: record.manifest.id, runId: run.id, variantId: variant.id } } : {}),
         ...(seedContext ? { seedContext, seedContextDigest: seedContextReceipt(seedContext).digest,
-          isExecutionStopped: generationStopped } : { isExecutionStopped }),
+          isExecutionStopped: generationStopped } : {
+          isExecutionStopped: record.manifest.budget.workerTimeoutMs === undefined ? isExecutionStopped : generationStopped }),
         ...(feedback ? { feedback } : {}),
         ...(searchContext ? { searchContext, variantId: variant.id, niche: variant.niche } : {}),
         ...(fileOperationsContext ? { fileOperationsContext, variantId: variant.id, niche: variant.niche } : {}),
@@ -179,9 +186,13 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       }
     } else {
       const worker = executable(variant.command, candidate);
-      const result = await runVerifySubprocessAsync(confinedUniverseArgv(worker, candidate, workerScratch, [], root), {
-        cwd: candidate, env: phaseEnvironment(record, run.generation, candidate, workerScratch, parent),
-        timeoutMs: remaining(), signal,
+      const argv = confinedUniverseArgv(worker, candidate, workerScratch, [], root);
+      const env = phaseEnvironment(record, run.generation, candidate, workerScratch, parent);
+      if (signal.aborted || isExecutionStopped?.()) { trial.status = 'cancelled'; trial.error = 'Run cancelled before worker dispatch'; return trial; }
+      if (workerExpired()) { trial.status = 'timed-out'; trial.error = 'Worker budget exhausted before dispatch'; return trial; }
+      const result = await runVerifySubprocessAsync(argv, {
+        cwd: candidate, env,
+        timeoutMs: workerRemaining(), signal,
       });
       const workerError = commandResultError(result, 'Worker');
       if (workerError) {
@@ -191,6 +202,9 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       }
     }
     if (signal.aborted) { trial.status = 'cancelled'; trial.error = 'Run cancelled after worker'; return trial; }
+    if (record.manifest.budget.workerTimeoutMs !== undefined && workerExpired()) {
+      trial.status = 'timed-out'; trial.error = 'Worker budget exhausted'; return trial;
+    }
 
     // The worker can write only its scratch candidate. Copy before evaluating:
     // the independently scored bytes are never writable by that worker, even
@@ -207,17 +221,20 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     assertComparatorUnchanged(record);
     if (isExecutionStopped?.()) { trial.status = 'cancelled'; trial.error = 'Run cancelled before evaluator'; return trial; }
     if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before evaluator'; return trial; }
+    const evaluationTimeout = Math.max(1, Math.min(record.manifest.evaluation.timeoutMs, remaining()));
+    const evaluationDeadline = performance.now() + evaluationTimeout;
+    const evaluationExpired = (): boolean => phaseExpired() || performance.now() >= evaluationDeadline;
     const evaluation = await runFixedUniverseEvaluator(record, root, archivePath, snapshotDigest, evaluatorScratch,
-      Math.max(1, Math.min(record.manifest.evaluation.timeoutMs, remaining())), signal,
+      evaluationTimeout, signal,
       phaseEnvironment(record, run.generation, archivePath, evaluatorScratch, parent),
       record.manifest.evaluation.builtin !== undefined,
       record.manifest.evaluation.builtin === undefined ? undefined : () => {
         if (!custodyGuard || custodyIntent) throw new Error('Built-in trial evaluator custody unavailable');
         const beforeDispatch = (): void => {
           custodyGuard!();
-          if (signal.aborted || isExecutionStopped?.() || phaseExpired()) throw new Error('Built-in trial evaluator stopped before dispatch');
+          if (signal.aborted || isExecutionStopped?.() || evaluationExpired()) throw new Error('Built-in trial evaluator stopped before dispatch');
           // Parent stop checks may themselves perform synchronous proof work.
-          if (signal.aborted || phaseExpired()) throw new Error('Built-in trial evaluator stopped before dispatch');
+          if (signal.aborted || evaluationExpired()) throw new Error('Built-in trial evaluator stopped before dispatch');
         };
         beforeDispatch();
         custodyIntent = { schemaVersion: 1, universeId: record.manifest.id, runId: run.id, trialId,
@@ -267,6 +284,9 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
       ...(!measurement.passed ? { error: 'Fixed evaluator rejected the candidate' } : {}),
     };
     assertTrialEvidenceBudget(measuredTrial);
+    // Settlement is persisted first; a late success is still never promoted.
+    if (signal.aborted || isExecutionStopped?.()) { trial.status = 'cancelled'; trial.error = 'Run cancelled before score publication'; return trial; }
+    if (evaluationExpired()) { trial.status = 'timed-out'; trial.error = 'Trial or evaluator budget exhausted before score publication'; return trial; }
     Object.assign(trial, measuredTrial);
     return trial;
   } catch (error) {
@@ -390,6 +410,7 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
       assertUniverseExecution(directory, execution);
       if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost');
       assertBuiltinTrialEvaluatorsSettled(directory);
+      if (options.isExecutionStopped?.() || controller.signal.aborted || Date.now() >= deadline) { controller.abort(); break; }
       const batch = variants.slice(index, index + record.manifest.budget.maxParallel);
       const results = await Promise.allSettled(batch.map(async (variant) => {
         const trial = await runTrial(record, run!, variant, overview.elites.find((elite) => elite.niche === variant.niche),
@@ -417,6 +438,11 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
       run.error = options.signal?.aborted ? 'Run cancelled by its owner' : 'Run duration budget exhausted';
     } else {
       assertComparatorUnchanged(record);
+      // Synchronous final proof must not carry a pre-proof deadline/stop decision
+      // into winner selection while the abort timer is waiting for the event loop.
+      if (options.isExecutionStopped?.() || controller.signal.aborted || Date.now() >= deadline) {
+        throw new Error('Run stopped or deadline exhausted before winner selection');
+      }
       run.status = 'completed';
       selectWinners(run, record.manifest, overview.elites);
     }

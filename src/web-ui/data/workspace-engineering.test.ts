@@ -8,6 +8,21 @@ vi.mock('./auth-store.js', () => ({ getMutationToken: vi.fn(), clearMutationToke
 beforeEach(() => { vi.clearAllMocks(); vi.mocked(getMutationToken).mockReturnValue('control-fixture'); });
 
 describe('workspace engineering evidence boundary', () => {
+  it('preserves an explicit worker ceiling inside the longer whole-trial limit', async () => {
+    const selected = engineeringEnrollment();
+    selected.campaigns[0]!.budget = { ...selected.campaigns[0]!.budget, trialTimeoutMs: 2_700_000, workerTimeoutMs: 900_000 };
+    vi.mocked(apiGet).mockResolvedValue([selected]);
+    await expect(listWorkspaceEngineering()).resolves.toEqual([selected]);
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+  it.each([{ workerTimeoutMs: 0 }, { workerTimeoutMs: 900_001 }, { workerTimeoutMs: 0.5 },
+    { workerTimeoutMs: 900_000, trialTimeoutMs: 800_000 }, { workerTimeoutMs: 300_000, trialTimeoutMs: 2_700_001 },
+    { workerTimeoutMs: undefined }])('refuses malformed split budget evidence %j', patch => {
+    const selected = engineeringEnrollment();
+    selected.campaigns[0]!.budget = { ...selected.campaigns[0]!.budget, trialTimeoutMs: 2_700_000, ...patch };
+    vi.mocked(apiGet).mockResolvedValue([selected]);
+    return expect(listWorkspaceEngineering()).rejects.toThrow('verified');
+  });
   it('accepts literal opted-in policy and rejects readiness that mislabels its effects', async () => {
     const selected = { ...engineeringEnrollment(), allowPendingContinuation: true as const };
     vi.mocked(apiGet).mockResolvedValue([selected]);
