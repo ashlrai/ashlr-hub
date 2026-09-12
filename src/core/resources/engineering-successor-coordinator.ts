@@ -12,7 +12,7 @@ import { resourcePoolStatus, runResourceTask, validateResourceTask } from './poo
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import { validateResourceBindings } from './worker.js';
 import { waitForResourceCapacity } from './capacity-wait.js';
-import type { ResourceEngineeringSuccessorCoordinatorOptions as Options,
+import type { EngineeringCoordinatorLifecycleReport, ResourceEngineeringSuccessorCoordinatorOptions as Options,
   ResourceEngineeringSuccessorCoordinatorSnapshot as Snapshot, ResourceEngineeringSuccessorEvidence as Evidence } from './engineering-successor-coordinator-types.js';
 export type * from './engineering-successor-coordinator-types.js';
 import { data, hash, evidence, engineeringSuccessorRecordStore, engineeringSuccessorKey, engineeringSuccessorPrompt,
@@ -27,10 +27,12 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
   const required = ['root', 'config', 'pool', 'bindings', 'cwd', 'supervision', 'readAdmissionEvidence', 'host'];
   if (!options || ![Object.prototype, null].includes(Object.getPrototypeOf(options)) || required.some(key => !Object.hasOwn(options, key)) ||
     Reflect.ownKeys(options).some(key => typeof key !== 'string' ||
-    !['root', 'config', 'pool', 'bindings', 'cwd', 'supervision', 'readAdmissionEvidence', 'host', 'signal'].includes(key) ||
+    !['root', 'config', 'pool', 'bindings', 'cwd', 'supervision', 'readAdmissionEvidence', 'host', 'signal', 'onLifecycle'].includes(key) ||
     !Object.hasOwn(Object.getOwnPropertyDescriptor(options, key)!, 'value'))) fail('Invalid successor options');
   const config = validateResourceEngineeringSuccessorCoordinatorConfig(options.config); const configDigest = hash(config);
   const root = options.root, cwd = options.cwd, signal = options.signal;
+  const onLifecycle = options.onLifecycle;
+  if (onLifecycle !== undefined && typeof onLifecycle !== 'function') fail('Invalid successor lifecycle observer');
   for (const path of [root, cwd]) if (typeof path !== 'string' || !isAbsolute(path) || resolve(path) !== path || parse(path).root === path) fail('Invalid successor path');
   if (signal !== undefined && !(signal instanceof AbortSignal) || signal?.aborted) fail('Successor startup cancelled');
   const pool = validateResourcePool(data(options.pool)); const bindings = validateResourceBindings(data(options.bindings), pool); const poolDigest = hash({ pool, bindings });
@@ -59,8 +61,26 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
   let live: { key: string; state: 'proposing' | 'waiting-for-capacity' | 'preparing' | 'admitting' } | undefined;
   const expected: EnrollmentRecord = { id: 'enrollment', kind: 'enrollment', configDigest, supervisionDigest: initial.configDigest,
     deadlineAt: initial.deadlineAt, poolDigest, cwd: cwdBinding };
+  let lifecycle: EngineeringCoordinatorLifecycleReport | undefined;
+  function report(state: EngineeringCoordinatorLifecycleReport['state'], reason: EngineeringCoordinatorLifecycleReport['reason'] = null): void {
+    if (lifecycle?.state === state && lifecycle.reason === reason || lifecycle?.sequence === Number.MAX_SAFE_INTEGER) return;
+    lifecycle = { schemaVersion: 1, supervisionId: config.supervisionId, configDigest, deadlineAt: expected.deadlineAt,
+      sequence: (lifecycle?.sequence ?? 0) + 1, reportedAt: new Date().toISOString(), state, reason };
+    // Reporting has no authority. Detached values and isolated failures ensure
+    // an observer cannot mutate coordinator identity or interrupt its effects.
+    try {
+      // A void callback may still be implemented by an async function. Do not
+      // await it or let its rejection become an effect-worker failure.
+      void Promise.resolve(onLifecycle?.({ ...lifecycle })).catch(() => {});
+    } catch { /* Keep the original execution path unchanged. */ }
+  }
   const deadline = Date.parse(expected.deadlineAt); const monotonicDeadline = performance.now() + Math.max(0, deadline - Date.now());
   const expired = () => Date.now() >= deadline || performance.now() >= monotonicDeadline;
+  function reportStopped(): void {
+    if (closing || faulted) return;
+    if (expired()) report('timed-out', 'deadline-reached');
+    else report('held', signal?.aborted ? 'signal-aborted' : 'execution-guard-refused');
+  }
   function owns(): boolean {
     try { return !closing && !faulted && !signal?.aborted && ownsLocalStoreLock(acquired.lock) && matchesResourceConsoleProject(cwdBinding); } catch { return false; }
   }
@@ -201,12 +221,13 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
     finally { if (live?.key === intent.key) live = undefined; }
   }
   async function tick(): Promise<void> {
-    if (!cheapGuard()) return;
-    const snapshot = current(); if (snapshot.paused) return;
+    if (!cheapGuard()) { reportStopped(); return; }
+    const snapshot = current(); if (snapshot.paused) { reportStopped(); return; }
+    report('running');
     let rows = read();
     for (const intent of rows.filter((row): row is Intent => row.kind === 'intent')) {
       try { await advance(intent, false); } catch { reasons.set(intent.key, 'successor-evidence-unavailable'); }
-      if (!cheapGuard()) return;
+      if (!cheapGuard()) { reportStopped(); return; }
     }
     rows = read();
     for (const candidate of snapshot.entries.filter(row => row.state === 'completed')) {
@@ -225,7 +246,7 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
       rows = read();
     }
   }
-  const onAbort = () => { active?.abort(); wake?.(); };
+  const onAbort = () => { active?.abort(); wake?.(); if (!closing && !faulted) report('held', 'signal-aborted'); };
   try {
     const prior = read(true);
     if (!prior.length) {
@@ -234,6 +255,7 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
     }
     signal?.addEventListener('abort', onAbort, { once: true });
   } catch (error) { releaseLocalStoreLock(acquired.lock); throw error; }
+  report('idle');
   return {
     observationScope,
     snapshot() {
@@ -251,17 +273,23 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
     },
     start() {
       if (closing || faulted) fail('Successor coordinator unavailable'); if (started) return; started = true;
+      report('running');
       loop = (async () => {
         while (!closing && !signal?.aborted && !expired()) {
-          try { await tick(); } catch { faulted = true; active?.abort(); break; }
+          try { await tick(); } catch { faulted = true; active?.abort(); report('faulted', 'coordinator-loop-failed'); break; }
           if (closing || signal?.aborted || expired()) break;
           await new Promise<void>(done => { const timer = setTimeout(() => { wake = undefined; done(); }, Math.min(config.pollIntervalMs, Math.max(1, deadline - Date.now())));
             wake = () => { clearTimeout(timer); wake = undefined; done(); }; });
+        }
+        if (!closing && !faulted) {
+          if (expired()) report('timed-out', 'deadline-reached');
+          else if (signal?.aborted) report('held', 'signal-aborted');
         }
       })();
     },
     close() {
       if (closePromise) return closePromise; closing = true; active?.abort(); wake?.(); signal?.removeEventListener('abort', onAbort);
+      report('closing');
       closePromise = (async () => {
         await loop;
         let uncertain = false;
@@ -270,8 +298,9 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
           if (currentReceipt && ['reserved', 'uncertain'].includes(currentReceipt.status)) uncertain = true;
         } } catch { uncertain = true; }
         const released = releaseLocalStoreLock(acquired.lock);
-        if (!released) fail('Successor ownership release unavailable');
-        if (uncertain) fail('Successor closed with unresolved proposal execution');
+        if (!released) { report('faulted', 'ownership-release-failed'); fail('Successor ownership release unavailable'); }
+        if (uncertain) { report('faulted', 'close-unresolved'); fail('Successor closed with unresolved proposal execution'); }
+        report('closed');
       })();
       return closePromise;
     },

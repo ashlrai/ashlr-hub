@@ -8,12 +8,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { createResourceEngineeringSuccessorCoordinator, parseResourceEngineeringSuccessorProposal,
   validateResourceEngineeringSuccessorCoordinatorConfig } from '../src/core/resources/engineering-successor-coordinator.js';
-import type { ResourceEngineeringSuccessorCoordinatorConfig, ResourceEngineeringSuccessorCoordinatorOptions, ResourceEngineeringSuccessorEvidence } from '../src/core/resources/engineering-successor-coordinator-types.js';
+import type { EngineeringCoordinatorLifecycleReport, ResourceEngineeringSuccessorCoordinatorConfig, ResourceEngineeringSuccessorCoordinatorOptions, ResourceEngineeringSuccessorEvidence } from '../src/core/resources/engineering-successor-coordinator-types.js';
 import type { ResourceConsoleEngineeringSupervisionSnapshot } from '../src/core/resources/console-engineering-supervisor-types.js';
 import type { ResourceConsoleEngineeringEnrollment } from '../src/core/resources/console-engineering-types.js';
 import * as runtime from '../src/core/resources/pool-runtime.js';
 import * as capacity from '../src/core/resources/capacity-wait.js';
 import * as records from '../src/core/util/immutable-private-record-store.js';
+import * as locks from '../src/core/fleet/local-store-lock.js';
 
 const roots: string[] = [];
 const owners: ReturnType<typeof createResourceEngineeringSuccessorCoordinator>[] = [];
@@ -76,6 +77,68 @@ const until = (owner: ReturnType<typeof createResourceEngineeringSuccessorCoordi
   vi.waitFor(() => expect(owner.snapshot().entries[0]?.state).toBe(state), { timeout: 5000, interval: 20 });
 
 describe('bounded engineering successor coordinator', () => {
+  it('reports monotonic deduplicated idle/running/held/resumed/closed transitions without execution', async () => {
+    const f = fixture(); const reports: EngineeringCoordinatorLifecycleReport[] = [];
+    f.options.onLifecycle = row => reports.push(row); f.stop(true); f.state.entries = [];
+    const owner = f.create(); expect(reports.map(row => row.state)).toEqual(['idle']);
+    owner.start(); owner.start();
+    await vi.waitFor(() => expect(reports.at(-1)).toMatchObject({ state: 'held', reason: 'execution-guard-refused' }));
+    const count = reports.length; await new Promise(resolve => setTimeout(resolve, 220)); expect(reports).toHaveLength(count);
+    f.stop(false); await vi.waitFor(() => expect(reports.at(-1)?.state).toBe('running'));
+    await owner.close(); await owner.close();
+    expect(reports.map(row => row.state)).toEqual(['idle', 'running', 'held', 'running', 'closing', 'closed']);
+    reports.forEach((row, index) => {
+      expect(row.sequence).toBe(index + 1); expect(new Date(row.reportedAt).toISOString()).toBe(row.reportedAt);
+      expect(row).toMatchObject({ schemaVersion: 1, supervisionId: config.supervisionId, configDigest: hash(config), deadlineAt: f.state.deadlineAt });
+    });
+    expect(f.run).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled(); expect(f.options.supervision.admit).not.toHaveBeenCalled();
+  });
+  it('reports an internally caught tick fault without closing independent supervision', async () => {
+    const f = fixture(); const reports: EngineeringCoordinatorLifecycleReport[] = []; f.options.onLifecycle = row => reports.push(row);
+    const owner = f.create(); f.state.configDigest = '0'.repeat(64); owner.start();
+    await vi.waitFor(() => expect(reports.at(-1)).toMatchObject({ state: 'faulted', reason: 'coordinator-loop-failed' }));
+    const count = reports.length; await new Promise(resolve => setTimeout(resolve, 150)); expect(reports).toHaveLength(count);
+    expect(f.state.paused).toBe(false); expect(f.state.entries).toHaveLength(1); expect(f.run).not.toHaveBeenCalled();
+    expect(JSON.stringify(reports)).not.toContain(f.root); expect(JSON.stringify(reports)).not.toContain(f.source.context);
+    await owner.close(); expect(reports.at(-1)).toMatchObject({ state: 'closed', reason: null });
+  });
+  it('isolates a throwing/mutating observer and captures it once', async () => {
+    const f = fixture(); let calls = 0;
+    f.options.onLifecycle = row => { calls++; row.configDigest = '0'.repeat(64); row.sequence = 999; throw new Error('PRIVATE_OBSERVER_FAILURE'); };
+    const owner = f.create(); const replacement = vi.fn(); f.options.onLifecycle = replacement;
+    owner.start(); await until(owner, 'admitted'); await owner.close();
+    expect(calls).toBeGreaterThanOrEqual(4); expect(replacement).not.toHaveBeenCalled();
+    expect(owner.observationScope().expectedEnrollment.configDigest).toBe(hash(config)); expect(f.run).toHaveBeenCalledTimes(1);
+  });
+  it('reports deadline termination without renewing or dispatching', async () => {
+    const f = fixture(); const reports: EngineeringCoordinatorLifecycleReport[] = []; f.options.onLifecycle = row => reports.push(row);
+    f.state.deadlineAt = new Date(Date.now() - 1000).toISOString(); const owner = f.create(); owner.start();
+    await vi.waitFor(() => expect(reports.at(-1)).toMatchObject({ state: 'timed-out', reason: 'deadline-reached' }));
+    expect(reports.at(-1)?.deadlineAt).toBe(f.state.deadlineAt); expect(f.run).not.toHaveBeenCalled();
+  });
+  it('ignores an asynchronously rejected observer without an unhandled rejection', async () => {
+    const f = fixture(); f.state.entries = []; let calls = 0;
+    f.options.onLifecycle = async () => { calls++; throw new Error('PRIVATE_ASYNC_OBSERVER_FAILURE'); };
+    const owner = f.create(); owner.start(); await new Promise(resolve => setTimeout(resolve, 120)); await owner.close();
+    await new Promise(resolve => setTimeout(resolve, 0)); expect(calls).toBe(4); expect(f.run).not.toHaveBeenCalled();
+  });
+  it('reports signal abort distinctly from generic authority refusal', async () => {
+    const f = fixture(); const reports: EngineeringCoordinatorLifecycleReport[] = []; const abort = new AbortController();
+    f.options.signal = abort.signal; f.options.onLifecycle = row => reports.push(row); f.state.entries = [];
+    const owner = f.create(); owner.start(); abort.abort();
+    await vi.waitFor(() => expect(reports.at(-1)).toMatchObject({ state: 'held', reason: 'signal-aborted' }));
+    const count = reports.length; await new Promise(resolve => setTimeout(resolve, 100)); expect(reports).toHaveLength(count);
+    expect(f.run).not.toHaveBeenCalled(); await owner.close(); expect(reports.at(-1)?.state).toBe('closed');
+  });
+  it.each(['uncertain', 'release'] as const)('reports %s close failure with a fixed reason', async kind => {
+    const f = fixture(); const reports: EngineeringCoordinatorLifecycleReport[] = []; f.options.onLifecycle = row => reports.push(row);
+    const owner = f.create(); owner.start(); await until(owner, 'admitted');
+    if (kind === 'uncertain') f.attempts[0]!.status = 'uncertain';
+    else { const release = locks.releaseLocalStoreLock; vi.spyOn(locks, 'releaseLocalStoreLock').mockImplementation(lock => { release(lock); return false; }); }
+    await expect(owner.close()).rejects.toThrow();
+    expect(reports.at(-1)).toMatchObject({ state: 'faulted', reason: kind === 'uncertain' ? 'close-unresolved' : 'ownership-release-failed' });
+    expect(reports.at(-2)?.state).toBe('closing'); expect(f.run).toHaveBeenCalledTimes(1);
+  });
   it('enrolls without execution, then proposes/prepares/admits once and reopens without another request', async () => {
     const f = fixture(); f.stop(true); const owner = f.create(); expect(f.run).not.toHaveBeenCalled();
     f.stop(false); owner.start(); await until(owner, 'admitted');

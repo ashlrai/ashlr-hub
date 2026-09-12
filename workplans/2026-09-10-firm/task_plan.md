@@ -1,6 +1,40 @@
 # Executable firm: package graph
 
-## Current increment — independent verified successor status (baseline d56309ce)
+## Current increment — coordinator lifecycle and useful-yield measurement (baseline 3a228e1b)
+
+- [x] Revalidate source, prior progress and lifecycle/benchmark patterns with three agents.
+- [x] Report actual coordinator transitions on a separate bounded observation channel.
+- [x] Surface last-reported state/time/reason without changing journal or worker-connection semantics.
+- [x] Prove the real caught-fault path preserves independent control availability and exposes no private exception text.
+- [x] Build and challenge a confined measurement-harness first slice for a still-unsolved Hub optimization.
+- [x] Verify regression, delivery/restart, latency, documentation and local build.
+
+Previous turn is progress: 3a228e1b passes all seven two-second probes and two
+verified deliveries/restart with exact journal/accounting evidence. A separate
+coordinator loop can still stop silently while its worker remains connected.
+Lifecycle reports must be explicitly historical, bound to the initialized
+configuration, monotonically sequenced and restricted to fixed safe reasons.
+They never grant execution, restart work or close unrelated enrolled work.
+
+Resource agent owns coordinator/adapter transition production; execution agent
+owns strict UI contract and real fault acceptance; cold agent owns the confined
+benchmark-harness first slice; parent owns worker/parent transport, integration,
+canonical documentation and final verification. The benchmark target remains
+unoptimized: protected evaluator reads in engineering-preparation.ts. Existing
+seed batching and registry reuse must not earn new improvement credit. No live
+provider, real KILL, account-policy, persistent service or public release changes.
+
+Final selected gates: 1,906 passing tests across 100 files, zero skips on macOS
+Node 24. All seven responsiveness probes passed; pause 75ms and no B admission.
+Full two-delivery/restart acceptance preserved deadline, journal and accounting.
+The measurement prototype repeated 298 observed launches and rejected six bad controls;
+its output is intentionally not accepted by the evaluation parser. Source/web
+typechecks, strict affected-test checks, build, lint, docs and five compiled
+structural checks passed. Clean committed build identity is verified at handoff.
+Trusted candidate/evaluator process separation and independent effect counting
+remain the next useful-yield milestone; full autonomy is not yet established.
+
+## Previous increment — independent verified successor status (baseline d56309ce)
 
 - [x] Revalidate clean source and explore journal, worker and browser contracts with three agents.
 - [x] Extract one unchanged journal codec and complete attribution validator.

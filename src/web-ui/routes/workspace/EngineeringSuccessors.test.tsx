@@ -27,6 +27,26 @@ beforeEach(() => { vi.useFakeTimers(); read.mockReset().mockResolvedValue(snapsh
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('successor planning observation panel', () => {
+  it('shows unknown lifecycle without treating connection or journal freshness as a report', async () => {
+    read.mockResolvedValue(journal()); render(<EngineeringSuccessors {...props()} />); await flush();
+    expect(screen.getByText('Unknown — no coordinator report')).toBeInTheDocument(); expect(screen.getByText('Worker connected')).toBeInTheDocument();
+    expect(screen.queryByText('Coordinator reported')).not.toBeInTheDocument();
+  });
+  it('retains the own report timestamp across new journal samples and exposes a connected caught fault honestly', async () => {
+    const value = journal('prepared'); value.observation!.coordinator = { schemaVersion: 1, supervisionId: value.supervisionId,
+      configDigest: value.configDigest, deadlineAt: value.deadlineAt, sequence: 7, reportedAt: '2026-09-18T00:00:00.000Z',
+      state: 'faulted', reason: 'coordinator-loop-failed' };
+    read.mockResolvedValue(value); const input = props(); render(<EngineeringSuccessors {...input} />); await flush();
+    expect(screen.getByText('Verified journal')).toBeInTheDocument(); expect(screen.getByText('Worker connected')).toBeInTheDocument();
+    expect(screen.getByText('Faulted')).toBeInTheDocument(); expect(screen.getByText(/coordinator loop failed/)).toBeInTheDocument();
+    expect(screen.getByText(/last reported lifecycle, not proof of current execution/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Inspect source' })).toBeEnabled();
+    const nextSample = { ...value, observation: { ...value.observation!, sampledAt: '2026-09-19T01:00:00.000Z', recordsDigest: 'e'.repeat(64) } };
+    read.mockResolvedValue(nextSample); await tick();
+    expect(document.querySelector('time[datetime="2026-09-18T00:00:00.000Z"]')).toBeInTheDocument();
+    expect(document.querySelector('time[datetime="2026-09-19T01:00:00.000Z"]')).toBeInTheDocument();
+    expect(input.onRegisteredEnrollments).toHaveBeenCalledExactlyOnceWith([next]);
+  });
   it('distinguishes verified journal milestones from worker activity and downstream proof', async () => {
     read.mockResolvedValue(journal()); const input = props(); render(<EngineeringSuccessors {...input} />); await flush();
     expect(screen.getByText('Verified journal')).toBeInTheDocument(); expect(screen.getByText('Worker connected')).toBeInTheDocument();

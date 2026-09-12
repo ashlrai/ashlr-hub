@@ -1,6 +1,84 @@
 # Verified local handoff
 
-## Current continuation: independent successor journal observation
+## Current continuation: coordinator lifecycle and useful-yield measurement
+
+Baseline `3a228e1b3d03645c36c4e8b65452c20e34f2c940`, initially clean branch
+`auto/p00` at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.
+Three agent workstreams own transition production, strict UI/actual fault
+acceptance, and a preparation benchmark prototype; parent integrates transport,
+canonical docs and final gates. Entire resume found no checkpoint. Original
+checkout, real KILL, account settings and provider state are outside this increment.
+
+The existing coordinator now emits a bounded transition-only report on a
+separate worker message. Original supervision/configuration/deadline pins and a
+process-local increasing sequence bind it; a startup report stays private until
+the returned scope verifies. Only fixed state/reason pairs cross the boundary.
+Malformed, reordered and differently bound reports cannot refresh the retained
+timestamp or close unrelated work. Sync/async observer errors are isolated.
+
+The UI displays **Last reported coordinator** and its own time independently of
+fresh journal evidence and worker connection. Running means the loop started or
+cleared its guard, not current active model execution. Held does not assert the
+specific cause behind a combined guard. A fresh journal cannot renew a report.
+No lifecycle observation changes accounting, budgets, admission, recovery or
+effect-worker ownership; no automatic restart is introduced.
+
+The actual worker fixture configures real preparation/owner/read and effect
+workers, then causes the next supervision snapshot to refuse with an intentional
+domain error. The real inner tick catch reports faulted while worker connection,
+fresh unchanged journal and profile reading remain available. No proposal,
+evaluation, preparation, admission or pool-ledger write occurs, and the private
+error sentinel is absent from the report. This proves retained availability and
+zero new actions, not survival of a separately running campaign.
+
+Independent review of the benchmark prototype found that candidate code in the
+same process could corrupt assertions or forge evaluator stdout. OS filesystem
+confinement alone does not protect evaluator authority from that. Its current
+scope is controlled leaf-path measurement and confinement/negative-control
+development, not a frozen competitive evaluator or an admitted Hub objective.
+Host-function constructor escapes remain a separate process-isolation problem;
+do not use prototype measurements to authorize autonomous acceptance or delivery.
+The separate measurement envelope has no `passed` or `score` fields; tests
+require the real Universe evaluation parser to reject it as evaluation evidence.
+
+Responsiveness passed the unchanged seven two-second probes: one test, zero
+skips, 78.96s. Proposal-admission/source/preparation journal reads took
+98.181/23.128/122.502ms; health took 1.061/0.933/0.927ms. Pause returned HTTP200
+in 75.074ms. A completed twice with one proposal, B remained unadmitted, and the
+original one-entry queue stayed paused with exact accounting. Close drained in
+12.521s with exit zero, no stderr and fixture cleanup. These are single-host
+observations, not a universal latency guarantee.
+
+Strengthened setup/delivery/restart passed: one test, zero skips, 159.13s.
+Both verified local deliveries completed at 121.32s and restart took 17.54s.
+The five fixture model requests, six evaluations and 150 reported tokens remained
+exact. Fresh journal samples matched their request windows and actual record
+digest; lifecycle reports matched original pins and came from the current
+process. Restart preserved the original deadline, records, entries, policy and
+accounting, with no request replay or read recovery. All private fixture
+processes, listeners and files were cleaned.
+
+The prototype passed eight tests with zero skips in 23.35s. Three fresh processes
+produced identical four-call totals of 298 observed launches (34/109 for one
+protected input; 40/115 for four inputs), with eight correctness checks. Six
+incorrect controls were rejected, including cache misuse, bad comparator bytes,
+direct assertion tampering, stdout forgery and an unexpected shell route.
+The real OS-confined measurement completed in 3.80s with confirmed process-group
+exit. Every measurement envelope was rejected by the real evaluation parser.
+These are controlled diagnostic counts, not a frozen reward baseline. Candidate
+process isolation and independently trusted effect counting remain future work.
+
+Final backend regression passed 214 tests across 12 files in 30.66s. Full web
+passed 1,682 tests across 85 files in 10.70s. Including both actual-CLI gates and
+the prototype, the distinct final selection is **1,906 tests / 100 files, zero
+skips**. Source/web and strict affected-test typechecks passed, as did the local
+build, lint (zero errors; 107 existing warnings), documentation links, lane
+classification and all five compiled structural safety checks. Clean committed
+build identity is recorded at handoff. The prototype's unsupported-platform cases may
+skip elsewhere; this count is the actual macOS/Node24 run. No public release,
+authenticated provider operation or always-on acceptance is claimed.
+
+## Previous continuation: independent successor journal observation
 
 Baseline `d56309ce2027976b4145dbe4954f4dd51e3c8aed`, clean branch `auto/p00` at
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agent streams

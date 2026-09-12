@@ -10,6 +10,8 @@ import type { ResourceConsoleEngineeringSupervisor } from './console-engineering
 import { createEngineeringWorkerRpcHost } from './engineering-worker-rpc.js';
 import { createEngineeringSuccessorReader, type EngineeringSuccessorReader } from './engineering-successor-reader.js';
 import type { ResourceEngineeringSuccessorJournalScope } from './engineering-successor-store.js';
+import type { EngineeringCoordinatorLifecycleReport } from './engineering-successor-coordinator-types.js';
+import { readEngineeringCoordinatorObservation } from './engineering-coordinator-observation.js';
 import { ENGINEERING_BACKGROUND_HOST_METHODS, type EngineeringBackground, type EngineeringBackgroundHost,
   type EngineeringBackgroundPreparation } from './engineering-background-types.js';
 
@@ -53,6 +55,10 @@ export async function createEngineeringBackground(input: {
   let supervisionMethods: Pick<ResourceConsoleEngineeringSupervisor, 'snapshot' | 'admit' | 'isExecutionStopped'> | undefined;
   let admission: Parameters<EngineeringBackground['configureSuccessors']>[2] | undefined;
   let observationReader: EngineeringSuccessorReader | undefined;
+  let observationPins: Pick<EngineeringCoordinatorLifecycleReport, 'supervisionId' | 'configDigest' | 'deadlineAt'> | undefined;
+  let expectedSupervisionId: string | undefined;
+  let coordinator: EngineeringCoordinatorLifecycleReport | null = null;
+  let initializingReport: EngineeringCoordinatorLifecycleReport | null = null;
   let closing = false; let faulted = false; let exited = false; let configured = false;
   const closeFlag = new Int32Array(new SharedArrayBuffer(4));
   const assertOpen = () => { if (closing || faulted || signal?.aborted || isClosing()) throw unavailable(); };
@@ -89,6 +95,20 @@ export async function createEngineeringBackground(input: {
     if (rpc.handle(message)) return;
     if (!message || typeof message !== 'object' || Array.isArray(message)) { fault(); return; }
     const value = message as Record<string, unknown>;
+    if (value.type === 'engineering-coordinator-observation') {
+      // Telemetry failure cannot close unrelated work or masquerade as an RPC
+      // failure. Retain only the last valid historical report, without renewing
+      // its timestamp. The journal remains independently verified on each read.
+      if (Object.keys(value).length !== 2 || !Object.hasOwn(value, 'report') || exited || faulted) return;
+      const report = readEngineeringCoordinatorObservation(value.report, observationPins);
+      if (!report || report.supervisionId !== expectedSupervisionId) return;
+      if (!observationPins) {
+        // Initialization emits idle before returning its verified scope. This
+        // bounded mailbox is not exposed until it matches those original pins.
+        if (!initializingReport || report.sequence > initializingReport.sequence) initializingReport = report;
+      } else if (!coordinator || report.sequence > coordinator.sequence) coordinator = report;
+      return;
+    }
     if (value.type !== 'engineering-result' || !Number.isSafeInteger(value.id) || typeof value.ok !== 'boolean' ||
         Object.keys(value).some(key => !['type', 'id', 'ok', 'value', 'code'].includes(key))) { fault(); return; }
     const item = pending.get(value.id as number); if (!item) { fault(); return; }
@@ -123,10 +143,14 @@ export async function createEngineeringBackground(input: {
       supervisionMethods = { snapshot: method(supervision, 'snapshot'), admit: method(supervision, 'admit'),
         isExecutionStopped: method(supervision, 'isExecutionStopped') };
       admission = readAdmissionEvidence; configured = true;
+      expectedSupervisionId = captured.config.supervisionId;
       const scope = await command<ResourceEngineeringSuccessorJournalScope>('configure-successors', captured);
       assertOpen();
       if (scope.directory !== join(captured.root, 'engineering-successors', captured.config.supervisionId) ||
           canonicalEvidencePackJsonV3(scope.config) !== canonicalEvidencePackJsonV3(captured.config)) throw unavailable();
+      observationPins = { supervisionId: captured.config.supervisionId, configDigest: scope.expectedEnrollment.configDigest,
+        deadlineAt: scope.expectedEnrollment.deadlineAt };
+      coordinator = readEngineeringCoordinatorObservation(initializingReport, observationPins); initializingReport = null;
       observationReader = createEngineeringSuccessorReader({ scope, configFile: captured.configFile });
       // Pay module loading and verify the original journal before execution
       // starts. This sample is never reused for later operator reads.
@@ -141,7 +165,7 @@ export async function createEngineeringBackground(input: {
       return { ...observed.snapshot,
         state: Date.parse(observed.sampledAt) >= Date.parse(observed.snapshot.deadlineAt) ? 'timed-out' : 'observing',
         observation: { kind: 'durable-journal', sampledAt: observed.sampledAt, recordsDigest: observed.recordsDigest,
-          workerState: 'connected' } };
+          workerState: 'connected', coordinator: coordinator ? { ...coordinator } : null } };
     },
     close() {
       if (closePromise) return closePromise;

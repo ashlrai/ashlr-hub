@@ -226,6 +226,7 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     expect(f.generations).toEqual([]); expect(f.proposals).toEqual([]); expect(tree(homedir())).toEqual(homeBefore);
     const setupBeforeStart = tree(f.output); expect((await setupCli(f, ['--expected-plan-digest', plan.planDigest])).disposition).toBe('replayed');
     expect(tree(f.output)).toEqual(setupBeforeStart);
+    const firstStartAt = Date.now();
     point('first-start.start'); const first = await consoleCli(argv, recovery); point('first-start.end');
     const initial = await first.read<ResourceConsoleEngineeringSupervisionSnapshot>('/api/resources/engineering-supervision');
     expect(initial.entries).toHaveLength(1); expect(initial.entries[0]).toMatchObject({ enrollmentId: f.recipe.id, enrollmentDigest: prepared.initialEnrollmentDigest });
@@ -242,6 +243,11 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     const sampledAt = Date.parse(successors.observation!.sampledAt);
     expect(new Date(sampledAt).toISOString()).toBe(successors.observation!.sampledAt);
     expect(sampledAt).toBeGreaterThanOrEqual(sampleStartedAt); expect(sampledAt).toBeLessThanOrEqual(sampleFinishedAt);
+    expect(successors.observation!.coordinator).toMatchObject({ schemaVersion: 1, supervisionId: successors.supervisionId,
+      configDigest: successors.configDigest, deadlineAt: originalDeadline, state: 'running', reason: null });
+    expect(successors.observation!.coordinator!.sequence).toBeGreaterThan(0);
+    expect(Date.parse(successors.observation!.coordinator!.reportedAt)).toBeGreaterThanOrEqual(firstStartAt);
+    expect(Date.parse(successors.observation!.coordinator!.reportedAt)).toBeLessThanOrEqual(sampleFinishedAt);
     expect(successors.entries[0]!.reason).toBeNull();
     const journalDirectory = join(f.root, 'engineering-successors', 'setup-queue', 'events', 'records');
     const journalRecords = readdirSync(journalDirectory).sort().map(name => JSON.parse(readFileSync(join(journalDirectory, name), 'utf8')));
@@ -266,7 +272,8 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     expect(ledger.allocation).toEqual(f.allocation); expect(ledger.workerAccess).toEqual(f.workerAccess);
     expect(ledger.attempts.every(row => row.inputTokens !== null && row.outputTokens !== null)).toBe(true);
     expect(ledger.attempts.reduce((sum, row) => sum + row.inputTokens! + row.outputTokens!, 0)).toBe(150);
-    const after = tree(f.output); point('restart.start'); const restarted = await consoleCli(argv, recovery); point('restart.end');
+    const after = tree(f.output); const restartStartedAt = Date.now();
+    point('restart.start'); const restarted = await consoleCli(argv, recovery); point('restart.end');
     const again = await restarted.read<ResourceConsoleEngineeringSupervisionSnapshot>('/api/resources/engineering-supervision');
     expect(again.deadlineAt).toBe(originalDeadline); expect(again.entries).toEqual(state.entries);
     const restartSampleStartedAt = Date.now();
@@ -277,6 +284,13 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
       observation: { kind: 'durable-journal', workerState: 'connected', recordsDigest: successors.observation!.recordsDigest } });
     expect(Date.parse(observedAgain.observation!.sampledAt)).toBeGreaterThanOrEqual(restartSampleStartedAt);
     expect(Date.parse(observedAgain.observation!.sampledAt)).toBeLessThanOrEqual(restartSampleFinishedAt);
+    expect(observedAgain.observation!.coordinator).toMatchObject({ schemaVersion: 1, supervisionId: successors.supervisionId,
+      configDigest: successors.configDigest, deadlineAt: originalDeadline });
+    // Reports are process-local: restart supplies new evidence, not the old
+    // running transition or a renewed campaign deadline.
+    expect(observedAgain.observation!.coordinator!.sequence).toBeGreaterThan(0);
+    expect(Date.parse(observedAgain.observation!.coordinator!.reportedAt)).toBeGreaterThanOrEqual(restartStartedAt);
+    expect(Date.parse(observedAgain.observation!.coordinator!.reportedAt)).toBeLessThanOrEqual(restartSampleFinishedAt);
     await restarted.close(); expect(f.generations).toHaveLength(4); expect(f.proposals).toHaveLength(1); expect(tree(f.output)).toEqual(after);
     expect(resourcePoolStatus(f.root, f.pool, f.bindings, f.observations).attempts).toEqual(ledger.attempts);
     const finalBefore = tree(f.base); expect((await setupCli(f, ['--expected-plan-digest', plan.planDigest])).disposition).toBe('replayed');

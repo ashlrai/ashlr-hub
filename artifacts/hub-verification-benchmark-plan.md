@@ -4,6 +4,58 @@ Status: design and local baseline observations, **not a frozen evaluator or an
 accepted optimization**. Audience: the engineer approving a real Hub campaign
 and the independent evaluator author. No candidate implementation is supplied.
 
+## Runnable prototype: limited measurement, not acceptance authority
+
+The continuation from `3a228e1b` adds a
+[standalone prototype](../scripts/evaluators/preparation-verification.mjs), a
+[test-only frozen dependency packager](../test/helpers/preparation-verification-bundle.ts)
+and [real-fixture tests](../test/universe-preparation-verification.test.ts).
+The target remains unchanged. The first slice compares ordinary preparation
+check and metadata reads for one/four protected evaluator files, including
+committed bytes that differ from the working checkout. It does not yet cover
+the full manager, successor-source or end-to-end sequence below.
+
+Use Node 24 or newer for this development fixture:
+
+```sh
+npx vitest run test/universe-preparation-verification.test.ts --no-file-parallelism
+```
+
+The prototype tests are gated on that runtime; the real OS-confinement case
+also requires macOS. Unsupported checks are skipped, not accepted. Fixtures are
+private and temporary; no enrolled provider or real project is dispatched.
+
+Do **not** enroll this prototype as a trusted improvement evaluator. Candidate
+code and measurement currently share a process. An isolated VM context can
+reduce accidental global interference, but exposed host-function constructors
+can escape that context; filesystem confinement does not prevent forged stdout
+or corrupted in-process checks. Competitive measurement requires an independently
+owned evaluator process and independently observed effects. The numeric results
+are development diagnostics, not evidence authorizing acceptance, rewards,
+promotion or autonomous delivery. Its `preparation-verification-measurement`
+envelope deliberately omits evaluation `passed` and `score` fields; the tests
+require the Universe evaluation parser to reject it, including the confined run.
+This prevents mistaking a prototype measurement for accepted evaluation evidence.
+
+On macOS with Node 24.18.0, the complete prototype suite passed eight tests with
+zero skips in 23.35s. Three fresh processes produced identical diagnostics:
+
+| Protected files | Public method | Observed launches | Git blob launches |
+| --- | --- | ---: | ---: |
+| 1 | check | 34 | 2 |
+| 1 | metadata | 109 | 2 |
+| 4 | check | 40 | 8 |
+| 4 | metadata | 115 | 8 |
+
+The four measured calls total 298 launches. Eight correctness checks also cover
+runtime drift and accessor refusal. Fixtures preserve a 40% account allocation
+ceiling, a held worker, dirty working-tree evaluator bytes, duplicate committed
+blobs and differing executable modes. Constant results, cached verification,
+incorrect blob content, direct assertion tampering, stdout forgery and an
+unexpected shell call all failed the prototype checks. The real confined run
+completed with confirmed process-group exit. These observations remain narrower
+than the full sequence below and have no trusted reward authority.
+
 ## Decision and scope
 
 Reduce redundant work in preparation verification while preserving exact input,

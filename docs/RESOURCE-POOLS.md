@@ -742,6 +742,23 @@ worker exit, fault or console close is rejected. Parent-owned projections can
 still be expensive; verify the independent gate below before making latency
 or always-on claims.
 
+The separate **Last reported coordinator** field describes a process-local
+transition, with its own timestamp and fixed reason. `running` means the loop
+started or cleared its guard; it does not establish active model execution or
+current health. `held` means an execution guard refused work (which can include
+pause, configuration/project drift or ownership uncertainty), or that its signal was aborted.
+It is not automatically labelled as a user pause. A caught loop failure reports
+`faulted` without closing independent enrolled work. Deadline and explicit close
+transitions are reported separately. Missing reports are unknown.
+
+Reports are pinned to the initialized supervision ID, configuration digest and
+original deadline. A strictly increasing sequence orders transitions from that
+one worker; wall time is display metadata. Invalid, reordered or differently
+bound reports cannot replace the last valid report or refresh its timestamp.
+Refreshing the journal does not refresh the coordinator report, and a connected
+worker can legitimately accompany a faulted coordinator. These observations
+never authorize execution, renew budgets, replay work or trigger a restart.
+
 Run the independent control-room responsiveness gate on macOS from the repository:
 
 ```sh

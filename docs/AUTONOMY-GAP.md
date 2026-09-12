@@ -154,13 +154,21 @@ the new reader returned one 503 near publication despite meeting latency limits.
 Bounded fresh sampling now handles a coherent record set classified solely as
 changing, without accepting partial records or touching locks. These are measured
 single-host runs, not a universal SLA. The UI separates recorded milestones from
-worker connection; coordinator lifecycle/fault reporting and current useful
-model-generated Hub improvement remain outstanding. A connected worker is not
+worker connection. A connected worker is not
 proof that its inner coordinator loop is running.
 The strengthened two-delivery/restart fixture also passed, including exact
 accounting, fresh request-window samples and a digest matched to the actual
 immutable journal. This remains controlled-fixture evidence, not authenticated
 provider commissioning or proof of autonomous product judgment.
+
+The lifecycle continuation adds a separate last-reported coordinator transition,
+timestamp and fixed reason. Its sequence and original configuration pins are
+independent from journal freshness and worker connection. A caught successor-loop
+fault can therefore be visible without closing unrelated enrolled work. This is
+observability, not automatic recovery or proof that a historical `running` report
+is current activity. Useful model-generated Hub improvement still requires a
+current, pinned evaluator and accepted delivery; prior shipped optimizations
+cannot be counted as new autonomous yield.
 
 The [offline pool upgrade](RESOURCE-POOLS.md#upgrade-a-pool-without-resetting-history)
 removes the need to discard accounting or conversations when adding workers.

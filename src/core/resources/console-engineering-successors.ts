@@ -16,6 +16,7 @@ export function createResourceConsoleEngineeringSuccessors(options: {
   pool: ResourceEngineeringSuccessorCoordinatorOptions['pool']; bindings: ResourceEngineeringSuccessorCoordinatorOptions['bindings'];
   readAdmissionEvidence: ResourceEngineeringSuccessorCoordinatorOptions['readAdmissionEvidence'];
   isClosing(): boolean; signal?: AbortSignal;
+  onLifecycle?: ResourceEngineeringSuccessorCoordinatorOptions['onLifecycle'];
 }) {
   const required = ['root', 'configFile', 'config', 'projectId', 'acceptance', 'preparation', 'supervision', 'supervisor',
     'pool', 'bindings', 'readAdmissionEvidence', 'isClosing'];
@@ -23,7 +24,7 @@ export function createResourceConsoleEngineeringSuccessors(options: {
     throw new Error('Invalid successor console options');
   }
   const descriptors = Object.getOwnPropertyDescriptors(options);
-  if (Reflect.ownKeys(options).some(key => typeof key !== 'string' || ![...required, 'signal'].includes(key)) ||
+  if (Reflect.ownKeys(options).some(key => typeof key !== 'string' || ![...required, 'signal', 'onLifecycle'].includes(key)) ||
       required.some(key => !Object.hasOwn(descriptors, key)) ||
       Object.values(descriptors).some(property => !Object.hasOwn(property, 'value'))) throw new Error('Invalid successor console options');
   const captured = Object.fromEntries(Object.entries(descriptors).map(([key, property]) => [key, property.value])) as typeof options;
@@ -33,9 +34,10 @@ export function createResourceConsoleEngineeringSuccessors(options: {
     return property.value.bind(host) as T[K];
   }
   const config = validateResourceEngineeringSuccessorCoordinatorConfig(captured.config);
-  const { root, configFile, projectId, acceptance, signal, readAdmissionEvidence, isClosing } = captured;
+  const { root, configFile, projectId, acceptance, signal, readAdmissionEvidence, isClosing, onLifecycle } = captured;
   if (typeof acceptance !== 'string' || !acceptance.trim() || Buffer.byteLength(acceptance) > 1024 ||
-      typeof isClosing !== 'function' || typeof readAdmissionEvidence !== 'function') throw new Error('Invalid successor console policy');
+      typeof isClosing !== 'function' || typeof readAdmissionEvidence !== 'function' ||
+      onLifecycle !== undefined && typeof onLifecycle !== 'function') throw new Error('Invalid successor console policy');
   const preparation = { successorSource: method(captured.preparation, 'successorSource'), prepareSuccessor: method(captured.preparation, 'prepareSuccessor') };
   const supervision = { snapshot: method(captured.supervision, 'snapshot'), admit: method(captured.supervision, 'admit'),
     isExecutionStopped: method(captured.supervision, 'isExecutionStopped') };
@@ -62,7 +64,7 @@ export function createResourceConsoleEngineeringSuccessors(options: {
   }
   return createResourceEngineeringSuccessorCoordinator({ root, config, pool: captured.pool,
     bindings: captured.bindings, cwd: binding.workspace, supervision, readAdmissionEvidence,
-    signal, host: {
+    signal, onLifecycle, host: {
       isExecutionStopped: stopped,
       // The coordinator supplies the exact completed row from this guard's
       // freshly validated queue. The manager still verifies its registration,

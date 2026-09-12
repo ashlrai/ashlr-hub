@@ -76,6 +76,7 @@ async function execute(kind: string, input: unknown): Promise<unknown> {
       successors = createResourceConsoleEngineeringSuccessors({ ...data<EngineeringBackgroundSuccessors>(input), preparation,
         supervision: supervision as ResourceConsoleEngineeringSupervisor, supervisor: supervisor as ResourcePoolSupervisor,
         readAdmissionEvidence: () => hostCall('readAdmissionEvidence', []),
+        onLifecycle: report => port!.postMessage({ type: 'engineering-coordinator-observation', report }),
         isClosing: () => rpc.isClosed() || hostCall<boolean>('isClosing', []), signal: abort.signal });
       return successors.observationScope();
     }

@@ -50,16 +50,64 @@ function sample() {
     deadlineAt: '2099-01-01T00:00:00.000Z', state: 'observing', maxSuccessors: 2, entries: [] },
     sampledAt: '2026-09-11T00:00:00.000Z', recordsDigest: 'b'.repeat(64) };
 }
-async function configure(background: EngineeringBackground, supervision = { snapshot: vi.fn(), admit: vi.fn(), isExecutionStopped: () => false }) {
+async function configure(background: EngineeringBackground, supervision = { snapshot: vi.fn(), admit: vi.fn(), isExecutionStopped: () => false }, initialReport?: unknown) {
   reader.create.mockReturnValue(reader); reader.read.mockResolvedValue(sample()); reader.close.mockResolvedValue(undefined);
   const scope = journal();
   const configured = background.configureSuccessors({ root: '/private/resources', configFile: '/private/successors.json',
     config: scope.config } as Parameters<EngineeringBackground['configureSuccessors']>[0],
     supervision as unknown as Parameters<EngineeringBackground['configureSuccessors']>[1], () => ({ observations: [], unavailableWorkerIds: [] }));
+  if (initialReport) fixture.workers[0]!.emit('message', { type: 'engineering-coordinator-observation', report: initialReport });
   reply(fixture.workers[0]!, 'configure-successors', scope); await configured;
+}
+function lifecycle(sequence = 1) {
+  return { schemaVersion: 1, supervisionId: 'automatic', configDigest: 'a'.repeat(64),
+    deadlineAt: '2099-01-01T00:00:00.000Z', sequence, reportedAt: '2026-09-10T23:59:59.000Z', state: 'idle', reason: null };
 }
 
 describe('engineering background ownership and drain protocol', () => {
+  it('pins pre-configuration lifecycle and keeps report time separate from fresh journal reads', async () => {
+    const options = input(); const background = await createEngineeringBackground(options); const worker = fixture.workers[0]!;
+    await configure(background, undefined, lifecycle());
+    const first = await background.snapshot(); expect(first.observation?.coordinator).toEqual(lifecycle());
+    first.observation!.coordinator!.state = 'closed';
+    const failed = { ...lifecycle(2), state: 'faulted', reason: 'coordinator-loop-failed' };
+    worker.emit('message', { type: 'engineering-coordinator-observation', report: failed });
+    reader.read.mockResolvedValueOnce({ ...sample(), sampledAt: '2026-09-11T00:01:00.000Z' });
+    const second = await background.snapshot();
+    expect(second.observation).toMatchObject({ workerState: 'connected', sampledAt: '2026-09-11T00:01:00.000Z', coordinator: failed });
+    expect(options.onFault).not.toHaveBeenCalled(); expect(Atomics.load(worker.closeFlag, 0)).toBe(0);
+    const check = background.check({}); reply(worker, 'check', { valid: true }); await expect(check).resolves.toEqual({ valid: true });
+    const closing = background.close(); reply(worker, 'close'); await closing;
+  });
+  it('discards an initial report not bound to the verified initialization scope', async () => {
+    const options = input(); const background = await createEngineeringBackground(options); const worker = fixture.workers[0]!;
+    await configure(background, undefined, { ...lifecycle(), configDigest: 'f'.repeat(64) });
+    expect((await background.snapshot()).observation?.coordinator).toBeNull();
+    worker.emit('message', { type: 'engineering-coordinator-observation', report: lifecycle(2) });
+    expect((await background.snapshot()).observation?.coordinator).toEqual(lifecycle(2));
+    expect(options.onFault).not.toHaveBeenCalled();
+    const closing = background.close(); reply(worker, 'close'); await closing;
+  });
+  it('ignores malformed, stale and misbound telemetry without renewing or closing execution', async () => {
+    const options = input(); const background = await createEngineeringBackground(options); const worker = fixture.workers[0]!;
+    await configure(background, undefined, lifecycle(4));
+    const invalid = [null, { ...lifecycle(5), extra: '/private/secret' }, { ...lifecycle(5), state: 'paused' },
+      { ...lifecycle(5), state: 'running', reason: 'signal-aborted' }, { ...lifecycle(5), reason: 'private-error' },
+      { ...lifecycle(5), configDigest: 'f'.repeat(64) }, { ...lifecycle(5), supervisionId: 'other' },
+      { ...lifecycle(5), deadlineAt: '2098-01-01T00:00:00.000Z' }, { ...lifecycle(5), reportedAt: 'yesterday' },
+      { ...lifecycle(5), sequence: Number.MAX_SAFE_INTEGER + 1 }, { ...lifecycle(5), sequence: 0 },
+      { ...lifecycle(4), state: 'running' }, { ...lifecycle(3), state: 'closed' }];
+    for (const report of invalid) {
+      worker.emit('message', { type: 'engineering-coordinator-observation', report });
+      expect((await background.snapshot()).observation?.coordinator).toEqual(lifecycle(4));
+    }
+    // Sequence, not wall time, orders the one live worker's reports.
+    const next = { ...lifecycle(5), reportedAt: '2026-09-10T23:58:00.000Z', state: 'running' };
+    worker.emit('message', { type: 'engineering-coordinator-observation', report: next });
+    expect((await background.snapshot()).observation?.coordinator).toEqual(next);
+    expect(options.onFault).not.toHaveBeenCalled(); expect(Atomics.load(worker.closeFlag, 0)).toBe(0);
+    const closing = background.close(); reply(worker, 'close'); await closing;
+  });
   it('sets close immediately but never terminates before acknowledged drain', async () => {
     const background = await createEngineeringBackground(input()); const worker = fixture.workers[0]!;
     const close = background.close(); expect(Atomics.load(worker.closeFlag, 0)).toBe(1);

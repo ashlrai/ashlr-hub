@@ -10,6 +10,19 @@ const iso = (value: unknown): value is string => typeof value === 'string' && Nu
 const states = ['idle', 'running', 'closed', 'timed-out', 'unavailable'];
 const entryStates = ['proposing', 'waiting-for-capacity', 'preparing', 'admitting', 'held', 'proposed', 'prepared', 'admitted', 'stopped'];
 const recordedStates = ['intent-recorded', 'proposed', 'prepared', 'admitted', 'stopped'];
+export const engineeringCoordinatorReasons: Record<string, string> = {
+  'execution-guard-refused': 'An execution guard refused further work.',
+  'signal-aborted': 'The coordinator received a stop signal.',
+  'deadline-reached': 'The original coordinator deadline was reached.',
+  'coordinator-loop-failed': 'The coordinator loop failed. Inspect the retained evidence before further action.',
+  'close-unresolved': 'Coordinator close retained unresolved work.',
+  'ownership-release-failed': 'Coordinator ownership release could not be confirmed.',
+};
+const lifecycleReasons: Record<string, Array<string | null>> = {
+  idle: [null], running: [null], closing: [null], closed: [null],
+  held: ['execution-guard-refused', 'signal-aborted'], 'timed-out': ['deadline-reached'],
+  faulted: ['coordinator-loop-failed', 'close-unresolved', 'ownership-release-failed'],
+};
 export const engineeringSuccessorReasons: Record<string, string> = {
   'proposal-output-unresolved': 'The proposal output is unresolved. This identity will not automatically request another response.',
   'source-or-authority-unavailable': 'The verified source or execution authority is unavailable. No further work is authorized by this status.',
@@ -28,12 +41,20 @@ export function decodeEngineeringSuccessors(value: unknown): Snapshot {
     Number(value.maxSuccessors) < 1 || Number(value.maxSuccessors) > 32 || !Array.isArray(value.entries) || value.entries.length > Number(value.maxSuccessors)) throw invalid();
   if (journal) {
     const observation = value.observation;
-    if (!object(observation) || !exact(observation, ['kind', 'sampledAt', 'recordsDigest', 'workerState']) ||
+    if (!object(observation) || !exact(observation, ['kind', 'sampledAt', 'recordsDigest', 'workerState', ...(Object.hasOwn(observation, 'coordinator') ? ['coordinator'] : [])]) ||
       observation.kind !== 'durable-journal' || !iso(observation.sampledAt) || !hash(observation.recordsDigest) ||
       typeof observation.workerState !== 'string' || !['connected', 'closing', 'exited', 'faulted'].includes(observation.workerState)) throw invalid();
     const expected = observation.workerState === 'faulted' || observation.workerState === 'exited' ? 'unavailable' :
       observation.workerState === 'closing' ? 'closed' : Date.parse(observation.sampledAt) >= Date.parse(value.deadlineAt) ? 'timed-out' : 'observing';
     if (value.state !== expected) throw invalid();
+    if (Object.hasOwn(observation, 'coordinator') && observation.coordinator !== null) {
+      const report = observation.coordinator;
+      if (!object(report) || !exact(report, ['schemaVersion', 'supervisionId', 'configDigest', 'deadlineAt', 'sequence', 'reportedAt', 'state', 'reason']) ||
+        report.schemaVersion !== 1 || report.supervisionId !== value.supervisionId || report.configDigest !== value.configDigest || report.deadlineAt !== value.deadlineAt ||
+        !Number.isSafeInteger(report.sequence) || Number(report.sequence) < 1 || !iso(report.reportedAt) ||
+        typeof report.state !== 'string' || !Object.hasOwn(lifecycleReasons, report.state) ||
+        !(report.reason === null || typeof report.reason === 'string') || !lifecycleReasons[report.state]!.includes(report.reason)) throw invalid();
+    }
   }
   const sources = new Set<string>(), tasks = new Set<string>(), successors = new Set<string>();
   for (const row of value.entries) {

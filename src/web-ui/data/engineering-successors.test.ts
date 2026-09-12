@@ -10,9 +10,36 @@ const fixture = (): Snapshot => ({ schemaVersion: 1, supervisionId: 'fleet', pro
     state: 'proposing', reason: null }] });
 const journal = (): Snapshot => ({ ...fixture(), state: 'observing', entries: [{ ...fixture().entries[0]!, state: 'intent-recorded' }],
   observation: { kind: 'durable-journal', sampledAt: '2026-09-10T23:59:00.000Z', recordsDigest: 'c'.repeat(64), workerState: 'connected' } });
+const lifecycle = () => ({ schemaVersion: 1 as const, supervisionId: 'fleet', configDigest: 'a'.repeat(64), deadlineAt: fixture().deadlineAt,
+  sequence: 1, reportedAt: '2026-09-10T20:00:00.000Z', state: 'running' as const, reason: null });
 beforeEach(() => vi.resetAllMocks());
 
 describe('successor metadata read boundary', () => {
+  it.each([
+    ['idle', null], ['running', null], ['closing', null], ['closed', null], ['held', 'execution-guard-refused'], ['held', 'signal-aborted'],
+    ['timed-out', 'deadline-reached'], ['faulted', 'coordinator-loop-failed'], ['faulted', 'close-unresolved'], ['faulted', 'ownership-release-failed'],
+  ])('accepts independently reported lifecycle %s / %s without age health inference', (state, reason) => {
+    const value = journal(); Object.assign(value.observation!, { coordinator: { ...lifecycle(), state, reason } });
+    expect(decodeEngineeringSuccessors(value)).toEqual(value);
+  });
+  it('accepts an explicitly unknown coordinator report and legacy omission', () => {
+    const value = journal(); Object.assign(value.observation!, { coordinator: null });
+    expect(decodeEngineeringSuccessors(value)).toEqual(value); expect(decodeEngineeringSuccessors(journal())).toEqual(journal());
+  });
+  it.each([undefined, false, {}, { supervisionId: 'other' }, { configDigest: 'b'.repeat(64) }, { deadlineAt: '2026-09-12T00:00:00.000Z' },
+    { schemaVersion: 2 }, { sequence: 0 }, { sequence: -1 }, { sequence: 1.5 }, { sequence: Number.MAX_SAFE_INTEGER + 1 },
+    { reportedAt: '2026-09-10' }, { state: 'executing' }, { state: 'held', reason: null }, { state: 'faulted', reason: 'signal-aborted' },
+    { state: 'running', reason: 'coordinator-loop-failed' }, { reason: '/private/sentinel' }, { error: 'private' }, { command: 'private' }])('rejects forged or inconsistent lifecycle %j', patch => {
+    const report = !patch || typeof patch !== 'object' || !Object.keys(patch).length ? patch : { ...lifecycle(), ...patch };
+    expect(() => decodeEngineeringSuccessors({ ...journal(), observation: { ...journal().observation, coordinator: report } })).toThrow('could not be verified');
+  });
+  it('refuses lifecycle getters and inherited/private keys before invocation', () => {
+    const getter = vi.fn(() => 'running'); const report = { ...lifecycle() }; Object.defineProperty(report, 'state', { get: getter, enumerable: true });
+    for (const coordinator of [report, Object.assign(Object.create({ secret: true }), lifecycle()), { ...lifecycle(), [Symbol('secret')]: true }]) {
+      expect(() => decodeEngineeringSuccessors({ ...journal(), observation: { ...journal().observation, coordinator } })).toThrow('could not be verified');
+    }
+    expect(getter).not.toHaveBeenCalled();
+  });
   it.each(['intent-recorded', 'proposed', 'prepared', 'admitted', 'stopped'] as const)('accepts the recorded %s milestone without live activity', state => {
     const value = journal(); value.entries[0]!.state = state;
     expect(decodeEngineeringSuccessors(value)).toEqual(value);

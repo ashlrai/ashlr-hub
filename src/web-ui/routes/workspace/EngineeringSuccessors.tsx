@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import type { ResourceConsoleEngineeringEnrollment as Enrollment } from '../../../core/resources/console-engineering-types.js';
 import type { ResourceEngineeringSuccessorCoordinatorSnapshot as Snapshot } from '../../../core/resources/engineering-successor-coordinator-types.js';
 import { StatusBadge, type Tone } from '../../components/primitives/StatusBadge.js';
-import { engineeringSuccessorReasons, readEngineeringSuccessors } from '../../data/engineering-successors.js';
+import { engineeringCoordinatorReasons, engineeringSuccessorReasons, readEngineeringSuccessors } from '../../data/engineering-successors.js';
 import { resourceTime } from '../resources/CapacityBoard.js';
 import styles from './EngineeringSuccessors.module.css';
 
@@ -25,6 +25,7 @@ const states: Record<Snapshot['state'], string> = {
   'timed-out': 'Original deadline exhausted', unavailable: 'Coordinator unavailable',
 };
 const workerStates = { connected: 'Worker connected', closing: 'Worker closing', exited: 'Worker exited', faulted: 'Worker unavailable' };
+const coordinatorStates = { idle: 'Idle', running: 'Running', held: 'Held', 'timed-out': 'Deadline reached', closing: 'Closing', closed: 'Closed', faulted: 'Faulted' };
 const identity = (value: Snapshot) => JSON.stringify([value.supervisionId, value.profileId, value.configDigest, value.deadlineAt, value.maxSuccessors]);
 
 /** Observes the console-wide successor loop. Inspection changes selection only. */
@@ -96,6 +97,12 @@ export function EngineeringSuccessors({ available, projectId, catalog, onInspect
         {snapshot.observation ? <><div><dt>Journal sampled</dt><dd><time dateTime={snapshot.observation.sampledAt}>{resourceTime(snapshot.observation.sampledAt)}</time></dd></div>
           <div><dt>Worker connection</dt><dd>{workerStates[snapshot.observation.workerState]}</dd></div></> : null}</dl>
       {snapshot.observation ? <p className={styles.explanation}>Verified journal records show recorded milestones, not current activity. A connected worker does not mean work is executing. This read does not reverify worker accounting or local delivery.</p> : null}
+      {snapshot.observation ? <>
+        <dl className={styles.facts}><div><dt>Last reported coordinator</dt><dd>{snapshot.observation.coordinator ? coordinatorStates[snapshot.observation.coordinator.state] : 'Unknown — no coordinator report'}</dd></div>
+          {snapshot.observation.coordinator ? <div><dt>Coordinator reported</dt><dd><time dateTime={snapshot.observation.coordinator.reportedAt}>{resourceTime(snapshot.observation.coordinator.reportedAt)}</time></dd></div> : null}</dl>
+        <p className={styles.explanation}>This is the last reported lifecycle, not proof of current execution. A fresh journal sample does not refresh this report; it may be stale.</p>
+        {snapshot.observation.coordinator?.reason ? <p className={styles.reason}>{Object.hasOwn(engineeringCoordinatorReasons, snapshot.observation.coordinator.reason) ? engineeringCoordinatorReasons[snapshot.observation.coordinator.reason] : 'Coordinator status needs inspection.'}</p> : null}
+      </> : null}
       {!snapshot.entries.length ? <p className={styles.empty}>No successor intent recorded. This view does not create objectives or start work.</p> :
         <ol className={styles.lineage} aria-label="Recorded successor lineage">{snapshot.entries.map(row => <li key={row.proposalTaskId}>
           <div className={styles.relationship}>
@@ -110,6 +117,6 @@ export function EngineeringSuccessors({ available, projectId, catalog, onInspect
           {row.reason ? <p className={styles.reason}>{Object.hasOwn(engineeringSuccessorReasons, row.reason) ? engineeringSuccessorReasons[row.reason] : 'Recorded evidence needs inspection.'}</p> : null}
         </li>)}</ol>}
     </> : !error && available ? <p role="status" className={styles.empty}>Reading the bounded successor queue…</p> : null}
-    <p className={styles.scope}>This view only reads recorded relationships{snapshot?.observation ? '' : ' and reported coordinator phases'}. Inspect a registered plan for its evaluation and local delivery evidence. Existing automatic supervision owns execution and pause controls.</p>
+    <p className={styles.scope}>This view only reads recorded relationships{snapshot?.observation ? ' and last-reported coordinator lifecycle' : ' and reported coordinator phases'}. Inspect a registered plan for its evaluation and local delivery evidence. Existing automatic supervision owns execution and pause controls.</p>
   </section>;
 }

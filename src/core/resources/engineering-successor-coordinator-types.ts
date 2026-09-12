@@ -14,6 +14,14 @@ export interface ResourceEngineeringSuccessorCoordinatorConfig {
   schemaVersion: 1; supervisionId: string; profileId: string; allowedWorkerIds: string[];
   maxOutputTokens: number; proposalTimeoutMs: number; maxSuccessors: number; pollIntervalMs: number;
 }
+/** Last reported process-local transition, not current health or journal authority. */
+export interface EngineeringCoordinatorLifecycleReport {
+  schemaVersion: 1; supervisionId: string; configDigest: string; deadlineAt: string;
+  sequence: number; reportedAt: string;
+  state: 'idle' | 'running' | 'held' | 'timed-out' | 'closing' | 'closed' | 'faulted';
+  reason: null | 'execution-guard-refused' | 'signal-aborted' | 'deadline-reached' | 'coordinator-loop-failed'
+    | 'close-unresolved' | 'ownership-release-failed';
+}
 export interface ResourceEngineeringSuccessorCoordinatorOptions {
   root: string; config: ResourceEngineeringSuccessorCoordinatorConfig; pool: ResourcePool; bindings: ResourceBinding[]; cwd: string;
   supervision: {
@@ -28,12 +36,14 @@ export interface ResourceEngineeringSuccessorCoordinatorOptions {
     isExecutionStopped(): boolean;
   };
   signal?: AbortSignal;
+  onLifecycle?(report: EngineeringCoordinatorLifecycleReport): void;
 }
 export type ResourceEngineeringSuccessorProposal = { action: 'stop' } | { action: 'propose'; name: string; objective: string };
 export interface ResourceEngineeringSuccessorCoordinatorSnapshot {
   schemaVersion: 1; supervisionId: string; profileId: string; configDigest: string; deadlineAt: string;
   state: 'observing' | 'idle' | 'running' | 'closed' | 'timed-out' | 'unavailable'; maxSuccessors: number;
-  observation?: { kind: 'durable-journal'; sampledAt: string; recordsDigest: string; workerState: 'connected' | 'closing' | 'exited' | 'faulted' };
+  observation?: { kind: 'durable-journal'; sampledAt: string; recordsDigest: string; workerState: 'connected' | 'closing' | 'exited' | 'faulted';
+    coordinator?: EngineeringCoordinatorLifecycleReport | null };
   entries: Array<{ sourceEnrollmentId: string; proposalTaskId: string; successorId: string;
     state: 'intent-recorded' | 'proposing' | 'waiting-for-capacity' | 'preparing' | 'admitting' | 'held' | 'proposed' | 'prepared' | 'admitted' | 'stopped'; reason: string | null }>;
 }

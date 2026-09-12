@@ -5,7 +5,7 @@ import type { ResourceConsoleEngineeringSupervisor } from './console-engineering
 
 export type EngineeringBackgroundPreparation = Omit<Parameters<typeof createResourceConsoleEngineeringPreparation>[0], 'owner'>;
 export type EngineeringBackgroundSuccessors = Omit<Parameters<typeof createResourceConsoleEngineeringSuccessors>[0],
-  'preparation' | 'supervision' | 'supervisor' | 'readAdmissionEvidence' | 'isClosing' | 'signal'>;
+  'preparation' | 'supervision' | 'supervisor' | 'readAdmissionEvidence' | 'isClosing' | 'signal' | 'onLifecycle'>;
 export const ENGINEERING_BACKGROUND_HOST_METHODS = [
   'owner.catalog', 'owner.snapshot', 'owner.checkRegistration', 'owner.register',
   'supervision.snapshot', 'supervision.admit', 'supervision.isExecutionStopped',
