@@ -147,3 +147,25 @@ remain open. Cross-scope proof checking also has substantial local overhead.
 The overarching autonomous-company goal remains active. Two workers were quota
 limited; parent continued without retrying them or switching accounts. Entire is
 enabled in manual-commit mode; branch resume found no checkpoint.
+
+### Final local artifact and command checks
+
+Source `dbed1726ad0ee544fe17fa57778cabb4b6dbc567` built successfully with 257
+web modules. `dist/build-identity.json` records that revision, package 3.4.0,
+`dirty:false` and Git provenance. Package-mode documentation checks pass.
+The compiled mission help and a real `node bin/ashlr ... mission status` process
+both ran successfully. The status fixture deliberately had no external setup,
+project or runtime files: it reported unstarted/expired recorded state without
+reading those paths, creating a mission journal, modifying its configuration or
+claiming owner liveness/delivery verification. The temporary fixture was removed
+after comparison. This process smoke check is separate from the 356 test cases.
+
+The generated builtin manifest file SHA-256 is
+`e79f39a653e33cfd05ce998b0f8a6f2319fba53dce5048bb4ffe58fef6f82e3e`.
+This is a file identity, not native qualification or the runtime's bundle seal.
+No earlier builtin qualification is transferred. The full mission acceptance
+was pinned to the preceding execution source `1d68373e`; the subsequent status
+projection, strict identifier checks and CLI changes have their focused gates
+and compiled-process smoke above. The observer URL assertion placement was
+reviewed/static-checked after that full run began. All verification processes
+are terminal. Final documentation-only commits do not change this code artifact.

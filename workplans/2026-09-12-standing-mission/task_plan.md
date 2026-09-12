@@ -166,3 +166,12 @@ active acceptance finishes (never replace its pinned bundle in flight).
 - The initial package-doc command used unsupported `--package`; corrected to
   `--mode package`, which passed. A read of an expired/removed test fixture and
   one wrong working-directory lookup failed without changing user data.
+
+### Final status
+
+The additive status command is complete and source `dbed1726ad0ee544fe17fa57778cabb4b6dbc567`
+built cleanly. Real compiled CLI status smoke passed without creating records or
+modifying its test configuration. Source/package documentation, TypeScript and
+lint pass; all verification handles are terminal. See `delivery.md` for exact
+test/artifact boundaries. This completes the bounded standing-mission increment,
+not the overarching autonomous-company goal or live account/service activation.
