@@ -1,6 +1,19 @@
 # Executable firm: package graph
 
-## Current handoff — retained calibration and candidate comparison
+## Current handoff — installed qualification
+
+Qualification source and corrected live acceptance suite are integrated locally
+as ef80e60d and fd8250e7. Native gate41730 passed all five cases, zero skips:
+full23 checks, both same-call qualifications and current/stale controls, with
+confirmed cleanup. The rebuilt installed identity exactly matches tested bytes.
+The earlier deadline failure is retained. The product supports explicitly longer
+diagnostic capture, not longer worker trials or accepted scored seed diagnostics.
+Focused integration passed589 tests/zero skips; selected native controls passed13
+with2 full-success scenarios explicitly excluded. See the
+[current continuation](../2026-09-12-qualified-workload/delivery.md). Shared workload
+extraction for future scoring is separately underway in `firm-scoring`.
+
+## Previous handoff — retained calibration and candidate comparison
 
 Integrated source `713bff6c2f787861975c4e1243beb0275bfa1e4c` connects three
 retained captures to a deterministic baseline descriptor and a scope-checked
