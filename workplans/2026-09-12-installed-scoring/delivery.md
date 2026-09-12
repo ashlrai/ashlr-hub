@@ -96,6 +96,68 @@ and fixture asset; the old result does not qualify a new build identity.
 5. Author the calibrated package from those genuine captures; prove a native
    baseline, target-only accepted improvement, and integrated delivery.
 
+The existing executable path does not need another scheduler:
+
+- Author through `buildPreparationScoringBuiltin({ measurementDirectory,
+  capture: { root, universeId, captureIds, expectedSourceDigest } })` exported
+  from `scripts/build-preparation-score.mjs`. This production helper reads real
+  capture records and installs the fixed package; the lower-level synthetic
+  package helper is not a commissioning substitute.
+- Prepare with `resources pool engineering prepare --check --json`, then the
+  same explicit options without `--check` and with `--expected-plan-digest`.
+  The recipe fixes scope, workers, original deadlines and a new local branch.
+- Use the prepared report's `consoleArguments.automatic` for a self-contained
+  quota-aware run. It starts the shared collector and the pinned supervision
+  queue. A bare `universe campaign run --resource-runtime ...` does not start
+  that collector: prepared quota runtimes require `shared-collector` mode and
+  otherwise hold on missing/stale quota evidence.
+- A measured passing seed followed by a strictly better changed candidate may
+  create the planned local branch. Equality is not improvement. Local branch
+  delivery is distinct from integration, remote publication and deployment.
+
+Independent recipe review found a further pre-dispatch gap: the calibrated
+immutable inventory can differ from the seed materialized by Git when replacement
+objects are present. The score later refuses the mismatch, but preparation must
+refuse before making the work eligible. A narrow retained-seed identity check is
+implemented and tested in `firm-builtin-recipes`, outside the frozen native run.
+It checks the actual retained artifact before campaign/catalog creation and on
+replay, while preserving valid target-only successors and legacy command pins.
+Primary integration and commissioning must include that correction.
+
+Compiler authoring review found a related source-provenance gap: checking only
+the target hash allowed already-weakened reverse consumers or configuration to
+enter the frozen compiler graph. The isolated correction requires the genuine
+full inventory on the production authoring path, validates every calibrated
+file's bytes/size/mode/identity before and after capture, and refuses untracked
+compiler source/configuration outside the separately trusted dependency tree.
+The regression demonstrates actual false compiler acceptance without the new
+inventory binding and refusal with it. Both corrections passed independent review
+and the parent combined131tests/6files/zero skipped56.06seconds. Source types,
+scoped lint, documentation and diff checks passed. They are not yet part of the
+frozen3a711953... bundle being qualified by10612.
+
+Corrections are committed locally as
+`8e448d831c7ed1cfbac9ec5b477a087a0147d74f` on
+`codex/preparation-builtin-recipes`; that worktree is clean. Packaging now asserts
+the production full-inventory argument and passed52/52, zero skipped,8.83seconds.
+Initial isolated attempts failed before exercising that contract because compiled
+modules were absent, then because the root dependency symlink violated canonical
+compiler-path requirements. The parent emitted TypeScript only into the isolated
+tree and replaced only its development dependency link with a local TypeScript
+copy plus links to the other existing dependencies. Main dependencies and frozen
+dist were unchanged. The final rerun is the passing evidence; earlier failures
+are not represented as passes. Source/web types, scoped lint, docs and lane checks
+passed (343real-IO/705unit in the isolated tree).
+
+The optimization artifact is rebased again onto target blob
+`c0fa8821cc81e73ef9cc03d006cbffc08f8c6933`;33pure tests, scratch apply/reverse and
+full-project selected-source compilation passed (725roots/1041files/no diagnostics).
+Patch SHA is `ab53b036e471081ea638a200b7b336724fc116b09135fe634e6b53f7e83ed615`;
+candidate SHA is `e0781f818bf3c34d51c21a358c1204a11b9242ceff0015c24ef898c2dc5041b7`.
+The strict31973 result below applies to the preceding59a46145... target, not this
+new rebase. Its native comparison remains pending; it has not been applied to
+production source or accepted through a calibrated campaign.
+
 Independent review corrected inherited Git environment overrides, directory
 fsync for evidence publication, and a final stop/deadline check after calibration
 publication. Driver syntax/lint pass, but its native end-to-end flow is untested.
@@ -109,6 +171,12 @@ build, docs/lane checks. Full-project packaged compiler rerun passed2/2,25.93s;
 actual baseline6121ms and TS2322 refusal6035ms, both independently settled under
 the existing60-second/1-GiB V8 heap limits. The target source SHA is
 9452a70b39bb3f9afcc3160b3c30044a2656438fc54976476fa2fe3adb2090a5.
-Strict rebased candidate comparison is live on agent-owned handle31973 and has
-not yet established improvement. Do not confuse its private test result with a
-calibrated accepted campaign or local Hub branch delivery.
+Strict rebased candidate comparison31973 is terminal exit0:1/1 passed, zero
+skipped,75.95seconds (test68.278seconds). Four-file check and metadata each reduced
+blob launches from8 to2 and total broker launches by exactly6; one-file results
+and its2blob launches were unchanged. Exact results, ledger accounting,
+same-child drift refusal and confirmed close passed. The optional raw-report
+flag was not enabled, so absolute total broker counts and a fresh Git digest
+were not retained; do not substitute historical values. This private native
+comparison is not a calibrated accepted campaign or local Hub branch delivery.
+The broader five-case gate10612 remains live; no repeat was started.
