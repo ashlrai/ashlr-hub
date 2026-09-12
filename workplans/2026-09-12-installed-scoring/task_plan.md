@@ -14,7 +14,7 @@ firm-p00. Extraction checkpoint21343f3b is separate; native41730 is terminal0.
   and explicit worker-phase budget support, with focused verification.
 - [x] Verify extracted installed workload natively and complete synthetic owner/package
   acceptance for the recorded bundle (not subsequent rebuilt identities).
-- [ ] Add pinned full-project selected-source TypeScript verification before scoring.
+- [x] Add pinned full-project selected-source TypeScript verification before scoring.
 - [ ] Obtain three real matching v2 baseline captures and retain reviewed data.
 - [ ] Verify scoring, target-only scope, all15 regional nonregression conditions,
   worker/evaluation budget support, accepted improvement and integrated delivery.
@@ -231,7 +231,38 @@ full-project compiler2/2passed25.93s (baseline6121ms, TS2322 refusal6035ms), con
 process absence and unchanged identities. Docs/lane check passed344real-IO/705unit.
 Current diagnostic aggregate3a711953b85b5c3b51435743a5ddb0a9fcabf871a22f2087e53a7265d16c72b5
 is undergoing fresh five-case qualification on live parent handle10612.
-Agent explore_next_execution owns live strict rebased candidate comparison31973.
-Both are test-only, not genuine capture or accepted delivery. Keep runtime source,
+Strict rebased candidate comparison31973 is terminal exit0:1/1 passed, zero
+skipped,75.95seconds. Both four-file regions reduced blob launches8to2 and total
+launches by exactly6; one-file behavior, drift refusal and custody checks passed.
+Raw optional report JSON was not emitted; historical absolute counts are not
+evidence for this rebase. Both gates are test-only, not genuine capture or accepted
+delivery. Keep runtime source,
 artifact patch, tests under those runs and dist frozen. Do not restart live handles.
 Primary auto/p00 remains unchanged until the combined source acceptance is ready.
+
+Three bounded read-only reviews now cover post-calibration campaign wiring,
+recipe identity/receipt correctness, and local primary integration readiness.
+They do not alter the frozen build, execute providers, or override the global stop.
+
+Those reviews found two concrete pre-dispatch/acceptance gaps, corrected in the
+isolated recipe tree: a Git replacement could change the actual materialized
+seed, and preexisting protected-source drift could weaken the compiler project.
+Retained seed equality now precedes campaign/catalog eligibility; production
+compiler authoring now requires the calibrated full checkout inventory. Parent
+joint gate passed131tests/6files/zero skipped56.06s; full source types, scoped
+lint, docs and diff checks passed. Independent reviews are closed. A remaining
+packaging rerun requires isolated compiled modules; parent is compiling only that
+tree, never the shared frozen build. Rebase the optimization artifact against
+the corrected target before considering another strict native comparison.
+
+Isolated corrections are now committed8e448d831c7ed1cfbac9ec5b477a087a0147d74f,
+clean worktree. Packaging52/52passed8.83s after correcting isolated development
+prerequisites (details in delivery.md); source/web types, docs/lane checks passed.
+Rebased candidate now targets c0fa8821...:33pure controls and full-project scratch
+compile passed. Strict31973 proves only the preceding59a46145... target. No native
+comparison has run against the latest correction/rebase yet.
+
+Main native10612 still qualifies only frozen3a711953... bytes. Do not cherry-pick
+these corrections into main or rebuild it while that handle is live. After its
+terminal result, commit/preserve exact evidence, integrate corrected source and
+recheck resulting measured identities. No calibration or provider activation yet.
