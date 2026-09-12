@@ -1,6 +1,64 @@
 # Verified local handoff
 
-## Current continuation: coordinator lifecycle and useful-yield measurement
+## Current continuation: independently owned candidate measurement
+
+Baseline `96e9a6e82402b337532fcbb1a934a3cca52a0fb7`, initially clean branch
+`auto/p00` at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.
+Three parallel agents delivered the controller/protocol, persistent child,
+focused tests and independent review; parent integrated the harness, packaging,
+actual OS tests and documentation. One initial test-authoring agent turn ended
+early; its edits were reviewed and completed by the parent, not counted as a
+completed independent test suite. Entire resume reported no checkpoint.
+
+Candidate code no longer shares the controller's process. Expected values,
+fixture mutation, snapshots, assertions and the final non-evaluation envelope
+stay in the controller. Candidate stdout, reported counters and candidate-side
+assertions cannot grant a passing measurement. A persistent candidate faces a
+controller-owned runtime mutation after successful reads. Exact readonly command
+allowlists and bounded private mailboxes preserve the production call shapes;
+no production target optimization or shared runner change is included.
+
+The first run exposed legitimate readonly Git and empty-input ACL compatibility
+gaps. Those were fixed before three fresh-process baselines passed. Review also
+fixed early-returning concurrent close calls and a false negative-control setup
+caused by a duplicate import; candidate payload syntax is now checked separately.
+OS-resolved account-home denial is independent of a replaced fixture `HOME`.
+
+Final expanded regression gate: **176 tests across seven files, zero skips,
+78.83s**, on macOS/Node 24.18.0. This includes 40 mailbox cases, 14 actual child
+return/deadline cases, 14 harness/OS cases and 108 existing subprocess/safety
+regressions. Direct measurement repeats exactly in three fresh processes.
+Actual checks cover fixture/inbox writes, out-of-scope and OS-home reads,
+signal-zero denial, native detached-process denial, loopback network denial,
+forbidden broker commands and late/truncated stdout rejection at shared close.
+The deadline test independently confirms the candidate PID no longer exists.
+The original `engineering-preparation.ts` and shared production runner are
+unchanged. The earlier 65-test combined gate also passed with zero skips.
+
+Local build, source/web typechecks, strict selected-test compilation, scoped
+lint, full lint (zero errors, 107 existing warnings), documentation checks and
+real-IO lane membership checks passed. The two actual-process suites are in the
+serialized lane. Production code/UI behavior was not changed, so the prior full
+UI/performance and delivery/restart suite is historical evidence, not rerun here.
+Final commit identity and clean-build identity are checked at handoff.
+
+**Integration finding:** this Mac rejects nested `sandbox_apply` with exit71,
+`Operation not permitted`, no stdout and confirmed group exit. The existing
+Universe-evaluator path therefore reports `CANDIDATE_CONFINEMENT_UNAVAILABLE`
+with zero accepted checks. Its passing test verifies refusal, not evaluator
+acceptance. No unconfined fallback or broader production profile was introduced.
+The next runtime milestone is a production-compatible independently owned
+controller/worker launch path, followed by a full fixed correctness workload
+and a genuinely useful evaluated Hub optimization.
+
+Other limits: broker launch counts are not a full OS-process census; bounded
+ordinary cleanup is not arbitrary controller-crash recovery; the inherited
+system-read profile is not universal filesystem/VM isolation. The measurement
+envelope is still deliberately rejected by `parseEvaluation`. There were no
+provider calls, account allocation edits, real KILL changes, service activation,
+remote pushes, npm publication or production deployment in this increment.
+
+## Previous continuation: coordinator lifecycle and useful-yield measurement
 
 Baseline `3a228e1b3d03645c36c4e8b65452c20e34f2c940`, initially clean branch
 `auto/p00` at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.

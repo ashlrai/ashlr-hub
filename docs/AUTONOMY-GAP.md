@@ -113,7 +113,11 @@ catalog-to-successor registration gap. Exact completed replay does not rewrite
 account history or renew deadlines; changed or incomplete setup is held.
 The generated command still needs actual account capacity and an appropriate
 fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md)
-is not yet a frozen, executable evaluator or evidence of useful self-improvement.
+now has a separately confined candidate measurement prototype, but is not a
+frozen acceptance evaluator or evidence of useful self-improvement. The verified
+Mac rejects its nested sandbox inside the existing Universe evaluator; that path
+fails closed, with no unconfined fallback. Production launch integration, the
+full correctness workload and independently graded improvement remain open.
 Actual-process setup testing also exposed a responsiveness gap: a status GET
 reset after waiting about 73 seconds during successor preparation, while the
 console remained alive and a fresh connection returned 200. Source inspection

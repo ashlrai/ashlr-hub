@@ -1,6 +1,41 @@
 # Executable firm: package graph
 
-## Current increment — coordinator lifecycle and useful-yield measurement (baseline 3a228e1b)
+## Current increment — isolated candidate correctness (baseline 96e9a6e8)
+
+- [x] Revalidate clean source and explore process, confinement and measurement boundaries with three agents.
+- [x] Split the measurement controller from a persistent candidate process.
+- [x] Broker fixed read-only commands while the OS denies candidate forks and signals.
+- [x] Verify exact outputs, parent-owned runtime mutation, protocol validation, confinement and owned-process cleanup.
+- [x] Preserve non-evaluation diagnostics until the full benchmark is suitable for autonomous acceptance.
+- [x] Run focused regression, local build and evidence/documentation checks.
+
+Previous turn is progress: lifecycle reporting and actual failure/restart gates
+passed, and a repeatable measurement prototype landed. Independent review proved
+same-process candidate code can interfere with its evaluator. This increment
+moves assertions, expected values, snapshots and final output to a separate
+controller. The candidate persists across parent-owned runtime mutation, but has
+read-only access to fixtures and may write only its own scratch. Bounded numbered
+mailboxes reuse the existing subprocess runner without changing its core API.
+
+A local macOS probe verified Node can boot with process-fork and signal denied;
+native subprocess creation returned EPERM. Required Git/ACL/start-time reads
+will go through a fixed read-only command broker outside that candidate sandbox.
+The child cannot grant itself more time or turn its stdout into a verdict.
+Nested process ownership and crash limitations must be tested or stated, never
+inferred from a leader exit. Measurements remain non-evaluation diagnostics.
+
+Resource agent owns controller/protocol; cold agent owns candidate loader;
+execution agent owns protocol tests and independent claims review; parent owns
+actual OS controls, harness, packaging, integration, documentation and verification. No target optimization,
+provider use, real account changes, services, remote pushes or public activation.
+
+Integration evidence found macOS refusing nested sandbox application. Direct
+isolated measurement works; the existing Universe evaluator path is withheld,
+not weakened. A production-compatible launch architecture remains the next
+integration milestone. Expanded isolation/subprocess regression passed 176 tests
+across seven files with zero skips in 78.83s; see report.md for final verification.
+
+## Previous increment — coordinator lifecycle and useful-yield measurement (baseline 3a228e1b)
 
 - [x] Revalidate source, prior progress and lifecycle/benchmark patterns with three agents.
 - [x] Report actual coordinator transitions on a separate bounded observation channel.

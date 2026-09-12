@@ -6,7 +6,7 @@ and the independent evaluator author. No candidate implementation is supplied.
 
 ## Runnable prototype: limited measurement, not acceptance authority
 
-The continuation from `3a228e1b` adds a
+The prototype introduced after `3a228e1b` comprises a
 [standalone prototype](../scripts/evaluators/preparation-verification.mjs), a
 [test-only frozen dependency packager](../test/helpers/preparation-verification-bundle.ts)
 and [real-fixture tests](../test/universe-preparation-verification.test.ts).
@@ -15,30 +15,46 @@ check and metadata reads for one/four protected evaluator files, including
 committed bytes that differ from the working checkout. It does not yet cover
 the full manager, successor-source or end-to-end sequence below.
 
-Use Node 24 or newer for this development fixture:
+Use Node 24 or newer on macOS for the actual-process development fixtures:
 
 ```sh
-npx vitest run test/universe-preparation-verification.test.ts --no-file-parallelism
+npx vitest run test/universe-preparation-verification.test.ts test/preparation-verification-child.test.ts test/preparation-verification-protocol.test.ts --no-file-parallelism
 ```
 
-The prototype tests are gated on that runtime; the real OS-confinement case
-also requires macOS. Unsupported checks are skipped, not accepted. Fixtures are
-private and temporary; no enrolled provider or real project is dispatched.
+Both candidate-process suites require that platform/runtime. Unsupported checks
+are skipped, not accepted. The separate mailbox suite exercises local data/file
+validation. Fixtures are private and temporary; no enrolled provider or real
+project is dispatched.
 
-Do **not** enroll this prototype as a trusted improvement evaluator. Candidate
-code and measurement currently share a process. An isolated VM context can
-reduce accidental global interference, but exposed host-function constructors
-can escape that context; filesystem confinement does not prevent forged stdout
-or corrupted in-process checks. Competitive measurement requires an independently
-owned evaluator process and independently observed effects. The numeric results
-are development diagnostics, not evidence authorizing acceptance, rewards,
-promotion or autonomous delivery. Its `preparation-verification-measurement`
+The continuation from `96e9a6e8` moves candidate execution into a persistent
+OS-confined child. The controller owns expected results, immutable fixture
+snapshots, runtime mutation, assertions and the final envelope. Numbered,
+nonce-correlated private mailboxes carry bounded JSON; candidate stdout is never
+a verdict. The child has readonly fixture/inbox access, writable private scratch,
+no network, and denied process creation/signals. Required readonly Git/ACL/process
+metadata commands pass an exact controller-owned allowlist. Reported process
+counts measure those actual broker launches, not a complete OS process census.
+OS-resolved user-home read denial is independent of the fixture's `HOME`.
+The inherited system-read profile is not a universal filesystem or VM boundary.
+
+Do **not** enroll this prototype as a trusted improvement evaluator. On the
+verified Mac, applying its child sandbox inside the existing Universe evaluator
+sandbox fails with `sandbox_apply: Operation not permitted`. That path emits
+`CANDIDATE_CONFINEMENT_UNAVAILABLE`, with zero accepted checks and no unconfined
+fallback. A production-compatible controller/worker launch architecture remains
+necessary; widening an inherited scratch grant would not isolate the candidate.
+Ordinary deadline/close settlement does not establish arbitrary controller-crash
+recovery. The full correctness workload and competitive reward remain unfinished.
+
+Numeric results are development diagnostics, not evidence authorizing acceptance,
+rewards, promotion or autonomous delivery. The `preparation-verification-measurement`
 envelope deliberately omits evaluation `passed` and `score` fields; the tests
 require the Universe evaluation parser to reject it, including the confined run.
 This prevents mistaking a prototype measurement for accepted evaluation evidence.
 
-On macOS with Node 24.18.0, the complete prototype suite passed eight tests with
-zero skips in 23.35s. Three fresh processes produced identical diagnostics:
+Historical baseline at `96e9a6e8` (before process separation): eight tests passed
+in 23.35s on macOS/Node 24.18.0. Three fresh processes produced these diagnostics;
+these are not the isolated-controller acceptance results:
 
 | Protected files | Public method | Observed launches | Git blob launches |
 | --- | --- | ---: | ---: |
@@ -47,14 +63,18 @@ zero skips in 23.35s. Three fresh processes produced identical diagnostics:
 | 4 | check | 40 | 8 |
 | 4 | metadata | 115 | 8 |
 
-The four measured calls total 298 launches. Eight correctness checks also cover
-runtime drift and accessor refusal. Fixtures preserve a 40% account allocation
+The historical four measured calls total 298 launches. Current correctness
+checks cover same-candidate runtime drift and malformed JSON input refusal;
+JSON does not transmit accessors, so the former accessor-input test is not claimed
+as cross-process evidence. Separate child tests exercise malformed return values.
+Fixtures preserve a 40% account allocation
 ceiling, a held worker, dirty working-tree evaluator bytes, duplicate committed
 blobs and differing executable modes. Constant results, cached verification,
 incorrect blob content, direct assertion tampering, stdout forgery and an
-unexpected shell call all failed the prototype checks. The real confined run
-completed with confirmed process-group exit. These observations remain narrower
-than the full sequence below and have no trusted reward authority.
+unexpected shell call are negative controls. Payload syntax is checked separately
+so parse failures cannot masquerade as behavioral coverage. The prior outer
+confined success does not carry forward to nested candidate confinement. See the
+[local handoff](../workplans/2026-09-10-firm/report.md) for current checks and gaps.
 
 ## Decision and scope
 

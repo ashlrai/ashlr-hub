@@ -177,6 +177,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-successor-reader.test.ts', // fixed actual read worker, private journal and concurrent busy worker
   'test/resource-engineering-lifecycle.test.ts', // actual effect worker caught coordinator fault and independent journal observation
   'test/universe-preparation-verification.test.ts', // pinned evaluator prototype, real Git fixtures and OS confinement
+  'test/preparation-verification-child.test.ts', // actual OS-confined persistent candidate processes and deadline settlement
   'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication
   'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures
   'test/resource-console-pool-evolution.test.ts', // pinned console origins across private ledger epochs
