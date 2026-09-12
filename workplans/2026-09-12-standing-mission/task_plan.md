@@ -76,7 +76,7 @@ active goal is not redefined as this increment.
 - [x] Reuse call-local verified setup evidence; preserve fresh independent samples.
 - [x] Verify scope/source/receipt freshness and measure real inspection latency.
 - [ ] Implement the smallest useful standing-mission integration using existing execution ownership.
-- [ ] Independently review, test, build and record remaining autonomy/activation gaps.
+- [x] Integrate independently authored tests, review, build and record remaining autonomy/activation gaps for evidence reuse.
 
 ## Ownership
 
@@ -98,7 +98,8 @@ native qualification. All previous process handles are terminal.
 Call-local evidence integration, focused verification and the encompassing
 scoped acceptance test are complete: 142 distinct tests pass across six files.
 Mission-owner design is recorded; its actual rollover implementation remains
-next, not complete. Local commit/build is the remaining gate for this increment.
+next, not complete. Source `4a448852` is committed and built cleanly; all current
+gates are terminal. Full autonomous mission execution remains active work.
 
 ### Worker availability
 

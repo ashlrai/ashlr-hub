@@ -105,3 +105,13 @@ This continuation does not activate providers, recover collector custody,
 unpause queues, change personal/Spark allocations, install a service, publish to
 npm, push remote Git or deploy a public site. Entire remains enabled with
 manual commits on `auto/p00`; prior resume found no checkpoint.
+
+### Built artifact
+
+Source `4a4488527b5dba69aabaeebc9a77f1d2b9cf8d7c` built successfully in run
+16678. `dist/build-identity.json` reports that exact SHA, package 3.4.0,
+`dirty:false`, provenance `git`; 257 web modules built. Package-mode documentation
+validation also passed. The nine-file builtin measurement bundle has digest
+`e41419e9fabaef5844c0aebe2504b980c4e4b1c60f72c174373b0c67c293d864`.
+Its bytes were inspected, not natively qualified or executed. Older bundle
+qualification does not transfer. All verification process handles are terminal.
