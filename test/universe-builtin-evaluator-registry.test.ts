@@ -40,6 +40,24 @@ describe('closed installed built-in evaluator registry', () => {
     expect(validateUniverseManifest(manifest({ builtin: 'preparation-measurement-v1', timeoutMs: 1000 })).evaluation)
       .toEqual({ builtin: 'preparation-measurement-v1', timeoutMs: 1000 });
   });
+  it.each([900_000, 900_001, 1_800_000])('accepts an explicitly selected diagnostic budget of %i without changing trial budgets', timeoutMs => {
+    const input = manifest({ builtin: 'preparation-measurement-v1', timeoutMs });
+    const value = validateUniverseManifest(input);
+    expect(value.evaluation.timeoutMs).toBe(timeoutMs);
+    expect(value.budget).toEqual(input.budget);
+  });
+  it.each([1_800_001, 1_800_000.5, Infinity])('refuses diagnostic budgets above the bounded ceiling: %s', timeoutMs => {
+    expect(() => validateUniverseManifest(manifest({ builtin: 'preparation-measurement-v1', timeoutMs }))).toThrow();
+  });
+  it('preserves the command evaluator and whole-trial limits', () => {
+    expect(validateUniverseManifest(manifest({ command: [process.execPath, 'evaluate.mjs'], timeoutMs: 900_000 })).evaluation.timeoutMs).toBe(900_000);
+    expect(() => validateUniverseManifest(manifest({ command: [process.execPath, 'evaluate.mjs'], timeoutMs: 900_001 }))).toThrow();
+    const input = manifest({ builtin: 'preparation-measurement-v1', timeoutMs: 1_800_000 });
+    input.budget.trialTimeoutMs = 900_000;
+    expect(validateUniverseManifest(input).budget.trialTimeoutMs).toBe(900_000);
+    input.budget.trialTimeoutMs = 900_001;
+    expect(() => validateUniverseManifest(input)).toThrow();
+  });
   it.each([
     { builtin: 'unknown', timeoutMs: 1000 },
     { builtin: 'preparation-measurement-v1', command: [process.execPath], timeoutMs: 1000 },

@@ -34,6 +34,13 @@ function partial(): string {
     diagnostics: [{ code: 'WORKFLOW_CANDIDATE_STARTUP_FAILED', message: 'Private fixture detail never copied' }] });
 }
 const vector = () => extractPreparationScenarioVector(json());
+function qualified(): PreparationMeasurementReport {
+  const value = report(); value.workload = 'preparation-workflows-v2'; value.metrics.correctness_checks = 23;
+  value.qualifications = ['runtime-drift', 'source-drift'].map((name, index) => ({ name: name as 'runtime-drift' | 'source-drift',
+    processes: 20, blobProcesses: 2, injections: 1,
+    requests: [1, 2].map(id => ({ id, method: index ? 'successor-metadata' : 'metadata', processes: 10, blobProcesses: 1 })) }));
+  value.metrics.qualification_processes = 40; value.metrics.qualification_blob_processes = 4; return value;
+}
 describe('fixed preparation scenario extraction', () => {
   it('has exactly fifteen stable ordered region keys, including repeated methods by ordinal', () => {
     const result = vector();
@@ -58,6 +65,27 @@ describe('fixed preparation scenario extraction', () => {
   });
 });
 describe('diagnostic comparison arithmetic', () => {
+  it('rejects mixed workload versions in either direction despite equal measured vectors', () => {
+    for (const [baseline, candidate] of [[json(), json(qualified())], [json(qualified()), json()]]) {
+      expect(comparePreparationMeasurements(baseline!, candidate!)).toMatchObject({ comparable: false, result: 'not-comparable',
+        reason: 'workload-mismatch', improved: false, regions: [] });
+    }
+  });
+  it('keeps qualification process counts outside the 15-region v2 comparison', () => {
+    const baseline = qualified(), candidate = qualified();
+    candidate.qualifications![0]!.requests[0]!.processes += 1000;
+    candidate.qualifications![0]!.processes += 1000; candidate.metrics.qualification_processes! += 1000;
+    expect(extractPreparationScenarioVector(json(candidate))).toEqual(vector());
+    expect(comparePreparationMeasurements(json(baseline), json(candidate))).toMatchObject({ result: 'unchanged', processTotal: { baseline: 150, candidate: 150, delta: 0 } });
+    candidate.metrics.files_1_check_processes!--;
+    expect(comparePreparationMeasurements(json(baseline), json(candidate))).toMatchObject({ result: 'improved', processTotal: { candidate: 149 } });
+  });
+  it('refuses successful vector extraction after v2 qualification settlement failure', () => {
+    const value = qualified(); value.checksPassed = false;
+    value.diagnostics = [{ code: 'PROCESS_SETTLEMENT_UNCONFIRMED', message: 'Unconfirmed.' }];
+    expect(() => extractPreparationScenarioVector(json(value))).toThrow();
+    expect(comparePreparationMeasurements(json(qualified()), json(value))).toMatchObject({ improved: false, result: 'not-comparable' });
+  });
   it('equality is unchanged, with no score or acceptance authority', () => {
     const result = comparePreparationMeasurements(json(), json());
     expect(result).toMatchObject({ scope: 'diagnostic-only', comparable: true, reason: null, result: 'unchanged', improved: false,

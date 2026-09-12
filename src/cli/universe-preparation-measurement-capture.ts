@@ -1,5 +1,6 @@
 import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 import type { PreparationMeasurementCapture } from '../core/universe/preparation-measurement-capture-types.js';
+import { parsePreparationMeasurementReport, summarizePreparationMeasurementReport } from '../core/universe/preparation-measurement-report.js';
 
 const USAGE = `usage: ashlr universe preparation-measurement-capture <universeId>
        --root <canonical absolute directory> --capture <safe id> [--json | --report]
@@ -41,6 +42,7 @@ function options(args: string[]): Options {
 
 function summary(value: PreparationMeasurementCapture) {
   const receipt = value.receipt;
+  const measurement = receipt?.report ? summarizePreparationMeasurementReport(parsePreparationMeasurementReport(receipt.report.stdout)) : null;
   return { schemaVersion: 1, kind: 'preparation-measurement-capture-summary', scope: 'diagnostic-only',
     state: value.state, disposition: value.disposition, outcome: receipt?.outcome ?? null, reason: receipt?.reason ?? null,
     universeId: value.intent?.universeId ?? null, captureId: value.intent?.captureId ?? null,
@@ -50,7 +52,8 @@ function summary(value: PreparationMeasurementCapture) {
     identityVerificationScope: 'recorded-attempt-only',
     processGroupSettlement: receipt?.processGroupSettlement ?? null,
     report: receipt?.report ? { sha256: receipt.report.sha256, bytes: receipt.report.bytes,
-      reportedChecksSatisfied: receipt.report.checksPassed } : null };
+      reportedChecksSatisfied: receipt.report.checksPassed, workload: measurement!.workload,
+      qualificationStatus: measurement!.qualificationStatus } : null };
 }
 
 function failure(json: boolean, report: boolean, code: 'INVALID_ARGUMENTS' | 'CAPTURE_UNAVAILABLE' | 'REPORT_UNAVAILABLE') {
@@ -84,6 +87,7 @@ export async function cmdUniversePreparationMeasurementCapture(args: string[]): 
         `Recorded process settlement: ${view.processGroupSettlement ?? 'unknown'} · recorded attempt identity verified: ${view.identityVerified ?? 'unknown'}`,
         'Identity verification describes the recorded attempt, not current runtime health; replay does not freshly reverify it.',
         `Reported checks: ${report ? report.checksPassed ? 'satisfied' : 'not satisfied' : 'unknown'}`,
+        `Recorded workload: ${view.report?.workload ?? 'unknown'} · during-call qualification: ${view.report?.qualificationStatus ?? 'unknown'}`,
         `Retained report: ${report ? `${report.bytes} bytes · SHA256 ${report.sha256}` : 'unavailable'}`,
         `Diagnostic reason: ${view.reason ?? 'none reported'}`,
         'Use --report with the same capture ID to emit valid retained bytes. Unresolved custody is not permission to retry.',

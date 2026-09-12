@@ -29,14 +29,18 @@ const METHODS = { manager: ['manager-open', 'bundle', 'manager-check', 'manager-
   successor: ['successor-check', 'successor-metadata', 'successor-bundle', 'successor-metadata'] };
 let root: string;
 const privateDir = (path: string) => mkdirSync(path, { recursive: true, mode: 0o700 });
-function report(delta = 0): string {
+function report(delta = 0, version: 1 | 2 = 1): string {
   const workflows = Object.entries(METHODS).map(([name, methods]) => ({ name, processes: methods.length * 10, blobProcesses: methods.length * 2,
     requests: methods.map((method, index) => ({ id: index + 1, method, processes: 10, blobProcesses: 2 })) }));
-  return canonical({ schemaVersion: 1, kind: 'preparation-verification-measurement', workload: 'preparation-workflows-v1', checksPassed: true,
-    metrics: { correctness_checks: 19, files_1_check_processes: 10 + delta, files_1_check_blob_processes: 2,
+  const qualifications = ['runtime-drift', 'source-drift'].map((name, index) => ({ name, processes: 20, blobProcesses: 4,
+    injections: 1, requests: [1, 2].map(id => ({ id, method: index ? 'successor-metadata' : 'metadata', processes: 10, blobProcesses: 2 })) }));
+  return canonical({ schemaVersion: 1, kind: 'preparation-verification-measurement', workload: `preparation-workflows-v${version}`, checksPassed: true,
+    ...(version === 2 ? { qualifications } : {}),
+    metrics: { correctness_checks: version === 2 ? 23 : 19, files_1_check_processes: 10 + delta, files_1_check_blob_processes: 2,
       files_1_metadata_processes: 10, files_1_metadata_blob_processes: 2, files_4_check_processes: 10, files_4_check_blob_processes: 2,
       files_4_metadata_processes: 10, files_4_metadata_blob_processes: 2, verification_processes: 40 + delta,
-      workflow_processes: 110, workflow_blob_processes: 22, fixture_owned_process_groups: 7 }, workflows, diagnostics: [] });
+      workflow_processes: 110, workflow_blob_processes: 22, fixture_owned_process_groups: 7,
+      ...(version === 2 ? { qualification_processes: 40, qualification_blob_processes: 8 } : {}) }, workflows, diagnostics: [] });
 }
 function evaluator(): PreparationMeasurementCaptureIntent['evaluator'] {
   const git = { path: '/Library/Developer/CommandLineTools/usr/bin/git', digest: digest('git') };
@@ -45,7 +49,7 @@ function evaluator(): PreparationMeasurementCaptureIntent['evaluator'] {
     files: PREPARATION_CALIBRATION_IMPLEMENTATION_FILES.map(name => ({ name, path: `/private/installed/${name}`, digest: digest(name) })),
     tools: [git, ...['/bin/ls', '/bin/ps', '/usr/bin/sandbox-exec'].map(path => ({ path, digest: digest(path) }))], git };
 }
-function writeCapture(universeId: string, captureId: string, delta = 0, actualWriter = false) {
+function writeCapture(universeId: string, captureId: string, delta = 0, actualWriter = false, version: 1 | 2 = 1) {
   const directory = join(root, 'universes', universeId), seed = join(directory, 'seed');
   const records = join(directory, 'preparation-measurements', 'records'); privateDir(records);
   privateDir(join(directory, 'preparation-measurements', 'staging'));
@@ -53,7 +57,7 @@ function writeCapture(universeId: string, captureId: string, delta = 0, actualWr
     startedAt: '2026-09-12T12:00:00.000Z', deadlineAt: '2026-09-12T12:01:00.000Z', timeoutMs: 60000,
     manifestDigest: digest(`${universeId} manifest`), comparatorDigest: digest(`${universeId} comparator`),
     artifact: { path: seed, digest: readArtifactSnapshot(seed).digest, revision: 'a'.repeat(40) }, evaluator: evaluator() };
-  const stdout = report(delta);
+  const stdout = report(delta, version);
   const receipt: PreparationMeasurementCaptureReceipt = { schemaVersion: 1, intentDigest: digest(canonical(intent)),
     finishedAt: '2026-09-12T12:00:10.000Z', durationMs: 10000, outcome: 'captured', reason: null,
     processGroupSettlement: 'group-exit-confirmed', identityVerified: true,
@@ -82,12 +86,12 @@ function seed(id: string, source = 'baseline', extra = 'unchanged') {
   writeFileSync(join(path, 'fixed.txt'), extra, { mode: 0o600 });
   return path;
 }
-function fixture(delta = -1, actualWriter = false) {
+function fixture(delta = -1, actualWriter = false, baselineVersion: 1 | 2 = 1, candidateVersion: 1 | 2 = baselineVersion) {
   seed('baseline');
-  for (const id of ['a', 'b', 'c']) writeCapture('baseline', id, 0, actualWriter);
+  for (const id of ['a', 'b', 'c']) writeCapture('baseline', id, 0, actualWriter, baselineVersion);
   const calibration = canonical(calibratePreparationMeasurements({ root, universeId: 'baseline', captureIds: ['c', 'a', 'b'], expectedSourceDigest: digest('baseline') }));
   seed('candidate', 'candidate');
-  const capture = writeCapture('candidate', 'candidate', delta, actualWriter);
+  const capture = writeCapture('candidate', 'candidate', delta, actualWriter, candidateVersion);
   const request = { root, universeId: 'candidate', captureId: 'candidate', calibration };
   return { capture, request };
 }
@@ -95,15 +99,18 @@ beforeEach(() => { root = realpathSync(mkdtempSync(join(tmpdir(), 'preparation-c
 afterEach(() => { vi.restoreAllMocks(); interception.afterSnapshot = undefined; rmSync(root, { recursive: true, force: true }); });
 
 describe('captured preparation candidate comparison', () => {
-  it('connects real calibration CLI output to real captured-comparison CLI through an explicit descriptor file', async () => {
-    const { capture } = fixture(-1, true);
+  it.each([1, 2] as const)('connects real calibration CLI output to real captured-comparison CLI using synthetic v%s immutable journals', async version => {
+    // Real private publication and decoding; these fixed counts/qualification
+    // rows are synthetic fixtures, not three native baseline measurements.
+    const { capture } = fixture(-1, true, version);
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(await cmdUniversePreparationMeasurementCalibrate(['baseline', '--root', root, '--capture', 'a', '--capture', 'b', '--capture', 'c',
       '--expected-source-digest', digest('baseline'), '--json'])).toBe(0);
     expect(output).toHaveBeenCalledOnce();
     const descriptor = String(output.mock.calls[0]![0]);
-    expect(JSON.parse(descriptor)).toMatchObject({ kind: 'preparation-measurement-calibration', scope: 'diagnostic-only', totalProcesses: 150 });
+    expect(JSON.parse(descriptor)).toMatchObject({ kind: 'preparation-measurement-calibration', scope: 'diagnostic-only',
+      workload: { id: `preparation-workflows-v${version}` }, totalProcesses: 150 });
     const file = join(root, 'calibration.json'); writeFileSync(file, descriptor, { mode: 0o600 });
     const before = readdirSync(capture.records).map(name => readFileSync(join(capture.records, name), 'utf8'));
     output.mockClear();
@@ -115,6 +122,18 @@ describe('captured preparation candidate comparison', () => {
     expect(readFileSync(file, 'utf8')).toBe(descriptor);
     expect(readdirSync(capture.records).map(name => readFileSync(join(capture.records, name), 'utf8'))).toEqual(before);
     expect(errors).not.toHaveBeenCalled();
+  });
+  it('refuses a v1 captured candidate against a v2 calibration through the real CLI without changing evidence', async () => {
+    const { request, capture } = fixture(-1, true, 2, 1);
+    const file = join(root, 'qualified-calibration.json'); writeFileSync(file, request.calibration, { mode: 0o600 });
+    const before = readdirSync(capture.records).map(name => readFileSync(join(capture.records, name), 'utf8'));
+    const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
+    expect(await cmdUniversePreparationMeasurementCompare(['candidate', '--root', root, '--capture', 'candidate', '--calibration', file, '--json'])).toBe(1);
+    expect(output).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(output.mock.calls[0]![0]))).toMatchObject({ scope: 'diagnostic-only', result: 'not-comparable',
+      reason: 'workload-mismatch', comparison: null, evidence: null });
+    expect(readFileSync(file, 'utf8')).toBe(request.calibration);
+    expect(readdirSync(capture.records).map(name => readFileSync(join(capture.records, name), 'utf8'))).toEqual(before);
   });
   it.each([[-1, 'improved'], [0, 'unchanged'], [1, 'regressed']] as const)('compares full inventory and real journal for delta %s', (delta, result) => {
     const { request, capture } = fixture(delta);

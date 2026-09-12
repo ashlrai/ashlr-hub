@@ -27,7 +27,7 @@ export interface PreparationMeasurementComparison {
   schemaVersion: 1;
   scope: 'diagnostic-only';
   comparable: boolean;
-  reason: 'baseline-checks-not-satisfied' | 'candidate-checks-not-satisfied' | 'both-checks-not-satisfied' | null;
+  reason: 'baseline-checks-not-satisfied' | 'candidate-checks-not-satisfied' | 'both-checks-not-satisfied' | 'workload-mismatch' | null;
   result: 'improved' | 'unchanged' | 'regressed' | 'not-comparable';
   improved: boolean;
   /** Sum of the 15 named regions only, never blob subtotals or fixture groups. */
@@ -45,7 +45,8 @@ function readReport(input: string): PreparationMeasurementReport {
   try { return parsePreparationMeasurementReport(input); } catch { invalid(); }
 }
 function complete(report: PreparationMeasurementReport): boolean {
-  return report.checksPassed && report.metrics.correctness_checks === 19 && report.workflows.length === 2;
+  return report.checksPassed && report.metrics.correctness_checks === (report.workload === 'preparation-workflows-v2' ? 23 : 19) &&
+    report.workflows.length === 2 && (report.workload !== 'preparation-workflows-v2' || report.qualifications?.length === 2);
 }
 function vector(report: PreparationMeasurementReport): PreparationScenarioCount[] {
   if (!complete(report)) invalid();
@@ -106,6 +107,9 @@ function reportedTotal(report: PreparationMeasurementReport): number | null {
 export function comparePreparationMeasurements(baselineReport: string, candidateReport: string): PreparationMeasurementComparison {
   const baseline = readReport(baselineReport), candidate = readReport(candidateReport);
   const baselineTotal = reportedTotal(baseline), candidateTotal = reportedTotal(candidate);
+  if (baseline.workload !== candidate.workload) return { schemaVersion: 1, scope: 'diagnostic-only', comparable: false,
+    reason: 'workload-mismatch', result: 'not-comparable', improved: false,
+    processTotal: { baseline: baselineTotal, candidate: candidateTotal, delta: null }, regions: [], regressions: [] };
   if (!complete(baseline) || !complete(candidate)) return {
     schemaVersion: 1, scope: 'diagnostic-only', comparable: false,
     reason: !complete(baseline) && !complete(candidate) ? 'both-checks-not-satisfied' :

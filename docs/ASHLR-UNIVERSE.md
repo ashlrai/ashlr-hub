@@ -2555,7 +2555,9 @@ ashlr universe preparation-measurement --input /absolute/path/report.json --json
 The input must be one regular, nonsymlink UTF-8 JSON file, at most 24 KiB, at an
 explicit normalized absolute path. Only the
 `preparation-verification-measurement` envelope for `preparation-workflows-v1`
-is supported. Legacy standalone and pre-initialization reports are unsupported.
+or `preparation-workflows-v2` is supported. Legacy standalone and pre-initialization
+reports are unsupported. V1 remains a historical 19-check workload; it is never
+silently upgraded to v2's during-call qualification coverage.
 This command does not accept `--root`, discover stores, run a benchmark, dispatch
 workers, or contact providers. It leaves the supplied file unchanged.
 
@@ -2565,6 +2567,32 @@ not an extra quantity to add. Missing totals in failed reports remain `null` in
 JSON and `unknown` in text; completed workflow rows provide only a labelled
 subtotal. Output includes fixed diagnostic codes but omits raw diagnostic
 messages and input paths.
+
+The installed v2 workload preserves the same fifteen leaf/workflow measurement
+regions and adds two fixed during-call qualification pairs. Each pair first
+confirms exact healthy metadata in one candidate process, then changes a trusted
+fixture while that same process awaits an intent-file ACL result. Runtime drift
+changes the resource configuration; source drift changes the delivered upstream
+reference. A completed pair requires exactly one observed mutation, semantic
+refusal without a returned value, unchanged fixture state apart from that mutation,
+and confirmed process shutdown. A transport failure does not count as refusal.
+
+Full v2 success requires 23 checks and both ordered qualification records. Its
+additional process/blob counters are labelled separately and excluded from the
+original fifteen-region comparison total. The same selected artifact, owned
+activity and original deadline cover both measurement and qualification; no
+extra time allowance is granted. A failed or interrupted pair remains incomplete.
+The inspector shows `not-in-workload` for v1, and `complete` or `incomplete` for v2.
+
+The closed measurement builtin permits an explicitly configured
+`evaluation.timeoutMs` up to 1,800,000 ms for diagnostic captures. This is a
+ceiling, not a new default or a renewed deadline. Each candidate session remains
+bounded to 900,000 ms. A campaign seed invocation is still limited by the original
+campaign time remaining, but even a successful diagnostic envelope is refused as
+scored seed evidence (`evaluator-invalid-result`); a separate scoring evaluator is
+not implemented yet. Command evaluators and
+the whole worker-plus-evaluation trial budget remain capped at 900,000 ms, so a
+long diagnostic allowance does **not** enable longer ordinary candidate trials.
 
 Exit status is 0 when the report says its checks were satisfied, 1 for reported
 failure or an unavailable/unsupported report, and 2 for invalid arguments. For
@@ -2641,6 +2669,12 @@ measurement regions. Replaying one capture three times is not three attempts;
 identical report hashes across distinct attempts are expected for deterministic
 counts.
 
+All three captures must use the same workload version. V2 calibration requires
+both completed during-call qualification pairs; v1 evidence remains readable
+without claiming those checks. V1/v2 comparisons are non-comparable. A new
+installed workload changes its implementation digest and needs fresh captures;
+old receipts or calibration files are not migrated into stronger evidence.
+
 ```sh
 ashlr universe preparation-measurement-calibrate hub-baseline \
   --root /absolute/private/universe \
@@ -2696,10 +2730,11 @@ helpers perform arithmetic only; they do not establish capture provenance.
 **Trust boundary:** a caller-supplied descriptor is diagnostic input, not installed
 acceptance authority. Parsing validates structure and internal consistency, not
 authorship. Historical capture identity is not current provider health. These
-commands do not yet qualify arbitrary candidates for autonomous scoring: installed
-baseline pins, candidate-linked during-call mutation controls, and a commissioned
-end-to-end acceptance run remain necessary. The existing campaign and delivery
-rules are unchanged.
+commands do not themselves authorize autonomous scoring. V2 supplies the fixed
+candidate-linked during-call checks, but installed scoring-baseline pins and a
+commissioned end-to-end optimization acceptance run remain necessary. These two
+mutation cases are not universal correctness or hostile-code security proof.
+The existing campaign and delivery rules are unchanged.
 
 ### Built-in trial shutdown custody
 

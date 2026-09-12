@@ -11,6 +11,7 @@ import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { calibratePreparationMeasurements, parsePreparationMeasurementCalibration, MAX_PREPARATION_CALIBRATION_BYTES,
   PREPARATION_CALIBRATION_IMPLEMENTATION_FILES,
   type PreparationMeasurementCalibration, type PreparationMeasurementCalibrationRequest } from '../src/core/universe/preparation-measurement-calibration.js';
+import { compareCapturedPreparationMeasurement } from '../src/core/universe/preparation-measurement-candidate-comparison.js';
 
 const TARGET = 'src/core/resources/engineering-preparation.ts';
 const root = '/private/calibration'; const directory = `${root}/universes/baseline`;
@@ -44,6 +45,16 @@ function refresh() {
   }
 }
 function author() { return calibratePreparationMeasurements(request); }
+function qualifyReports() {
+  for (const row of rows.filter(row => row.receipt)) {
+    const value = report();
+    const qualifications = ['runtime-drift', 'source-drift'].map((name, index) => ({ name, injections: 1, processes: 4, blobProcesses: 2,
+      requests: [1, 2].map(id => ({ id, method: index ? 'successor-metadata' : 'metadata', processes: 2, blobProcesses: 1 })) }));
+    row.receipt!.report!.stdout = JSON.stringify({ ...value, workload: 'preparation-workflows-v2', qualifications,
+      metrics: { ...value.metrics, correctness_checks: 23, qualification_processes: 8, qualification_blob_processes: 4 } });
+  }
+  refresh();
+}
 function parse(value: unknown) { return parsePreparationMeasurementCalibration(JSON.stringify(value)); }
 beforeEach(() => {
   vi.clearAllMocks(); rows = [];
@@ -72,6 +83,39 @@ beforeEach(() => {
 });
 
 describe('read-only preparation calibration authoring', () => {
+  it('authors and compares qualified v2 captures without changing the 15-region total', () => {
+    qualifyReports(); const value = author();
+    expect(value.workload.id).toBe('preparation-workflows-v2'); expect(value.scenarios).toHaveLength(15); expect(value.totalProcesses).toBe(22);
+    expect(parse(value)).toEqual(value);
+    expect(compareCapturedPreparationMeasurement({ root, universeId: request.universeId, captureId: 'first', calibration: canonical(value) }))
+      .toMatchObject({ result: 'unchanged', comparison: { processTotal: { baseline: 22, candidate: 22 } } });
+  });
+  it('refuses mixed capture versions during calibration and cross-version candidate comparison', () => {
+    const v1 = author(); qualifyReports();
+    expect(compareCapturedPreparationMeasurement({ root, universeId: request.universeId, captureId: 'first', calibration: canonical(v1) }))
+      .toMatchObject({ result: 'not-comparable', reason: 'workload-mismatch' });
+    rows[1]!.receipt!.report!.stdout = JSON.stringify(report()); refresh();
+    expect(author).toThrow();
+  });
+  it.each(['missing-qualification', 'failed-pair', 'unconfirmed'] as const)('refuses v2 %s as calibration or comparable candidate evidence', kind => {
+    qualifyReports(); const calibration = author();
+    const value = JSON.parse(rows[1]!.receipt!.report!.stdout);
+    if (kind === 'missing-qualification') delete value.qualifications;
+    if (kind === 'failed-pair') {
+      value.checksPassed = false; value.qualifications = value.qualifications.slice(0, 1);
+      value.metrics = { correctness_checks: 21 }; value.diagnostics = [{ code: 'CANDIDATE_QUALIFICATION_FAILED', message: 'Refused.' }];
+      rows[1]!.receipt!.report!.checksPassed = false;
+    }
+    if (kind === 'unconfirmed') {
+      value.checksPassed = false; value.diagnostics = [{ code: 'PROCESS_SETTLEMENT_UNCONFIRMED', message: 'Unconfirmed.' }];
+      rows[1]!.receipt!.report!.checksPassed = false;
+      rows[1]!.receipt!.outcome = 'held'; rows[1]!.receipt!.reason = 'settlement-unconfirmed'; rows[1]!.receipt!.processGroupSettlement = 'unconfirmed';
+    }
+    rows[1]!.receipt!.report!.stdout = JSON.stringify(value); refresh();
+    expect(author).toThrow();
+    expect(compareCapturedPreparationMeasurement({ root, universeId: request.universeId, captureId: 'first', calibration: canonical(calibration) }))
+      .toMatchObject({ result: 'not-comparable', comparison: null });
+  });
   it('creates a deterministic 15-region descriptor from three unique successful attempts with identical report bytes', () => {
     const value = author();
     expect(value).toMatchObject({ scope: 'diagnostic-only', totalProcesses: 22, baseline: { artifactDigest: artifact().digest,

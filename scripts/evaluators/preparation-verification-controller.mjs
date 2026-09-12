@@ -3,7 +3,8 @@ import * as fs from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 import { setTimeout, clearTimeout } from 'node:timers';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { userInfo } from 'node:os';
 import { exact, MAX_CALLS, MAX_MESSAGE_BYTES, MAX_SESSION_DURATION_MS, publishMessage, readMessage } from './preparation-verification-protocol.mjs';
@@ -91,6 +92,182 @@ export function readonlyCommand(request, fixtureRoot, scratch, trustedGitPath = 
     file = '/bin/ps'; args = request.args;
   } else throw failure();
   return { file, args, options, input, blob };
+}
+
+/** Trusted mutation boundary; never changes native results or broker accounting. */
+export function createPreparationMutationInterceptor({ run, toolPath, fixtureRoot, matches, mutate }) {
+  const message = 'PREPARATION_MUTATION_INTERCEPTOR_FAILED';
+  const privateDirectory = value => {
+    canonicalDirectory(value);
+    const stat = fs.lstatSync(value);
+    if ((stat.mode & 0o777) !== 0o700 || typeof process.getuid === 'function' && stat.uid !== process.getuid()) throw new Error(message);
+  };
+  const json = text => {
+    if (typeof text !== 'string' || Buffer.byteLength(text) > MAX_MESSAGE_BYTES) throw new Error(message);
+    return JSON.parse(text);
+  };
+  const success = result => {
+    if (result.exitCode !== 0 || result.signal !== null || result.timedOut !== false || result.cancelled !== false ||
+        result.error !== undefined || result.outputTruncated !== undefined || result.stderr !== '' ||
+        result.processGroupSettlement !== 'group-exit-confirmed') throw new Error(message);
+    const output = json(result.stdout);
+    if (!exact(output, ['started', 'status', 'signal', 'stdoutBase64', 'stderrBase64', 'error']) || output.started !== true ||
+        output.status !== 0 || output.signal !== null || output.error !== null) throw new Error(message);
+    for (const key of ['stdoutBase64', 'stderrBase64']) if (base64(output[key]).length > 64 * 1024) throw new Error(message);
+  };
+  privateDirectory(fixtureRoot);
+  if (typeof run !== 'function' || typeof matches !== 'function' || typeof mutate !== 'function' || !isAbsolute(toolPath) ||
+      resolve(toolPath) !== toolPath || fs.realpathSync(toolPath) !== toolPath || !fs.lstatSync(toolPath).isFile()) throw new Error(message);
+  let armed = false, fired = false, count = 0, fault = false, pending = false, lastId = 0, scratchPin;
+  const nonces = new Set();
+  function fail() { fault = true; throw new Error(message); }
+  const wrapped = async (argv, opts) => {
+    // Cleanup/lifecycle calls still reach the original runner after injector failure.
+    if (!argv.includes(toolPath)) return run(argv, opts);
+    if (fault || pending) return fail();
+    pending = true;
+    try {
+      if (argv.length !== 6 || argv[0] !== '/usr/bin/sandbox-exec' || argv[1] !== '-p' || typeof argv[2] !== 'string' ||
+          argv[3] !== process.execPath || argv[4] !== '--no-addons' || argv[5] !== toolPath) fail();
+      const input = json(opts.input);
+      if (!exact(input, ['request', 'fixtureRoot', 'scratch', 'gitPin']) || input.fixtureRoot !== fixtureRoot || input.scratch !== opts.cwd) fail();
+      assertPreparationGit(input.gitPin);
+      privateDirectory(opts.cwd); if (scratchPin !== undefined && scratchPin !== opts.cwd) fail(); scratchPin = opts.cwd;
+      readonlyCommand(input.request, fixtureRoot, opts.cwd, input.gitPin.path);
+      const request = input.request;
+      if (request.id !== lastId + 1 || request.id > 4096 || nonces.has(request.nonce)) fail();
+      lastId = request.id; nonces.add(request.nonce);
+      Object.freeze(request.args); Object.freeze(request.options); Object.freeze(request);
+      const selected = armed && !fired ? matches(request) : false;
+      if (typeof selected !== 'boolean') fail();
+      const result = await run(argv, opts);
+      if (selected) {
+        success(result); fired = true;
+        if (mutate() !== undefined) fail(); // No asynchronous mutation after resume.
+        count++;
+      }
+      return result;
+    } catch { return fail(); }
+    finally { pending = false; }
+  };
+  return { run: wrapped, arm() { if (fault || armed || pending) fail(); armed = true; },
+    assertInjected() { if (fault || !armed || pending || count !== 1) fail(); }, injections() { return count; } };
+}
+
+const qualificationError = (stale = false) => {
+  const code = stale ? 'CANDIDATE_QUALIFICATION_STALE_RESULT' : 'CANDIDATE_QUALIFICATION_FAILED';
+  return Object.assign(new Error(code), { code });
+};
+const qualificationCanonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
+function qualificationSnapshot(root) {
+  let entries = 0, bytes = 0;
+  const visit = file => {
+    if (++entries > 32768) throw qualificationError();
+    const stat = fs.lstatSync(file, { bigint: true });
+    let content;
+    if (stat.isSymbolicLink()) content = { symlink: fs.readlinkSync(file) };
+    else if (stat.isDirectory()) content = Object.fromEntries(fs.readdirSync(file).sort().map(name => [name, visit(join(file, name))]));
+    else {
+      if (!stat.isFile() || stat.size > BigInt(256 * 1024 * 1024 - bytes)) throw qualificationError();
+      const data = fs.readFileSync(file); bytes += data.length;
+      if (bytes > 256 * 1024 * 1024) throw qualificationError();
+      content = createHash('sha256').update(data).digest('hex');
+    }
+    return { ino: String(stat.ino), mode: String(stat.mode), mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs), content };
+  };
+  return qualificationCanonical(visit(root));
+}
+
+/** Fixed qualification choices only. Mutators and expected data are trusted
+ * controller code; neither comes from candidate output or installed CLI flags. */
+export async function qualifyPreparationCandidate({ name, fixture, bridge, bridgePath, candidateRoot, fixtureRoot, workRoot,
+  activity, signal, gitPin, deadlineAt, deadlineMonotonicMs }) {
+  let session, stale = false, closed = false;
+  try {
+    if (!['runtime-drift', 'source-drift'].includes(name) || !Number.isSafeInteger(deadlineAt) ||
+        !Number.isFinite(deadlineMonotonicMs) || !activity || Date.parse(activity.owner.deadlineAt) !== deadlineAt ||
+        !(signal instanceof globalThis.AbortSignal)) throw qualificationError();
+    const remaining = () => Math.floor(Math.min(deadlineAt - Date.now(), deadlineMonotonicMs - performance.now()));
+    const guard = () => { if (signal.aborted || remaining() <= 0) throw qualificationError(); };
+    guard(); assertPreparationGit(gitPin); canonicalDirectory(fixtureRoot);
+    const source = name === 'source-drift';
+    const method = source ? 'successor-metadata' : 'metadata';
+    const input = source ? { ...fixture.options, expectedPlanDigest: fixture.plan.planDigest } : fixture.bundleInput;
+    const intent = join(input.output, 'intent.json');
+    if (!within(fixtureRoot, intent) || resolve(intent) !== intent) throw qualificationError();
+    const runtimeFile = source ? undefined : fixture.options.config.resourceRuntime;
+    if (!source) {
+      if (!within(fixtureRoot, runtimeFile) || fs.realpathSync(runtimeFile) !== runtimeFile) throw qualificationError();
+      const original = qualificationCanonical(fixture.runtime) + '\n';
+      const changed = qualificationCanonical({ ...fixture.runtime, capacityWaitMs: 1000 }) + '\n';
+      const current = fs.readFileSync(runtimeFile, 'utf8');
+      if (current !== original && current !== changed) throw qualificationError();
+      // Restore only the known between-call mutation after its session closed.
+      guard(); if (current !== original) fs.writeFileSync(runtimeFile, original, { mode: 0o600 }); guard();
+    }
+    const git = (...args) => {
+      guard(); assertPreparationGit(gitPin);
+      const result = execFileSync(gitPin.path, ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false',
+        '-C', canonicalDirectory(fixture.repo), ...args], { encoding: 'utf8', timeout: Math.max(1, Math.min(10000, remaining())),
+        maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } }).trim();
+      assertPreparationGit(gitPin); guard(); return result;
+    };
+    if (source) {
+      if (!within(fixtureRoot, fixture.repo)) throw qualificationError();
+      const current = git('rev-parse', '--verify', 'refs/heads/codex/upstream');
+      if (current !== fixture.receipt.commit && current !== fixture.revision) throw qualificationError();
+      if (current !== fixture.receipt.commit) git('update-ref', 'refs/heads/codex/upstream', fixture.receipt.commit);
+      if (git('rev-parse', '--verify', 'refs/heads/codex/upstream') !== fixture.receipt.commit) throw qualificationError();
+    }
+    const expected = source ? bridge.baseline.readResourceEngineeringSuccessorMetadata(input) : bridge.baseline.readPreparedResourceEngineeringMetadata(input);
+    guard();
+    const before = qualificationSnapshot(fixtureRoot);
+    let changed;
+    const interceptor = createPreparationMutationInterceptor({ run: bridge.runVerifySubprocessAsync,
+      toolPath: fileURLToPath(new URL('./preparation-verification-tool.mjs', import.meta.url)), fixtureRoot,
+      matches: request => request.file === '/bin/ls' && request.args[0] === '-lde' && request.args.slice(1).includes(intent),
+      mutate() {
+        guard();
+        if (source) {
+          if (git('rev-parse', '--verify', 'refs/heads/codex/upstream') !== fixture.receipt.commit) throw qualificationError();
+          git('update-ref', 'refs/heads/codex/upstream', fixture.revision);
+          if (git('rev-parse', '--verify', 'refs/heads/codex/upstream') !== fixture.revision) throw qualificationError();
+        } else fs.writeFileSync(runtimeFile, qualificationCanonical({ ...fixture.runtime, capacityWaitMs: 1000 }) + '\n', { mode: 0o600 });
+        changed = qualificationSnapshot(fixtureRoot);
+        if (changed === before) throw qualificationError();
+        guard();
+      } });
+    session = await createPreparationCandidateSession({ bridge: { ...bridge, runVerifySubprocessAsync: interceptor.run }, bridgePath,
+      candidateRoot, fixtureRoot, workRoot, activity, signal, gitPin, timeoutMs: Math.min(MAX_SESSION_DURATION_MS, remaining()) });
+    guard(); if (qualificationSnapshot(fixtureRoot) !== before) throw qualificationError();
+    const healthy = await session.call(method, input);
+    guard();
+    if (healthy.error !== undefined || !Object.hasOwn(healthy, 'value') || qualificationCanonical(healthy.value) !== qualificationCanonical(expected) ||
+        healthy.measurement.processes <= 0 || qualificationSnapshot(fixtureRoot) !== before) throw qualificationError();
+    interceptor.arm();
+    const mutated = await session.call(method, input);
+    guard(); interceptor.assertInjected();
+    if (!changed || qualificationSnapshot(fixtureRoot) !== changed || mutated.measurement.processes <= 0) throw qualificationError();
+    stale = mutated.error === undefined && Object.hasOwn(mutated, 'value') && qualificationCanonical(mutated.value) === qualificationCanonical(expected);
+    const refused = mutated.error === 'candidate-threw' && !Object.hasOwn(mutated, 'value');
+    const ledger = session.measurementLedger();
+    const requests = [healthy, mutated].map((result, index) => ({ id: index + 1, method, ...result.measurement }));
+    if (qualificationCanonical(ledger.requests) !== qualificationCanonical(requests) ||
+        ledger.processes !== requests.reduce((total, row) => total + row.processes, 0) ||
+        ledger.blobProcesses !== requests.reduce((total, row) => total + row.blobProcesses, 0)) throw qualificationError();
+    await session.close(); closed = true;
+    guard(); interceptor.assertInjected(); assertPreparationGit(gitPin);
+    if (qualificationSnapshot(fixtureRoot) !== changed) throw qualificationError();
+    if (!refused) throw qualificationError(stale);
+    return { name, ...ledger, injections: 1 };
+  } catch (error) {
+    if (session && !closed) { try { await session.close(); } catch { throw qualificationError(); } }
+    // Stale-result classification requires a complete, independently verified
+    // pair AND successful close. A failed transport/cleanup never impersonates it.
+    if (closed && error?.code === 'CANDIDATE_QUALIFICATION_STALE_RESULT') throw qualificationError(true);
+    throw qualificationError();
+  }
 }
 
 export async function createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs = 60000, signal, activity, gitPin: suppliedGitPin }) {

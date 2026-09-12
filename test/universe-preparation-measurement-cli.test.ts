@@ -26,6 +26,13 @@ function partial() {
   return { ...complete(), checksPassed: false, metrics: { correctness_checks: 15 }, workflows: complete().workflows.slice(0, 1),
     diagnostics: [{ code: 'WORKFLOW_CANDIDATE_STARTUP_FAILED', message: 'PRIVATE_REPORT_MESSAGE' }] };
 }
+function qualified() {
+  const qualifications = ['runtime-drift', 'source-drift'].map((name, index) => ({ name, injections: 1,
+    processes: 20, blobProcesses: 2, requests: [1, 2].map(id => ({ id,
+      method: index ? 'successor-metadata' : 'metadata', processes: 10, blobProcesses: 1 })) }));
+  return { ...complete(), workload: 'preparation-workflows-v2', qualifications,
+    metrics: { ...complete().metrics, correctness_checks: 23, qualification_processes: 40, qualification_blob_processes: 4 } };
+}
 let bytes: Buffer;
 const stat = (changes: Partial<Stats> = {}): Stats => ({ dev: 1, ino: 2, size: bytes.length, mtimeMs: 3, ctimeMs: 4,
   isFile: () => true, isSymbolicLink: () => false, ...changes }) as Stats;
@@ -42,6 +49,35 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('read-only preparation measurement CLI', () => {
+  it('labels historical v1 as lacking during-call qualification rather than silently upgrading it', async () => {
+    expect(await cmdUniversePreparationMeasurement(['--input', input, '--json'])).toBe(0);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({ workload: 'preparation-workflows-v1',
+      qualificationStatus: 'not-in-workload', qualifications: [], qualificationProcesses: null, qualificationBlobProcesses: null });
+  });
+
+  it.each([true, false])('exposes v2 qualification without changing old totals (json=%s)', async json => {
+    bytes = Buffer.from(JSON.stringify(qualified()));
+    expect(await cmdUniversePreparationMeasurement(['--input', input, ...(json ? ['--json'] : [])])).toBe(0);
+    if (json) expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({ workload: 'preparation-workflows-v2',
+      qualificationStatus: 'complete', correctnessChecks: 23, qualificationProcesses: 40, qualificationBlobProcesses: 4,
+      leafProcesses: 20, workflowProcesses: 100, qualifications: [{ name: 'runtime-drift' }, { name: 'source-drift' }] });
+    else {
+      expect(output.mock.calls[0]![0]).toContain('During-call qualification: complete');
+      expect(output.mock.calls[0]![0]).toContain('Qualification broker processes (excluded from comparison total): 40');
+      expect(output.mock.calls[0]![0]).toContain('Qualification source-drift: 1 observed mutation');
+    }
+  });
+
+  it('keeps partially qualified failures incomplete with unknown aggregate qualification counts', async () => {
+    bytes = Buffer.from(JSON.stringify({ ...qualified(), checksPassed: false, qualifications: qualified().qualifications.slice(0, 1),
+      metrics: { correctness_checks: 21 }, diagnostics: [{ code: 'CANDIDATE_QUALIFICATION_FAILED', message: 'PRIVATE_QUALIFICATION_DETAIL' }] }));
+    expect(await cmdUniversePreparationMeasurement(['--input', input, '--json'])).toBe(1);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({ qualificationStatus: 'incomplete',
+      qualificationProcesses: null, qualificationBlobProcesses: null, qualifications: [{ name: 'runtime-drift' }],
+      diagnosticCodes: ['CANDIDATE_QUALIFICATION_FAILED'] });
+    expect(output.mock.calls[0]![0]).not.toContain('PRIVATE_QUALIFICATION_DETAIL');
+  });
+
   it('reuses the bounded reader for a larger calibration descriptor without changing report limits', () => {
     bytes = Buffer.alloc(2 * 1024 * 1024, 32);
     expect(readPreparationEvidenceFile(input, 2 * 1024 * 1024)).toHaveLength(2 * 1024 * 1024);

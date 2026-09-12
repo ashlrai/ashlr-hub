@@ -65,7 +65,10 @@ export function validateUniverseManifest(value: unknown): UniverseManifest {
       !integer(value.budget.maxDurationMs, 1, 86_400_000) || !integer(value.budget.trialTimeoutMs, 1, 900_000) ||
       !object(value.evaluation) || !(exact(value.evaluation, ['command', 'timeoutMs']) && command(value.evaluation.command) ||
         builtinEvaluation(value.evaluation)) ||
-      !integer(value.evaluation.timeoutMs, 1, 900_000) || !Array.isArray(value.variants) || value.variants.length < 1 || value.variants.length > 64) {
+      // The fixed diagnostic spans several separately bounded native sessions.
+      // This ceiling does not extend worker trials or any running deadline.
+      !integer(value.evaluation.timeoutMs, 1, builtinEvaluation(value.evaluation) ? 1_800_000 : 900_000) ||
+      !Array.isArray(value.variants) || value.variants.length < 1 || value.variants.length > 64) {
     throw new Error('Invalid Universe manifest: expected bounded version 1 identity, objective, seed, metric, budget, evaluator, and variants');
   }
   const ids = new Set<string>();

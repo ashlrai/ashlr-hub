@@ -48,7 +48,7 @@ function intent(input: unknown): Intent {
     'manifestDigest', 'comparatorDigest', 'artifact', 'evaluator']);
   if (value.schemaVersion !== 1 || typeof value.captureId !== 'string' || !ID.test(value.captureId) ||
     typeof value.universeId !== 'string' || !ID.test(value.universeId) || !timestamp(value.startedAt) || !timestamp(value.deadlineAt) ||
-    !Number.isSafeInteger(value.timeoutMs) || Number(value.timeoutMs) < 1 || Number(value.timeoutMs) > 900_000 ||
+    !Number.isSafeInteger(value.timeoutMs) || Number(value.timeoutMs) < 1 || Number(value.timeoutMs) > 1_800_000 ||
     Date.parse(value.deadlineAt) - Date.parse(value.startedAt) !== value.timeoutMs || !hash(value.manifestDigest) || !hash(value.comparatorDigest)) throw unavailable();
   const artifact = ownCaptureData(value.artifact, ['path', 'digest', 'revision']);
   if (!path(artifact.path) || !hash(artifact.digest) || typeof artifact.revision !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(artifact.revision)) throw unavailable();

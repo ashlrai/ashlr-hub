@@ -50,6 +50,43 @@ describe('fixed fixture runner ownership', () => {
     expect(run).not.toHaveBeenCalled();
   });
 
+  it.each([900_000, 900_001, 1_800_000])('accepts an original %i ms fixture budget without increasing the tool timeout', async duration => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    vi.spyOn(performance, 'now').mockReturnValue(100);
+    const run = vi.fn<Run>(async () => result()), runtime = createPreparationFixtureRuntime(run);
+    const observed = await runtime.withScope(scope(duration), async (_signal, deadline) => {
+      expect(deadline).toBe(100 + duration);
+      return runtime.run(['fixed'], runOptions());
+    });
+    expect(observed.measurement.processGroups).toBe(1);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(run.mock.calls[0]![1].timeoutMs).toBe(5000);
+  });
+
+  it('refuses a fixture budget one millisecond above the ceiling before action or dispatch', async () => {
+    vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
+    const run = vi.fn<Run>(async () => result()), action = vi.fn(async () => 'ready');
+    await expect(createPreparationFixtureRuntime(run).withScope(scope(1_800_001), action)).rejects.toThrow();
+    expect(action).not.toHaveBeenCalled(); expect(run).not.toHaveBeenCalled();
+  });
+
+  it.each(['wall', 'monotonic'] as const)('never renews the original 30-minute %s deadline between fixture commands', async clock => {
+    const started = 1_800_000_000_000; let elapsed = 0;
+    vi.spyOn(Date, 'now').mockImplementation(() => started + (clock === 'wall' ? elapsed : 0));
+    vi.spyOn(performance, 'now').mockImplementation(() => clock === 'monotonic' ? elapsed : 0);
+    const run = vi.fn<Run>(async () => result()), runtime = createPreparationFixtureRuntime(run);
+    await expect(runtime.withScope(scope(1_800_000), async () => {
+      await runtime.run(['first'], runOptions());
+      elapsed = 1_799_990;
+      await runtime.run(['last'], runOptions());
+      expect(run.mock.calls[1]![1].timeoutMs).toBe(10);
+      elapsed = 1_800_000;
+      await runtime.run(['expired'], runOptions()).catch(() => undefined);
+      return 'must not accept';
+    })).rejects.toThrow();
+    expect(run).toHaveBeenCalledTimes(2);
+  });
+
   it.each(['expired', 'aborted'] as const)('refuses %s setup before invoking its action', async kind => {
     const run = vi.fn<Run>(async () => result()), action = vi.fn(async () => 'ready');
     const options = scope(kind === 'expired' ? -1 : 1000);
