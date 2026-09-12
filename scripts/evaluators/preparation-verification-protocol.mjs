@@ -6,6 +6,8 @@ import { TextDecoder } from 'node:util';
 
 export const MAX_MESSAGE_BYTES = 256 * 1024;
 export const MAX_CALLS = 16;
+// Explicit host-selected upper bound, not a default or renewable call budget.
+export const MAX_SESSION_DURATION_MS = 300000;
 export const exact = (value, keys) => value !== null && typeof value === 'object' && !Array.isArray(value) &&
   [Object.prototype, null].includes(Object.getPrototypeOf(value)) && Reflect.ownKeys(value).length === keys.length &&
   keys.every(key => Object.hasOwn(Object.getOwnPropertyDescriptors(value), key) &&

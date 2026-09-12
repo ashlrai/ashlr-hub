@@ -12,10 +12,18 @@ import { performance } from 'node:perf_hooks';
 import { stripTypeScriptTypes, syncBuiltinESMExports } from 'node:module';
 import { createContext, runInContext, SourceTextModule, SyntheticModule } from 'node:vm';
 import { TextDecoder, types } from 'node:util';
-import { exact, readMessage, publishMessage, MAX_MESSAGE_BYTES, MAX_CALLS } from './preparation-verification-protocol.mjs';
+import { exact, readMessage, publishMessage, MAX_MESSAGE_BYTES, MAX_CALLS, MAX_SESSION_DURATION_MS } from './preparation-verification-protocol.mjs';
 
 const TARGET = 'src/core/resources/engineering-preparation.ts';
 const HASH = /^[a-f0-9]{64}$/;
+const LEAF_METHODS = Object.freeze({
+  check: 'checkResourceEngineeringPreparation', metadata: 'readPreparedResourceEngineeringMetadata',
+  bundle: 'readPreparedResourceEngineeringBundle',
+  'successor-check': 'checkResourceEngineeringSuccessorPreparation',
+  'successor-metadata': 'readResourceEngineeringSuccessorMetadata',
+  'successor-bundle': 'readResourceEngineeringSuccessorBundle',
+});
+const MANAGER_METHODS = Object.freeze({ 'manager-open': 'open', 'manager-check': 'check', 'manager-replay': 'replay', 'manager-close': 'close' });
 const sleeper = new Int32Array(new SharedArrayBuffer(4));
 const clock = performance.now.bind(performance);
 const wallClock = Date.now.bind(Date);
@@ -64,7 +72,7 @@ function startupInput() {
         path.resolve(value[key]) !== value[key] || fs.realpathSync(value[key]) !== value[key]) fail();
   }
   const duration = Date.parse(value.deadlineAt) - wallClock();
-  if (duration <= 0 || duration > 120000) fail();
+  if (duration <= 0 || duration > MAX_SESSION_DURATION_MS) fail();
   startup = Object.freeze(value); expires = clock() + duration;
 }
 
@@ -120,7 +128,7 @@ function normalizeOptions(value) {
   const timeoutMs = options.timeout === undefined ? Math.min(30000, Math.floor(remaining())) : options.timeout;
   const maxBuffer = options.maxBuffer === undefined ? 1024 * 1024 : options.maxBuffer;
   if (!encoding || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 30000 ||
-      !Number.isSafeInteger(maxBuffer) || maxBuffer < 1 || maxBuffer > 8 * 1024 * 1024 ||
+      !Number.isSafeInteger(maxBuffer) || maxBuffer < 1 || maxBuffer > 68 * 1024 * 1024 ||
       options.input !== undefined && typeof options.input !== 'string' && !Buffer.isBuffer(options.input)) fail();
   return { cwd: options.cwd ?? null, encoding, timeoutMs, maxBuffer,
     inputBase64: options.input === undefined ? null : bufferFrom(options.input).toString('base64') };
@@ -195,24 +203,77 @@ async function loadCandidate() {
     }, { context });
   });
   await subject.evaluate({ timeout: Math.max(1, Math.min(1000, Math.floor(remaining()))) }); remaining();
-  return { subject: subject.namespace, objectPrototype, arrayPrototype };
+  let workflow;
+  async function loadWorkflow() {
+    if (workflow) return workflow;
+    if (typeof bridge.workflowSource !== 'string' || byteLength(bridge.workflowSource) > 32 * 1024 * 1024 ||
+        !bridge.workflowDependencies || typeof bridge.workflowDependencies !== 'object') fail();
+    // Fixed shipped code runs in the child's host realm, never the controller.
+    // Its only preparation import is the selected candidate, not bridge.baseline.
+    const trusted = new SourceTextModule(bridge.workflowSource, {
+      identifier: 'trusted-preparation-workflow', importModuleDynamically: fail,
+      initializeImportMeta(meta) { meta.url = pathToFileURL(startup.bridgePath).href; },
+    });
+    const cache = new Map();
+    await trusted.link(specifier => {
+      if (cache.has(specifier)) return cache.get(specifier);
+      let namespace;
+      if (specifier === 'ashlr:preparation-candidate') {
+        namespace = Object.fromEntries(Object.keys(subject.namespace).filter(key =>
+          typeof subject.namespace[key] === 'function').map(key => {
+          const value = subject.namespace[key];
+          return [key, (...args) => plainData(value(...args), objectPrototype, arrayPrototype)];
+        }));
+      } else if (specifier === 'ashlr:preparation-native') {
+        namespace = { require(name) {
+          if (typeof name !== 'string' || !hasOwn(bridge.workflowDependencies, name)) fail();
+          const dependency = bridge.workflowDependencies[name];
+          return hasOwn(dependency, 'default') ? dependency.default : dependency;
+        } };
+      } else if (hasOwn(bridge.workflowDependencies, specifier)) namespace = bridge.workflowDependencies[specifier];
+      else fail();
+      const keys = Object.keys(namespace);
+      const module = new SyntheticModule(keys, function () {
+        for (const key of keys) this.setExport(key, namespace[key]);
+      });
+      cache.set(specifier, module); return module;
+    });
+    await trusted.evaluate({ timeout: Math.max(1, Math.min(1000, Math.floor(remaining()))) }); remaining();
+    if (typeof trusted.namespace.createPreparationWorkflow !== 'function') fail();
+    const instance = trusted.namespace.createPreparationWorkflow();
+    if (!instance || Object.values(MANAGER_METHODS).some(method => typeof instance[method] !== 'function')) fail();
+    workflow = instance; return workflow;
+  }
+  return { subject: subject.namespace, objectPrototype, arrayPrototype, loadWorkflow,
+    async closeWorkflow() { if (workflow) { await workflow.close(); remaining(); } } };
 }
 async function main() {
-  startupInput(); const { subject, objectPrototype, arrayPrototype } = await loadCandidate();
+  startupInput(); const { subject, objectPrototype, arrayPrototype, loadWorkflow, closeWorkflow } = await loadCandidate();
   if (typeof subject.checkResourceEngineeringPreparation !== 'function' || typeof subject.readPreparedResourceEngineeringMetadata !== 'function') fail();
   publishMessage(path.join(startup.outbox, 'ready.json'), { schemaVersion: 1, sessionId: startup.sessionId, ready: true });
   for (let id = 1; id <= MAX_CALLS + 1; id++) {
     const request = waitMessage(path.join(startup.inbox, `request-${id}.json`));
     if (!exact(request, ['schemaVersion', 'id', 'nonce', 'method', 'input']) || request.schemaVersion !== 1 || request.id !== id ||
-        typeof request.nonce !== 'string' || !HASH.test(request.nonce) || !['check', 'metadata', 'close'].includes(request.method) ||
+        typeof request.nonce !== 'string' || !HASH.test(request.nonce) ||
+        !(hasOwn(LEAF_METHODS, request.method) || hasOwn(MANAGER_METHODS, request.method) || request.method === 'close') ||
         id > MAX_CALLS && request.method !== 'close') fail();
     const base = { schemaVersion: 1, id, nonce: request.nonce };
     if (request.method === 'close') {
-      if (request.input !== null) fail(); publishMessage(path.join(startup.outbox, `reply-${id}.json`), { ...base, ok: true, value: null }); exit(0);
+      if (request.input !== null) fail(); await closeWorkflow();
+      publishMessage(path.join(startup.outbox, `reply-${id}.json`), { ...base, ok: true, value: null }); exit(0);
     }
     let reply;
     try {
-      const output = request.method === 'check' ? subject.checkResourceEngineeringPreparation(request.input) : subject.readPreparedResourceEngineeringMetadata(request.input);
+      let output;
+      if (hasOwn(LEAF_METHODS, request.method)) {
+        const method = subject[LEAF_METHODS[request.method]];
+        if (typeof method !== 'function') fail();
+        output = method(request.input);
+      } else {
+        if (request.method === 'manager-close' && request.input !== null) fail();
+        const manager = await loadWorkflow();
+        output = await manager[MANAGER_METHODS[request.method]](request.input);
+      }
       remaining();
       try { reply = { ...base, ok: true, value: plainData(output, objectPrototype, arrayPrototype) }; }
       catch { reply = { ...base, ok: false, error: 'invalid-result' }; }

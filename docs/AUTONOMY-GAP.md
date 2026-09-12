@@ -123,7 +123,11 @@ checks prevent a controller exit from claiming all inner work settled.
 The default-registry test completes two matching measurements; final focused
 coverage includes 433 tests across 18 suites (see the proposal's handoff).
 The output is deliberately rejected as
-Universe evaluation evidence. The full manager/successor correctness workload,
+Universe evaluation evidence. A candidate-linked workflow extension now exposes
+explicit manager restoration/check/replay and successor reads for real-process
+measurement. It uses the actual manager and owner over a disclosed nonexecuting
+supervisor fixture view; the installed default measurement does not yet score
+these operations. The full manager/successor correctness workload,
 frozen competitive reward, OS-wide process census, native transitive dependency
 pins and arbitrary controller-crash recovery remain open. This is neither an
 accepted Hub optimization nor provider/account/service activation. Build and

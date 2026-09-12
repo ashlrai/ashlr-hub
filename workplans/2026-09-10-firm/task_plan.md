@@ -1,6 +1,31 @@
 # Executable firm: package graph
 
-## Current increment — installed controller integration (baseline f00b4f01)
+## Current increment — faithful full-workflow measurement (baseline 2acf3771)
+
+- [x] Map manager replay, restart and successor paths with three Explore agents.
+- [x] Extend candidate substitution so nested workflow calls exercise candidate code, not the baseline.
+- [x] Build trusted real-store fixtures and candidate-owned read workflows with unchanged authority.
+- [x] Prove the implemented path coverage with substitution, return, between-call drift and restart controls; retain the broader mutation matrix as unfinished.
+- [x] Run real process, legacy and packaging checks; record measured scope and remaining reward requirements.
+
+Final gate: 352 tests across 12 suites, zero skips, 1,610.47s. Full build,
+source/web typechecks, strict new-test compilation, docs, lane classification and
+lint pass (zero errors, 107 existing warnings); local package dry-run includes
+all eight builtin bundle/manifest files. Two fresh manager baselines each record
+1,722 validated broker operations; two successor baselines each record 2,639.
+These are repeatable measurement observations, not a frozen reward. The next
+deliverable is candidate-linked during-call mutation controls using the existing
+trusted test-bridge seam, then integrated workload budgeting and scoring review.
+
+Previous turn is verified progress: the installed evaluator runs separately
+confined candidates, has independent process custody, and passes 433 distinct
+checks. The broad goal remains the autonomous engineering firm. The next gap is
+faithful workload coverage: current check/metadata-only measurement cannot prove
+manager restart/replay or successor behavior. Expand the workload before freezing
+a reward or optimizing the target. Existing resource reserves and live services
+remain unchanged; use private local fixtures and no provider calls.
+
+## Previous increment — installed controller integration (baseline f00b4f01)
 
 - [x] Revalidate source and explore the launch, comparator and workload gaps with three agents.
 - [x] Choose a closed version-pinned installed controller, never an unconfined project command.

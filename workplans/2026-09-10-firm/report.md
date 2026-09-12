@@ -1,6 +1,79 @@
 # Verified local handoff
 
-## Current continuation: installed evaluator with aggregate process custody
+## Current continuation: candidate-linked full-workflow measurement
+
+Baseline `2acf37714ee01135550de75d33de0a648ac4ce54`, initially clean branch
+`auto/p00` at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.
+Three parallel agents delivered the fixed workflow facade, candidate linking,
+readonly native grammar, fixtures and independent review. Parent integrated the
+real-process tests and evidence. Entire resume found no checkpoint; the original
+working checkout remains preserved.
+
+The installed bridge now embeds a separate fixed workflow graph. Every nested
+import of the mutable preparation module, including successor aliases, resolves
+to the candidate. Build metadata rejects accidental baseline inclusion; runtime
+linking has no candidate-selected dependency build or baseline fallback. Strict
+plain-data checks run before candidate results enter trusted manager code.
+Unrelated exported constants are ignored, while noncallable required imports fail.
+
+Explicit measured operations exercise real manager/owner restoration, check,
+exact replay, ordinary full bundle and successor check/metadata/full bundle reads.
+The supervisor is a disclosed nonexecuting fixture view, not a live console.
+Successor fixtures use real local delivery receipts and command-only evaluations;
+they never execute a provider or the successor campaign. Only already-restored
+registrations can reach manager replay. Detached ledgers expose per-request and
+cumulative validated broker operations, not an exhaustive OS-process census.
+
+Real testing discovered missing exact readonly Git forms and insufficient time
+for the larger sequence. Those forms are now individually admitted without
+writes, wildcard revisions or candidate environment injection. Full workflow
+tests explicitly use one 300-second session deadline; the ordinary 60-second
+default, 30-second tool limit and installed 110-second example are unchanged.
+The successor protocol took about 231 seconds in an observed run, not a speedup.
+
+Full report equality exposed a test-context mismatch: the trusted fixture still
+held a setup owner and a signing key unavailable to the candidate. Expected full
+reports are now recomputed after setup closure in an empty private home; no
+readiness fields are stripped and no authority is copied. Independent review
+also expanded snapshots to precede candidate startup and corrected final
+dispatch/settlement deadline edges. Six deterministic private-mailbox tests prove
+expiry/cancellation during confinement refuses launch, elapsed setup is deducted,
+and a clean but late close remains refused. No native processes run in these six
+tests; the separate real-process regressions retain their role.
+
+The full local build, source/web typechecks, strict compilation of all new tests,
+documentation checks and lint pass (zero errors, 107 existing warnings). Real-IO
+classification passes with 328 real-IO files and 679 unit files. The actual local
+npm dry-run includes all seven builtin code files plus the manifest, with none
+missing; packed size is 12,127,636 bytes at this uncommitted build. This is local
+packaging evidence, not publication or deployment.
+
+Final combined verification passed **352 tests across 12 suites, zero skips**, in
+1,610.47s on macOS/Node 24.18.0. This includes all twelve new real workflow cases,
+the fixed build graph, exact native grammar, six deterministic deadline cases,
+actual child isolation, the legacy measurement path, actual installed execution,
+registry/activity and release packaging/byte coverage. The earlier pass had
+190 successes and one old fixture-expectation failure; the complete affected
+workflow suite was rerun after correcting it, not excluded or weakened.
+
+Two fresh manager processes agree on 1,722 validated broker operations per
+sequence (12 blob operations); two fresh successor processes agree on 2,639
+(23 blob operations). Complete outputs and private filesystem snapshots match.
+Detailed per-operation observations and remaining candidate-linked mutation
+controls are recorded in `workflow-notes.md` and the benchmark plan.
+
+The default installed measurement workload remains the prior eight checks:
+the new workflow protocol is not yet the frozen
+competitive correctness/reward workload. Missing adversarial matrix cases,
+independent complete process census, arbitrary controller-crash recovery and an
+accepted useful Hub optimization remain next milestones. This increment makes
+those measurements more faithful; it does not activate an autonomous company.
+No account policies, real KILL marker, providers, services, remote repositories,
+npm publication or production deployment were changed. Parent owns the local
+commit; clean post-commit build identity and unchanged builtin manifest bytes
+are checked at handoff. Rollback source is the baseline commit above.
+
+## Previous continuation: installed evaluator with aggregate process custody
 
 Baseline `f00b4f01c44ab9b44e9f7e7c0eaeda377310d3f8`, initially clean branch
 `auto/p00` at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.

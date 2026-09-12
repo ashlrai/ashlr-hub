@@ -1,0 +1,120 @@
+/** Build/parse only: generated evaluator and candidate code are never evaluated. */
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import ts from 'typescript';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { buildPreparationVerificationBridge, PREPARATION_BUILTIN_FILES } from '../scripts/build-preparation-builtin.mjs';
+
+const builds = vi.hoisted(() => [] as Array<{
+  options: import('esbuild').BuildOptions;
+  result: import('esbuild').BuildResult;
+}>);
+vi.mock('esbuild', async importOriginal => {
+  const original = await importOriginal<typeof import('esbuild')>();
+  return { ...original, async build(options: import('esbuild').BuildOptions) {
+    const result = await original.build(options);
+    builds.push({ options, result });
+    return result;
+  } };
+});
+
+const repository = dirname(dirname(fileURLToPath(import.meta.url)));
+const target = join(repository, 'src/core/resources/engineering-preparation.ts');
+const candidateSlot = 'ashlr:preparation-candidate';
+const installedFiles = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs',
+  'preparation-verification-child.mjs', 'preparation-verification-controller.mjs',
+  'preparation-verification-protocol.mjs', 'preparation-verification-tool.mjs', 'preparation-verification.mjs'];
+let root: string;
+let first: string;
+let second: string;
+let workflow: string;
+let graph: import('esbuild').Metafile;
+
+function parsed(text: string) {
+  return ts.createSourceFile('fixed-workflow.mjs', text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+}
+function imports(text: string) {
+  return parsed(text).statements.filter(ts.isImportDeclaration).map(statement => {
+    if (!ts.isStringLiteral(statement.moduleSpecifier)) throw new Error('Nonliteral fixed import');
+    const bindings = statement.importClause?.namedBindings;
+    return { path: statement.moduleSpecifier.text,
+      names: bindings && ts.isNamedImports(bindings)
+        ? bindings.elements.map(element => element.propertyName?.text ?? element.name.text) : [] };
+  });
+}
+
+beforeAll(async () => {
+  root = realpathSync(mkdtempSync(join(tmpdir(), 'preparation-workflow-bridge-')));
+  first = join(root, 'first'); second = join(root, 'second');
+  await buildPreparationVerificationBridge(repository, join(first, 'preparation-bridge.mjs'));
+  const captured = builds.find(entry => entry.options.metafile === true);
+  if (!captured?.result.metafile || !captured.result.outputFiles?.[0]) throw new Error('Missing workflow build graph');
+  graph = captured.result.metafile; workflow = captured.result.outputFiles[0].text;
+  // The mutable artifact location cannot redirect author-time dependency input.
+  const candidate = join(root, 'candidate');
+  mkdirSync(join(candidate, 'scripts/evaluators'), { recursive: true, mode: 0o700 });
+  mkdirSync(join(candidate, 'src/core/resources'), { recursive: true, mode: 0o700 });
+  writeFileSync(join(candidate, 'scripts/evaluators/preparation-verification-workflow.ts'), 'export const candidateOnly = true;\n');
+  writeFileSync(join(candidate, 'src/core/resources/engineering-preparation.ts'), 'export const candidateOnly = true;\n');
+  vi.stubEnv('ASHLR_UNIVERSE_CANDIDATE', candidate);
+  await buildPreparationVerificationBridge(repository, join(second, 'preparation-bridge.mjs'));
+}, 30000);
+
+afterAll(() => {
+  vi.unstubAllEnvs();
+  if (root) rmSync(root, { recursive: true, force: true });
+});
+
+describe('fixed candidate-linked workflow packaging', () => {
+  it('bundles the real manager and successor alias without inlining baseline preparation', () => {
+    const inputs = Object.keys(graph.inputs).map(file => resolve(repository, file));
+    expect(inputs).toContain(join(repository, 'scripts/evaluators/preparation-verification-workflow.ts'));
+    expect(inputs).toContain(join(repository, 'src/core/resources/console-engineering-preparation.ts'));
+    expect(inputs).toContain(join(repository, 'src/core/resources/engineering-preparation-registry.ts'));
+    expect(inputs).toContain(join(repository, 'src/core/resources/engineering-successor-preparation.ts'));
+    expect(inputs).not.toContain(target);
+    const external = Object.values(graph.outputs).flatMap(output => output.imports);
+    expect(external.some(entry => entry.path === candidateSlot && entry.external)).toBe(true);
+    expect(external.every(entry => entry.external && (entry.path === candidateSlot || isBuiltin(entry.path)))).toBe(true);
+  });
+
+  it('routes both ordinary and successor named imports through the candidate slot', () => {
+    const candidateImports = imports(workflow).filter(entry => entry.path === candidateSlot);
+    const names = new Set(candidateImports.flatMap(entry => entry.names));
+    for (const name of ['checkResourceEngineeringPreparation', 'readPreparedResourceEngineeringBundle',
+      'readPreparedResourceEngineeringMetadata', 'prepareResourceEngineeringBundle',
+      'readResourceEngineeringSuccessorBundle', 'readResourceEngineeringSuccessorMetadata',
+      'checkResourceEngineeringSuccessorPreparation', 'prepareResourceEngineeringSuccessorBundle']) {
+      expect(names.has(name), name).toBe(true);
+    }
+    expect(imports(workflow).every(entry => entry.path === candidateSlot ||
+      entry.path === 'ashlr:preparation-native' || isBuiltin(entry.path))).toBe(true);
+  });
+
+  it('embeds the exact inspected workflow as inert string data in the existing bridge', () => {
+    const bridge = parsed(readFileSync(join(first, 'preparation-bridge.mjs'), 'utf8'));
+    const declarations = bridge.statements.filter(ts.isVariableStatement).flatMap(statement => statement.declarationList.declarations);
+    const value = declarations.find(declaration => ts.isIdentifier(declaration.name) && declaration.name.text === 'workflowSource')?.initializer;
+    expect(value && ts.isStringLiteral(value) ? value.text : undefined).toBe(workflow);
+  });
+
+  it('retains the fixed seven-file contract and copies only its unchanged trusted sidecars', () => {
+    expect(PREPARATION_BUILTIN_FILES).toEqual(installedFiles);
+    // This authoring helper leaves copying the top-level evaluator to the full packager.
+    expect(readdirSync(first).sort()).toEqual(installedFiles.filter(name => name !== 'preparation-verification.mjs').sort());
+    for (const name of installedFiles.filter(name => !['preparation-bridge.mjs', 'preparation-verification.mjs'].includes(name))) {
+      expect(readFileSync(join(first, name))).toEqual(readFileSync(join(repository, 'scripts/evaluators', name)));
+    }
+  });
+
+  it('is byte deterministic and ignores a candidate-supplied workflow or dependency source', () => {
+    expect(readdirSync(second).sort()).toEqual(readdirSync(first).sort());
+    for (const name of readdirSync(first)) expect(readFileSync(join(second, name))).toEqual(readFileSync(join(first, name)));
+    const graphs = builds.filter(entry => entry.options.metafile === true).map(entry => entry.result.metafile);
+    expect(graphs).toHaveLength(2);
+    expect(graphs[1]).toEqual(graphs[0]);
+  });
+});

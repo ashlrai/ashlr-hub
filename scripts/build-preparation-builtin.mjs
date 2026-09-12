@@ -5,6 +5,7 @@
 import { createHash } from 'node:crypto';
 import { copyFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { isBuiltin } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { build } from 'esbuild';
 
@@ -25,6 +26,33 @@ const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export async function buildPreparationVerificationBridge(repository, outfile) {
   const root = realpathSync(repository);
   const subject = join(root, 'src/core/resources/engineering-preparation.ts');
+  const candidateSpecifier = 'ashlr:preparation-candidate';
+  // This separate trusted graph must never inline the baseline subject. Every
+  // nested reader, including successor re-exports, resolves to the same slot.
+  const workflow = await build({ absWorkingDir: root,
+    entryPoints: [join(root, 'scripts/evaluators/preparation-verification-workflow.ts')],
+    bundle: true, platform: 'node', target: 'node24', format: 'esm', write: false, metafile: true,
+    banner: { js: 'import { require as fixedWorkflowRequire } from "ashlr:preparation-native"; const require = fixedWorkflowRequire;' },
+    plugins: [{ name: 'exact-preparation-candidate', setup(builder) {
+      builder.onResolve({ filter: /engineering-preparation\.[cm]?[jt]s$/ }, async args => {
+        if (args.pluginData?.candidateResolved) return;
+        const resolved = await builder.resolve(args.path, { resolveDir: args.resolveDir, kind: args.kind,
+          pluginData: { candidateResolved: true } });
+        if (resolved.errors.length) return { errors: resolved.errors };
+        if (resolved.path && realpathSync(resolved.path) === subject) return { path: candidateSpecifier, external: true };
+      });
+    } }], logLevel: 'silent' });
+  if (Object.keys(workflow.metafile.inputs).some(file => resolve(root, file) === subject)) {
+    throw new Error('Trusted workflow unexpectedly includes baseline preparation');
+  }
+  const workflowImports = Object.values(workflow.metafile.outputs).flatMap(output => output.imports);
+  if (!workflowImports.some(entry => entry.path === candidateSpecifier) ||
+      workflowImports.some(entry => entry.path !== candidateSpecifier && !isBuiltin(entry.path))) {
+    throw new Error('Trusted workflow has an unsupported dependency');
+  }
+  const workflowNatives = [...new Set(workflowImports.filter(entry => isBuiltin(entry.path)).map(entry => entry.path))].sort();
+  const workflowSource = workflow.outputFiles[0]?.text;
+  if (!workflowSource || Buffer.byteLength(workflowSource) > 32 * 1024 * 1024) throw new Error('Trusted workflow exceeds source limit');
   const source = readFileSync(subject, 'utf8');
   const paths = [...new Set([...source.matchAll(/\bfrom\s+'([^']+)'/g)].map(match => match[1]))]
     .filter(path => path.startsWith('.'));
@@ -32,8 +60,11 @@ export async function buildPreparationVerificationBridge(repository, outfile) {
   const imports = paths.map((path, index) => `import * as dependency${index} from ${JSON.stringify(resolve(dirname(subject), path.replace(/\.js$/, '.ts')))};`);
   mkdirSync(dirname(outfile), { recursive: true });
   await build({ absWorkingDir: root, stdin: {
-    contents: `${imports.join('\n')}\nimport * as baseline from ${JSON.stringify(subject)};
+    contents: `${imports.join('\n')}\n${workflowNatives.map((specifier, index) => `import * as workflowNative${index} from ${JSON.stringify(specifier)};`).join('\n')}
+    import * as baseline from ${JSON.stringify(subject)};
     export { baseline };
+    export const workflowSource = ${JSON.stringify(workflowSource)};
+    export const workflowDependencies = {${workflowNatives.map((specifier, index) => `${JSON.stringify(specifier)}:workflowNative${index}`).join(',')}};
     export { runVerifySubprocessAsync } from ${JSON.stringify(join(root, 'src/core/run/verify-commands.ts'))};
     export { confinedUniverseArgv } from ${JSON.stringify(join(root, 'src/core/universe/fixed-evaluator.ts'))};
     export const dependencies = {${paths.map((path, index) => `${JSON.stringify(path)}:dependency${index}`).join(',')}};`,

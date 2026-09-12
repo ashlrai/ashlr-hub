@@ -79,6 +79,86 @@ confined success does not carry forward to nested candidate confinement. See the
 
 ### Installed builtin measurement route
 
+#### Candidate-linked workflow measurement
+
+The workflow extension based on `2acf37714ee01135550de75d33de0a648ac4ce54`
+adds a separate fixed workflow graph embedded in the shipped bridge. At authoring
+time, only the exact preparation module is externalized; a build graph check
+rejects accidental inclusion of baseline preparation or non-native dependencies.
+At runtime that import resolves to the selected candidate, including successor
+re-exports. It never falls back to baseline code or builds a candidate-supplied
+dependency. Candidate return values are checked before trusted manager code can
+consume them, not merely after final JSON serialization.
+
+The private measurement protocol adds ordinary full bundle reads, successor
+check/metadata/full bundle reads, and explicit manager open/check/replay/close.
+Manager construction and restoration happen inside the measured open request.
+The actual manager and engineering owner validate real registration stores;
+their supervisor is a deliberately nonexecuting fixture view backed by pinned
+project directories and validated pool files. Only already-restored IDs can
+reach replay. This is not a live supervisor or an execution permission grant.
+
+The controller exposes detached cumulative and per-request launch counts. They
+count validated, settled native broker operations, not all OS processes or
+incompletely settled failures. The fixed tool wrapper and its descendants are
+not a complete process census. A failed session cannot become accepted evidence.
+Reconcile totals at completed request boundaries and require successful session
+close before interpreting a run; an in-flight request can contribute launches
+and appear in the ledger before its request reply completes.
+The successor reader's larger declared buffer is admitted while actual tool
+output remains capped at 64 KiB per stream; writes, network tools and expanded
+Git command forms remain refused.
+
+The full workflow tests explicitly request a 300-second session deadline. The
+first real manager run exhausted the earlier 120-second leaf ceiling; a complete
+successor sequence then measured 231 seconds, leaving insufficient headroom at 240.
+One deadline covers all calls and shutdown; it is never renewed by an operation.
+The normal 60-second session default, individual 30-second tool ceiling and
+110-second installed evaluator example below remain unchanged. A larger test
+budget is not evidence of speedup or permission to exceed a campaign allowance.
+
+The corrected manager fixture produces identical counts in two fresh candidate
+processes, with exact output and before-startup/after-close snapshot equality:
+
+| Operation | Validated broker operations | Of which blob operations |
+| --- | ---: | ---: |
+| Restoration/open | 708 | 6 |
+| Full bundle read | 237 | 2 |
+| Check | 264 | 2 |
+| Exact replay | 513 | 2 |
+| Total | 1,722 | 12 |
+
+These are observations for the private fixed fixture, not a frozen competitive
+score. Owner work outside the mutable preparation module also contributes.
+
+The real delivered successor fixture likewise matches in two fresh processes:
+
+| Operation | Validated broker operations | Of which blob operations |
+| --- | ---: | ---: |
+| Successor check | 700 | 7 |
+| Successor metadata | 909 | 8 |
+| Successor full bundle | 1,030 | 8 |
+| Total | 2,639 | 23 |
+
+No successor campaign executes in these reads. The command-only upstream setup,
+trusted expected-output reads and fixture teardown are outside the measured calls.
+
+Run the new real-process evidence and authoring-graph controls locally with:
+
+```sh
+npm run test:serial -- test/preparation-verification-workflow.test.ts test/preparation-verification-workflow-bridge.test.ts test/preparation-verification-readonly-commands.test.ts test/preparation-verification-controller-deadline.test.ts
+```
+
+These tests create and remove private temporary fixtures, including a genuine
+two-generation command-only upstream delivery. They do not contact a model,
+change real account policy or launch a successor campaign. See the handoff for
+the actual verification outcome. The default installed harness still emits its
+original non-evaluation measurement; these expanded operations are not yet its
+frozen scoring workload. Completing the full correctness matrix, integrated
+workload budgeting and repeated numerical baseline precedes optimization.
+
+#### Installed invocation
+
 The continuation based on `f00b4f01c44ab9b44e9f7e7c0eaeda377310d3f8`
 adds the closed builtin `preparation-measurement-v1`. The first actual
 default-registry test completed two measurements successfully in approximately

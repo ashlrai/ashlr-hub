@@ -6,10 +6,19 @@ import { setTimeout, clearTimeout } from 'node:timers';
 import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { userInfo } from 'node:os';
-import { exact, MAX_CALLS, MAX_MESSAGE_BYTES, publishMessage, readMessage } from './preparation-verification-protocol.mjs';
+import { exact, MAX_CALLS, MAX_MESSAGE_BYTES, MAX_SESSION_DURATION_MS, publishMessage, readMessage } from './preparation-verification-protocol.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+const GIT_CONFIG = ['core.hooksPath=/dev/null', 'core.fsmonitor=false', 'core.attributesFile=/dev/null',
+  'commit.gpgsign=false', 'tag.gpgsign=false', 'gc.auto=0', 'maintenance.auto=false',
+  'core.logAllRefUpdates=false', 'protocol.allow=never'];
+const METHODS = ['check', 'metadata', 'bundle', 'successor-check', 'successor-metadata', 'successor-bundle',
+  'manager-open', 'manager-check', 'manager-replay', 'manager-close'];
+function branchRef(value) {
+  return typeof value === 'string' && value.startsWith('refs/heads/') && !value.includes('..') &&
+    value.slice(11).split('/').every(part => /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/.test(part) && !part.endsWith('.') && !part.endsWith('.lock'));
+}
 const failure = () => new Error('CANDIDATE_SESSION_FAILED');
 const wait = () => new Promise(done => setTimeout(done, 2));
 function within(root, file) { const part = relative(root, file); return part === '' || part !== '..' && !part.startsWith('../') && !isAbsolute(part); }
@@ -31,13 +40,16 @@ export function readonlyCommand(request, fixtureRoot, scratch) {
   if (!exact(options, ['cwd', 'encoding', 'timeoutMs', 'maxBuffer', 'inputBase64']) ||
       !(options.cwd === null || typeof options.cwd === 'string' && isAbsolute(options.cwd) && within(fixtureRoot, options.cwd)) ||
       !['utf8', 'buffer'].includes(options.encoding) || !Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 30000 ||
-      !Number.isSafeInteger(options.maxBuffer) || options.maxBuffer < 1 || options.maxBuffer > 8 * 1024 * 1024) throw failure();
+      // deliveryGit declares the artifact ceiling plus framing. The fixed tool
+      // still independently caps actual captured output at 64 KiB per stream.
+      !Number.isSafeInteger(options.maxBuffer) || options.maxBuffer < 1 || options.maxBuffer > 68 * 1024 * 1024) throw failure();
   const input = options.inputBase64 === null ? undefined : base64(options.inputBase64);
   let file, args; let blob = false;
   if (request.file === 'git' || request.file === '/usr/bin/git') {
     const rest = [...request.args]; let repository;
+    if (rest[0] === '--no-replace-objects') rest.shift();
     while (rest[0] === '-c') {
-      rest.shift(); if (!['core.hooksPath=/dev/null', 'core.fsmonitor=false', 'commit.gpgsign=false'].includes(rest.shift())) throw failure();
+      rest.shift(); if (!GIT_CONFIG.includes(rest.shift())) throw failure();
     }
     if (rest.shift() !== '-C') throw failure(); repository = rest.shift();
     if (typeof repository !== 'string' || !within(fixtureRoot, canonicalDirectory(repository))) throw failure();
@@ -45,11 +57,17 @@ export function readonlyCommand(request, fixtureRoot, scratch) {
     if (verb === 'rev-parse') {
       if (!(rest.length === 1 && ['--show-toplevel', '--show-object-format', '--git-dir', '--is-inside-work-tree'].includes(rest[0]) ||
           JSON.stringify(rest) === JSON.stringify(['--is-inside-work-tree', '--absolute-git-dir', '--git-common-dir', '--show-toplevel']) ||
-          rest.length === 2 && rest[0] === '--verify' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})\^\{commit\}$/.test(rest[1]))) throw failure();
+          rest.length === 2 && rest[0] === '--verify' && (/^(?:[a-f0-9]{40}|[a-f0-9]{64})\^\{(?:commit|tree)\}$/.test(rest[1]) || branchRef(rest[1])))) throw failure();
+    } else if (verb === 'symbolic-ref') {
+      if (rest.length !== 2 || rest[0] !== '-q' || !branchRef(rest[1])) throw failure();
+    } else if (verb === 'show-ref') {
+      if (rest.length !== 3 || rest[0] !== '--verify' || rest[1] !== '--quiet' || !branchRef(rest[2])) throw failure();
+    } else if (verb === 'rev-list') {
+      if (rest.length !== 4 || rest[0] !== '--parents' || rest[1] !== '-n' || rest[2] !== '1' || !OID.test(rest[3])) throw failure();
     } else if (verb === 'ls-files') {
       if (rest.length !== 1 || rest[0] !== '-z') throw failure();
     } else if (verb === 'for-each-ref') {
-      if (rest.length !== 1 || rest[0] !== '--format=%(refname)') throw failure();
+      if (rest[0] !== '--format=%(refname)' || !(rest.length === 1 || rest.length === 2 && branchRef(rest[1]))) throw failure();
     } else if (verb === 'ls-tree') {
       if (rest.length !== 3 || !['-rz', '-rlz'].includes(rest[0]) || rest[1] !== '--full-tree' || !OID.test(rest[2])) throw failure();
     } else if (verb === 'cat-file') {
@@ -60,7 +78,8 @@ export function readonlyCommand(request, fixtureRoot, scratch) {
       } else throw failure();
     } else throw failure();
     if (verb !== 'cat-file' && input !== undefined) throw failure();
-    file = '/usr/bin/git'; args = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repository, verb, ...rest];
+    // Rebuild an invariant safe prefix rather than trusting candidate options.
+    file = '/usr/bin/git'; args = ['--no-replace-objects', ...GIT_CONFIG.flatMap(value => ['-c', value]), '-C', repository, verb, ...rest];
   } else if (request.file === '/bin/ls') {
     if (request.args.length < 2 || request.args[0] !== '-lde' || input !== undefined && input.length !== 0 || request.args.slice(1).some(path =>
       !isAbsolute(path) || resolve(path) !== path || !within(fixtureRoot, path) && !within(scratch, path))) throw failure();
@@ -74,7 +93,7 @@ export function readonlyCommand(request, fixtureRoot, scratch) {
 }
 
 export async function createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs = 60000, signal, activity }) {
-  if (process.platform !== 'darwin' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000 ||
+  if (process.platform !== 'darwin' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_SESSION_DURATION_MS ||
       typeof bridge?.runVerifySubprocessAsync !== 'function' || typeof bridge?.confinedUniverseArgv !== 'function') throw failure();
   for (const path of [candidateRoot, fixtureRoot, workRoot]) canonicalDirectory(path);
   if (within(candidateRoot, workRoot) || within(fixtureRoot, workRoot) || within(workRoot, candidateRoot)) throw failure();
@@ -90,7 +109,8 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
   if (signal?.aborted) throw failure();
   const environment = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: scratch, USERPROFILE: scratch, TMPDIR: scratch,
     ASHLR_HOME: scratch, ASHLR_UNIVERSE_CANDIDATE: candidateRoot, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
-    GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LANG: 'C', LC_ALL: 'C' };
+    GIT_CONFIG_SYSTEM: '/dev/null', GIT_ATTR_NOSYSTEM: '1', GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1',
+    GIT_ALLOW_PROTOCOL: '', GIT_PROTOCOL_FROM_USER: '0', GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LANG: 'C', LC_ALL: 'C' };
   const readable = [fixtureRoot, inbox, dirname(child), dirname(bridgePath), candidateRoot];
   function confined(command) {
     const argv = bridge.confinedUniverseArgv(command, scratch, scratch, readable, workRoot);
@@ -111,13 +131,16 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
   }
   const command = confined([process.execPath, '--no-addons', '--experimental-vm-modules', '--no-warnings', child]);
   command[2] += '\n(deny process-fork)\n(deny signal)\n';
+  const launchTimeoutMs = Math.floor(deadline - performance.now());
+  if (signal?.aborted || launchTimeoutMs <= 0) throw failure();
   signal?.addEventListener('abort', onAbort, { once: true });
   let terminal, terminalError, closePromise, busy = false, closed = false, faulted = false, callId = 0, execId = 0;
-  const completion = bridge.runVerifySubprocessAsync(command, { cwd: scratch, env: environment, timeoutMs,
+  const cumulativeMeasurement = { processes: 0, blobProcesses: 0 }, requests = [];
+  const completion = bridge.runVerifySubprocessAsync(command, { cwd: scratch, env: environment, timeoutMs: launchTimeoutMs,
     input: JSON.stringify({ schemaVersion: 1, sessionId, inbox, outbox, candidateRoot, bridgePath, deadlineAt }),
     maxOutputChars: 4096, signal: abort.signal, terminationGraceMs: 1000, requireProcessGroupExit: true,
     ...(activity ? { processGroupLifecycle: activity.lifecycle('candidate') } : {}) }).then(result => { terminal = result; return result; }, error => { terminalError = error; });
-  const timer = setTimeout(() => abort.abort(), timeoutMs);
+  const timer = setTimeout(() => abort.abort(), Math.max(0, deadline - performance.now()));
   function guard(allowTerminal = false) { if (faulted || terminal && !allowTerminal || terminalError || abort.signal.aborted || performance.now() >= deadline) throw failure(); }
   async function settle() {
     await completion;
@@ -130,7 +153,9 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
     if (request.id !== execId + 1 || request.id > 4096) throw failure();
     guard(); execId = request.id;
     const argv = confined([process.execPath, '--no-addons', tool]);
-    const remaining = Math.max(1, Math.floor(deadline - performance.now()));
+    guard();
+    const remaining = Math.floor(deadline - performance.now());
+    if (remaining <= 0) throw failure();
     // Count observed broker launches, never child-provided counters or failed
     // pre-spawn attempts. This is not a census of trusted tool descendants.
     const result = await bridge.runVerifySubprocessAsync(argv, { cwd: scratch, env: environment,
@@ -145,11 +170,13 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
         output.error !== null && (!exact(output.error, ['code']) || typeof output.error.code !== 'string')) throw failure();
     base64(output.stdoutBase64); base64(output.stderrBase64);
     measurement.processes++; if (selected.blob) measurement.blobProcesses++;
+    cumulativeMeasurement.processes++; if (selected.blob) cumulativeMeasurement.blobProcesses++;
     delete output.started;
     guard(); publishMessage(join(inbox, `exec-reply-${execId}.json`), { schemaVersion: 1, id: execId, nonce: request.nonce, ok: true, result: output });
   }
   async function exchange(method, input) {
     const id = ++callId, nonce = randomBytes(32).toString('hex'), measurement = { processes: 0, blobProcesses: 0 };
+    requests.push({ id, method, measurement });
     publishMessage(join(inbox, `request-${id}.json`), { schemaVersion: 1, id, nonce, method, input });
     while (true) {
       guard(method === 'close');
@@ -160,7 +187,10 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
         if (!(exact(reply, ['schemaVersion', 'id', 'nonce', 'ok', 'value']) && reply.ok === true ||
             exact(reply, ['schemaVersion', 'id', 'nonce', 'ok', 'error']) && reply.ok === false && ['candidate-threw', 'invalid-result'].includes(reply.error)) ||
             reply.schemaVersion !== 1 || reply.id !== id || reply.nonce !== nonce || method === 'close' && (!reply.ok || reply.value !== null)) throw failure();
-        return reply.ok ? { value: reply.value, measurement } : { error: reply.error, measurement };
+        // Preserve the existing call response; aggregate evidence is available
+        // through the separate detached ledger, not added to legacy replies.
+        const counts = { measurement: { ...measurement } };
+        return reply.ok ? { value: reply.value, ...counts } : { error: reply.error, ...counts };
       }
       if (terminal) throw failure();
       await wait();
@@ -186,8 +216,12 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
     throw failure();
   }
   return {
+    // Read-only copies remain useful after a failed call or close. They are
+    // observed native launches, not a claim that the invocation was accepted.
+    measurementLedger() { return { ...cumulativeMeasurement,
+      requests: requests.map(({ id, method, measurement }) => ({ id, method, ...measurement })) }; },
     async call(method, input) {
-      if (closed || busy || faulted || callId >= MAX_CALLS || !['check', 'metadata'].includes(method)) throw failure();
+      if (closed || busy || faulted || callId >= MAX_CALLS || !METHODS.includes(method)) throw failure();
       busy = true;
       try { return await exchange(method, input); }
       catch { await discard(); throw failure(); }
@@ -201,7 +235,7 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
       closePromise = (async () => {
         try {
           if (busy || faulted) { await discard(); throw failure(); }
-          await exchange('close', null); await settle();
+          await exchange('close', null); await settle(); guard(true);
         } catch { await discard(); throw failure(); }
         finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
       })();
