@@ -87,6 +87,12 @@ publication. Replacement invalidates the plan rather than silently adopting new
 acceptance rules. Diagnostic-only and arbitrary builtins are refused. Existing
 automatic admission and supervision can consume the resulting bundle, but a
 prepared recipe alone does not establish account capacity or running autonomy.
+The materialized experiment seed must also match the immutable Git inventory
+validated against calibration, before campaign/catalog creation and on replay.
+Git replacement objects cannot substitute different files during materialization.
+A mismatch leaves incomplete output for inspection, without a receipt or eligible
+campaign; no automatic repair or worker dispatch follows. A target-only successor
+is checked against its own requested seed, not forced back to the baseline bytes.
 
 1. Write a reviewed recipe as private `0600` JSON, including a new `codex/`
    delivery branch and explicit budgets. The [historical marker-filter recipe](FIRM-DEMO.md#a-real-hub-source-campaign)

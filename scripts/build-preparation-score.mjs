@@ -165,7 +165,7 @@ export async function buildPreparationScoringBuiltin({ measurementDirectory, cap
   const compilerSources = captureCompilerSources(sourceRoot);
   const { authorPreparationTypecheckProject } = await import('./build-preparation-typecheck.mjs');
   const typecheckProject = await authorPreparationTypecheckProject({ repository: sourceRoot,
-    expectedSourceSha256: descriptor.baseline.source.sha256 });
+    expectedSourceSha256: descriptor.baseline.source.sha256, expectedFiles: descriptor.baseline.files });
   assertCompilerSources(compilerSources);
   const output = join(sourceRoot, 'dist/core/universe/builtins/preparation-score');
   try { lstatSync(output); } catch (error) { if (error?.code !== 'ENOENT') throw error; mkdirSync(output, { mode: 0o700 }); }

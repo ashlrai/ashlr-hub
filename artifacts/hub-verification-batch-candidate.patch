@@ -41,7 +41,7 @@ diff --git a/src/core/resources/engineering-preparation.ts b/src/core/resources/
  interface SuccessorContext {
    source: UniverseCampaignDeliverySource;
    origin: UniverseCampaignDeliveryOrigin;
-@@ -196,8 +219,12 @@
+@@ -198,8 +221,12 @@
      if (!protectedFiles.length || protectedFiles.some(file => recipe.generation.files.includes(file)) ||
        recipe.generation.contextFiles.some(file => !entries.has(file))) fail('INVALID_INPUT', 'Fixed evaluator must be tracked and outside mutable paths');
 +    const evaluatorFiles = [...new Set(protectedFiles)].sort();

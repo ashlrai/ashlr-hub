@@ -40,10 +40,72 @@ function fixture() {
     write(`node_modules/typescript/lib/${name}`, fs.readFileSync(join(compilerDirectory, name)));
   }
   const author = () => authorPreparationTypecheckProject({ repository: root, expectedSourceSha256: sha(baseline) });
-  return { root, write, author };
+  const inventory = () => ['package.json', 'src/z-consumer.ts', PREPARATION_TYPECHECK_TARGET, 'tsconfig.json'].sort().map(path => {
+    const bytes = fs.readFileSync(join(root, path));
+    return { path, executable: (fs.statSync(join(root, path)).mode & 0o111) !== 0, bytes: bytes.length, sha256: sha(bytes) };
+  });
+  const calibrated = (expectedFiles: ReturnType<typeof inventory>) => authorPreparationTypecheckProject({ repository: root,
+    expectedSourceSha256: sha(baseline), expectedFiles });
+  return { root, write, author, inventory, calibrated };
 }
 
 describe('trusted preparation typecheck project authoring', () => {
+  it('binds the complete calibrated checkout while retaining separately pinned dependency declarations', async () => {
+    const f = fixture(); const expected = f.inventory();
+    const project = await f.calibrated(expected);
+    expect(project).toEqual(await f.author());
+    expect(project.files.some(file => file.path === 'node_modules/fixture-lib/index.d.ts')).toBe(true);
+    expect(verifyPreparationTypes(project, baseline)).toMatchObject({ passed: true });
+    expect(f.inventory()).toEqual(expected);
+  }, 15_000);
+
+  it('refuses a preexisting weakened consumer that would falsely approve an ill-typed candidate', async () => {
+    const f = fixture(); const inventory = f.inventory(); const original = await f.calibrated(inventory);
+    const candidate = baseline.replace('): string { return value;', '): number { return value.length;');
+    expect(verifyPreparationTypes(original, candidate)).toMatchObject({ passed: false });
+    f.write('src/z-consumer.ts', 'import { prepare } from "./core/resources/engineering-preparation.js";\nexport const observed: string | number = prepare("ok");\n');
+    const drifted = await f.author();
+    expect(verifyPreparationTypes(drifted, candidate)).toMatchObject({ passed: true });
+    expect(fs.readFileSync(join(f.root, PREPARATION_TYPECHECK_TARGET), 'utf8')).toBe(baseline);
+    await expect(f.calibrated(inventory)).rejects.toThrow(invalid);
+  }, 15_000);
+
+  it.each(['deleted-consumer', 'config', 'package', 'executable-mode', 'untracked-ambient'] as const)(
+    'refuses %s divergence with unchanged target', async kind => {
+      const f = fixture(); const inventory = f.inventory();
+      if (kind === 'deleted-consumer') fs.unlinkSync(join(f.root, 'src/z-consumer.ts'));
+      if (kind === 'config') f.write('tsconfig.json', JSON.stringify({ compilerOptions: PREPARATION_TYPECHECK_OPTIONS,
+        include: ['src'], exclude: ['src/z-consumer.ts'] }));
+      if (kind === 'package') f.write('package.json', '{"type":"module","name":"changed"}');
+      if (kind === 'executable-mode') fs.chmodSync(join(f.root, 'src/z-consumer.ts'), 0o700);
+      if (kind === 'untracked-ambient') f.write('src/ambient.d.ts', 'declare const untrackedAmbient: string;\n');
+      expect(fs.readFileSync(join(f.root, PREPARATION_TYPECHECK_TARGET), 'utf8')).toBe(baseline);
+      await expect(f.calibrated(inventory)).rejects.toThrow(invalid);
+    }, 15_000);
+
+  it('rechecks calibrated files outside the compiler graph after authoring', async () => {
+    const f = fixture(); f.write('protected.txt', 'original');
+    const inventory = [...f.inventory(), { path: 'protected.txt', executable: false, bytes: 8, sha256: sha('original') }];
+    const actual = await vi.importActual<typeof import('node:fs')>('node:fs'); let injected = false;
+    vi.mocked(fs.openSync).mockImplementation((...args: Parameters<typeof fs.openSync>) => {
+      if (!injected && args[0] === join(f.root, 'node_modules/fixture-lib/index.d.ts')) {
+        f.write('protected.txt', 'modified'); injected = true;
+      }
+      return actual.openSync(...args);
+    });
+    await expect(f.calibrated(inventory)).rejects.toThrow(invalid); expect(injected).toBe(true);
+  }, 15_000);
+
+  it.each(['escape', 'duplicate', 'oversized', 'digest', 'size'] as const)('refuses malformed calibrated inventory %s', async kind => {
+    const f = fixture(); const inventory = f.inventory();
+    if (kind === 'escape') inventory[0]!.path = '../outside';
+    if (kind === 'duplicate') inventory.push({ ...inventory[0]! });
+    if (kind === 'oversized') inventory[0]!.bytes = 64 * 1024 * 1024 + 1;
+    if (kind === 'digest') inventory[0]!.sha256 = '0'.repeat(64);
+    if (kind === 'size') inventory[0]!.bytes++;
+    await expect(f.calibrated(inventory)).rejects.toThrow(invalid);
+  }, 15_000);
+
   it('captures all roots, reverse consumers, referenced libs and package metadata deterministically without emitting files', async () => {
     const f = fixture(); const before = fs.readdirSync(f.root);
     const first = await f.author(), second = await f.author();

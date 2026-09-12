@@ -458,7 +458,8 @@ describe('explicit nested preparation scoring packaging', () => {
     const mkdir = vi.spyOn(fs, 'mkdirSync'), capture = { root: '/explicit/private', universeId: 'baseline',
       captureIds: ['a', 'b', 'c'] as [string, string, string], expectedSourceDigest: f.calibration.baseline.source.sha256 };
     await expect(buildPreparationScoringBuiltin({ measurementDirectory: f.measurementDirectory, capture })).rejects.toThrow('Real project does not compile');
-    expect(fake.author).toHaveBeenCalledExactlyOnceWith({ repository, expectedSourceSha256: f.calibration.baseline.source.sha256 });
+    expect(fake.author).toHaveBeenCalledExactlyOnceWith({ repository, expectedSourceSha256: f.calibration.baseline.source.sha256,
+      expectedFiles: f.calibration.baseline.files });
     expect(fake.calibrate.mock.invocationCallOrder[0]).toBeLessThan(fake.author.mock.invocationCallOrder[0]!);
     expect(fake.build).not.toHaveBeenCalled(); expect(mkdir).not.toHaveBeenCalled();
   });

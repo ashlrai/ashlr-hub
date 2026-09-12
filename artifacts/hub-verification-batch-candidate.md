@@ -1,6 +1,6 @@
 # Candidate: batch immutable evaluator blob reads
 
-Status: **unapplied; rebased for builtin recipes, native revalidation pending**.
+Status: **unapplied; rebased for builtin recipes and retained-seed checks, native revalidation pending**.
 The historical candidate's strict native process-count comparison passed with
 pinned developer Git. That comparison preserved healthy results and during-call
 drift refusal, with two blob launches instead of eight for both four-file reads.
@@ -22,23 +22,25 @@ Originally prepared against source commit `948a7fa4cde76002b6029b61f588127e3f70c
 target Git blob `a5a6fcf36dd6990f309ee1f0e15072c63cce16d4`. The native measurements
 below apply only to that historical target and candidate, not the rebase.
 
-Rebased on 2026-09-12 against the frozen, uncommitted builtin-recipe target in
+Rebased on 2026-09-12 against the frozen, uncommitted retained-seed fix in
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-builtin-recipes`, whose checkout
-base is `d44c99115c11bb183b41e816ff5b80588401646f`. The exact target Git blob is
-`59a46145ddd662d7ded903316c7e6925a858eacc`; the base commit alone does not contain
+base is `600c099cdd5c67dde7bfd74e0a858835940ba4d1`. The exact target Git blob is
+`c0fa8821cc81e73ef9cc03d006cbffc08f8c6933`; the base commit alone does not contain
 that target. Patch SHA-256:
-`9d56c0eff2480549cc1c1923463f459a379716d16f0782e6573a2c061fd9c765`.
-Applying it produces candidate Git blob `1ad0490a16df02748c4806eac752fef89ec515e4`
-and SHA-256 `c2d1fe431a0dec8c36f166ffa64c4848133dd5c9c14e4d8b21623bb59b23e144`.
+`ab53b036e471081ea638a200b7b336724fc116b09135fe634e6b53f7e83ed615`.
+Applying it produces candidate Git blob `cba31a09d5a8483318c855ff730b24aed7814000`
+and SHA-256 `e0781f818bf3c34d51c21a358c1204a11b9242ceff0015c24ef898c2dc5041b7`.
 
-Only import context and the existing command-evaluator branch were rebased.
-The batch helper is unchanged; the builtin branch and every `assertEvaluator`
-freshness fence remain byte-identical. The acceptance fixture now pins this
+This rebase changes only the command-branch hunk's line coordinates; the batch
+helper and optimization are unchanged from the previous builtin-recipe rebase.
+The builtin branch, retained materialized-seed checks, and every `assertEvaluator`
+freshness fence remain byte-identical after patch application. The acceptance fixture now pins this
 new target blob without changing its behavior, process-count or custody checks.
 Read-only `git apply --check` passed. Actual application to a private scratch
 copy followed by a no-emit full-project compile passed with 725 roots, 1,041
 source files and zero diagnostics; the live target was unchanged. The 33 pure
-artifact controls passed. These checks do not renew the historical native proof.
+artifact controls passed with zero skips in 419 ms (concurrent, uncontrolled
+timing; not a performance result). These checks do not renew the historical native proof.
 
 The command-evaluator branch of `capture()` hashes each protected evaluator file through a separate
 `git cat-file blob <OID>` invocation. For multiple protected paths, the candidate

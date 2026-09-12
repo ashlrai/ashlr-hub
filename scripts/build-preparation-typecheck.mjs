@@ -17,6 +17,7 @@ const MAX_FILE = 8 * 1024 * 1024;
 const MAX_TEXT = 64 * 1024 * 1024;
 const MAX_JSON = 32 * 1024 * 1024;
 const MAX_PROBES = 65_536;
+const MAX_INVENTORY_BYTES = 64 * 1024 * 1024;
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 const fail = () => { throw new Error('Preparation typecheck authoring inputs unavailable, invalid or changed'); };
 const same = (a, b) => ['dev', 'ino', 'size', 'mode', 'mtimeNs', 'ctimeNs', 'nlink'].every(key => a[key] === b[key]);
@@ -76,12 +77,47 @@ async function checker() {
   return { verify: loaded.verifyPreparationTypes, assertUnchanged, compilerSha256: sha(compiler.bytes) };
 }
 
-export async function authorPreparationTypecheckProject({ repository, expectedSourceSha256 }) {
+// Calibration covers checkout files, not the separately trusted installed
+// compiler/dependency tree. Retain byte identities across the entire capture;
+// matching only the mutable target would allow a weakened reverse consumer.
+function calibratedInventory(repository, input, expectedSourceSha256) {
+  if (input === undefined) return null;
+  if (!Array.isArray(input) || input.length < 1 || input.length > 8192) fail();
+  const rows = new Map(); let total = 0;
+  for (const row of input) {
+    if (!row || typeof row !== 'object' || Object.keys(row).sort().join(',') !== 'bytes,executable,path,sha256' ||
+        typeof row.path !== 'string' || !row.path || isAbsolute(row.path) || /[\\:]/u.test(row.path) ||
+        [...row.path].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159) ||
+        row.path.split('/').some(part => !part || ['.', '..', '.git', '.ashlr'].includes(part.toLowerCase())) ||
+        rows.has(row.path) || typeof row.executable !== 'boolean' || !Number.isSafeInteger(row.bytes) || row.bytes < 0 ||
+        typeof row.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(row.sha256)) fail();
+    total += row.bytes; if (total > MAX_INVENTORY_BYTES) fail();
+    rows.set(row.path, { path: row.path, bytes: row.bytes, executable: row.executable, sha256: row.sha256 });
+  }
+  if (rows.get(TARGET)?.sha256 !== expectedSourceSha256) fail();
+  const assertFiles = () => {
+    for (const row of rows.values()) {
+      const current = boundedRead(join(repository, row.path), MAX_INVENTORY_BYTES);
+      if (current.bytes.length !== row.bytes || sha(current.bytes) !== row.sha256 ||
+          ((current.stat.mode & 0o111n) !== 0n) !== row.executable || row.identity && !same(row.identity, current.stat)) fail();
+      row.identity ??= current.stat;
+    }
+    for (const row of rows.values()) {
+      const path = join(repository, row.path);
+      if (!same(row.identity, lstatSync(path, { bigint: true })) || realpathSync(path) !== path) fail();
+    }
+  };
+  assertFiles();
+  return { rows, assertFiles };
+}
+
+export async function authorPreparationTypecheckProject({ repository, expectedSourceSha256, expectedFiles }) {
   try {
     if (typeof repository !== 'string' || !isAbsolute(repository) || resolve(repository) !== repository ||
         realpathSync(repository) !== repository || typeof expectedSourceSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(expectedSourceSha256)) fail();
     const rootIdentity = lstatSync(repository, { bigint: true });
     if (!rootIdentity.isDirectory() || rootIdentity.isSymbolicLink()) fail();
+    const calibrated = calibratedInventory(repository, expectedFiles, expectedSourceSha256);
     const runtime = await checker();
     const observations = new Map(); const files = new Map(); let textBytes = 0;
     const within = path => path === repository || path.startsWith(`${repository}${sep}`);
@@ -181,6 +217,11 @@ export async function authorPreparationTypecheckProject({ repository, expectedSo
       compilerOptions: config.config.compilerOptions,
       files: [...files].map(([path, text]) => ({ path: relative(repository, path).split(sep).join('/'), text })).sort((a, b) => a.path.localeCompare(b.path)),
     };
+    if (calibrated) for (const file of snapshot.files) {
+      if (file.path.startsWith('node_modules/')) continue;
+      const expected = calibrated.rows.get(file.path);
+      if (!expected || Buffer.byteLength(file.text) !== expected.bytes || sha(Buffer.from(file.text)) !== expected.sha256) fail();
+    }
     if (Buffer.byteLength(JSON.stringify(snapshot)) > MAX_JSON) fail();
     // This second compile is intentionally closed: success from the discovery
     // host is insufficient if a package/lib/consumer was omitted from capture.
@@ -192,6 +233,8 @@ export async function authorPreparationTypecheckProject({ repository, expectedSo
       catch (error) { if (error?.code !== 'ENOENT') throw error; current = null; }
       if (before === null ? current !== null : current === null || !same(before, current) || realpathSync(path) !== path) fail();
     }
+    if (!same(rootIdentity, lstatSync(repository, { bigint: true }))) fail();
+    calibrated?.assertFiles();
     if (!same(rootIdentity, lstatSync(repository, { bigint: true }))) fail();
     runtime.assertUnchanged();
     return snapshot;

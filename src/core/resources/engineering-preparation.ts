@@ -150,6 +150,7 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
   if (entries.size + directories.size > MAX_ARTIFACT_ENTRIES || seedBytes > MAX_ARTIFACT_BYTES) fail('INVALID_INPUT', 'Preparation seed exceeds artifact bounds');
   const evaluationCommand = manifest.evaluation.command;
   let assertEvaluator = () => {};
+  let expectedSeedArtifactDigest: string | undefined;
   let evaluatorPins;
   if (!evaluationCommand) {
     // Diagnostic reports are deliberately not Evaluation evidence. Only the
@@ -176,6 +177,7 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
       size: file.bytes, digest: file.sha256 }))) };
     try { assertPreparationProcessScope(read.text, inventory); }
     catch { fail('CONFLICT', 'Preparation seed does not match the installed scoring scope'); }
+    expectedSeedArtifactDigest = inventory.digest;
     evaluatorPins = { builtin: installed };
     assertEvaluator = () => {
       if (canonical(resolveBuiltinEvaluator(PREPARATION_PROCESS_SCORE_BUILTIN)) !== captured) fail('CONFLICT', 'Preparation installed evaluator changed');
@@ -212,7 +214,7 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
   successor?.assertSource();
   assertEvaluator();
   return { options, recipe, runtime, preview, paths, plan, manifest, campaign, definition, deliveryPlan, supervisionBase,
-    assertEvaluator,
+    assertEvaluator, expectedSeedArtifactDigest,
     ...(successor ? { campaignDeliveryOrigin: successor.origin } : {}) };
 }
 
@@ -244,8 +246,18 @@ function generated(current: ReturnType<typeof capture>) {
     enrollments: [{ enrollmentId: recipe.id, expectedEnrollmentDigest: enrollmentDigest }] });
   return { catalog, supervision, enrollmentDigest, controls };
 }
-function evidence(current: ReturnType<typeof capture>, bundle: ReturnType<typeof generated>) {
+function preparedExperiment(current: ReturnType<typeof capture>) {
   const stored = manifestRecord(universePath(current.paths.universeRoot, current.recipe.id)); assertComparatorUnchanged(stored);
+  // The existing materializer and hardened scope reader have different Git
+  // replacement policies. Bind the actual retained artifact to the validated
+  // original tree before any campaign/catalog creation or completed replay.
+  if (current.expectedSeedArtifactDigest !== undefined && stored.seedArtifact.digest !== current.expectedSeedArtifactDigest) {
+    fail('CONFLICT', 'Prepared materialized seed differs from the installed scoring scope');
+  }
+  return stored;
+}
+function evidence(current: ReturnType<typeof capture>, bundle: ReturnType<typeof generated>) {
+  const stored = preparedExperiment(current);
   const campaign = readUniverseCampaign(current.recipe.id, { root: current.paths.universeRoot });
   if (stored.manifestDigest !== sha(current.manifest) || campaign.sourceState !== 'healthy' ||
     campaign.definitionDigest !== sha(current.campaign) || campaign.manifestDigest !== stored.manifestDigest ||
@@ -293,6 +305,7 @@ function inspectPreparedBundle(input: ResourceEngineeringPreparationOptions & { 
   if (current.plan.planDigest !== expectedPlanDigest || !present(options.output)) fail('CONFLICT', 'Prepared bundle is missing or changed');
   inspectPrivateDirectory(options.output);
   if (!present(current.paths.receipt)) fail('CONFLICT', 'Incomplete preparation output requires inspection; no automatic repair');
+  if (current.expectedSeedArtifactDigest !== undefined) preparedExperiment(current);
   const bundle = generated(current); const expected = evidence(current, bundle);
   if (canonical(readResourceJson(current.paths.receipt)) !== canonical(expected) ||
     canonical(readResourceJson(join(options.output, 'intent.json'))) !== canonical({ schemaVersion: 1, planDigest: expectedPlanDigest })) {
@@ -335,6 +348,7 @@ function prepareBundle(input: ResourceEngineeringPreparationOptions & { expected
   mkdirSync(current.paths.universeRoot, { mode: 0o700 }); mkdirSync(current.paths.graphRoot, { mode: 0o700 }); fsyncDirectory(options.output);
   if (successor) initUniverseWithCampaignDeliveryOrigin(current.manifest, successor.origin, successor.assertSource, { root: current.paths.universeRoot });
   else initUniverse(current.manifest, { root: current.paths.universeRoot });
+  if (current.expectedSeedArtifactDigest !== undefined) preparedExperiment(current);
   initUniverseCampaign(current.campaign, { root: current.paths.universeRoot });
   const bundle = generated(current);
   writePrivate(current.paths.manifest, current.manifest); writePrivate(current.paths.campaign, current.campaign);

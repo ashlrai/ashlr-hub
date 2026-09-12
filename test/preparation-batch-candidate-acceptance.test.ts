@@ -16,7 +16,7 @@ import { preparationManagerFixture } from './helpers/preparation-workflow-manage
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const target = 'src/core/resources/engineering-preparation.ts';
-const targetBlob = '59a46145ddd662d7ded903316c7e6925a858eacc';
+const targetBlob = 'c0fa8821cc81e73ef9cc03d006cbffc08f8c6933';
 const patchFile = join(repository, 'artifacts/hub-verification-batch-candidate.patch');
 const supported = process.platform === 'darwin' && Number(process.versions.node.split('.')[0]) >= 24;
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');

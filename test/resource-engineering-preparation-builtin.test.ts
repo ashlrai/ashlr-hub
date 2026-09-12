@@ -14,6 +14,9 @@ import { checkResourceEngineeringPreparation, prepareResourceEngineeringBundle, 
 import * as commissioning from '../src/core/resources/console-engineering-check.js';
 import * as runtime from '../src/core/universe/resource-runtime-check.js';
 import * as pool from '../src/core/resources/pool-runtime.js';
+import * as enrollment from '../src/core/resources/console-engineering.js';
+import * as campaigns from '../src/core/universe/campaign-store.js';
+import { manifestRecord, universePath } from '../src/core/universe/store.js';
 
 const TARGET = 'src/core/resources/engineering-preparation.ts';
 const roots: string[] = [];
@@ -83,6 +86,15 @@ function fixture() {
   const options = { recipe, workspace, resourceRuntime, projectsFile, output: join(base, 'bundle') };
   return { base, options, installed, resolve, dispatch, ledger, calibration, calibrationFile };
 }
+function replaceCommit(f: ReturnType<typeof fixture>) {
+  const repo = f.options.workspace;
+  writeFileSync(join(repo, 'README.md'), 'replacement protected bytes\n'); git(repo, 'add', 'README.md');
+  const replacement = git(repo, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+    'commit-tree', git(repo, 'write-tree'), '-m', 'private replacement fixture');
+  git(repo, 'replace', f.options.recipe.seedRevision, replacement);
+  expect(git(repo, 'rev-parse', `${f.options.recipe.seedRevision}^{commit}`)).toBe(f.options.recipe.seedRevision);
+  expect(git(repo, 'cat-file', 'blob', `${f.options.recipe.seedRevision}:README.md`)).toBe('replacement protected bytes');
+}
 
 describe('closed builtin engineering preparation', () => {
   it('checks and prepares the exact scorer with split budgets, then replays without writes or dispatch', () => {
@@ -142,6 +154,36 @@ describe('closed builtin engineering preparation', () => {
     expect(() => prepareResourceEngineeringBundle({ ...f.options, expectedPlanDigest: plan.planDigest })).toThrow(/installed evaluator changed/);
     expect(f.dispatch).not.toHaveBeenCalled();
   });
+  it.each(['before-check', 'after-check'])('refuses a genuinely replaced materialized commit %s before campaign or catalog eligibility', when => {
+    const f = fixture();
+    if (when === 'before-check') replaceCommit(f);
+    const plan = checkResourceEngineeringPreparation(f.options);
+    if (when === 'after-check') replaceCommit(f);
+    const catalog = vi.spyOn(enrollment, 'prepareResourceConsoleEngineeringEnrollments');
+    const campaign = vi.spyOn(campaigns, 'initUniverseCampaign');
+    expect(() => prepareResourceEngineeringBundle({ ...f.options, expectedPlanDigest: plan.planDigest })).toThrow(/materialized seed differs/);
+    // Prove the real materializer reached the mismatched bytes, not an unrelated
+    // refusal: its internally consistent record cannot satisfy calibrated scope.
+    const record = manifestRecord(universePath(plan.paths.universeRoot, f.options.recipe.id));
+    expect(record.seedArtifact.digest).not.toBe(f.calibration.baseline.artifactDigest);
+    expect(readFileSync(join(record.seedArtifact.path, 'README.md'), 'utf8')).toBe('replacement protected bytes\n');
+    expect(campaign).not.toHaveBeenCalled(); expect(catalog).not.toHaveBeenCalled(); expect(f.dispatch).not.toHaveBeenCalled();
+    expect(existsSync(plan.paths.receipt)).toBe(false); expect(existsSync(plan.paths.engineering)).toBe(false);
+    expect(existsSync(join(f.options.output, 'intent.json'))).toBe(true);
+    const after = tree(f.base);
+    expect(() => prepareResourceEngineeringBundle({ ...f.options, expectedPlanDigest: plan.planDigest })).toThrow(/Incomplete preparation/);
+    expect(tree(f.base)).toEqual(after);
+  });
+  it('replays the original retained seed after a replacement is added without adopting or writing the replacement', () => {
+    const f = fixture(), plan = checkResourceEngineeringPreparation(f.options), input = { ...f.options, expectedPlanDigest: plan.planDigest };
+    const prepared = prepareResourceEngineeringBundle(input); replaceCommit(f); const before = tree(f.base);
+    expect(readPreparedResourceEngineeringMetadata(input)).toMatchObject({ planDigest: plan.planDigest, disposition: 'replayed' });
+    expect(prepareResourceEngineeringBundle(input)).toEqual({ ...prepared, disposition: 'replayed' });
+    const record = manifestRecord(universePath(plan.paths.universeRoot, f.options.recipe.id));
+    expect(record.seedArtifact.digest).toBe(f.calibration.baseline.artifactDigest);
+    expect(readFileSync(join(record.seedArtifact.path, 'README.md'), 'utf8')).toBe('protected\n');
+    expect(tree(f.base)).toEqual(before); expect(f.dispatch).not.toHaveBeenCalled();
+  });
   it.each(['extra-file', 'protected-bytes', 'protected-mode', 'target-mode'])( 'refuses seed %s outside the installed full calibration', kind => {
     const f = fixture();
     if (kind === 'extra-file') writeFileSync(join(f.options.workspace, 'extra.txt'), 'extra');
@@ -160,7 +202,14 @@ describe('closed builtin engineering preparation', () => {
     writeFileSync(join(f.options.workspace, TARGET), 'export const value = 2;\n'); git(f.options.workspace, 'add', TARGET);
     git(f.options.workspace, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'target only');
     f.options.recipe.seedRevision = git(f.options.workspace, 'rev-parse', 'HEAD');
-    expect(checkResourceEngineeringPreparation(f.options).planDigest).not.toBe(first.planDigest);
+    const changed = checkResourceEngineeringPreparation(f.options);
+    expect(changed.planDigest).not.toBe(first.planDigest);
+    const input = { ...f.options, expectedPlanDigest: changed.planDigest };
+    const prepared = prepareResourceEngineeringBundle(input);
+    expect(readPreparedResourceEngineeringMetadata(input)).toMatchObject({ planDigest: prepared.planDigest });
+    const record = manifestRecord(universePath(changed.paths.universeRoot, f.options.recipe.id));
+    expect(record.seedArtifact.digest).not.toBe(f.calibration.baseline.artifactDigest);
+    expect(readFileSync(join(record.seedArtifact.path, TARGET), 'utf8')).toBe('export const value = 2;\n');
     expect(readFileSync(join(f.options.workspace, 'README.md'), 'utf8')).toBe('uncommitted user changes');
   });
 });

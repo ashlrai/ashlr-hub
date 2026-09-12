@@ -2806,6 +2806,15 @@ baseline successfully using the closed project before publication. Finish
 all workload-affecting code before collecting the matching captures. Retain the
 original bundle and evidence for rollback; do not substitute newly rebuilt bytes.
 
+Production authoring also requires the full calibrated checkout inventory, not
+only the editable file's hash. It checks every calibrated file's bytes, size and
+executable mode before and after capture, and rejects captured checkout inputs
+that are absent from that inventory. Deleting or weakening a reverse consumer,
+changing configuration or adding an untracked ambient declaration cannot silently
+weaken the compiler gate. Installed `node_modules` declarations and the compiler
+are separately trusted authoring inputs pinned into the resulting package; they
+are not described as calibrated repository source.
+
 The lower-level `buildPreparationScoreBundle` is a test/release-authoring helper;
 accepting a supplied descriptor and compiler project there does not prove capture
 provenance. The SDK
