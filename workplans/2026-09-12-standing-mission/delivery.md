@@ -5,6 +5,13 @@ Implemented on primary `auto/p00` in
 was preserved. Entire resume found no checkpoint. Parent integrated three agents'
 implementation, acceptance and independent review.
 
+Source commit: `694b568e4166791a63c4670a147206708cc12480`. Clean full build64056
+exited0 with257webmodules; its build identity reports that exact SHA and
+`dirty:false`. Builtin evaluator digest is
+`db228df553eada0318d0685d49be06f9c1a41ea659c75bb89d4fff7d0f43ca39`.
+This build does not inherit the older native qualification of evaluator9a051509.
+Source and package documentation checks both passed.
+
 ## What works
 
 Optional host-pinned `registrationScope` separates preparation histories while
@@ -48,6 +55,10 @@ The shared ledger's 4,096-attempt/storage bounds also need a retained-history
 strategy for continuous operation. Existing global stop, collector custody and
 account commissioning remain separate and unchanged. No remote push, npm
 publication, provider call or resident service activation occurred.
+
+Read-only post-build sample at `2026-09-12T11:46:17.268Z` confirms active/healthy
+global stop and a pending v1 collector record with legacy owner evidence missing;
+`recoveryAttempted:false`. No account or collector configuration was changed.
 
 Documentation was updated in the existing resource guide and CLI help rather
 than adding a competing operating contract. It distinguishes explicit history
