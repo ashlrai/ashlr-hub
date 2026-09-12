@@ -12,7 +12,7 @@ identify the shortest real path to account operation.
 - [x] Dispatch independent integration, account-operation and native-coverage reviews.
 - [ ] Finish the existing native gate and record its actual outcome.
 - [x] Fix isolated native test evidence retention and independently review it.
-- [ ] Run the four missing same-call native stale-result controls against the frozen bundle.
+- [x] Run the four missing same-call native stale-result controls against the frozen bundle.
 - [ ] Integrate the two ordered changes after the gate terminates.
 - [ ] Run combined local acceptance and retain exact remaining activation blockers.
 
@@ -65,3 +65,7 @@ Independent local dependency copy completed66991exit0. Full isolated build5553
 now passes, including release dependency inventory, build identity,257-module web
 build, scoped lint and docs. No source/package validation was weakened. This is
 a local source build, not production deployment or native account commissioning.
+
+Primary3245 is terminal0:4passed/1filtered/362.58s. All four current/stale runtime
+and source qualification controls passed against unchanged25d57874; all nine
+asset hashes independently rechecked afterward.73003remains the only live gate.
