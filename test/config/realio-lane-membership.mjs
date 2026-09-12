@@ -198,6 +198,7 @@ export const REAL_IO_TEST_FILES = [
   'test/preparation-typecheck-full-project-acceptance.test.ts', // real full-project packaged compiler subprocess and process-group settlement
   'test/preparation-verification-child.test.ts', // actual OS-confined persistent candidate processes and deadline settlement
   'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication
+  'test/resource-spark-enrollment-files.test.ts', // private proposal publication and filesystem tamper refusal
   'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures
   'test/resource-console-pool-evolution.test.ts', // pinned console origins across private ledger epochs
   'test/resource-pool-evolution-engineering.test.ts', // evolved account ledger through campaign preparation and evaluated delivery

@@ -1221,6 +1221,49 @@ account pause still blocks Spark aliases after an upgrade. The separate
 one account's General scope while permitting its Spark scope under the other
 admission checks; task-level `allowedWorkerIds` is not a durable reserve.
 
+### Prepare a Spark alias from existing General configuration
+
+Use this offline helper when one supported General Codex worker represents an
+account and you want to propose its separate Spark allowance. It copies the
+existing account binding, capacity key, limits and reserve, annotates General,
+and constructs the matching quota configuration. Other accounts are unchanged.
+The helper refuses preexisting aliases that need a separately reviewed evolution.
+
+From a current built checkout, with existing private pool, bindings and quota
+configuration files and a private `0700` parent directory:
+
+```sh
+node bin/ashlr resources pool spark prepare \
+  --pool /absolute/private/pool-before.json \
+  --bindings /absolute/private/bindings-before.json \
+  --quota-config /absolute/private/quota-before.json \
+  --general-worker personal --spark-worker personal-spark \
+  --output /absolute/private/new-spark-proposal --json
+```
+
+This **creates a new private proposal directory**, not an enrolled account. The
+output path must not exist, even as an empty directory. It contains `pool.json`,
+`bindings.json`, `quota-config.json`, `general-reservation.json`, an intent and a
+manifest with exact output-byte hashes. The manifest's input digest identifies
+the captured JSON values, not the input files' whitespace. Files contain existing
+launcher configuration/account hints: keep them private and out of source control.
+The CLI reports paths, digests and fixed status fields, not launcher/hint contents.
+
+Use the proposed pool and bindings in the [existing migration procedure](#upgrade-a-pool-without-resetting-history).
+That separate check still validates the actual ledger, owners and retained work.
+Keep the account paused through migration, then merge the **single proposed
+General exclusion** with the existing [quota-scope policy](#reserve-general-or-spark-independently)
+using its fresh revision. Do not replace other exclusions with this descriptor.
+Only after that reservation is verified should account unpausing be considered.
+Existing account pauses and allocation ceilings are untouched by preparation.
+
+Preparation supplies no quota observations, account authentication, engineering
+runtime pins or service activation. Fresh exact-scope quota and all other
+admission checks still apply. On failure, preserve any incomplete output for
+inspection; a manifest alone is not proof that the command succeeded. After
+resolving the cause, use a new output path. This command never resumes or
+overwrites an existing proposal and never deletes migration or collector records.
+
 ### Upgrade a pool without resetting history
 
 `ashlr resources pool evolve` adds workers or supported quota annotations while
