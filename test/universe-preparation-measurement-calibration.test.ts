@@ -53,7 +53,8 @@ beforeEach(() => {
       startedAt: `2026-09-12T00:00:0${index}.000Z`, deadlineAt: `2026-09-12T00:00:0${index + 1}.000Z`, timeoutMs: 1000,
       manifestDigest: 'b'.repeat(64), comparatorDigest: 'c'.repeat(64), artifact: { path: `${directory}/seed`, digest: artifact().digest, revision: 'd'.repeat(40) },
       evaluator: { id: 'preparation-measurement-v1', digest: 'e'.repeat(64), executableDigest: 'f'.repeat(64),
-        command: ['/private/node', '--no-addons', '/private/installed/preparation-verification.mjs'],
+        command: ['/private/node', '--experimental-vm-modules', '--no-warnings',
+          '/private/installed/preparation-verification.mjs', '/private/installed/preparation-bridge.mjs'],
         files: PREPARATION_CALIBRATION_IMPLEMENTATION_FILES.map(name => ({ name, path: `/private/installed/${name}`, digest: 'a'.repeat(64) })),
         tools: [git], git } };
     const stdout = JSON.stringify(report()) + '\n';
@@ -100,6 +101,19 @@ describe('read-only preparation calibration authoring', () => {
     if (key === 'tool') { intent.evaluator.tools[0]!.digest = '1'.repeat(64); intent.evaluator.git.digest = '1'.repeat(64); }
     if (key === 'installed-path') intent.evaluator.files[0]!.path = '/different/preparation-verification.mjs';
     refresh(); expect(author).toThrow(); expect(io.snapshot).not.toHaveBeenCalled();
+  });
+  it.each(['short', 'extra', 'vm-flag', 'warning-flag', 'entry', 'bridge'] as const)('refuses identical forged %s command tuples across all three captures', kind => {
+    for (const row of rows.filter(row => row.kind === 'intent')) {
+      const command = row.intent.evaluator.command;
+      if (kind === 'short') command.pop();
+      if (kind === 'extra') command.push('--extra');
+      if (kind === 'vm-flag') command[1] = '--no-addons';
+      if (kind === 'warning-flag') command[2] = '--trace-warnings';
+      if (kind === 'entry') command[3] = '/private/other/preparation-verification.mjs';
+      if (kind === 'bridge') command[4] = '/private/other/preparation-bridge.mjs';
+    }
+    refresh(); expect(author).toThrow('Preparation measurement calibration unavailable or invalid');
+    expect(io.write).not.toHaveBeenCalled();
   });
   it.each(['held', 'failed', 'unverified', 'missing-receipt', 'bad-report-hash'] as const)('refuses %s capture evidence', kind => {
     const receipt = rows[1]!.receipt!;

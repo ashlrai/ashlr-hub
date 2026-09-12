@@ -20,6 +20,7 @@ vi.mock('../src/core/universe/artifacts.js', async original => {
 import { canonical, digest, readArtifactSnapshot } from '../src/core/universe/artifacts.js';
 import { calibratePreparationMeasurements, PREPARATION_CALIBRATION_IMPLEMENTATION_FILES } from '../src/core/universe/preparation-measurement-calibration.js';
 import { compareCapturedPreparationMeasurement } from '../src/core/universe/preparation-measurement-candidate-comparison.js';
+import { writePreparationCaptureRecord } from '../src/core/universe/preparation-measurement-capture-store.js';
 import { cmdUniversePreparationMeasurementCalibrate } from '../src/cli/universe-preparation-measurement-calibrate.js';
 import { cmdUniversePreparationMeasurementCompare } from '../src/cli/universe-preparation-measurement-compare.js';
 
@@ -44,7 +45,7 @@ function evaluator(): PreparationMeasurementCaptureIntent['evaluator'] {
     files: PREPARATION_CALIBRATION_IMPLEMENTATION_FILES.map(name => ({ name, path: `/private/installed/${name}`, digest: digest(name) })),
     tools: [git, ...['/bin/ls', '/bin/ps', '/usr/bin/sandbox-exec'].map(path => ({ path, digest: digest(path) }))], git };
 }
-function writeCapture(universeId: string, captureId: string, delta = 0) {
+function writeCapture(universeId: string, captureId: string, delta = 0, actualWriter = false) {
   const directory = join(root, 'universes', universeId), seed = join(directory, 'seed');
   const records = join(directory, 'preparation-measurements', 'records'); privateDir(records);
   privateDir(join(directory, 'preparation-measurements', 'staging'));
@@ -57,9 +58,20 @@ function writeCapture(universeId: string, captureId: string, delta = 0) {
     finishedAt: '2026-09-12T12:00:10.000Z', durationMs: 10000, outcome: 'captured', reason: null,
     processGroupSettlement: 'group-exit-confirmed', identityVerified: true,
     report: { stdout, sha256: digest(stdout), bytes: Buffer.byteLength(stdout), checksPassed: true } };
+  let published = false;
   const save = () => {
-    writeFileSync(join(records, `${captureId}.intent.json`), `${canonical({ id: `${captureId}.intent`, kind: 'intent', intent, receipt: null })}\n`, { mode: 0o600 });
-    writeFileSync(join(records, `${captureId}.receipt.json`), `${canonical({ id: `${captureId}.receipt`, kind: 'receipt', intent, receipt })}\n`, { mode: 0o600 });
+    const intentRow = { id: `${captureId}.intent`, kind: 'intent' as const, intent, receipt: null };
+    const receiptRow = { id: `${captureId}.receipt`, kind: 'receipt' as const, intent, receipt };
+    if (!published && actualWriter) {
+      // Real immutable publication for initial synthetic evidence. Later writes
+      // deliberately simulate corrupted or different historical fixture inputs.
+      writePreparationCaptureRecord(directory, intentRow, () => undefined);
+      writePreparationCaptureRecord(directory, receiptRow, () => undefined);
+      published = true;
+    } else {
+      writeFileSync(join(records, `${captureId}.intent.json`), `${canonical(intentRow)}\n`, { mode: 0o600 });
+      writeFileSync(join(records, `${captureId}.receipt.json`), `${canonical(receiptRow)}\n`, { mode: 0o600 });
+    }
   };
   save();
   return { intent, receipt, save, directory, seed, records };
@@ -70,12 +82,12 @@ function seed(id: string, source = 'baseline', extra = 'unchanged') {
   writeFileSync(join(path, 'fixed.txt'), extra, { mode: 0o600 });
   return path;
 }
-function fixture(delta = -1) {
+function fixture(delta = -1, actualWriter = false) {
   seed('baseline');
-  for (const id of ['a', 'b', 'c']) writeCapture('baseline', id);
+  for (const id of ['a', 'b', 'c']) writeCapture('baseline', id, 0, actualWriter);
   const calibration = canonical(calibratePreparationMeasurements({ root, universeId: 'baseline', captureIds: ['c', 'a', 'b'], expectedSourceDigest: digest('baseline') }));
   seed('candidate', 'candidate');
-  const capture = writeCapture('candidate', 'candidate', delta);
+  const capture = writeCapture('candidate', 'candidate', delta, actualWriter);
   const request = { root, universeId: 'candidate', captureId: 'candidate', calibration };
   return { capture, request };
 }
@@ -84,7 +96,7 @@ afterEach(() => { vi.restoreAllMocks(); interception.afterSnapshot = undefined; 
 
 describe('captured preparation candidate comparison', () => {
   it('connects real calibration CLI output to real captured-comparison CLI through an explicit descriptor file', async () => {
-    const { capture } = fixture();
+    const { capture } = fixture(-1, true);
     const output = vi.spyOn(console, 'log').mockImplementation(() => undefined);
     const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
     expect(await cmdUniversePreparationMeasurementCalibrate(['baseline', '--root', root, '--capture', 'a', '--capture', 'b', '--capture', 'c',
@@ -123,7 +135,7 @@ describe('captured preparation candidate comparison', () => {
     capture.receipt.intentDigest = digest(canonical(capture.intent)); capture.save();
     expect(compareCapturedPreparationMeasurement(request).result).toBe('improved');
   });
-  it.each(['aggregate', 'node', 'git', 'tool', 'implementation', 'missing-file'] as const)('refuses changed %s identity', kind => {
+  it.each(['aggregate', 'node', 'git', 'tool', 'implementation', 'missing-file', 'command-flag', 'command-entry', 'extra-tool'] as const)('refuses changed %s identity', kind => {
     const { request, capture } = fixture(), selected = capture.intent.evaluator;
     if (kind === 'aggregate') selected.digest = digest('changed');
     if (kind === 'node') selected.executableDigest = digest('changed');
@@ -131,6 +143,9 @@ describe('captured preparation candidate comparison', () => {
     if (kind === 'tool') selected.tools[1]!.digest = digest('changed');
     if (kind === 'implementation') selected.files[0]!.digest = digest('changed');
     if (kind === 'missing-file') selected.files.pop();
+    if (kind === 'command-flag') selected.command[1] = '--inspect';
+    if (kind === 'command-entry') selected.command[3] = '/private/other.mjs';
+    if (kind === 'extra-tool') selected.tools.push({ path: '/private/other-tool', digest: digest('other-tool') });
     capture.receipt.intentDigest = digest(canonical(capture.intent)); capture.save();
     expect(compareCapturedPreparationMeasurement(request)).toMatchObject({ result: 'not-comparable', reason: 'workload-mismatch', evidence: null });
   });

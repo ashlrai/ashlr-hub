@@ -42,10 +42,16 @@ export function preparationCalibrationWorkload(input: PreparationMeasurementCapt
   const files = list(evaluator.files, 32).map(input => {
     const file = own(input, ['name', 'path', 'digest']); const path = text(file.path);
     if (!isAbsolute(path) || resolve(path) !== path) return fail();
-    return { name: text(file.name), sha256: hash(file.digest) };
+    return { name: text(file.name), path, sha256: hash(file.digest) };
   }).sort((a, b) => a.name.localeCompare(b.name));
   if (canonical(files.map(file => file.name)) !== canonical(PREPARATION_CALIBRATION_IMPLEMENTATION_FILES)) return fail();
-  return { id: 'preparation-workflows-v1', evaluatorId: 'preparation-measurement-v1', digest: hash(evaluator.digest), files,
+  // The aggregate registry digest binds code/native bytes, not caller argv.
+  // Check the installed command contract before dropping relocation-only paths.
+  if (command.length !== 5 || command[1] !== '--experimental-vm-modules' || command[2] !== '--no-warnings' ||
+    command[3] !== files.find(file => file.name === 'preparation-verification.mjs')!.path ||
+    command[4] !== files.find(file => file.name === 'preparation-bridge.mjs')!.path) return fail();
+  return { id: 'preparation-workflows-v1', evaluatorId: 'preparation-measurement-v1', digest: hash(evaluator.digest),
+    files: files.map(({ name, sha256 }) => ({ name, sha256 })),
     node: pin({ path: command[0], sha256: evaluator.executableDigest }),
     tools: list(evaluator.tools, 16).map(normalizePin).sort((a, b) => a.path.localeCompare(b.path)), git: normalizePin(evaluator.git) };
 }
