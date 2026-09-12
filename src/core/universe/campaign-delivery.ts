@@ -2,7 +2,7 @@ import { resolve } from 'node:path';
 import { artifactDigest, canonical, defaultUniverseRoot, digest } from './artifacts.js';
 import { runUniverseCampaign, type UniverseCampaignExpectation } from './campaign.js';
 import { campaignDirectory, campaignUniverse, readCampaignEvents, readUniverseCampaign } from './campaign-store.js';
-import { verifiedInitialCampaignRepair, verifiedInitialCampaignSeedImprovement } from './campaign-improvement.js';
+import { verifiedCampaignPassedSeedImprovement, verifiedInitialCampaignRepair, verifiedInitialCampaignSeedImprovement } from './campaign-improvement.js';
 import { deliverUniverseEliteOwned, readUniverseDeliveries, validUniverseDeliveryBranch,
   type UniverseDeliveryReceipt } from './delivery.js';
 import { withUniverseExecution } from './execution.js';
@@ -72,17 +72,22 @@ function initialRepairOption(target: UniverseCampaignDeliveryTarget): true | und
 /** The pure proof is not enough: delivery and restart inspection also verify its archived baseline bytes. */
 export function hasVerifiedInitialCampaignRepair(universe: UniverseSummary, campaign: UniverseCampaignSummary,
   trial: UniverseTrial, seedDigest: string, options: { root: string }): boolean {
-  return hasVerifiedInitialCampaignComparison(universe, campaign, trial, seedDigest, options, verifiedInitialCampaignRepair);
+  return hasVerifiedCampaignComparison(universe, campaign, trial, seedDigest, options, verifiedInitialCampaignRepair);
 }
 
 export function hasVerifiedInitialCampaignSeedImprovement(universe: UniverseSummary, campaign: UniverseCampaignSummary,
   trial: UniverseTrial, seedDigest: string, options: { root: string }): boolean {
-  return hasVerifiedInitialCampaignComparison(universe, campaign, trial, seedDigest, options, verifiedInitialCampaignSeedImprovement);
+  return hasVerifiedCampaignComparison(universe, campaign, trial, seedDigest, options, verifiedInitialCampaignSeedImprovement);
 }
 
-function hasVerifiedInitialCampaignComparison(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+export function hasVerifiedCampaignPassedSeedImprovement(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string, options: { root: string }): boolean {
+  return hasVerifiedCampaignComparison(universe, campaign, trial, seedDigest, options, verifiedCampaignPassedSeedImprovement);
+}
+
+function hasVerifiedCampaignComparison(universe: UniverseSummary, campaign: UniverseCampaignSummary,
   trial: UniverseTrial, seedDigest: string, options: { root: string },
-  verify: typeof verifiedInitialCampaignRepair | typeof verifiedInitialCampaignSeedImprovement): boolean {
+  verify: typeof verifiedInitialCampaignRepair | typeof verifiedInitialCampaignSeedImprovement | typeof verifiedCampaignPassedSeedImprovement): boolean {
   const proof = verify(universe, campaign, trial, seedDigest);
   if (!proof) return false;
   // Captured summaries cannot authorize a final effect after durable evidence
@@ -172,6 +177,7 @@ export async function deliverCompletedUniverseCampaign(id: string,
     if (options.signal?.aborted) return { campaign: current, delivery: { status: 'withheld', reason: 'cancelled' } };
     if (current.state !== 'completed') return { campaign: current, delivery: { status: 'withheld', reason: 'campaign-not-completed' } };
     const seedDigest = manifestRecord(directory).seedArtifact.digest;
+    const passedSeed = current.seedEvaluation?.result?.measurement?.passed === true;
     const allTrials = new Map(universe.runs.flatMap((run) => run.trials).map((trial) => [trial.id, trial]));
     const trials = universe.runs.flatMap((run) => run.status === 'completed' &&
       run.campaign?.id === id && run.campaign.definitionDigest === current.definitionDigest &&
@@ -179,6 +185,7 @@ export async function deliverCompletedUniverseCampaign(id: string,
       ? run.trials.filter((trial) => {
         const parent = trial.parentTrialId ? allTrials.get(trial.parentTrialId) : undefined;
         return trial.selected && trial.status === 'passed' && trial.score !== null && trial.artifact && trial.artifact.digest !== seedDigest &&
+          (!passedSeed || verifiedCampaignPassedSeedImprovement(universe, current, trial, seedDigest) !== null) &&
           (trial.delta !== null && trial.delta > 0 && parent?.artifact && trial.artifact.digest !== parent.artifact.digest ||
             verifiedInitialCampaignSeedImprovement(universe, current, trial, seedDigest) !== null ||
             allowInitialRepair && verifiedInitialCampaignRepair(universe, current, trial, seedDigest) !== null);
@@ -195,12 +202,16 @@ export async function deliverCompletedUniverseCampaign(id: string,
       .filter((trial) => universe.elites.some((elite) => elite.trialId === trial.id))
       .sort((a, b) => direction * (a.score! - b.score!) || a.id.localeCompare(b.id))[0];
     if (!selected) return { campaign: current, delivery: { status: 'withheld', reason: 'no-strict-improvement' } };
-    // Initial seed comparison adds baseline custody to the existing final Git effect
-    // checks, not only the earlier eligibility read. A changed baseline must
-    // not publish a ref while still looking valid in the captured summary.
-    const isExecutionStopped = selected.parentTrialId === null ? () => {
+    // Passed-seed custody applies to descendants too: improvement over an
+    // intermediate regression must not publish a net regression from the seed.
+    const isExecutionStopped = passedSeed || selected.parentTrialId === null ? () => {
       if (options.isExecutionStopped?.()) return true;
-      if (!hasVerifiedInitialCampaignSeedImprovement(universe, current, selected, seedDigest, store) &&
+      if (passedSeed) {
+        if (!hasVerifiedCampaignPassedSeedImprovement(universe, current, selected, seedDigest, store)) {
+          throw new Error(selected.parentTrialId === null ? 'Initial campaign improvement baseline artifact is missing or changed'
+            : 'Campaign improvement baseline artifact is missing or changed');
+        }
+      } else if (!hasVerifiedInitialCampaignSeedImprovement(universe, current, selected, seedDigest, store) &&
           !(allowInitialRepair && hasVerifiedInitialCampaignRepair(universe, current, selected, seedDigest, store))) {
         throw new Error('Initial campaign improvement baseline artifact is missing or changed');
       }

@@ -522,6 +522,9 @@ are not a funnel, a model ranking or proof of production acceptance. A first
 passing repair is not automatically a strict improvement over a prior trial.
 Seed score and direction-adjusted changes remain separate from parent-trial
 feedback. Scores are never aggregated across different comparators.
+For campaigns with a measured passing seed, local delivery must beat that seed
+by the declared positive improvement threshold in every generation. Improving
+only a worse intermediate candidate does not qualify as delivered progress.
 
 Usage includes unsuccessful attempts, not just the final selected candidate.
 **Recorded token subtotal** preserves known input/output usage when another

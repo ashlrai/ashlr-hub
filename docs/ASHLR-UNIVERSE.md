@@ -1180,6 +1180,15 @@ Delivery and recovery verify the exact seed intent/result, campaign linkage,
 original timing, settled evaluation and current artifact bytes. Equal, worse,
 below-threshold or unchanged candidates remain ineligible.
 
+The passing seed also remains the delivery baseline for **later generations**.
+A positive parent-relative delta alone cannot authorize a result that is equal
+to, worse than, or insufficiently better than that seed. For example, with a
+minimized score and `minImprovement: 1`, seed 140 → candidate 145 → candidate 144
+can remain useful exploration, but cannot be delivered; candidate 139 can qualify.
+This guard is rechecked against durable seed evidence and artifact bytes before
+Git publication and by recovery readers. A historical receipt that fails this
+comparison is not a verified campaign handoff; its branch and records are retained.
+
 This comparison does not invent an archive parent: the first trial retains
 `parentTrialId: null` and `delta: null`. Archive admission/improvement counters
 keep their existing meaning; successful seed-based delivery is recorded in the

@@ -1,5 +1,7 @@
-import { campaignUniverse } from './campaign-store.js';
-import { hasVerifiedInitialCampaignRepair, hasVerifiedInitialCampaignSeedImprovement, type UniverseCampaignDeliveryTarget } from './campaign-delivery.js';
+import { campaignUniverse, readUniverseCampaign } from './campaign-store.js';
+import { canonical } from './artifacts.js';
+import { hasVerifiedCampaignPassedSeedImprovement, hasVerifiedInitialCampaignRepair, hasVerifiedInitialCampaignSeedImprovement,
+  type UniverseCampaignDeliveryTarget } from './campaign-delivery.js';
 import { readUniverseDeliveries, type UniverseDeliveryReceipt } from './delivery.js';
 import { manifestRecord, universePath } from './store.js';
 import type { UniverseCampaignSummary } from './types.js';
@@ -11,6 +13,9 @@ export function readCompletedCampaignDelivery(campaign: UniverseCampaignSummary,
     const repairOption = Object.getOwnPropertyDescriptor(target, 'allowInitialRepair');
     if ('allowInitialRepair' in target && (!repairOption || !Object.hasOwn(repairOption, 'value') || repairOption.value !== true)) return null;
     if (campaign.sourceState !== 'healthy' || campaign.state !== 'completed') return null;
+    // Caller projections cannot erase a measured seed to bypass its delivery
+    // floor. Interpret policy only from the exact current durable campaign.
+    if (canonical(readUniverseCampaign(campaign.definition.id, options)) !== canonical(campaign)) return null;
     const universeId = campaign.definition.universeId;
     const universe = campaignUniverse(campaign, options);
     if (universe.sourceState !== 'healthy' || universe.manifestDigest !== campaign.manifestDigest ||
@@ -30,6 +35,8 @@ export function readCompletedCampaignDelivery(campaign: UniverseCampaignSummary,
     // A healthy same-branch receipt from a different campaign is not our handoff.
     if (!trial?.selected || trial.status !== 'passed' || trial.score === null ||
         !trial.artifact || trial.artifact.digest !== receipt.artifactDigest || trial.artifact.digest === seedDigest) return null;
+    if (campaign.seedEvaluation?.result?.measurement?.passed === true &&
+        !hasVerifiedCampaignPassedSeedImprovement(universe, campaign, trial, seedDigest, options)) return null;
     const strictImprovement = trial.delta !== null && trial.delta > 0 && parent?.artifact && parent.artifact.digest !== trial.artifact.digest;
     if (!strictImprovement && !hasVerifiedInitialCampaignSeedImprovement(universe, campaign, trial, seedDigest, options) &&
         !(repairOption?.value === true && hasVerifiedInitialCampaignRepair(universe, campaign, trial, seedDigest, options))) return null;

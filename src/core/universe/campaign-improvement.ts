@@ -16,13 +16,14 @@ export type VerifiedInitialCampaignRepair = VerifiedFailedTrialRepair | {
   baselineArtifactDigest: string;
   delta: number;
 };
-export interface VerifiedInitialCampaignSeedImprovement {
+export interface VerifiedCampaignPassedSeedImprovement {
   kind: 'passed-seed-evaluation';
   seedIntentDigest: string;
   seedResultDigest: string;
   baselineArtifactDigest: string;
   delta: number;
 }
+export type VerifiedInitialCampaignSeedImprovement = VerifiedCampaignPassedSeedImprovement;
 const HASH = /^[a-f0-9]{64}$/;
 const REJECTED_BY_EVALUATOR = 'Fixed evaluator rejected the candidate';
 const finite = (value: number | null): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -41,7 +42,7 @@ function timestamp(value: string | null): number | null {
  */
 export function verifiedInitialCampaignRepair(universe: UniverseSummary, campaign: UniverseCampaignSummary,
   trial: UniverseTrial, seedDigest: string): VerifiedInitialCampaignRepair | null {
-  const proof = verifiedInitialCampaignComparison(universe, campaign, trial, seedDigest, 'repair');
+  const proof = verifiedCampaignComparison(universe, campaign, trial, seedDigest, 'repair', true);
   return proof && !('kind' in proof && proof.kind === 'passed-seed-evaluation') ? proof : null;
 }
 
@@ -50,12 +51,20 @@ export function verifiedInitialCampaignRepair(universe: UniverseSummary, campaig
  * still own delivery authority and must freshly verify durable/byte custody. */
 export function verifiedInitialCampaignSeedImprovement(universe: UniverseSummary, campaign: UniverseCampaignSummary,
   trial: UniverseTrial, seedDigest: string): VerifiedInitialCampaignSeedImprovement | null {
-  const proof = verifiedInitialCampaignComparison(universe, campaign, trial, seedDigest, 'passed-seed');
+  const proof = verifiedCampaignComparison(universe, campaign, trial, seedDigest, 'passed-seed', true);
   return proof && 'kind' in proof && proof.kind === 'passed-seed-evaluation' ? proof : null;
 }
 
-function verifiedInitialCampaignComparison(universe: UniverseSummary, campaign: UniverseCampaignSummary,
-  trial: UniverseTrial, seedDigest: string, mode: 'repair' | 'passed-seed'):
+/** Absolute improvement over this campaign's passed seed at any generation.
+ * Archive parent improvement remains a separate eligibility requirement. */
+export function verifiedCampaignPassedSeedImprovement(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string): VerifiedCampaignPassedSeedImprovement | null {
+  const proof = verifiedCampaignComparison(universe, campaign, trial, seedDigest, 'passed-seed', false);
+  return proof && 'kind' in proof && proof.kind === 'passed-seed-evaluation' ? proof : null;
+}
+
+function verifiedCampaignComparison(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string, mode: 'repair' | 'passed-seed', initialOnly: boolean):
   VerifiedInitialCampaignRepair | VerifiedInitialCampaignSeedImprovement | null {
   const generationSucceeded = (value: UniverseTrial): boolean => {
     const variant = universe.manifest.variants.find(row => row.id === value.variantId);
@@ -69,7 +78,7 @@ function verifiedInitialCampaignComparison(universe: UniverseSummary, campaign: 
       !Number.isFinite(universe.manifest.metric.minImprovement) || universe.manifest.metric.minImprovement < 0 ||
       !['maximize', 'minimize'].includes(universe.manifest.metric.direction) ||
       !trial.selected || trial.status !== 'passed' || !finite(trial.score) || trial.error !== undefined ||
-      trial.parentTrialId !== null || trial.delta !== null || !trial.artifact || !HASH.test(trial.artifact.digest) ||
+      initialOnly && (trial.parentTrialId !== null || trial.delta !== null) || !trial.artifact || !HASH.test(trial.artifact.digest) ||
       trial.artifact.digest === seedDigest || trial.artifact.revision !== universe.manifest.seed.revision ||
       !generationSucceeded(trial)) return null;
 

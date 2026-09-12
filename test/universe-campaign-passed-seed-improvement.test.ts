@@ -1,7 +1,7 @@
 /** Pure recorded proof only: no fabricated archive parent or filesystem authority. */
 import { describe, expect, it } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
-import { verifiedInitialCampaignRepair, verifiedInitialCampaignSeedImprovement } from '../src/core/universe/campaign-improvement.js';
+import { verifiedCampaignPassedSeedImprovement, verifiedInitialCampaignRepair, verifiedInitialCampaignSeedImprovement } from '../src/core/universe/campaign-improvement.js';
 import type { UniverseCampaignSummary, UniverseSummary, UniverseTrial } from '../src/core/universe/types.js';
 
 function fixture() {
@@ -97,5 +97,44 @@ describe('first candidate improvement over a passed measured seed', () => {
       f.campaign.seedEvaluation.result.intentDigest = digest(canonical(f.campaign.seedEvaluation.intent));
     }
     expect(f.proof()).toBeNull();
+    // The all-generation proof retains the same seed/provenance checks, while
+    // archive parent/delta validity remains a separate delivery prerequisite.
+    if (!['fabricated parent', 'fabricated delta'].includes(name)) {
+      expect(verifiedCampaignPassedSeedImprovement(f.universe, f.campaign, f.trial, f.seedDigest)).toBeNull();
+    }
+  });
+});
+
+describe('all-generation passed seed comparison (pure recorded evidence)', () => {
+  it.each([
+    { direction: 'minimize' as const, parent: 145, candidate: 144, minimum: 1, delta: null },
+    { direction: 'minimize' as const, parent: 145, candidate: 140, minimum: 1, delta: null },
+    { direction: 'minimize' as const, parent: 145, candidate: 139, minimum: 2, delta: null },
+    { direction: 'minimize' as const, parent: 145, candidate: 139, minimum: 1, delta: 1 },
+    { direction: 'maximize' as const, parent: 135, candidate: 136, minimum: 1, delta: null },
+    { direction: 'maximize' as const, parent: 135, candidate: 140, minimum: 1, delta: null },
+    { direction: 'maximize' as const, parent: 135, candidate: 141, minimum: 2, delta: null },
+    { direction: 'maximize' as const, parent: 135, candidate: 141, minimum: 1, delta: 1 },
+  ])('checks $direction seed140 via parent$parent to$candidate at minimum$minimum', ({ direction, parent, candidate, minimum, delta }) => {
+    const f = fixture(); f.universe.manifest.metric = { ...f.universe.manifest.metric, direction, minImprovement: minimum };
+    f.campaign.seedEvaluation!.result!.measurement!.score = 140;
+    const firstRun = structuredClone(f.universe.runs[0]!); firstRun.id = 'parent-run';
+    firstRun.trials[0]!.id = 'parent-trial'; firstRun.trials[0]!.score = parent;
+    firstRun.trials[0]!.artifact!.digest = 'e'.repeat(64);
+    const candidateRun = f.universe.runs[0]!; candidateRun.generation = 2; candidateRun.campaign!.ordinal = 2;
+    candidateRun.startedAt = '2026-09-12T00:00:04.000Z'; candidateRun.finishedAt = '2026-09-12T00:00:05.000Z';
+    f.trial.parentTrialId = 'parent-trial'; f.trial.score = candidate;
+    f.trial.delta = (direction === 'maximize' ? 1 : -1) * (candidate - parent);
+    f.universe.runs.unshift(firstRun);
+    const firstStep = structuredClone(f.campaign.steps[0]!); firstStep.runId = firstRun.id;
+    f.campaign.steps[0]!.ordinal = 2; f.campaign.steps[0]!.generation = 2; f.campaign.steps[0]!.createdAt = candidateRun.startedAt;
+    f.campaign.steps.unshift(firstStep); f.campaign.definition.budget.maxGenerations = 2;
+    const before = canonical({ universe: f.universe, campaign: f.campaign });
+    expect(f.proof()).toBeNull(); // Initial-only callers retain their old contract.
+    const proof = verifiedCampaignPassedSeedImprovement(f.universe, f.campaign, f.trial, f.seedDigest);
+    if (delta === null) expect(proof).toBeNull();
+    else expect(proof).toMatchObject({ kind: 'passed-seed-evaluation', baselineArtifactDigest: f.seedDigest, delta });
+    expect(canonical({ universe: f.universe, campaign: f.campaign })).toBe(before);
+    expect(f.trial.delta).toBeGreaterThan(0);
   });
 });

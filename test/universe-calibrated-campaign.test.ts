@@ -4,7 +4,7 @@
  */
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
@@ -13,11 +13,11 @@ import { artifactDigest, copyArtifact, digest, freezeArtifact } from '../src/cor
 import { resolveBuiltinEvaluator } from '../src/core/universe/builtin-evaluator-registry.js';
 import { deliverCompletedUniverseCampaign } from '../src/core/universe/campaign-delivery.js';
 import { readCompletedCampaignDelivery } from '../src/core/universe/campaign-delivery-recovery.js';
-import { verifiedInitialCampaignRepair } from '../src/core/universe/campaign-improvement.js';
+import { verifiedCampaignPassedSeedImprovement, verifiedInitialCampaignRepair } from '../src/core/universe/campaign-improvement.js';
 import { runCampaignSeedEvaluationOwned } from '../src/core/universe/campaign-seed-evaluation.js';
 import { readCampaignSeedContext } from '../src/core/universe/campaign-seed-context.js';
 import { appendCampaignEvent, campaignDirectory, initUniverseCampaign, readCampaignEvents, readUniverseCampaign } from '../src/core/universe/campaign-store.js';
-import { readUniverseDeliveries } from '../src/core/universe/delivery.js';
+import { deliverUniverseElite, readUniverseDeliveries } from '../src/core/universe/delivery.js';
 import { withUniverseExecution } from '../src/core/universe/execution.js';
 import { runFixedUniverseEvaluator } from '../src/core/universe/fixed-evaluator.js';
 import { appendRecord, initUniverse, manifestRecord, newRun, parseEvaluation, projectUniverse, selectWinners } from '../src/core/universe/store.js';
@@ -61,7 +61,13 @@ afterEach(() => {
   for (const root of roots.splice(0)) { writable(root); rmSync(root, { recursive: true, force: true }); }
 });
 
-function fixture(minImprovement = 1, maxGenerations = 1) {
+function fixture(minImprovement = 1, maxGenerations = 1, configuration: {
+  seedScore?: number; direction?: 'minimize' | 'maximize'; measureSeed?: boolean;
+} = {}) {
+  if (configuration.seedScore !== undefined) evaluator.mockImplementation(async (...args) => {
+    args[9]?.(); return { stdout: scoreOutput(configuration.seedScore!), stderr: '', exitCode: 0, signal: null,
+      timedOut: false, cancelled: false, processGroupSettlement: 'group-exit-confirmed' };
+  });
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'calibrated-campaign-'))); roots.push(root);
   const repo = join(root, 'repo'); mkdirSync(repo, { mode: 0o700 });
   const git = (...args: string[]): string => execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
@@ -72,13 +78,18 @@ function fixture(minImprovement = 1, maxGenerations = 1) {
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'seed');
   const manifest: UniverseManifest = { schemaVersion: 1, id: 'calibrated', name: 'Synthetic scored campaign',
     objective: 'Reduce verified process count', seed: { repo, revision: git('rev-parse', 'HEAD') },
-    metric: { name: 'preparation_processes', direction: 'minimize', minImprovement },
+    metric: { name: 'preparation_processes', direction: configuration.direction ?? 'minimize', minImprovement },
     budget: { maxTrials: 1, maxDurationMs: 5000, trialTimeoutMs: 1000, maxParallel: 1 },
-    evaluation: { builtin: 'preparation-process-score-v1', timeoutMs: 1000 },
+    // The closed process scorer permits minimize only. Generic maximize proof
+    // coverage uses a synthetic command evaluator, not a forged scorer policy.
+    evaluation: configuration.direction === 'maximize'
+      ? { command: [process.execPath, '-e', 'void 0'], timeoutMs: 1000 }
+      : { builtin: 'preparation-process-score-v1', timeoutMs: 1000 },
     variants: [{ id: 'change', niche: 'processes', hypothesis: 'Batch immutable reads', command: [process.execPath, '-e', 'void 0'] }] };
   initUniverse(manifest, { root });
   const directory = join(root, 'universes', manifest.id);
-  const campaign = initUniverseCampaign({ schemaVersion: 1, id: 'campaign', universeId: manifest.id, measureSeed: true, feedback: true,
+  const campaign = initUniverseCampaign({ schemaVersion: 1, id: 'campaign', universeId: manifest.id,
+    ...(configuration.measureSeed === false ? {} : { measureSeed: true }), feedback: true,
     budget: { maxGenerations, maxDurationMs: 60_000, maxModelRequests: 0, maxStagnantGenerations: maxGenerations, maxReportedTokens: null } }, { root });
   const campaignPath = campaignDirectory(campaign.definition.id, { root });
   const startedAt = new Date().toISOString();
@@ -95,7 +106,8 @@ function fixture(minImprovement = 1, maxGenerations = 1) {
     run.feedbackEnabled = true; run.feedbackVersion = 2;
     appendCampaignEvent(campaignPath, { kind: 'step', at: run.startedAt, ordinal: run.campaign.ordinal,
       runId: run.id, generation: run.generation, variantIds: ['change'], reservedModelRequests: 0 });
-    run.seedContext = readCampaignSeedContext(run, record, root);
+    const seedContext = readCampaignSeedContext(run, record, root);
+    if (seedContext !== undefined) run.seedContext = seedContext;
     appendRecord(directory, { id: `${run.id}.start`, kind: 'start', run, ownerPid: process.pid, ownerStart: 'fixture' });
     const trialId = randomUUID(); mkdirSync(join(directory, 'artifacts', run.id), { mode: 0o700 });
     const path = join(directory, 'artifacts', run.id, trialId); copyArtifact(record.seedArtifact.path, path);
@@ -118,6 +130,96 @@ function fixture(minImprovement = 1, maxGenerations = 1) {
 }
 
 describe('calibrated scoring campaign ingestion and local delivery (synthetic evaluator)', () => {
+  it('withholds parent-relative improvement 140 to145 to144 because it still regresses the measured seed', async () => {
+    const f = fixture(1, 2, { seedScore: 140 }); await f.measure();
+    const first = f.accept(145); const later = f.accept(144); f.finish();
+    expect(first.trial).toMatchObject({ selected: true, parentTrialId: null, delta: null });
+    expect(later.trial).toMatchObject({ selected: true, parentTrialId: first.trial.id, delta: 1 });
+    expect(await deliverCompletedUniverseCampaign('campaign', f.options)).toMatchObject({ delivery: { status: 'withheld', reason: 'no-strict-improvement' } });
+    expect(f.git('branch', '--list', f.options.delivery.branch)).toBe('');
+    expect(readUniverseDeliveries(f.manifest.id, { root: f.root }).deliveries).toEqual([]);
+    expect(existsSync(join(f.directory, 'deliveries'))).toBe(false);
+  });
+  it.each([
+    { direction: 'minimize' as const, parent: 145, candidate: 140, minimum: 1, name: 'equal seed' },
+    { direction: 'minimize' as const, parent: 145, candidate: 139, minimum: 2, name: 'subthreshold seed improvement' },
+    { direction: 'maximize' as const, parent: 135, candidate: 136, minimum: 1, name: 'still regressed seed' },
+    { direction: 'maximize' as const, parent: 135, candidate: 140, minimum: 1, name: 'equal seed' },
+    { direction: 'maximize' as const, parent: 135, candidate: 141, minimum: 2, name: 'subthreshold seed improvement' },
+  ])('withholds $direction descendant with $name despite selected parent-relative progress', async ({ direction, parent, candidate, minimum }) => {
+    const f = fixture(minimum, 2, { seedScore: 140, direction }); await f.measure();
+    const first = f.accept(parent), later = f.accept(candidate); f.finish();
+    expect(later.trial).toMatchObject({ selected: true, parentTrialId: first.trial.id }); expect(later.trial.delta).toBeGreaterThanOrEqual(minimum);
+    expect(await deliverCompletedUniverseCampaign('campaign', f.options)).toMatchObject({ delivery: { status: 'withheld', reason: 'no-strict-improvement' } });
+    expect(f.git('branch', '--list', f.options.delivery.branch)).toBe(''); expect(existsSync(join(f.directory, 'deliveries'))).toBe(false);
+    expect(readCompletedCampaignDelivery(f.read(), f.options.delivery, { root: f.root })).toBeNull();
+  });
+  it.each([
+    { direction: 'minimize' as const, parent: 145, candidate: 139 },
+    { direction: 'maximize' as const, parent: 135, candidate: 141 },
+  ])('delivers and replays a $direction descendant only after beating both seed and parent', async ({ direction, parent, candidate }) => {
+    const f = fixture(1, 2, { seedScore: 140, direction }); await f.measure();
+    const first = f.accept(parent), later = f.accept(candidate); f.finish();
+    expect(later.trial).toMatchObject({ parentTrialId: first.trial.id, delta: 6, selected: true });
+    const before = readCampaignEvents(f.campaignPath), index = readFileSync(join(f.repo, '.git', 'index'));
+    expect(verifiedCampaignPassedSeedImprovement(projectUniverse(f.directory), f.read(), later.trial, manifestRecord(f.directory).seedArtifact.digest)?.delta).toBe(1);
+    const result = await deliverCompletedUniverseCampaign('campaign', f.options);
+    expect(result.delivery).toMatchObject({ status: 'delivered', receipt: { trialId: later.trial.id } });
+    if (result.delivery.status !== 'delivered') throw Error('Expected strict descendant improvement');
+    expect(f.git('show', `${result.delivery.receipt.commit}:target.ts`)).toContain(`changed-${candidate}`);
+    expect(await deliverCompletedUniverseCampaign('campaign', f.options)).toEqual(result);
+    expect(readCompletedCampaignDelivery(f.read(), f.options.delivery, { root: f.root })).toEqual(result.delivery.receipt);
+    expect(readUniverseDeliveries(f.manifest.id, { root: f.root }).deliveries).toEqual([result.delivery.receipt]);
+    expect(readCampaignEvents(f.campaignPath)).toEqual(before); expect(evaluator).toHaveBeenCalledTimes(1);
+    expect(readFileSync(join(f.repo, '.git', 'index'))).toEqual(index); expect(f.git('rev-parse', 'HEAD')).toBe(f.manifest.seed.revision);
+  });
+  it('refuses campaign recovery of a valid low-level receipt for a seed-regressed descendant', async () => {
+    const f = fixture(1, 2, { seedScore: 140 }); await f.measure(); f.accept(145); const later = f.accept(144); f.finish();
+    // Model a historical generic delivery, not corrupted or fabricated receipt bytes.
+    const receipt = await deliverUniverseElite(f.manifest.id, { root: f.root, trialId: later.trial.id, branch: f.options.delivery.branch });
+    expect(receipt.status).toBe('delivered'); expect(readUniverseDeliveries(f.manifest.id, { root: f.root }).deliveries).toEqual([receipt]);
+    expect(readCompletedCampaignDelivery(f.read(), f.options.delivery, { root: f.root })).toBeNull();
+    const omitted = f.read(); delete omitted.seedEvaluation;
+    expect(readCompletedCampaignDelivery(omitted, f.options.delivery, { root: f.root })).toBeNull();
+    const changed = f.read(); changed.seedEvaluation!.result!.measurement!.passed = false;
+    expect(readCompletedCampaignDelivery(changed, f.options.delivery, { root: f.root })).toBeNull();
+    await expect(deliverCompletedUniverseCampaign('campaign', f.options)).rejects.toThrow(/non-improving evidence/);
+    expect(f.git('rev-parse', `refs/heads/${receipt.branch}`)).toBe(receipt.commit);
+    expect(readUniverseDeliveries(f.manifest.id, { root: f.root }).deliveries).toEqual([receipt]); expect(evaluator).toHaveBeenCalledTimes(1);
+  });
+  it.each(['failed-seed', 'unmeasured'] as const)('preserves existing parent-relative delivery for %s campaigns', async mode => {
+    const f = fixture(1, 2, { measureSeed: mode !== 'unmeasured' });
+    if (mode === 'failed-seed') {
+      evaluator.mockImplementation(async (...args) => { args[9]?.(); return { stdout: scoreOutput(140, false), stderr: '', exitCode: 0,
+        signal: null, timedOut: false, cancelled: false, processGroupSettlement: 'group-exit-confirmed' }; });
+      await f.measure();
+    }
+    f.accept(145); const later = f.accept(144); f.finish();
+    const result = await deliverCompletedUniverseCampaign('campaign', f.options);
+    expect(result.delivery).toMatchObject({ status: 'delivered', receipt: { trialId: later.trial.id } });
+    if (result.delivery.status !== 'delivered') throw Error('Legacy descendant delivery changed');
+    expect(readCompletedCampaignDelivery(f.read(), f.options.delivery, { root: f.root })).toEqual(result.delivery.receipt);
+    expect(evaluator).toHaveBeenCalledTimes(mode === 'failed-seed' ? 1 : 0);
+  });
+  it.each(['seed-bytes', 'seed-journal'] as const)('rechecks %s during the final effect guard for parented delivery', async kind => {
+    const f = fixture(1, 2, { seedScore: 140 }); await f.measure(); f.accept(145); f.accept(139); f.finish();
+    const event = readCampaignEvents(f.campaignPath).find(row => row.kind === 'seed-evaluation-result')!;
+    const target = kind === 'seed-bytes' ? join(manifestRecord(f.directory).seedArtifact.path, 'target.ts')
+      : join(f.campaignPath, 'ledger', 'records', `${event.id}.json`);
+    const original = readFileSync(target), mode = lstatSync(target).mode & 0o777; let checks = 0, injected = false;
+    try {
+      await expect(deliverCompletedUniverseCampaign('campaign', { ...f.options, isExecutionStopped: () => {
+        if (++checks === 2) {
+          chmodSync(target, 0o600); writeFileSync(target, kind === 'seed-bytes' ? 'export const changed = true;\n' : '{}\n');
+          chmodSync(target, mode); injected = true;
+        }
+        return false;
+      } })).rejects.toThrow();
+      expect(injected).toBe(true); expect(checks).toBe(2); expect(f.git('branch', '--list', f.options.delivery.branch)).toBe('');
+      expect(existsSync(join(f.directory, 'deliveries'))).toBe(false);
+    } finally { chmodSync(target, 0o600); writeFileSync(target, original); chmodSync(target, mode); }
+    expect(evaluator).toHaveBeenCalledTimes(1);
+  });
   it('retains passing seed 150 as feedback without creating a parent or replaying the evaluator', async () => {
     const f = fixture(); expect(await f.measure()).toEqual({ status: 'measured', reason: null });
     expect(f.read().seedEvaluation?.result).toMatchObject({ status: 'measured', processGroupSettlement: 'group-exit-confirmed',
