@@ -24,6 +24,7 @@ import type { ResourceConsoleEngineeringSupervisionSnapshot } from './console-en
 import type { ResourceEngineeringSuccessorCoordinatorSnapshot } from './engineering-successor-coordinator-types.js';
 import type { ResourceConsoleSnapshot, ResourceConsoleTranscript } from './console-types.js';
 import { MissionConsoleRequestError, requestEngineeringMissionConsole } from './engineering-mission-console.js';
+import { beginEngineeringMissionInvocation } from './engineering-mission-invocations.js';
 
 export interface ResourceEngineeringMissionReport {
   schemaVersion: 1; missionId: string; state: 'completed' | 'stopped' | 'held'; reason: string;
@@ -49,6 +50,8 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
     scopesReserved: 0, deadlineAt: config.deadlineAt, tip: null };
   let phase = 'startup', index = 1, handle: ResourceConsoleServerHandle | null = null;
   let lease: LocalStoreLock | null = null;
+  let shutdownUnresolved = false;
+  let invocation: ReturnType<typeof beginEngineeringMissionInvocation> | undefined;
   const abort = new AbortController();
   const stoppedExternally = () => abort.abort();
   if (host.signal !== undefined && !(host.signal instanceof AbortSignal)) throw new Error('Invalid mission signal');
@@ -81,6 +84,9 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
     const acquired = acquireLocalStoreLockWithOutcome(join(config.root, '.mission.lock'), 0, { anchorPath: config.root, exactPrivateStorage: true });
     requireFact(acquired.state === 'acquired', 'Mission already owned or unavailable');
     lease = acquired.lock;
+    invocation = beginEngineeringMissionInvocation(config, {
+      isOwned: () => ownsLocalStoreLock(lease), isBound: () => matchesResourceConsoleProject(binding),
+    });
     const stopped = () => {
       try { const kill = readKillSwitch(); return abort.signal.aborted || Date.now() >= deadline || performance.now() >= monotonicDeadline ||
         !ownsLocalStoreLock(lease) || !matchesResourceConsoleProject(binding) || present(join(config.root, 'STOP')) ||
@@ -98,7 +104,7 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
       });
       requireFact(result === 'recorded' || result === 'replayed', 'Mission record publication unavailable'); read();
     };
-    const progress = (next: string) => { phase = next; try {
+    const progress = (next: string) => { phase = next; invocation?.observe(index, next); try {
       void Promise.resolve(host.onProgress?.({ missionId: config.id, scope: index, phase, consoleUrl: handle?.consoleUrl ?? null })).catch(() => {});
     } catch { /* Observation never owns execution. */ } };
     const wait = async () => {
@@ -108,7 +114,11 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         abort.signal.addEventListener('abort', done, { once: true }); if (abort.signal.aborted) done();
       }); guard();
     };
-    const close = async () => { const active = handle; handle = null; if (active) await active.close(); };
+    const close = async () => {
+      const active = handle; handle = null;
+      try { if (active) await active.close(); }
+      catch (error) { shutdownUnresolved = true; throw error; }
+    };
     const request = async <T>(path: string, body?: unknown): Promise<T> => {
       guard(); requireFact(handle && new URL(handle.url).hostname === '127.0.0.1', 'Mission console unavailable');
       return requestEngineeringMissionConsole<T>({ handle: handle!, path, ...(body === undefined ? {} : { body }),
@@ -273,7 +283,12 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
   } finally {
     if (timer) clearInterval(timer); host.signal?.removeEventListener('abort', stoppedExternally); abort.abort();
     try { if (handle) await handle.close(); }
-    catch { report.state = 'held'; report.reason = 'shutdown-unresolved'; }
+    catch { shutdownUnresolved = true; }
+    if (shutdownUnresolved) { report.state = 'held'; report.reason = 'shutdown-unresolved'; }
     if (lease && !releaseLocalStoreLock(lease)) { report.state = 'held'; report.reason = 'ownership-release-unresolved'; }
+    // Invocation observations are not scope decisions. Publish only after both
+    // cleanup outcomes are known, so retained evidence cannot hide a failed drain.
+    try { invocation?.finish({ state: report.state, reason: report.reason, scopesReserved: report.scopesReserved }); }
+    catch { report.state = 'held'; report.reason = 'invocation-record-unavailable'; }
   }
 }

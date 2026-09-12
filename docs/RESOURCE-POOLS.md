@@ -343,6 +343,23 @@ read provider usage or rerun Git proof. `ownerState: "not-observed"` and
 current liveness or branch integrity. Status exits `0` for a valid observation,
 including an unstarted or expired mission; unreadable/drifted history exits `1`.
 
+The `invocations` field separately reports retained runner attempts: the latest
+start, final outcome/reason, monotonic elapsed time and per-scope phase durations.
+It also counts attempts without a terminal observation. A missing outcome means
+**unknown**, not an active worker or permission to retry. Final outcomes are
+recorded after console shutdown and mission-lock release; either failure is
+retained as a held result. Setup failures before ownership have no invocation
+record and remain visible only in the command's returned report.
+
+These private immutable observations live in `mission-invocations`, separate
+from the execution decisions in `mission-events`. They contain no prompts,
+model output, console URLs or credentials. Repeated phase notifications share
+one timing bucket; timings are available after finalization, not a live heartbeat.
+The journal is bounded to 4096 starts and 8192 total records, with no automatic
+eviction. Unreadable/full history prevents a new recorded invocation; a failed
+final write returns `invocation-record-unavailable` and leaves its outcome unknown.
+Neither status nor invocation history renews a deadline or proves delivery.
+
 SIGINT/SIGTERM, global KILL, deadline expiry, lost ownership or a `STOP` entry in
 the mission root prevent further execution and drain owned work. Existing account
 and queue pauses are not cleared. Immutable `mission-events` retain reservations,

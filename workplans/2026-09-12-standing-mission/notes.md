@@ -208,3 +208,31 @@ recorded completion and tip, with observation-only flags and no raw proposals.
 Actual private-record fixtures and CLI boundary tests pass (71 tests across the
 three mission-focused files, seven more cases than before). TypeScript, lint
 and source documentation checks pass. No build was replaced during acceptance.
+
+### Durable invocation diagnostics continuation
+
+Exploration confirmed the next useful-evaluator gate is qualification of the
+installed measurement bundle, then genuine three-capture calibration and explicit
+score authoring. The scoring source and recipe integration already exist; the
+installed scoring package does not. The real global stop remains active, so no
+genuine capture or account fleet activation was attempted.
+
+The separate `mission-invocations` journal records starts and final outcomes,
+including monotonic phase/scope timing, without changing `mission-events`
+execution decisions. Finalization occurs after console drain and mission lease
+release, using the observation store's own writer lock and the pinned start
+identity. A late older finish cannot replace the latest invocation. Unfinished
+starts remain unknown, not live; phase durations are finalized observations,
+not heartbeat data. Startup validation failures before ownership remain CLI-only.
+
+Initial validation found an overly broad test mock missing a transitive export
+and a TypeScript Phase narrowing error; both were corrected. Focused final-source
+verification (93523) passed 115 tests across five files, including seven runner
+diagnostic tests and 37 observation-store tests. Source docs, owned lint and test
+lane classification passed. Review also fixed the previously generic failed-drain
+reason when the console handle had already been detached.
+
+Long-running gates remain in progress: installed native qualifier 96998, and
+actual two-scope mission replay 15161. The latter started before the subsequent
+failed-drain flag fix; that fix has its separate focused regression. No fixed
+installed evaluator bytes or helpers were replaced while either gate ran.

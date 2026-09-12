@@ -175,3 +175,34 @@ modifying its test configuration. Source/package documentation, TypeScript and
 lint pass; all verification handles are terminal. See `delivery.md` for exact
 test/artifact boundaries. This completes the bounded standing-mission increment,
 not the overarching autonomous-company goal or live account/service activation.
+
+## Continuation: durable run diagnostics and current evaluator qualification
+
+Previous goal turn was verified progress: mission execution/restart, status,
+356 focused cases and clean source build dbed1726. Current checkout is clean
+77f0610e before this continuation; the full north-star objective stays active.
+
+- [x] Recheck repository, prior execution evidence, real global stop and installed evaluator.
+- [ ] Qualify fixed installed evaluator 3701f201 through isolated native acceptance; do not rebuild its assets while running.
+- [ ] Explore and implement durable mission invocation outcomes and phase timing using existing private immutable storage.
+- [ ] Verify interruption/restart diagnostics, non-dispatching status, bounded history and sensitive-data exclusion.
+- [ ] Record exact source/artifact/qualification results and remaining actual-account/service gates.
+
+At the start of this continuation the real stop is active/healthy. It is not
+cleared. Qualification uses the established isolated test home, temporary Git
+fixtures and no model/provider traffic; it is not genuine calibration or fleet
+activation. Installed diagnostic identity is
+3701f20177a1d4592fcd4c84ec0ac187f54b0ce6c6843fcd7b95f18dd63f72ed,
+nine files, Node24.18.0. The completed Explore agent is mapping the actual
+benchmark and diagnostic integration. Previously quota-failed agents are not retried.
+
+- Implemented separate bounded immutable invocation observations and additive
+  status projection; final outcome follows shutdown and lease-release results.
+- The available Explore agent implemented and tested the journal; parent wired
+  the runner/status, cleanup regressions and runbook. No errored agent was retried.
+- Focused final-source gate 93523: 115 tests passed across five files. Source
+  documentation, owned lint and real-IO lane classification passed.
+- Errors corrected: two guessed test-path/glob reads, a transitive-export test
+  mock omission and Phase type narrowing. No user data changed by failed reads.
+- Long gates 96998 (native installed qualification) and 15161 (real mission
+  replay) remain active. Preserve their handles and fixed compiled assets.

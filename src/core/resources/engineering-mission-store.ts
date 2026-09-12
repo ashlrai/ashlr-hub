@@ -6,6 +6,7 @@ import { readImmutablePrivateRecords, type ImmutablePrivateRecordStoreConfig } f
 import type { ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
 import { validateResourceTask } from './pool-runtime.js';
 import { parseResourceEngineeringSuccessorProposal } from './engineering-successor-store.js';
+import { readEngineeringMissionInvocations } from './engineering-mission-invocations.js';
 
 export interface ResourceEngineeringMissionConfig {
   schemaVersion: 1; id: string;
@@ -136,5 +137,6 @@ export function readResourceEngineeringMissionStatus(input: unknown, now = Date.
     sampledAt: new Date(now).toISOString(), recordedPhase: latest, scopesReserved: scopes.length, scopesSettled: settled.length,
     maxScopes: config.maxScopes, deadlineAt: config.deadlineAt, remainingMs: Math.max(0, Date.parse(config.deadlineAt) - now),
     recordedCompletion: finished?.reason ?? null, recordedTip: last?.tip ?? null,
+    invocations: readEngineeringMissionInvocations(config),
     ownerState: 'not-observed', deliveryState: 'not-revalidated', executionAuthorized: false, effectsExecuted: false, providerContacted: false };
 }

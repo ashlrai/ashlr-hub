@@ -15,6 +15,7 @@ import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { checkResourceEngineeringAutonomousSetup, prepareResourceEngineeringAutonomousSetup } from '../src/core/resources/engineering-autonomous-setup.js';
 import { runResourceEngineeringMission } from '../src/core/resources/engineering-mission.js';
 import { readEngineeringMissionRecords, type ResourceEngineeringMissionConfig } from '../src/core/resources/engineering-mission-store.js';
+import { readEngineeringMissionInvocations } from '../src/core/resources/engineering-mission-invocations.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -114,6 +115,8 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     } });
     expect(first, JSON.stringify({ first, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt: f.config.deadlineAt });
     expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
+    expect(readEngineeringMissionInvocations(f.config)).toMatchObject({ count: 1, unfinishedCount: 0,
+      latest: { outcome: { state: 'stopped', reason: first.reason } } });
     const firstRows = readEngineeringMissionRecords(f.config); expect(firstRows.some(row => row.kind === 'settled')).toBe(true);
     const second = await runResourceEngineeringMission(f.config, { onProgress(value) { phases.push(`${value.scope}:${value.phase}`); } });
     expect(second, JSON.stringify({ second, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'completed', reason: 'stop-requested', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
@@ -144,5 +147,9 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(replayUrls.every(url => url === null)).toBe(true);
     expect(f.calls).toEqual({ generation: 3, successor: 2, mission: 1 });
     expect(readEngineeringMissionRecords(f.config)).toEqual(final);
+    const invocations = readEngineeringMissionInvocations(f.config);
+    expect(invocations).toMatchObject({ count: 3, unfinishedCount: 0,
+      latest: { index: 3, outcome: { state: 'completed', reason: 'stop-requested', scopesReserved: 2 } } });
+    expect(invocations.latest!.timings.some(row => row.phase === 'reconciling')).toBe(true);
   }, 1800_000);
 });

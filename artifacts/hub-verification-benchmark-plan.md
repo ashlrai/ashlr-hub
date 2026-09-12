@@ -453,16 +453,22 @@ The existing tests' exact helper-call counts are baseline observations, not a
 requirement to preserve redundant internals; replacement implementations must
 still satisfy independent final-state and fault-injection checks.
 
-## Planned next acceptance step: closed scoring adapter
+## Closed scoring adapter: source implemented, native acceptance pending
 
-**Planned, not implemented.** Turn the fixed workload into accepted evidence with
-one small installed score adapter; do not add another scheduler or framework.
-Keep `preparation-measurement-v1` diagnostic-only. Add a separate closed builtin
-selection through the existing [registry](../src/core/universe/builtin-evaluator-registry.ts)
-and [build manifest](../scripts/build-preparation-builtin.mjs), with a packaged
-baseline vector and workload version. Pin the baseline source and runtime/tool
-identities; bind the resulting installed bytes through the existing comparator.
-Do not put the final bundle's own digest inside its baseline file.
+The [closed scorer](../src/core/universe/preparation-process-score.ts),
+[explicit authoring function](../scripts/build-preparation-score.mjs) and
+[recipe integration](../src/core/resources/engineering-preparation.ts) exist in
+source. `preparation-measurement-v1` remains diagnostic-only; the separate
+`preparation-process-score-v1` builtin requires genuine three-capture calibration
+and baseline-wide compiler provenance. Ordinary builds do not invent that baseline.
+At the September 12 standing-mission verification, the installed directory held
+only the measurement package, not an authored scoring package. Current native
+qualification, genuine calibration, score authoring and scored candidate delivery
+are separate remaining gates; historical bundle results do not transfer.
+
+The acceptance criteria below still apply. Pin baseline source and runtime/tool
+identities, bind installed bytes through the existing comparator, and do not put
+the final bundle's own digest inside its baseline file.
 
 1. Freeze the exact scenario/request set and three repeatable baseline runs.
    Include the [installed workload](../scripts/evaluators/preparation-verification.mjs)
