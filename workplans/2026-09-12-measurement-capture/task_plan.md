@@ -16,7 +16,13 @@ This is not a scored trial, accepted improvement, delivery or running service.
 3. [x] CLI builder: explicit capture command, help/routing and mock tests; depends on core types.
 4. [x] Independent reviewer: replay, custody, deadline, drift and publication boundaries.
 5. [x] Parent: combined mock tests, source/web types, documentation, build and serialized native acceptance.
-6. [ ] Parent: integrate with automatic-admission recovery and verify the merged build.
+6. [x] Parent: integrate with automatic-admission recovery and verify the merged build.
+
+Integrated code revision: `91b5d1272a0e684e26916f38a458e532b8a9642d`.
+Combined build, source/web types, documentation and lane checks passed. Final
+combined gate 57459 passed 146 tests across eight suites, zero skips, 31.44s;
+actual recovery and capture passed on the same built source. Only the adjacent
+test-lane additions conflicted during integration; both entries were retained.
 
 Core and CLI work concurrently after the interface is fixed. Parent is sole
 committer/integrator. Dependencies are a real local copy, not source.

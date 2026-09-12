@@ -44,3 +44,9 @@ The pinned native-Git change is separately committed as `9338c627`. Combining
 these changes alters trusted preparation dependencies and therefore the builtin
 identity. Rebuild and verify the combined source; do not reuse old comparator
 pins or call the separate native gate proof of a later build.
+
+Post-integration verification is now complete for the local increment. Native
+Git plus recovery at `0de7c635` passed its build and a focused 115-test/four-suite
+gate (267.83s). Capture was then integrated at `91b5d127`; the combined build and
+146-test/eight-suite gate passed (31.44s), including real recovery and capture.
+No public release or account/service activation followed these local checks.

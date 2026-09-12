@@ -150,6 +150,13 @@ candidate substitution, installed-runtime drift and cancellation; its output
 remains non-scoring measurement. A read-only
 [`preparation-measurement` inspector](ASHLR-UNIVERSE.md#inspect-preparation-measurements)
 summarizes explicit report files without treating reported checks as acceptance.
+An explicit [capture command](ASHLR-UNIVERSE.md#capture-preparation-measurements)
+now retains seed-only diagnostic reports with immutable intent/receipt custody,
+original deadline and artifact/evaluator/tool pins. Real installed failed-check
+capture and byte-exact no-write replay are verified; full-success capture through
+this new command remains a separate gate. It does not score, select, dispatch a
+model or deliver into the registered repository. Pending custody fences that
+Universe's execution under the existing owner contract, not a new global lock.
 Additional candidate-linked during-call probes challenge runtime
 and delivered-branch freshness using deliberately stale candidate controls;
 their trusted test-only injector preserves original native results. These are

@@ -2600,7 +2600,10 @@ Node and native-tool identities. Exact completed replay returns the recorded
 result without running again. An unfinished or uncertain attempt is held rather
 than retried, including under a different capture ID. The same Universe's
 execution remains fenced while process custody is unresolved; independent
-Universes are unaffected. A settled failure does not authorize an automatic retry.
+Universes can acquire their own execution independently. Existing enclosing
+portfolio controllers may hold their whole enrollment on an ownership refusal;
+this command does not change those controller semantics. A settled failure does
+not authorize an automatic retry.
 
 Valid partial or failed diagnostic reports remain useful evidence. Retained
 report text preserves whitespace and is bound to its byte length and SHA-256;

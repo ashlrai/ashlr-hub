@@ -1,6 +1,33 @@
 # Executable firm: package graph
 
-## Current increment — pinned native Git for meaningful self-improvement (baseline f0d6898a)
+## Current handoff — recovery and durable diagnostic capture
+
+Integrated code revision `91b5d1272a0e684e26916f38a458e532b8a9642d` includes:
+
+- `9338c627`: pinned native Git; original 145-test installed/native gate passed.
+- `0de7c635`: durable automatic admission recovery and sampled UI status;
+  isolated 95-test gate and rebuilt 115-test integration gate passed.
+- `91b5d127`: one-shot pinned diagnostic capture, immutable report custody,
+  historical CLI replay and same-Universe unsettled-execution guard. Isolated
+  175-test mock/CLI and 104-test real-I/O gates passed.
+
+Final combined build/types/docs/lane checks passed; gate 57459 passed 146 tests
+in eight suites, zero skips, 31.44s. Actual recovery and capture ran on the same
+source. No native workload remains active at this handoff. See
+[`preparation-measurement-capture-verification.md`](../../artifacts/preparation-measurement-capture-verification.md)
+and the [capture plan](../2026-09-12-measurement-capture/task_plan.md).
+
+Next meaningful loop: retain a full successful native diagnostic, define the
+separate frozen improvement score, evaluate an actual candidate through the
+existing archive/campaign path and verify its local delivery. Do not turn a
+diagnostic pass into acceptance. Then continue the resident-window milestone
+below, preserving declared resource ceilings, personal General/Spark policy and
+the existing activation door. No remote release, npm publish, actual-account
+commissioning or service activation occurred. The overall north star is active,
+not complete. Earlier paragraphs below are chronological evidence, not live
+process status.
+
+## Previous increment — pinned native Git for meaningful self-improvement (baseline f0d6898a)
 
 - [x] Revalidate the clean integration worktree and explore launcher identity, scoring and delivery dependencies with three agents.
 - [x] Implement a closed read-only selector for installed Apple developer Git and carry its pinned identity through trusted dispatch.

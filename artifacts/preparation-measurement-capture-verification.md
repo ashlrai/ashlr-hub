@@ -39,6 +39,20 @@ failure handling and historical identity labels. A packaging failure caused by
 the development dependency symlink was resolved with a local dependency copy,
 without relaxing the package-root checks.
 
+## Integrated verification
+
+Integration onto automatic recovery produced code revision
+`91b5d1272a0e684e26916f38a458e532b8a9642d`. Its build, source/web types,
+documentation and lane checks passed. The final combined gate passed **146
+tests, eight suites, zero skips, 31.44 seconds**. Actual recovery passed in
+24.973s and installed failed-diagnostic capture in 2.304s on that same build.
+These durations describe the local fixtures, not product throughput benchmarks.
+
+The per-Universe guard does not install a global lock. Existing enclosing
+portfolio controllers can hold their entire enrollment on acquisition refusal;
+independence means separately acquired execution contexts, not every dependent
+branch within a halted portfolio.
+
 ## Not established
 
 Full-success native capture through the new command, benchmark scoring,
