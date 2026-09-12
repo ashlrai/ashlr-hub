@@ -17,6 +17,7 @@ beforeEach(() => vi.resetAllMocks());
 describe('successor metadata read boundary', () => {
   it.each([
     ['idle', null], ['running', null], ['closing', null], ['closed', null], ['held', 'execution-guard-refused'], ['held', 'signal-aborted'],
+    ['waiting', 'proposal-workers-ineligible'], ['waiting', 'proposal-admission-unavailable'],
     ['timed-out', 'deadline-reached'], ['faulted', 'coordinator-loop-failed'], ['faulted', 'close-unresolved'], ['faulted', 'ownership-release-failed'],
   ])('accepts independently reported lifecycle %s / %s without age health inference', (state, reason) => {
     const value = journal(); Object.assign(value.observation!, { coordinator: { ...lifecycle(), state, reason } });
@@ -29,6 +30,8 @@ describe('successor metadata read boundary', () => {
   it.each([undefined, false, {}, { supervisionId: 'other' }, { configDigest: 'b'.repeat(64) }, { deadlineAt: '2026-09-12T00:00:00.000Z' },
     { schemaVersion: 2 }, { sequence: 0 }, { sequence: -1 }, { sequence: 1.5 }, { sequence: Number.MAX_SAFE_INTEGER + 1 },
     { reportedAt: '2026-09-10' }, { state: 'executing' }, { state: 'held', reason: null }, { state: 'faulted', reason: 'signal-aborted' },
+    { state: 'waiting', reason: null }, { state: 'waiting', reason: 'quota-exhausted' }, { state: 'waiting', reason: 'execution-guard-refused' },
+    { state: 'running', reason: 'proposal-workers-ineligible' }, { state: 'held', reason: 'proposal-admission-unavailable' },
     { state: 'running', reason: 'coordinator-loop-failed' }, { reason: '/private/sentinel' }, { error: 'private' }, { command: 'private' }])('rejects forged or inconsistent lifecycle %j', patch => {
     const report = !patch || typeof patch !== 'object' || !Object.keys(patch).length ? patch : { ...lifecycle(), ...patch };
     expect(() => decodeEngineeringSuccessors({ ...journal(), observation: { ...journal().observation, coordinator: report } })).toThrow('could not be verified');

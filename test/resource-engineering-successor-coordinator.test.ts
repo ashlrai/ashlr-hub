@@ -85,6 +85,89 @@ const until = (owner: ReturnType<typeof createResourceEngineeringSuccessorCoordi
   vi.waitFor(() => expect(owner.snapshot().entries[0]?.state).toBe(state), { timeout: 5000, interval: 20 });
 
 describe('bounded engineering successor coordinator', () => {
+  it.each(['proposal-workers-ineligible', 'proposal-admission-unavailable'] as const)(
+    'reports deduplicated %s before intent and real progress on recovery', async reason => {
+      const f = fixture(); let held = true; const reports: EngineeringCoordinatorLifecycleReport[] = [];
+      f.options.onLifecycle = row => reports.push(row);
+      const status = f.status.getMockImplementation()!;
+      f.status.mockImplementation((...args) => {
+        const value = status(...args);
+        return held ? { ...value, plan: { ...value.plan, candidates: [], selectedWorkerId: null } } : value;
+      });
+      const evidence = vi.fn(() => {
+        if (held && reason === 'proposal-admission-unavailable') throw new Error('PRIVATE_ADMISSION_FAILURE');
+        return { observations: [], unavailableWorkerIds: [] };
+      });
+      f.options.readAdmissionEvidence = evidence;
+      const owner = f.create(), initialized = f.files(); owner.start();
+      await vi.waitFor(() => expect(reports.at(-1)).toMatchObject({ state: 'waiting', reason }));
+      const waiting = { ...reports.at(-1)! }, count = reports.length;
+      await vi.waitFor(() => expect(evidence.mock.calls.length).toBeGreaterThanOrEqual(3));
+      expect(reports).toHaveLength(count); expect(reports.at(-1)).toEqual(waiting);
+      expect(f.files()).toEqual(initialized); expect(owner.snapshot().entries).toEqual([]);
+      expect(f.run).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
+      expect(f.options.supervision.admit).not.toHaveBeenCalled(); expect(f.state.admission!.remainingEnrollments).toBe(2);
+      expect(JSON.stringify(reports)).not.toContain('PRIVATE_ADMISSION_FAILURE');
+      held = false; await until(owner, 'admitted');
+      expect(reports.at(-1)).toMatchObject({ state: 'running', reason: null, sequence: waiting.sequence + 1 });
+      expect(f.run).toHaveBeenCalledTimes(1); expect(f.prepare).toHaveBeenCalledTimes(1);
+      expect(f.options.supervision.admit).toHaveBeenCalledTimes(1);
+      await owner.close(); expect(reports.slice(-2).map(row => row.state)).toEqual(['closing', 'closed']);
+    });
+  it.each(['pause', 'kill', 'deadline', 'signal', 'close'] as const)('gives %s precedence over a retained waiting observation', async mode => {
+    const f = fixture(), abort = new AbortController(); const reports: EngineeringCoordinatorLifecycleReport[] = [];
+    f.options.signal = abort.signal; f.options.onLifecycle = row => reports.push(row);
+    f.options.readAdmissionEvidence = () => { throw new Error('PRIVATE_WAIT'); };
+    const owner = f.create(), initialized = f.files(); owner.start();
+    await vi.waitFor(() => expect(reports.at(-1)?.state).toBe('waiting'));
+    if (mode === 'pause') f.state.paused = true;
+    else if (mode === 'kill') f.stop(true);
+    else if (mode === 'deadline') vi.spyOn(performance, 'now').mockReturnValue(performance.now() + 60_001);
+    else if (mode === 'signal') abort.abort();
+    else await owner.close();
+    const expected = mode === 'deadline' ? { state: 'timed-out', reason: 'deadline-reached' }
+      : mode === 'close' ? { state: 'closed', reason: null }
+      : { state: 'held', reason: mode === 'signal' ? 'signal-aborted' : 'execution-guard-refused' };
+    await vi.waitFor(() => expect(reports.at(-1)).toMatchObject(expected));
+    const count = reports.length; await new Promise(resolve => setTimeout(resolve, 150));
+    expect(reports).toHaveLength(count); expect(f.files()).toEqual(initialized);
+    expect(f.run).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled(); expect(f.options.supervision.admit).not.toHaveBeenCalled();
+  });
+  it('honors synchronous observer cancellation on resumed progress before recording any new intent', async () => {
+    const f = fixture(), abort = new AbortController(); let held = true, cancelOnProgress = false;
+    const reports: EngineeringCoordinatorLifecycleReport[] = [];
+    f.options.signal = abort.signal;
+    f.options.readAdmissionEvidence = () => { if (held) throw new Error('Held'); return { observations: [], unavailableWorkerIds: [] }; };
+    f.options.onLifecycle = row => { reports.push(row); if (cancelOnProgress && row.state === 'running') abort.abort(); };
+    const owner = f.create(), initialized = f.files(); owner.start();
+    await vi.waitFor(() => expect(reports.at(-1)?.state).toBe('waiting'));
+    cancelOnProgress = true; held = false;
+    await vi.waitFor(() => expect(reports.at(-1)).toMatchObject({ state: 'held', reason: 'signal-aborted' }));
+    expect(f.files()).toEqual(initialized); expect(f.run).not.toHaveBeenCalled();
+    expect(f.prepare).not.toHaveBeenCalled(); expect(f.options.supervision.admit).not.toHaveBeenCalled();
+  });
+  it.each(['prepare', 'admit'] as const)('rechecks stop after resumed lifecycle reporting before existing %s continuation', async stage => {
+    const f = fixture(), abort = new AbortController(); let held = false, cancelOnProgress = false;
+    const reports: EngineeringCoordinatorLifecycleReport[] = [];
+    f.options.signal = abort.signal;
+    f.state.entries.push({ ...f.state.entries[0]!, enrollmentId: 'other-source' });
+    const status = f.status.getMockImplementation()!;
+    f.status.mockImplementation((...args) => {
+      const value = status(...args);
+      return held ? { ...value, plan: { ...value.plan, candidates: [], selectedWorkerId: null } } : value;
+    });
+    const admit = vi.mocked(f.options.supervision.admit);
+    if (stage === 'prepare') f.prepare.mockImplementation(async () => { held = true; throw new Error('Retry later'); });
+    else admit.mockImplementation(() => { held = true; throw new Error('Retry later'); });
+    f.options.onLifecycle = row => { reports.push(row); if (cancelOnProgress && row.state === 'running') abort.abort(); };
+    const owner = f.create(); owner.start();
+    await vi.waitFor(() => expect(reports.at(-1)?.state).toBe('waiting'));
+    const prepareCalls = f.prepare.mock.calls.length, admitCalls = admit.mock.calls.length, before = f.files();
+    cancelOnProgress = true;
+    await vi.waitFor(() => expect(reports.at(-1)).toMatchObject({ state: 'held', reason: 'signal-aborted' }));
+    expect(f.files()).toEqual(before); expect(f.run).toHaveBeenCalledTimes(1);
+    expect(f.prepare).toHaveBeenCalledTimes(prepareCalls); expect(admit).toHaveBeenCalledTimes(admitCalls);
+  });
   it('defers quota-held new intent without spending a slot, then freshly proposes once under the original deadline', async () => {
     const f = fixture(); f.options.config = { ...config, maxSuccessors: 1 };
     const deadline = f.state.deadlineAt; let held = true;

@@ -11,6 +11,8 @@ const states = ['idle', 'running', 'closed', 'timed-out', 'unavailable'];
 const entryStates = ['proposing', 'waiting-for-capacity', 'preparing', 'admitting', 'held', 'proposed', 'prepared', 'admitted', 'stopped'];
 const recordedStates = ['intent-recorded', 'proposed', 'prepared', 'admitted', 'stopped'];
 export const engineeringCoordinatorReasons: Record<string, string> = {
+  'proposal-workers-ineligible': 'Waiting for eligible proposal resources within the original deadline. No new proposal intent was recorded for the waiting work.',
+  'proposal-admission-unavailable': 'Waiting because fresh proposal admission evidence could not be verified. No new proposal intent was recorded for the waiting work; the original deadline still applies.',
   'execution-guard-refused': 'An execution guard refused further work.',
   'signal-aborted': 'The coordinator received a stop signal.',
   'deadline-reached': 'The original coordinator deadline was reached.',
@@ -20,6 +22,7 @@ export const engineeringCoordinatorReasons: Record<string, string> = {
 };
 const lifecycleReasons: Record<string, Array<string | null>> = {
   idle: [null], running: [null], closing: [null], closed: [null],
+  waiting: ['proposal-workers-ineligible', 'proposal-admission-unavailable'],
   held: ['execution-guard-refused', 'signal-aborted'], 'timed-out': ['deadline-reached'],
   faulted: ['coordinator-loop-failed', 'close-unresolved', 'ownership-release-failed'],
 };

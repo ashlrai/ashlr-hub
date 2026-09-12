@@ -79,12 +79,14 @@ describe('engineering background ownership and drain protocol', () => {
     const closing = background.close(); reply(worker, 'close'); await closing;
     await expect(background.pendingAutomaticAdmissions(original, [])).rejects.toThrow('unavailable');
   });
-  it('pins pre-configuration lifecycle and keeps report time separate from fresh journal reads', async () => {
+  it.each([
+    ['faulted', 'coordinator-loop-failed'], ['waiting', 'proposal-workers-ineligible'], ['waiting', 'proposal-admission-unavailable'],
+  ])('pins pre-configuration lifecycle and keeps %s/%s report time separate from fresh journal reads', async (state, reason) => {
     const options = input(); const background = await createEngineeringBackground(options); const worker = fixture.workers[0]!;
     await configure(background, undefined, lifecycle());
     const first = await background.snapshot(); expect(first.observation?.coordinator).toEqual(lifecycle());
     first.observation!.coordinator!.state = 'closed';
-    const failed = { ...lifecycle(2), state: 'faulted', reason: 'coordinator-loop-failed' };
+    const failed = { ...lifecycle(2), state, reason };
     worker.emit('message', { type: 'engineering-coordinator-observation', report: failed });
     reader.read.mockResolvedValueOnce({ ...sample(), sampledAt: '2026-09-11T00:01:00.000Z' });
     const second = await background.snapshot();

@@ -822,7 +822,17 @@ transition, with its own timestamp and fixed reason. `running` means the loop
 started or cleared its guard; it does not establish active model execution or
 current health. `held` means an execution guard refused work (which can include
 pause, configuration/project drift or ownership uncertainty), or that its signal was aborted.
-It is not automatically labelled as a user pause. A caught loop failure reports
+`waiting` means at least one otherwise-ready source was deferred before a new
+proposal intent: `proposal-workers-ineligible` reports no eligible allowed worker;
+`proposal-admission-unavailable` reports that fresh admission evidence could not
+be verified. If both occur in one pass, unavailable evidence takes precedence.
+Neither reason implies quota exhaustion specifically or promises a start time.
+Waiting consumes no new intent slot for that source and retains the original
+deadline; other sources may already have recorded work. Unchanged waiting polls
+retain the report timestamp and sequence. Actual progress clears waiting, while
+pause, stop, deadline and close take precedence. Deploy the matching console UI
+with this backend so its strict decoder recognizes the new lifecycle value.
+The `held` state is not automatically labelled as a user pause. A caught loop failure reports
 `faulted` without closing independent enrolled work. Deadline and explicit close
 transitions are reported separately. Missing reports are unknown.
 

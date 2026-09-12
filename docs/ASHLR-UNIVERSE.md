@@ -1201,6 +1201,12 @@ reused after verifying its pins and bytes. When the campaign also enables
 separate `seedContext`, including generations editing an already retained elite.
 The historical seed context stays alongside current-parent source and latest
 trial feedback; it is not a synthetic trial or an acceptance decision.
+When that seed passed, the model instruction explicitly distinguishes archive
+selection from delivery: improving a retained parent alone is insufficient;
+delivery must also strictly improve the exact starting seed in the recorded
+metric direction and meet `minImprovement`. This explains the existing delivery
+gate without changing scores, scheduling or acceptance. Absent and failed seed
+measurements retain their prior prompt wording.
 
 The context contains the finite score, passing status, declared numeric metrics
 and bounded evaluator diagnostics. It is limited to 16 KiB of UTF-8 canonical

@@ -5,6 +5,7 @@ type Pins = Pick<EngineeringCoordinatorLifecycleReport, 'supervisionId' | 'confi
 const keys = ['schemaVersion', 'supervisionId', 'configDigest', 'deadlineAt', 'sequence', 'reportedAt', 'state', 'reason'];
 const reasons: Record<string, readonly (string | null)[]> = {
   idle: [null], running: [null], held: ['execution-guard-refused', 'signal-aborted'],
+  waiting: ['proposal-workers-ineligible', 'proposal-admission-unavailable'],
   'timed-out': ['deadline-reached'], closing: [null], closed: [null],
   faulted: ['coordinator-loop-failed', 'close-unresolved', 'ownership-release-failed'],
 };

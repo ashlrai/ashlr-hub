@@ -18,9 +18,9 @@ export interface ResourceEngineeringSuccessorCoordinatorConfig {
 export interface EngineeringCoordinatorLifecycleReport {
   schemaVersion: 1; supervisionId: string; configDigest: string; deadlineAt: string;
   sequence: number; reportedAt: string;
-  state: 'idle' | 'running' | 'held' | 'timed-out' | 'closing' | 'closed' | 'faulted';
+  state: 'idle' | 'running' | 'waiting' | 'held' | 'timed-out' | 'closing' | 'closed' | 'faulted';
   reason: null | 'execution-guard-refused' | 'signal-aborted' | 'deadline-reached' | 'coordinator-loop-failed'
-    | 'close-unresolved' | 'ownership-release-failed';
+    | 'close-unresolved' | 'ownership-release-failed' | 'proposal-workers-ineligible' | 'proposal-admission-unavailable';
 }
 export interface ResourceEngineeringSuccessorCoordinatorOptions {
   root: string; config: ResourceEngineeringSuccessorCoordinatorConfig; pool: ResourcePool; bindings: ResourceBinding[]; cwd: string;

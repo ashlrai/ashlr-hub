@@ -5,6 +5,7 @@ const base = { schemaVersion: 1, supervisionId: 'automatic', configDigest: 'a'.r
 describe('closed coordinator telemetry contract', () => {
   it.each([
     ['idle', null], ['running', null], ['closing', null], ['closed', null],
+    ['waiting', 'proposal-workers-ineligible'], ['waiting', 'proposal-admission-unavailable'],
     ['held', 'execution-guard-refused'], ['held', 'signal-aborted'], ['timed-out', 'deadline-reached'],
     ['faulted', 'coordinator-loop-failed'], ['faulted', 'close-unresolved'], ['faulted', 'ownership-release-failed'],
   ])('accepts only known state/reason pair %s %s', (state, reason) => {
@@ -17,6 +18,9 @@ describe('closed coordinator telemetry contract', () => {
     const inherited = Object.assign(Object.create({ secret: true }), base);
     for (const row of [getter, inherited, { ...base, [Symbol('secret')]: true }, { ...base, private: true },
       { ...base, state: '__proto__' }, { ...base, reason: 'exception text' }, { ...base, reportedAt: '2026-09-11' },
+      { ...base, state: 'waiting', reason: null }, { ...base, state: 'waiting', reason: 'execution-guard-refused' },
+      { ...base, state: 'running', reason: 'proposal-workers-ineligible' },
+      { ...base, state: 'held', reason: 'proposal-admission-unavailable' },
       { ...base, configDigest: 'no' }, { ...base, supervisionId: '../escape' }]) {
       expect(readEngineeringCoordinatorObservation(row)).toBeNull();
     }

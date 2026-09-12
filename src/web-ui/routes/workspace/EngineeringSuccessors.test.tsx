@@ -27,6 +27,40 @@ beforeEach(() => { vi.useFakeTimers(); read.mockReset().mockResolvedValue(snapsh
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('successor planning observation panel', () => {
+  it.each(['proposal-workers-ineligible', 'proposal-admission-unavailable'] as const)('explains pre-intent waiting for %s without inventing work or freshening its report', async reason => {
+    const value = journal(); value.entries = [];
+    value.observation!.coordinator = { schemaVersion: 1, supervisionId: value.supervisionId,
+      configDigest: value.configDigest, deadlineAt: value.deadlineAt, sequence: 2,
+      reportedAt: '2026-09-18T00:00:00.000Z', state: 'waiting', reason };
+    read.mockResolvedValue(value); const input = props(); const view = render(<EngineeringSuccessors {...input} />); await flush();
+    expect(screen.getByText('Waiting before proposal')).toBeInTheDocument();
+    expect(screen.getByText(reason === 'proposal-workers-ineligible' ? /Waiting for eligible proposal resources/ : /fresh proposal admission evidence could not be verified/)).toBeInTheDocument();
+    expect(screen.getByText(/No successor intent recorded/)).toBeInTheDocument();
+    expect(screen.getByText('0 / 4')).toBeInTheDocument();
+    expect(screen.queryByText('Running')).not.toBeInTheDocument();
+    read.mockResolvedValue({ ...value, observation: { ...value.observation!, sampledAt: '2026-09-19T01:00:00.000Z' } }); await tick();
+    expect(document.querySelector('time[datetime="2026-09-18T00:00:00.000Z"]')).toBeInTheDocument();
+    expect(document.querySelector('time[datetime="2026-09-19T01:00:00.000Z"]')).toBeInTheDocument();
+    expect(screen.getByText(/last reported lifecycle, not proof of current execution/)).toBeInTheDocument();
+    expect(input.onRegisteredEnrollments).not.toHaveBeenCalled(); expect(input.onInspectEnrollment).not.toHaveBeenCalled();
+    expect(read).toHaveBeenCalledTimes(2);
+    view.rerender(<EngineeringSuccessors {...input} available={false} />);
+    expect(screen.getByText('Waiting before proposal')).toBeInTheDocument();
+    expect(screen.getByText(/Displayed evidence may be stale/)).toBeInTheDocument();
+  });
+  it('updates waiting to reported progress only when a new lifecycle report arrives', async () => {
+    const value = journal(); value.entries = [];
+    value.observation!.coordinator = { schemaVersion: 1, supervisionId: value.supervisionId,
+      configDigest: value.configDigest, deadlineAt: value.deadlineAt, sequence: 2,
+      reportedAt: '2026-09-18T00:00:00.000Z', state: 'waiting', reason: 'proposal-workers-ineligible' };
+    read.mockResolvedValue(value); render(<EngineeringSuccessors {...props()} />); await flush();
+    read.mockResolvedValue({ ...value, observation: { ...value.observation!, coordinator: {
+      ...value.observation!.coordinator!, sequence: 3, reportedAt: '2026-09-19T01:00:00.000Z', state: 'running', reason: null,
+    } } }); await tick();
+    expect(screen.getByText('Running')).toBeInTheDocument(); expect(screen.queryByText('Waiting before proposal')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Waiting for eligible proposal resources/)).not.toBeInTheDocument();
+    expect(screen.getByText(/No successor intent recorded/)).toBeInTheDocument();
+  });
   it('shows unknown lifecycle without treating connection or journal freshness as a report', async () => {
     read.mockResolvedValue(journal()); render(<EngineeringSuccessors {...props()} />); await flush();
     expect(screen.getByText('Unknown — no coordinator report')).toBeInTheDocument(); expect(screen.getByText('Worker connected')).toBeInTheDocument();

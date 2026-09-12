@@ -25,7 +25,7 @@ const states: Record<Snapshot['state'], string> = {
   'timed-out': 'Original deadline exhausted', unavailable: 'Coordinator unavailable',
 };
 const workerStates = { connected: 'Worker connected', closing: 'Worker closing', exited: 'Worker exited', faulted: 'Worker unavailable' };
-const coordinatorStates = { idle: 'Idle', running: 'Running', held: 'Held', 'timed-out': 'Deadline reached', closing: 'Closing', closed: 'Closed', faulted: 'Faulted' };
+const coordinatorStates = { idle: 'Idle', running: 'Running', waiting: 'Waiting before proposal', held: 'Held', 'timed-out': 'Deadline reached', closing: 'Closing', closed: 'Closed', faulted: 'Faulted' };
 const identity = (value: Snapshot) => JSON.stringify([value.supervisionId, value.profileId, value.configDigest, value.deadlineAt, value.maxSuccessors]);
 
 /** Observes the console-wide successor loop. Inspection changes selection only. */

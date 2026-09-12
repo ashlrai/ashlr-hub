@@ -162,7 +162,7 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
           // mandatory post-reservation check below is the next effect boundary;
           // avoid a duplicate deep proof consuming the same bounded timeout.
           if (!proposalGuard()) fail('Successor dispatch stopped');
-          live = { key, state: 'proposing' };
+          report('running'); live = { key, state: 'proposing' };
           const admission = data<ReturnType<Options['readAdmissionEvidence']>>(proposalEvidence());
           response = await runResourceTask({ root, pool, bindings, ...admission, task: intent.task, signal: controller.signal,
             // The runtime invokes this after releasing its reservation lock;
@@ -196,6 +196,7 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
     if (!settled || settled.status !== 'completed' || hash(settled) !== result.receiptDigest || settled.outputDigest !== digest(result.output)) fail('Successor receipt unavailable');
     const proposal = parseResourceEngineeringSuccessorProposal(result.output);
     if (proposal.action === 'stop') return;
+    report('running');
     if (!fresh(intent.source)) fail('Successor source changed');
     rows = read(); let prepared = rows.find((row): row is Prepared => row.kind === 'prepared' && row.key === key);
     if (!prepared) {
@@ -207,6 +208,7 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
         enrollmentDigest: enrollment.enrollmentDigest, projectId: enrollment.projectId };
       write(prepared, intent.source);
     }
+    report('running');
     if (!fresh(intent.source)) fail('Successor source changed');
     const snapshot = current();
     live = { key, state: 'admitting' };
@@ -223,7 +225,7 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
   async function tick(): Promise<void> {
     if (!cheapGuard()) { reportStopped(); return; }
     const snapshot = current(); if (snapshot.paused) { reportStopped(); return; }
-    report('running');
+    let waiting: 'proposal-workers-ineligible' | 'proposal-admission-unavailable' | undefined;
     let rows = read();
     for (const intent of rows.filter((row): row is Intent => row.kind === 'intent')) {
       try { await advance(intent, false); } catch { reasons.set(intent.key, 'successor-evidence-unavailable'); }
@@ -239,9 +241,11 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
         if (!cheapGuard()) { reportStopped(); return; }
         const plan = resourceAdmissionPreflight(root, pool, bindings, config.allowedWorkerIds, admission);
         eligible = plan.candidates.some(row => config.allowedWorkerIds.includes(row.workerId));
+        if (!eligible) waiting ??= 'proposal-workers-ineligible';
       } catch {
         // Unavailable preflight evidence must not consume an intent or successor
         // slot. The existing poll can reconsider before any proposal is invoked.
+        waiting = 'proposal-admission-unavailable';
       }
       if (!cheapGuard()) { reportStopped(); return; }
       if (!eligible) continue;
@@ -253,10 +257,16 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
         allowedWorkerIds: config.allowedWorkerIds, maxOutputTokens: config.maxOutputTokens,
         timeoutMs: Math.max(1, Math.min(config.proposalTimeoutMs, Math.floor(deadline - Date.now()), Math.floor(monotonicDeadline - performance.now()))) });
       const intent: Intent = { id: `intent-${key}`, kind: 'intent', key, source, task, successorId: `successor-${key}` };
+      report('running');
+      if (!cheapGuard() || current().paused) { reportStopped(); return; }
       write(intent, source);
       try { await advance(intent, true); } catch { reasons.set(key, 'successor-evidence-unavailable'); }
       rows = read();
     }
+    if (!cheapGuard() || current().paused) { reportStopped(); return; }
+    // Only transitions update reportedAt. Repeated ineligible polls must not
+    // turn an old waiting observation into fresh-looking execution telemetry.
+    if (waiting) report('waiting', waiting); else report('running');
   }
   const onAbort = () => { active?.abort(); wake?.(); if (!closing && !faulted) report('held', 'signal-aborted'); };
   try {
