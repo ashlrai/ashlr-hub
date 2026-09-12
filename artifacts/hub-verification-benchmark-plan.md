@@ -462,9 +462,11 @@ source. `preparation-measurement-v1` remains diagnostic-only; the separate
 `preparation-process-score-v1` builtin requires genuine three-capture calibration
 and baseline-wide compiler provenance. Ordinary builds do not invent that baseline.
 At the September 12 standing-mission verification, the installed directory held
-only the measurement package, not an authored scoring package. Current native
-qualification, genuine calibration, score authoring and scored candidate delivery
-are separate remaining gates; historical bundle results do not transfer.
+only the measurement package, not an authored scoring package. Fresh five-case
+native qualification and exact post-build identity are recorded in the
+[standing-mission verification](../workplans/2026-09-12-standing-mission/delivery.md).
+Genuine calibration, score authoring and scored candidate delivery remain separate
+gates; historical results for different bundles do not transfer.
 
 The acceptance criteria below still apply. Pin baseline source and runtime/tool
 identities, bind installed bytes through the existing comparator, and do not put

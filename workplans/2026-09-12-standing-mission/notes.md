@@ -236,3 +236,20 @@ Long-running gates remain in progress: installed native qualifier 96998, and
 actual two-scope mission replay 15161. The latter started before the subsequent
 failed-drain flag fix; that fix has its separate focused regression. No fixed
 installed evaluator bytes or helpers were replaced while either gate ran.
+
+Both gates completed successfully. Mission 15161 passed one case (612.12s);
+native 96998 passed all five (1503.54s), including the actual 23-check workload,
+15-region vector and runtime/source drift controls. Final journal hardening added
+extended-year timestamp coverage; combined 79402 passed 116 tests and TypeScript.
+
+Clean source d9b604c99179bbbbba449cb2a493764a66c8a5a9 built successfully (1916).
+Compiled CLI observation smoke passed with byte/identity-stable temporary
+fixture, no external setup files, unchanged real global stop and no dispatch.
+Its owned temporary directory was removed. The rebuilt nine-file evaluator seal
+is exactly 3701f20177a1d4592fcd4c84ec0ac187f54b0ce6c6843fcd7b95f18dd63f72ed,
+equal to the newly qualified bundle, not an inferred transfer to changed bytes.
+
+Independent handoff review corrected a documentation overclaim: write failure
+can follow publication, and the generic writer can leave its lock behind without
+returning failure. A missing finish means unknown; failed finalization alone does
+not prove absence. No generic storage recovery or authority semantics were changed.

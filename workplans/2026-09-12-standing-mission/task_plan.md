@@ -206,3 +206,17 @@ benchmark and diagnostic integration. Previously quota-failed agents are not ret
   mock omission and Phase type narrowing. No user data changed by failed reads.
 - Long gates 96998 (native installed qualification) and 15161 (real mission
   replay) remain active. Preserve their handles and fixed compiled assets.
+
+### Continuation completed locally
+
+- [x] Durable invocation journal, runner/status integration and cleanup diagnostics.
+- [x] Final focused gate: 79402, 116 tests across five files, followed by source TypeScript.
+- [x] Real mission replay: 15161, one test, 612.12s test time.
+- [x] Installed native qualifier: 96998, five tests, 1503.54s test time; fixed bundle remained unchanged throughout.
+- [x] Clean d9b604c9 source build, compiled observation smoke, and exact post-build evaluator identity comparison.
+- [x] Document finalization ambiguity, verified layers and remaining calibration/activation gates.
+
+The goal remains active. This completes this bounded local reliability increment,
+not genuine calibration, scoring-package authoring, account-fleet commissioning,
+resident service installation or production release. All verification sessions
+are terminal. The real global stop remains active and unchanged.

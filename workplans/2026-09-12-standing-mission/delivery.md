@@ -169,3 +169,52 @@ projection, strict identifier checks and CLI changes have their focused gates
 and compiled-process smoke above. The observer URL assertion placement was
 reviewed/static-checked after that full run began. All verification processes
 are terminal. Final documentation-only commits do not change this code artifact.
+
+## Durable invocation diagnostics and fresh native qualification
+
+Implementation source: `d9b604c99179bbbbba449cb2a493764a66c8a5a9`, branch
+`auto/p00`, worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.
+The original working checkout remains untouched. The new journal is separate
+from scope decisions and retains bounded starts, sanitized terminal outcomes
+and monotonic phase/scope durations. Status exposes recorded evidence only;
+missing final records never imply live ownership. Shutdown and mission-lease
+release outcomes precede finalization. Detached scope-drain failures now retain
+the specific `shutdown-unresolved` reason.
+
+Verified locally on September 12:
+
+- Final focused gate 79402: **116 tests across five files**, 13.04s total,
+  followed by successful source TypeScript. Includes 38 journal cases and seven
+  runner cleanup/status cases; these are not added again to prior overlapping counts.
+- Actual mission acceptance 15161: **one test**, 612.12s test time. Real temporary
+  Git delivery, six loopback-fixture receipts, two scopes, stopped/restarted owner,
+  retained invocation outcomes, completed replay and no duplicate worker calls.
+  It began before the subsequent detached-drain flag fix and timestamp-decoder
+  hardening; those changes have the final focused gates and independent review.
+- Native qualifier 96998: **five tests**, 1503.54s test time, 1504.76s total.
+  Includes the actual 23-check default workload, two drift qualifications,
+  fifteen benchmark regions, process settlement, unchanged fixture evidence,
+  and four healthy/stale runtime/source controls. No real model providers.
+- Owned lint, diff checks, source documentation and test-lane classification pass.
+- Clean source build 1916: 257 web modules; build identity records d9b604c9,
+  package 3.4.0, Git provenance and `dirty:false`.
+- Runnable [compiled CLI smoke](smoke-invocation-status.mjs): a private retained
+  shutdown observation was read by `node bin/ashlr ... mission status`; fixture
+  bytes/metadata stayed unchanged, owner/delivery authority remained false, and
+  the real global stop was unchanged. Its temporary fixture was removed.
+
+The nine-file runtime evaluator seal before qualification and after rebuilding is
+identical: `3701f20177a1d4592fcd4c84ec0ac187f54b0ce6c6843fcd7b95f18dd63f72ed`.
+Manifest-file SHA256 is unchanged:
+`e79f39a653e33cfd05ce998b0f8a6f2319fba53dce5048bb4ffe58fef6f82e3e`.
+This is fresh native evidence for those exact bytes, not genuine three-capture
+calibration, a scoring-package authoring receipt, or scored candidate delivery.
+
+Remaining live gates: genuine current-source calibration, explicit scoring
+package authoring, measured target-only improvement through delivery, then
+account/service commissioning. The real global stop remains healthy/active.
+No account allocation changes, credential operations, provider calls, global
+stop overrides, service activation, GitHub Actions, remote pushes, publication
+or deployment occurred. Two agent roles remained quota-blocked; the available
+agent completed journal implementation and independent review. No quota bypass.
+The global north-star goal is still active, not achieved by this increment.
