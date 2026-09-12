@@ -15,6 +15,8 @@ import { extractPreparationScenarioVector, PREPARATION_SCENARIO_KEYS } from '../
 import type { UniverseManifest } from '../src/core/universe/types.js';
 import * as registry from '../src/core/universe/builtin-evaluator-registry.js';
 import * as verify from '../src/core/run/verify-commands.js';
+import { inspectBuiltinActivity, type BuiltinActivityOwner } from '../scripts/evaluators/preparation-verification-activity.mjs';
+import { createFixtureCustody } from './helpers/fixture-custody.js';
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const target = 'src/core/resources/engineering-preparation.ts';
@@ -23,7 +25,7 @@ const EVALUATION_TIMEOUT = 1_800_000;
 const TRIAL_TIMEOUT = 900_000;
 const EVALUATION_TEST_TIMEOUT = EVALUATION_TIMEOUT + 60_000;
 let root: string, repo: string, universe: string, revision: string, record: ManifestRecord;
-let preserveRoot = false;
+const fixtureCustody = createFixtureCustody();
 const source = readFileSync(join(repository, target), 'utf8');
 type Measurement = PreparationMeasurementReport;
 function measurement(output: string): Measurement {
@@ -77,7 +79,11 @@ beforeAll(() => {
 }, 60000);
 afterEach(() => { vi.restoreAllMocks(); });
 afterAll(() => {
-  if (!root || preserveRoot) return;
+  if (!root) return;
+  if (!fixtureCustody.canCleanup()) {
+    console.warn(`Builtin acceptance retained unconfirmed fixture: ${root}`);
+    return;
+  }
   const writable = (file: string): void => {
     const stat = lstatSync(file); if (!stat.isDirectory() || stat.isSymbolicLink()) return;
     chmodSync(file, 0o700); for (const name of readdirSync(file)) writable(join(file, name));
@@ -153,16 +159,18 @@ function completeWorkload(value: Measurement): void {
   expect(value.metrics.verification_processes).toBeGreaterThan(0);
   expect(value.metrics.fixture_owned_process_groups).toBeGreaterThan(0);
 }
-function completeActivities(directory: string): void {
+function completeActivities(directory: string, requireTool = true): void {
   const roots = readdirSync(directory).filter(name => name.startsWith('builtin-activity-'));
   expect(roots).toHaveLength(1);
   const activity = join(directory, roots[0]!);
   expect(readdirSync(activity)).toContain('complete.json');
+  const owner: BuiltinActivityOwner = JSON.parse(readFileSync(join(activity, 'owner.json'), 'utf8'));
+  expect(owner.implementationDigest).toBe(record.evaluationBuiltinDigest);
+  expect(inspectBuiltinActivity(activity, owner)).toBe(true);
   const groups = spawnedActivities(activity);
   expect(groups.some(row => row.kind === 'candidate')).toBe(true);
-  expect(groups.some(row => row.kind === 'tool')).toBe(true);
+  if (requireTool) expect(groups.some(row => row.kind === 'tool')).toBe(true);
   const absent = groups.every(row => groupAbsent(row.pgid));
-  if (!absent) preserveRoot = true;
   expect(absent, 'Every recorded group must be absent before interpreting completed workload evidence').toBe(true);
 }
 
@@ -183,6 +191,7 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     const results: Measurement[] = []; const before = artifactDigest(record.seedArtifact.path);
     for (let index = 0; index < 2; index++) {
       const context = scratch();
+      const custody = fixtureCustody.reserve();
       const result = await runFixedUniverseEvaluator(record, universe, record.seedArtifact.path, before,
         context.directory, EVALUATION_TIMEOUT, new AbortController().signal, context.env, true);
       expect({ exitCode: result.exitCode, error: result.error, signal: result.signal, stderr: result.stderr,
@@ -190,7 +199,8 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
         exitCode: 0, error: undefined, signal: null, stderr: '', timedOut: false, cancelled: false, processGroupSettlement: 'group-exit-confirmed',
       });
       const value = measurement(result.stdout); expect(value.checksPassed, JSON.stringify(value)).toBe(true);
-      completeWorkload(value); completeActivities(context.directory);
+      completeWorkload(value);
+      custody.confirmSettled(() => { completeActivities(context.directory); return true; });
       expect(value.metrics.verification_processes).toBeGreaterThan(0); results.push(value);
       expect(artifactDigest(record.seedArtifact.path)).toBe(before);
     }
@@ -208,6 +218,7 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     writeFileSync(file, source.replace(anchor, 'throw new Error("Deliberately poisoned manager bundle reader");'));
     const expected = artifactDigest(candidate); freezeArtifact(candidate);
     const context = scratch();
+    const custody = fixtureCustody.reserve();
     const result = await runFixedUniverseEvaluator(record, universe, candidate, expected, context.directory,
       EVALUATION_TIMEOUT, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: candidate }, true);
     expect(result.exitCode).toBe(0); expect(result.error).toBeUndefined();
@@ -219,7 +230,8 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     expect(value.diagnostics.map(row => row.code)).toEqual(['WORKFLOW_CANDIDATE_BEHAVIOR_FAILED']);
     expect(value.workflows).toEqual([]);
     expect(value.qualifications).toEqual([]);
-    expect(artifactDigest(candidate)).toBe(expected); completeActivities(context.directory);
+    expect(artifactDigest(candidate)).toBe(expected);
+    custody.confirmSettled(() => { completeActivities(context.directory); return true; });
   }, EVALUATION_TEST_TIMEOUT);
 
   it.each([
@@ -236,16 +248,19 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     const candidate = join(root, 'changed-artifact'); const expected = copyArtifact(record.seedArtifact.path, candidate); freezeArtifact(candidate);
     const file = join(candidate, target); chmodSync(file, 0o600); writeFileSync(file, source + '\n// fixture-only drift\n');
     const context = scratch(); let reached = false;
+    const dispatch = vi.spyOn(verify, 'runVerifySubprocessAsync').mockRejectedValue(new Error('Unexpected evaluator dispatch'));
     await expect(runFixedUniverseEvaluator(record, universe, candidate, expected, context.directory, EVALUATION_TIMEOUT,
       new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: candidate }, true, () => { reached = true; })).rejects.toThrow();
-    expect(reached).toBe(false);
+    expect(reached).toBe(false); expect(dispatch).not.toHaveBeenCalled();
   });
 
   it('returns a pre-aborted invocation as not started, with no measurement', async () => {
     const context = scratch(); const abort = new AbortController(); abort.abort();
+    const dispatch = vi.spyOn(verify, 'runVerifySubprocessAsync').mockRejectedValue(new Error('Unexpected evaluator dispatch'));
     const result = await runFixedUniverseEvaluator(record, universe, record.seedArtifact.path, record.seedArtifact.digest,
       context.directory, EVALUATION_TIMEOUT, abort.signal, context.env, true);
     expect(result.cancelled).toBe(true); expect(result.processGroupSettlement).toBe('not-started'); expect(result.stdout).toBe('');
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it.each(['abort', 'elapsed deadline'] as const)('does not dispatch when the final launch guard causes %s', async cause => {
@@ -268,10 +283,11 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     const pinned = manifestRecord(universePath(universe, 'bundle-before'));
     const original = readFileSync(copied.controller, 'utf8'); writeFileSync(copied.controller, original + '\n// fixture-only drift\n');
     const context = scratch(); let reached = false;
+    const dispatch = vi.spyOn(verify, 'runVerifySubprocessAsync').mockRejectedValue(new Error('Unexpected evaluator dispatch'));
     await expect(runFixedUniverseEvaluator(pinned, universe, pinned.seedArtifact.path, pinned.seedArtifact.digest,
       context.directory, EVALUATION_TIMEOUT, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: pinned.seedArtifact.path },
       true, () => { reached = true; })).rejects.toThrow();
-    expect(reached).toBe(false);
+    expect(reached).toBe(false); expect(dispatch).not.toHaveBeenCalled();
   });
 
   it('rechecks installed controller bytes after actual process settlement before returning its measurement', async () => {
@@ -288,14 +304,16 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
       return result;
     });
     const context = scratch();
+    const custody = fixtureCustody.reserve();
     await expect(runFixedUniverseEvaluator(pinned, universe, pinned.seedArtifact.path, pinned.seedArtifact.digest,
       context.directory, EVALUATION_TIMEOUT, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: pinned.seedArtifact.path }, true)).rejects.toThrow();
     expect(run).toHaveBeenCalledOnce(); expect(settled).toBe(true);
-    completeActivities(context.directory);
+    custody.confirmSettled(() => { completeActivities(context.directory); return true; });
   }, EVALUATION_TEST_TIMEOUT);
 
   it('cancels after a real candidate registration without converting incomplete custody into accepted output', async () => {
     const context = scratch(); const abort = new AbortController();
+    const custody = fixtureCustody.reserve();
     const pending = runFixedUniverseEvaluator(record, universe, record.seedArtifact.path, record.seedArtifact.digest,
       context.directory, EVALUATION_TIMEOUT, abort.signal, context.env, true);
     let finished = false; void pending.then(() => { finished = true; }, () => { finished = true; });
@@ -327,19 +345,21 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
       if (!names.includes('complete.json')) expect(result.processGroupSettlement).toBe('unconfirmed');
       if (result.processGroupSettlement === 'unconfirmed') expect(result.error).toEqual(expect.any(String));
       if (result.processGroupSettlement === 'group-exit-confirmed') {
-        expect(spawnedActivities(activityRoot!).every(row => groupAbsent(row.pgid))).toBe(true);
+        // Cancellation may precede the first tool command; require complete
+        // custody of what actually started, not a fabricated tool invocation.
+        custody.confirmSettled(() => { completeActivities(context.directory, false); return true; });
       }
     } finally {
       abort.abort(); await pending.catch(() => undefined);
-      // Absence of known groups is only cleanup evidence, not proof that an
-      // interrupted activity ledger is complete. Never kill a recycled PGID.
+      // Diagnostic wait only. Known-group absence cannot release an incomplete
+      // invocation or clear an earlier case's custody hold. Never kill a recycled PGID.
       if (activityRoot) {
         const cleanupDeadline = performance.now() + 6000;
         while (spawnedActivities(activityRoot).some(row => !groupAbsent(row.pgid)) && performance.now() < cleanupDeadline) {
           await new Promise(resolve => setTimeout(resolve, 20));
         }
-        preserveRoot = spawnedActivities(activityRoot).some(row => !groupAbsent(row.pgid));
-        expect(preserveRoot, 'Retain fixture custody if a recorded process group cannot be confirmed absent').toBe(false);
+        expect(spawnedActivities(activityRoot).some(row => !groupAbsent(row.pgid)),
+          'Retain fixture custody if a recorded process group cannot be confirmed absent').toBe(false);
       }
     }
   }, 60000);

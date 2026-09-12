@@ -32,9 +32,16 @@ The latest strict optimization comparison passed independently on the matching
 isolated target; exact records are in `rebased-candidate-comparison.json`.
 Neither this source integration nor its diagnostic comparison commissions the
 scorer or fleet. The older console ports57294/56322 are not listening; a fresh
-compiled stop check remains healthy/active. Real configuration paths still need
-to be established. The following sections preserve earlier checkpoint evidence
+compiled stop check remains healthy/active. Account configuration paths are now
+known; the engineering runtime and project catalog still need to be established.
+The following sections preserve earlier checkpoint evidence
 and must not be read as a claim that older build identities qualify this one.
+
+## Historical source checkpoints
+
+The source heads, live-session labels and counts below describe the checkpoints
+at which they were recorded. Use the current acceptance update above for current
+status; do not restart an older handle or infer activation from these records.
 
 The candidate branch `codex/preparation-scoring-runtime` now contains the closed
 calibrated scoring route, fixed installed owner, explicit authoring package,
