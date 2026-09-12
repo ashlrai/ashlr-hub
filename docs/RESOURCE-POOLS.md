@@ -341,6 +341,13 @@ completion. Opt-in proposal prompts are bounded to 64 KiB; fixed feedback
 unavailability and prompt-bound diagnostics are retained in invocation history.
 No model, provider or real mission acceptance is implied by this option.
 
+For opted-in missions, `mission check` reports the configured feedback mode.
+`mission status` includes `recordedFeedback`: the latest retained proposal's scope
+index, availability, fixed fallback reason, evidence digest and campaign count.
+An unrecorded or invalid envelope is explicit; no prompt text is exposed. This is
+proposal **intent**, not proof the worker consumed it, and status does not
+revalidate current delivery or usage evidence. Legacy status output is unchanged.
+
 From the repository root, check the selected configuration without starting work:
 
 ```sh

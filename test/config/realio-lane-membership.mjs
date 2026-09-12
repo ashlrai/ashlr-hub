@@ -52,6 +52,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-mission-store.test.ts', // private immutable mission records and configuration replay
   'test/resource-engineering-mission-invocations.test.ts', // private immutable invocation observations and timing
   'test/resource-engineering-mission-diagnostics.test.ts', // real journal and lease cleanup with execution doubles
+  'test/resource-engineering-mission-feedback-loop.test.ts', // private mission/receipt journals and inert loopback transport
   'test/resource-engineering-mission-acceptance.test.ts', // two actual mission scopes, local transport, delivery and restart
   'test/resource-engineering-setup-evidence.test.ts', // private Git setup receipts and fresh metadata reconstruction
   'test/universe-seed-batch.test.ts', // real SHA1/SHA256 seed materialization and bounded blob batches

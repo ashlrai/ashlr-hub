@@ -91,6 +91,10 @@ describe('mission configuration and immutable sequencing', () => {
       scopesSettled: 0, remainingMs: 500, recordedCompletion: null, recordedTip: null, ownerState: 'not-observed',
       deliveryState: 'not-revalidated', executionAuthorized: false, effectsExecuted: false, providerContacted: false });
     expect(readdirSync(config.root)).toEqual([]);
+    expect(readResourceEngineeringMissionStatus(config, now)).not.toHaveProperty('recordedFeedback');
+    expect(readResourceEngineeringMissionStatus({ ...config, proposalFeedback: 'measured-outcomes-v1' }, now)).toHaveProperty(
+      'recordedFeedback', expect.objectContaining({ mode: 'measured-outcomes-v1', state: 'not-recorded' }));
+    expect(readdirSync(config.root)).toEqual([]);
   });
   it('shows recorded progress and completion after deadline without claiming live delivery or revealing proposal text', () => {
     const { config, write, payloads } = fixture(); write('definition', 0); write('reserved', 1); write('prepared', 1); write('running', 1);

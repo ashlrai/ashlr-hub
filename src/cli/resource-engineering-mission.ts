@@ -49,6 +49,7 @@ export async function cmdResourceEngineeringMission(args: string[]): Promise<num
     if (setup.planDigest !== config.initial.expectedPlanDigest || !setup.initialEnrollmentDigest) throw new Error('Mission initial setup changed');
     if (mode === 'check') {
       console.log(JSON.stringify({ schemaVersion: 1, state: 'checked', missionId: config.id, configDigest,
+        ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}),
         deadlineAt: config.deadlineAt, maxScopes: config.maxScopes, holds: setup.holds, effectsExecuted: false })); return 0;
     }
     const { runResourceEngineeringMission } = await import('../core/resources/engineering-mission.js');

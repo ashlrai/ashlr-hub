@@ -46,6 +46,12 @@ describe('engineering mission CLI', () => {
     expect(backend.run.mock.calls[0]![1].signal).toBeInstanceOf(AbortSignal);
     expect([process.listeners('SIGINT'), process.listeners('SIGTERM')]).toEqual(signals);
   });
+  it('reports feedback mode for an opted-in check without starting execution', async () => {
+    backend.validate.mockReturnValue({ ...config, proposalFeedback: 'measured-outcomes-v1' });
+    expect(await command(['check', '--config', '/private/mission.json', '--json'])).toBe(0);
+    expect(JSON.parse(String(output.mock.calls[0]![0]))).toHaveProperty('proposalFeedback', 'measured-outcomes-v1');
+    expect(backend.run).not.toHaveBeenCalled();
+  });
   it.each(['held', 'stopped'])('returns nonzero for a %s mission', async state => {
     backend.run.mockResolvedValue({ state, reason: 'fixture' });
     expect(await command(['run', '--config', '/private/mission.json', '--expected-config-digest', digest, '--execute'])).toBe(1);
