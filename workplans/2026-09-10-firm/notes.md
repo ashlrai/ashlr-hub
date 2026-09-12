@@ -1,5 +1,81 @@
 # Firm build notes
 
+## September 11: responsiveness investigation (baseline 104650e8)
+
+- Three independent explorers identified synchronous repeated source checks,
+  captures, graph snapshots and immutable registration guards. Prior 73,098 ms
+  socket wait is evidence of delayed observation, not measured CPU attribution.
+- Source execution leases are privately branded. Moving a proof into a worker
+  does not transfer authority, and parent publication must still freshly check
+  source/configuration/stage identity. Whole-manager worker offload is not a
+  safe small patch. No cross-call positive-proof cache will be introduced.
+- Delivery already has a bounded, content-OID-verified Git batch parser. Seed
+  materialization currently launches one blob process per tracked file. Reuse
+  that parser without a circular artifacts/delivery import; retain existing
+  path policy, aggregate limits, no-clobber output and disk artifact digest.
+- Independent actual-CLI probes will use fresh connections without read retries
+  and record status/pause latency around durable proposal and preparation
+  evidence. The proposed two-second target is an acceptance goal, not a result.
+- Current-turn inspection tried nonexistent universe/execution-lock.ts; corrected
+  to the existing universe/execution.ts. No production state was changed.
+- Targeted parser/delivery gate: 52/52 tests in two files, no skips, 2.01s.
+  Actual 128-file SHA1 and SHA256 fixtures each observed two Git calls; the old
+  algorithm's 129-call count is source-derived, not a timed baseline. Exact
+  artifact bytes/modes/digest and dirty repository inventory were preserved.
+- Publication guards now read fresh verified metadata instead of rebuilding
+  unused commissioning diagnostics. Initial complete reporting is unchanged.
+  Cold review verified that commissioning status was not an admission predicate.
+  Five focused preparation suites passed 56/56, no skips, 205.84s. New assertions
+  observe three metadata checks, four owner checks and two complete reports;
+  changed receipt evidence is refused at each of the three writer checkpoints.
+- Profiling harness attempts were interrupted without retained phase results.
+  Absence of intermediate Vitest output does not prove a module deadlock or
+  that no fixture effects ran: the successful 205.84s regression run also emitted
+  only its final summary. Native sampling alone does not establish the dominant
+  verification stage. Use the uninstrumented actual-CLI HTTP gate as evidence.
+- Static source and new-test checks passed. Full lint passed with zero errors
+  and 107 existing warnings. Compiling the unchanged delivery test in an extra
+  strict ad hoc command exposed two pre-existing Buffer generic typing errors;
+  its runtime tests pass and the unrelated fixture was not edited.
+- Documentation checking caught an invented AUTONOMY-GAP anchor; corrected to
+  the existing next-executable-milestones heading and the check passed. A lookup
+  of absent DEVELOPMENT/TESTING guides was corrected to CONTRIBUTING.md.
+- Clean isolated 104650e8 actual-CLI baseline: one responsiveness test failed,
+  zero skips, 139.50s total. Fresh proposal-admission health/status: 6.448/6.451s;
+  post-result source-proof health/status: 64.019/64.365s; preparation health/
+  status: 48.406/48.496s. Pause returned 409 after 50.469s, not an accepted pause.
+  B was admitted and its first generation started; terminal paused=false and
+  two queue entries. Graceful close took 3.508s, exit zero, no stderr. All GETs
+  returned 200 without transport errors. No read/control retry was used.
+- The same frozen test was moved byte-identically (cmp verified against the
+  retained baseline copy) to benchmarks/resource-engineering-responsiveness.test.ts.
+  Dedicated npm run test:engineering-responsiveness preserves hermetic HOME,
+  one worker, original observation/overall bounds and all two-second assertions.
+  It is separate from default correctness lanes and fails on unsupported hosts,
+  not a skipped pass. Cold review found no false-pass or control-auth issue.
+- Candidate dedicated gate also failed, one test, zero skips, 123.29s total:
+  proposal health/status 5.992/5.995s; post-result health/status 60.967/61.329s;
+  preparation health/status 45.806/45.893s; pause 409 after 47.647s. B was already
+  admitted and its first generation started; paused remained false. Close was
+  clean in 3.005s, no stderr. All GETs were 200 without socket errors. One sample
+  per revision is not a statistical speedup result. Two-second control latency
+  remains failed; no deadline or retry policy was relaxed to obtain a pass.
+- Unchanged happy-path actual CLI setup/continuation/restart acceptance passed:
+  one test, zero skips, 185.58s. Exactly five model-fixture requests, six durable
+  evaluations, two delivery refs and 150 reported tokens. Original deadlines,
+  allocation, seed context, receipts and post-execution setup replay preserved.
+  Exactly one allowed read-only recovery followed a 61.533s stalled read. This
+  is not a responsiveness pass. Fixture children/listeners/trees were cleaned.
+- Final source/web typechecks passed; full web passed 1,604 tests / 85 files,
+  zero skips, 11.00s. Combined non-overlapping correctness result: 1,713 tests /
+  93 files, zero skips. Final independent source review found no actionable
+  correctness/authority regression; the separate performance gate remains red.
+- Local production-format build, compiled setup help and five structural safety
+  checks passed. Documentation links and git diff checks passed. Original
+  checkout remains a01fc086 with pre-existing untracked workplans; real KILL
+  remains 19 bytes with mtime 1788533266. No remote push, npm publication,
+  provider execution or persistent-service activation was performed.
+
 ## September 11: coherent offline autonomous startup (in progress)
 
 - Baseline f543e362, isolated auto/p00; Entire resume found no checkpoint.

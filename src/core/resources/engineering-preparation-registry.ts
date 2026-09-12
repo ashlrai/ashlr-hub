@@ -164,7 +164,11 @@ export function createResourceEngineeringPreparationRegistry(input: {
     if (!decodeRegistration(captured) || captured.configDigest !== contextDigest) fail('CONFLICT', 'Objective registration context changed');
     const verified = committed(captured); currentConfig(); beforePublication(verified.catalog);
     const written = writeImmutablePrivateRecord(store, captured, { prepublish: () => {
-      try { currentConfig(); beforePublication(committed(captured).catalog); return true; } catch { return false; }
+      // Each writer boundary still reconstructs the entire bundle proof and
+      // invokes the live owner's check. Only unused commissioning diagnostics
+      // and command suggestions are omitted; the initial returned report stays
+      // unchanged. No proof survives from one publication boundary to the next.
+      try { currentConfig(); beforePublication(committed(captured, captured.request, true).catalog); return true; } catch { return false; }
     } });
     if (!['recorded', 'replayed'].includes(written)) fail('UNAVAILABLE', 'Objective registration incomplete; inspect retained output before retrying');
     return verified;

@@ -204,6 +204,15 @@ initial delivery is verified, the configured successor loop can propose, prepare
 and queue another objective without a per-objective human action. The original
 deadline begins at first console startup and is preserved on restart.
 
+Seed materialization reads the pinned Git blobs in one bounded batch, verifies
+every object identity and the aggregate byte limit before creating seed files,
+then verifies the resulting disk artifact digest. Immutable registration still
+rechecks the prepared bundle and live owner at every publication boundary; it
+does not rebuild unused commissioning diagnostics at those internal boundaries.
+These reductions do not make the remaining synchronous proof work nonblocking.
+See the [responsiveness limitation](AUTONOMY-GAP.md#next-executable-milestones) before
+treating the console as an unattended always-on service.
+
 KILL, pauses, uncertainty holds and account reserves remain authoritative. This
 command does not authenticate accounts, install a service, renew allowance or
 deploy production. A usable evaluator must offer meaningful additional headroom:
@@ -695,6 +704,28 @@ This is bounded autonomous follow-up, not an unlimited resident company or an
 independently commissioned production fleet.
 
 #### Diagnose automatic intake latency
+
+Run the independent control-room responsiveness gate on macOS from the repository:
+
+```sh
+npm run test:engineering-responsiveness
+```
+
+It uses the actual setup and console CLI with private temporary Git repositories,
+fixed evaluators and a loopback worker. It does not use your provider accounts.
+Seven fresh, non-retried HTTP probes cover proposal admission, source proof and
+successor preparation; one authenticated pause must prevent successor admission.
+Each measured response must complete within two seconds. A longer observation
+ceiling records the actual stall and does **not** relax that assertion. The test
+also verifies original deadline, delivery, exact charged proposal and unchanged
+account policies. It prints bounded `RESPONSIVENESS_MEASUREMENTS`, without tokens
+or private source content, and cleans its child processes and temporary state.
+
+This is an explicit performance acceptance gate, separate from `npm test`.
+Treat a failure as an unresolved responsiveness defect, not permission to raise
+the target, retry the control action or claim always-on readiness. Passing the
+default correctness tests does not satisfy this gate. Other platforms are not
+covered by this macOS fixture; compare revisions on the same otherwise-idle host.
 
 The successor acceptance fixture uses temporary Git repositories, fixed evaluators
 and loopback workers, not your enrolled provider accounts. To print existing

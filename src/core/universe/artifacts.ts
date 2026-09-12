@@ -6,6 +6,7 @@ import {
 } from 'node:fs';
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
+import { parseGitBlobBatch } from './git-blob-batch.js';
 
 export const MAX_ARTIFACT_BYTES = 64 * 1024 * 1024;
 export const MAX_ARTIFACT_ENTRIES = 8_192;
@@ -142,10 +143,10 @@ export function freezeArtifact(root: string): void {
   chmodSync(root, 0o500);
 }
 
-function git(repo: string, args: string[], maxBuffer = 4 * 1024 * 1024): Buffer {
+function git(repo: string, args: string[], maxBuffer = 4 * 1024 * 1024, input?: string): Buffer {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-C', repo, ...args], {
     env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_OPTIONAL_LOCKS: '0' },
-    timeout: 30_000, maxBuffer, stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: 30_000, maxBuffer, input, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
   });
 }
 
@@ -171,12 +172,12 @@ export function materializeSeed(seed: { repo: string; revision: string }, destin
     }
     return { mode: match[1], oid: match[2]!, path: match[3]! };
   });
+  const oids = parsed.map((entry) => entry.oid);
+  const blobs = parseGitBlobBatch(oids.length ? git(seed.repo, ['cat-file', '--batch'],
+    MAX_ARTIFACT_BYTES + 4 * 1024 * 1024, `${oids.join('\n')}\n`) : Buffer.alloc(0), oids, MAX_ARTIFACT_BYTES);
   mkdirSync(destination, { mode: 0o700 });
-  let bytes = 0;
-  for (const entry of parsed) {
-    const data = git(seed.repo, ['cat-file', 'blob', entry.oid], MAX_ARTIFACT_BYTES + 1);
-    bytes += data.length;
-    if (bytes > MAX_ARTIFACT_BYTES) throw new Error('Seed byte limit exceeded');
+  for (const [index, entry] of parsed.entries()) {
+    const data = blobs[index]!;
     const target = join(destination, entry.path);
     mkdirSync(dirname(target), { recursive: true, mode: 0o700 });
     writeFileSync(target, data, { flag: 'wx', mode: entry.mode === '100755' ? 0o700 : 0o600 });

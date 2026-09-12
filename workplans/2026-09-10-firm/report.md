@@ -1,6 +1,75 @@
 # Verified local handoff
 
-## Current continuation: coherent autonomous startup
+## Current continuation: verified efficiency and control responsiveness
+
+Baseline `104650e8fee836fdc4ecdf21ac1a9b8ea2edd9a9`, isolated `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agent streams
+handled exploration, implementation, independent actual-CLI acceptance and cold
+review; the parent integrates and commits. Entire resume found no checkpoint.
+No provider account, real KILL, persistent service or public release was changed.
+
+Implemented:
+
+- Seed preparation shares delivery's bounded Git blob parser. Real 128-file
+  SHA1 and SHA256 fixtures observe two Git subprocesses instead of the old
+  algorithm's source-derived 129. Bytes, executable modes, disk artifact digest,
+  dirty checkout/index/refs, no-clobber behavior and existing limits remain intact.
+  All batch responses are verified before seed files are created.
+- Immutable objective publication retains fresh bundle verification and live
+  owner checks at every checkpoint without repeatedly constructing unused
+  commissioning diagnostics. The initial complete report remains unchanged.
+- `npm run test:engineering-responsiveness` runs a separately selected macOS
+  actual-CLI gate, with isolated HOME, local fixtures, seven fresh no-retry
+  probes, exact accounting and authenticated pause. The original two-second
+  assertions are unchanged. Unsupported platforms fail rather than skip-pass.
+
+Verified: 52 tests / two parser-delivery files passed (2.01s); 56 tests / five
+preparation/metadata/successor/manager files passed (205.84s), all zero skips.
+New registry tests observe three fresh metadata checks, four live callbacks and
+two full reports (previously five), and refuse drift at each writer checkpoint.
+Source and new-test strict checks, scoped lint, full lint (zero errors, 107
+existing warnings), documentation links and lane membership passed. An extra
+strict compile of the unchanged delivery test exposed two existing Buffer
+generic type errors; that test's runtime checks pass and it was not edited.
+
+The baseline responsiveness gate **failed**: fresh status waited up to 64.365s;
+pause returned 409 after 50.469s because B had already been admitted. B's first
+generation started. This is real control starvation/CAS overtaking, not merely
+keep-alive behavior. The baseline completed in 139.50s with one failed test,
+zero skips. The candidate's identical gate also failed: one failed test, zero
+skips, 123.29s total. The table records single-host observations, not a statistical
+speedup claim; both revisions fail the unchanged two-second requirement.
+
+| Fresh request | Baseline seconds | Candidate seconds |
+| --- | ---: | ---: |
+| Proposal admission health / status | 6.448 / 6.451 | 5.992 / 5.995 |
+| Post-result source-proof health / status | 64.019 / 64.365 | 60.967 / 61.329 |
+| Preparation health / status | 48.406 / 48.496 | 45.806 / 45.893 |
+| Pause response (409 on both) | 50.469 | 47.647 |
+
+Both revisions admitted B and began its first generation before the pause was
+processed. The candidate closed cleanly in 3.005s with no stderr. GETs returned
+200 with no socket errors. The unchanged uninterrupted A -> B/setup acceptance
+passed separately: one test, zero skips, 185.58s. It retained five fixture model
+requests, six evaluations, two delivery refs, 150 reported tokens, seed context,
+original deadlines and exact restart/replay proofs. Exactly one permitted
+read-only reconnection followed a 61.533s stalled read. This correctness pass
+does not establish always-on readiness or fix operator-control starvation.
+
+Full web verification passed 1,604 tests / 85 files in 11.00s. Combined with the
+109 focused backend/actual-CLI tests, this increment has 1,713 passing tests /
+93 files, zero skips, plus the explicitly failing responsiveness gate above.
+Final source/web typechecks, local production-format build, compiled setup help
+and all five structural safety checks passed. Independent final source review
+found no actionable correctness or authority regression. Local commit/build
+identity is recorded at handoff; none of these checks activates a service or
+publishes a release. The original checkout and real KILL metadata are unchanged.
+
+Do not report the default correctness lane as satisfying the separate latency
+gate. Responsive operator controls, useful graded Hub self-improvement, actual
+account commissioning and resident operation remain unfinished North Star work.
+
+## Previous continuation: coherent autonomous startup
 
 Baseline `f543e3627adbbe979c5b4a826d5e1036ab745edb`, isolated branch `auto/p00`.
 Three agents handled core implementation, independent actual-process acceptance

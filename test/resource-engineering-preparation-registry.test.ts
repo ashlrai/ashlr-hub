@@ -8,9 +8,12 @@ import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { createResourceEngineeringPreparationRegistry } from '../src/core/resources/engineering-preparation-registry.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
 import type { ResourceConsoleEngineeringPreparationConfig } from '../src/core/resources/console-engineering-preparation-types.js';
+import * as preparation from '../src/core/resources/engineering-preparation.js';
+import * as commissioning from '../src/core/resources/console-engineering-check.js';
 
 const roots: string[] = [];
 afterEach(() => {
+  vi.restoreAllMocks();
   const writable = (file: string): void => { if (!lstatSync(file).isDirectory()) return; chmodSync(file, 0o700);
     for (const name of readdirSync(file)) writable(join(file, name)); };
   for (const root of roots.splice(0)) { writable(root); rmSync(root, { recursive: true, force: true }); }
@@ -57,6 +60,48 @@ function fixture() {
 }
 
 describe('owner-independent preparation registry boundaries', () => {
+  it('keeps fresh full bundle evidence at all writer boundaries without repeating unused commissioning reports', () => {
+    const f = fixture(); const plan = f.registry.materialize(request).plan;
+    const metadata = vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata');
+    const full = vi.spyOn(preparation, 'readPreparedResourceEngineeringBundle');
+    const reports = vi.spyOn(commissioning, 'checkResourceConsoleEngineering');
+    const guard = vi.fn();
+    const prepared = f.registry.prepare({ ...request, expectedPlanDigest: plan.planDigest }, { beforeNew() {}, beforePublication: guard });
+    expect(prepared.disposition).toBe('created');
+    expect(full).toHaveBeenCalledTimes(1);
+    expect(metadata).toHaveBeenCalledTimes(3);
+    expect(guard).toHaveBeenCalledTimes(4);
+    // Creator and initial committed report remain complete; the three writer
+    // gates use the same fresh evidence reader without its diagnostics wrapper.
+    expect(reports).toHaveBeenCalledTimes(2);
+    const row = f.registry.registrations()[0]!;
+    const before = tree(f.base); const verified = f.registry.committed(row);
+    expect(verified.report).toHaveProperty('commissioning');
+    expect(verified.report).toHaveProperty('consoleArguments');
+    expect(verified.report.enrollmentDigest).toBe(prepared.enrollmentDigest);
+    expect(tree(f.base)).toEqual(before);
+  });
+
+  it.each([1, 2, 3])('refuses receipt drift at fresh writer boundary %i without publishing registration', boundary => {
+    const f = fixture(); const plan = f.registry.materialize(request).plan;
+    const original = preparation.readPreparedResourceEngineeringMetadata;
+    let calls = 0;
+    vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata').mockImplementation(input => {
+      if (++calls === boundary) {
+        const file = join(input.output, 'receipt.json');
+        save(file, { ...JSON.parse(readFileSync(file, 'utf8')), enrollmentDigest: 'f'.repeat(64) });
+      }
+      return original(input);
+    });
+    expect(() => f.registry.prepare({ ...request, expectedPlanDigest: plan.planDigest }, { beforeNew() {}, beforePublication() {} }))
+      .toThrow('Objective registration incomplete');
+    expect(calls).toBe(boundary);
+    expect(existsSync(join(f.root, 'console-engineering-preparations', 'records', `${request.id}.json`))).toBe(false);
+    // Retain incomplete evidence rather than repairing it or executing work.
+    expect(existsSync(join(f.config.outputRoot, request.id, 'receipt.json'))).toBe(true);
+    expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
+  });
+
   it('deeply freezes returned configuration and nested objective/plan aliases without freezing caller data', () => {
     const f = fixture(); const before = tree(f.base);
     const expected = f.registry.materialize(request).plan;

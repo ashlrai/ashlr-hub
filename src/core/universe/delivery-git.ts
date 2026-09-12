@@ -1,10 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { isAbsolute } from 'node:path';
 import { canonical, digest, MAX_ARTIFACT_BYTES, type UniverseArtifactEntry } from './artifacts.js';
 import { fileOperationsPathKey, validFileOperationsPath } from './generation.js';
 import { killSwitchOn } from '../sandbox/policy.js';
+import { parseGitBlobBatch } from './git-blob-batch.js';
 
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 const MAX_ENTRIES = 8_192;
@@ -66,28 +66,8 @@ export function deliveryGit(repo: string, deadline = performance.now() + 120_000
   function readBlobs<T>(list: GitTreeEntry[], consume: (entry: GitTreeEntry, data: Buffer) => T): T[] {
     if (!list.length) return [];
     const bytes = invoke(['cat-file', '--batch'], list.map((entry) => entry.oid).join('\n') + '\n')!;
-    let offset = 0;
-    let total = 0;
-    const results = list.map((entry) => {
-      const end = bytes.indexOf(10, offset);
-      if (end < 0) throw new Error('Delivery object batch is incomplete');
-      const header = bytes.subarray(offset, end).toString('utf8');
-      const match = /^([a-f0-9]{40}|[a-f0-9]{64}) blob (0|[1-9][0-9]*)$/.exec(header);
-      if (!match || match[1] !== entry.oid) throw new Error('Delivery object batch identity changed');
-      const size = Number(match[2]);
-      total += size;
-      if (!Number.isSafeInteger(size) || total > MAX_ARTIFACT_BYTES || end + size + 1 >= bytes.length || bytes[end + size + 1] !== 10) {
-        throw new Error('Delivery object batch exceeds its byte envelope');
-      }
-      const data = bytes.subarray(end + 1, end + 1 + size);
-      const actualOid = createHash(entry.oid.length === 40 ? 'sha1' : 'sha256')
-        .update(`blob ${size}\0`).update(data).digest('hex');
-      if (actualOid !== entry.oid) throw new Error('Delivery object content does not match its identity');
-      offset = end + size + 2;
-      return consume(entry, data);
-    });
-    if (offset !== bytes.length) throw new Error('Delivery object batch contains trailing bytes');
-    return results;
+    const blobs = parseGitBlobBatch(bytes, list.map((entry) => entry.oid), MAX_ARTIFACT_BYTES);
+    return list.map((entry, index) => consume(entry, blobs[index]!));
   }
   function treeDigest(tree: string): string {
     const summaries = readBlobs(entries(tree), (entry, data) => ({ path: entry.path, executable: entry.executable,

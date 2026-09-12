@@ -1,6 +1,53 @@
 # Executable firm: package graph
 
-## Current increment — coherent autonomous startup (baseline f543e362)
+## Current increment — responsive autonomous verification (baseline 104650e8)
+
+- [x] Trace the synchronous proof path with three independent exploration streams.
+- [x] Freeze independent no-retry HTTP probes with a two-second status/pause target.
+- [x] Batch committed seed reads and remove unused repeated publication diagnostics.
+- [x] Verify batch identity/bytes and all registration checkpoint drift refusals.
+- [ ] Keep real status and stop processing responsive without weakening verification.
+- [x] Verify uninterrupted actual CLI continuation/restart, drift refusal and unchanged accounting.
+- [ ] Satisfy the frozen authenticated-pause gate before downstream admission.
+- [x] Update canonical guidance and validate the tested local improvement for local handoff.
+
+The previous goal turn made progress: 104650e8 adds real autonomous setup with
+verified two-delivery continuation/restart. Its acceptance also exposed a status
+GET reset after 73,098 ms while the console remained alive. This turn targets the
+underlying responsiveness gap, not a higher HTTP timeout or more read retries.
+Reuse the same evaluator, fresh source/receipt checks, explicit project/account
+scope and original deadlines. No live providers, account-policy changes, real
+KILL changes, persistent service installation or public deployment are needed
+for measurement and local implementation. Existing output/history remains owned.
+
+Ownership: resource agent architecture/hotspots; execution agent independent
+responsiveness acceptance; cold reviewer concurrency/authority invariants;
+parent measurement, integration and canonical handoff. Investigation precedes
+implementation ownership. A useful Hub benchmark remains a separate unfinished
+North Star requirement, not fulfilled merely by this latency improvement.
+
+Investigation decision: do not move branded leases/publication to a worker or
+replace fresh proof with a cache. Measure the actual CLI and individual proof
+costs first. A separate bounded improvement reuses delivery's verified Git batch
+parser for seed materialization (one blob process instead of one per file),
+preserving the disk artifact digest. This is not by itself a status-latency fix.
+The independent initial responsiveness target remains fresh status/pause within
+two seconds. No timeout increase or additional observational retries will count
+as meeting it. Default pause drains existing metadata work but withholds new
+execution; do not silently claim immediate cancellation of synchronous work.
+
+Progress evidence: 52 batch/delivery tests across two files and 56 preparation,
+metadata, successor and manager tests across five files passed, with zero skips.
+The 128-file SHA1 and SHA256 fixtures each observed two Git calls (not 129).
+The registry fixture observes all four live owner checks and three fresh
+metadata checks, with two complete reports instead of five. The independent
+HTTP gate failed on baseline and candidate: pause was delayed 50.469s/47.647s,
+returned 409 and did not prevent B admission. The unchanged uninterrupted CLI
+acceptance passed (one permitted read recovery); full web passed 1,604 tests.
+Combined correctness coverage is 1,713 tests across 93 files, zero skips. Do not
+mark responsiveness complete from these structural wins or correctness passes.
+
+## Previous increment — coherent autonomous startup (baseline f543e362)
 
 - [x] Explore commissioning, restart semantics and current useful Hub acceptance with three agents.
 - [x] Define and implement one offline recipe/policy setup using the real preparation registry.

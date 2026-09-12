@@ -122,6 +122,19 @@ plausible contributor; the request wait is not a direct CPU-time measurement.
 Read reconnection is not a latency fix; keeping status and stop
 handling responsive during that work needs its own measured improvement.
 
+The explicit [control-room responsiveness gate](RESOURCE-POOLS.md#diagnose-automatic-intake-latency)
+now measures fresh, non-retried requests during proposal admission, source proof
+and successor preparation. On baseline `104650e8`, its two-second target failed:
+post-result status took about 64 seconds; a pause sent during preparation returned
+409 after about 50 seconds because successor admission had already advanced the
+revision. B started before pause could be applied. This is an operator-control
+starvation defect, not only keep-alive reconnection behavior. Batched seed reads
+and omission of unused repeated diagnostics preserve correctness but are not a
+substitute for proving responsive controls: the candidate still took about
+61 seconds for status and returned pause 409 after about 48 seconds in the same
+gate. Default correctness-test success
+must not be reported as passing this separate gate or as always-on readiness.
+
 The [offline pool upgrade](RESOURCE-POOLS.md#upgrade-a-pool-without-resetting-history)
 removes the need to discard accounting or conversations when adding workers.
 Its explicit digest-pinned transition preserves prior identity and has a held
