@@ -11,11 +11,14 @@ import { readResourceJson } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import type { ResourceConsoleEngineeringOwner } from './console-engineering.js';
 import type { ResourceConsoleEngineeringSupervisionConfig, ResourceConsoleEngineeringSupervisionSnapshot, ResourceConsoleEngineeringSupervisionAdmission } from './console-engineering-supervisor-types.js';
+import { validateResourceConsoleEngineeringSupervisionConfig, validateResourceConsoleEngineeringSupervisionState,
+  ENGINEERING_SUPERVISION_STATE_MAX_BYTES, type ResourceConsoleEngineeringSupervisionState as DurableState } from './console-engineering-supervision-state.js';
+export { validateResourceConsoleEngineeringSupervisionConfig } from './console-engineering-supervision-state.js';
 export type { ResourceConsoleEngineeringSupervisionConfig, ResourceConsoleEngineeringSupervisionSnapshot, ResourceConsoleEngineeringSupervisionAdmission } from './console-engineering-supervisor-types.js';
 
 const HASH = /^[a-f0-9]{64}$/;
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
-const MAX_STATE_BYTES = 128 * 1024;
+const MAX_STATE_BYTES = ENGINEERING_SUPERVISION_STATE_MAX_BYTES;
 const exact = (value: unknown, keys: string[]): value is Record<string, unknown> => !!value && typeof value === 'object' &&
   !Array.isArray(value) && Reflect.ownKeys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const integer = (value: unknown, min: number, max: number): value is number => Number.isSafeInteger(value) && Number(value) >= min && Number(value) <= max;
@@ -24,33 +27,6 @@ function data<T>(value: unknown): T {
   const text = canonicalEvidencePackJsonV3(value);
   if (text === null || Buffer.byteLength(text) > MAX_STATE_BYTES) fail('INVALID_INPUT', 'Invalid engineering supervision data');
   return JSON.parse(text) as T;
-}
-export function validateResourceConsoleEngineeringSupervisionConfig(value: unknown): ResourceConsoleEngineeringSupervisionConfig {
-  const config = data<ResourceConsoleEngineeringSupervisionConfig>(value);
-  const admission = config !== null && typeof config === 'object' && Object.hasOwn(config, 'maxEnrollments');
-  const automatic = config !== null && typeof config === 'object' && Object.hasOwn(config, 'autoAdmitPrepared');
-  if (!exact(config, ['schemaVersion', 'id', 'maxDurationMs', 'pollIntervalMs', 'maxConcurrent', 'maxAttemptsPerEnrollment', 'enrollments',
-    ...(admission ? ['maxEnrollments'] : []), ...(automatic ? ['autoAdmitPrepared'] : [])]) ||
-      config.schemaVersion !== 1 || typeof config.id !== 'string' || !ID.test(config.id) ||
-      !integer(config.maxDurationMs, 1, 86_400_000) || !integer(config.pollIntervalMs, 100, 60_000) ||
-      !integer(config.maxConcurrent, 1, 4) || !integer(config.maxAttemptsPerEnrollment, 1, 16) ||
-      !Array.isArray(config.enrollments) || config.enrollments.length < (admission ? 0 : 1) || config.enrollments.length > 32 ||
-      admission && (!integer(config.maxEnrollments, 1, 32) || config.maxEnrollments < config.enrollments.length) ||
-      automatic && (!admission || config.autoAdmitPrepared !== true) ||
-      config.enrollments.some(row => !exact(row, ['enrollmentId', 'expectedEnrollmentDigest']) ||
-        typeof row.enrollmentId !== 'string' || !ID.test(row.enrollmentId) ||
-        typeof row.expectedEnrollmentDigest !== 'string' || !HASH.test(row.expectedEnrollmentDigest)) ||
-      new Set(config.enrollments.map(row => row.enrollmentId)).size !== config.enrollments.length) {
-    fail('INVALID_INPUT', 'Invalid engineering supervision configuration');
-  }
-  return config;
-}
-
-interface DurableState {
-  schemaVersion: 1; configDigest: string; createdAt: string; deadlineAt: string; writtenAt: string;
-  paused: boolean; revision: number;
-  entries: Array<{ enrollmentId: string; enrollmentDigest: string; attempts: number;
-    lastEvidenceDigest: string | null; lastOutcome: 'attempting' | 'settled' | 'unavailable' | null }>;
 }
 export interface ResourceConsoleEngineeringSupervisor {
   snapshot(): ResourceConsoleEngineeringSupervisionSnapshot;
@@ -69,9 +45,6 @@ export interface ResourceConsoleEngineeringSupervisorOptions {
 }
 function present(path: string): boolean {
   try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
-}
-function timestamp(value: unknown): value is string {
-  return typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 }
 
 /** Construction enrolls private metadata/ownership only; start() is the explicit execution boundary. */
@@ -147,23 +120,9 @@ export function createResourceConsoleEngineeringSupervisor(options: ResourceCons
   }
   try {
     if (present(statePath)) {
-      const source = data<DurableState>(readResourceJson(statePath, MAX_STATE_BYTES));
-      if (!exact(source, ['schemaVersion', 'configDigest', 'createdAt', 'deadlineAt', 'writtenAt', 'paused', 'revision', 'entries']) ||
-          source.schemaVersion !== 1 || source.configDigest !== configDigest || !timestamp(source.createdAt) || !timestamp(source.deadlineAt) ||
-          !timestamp(source.writtenAt) || source.writtenAt < source.createdAt || Date.parse(source.deadlineAt) !== Date.parse(source.createdAt) + config.maxDurationMs ||
-          typeof source.paused !== 'boolean' || !integer(source.revision, 0, Number.MAX_SAFE_INTEGER) || !Array.isArray(source.entries) ||
-          source.entries.length < config.enrollments.length || source.entries.length > (config.maxEnrollments ?? config.enrollments.length) ||
-          new Set(source.entries.map(row => row.enrollmentId)).size !== source.entries.length || source.entries.some((row, index) => {
-            const expected = config.enrollments[index];
-            return !exact(row, ['enrollmentId', 'enrollmentDigest', 'attempts', 'lastEvidenceDigest', 'lastOutcome']) ||
-              typeof row.enrollmentId !== 'string' || !ID.test(row.enrollmentId) || typeof row.enrollmentDigest !== 'string' || !HASH.test(row.enrollmentDigest) ||
-              expected !== undefined && (row.enrollmentId !== expected.enrollmentId || row.enrollmentDigest !== expected.expectedEnrollmentDigest) ||
-              !catalog.some(value => value.id === row.enrollmentId && value.enrollmentDigest === row.enrollmentDigest) ||
-              !integer(row.attempts, 0, config.maxAttemptsPerEnrollment) ||
-              (row.lastEvidenceDigest !== null && (typeof row.lastEvidenceDigest !== 'string' || !HASH.test(row.lastEvidenceDigest))) ||
-              ![null, 'attempting', 'settled', 'unavailable'].includes(row.lastOutcome) ||
-              (row.attempts === 0 ? row.lastEvidenceDigest !== null || row.lastOutcome !== null : row.lastEvidenceDigest === null || row.lastOutcome === null);
-          })) fail('CONFLICT', 'Engineering supervision configuration or state changed');
+      const source = validateResourceConsoleEngineeringSupervisionState(readResourceJson(statePath, MAX_STATE_BYTES), {
+        config, catalog: catalog.map(({ id, enrollmentDigest }) => ({ id, enrollmentDigest })),
+      });
       state = source; persistedDigest = digest(canonical(source));
     } else {
       const now = new Date().toISOString();

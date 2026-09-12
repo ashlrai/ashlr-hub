@@ -116,6 +116,13 @@ setup publishes private artifacts and a real initial preparation registration,
 without constructing an execution owner or starting work. This closes the static
 catalog-to-successor registration gap. Exact completed replay does not rewrite
 account history or renew deadlines; changed or incomplete setup is held.
+The read-only [predecessor completion check](RESOURCE-POOLS.md#inspect-a-completed-predecessor)
+joins the finished queue, scoped registrations, graph and evaluated-delivery
+proofs, generation/proposal receipts, successor lineage and evaluator custody.
+It identifies a unique delivered tip and preserves explicit stop responses.
+This is historical evidence, not an atomic publication seal or authority to
+create another operating window. The standing-mission owner and action-time
+rollover remain separate implementation work.
 The generated command still needs actual account capacity and an appropriate
 fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md#installed-builtin-measurement-route)
 now has a closed installed `preparation-measurement-v1` launch route on

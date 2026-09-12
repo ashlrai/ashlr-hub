@@ -20,6 +20,7 @@ import type { ResourceConsoleEngineeringCatalog } from '../src/core/resources/co
 import type { ResourceConsoleEngineeringSupervisionSnapshot } from '../src/core/resources/console-engineering-supervisor-types.js';
 import type { ResourceEngineeringSuccessorCoordinatorSnapshot } from '../src/core/resources/engineering-successor-coordinator-types.js';
 import { resourceEngineeringPreparationRegistrationRoot } from '../src/core/resources/engineering-preparation-registry.js';
+import { checkResourceEngineeringPredecessor } from '../src/core/resources/engineering-predecessor-check.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 const point = (phase: string, details?: Record<string, number>) => { if (process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING === '1') console.log('SETUP_PHASE ' + JSON.stringify({ phase, monotonicMs: performance.now(), ...details })); };
@@ -122,6 +123,14 @@ async function setupCli(f: Fixture, extra: string[]) {
     '--resource-runtime', f.files.runtime, '--workspace', f.repo, '--projects', f.files.projects, '--json', ...extra],
   { timeout: 90_000, maxBuffer: 256 * 1024, env: childEnv() });
   expect(stderr).toBe(''); return JSON.parse(stdout) as SetupReport;
+}
+async function predecessorCli(f: Fixture, expectedPlanDigest: string, expectedDeadlineAt: string) {
+  const { stdout, stderr } = await promisify(execFile)(process.execPath, ['--import', 'tsx', 'src/cli/index.ts',
+    'resources', 'pool', 'engineering', 'predecessor', 'check', '--recipe', f.files.recipe, '--policy', f.files.policy,
+    '--output', f.output, '--resource-runtime', f.files.runtime, '--workspace', f.repo, '--projects', f.files.projects,
+    '--expected-plan-digest', expectedPlanDigest, '--expected-deadline-at', expectedDeadlineAt, '--json'],
+  { timeout: 90_000, maxBuffer: 256 * 1024, env: childEnv() });
+  expect(stderr).toBe(''); return JSON.parse(stdout) as ReturnType<typeof checkResourceEngineeringPredecessor>;
 }
 async function until(check: (deadlineMonotonicMs: number) => Promise<boolean>, timeoutMs: number) {
   const deadline = performance.now() + timeoutMs;
@@ -312,6 +321,61 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     expect(resourcePoolStatus(f.root, f.pool, f.bindings, f.observations).attempts).toEqual(ledger.attempts);
     const finalBefore = tree(f.base); expect((await setupCli(f, ['--expected-plan-digest', plan.planDigest])).disposition).toBe('replayed');
     expect(tree(f.base)).toEqual(finalBefore);
-  }, 360_000);
+    // Reuse the actual source-CLI setup inputs and original queue deadline.
+    // This observation neither seals the predecessor nor authorizes another run.
+    const predecessorInput = { setup: { recipe: JSON.parse(readFileSync(f.files.recipe, 'utf8')),
+      policy: JSON.parse(readFileSync(f.files.policy, 'utf8')), output: f.output, resourceRuntime: f.files.runtime,
+      workspace: f.repo, projectsFile: f.files.projects }, expectedPlanDigest: plan.planDigest, expectedDeadlineAt: originalDeadline };
+    const beforePredecessorCheck = tree(f.base); const homeBeforePredecessorCheck = tree(homedir());
+    point('predecessor-direct.start');
+    const predecessor = checkResourceEngineeringPredecessor(predecessorInput);
+    point('predecessor-direct.end');
+    expect(predecessor).toMatchObject({ status: 'verified', reasons: [], executionAuthorized: false, effectsExecuted: false,
+      continuation: 'eligible', tip: { enrollmentId: successorId,
+        enrollmentDigest: state.entries.find(row => row.enrollmentId === successorId)!.enrollmentDigest,
+        commit: b.receipt.commit, projectId: 'default' } });
+    point('predecessor-cli.start');
+    expect(await predecessorCli(f, plan.planDigest, originalDeadline)).toMatchObject({ status: predecessor.status, reasons: [],
+      evidenceDigest: predecessor.evidenceDigest, tip: predecessor.tip, continuation: predecessor.continuation,
+      executionAuthorized: false, effectsExecuted: false, providerContacted: false });
+    point('predecessor-cli.end');
+    for (const changed of [
+      { expectedPlanDigest: plan.planDigest === '0'.repeat(64) ? '1'.repeat(64) : '0'.repeat(64) },
+      { expectedDeadlineAt: new Date(Date.parse(originalDeadline) + 1).toISOString() },
+    ]) {
+      const held = checkResourceEngineeringPredecessor({ ...predecessorInput, ...changed });
+      expect(held).toMatchObject({ status: 'held', tip: null, executionAuthorized: false, effectsExecuted: false, continuation: null });
+      expect(held.reasons.length).toBeGreaterThan(0);
+    }
+    expect(tree(f.base)).toEqual(beforePredecessorCheck); expect(tree(homedir())).toEqual(homeBeforePredecessorCheck);
+    // A signed completed graph cannot substitute for its accounted generation.
+    // Remove one actual generation receipt, never the proposal receipt, then
+    // restore exact ledger bytes. This deliberate write changes file timestamps.
+    const ledgerFile = join(f.root, 'pool-state.json'); const retainedLedgerBytes = readFileSync(ledgerFile);
+    const retainedLedger = JSON.parse(retainedLedgerBytes.toString('utf8'));
+    const proposalTaskId = journalRecords.find(row => row.kind === 'intent')!.task.id;
+    const generationReceipt = ledger.attempts.find(row => row.id !== proposalTaskId)!;
+    expect(generationReceipt).toBeDefined();
+    try {
+      save(ledgerFile, { ...retainedLedger, attempts: retainedLedger.attempts.filter((row: { id: string }) => row.id !== generationReceipt.id) });
+      const missingReceiptBefore = tree(f.base);
+      point('predecessor-missing-generation.start');
+      const missingReceipt = checkResourceEngineeringPredecessor(predecessorInput);
+      point('predecessor-missing-generation.end');
+      expect(missingReceipt).toMatchObject({ status: 'held', tip: null, continuation: null, executionAuthorized: false, effectsExecuted: false });
+      expect(missingReceipt.reasons.length).toBeGreaterThan(0);
+      expect(tree(f.base)).toEqual(missingReceiptBefore);
+    } finally { writeFileSync(ledgerFile, retainedLedgerBytes); }
+    expect(readFileSync(ledgerFile)).toEqual(retainedLedgerBytes);
+    const restoredBefore = tree(f.base);
+    point('predecessor-restored.start');
+    expect(checkResourceEngineeringPredecessor(predecessorInput)).toMatchObject({ status: 'verified', evidenceDigest: predecessor.evidenceDigest,
+      tip: predecessor.tip, executionAuthorized: false, effectsExecuted: false });
+    point('predecessor-restored.end');
+    expect(tree(f.base)).toEqual(restoredBefore); expect(tree(homedir())).toEqual(homeBeforePredecessorCheck);
+    expect(f.generations).toHaveLength(4); expect(f.proposals).toHaveLength(1);
+  // The original effect/restart window remains 360s. Extra time is only for
+  // post-close, read-only historical proof and refusal controls below that window.
+  }, 900_000);
   }
 });

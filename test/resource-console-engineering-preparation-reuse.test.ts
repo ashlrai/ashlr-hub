@@ -18,6 +18,8 @@ import * as artifacts from '../src/core/universe/artifacts.js';
 import * as campaigns from '../src/core/universe/campaign-store.js';
 import * as deliveryRecovery from '../src/core/universe/campaign-delivery-recovery.js';
 import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
+import { createResourceEngineeringPreparationRegistry } from '../src/core/resources/engineering-preparation-registry.js';
+import { readResourceEngineeringDeliveredSource } from '../src/core/resources/engineering-delivered-source.js';
 
 const roots: string[] = []; const owners: ResourceConsoleEngineeringOwner[] = []; const supervisors: ResourcePoolSupervisor[] = [];
 afterEach(async () => {
@@ -38,7 +40,7 @@ function tree(file: string): unknown {
     content: stat.isFile() ? digest(readFileSync(file)) : Object.fromEntries(readdirSync(file).sort().map(name => [name, tree(join(file, name))])) };
 }
 const request = { id: 'objective', profileId: 'pinned', name: 'Measured improvement', objective: 'Increase the value within the fixed checks.' };
-async function fixture() {
+async function fixture(registrationScope?: string) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'console-preparation-reuse-'))); roots.push(base);
   const workspace = join(base, 'repo'); const transport = join(base, 'transport'); const outputRoot = join(base, 'prepared'); const root = join(base, 'ledger');
   mkdirSync(outputRoot, { mode: 0o700 });
@@ -64,6 +66,7 @@ async function fixture() {
     execution: { maxDurationMs: 30_000, constitutionVersion: 'fixture', policyEpoch: 1 },
     supervision: { maxDurationMs: 60_000, pollIntervalMs: 1000, maxAttemptsPerEnrollment: 2 } };
   const config: ResourceConsoleEngineeringPreparationConfig = { schemaVersion: 1, outputRoot, resourceRuntime,
+    ...(registrationScope === undefined ? {} : { registrationScope }),
     profiles: [{ id: 'pinned', label: 'Fixed checks', acceptance: 'Only value may change; fixed evaluator applies.', recipe }] };
   const configFile = join(base, 'preparation.json'); save(configFile, config);
   const supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, projects: [], readObservations: () => [], pollIntervalMs: 60_000 });
@@ -78,10 +81,12 @@ async function fixture() {
 }
 
 describe('call-local console preparation validation reuse', () => {
-  it('omits malformed complete source while preserving BOM and truthful prefix truncation in successor evidence', async () => {
+  it.each([undefined, 'window-one'])('preserves exact owner-free successor evidence and fresh refusal for scope %s', async registrationScope => {
     // Real registration and fresh bundle validation; controlled delivery/run witnesses isolate
     // evidence formatting here. This does not assert evaluator or delivery-proof correctness.
-    const f = await fixture();
+    const f = await fixture(registrationScope);
+    const { owner: _owner, ...registryOptions } = f.options;
+    const registry = createResourceEngineeringPreparationRegistry(registryOptions);
     const originalSnapshot = f.owner.snapshot.bind(f.owner);
     vi.spyOn(f.owner, 'snapshot').mockImplementation(id => ({ ...originalSnapshot(id), state: 'completed' }));
     const manager = f.create(); const plan = manager.check(request);
@@ -110,6 +115,7 @@ describe('call-local console preparation validation reuse', () => {
     const context = () => {
       const source = manager.successorSource(request.id, prepared.enrollment.enrollmentDigest);
       expect(source).not.toBeNull();
+      expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).toEqual(source);
       return JSON.parse(source!.context) as { files: Array<{ path: string; text: string; truncated: boolean }>; omittedFiles: number };
     };
     expect(context()).toMatchObject({ files: [{ path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 1 });
@@ -118,8 +124,27 @@ describe('call-local console preparation validation reuse', () => {
       { path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 0 });
     sourceBytes = Buffer.from('binary\0source');
     expect(context()).toMatchObject({ files: [{ path: 'evaluate.mjs', text: '\ufeffvalid\r\n', truncated: false }], omittedFiles: 1 });
+    const metadata = vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata');
+    expect(readResourceEngineeringDeliveredSource(registry, 'missing', prepared.enrollment.enrollmentDigest)).toBeNull();
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, '0'.repeat(64))).toBeNull();
+    expect(metadata).not.toHaveBeenCalled();
+    // The host wrapper still needs its live completed guard. The extracted
+    // helper intentionally proves only delivery; these witnesses do not claim
+    // the unlaunched fixture has completed a graph or settled owner custody.
+    vi.mocked(f.owner.snapshot).mockRestore();
+    expect(manager.successorSource(request.id, prepared.enrollment.enrollmentDigest)).toBeNull();
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).not.toBeNull();
     expect(tree(f.base)).toEqual(before); expect(originalSnapshot(request.id).launched).toBe(false);
     expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
+    save(f.configFile, { ...f.config, profiles: [{ ...f.config.profiles[0]!, acceptance: 'Changed pinned profile' }] });
+    const changedConfig = tree(f.base);
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).toBeNull();
+    expect(tree(f.base)).toEqual(changedConfig);
+    save(f.configFile, f.config);
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).not.toBeNull();
+    unlinkSync(join(f.bundle, 'receipt.json')); const missingReceipt = tree(f.base);
+    expect(readResourceEngineeringDeliveredSource(registry, request.id, prepared.enrollment.enrollmentDigest)).toBeNull();
+    expect(tree(f.base)).toEqual(missingReceipt);
   });
 
   it('checks and replays an existing objective using one fresh committed read per call without writes', async () => {

@@ -3,14 +3,12 @@ import { createResourceEngineeringPreparationRegistry, validateResourceConsoleEn
 export { validateResourceConsoleEngineeringObjective, validateResourceConsoleEngineeringPreparationConfig } from './engineering-preparation-registry.js';
 /** Host-pinned objective preparation on the existing engineering owner. No execution or queue mutation. */
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
-import { canonical, digest, readArtifactSnapshot } from '../universe/artifacts.js';
-import { decodeUtf8Excerpt } from '../util/utf8-excerpt.js';
+import { canonical } from '../universe/artifacts.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import { type ResourceConsoleEngineeringOwner } from './console-engineering.js';
 import type { ResourceEngineeringSuccessorSource } from './engineering-preparation-types.js';
 import { checkResourceEngineeringSuccessorPreparation, prepareResourceEngineeringSuccessorBundle } from './engineering-successor-preparation.js';
-import { campaignUniverse, readUniverseCampaign } from '../universe/campaign-store.js';
-import { readCompletedCampaignDelivery } from '../universe/campaign-delivery-recovery.js';
+import { readResourceEngineeringDeliveredSource, type ResourceEngineeringDeliveredSource } from './engineering-delivered-source.js';
 import type { ResourceConsoleEngineeringObjective, ResourceConsoleEngineeringObjectivePlan, ResourceConsoleEngineeringObjectivePrepared,
   ResourceConsoleEngineeringPreparationConfig, ResourceConsoleEngineeringProfile } from './console-engineering-preparation-types.js';
 
@@ -23,7 +21,6 @@ function copy<T>(input: unknown): T {
 }
 const exact = (value: unknown, keys: string[]): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value) &&
   Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
-const hash = (value: unknown) => digest(canonical(value));
 export class ResourceEngineeringAutomaticAdmissionOwnershipError extends Error {
   constructor() { super('Automatic admission owner unavailable'); }
 }
@@ -37,9 +34,7 @@ export interface ResourceConsoleEngineeringPreparationOwner {
   pendingAutomaticAdmissions(binding: ResourceEngineeringAutomaticAdmission,
     admitted: Array<{ enrollmentId: string; enrollmentDigest: string }>, preferredEnrollmentId?: string): ResourceEngineeringAutomaticAdmissionCandidate[];
   /** Private host capability: derive lineage only from this owner's prepared, delivered enrollment. */
-  successorSource(id: string, expectedEnrollmentDigest: string): {
-    source: ResourceEngineeringSuccessorSource; projectId: string; commit: string; objective: string; context: string;
-  } | null;
+  successorSource(id: string, expectedEnrollmentDigest: string): ResourceEngineeringDeliveredSource | null;
   /** Private host capability, never accepted by the ordinary browser preparation route. */
   prepareSuccessor(input: ResourceConsoleEngineeringObjective & { source: ResourceEngineeringSuccessorSource }): Promise<ResourceConsoleEngineeringObjectivePrepared>;
 }
@@ -126,45 +121,8 @@ export function createResourceConsoleEngineeringPreparation(input: {
     },
     successorSource(id, expectedEnrollmentDigest) {
       try {
-        const row = registrations().find(item => item.request.id === id && item.enrollmentDigest === expectedEnrollmentDigest);
-        if (!row || options.owner.snapshot(id).state !== 'completed') return null;
-        const verified = committed(row, row.request, true); const enrollment = verified.catalog.enrollments[0];
-        if (verified.catalog.enrollments.length !== 1 || !enrollment || enrollment.id !== id ||
-          enrollment.host.definition.tasks.length !== 1 || enrollment.host.deliveryPlan.deliveries.length !== 1) return null;
-        const campaignId = enrollment.host.definition.tasks[0]!.campaignId;
-        const target = enrollment.host.deliveryPlan.deliveries[0]!;
-        if (target.campaignId !== campaignId) return null;
-        const campaign = readUniverseCampaign(campaignId, { root: enrollment.host.root });
-        const receipt = readCompletedCampaignDelivery(campaign, target, { root: enrollment.host.root });
-        if (!receipt) return null;
-        const universe = campaignUniverse(campaign, { root: enrollment.host.root });
-        const trial = universe.runs.find(run => run.id === receipt.runId)?.trials.find(item => item.id === receipt.trialId);
-        if (universe.sourceState !== 'healthy' || !trial?.artifact || trial.artifact.digest !== receipt.artifactDigest) return null;
-        const artifact = readArtifactSnapshot(trial.artifact.path);
-        if (artifact.digest !== receipt.artifactDigest) return null;
-        // Stable measured evidence and declared source bytes, not the mutable
-        // project checkout or a volatile polling timestamp. Truncation is explicit.
-        const seed = campaign.seedEvaluation?.result?.measurement;
-        const observed = { metric: universe.manifest.metric, seed: seed ? { passed: seed.passed, score: seed.score } : null,
-          delivered: { score: trial.score, deltaFromParent: trial.delta, artifactDigest: receipt.artifactDigest },
-          files: [] as Array<{ path: string; text: string; truncated: boolean }>, omittedFiles: 0 };
-        const allowed = new Set([...verified.candidate.plan.files, ...verified.candidate.plan.contextFiles]);
-        for (const file of artifact.entries.filter(file => allowed.has(file.path))) {
-          if (observed.files.length >= 4) { observed.omittedFiles++; continue; }
-          try {
-            const excerpt = decodeUtf8Excerpt(file.data, 1600);
-            const value = excerpt.text;
-            if (value.includes('\0')) throw new Error('Binary source');
-            const item = { path: file.path, ...excerpt };
-            if (Buffer.byteLength(canonical({ ...observed, files: [...observed.files, item] })) > 4096) { observed.omittedFiles++; continue; }
-            observed.files.push(item);
-          } catch { observed.omittedFiles++; }
-        }
-        const { campaignId: _campaign, ...delivery } = target;
-        return copy({ source: { root: enrollment.host.root, campaignId, expectedDefinitionDigest: campaign.definitionDigest,
-          expectedManifestDigest: campaign.manifestDigest, expectedComparatorDigest: campaign.comparatorDigest,
-          delivery, expectedDeliveryDigest: hash(receipt) }, projectId: enrollment.projectId,
-          commit: receipt.commit, objective: row.request.objective, context: canonical(observed) });
+        if (options.owner.snapshot(id).state !== 'completed') return null;
+        return readResourceEngineeringDeliveredSource(registry, id, expectedEnrollmentDigest);
       } catch { return null; }
     },
     async prepareSuccessor(input) {

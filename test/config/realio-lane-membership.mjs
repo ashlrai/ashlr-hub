@@ -101,6 +101,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-files-acceptance.test.ts', // independent real file-to-task snapshot acceptance
   'test/resource-console-engineering-acceptance.test.ts', // actual HTTP, shared quota, Git evaluation and delivery
   'test/resource-console-engineering-core.test.ts', // signed graph attribution and durable console launch/cancel ownership
+  'test/resource-console-engineering-graph-completion.test.ts', // read-only completion over real private ownership records
   'test/resource-console-engineering-registration.test.ts', // immutable same-owner dynamic enrollment with real private supervisor state
   'test/resource-console-engineering-preparation-boundaries.test.ts', // real pinned recipe files and immutable objective registration boundaries
   'test/resource-console-engineering-preparation-reuse.test.ts', // real committed bundle replay and call-local validation counts
@@ -110,6 +111,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-outcomes.test.ts', // exact receipt joins against real private resource history and ledger
   'test/resource-engineering-outcomes-review.test.ts', // independent overflow, changed-sample and incomplete-proof regressions
   'test/resource-engineering-supervisor-admission.test.ts', // durable bounded queue admission and restart over private state
+  'test/resource-engineering-supervision-state.test.ts', // read-only private supervision state and owner restart identity
   'test/resource-engineering-supervisor-admission-acceptance.test.ts', // actual prepare-to-queue evaluation, delivery and restart
   'test/resource-engineering-auto-admission-recovery-acceptance.test.ts', // ordinary registration gap recovery, paused restart and delivery
   'test/universe-preparation-measurement-capture-acceptance.test.ts', // actual installed failed diagnostic, immutable custody and CLI report replay

@@ -149,6 +149,57 @@ export interface ResourceConsoleEngineeringPreparedEnrollment {
   accountingPoolDigest: string;
 }
 
+function readEngineeringOwnership(value: Pick<ResourceConsoleEngineeringPreparedEnrollment, 'row' | 'summary' | 'definitionDigest'>) {
+  inspectPrivateDirectory(value.row.graphRoot);
+  const result = readImmutablePrivateRecords(records(value.row.graphRoot), { requireComplete: true });
+  if (result.sourceState === 'degraded' || result.sourceState !== 'missing' && !result.complete || result.records.some((record) =>
+    record.enrollmentDigest !== value.summary.enrollmentDigest || record.definitionDigest !== value.definitionDigest)) {
+    fail('UNAVAILABLE', 'Engineering ownership evidence unavailable');
+  }
+  const launch = result.records.find((record) => record.kind === 'launch');
+  const cancel = result.records.find((record) => record.kind === 'cancel');
+  if (cancel && (!launch || Date.parse(cancel.at) < Date.parse(launch.at))) fail('UNAVAILABLE', 'Engineering cancellation evidence unavailable');
+  return { launch, cancel };
+}
+
+export interface ResourceConsoleEngineeringGraphCompletion {
+  enrollmentId: string; enrollmentDigest: string; graphId: string; definitionDigest: string;
+  graphDigest: string; ownershipDigest: string; launchedAt: string; deadlineAt: string;
+}
+
+/** Host-only observation from a freshly prepared enrollment, not custody or launch authority. */
+export function readResourceConsoleEngineeringGraphCompletion(
+  prepared: ResourceConsoleEngineeringPreparedEnrollment,
+): ResourceConsoleEngineeringGraphCompletion | null {
+  try {
+    // Prepared bindings contain executable handlers. Capture only their inert
+    // identity fields, without invoking caller accessors or constructing an owner.
+    const fields = ['row', 'summary', 'definition', 'definitionDigest'] as const;
+    const captured = Object.fromEntries(fields.map(key => {
+      const property = Object.getOwnPropertyDescriptor(prepared, key);
+      if (!property || !Object.hasOwn(property, 'value')) fail('INVALID_INPUT', 'Invalid prepared engineering identity');
+      return [key, property.value];
+    }));
+    const value = snapshot<Pick<ResourceConsoleEngineeringPreparedEnrollment, typeof fields[number]>>(captured);
+    const definition = validateControlGraph(value.definition);
+    if (!path(value.row.graphRoot) || !ID.test(value.row.id) || !HASH.test(value.summary.enrollmentDigest) ||
+      value.row.id !== value.summary.id || value.row.graphId !== value.summary.graphId || definition.id !== value.row.graphId ||
+      definition.hostEnrollmentDigest !== value.summary.enrollmentDigest || digest(canonical(definition)) !== value.definitionDigest) return null;
+    const sample = () => ({ ownership: readEngineeringOwnership(value), graph: readControlGraph(value.row.graphRoot) });
+    const first = sample(); const { graph, ownership } = first;
+    if (!ownership.launch || ownership.cancel || graph.sourceState !== 'healthy' || graph.status !== 'completed' ||
+      graph.graphId !== value.row.graphId || graph.definitionDigest !== value.definitionDigest || graph.deadlineAt === null ||
+      graph.nodes.length !== definition.nodes.length || graph.nodes.some((node, index) => node.state !== 'completed' ||
+        node.id !== definition.nodes[index]!.id || node.kind !== definition.nodes[index]!.kind)) return null;
+    // Completion facts can race a cancellation or graph publication. The seal
+    // caller still supplies its own quiescence and final-publication guards.
+    if (canonical(first) !== canonical(sample())) return null;
+    return { enrollmentId: value.row.id, enrollmentDigest: value.summary.enrollmentDigest, graphId: graph.graphId,
+      definitionDigest: value.definitionDigest, graphDigest: digest(canonical(graph)),
+      ownershipDigest: digest(canonical(ownership.launch)), launchedAt: ownership.launch.at, deadlineAt: graph.deadlineAt };
+  } catch { return null; }
+}
+
 /** Shared read-only enrollment validation. Prepared handlers are host-only, never a public report. */
 export function prepareResourceConsoleEngineeringEnrollments(options: {
   catalog: ResourceConsoleEngineeringCatalog; root: string; poolFile: string; bindingsFile: string;
@@ -260,18 +311,7 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
     if (typeof id !== 'string' || !ID.test(id)) fail('INVALID_INPUT', 'Invalid engineering enrollment');
     return enrolled.get(id) ?? fail('NOT_FOUND', 'Engineering enrollment was not found');
   };
-  const ownership = (value: Entry) => {
-    inspectPrivateDirectory(value.row.graphRoot);
-    const result = readImmutablePrivateRecords(records(value.row.graphRoot), { requireComplete: true });
-    if (result.sourceState === 'degraded' || result.sourceState !== 'missing' && !result.complete || result.records.some((record) =>
-      record.enrollmentDigest !== value.summary.enrollmentDigest || record.definitionDigest !== value.definitionDigest)) {
-      fail('UNAVAILABLE', 'Engineering ownership evidence unavailable');
-    }
-    const launch = result.records.find((record) => record.kind === 'launch');
-    const cancel = result.records.find((record) => record.kind === 'cancel');
-    if (cancel && (!launch || Date.parse(cancel.at) < Date.parse(launch.at))) fail('UNAVAILABLE', 'Engineering cancellation evidence unavailable');
-    return { launch, cancel };
-  };
+  const ownership = readEngineeringOwnership;
   const admit = (value: Entry, running = false) => {
     if (closing || signal?.aborted) fail('UNAVAILABLE', 'Engineering owner is closing');
     // Queue pause gates new launches, not work already running. Explicit cancel

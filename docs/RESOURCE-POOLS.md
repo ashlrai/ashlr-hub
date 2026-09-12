@@ -243,6 +243,48 @@ an already-passing binary test cannot prove repeated strict improvement. The
 [Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md)
 records a candidate graded metric and its still-unfinished evaluator requirements.
 
+### Inspect a completed predecessor
+
+After the owning console closes normally, agents can inspect whether a setup's
+entire admitted successor chain has completed. Keep the original setup plan
+digest and persisted supervision deadline; do not calculate a new deadline:
+
+```sh
+node bin/ashlr resources pool engineering predecessor check \
+  --recipe /absolute/private/recipe.json \
+  --policy /absolute/private/policy.json \
+  --output /absolute/private/setup \
+  --resource-runtime /absolute/private/runtime.json \
+  --workspace /absolute/project \
+  --projects /absolute/private/projects.json \
+  --expected-plan-digest ORIGINAL_SETUP_SHA256 \
+  --expected-deadline-at ORIGINAL_PERSISTED_ISO_DEADLINE \
+  --json
+```
+
+Replace both uppercase pins with retained values. This command is read-only.
+`verified` identifies the unique delivered tip only after checking scoped
+registration and queue membership, completed graphs, evaluated local deliveries,
+generation and proposal receipts, successor admission, and settled evaluator
+custody. Extra unlinked objectives, missing receipts, unfinished proposals,
+retained execution locks, or changed evidence produce `held`. It does not reclaim
+locks or repair history. Exit codes are `0` verified, `1` held/unavailable, and
+`2` invalid arguments.
+
+`continuation: "stop-requested"` preserves an explicit successor stop response;
+`"eligible"` only means no such stop was recorded at the delivered tip. Neither
+grants execution permission. `executionAuthorized` and `effectsExecuted` remain
+`false`. Unknown token or timing measurements remain unknown; a missing worker
+receipt cannot be treated as completed accounting. Evidence is sampled twice,
+not atomically sealed against another process. A future standing-mission owner
+must revalidate it at publication and apply its own retained limits, account
+reserves, stop state, and project policy. This command does not renew a finite
+queue, create the next setup, start a service, or deploy a branch.
+The current implementation performs synchronous private-file and Git proof
+reads. Use it as an offline inspection after normal console shutdown, not as a
+high-frequency UI poll or inside a live owner's event loop. It does not pause
+the original deadline while inspecting evidence.
+
 ### Prepare and run objectives in the workspace
 
 With `--engineering-preparation /absolute/private/profiles.json`, an execution
