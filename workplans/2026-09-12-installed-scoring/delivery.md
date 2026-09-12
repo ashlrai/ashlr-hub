@@ -14,11 +14,15 @@ worktree. Primary `auto/p00` remains at `b3abe997` with its earlier
 qualification increment. Neither checkout has been pushed or deployed here.
 
 Current source: `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-scoring`,
-Compiler verification was built from that checkpoint plus the owned compiler
-packet. Passed-seed delivery integration is in that checkpoint. The rebuild now
-has diagnostic identity `4937844f46bbd3965694fa9deef6b18132899b09b8025d31a16b79764bd531f1`;
-it has not yet passed native qualification. The old qualified bundle remains
-verified at `/Users/masonwyatt/.codex/artifacts/ashlr-preparation-qualified-backup.O0qP0h/preparation`.
+Compiler source was checkpointed at `d44c9911`; full-source capture support at
+`782aed2e`; closed recipe support and its rebased candidate are integrated at
+`f0606832`. The combined build has diagnostic identity
+`3a711953b85b5c3b51435743a5ddb0a9fcabf871a22f2087e53a7265d16c72b5` and is not yet
+qualified. Its native gate is live on handle10612. The preceding4937844f... bundle
+passed all five native cases and is preserved at
+`/Users/masonwyatt/.codex/artifacts/ashlr-preparation-runtime-pin.HJhKaA/preparation`;
+its receipt is `rebuilt-bundle-qualification.json`. The still-earlier460b5f...
+qualified bundle remains separately preserved in the earlier backup.
 
 ## Verification
 
@@ -63,8 +67,9 @@ and fixture asset; the old result does not qualify a new build identity.
    source/web types, scoped lint, docs and lane classification passed. The package
    tests exercise real tiny-project compiler subprocesses, not the full native
    workload. Actual full-project authoring/closed compilation passed separately.
-2. Qualify the exact rebuilt diagnostic bytes, then retain the result separately
-   from the older qualified bundle. Native handle15864 is live. Full-project
+2. Qualify the exact combined diagnostic bytes, then retain the result separately
+   from the older qualified bundles. Native handle15864 is terminal5/5passed;
+   current handle10612 tests the new3a711953... bytes. Full-project
    packaged compiler acceptance has now passed2/2: baseline5900ms and TS2322
    refusal5926ms within60seconds and a1-GiB V8 heap, with independently confirmed
    process absence. This test packages synthetic calibration solely to exercise
@@ -72,11 +77,11 @@ and fixture asset; the old result does not qualify a new build identity.
 3. Resolve the real global stop through the operator; never bypass it. The latest
    read-only check found healthy/active/present. The prior attempt retained only
    a preflight failure, not usable capture data.
-4. Integrate the locally verified closed scoring-builtin recipe connection
-   (600c099c) and explicit full-source capture mode before collecting a
-   Hub-deliverable calibration. The changed target and import graph need their
-   own combined-build qualification; this turn's4937844f... result cannot qualify
-   that future build. A private one-file calibration cannot be reused for a full
+4. Finish combined-build qualification and strict rebased candidate acceptance
+   before collecting a Hub-deliverable calibration. Recipe600c099c is now
+   integrated asf0606832. The changed target and import graph need their own
+   evidence;4937844f... results cannot qualify the new build. A private
+   one-file calibration cannot be reused for a full
    Hub seed. After resolving the real stop, run
    `run-calibration.mjs` only against an explicitly empty private
    evidence root and a fixed original deadline. It has NOT been executed. It
@@ -98,3 +103,12 @@ publication. Driver syntax/lint pass, but its native end-to-end flow is untested
 No autonomous provider calls, account allocation changes,
 KILL overrides, resident fleet activation, GitHub Actions, remote publication,
 or production deployment were performed by this implementation packet.
+
+Latest combined verification:397tests/12files/zero skipped59.29seconds, full local
+build, docs/lane checks. Full-project packaged compiler rerun passed2/2,25.93s;
+actual baseline6121ms and TS2322 refusal6035ms, both independently settled under
+the existing60-second/1-GiB V8 heap limits. The target source SHA is
+9452a70b39bb3f9afcc3160b3c30044a2656438fc54976476fa2fe3adb2090a5.
+Strict rebased candidate comparison is live on agent-owned handle31973 and has
+not yet established improvement. Do not confuse its private test result with a
+calibrated accepted campaign or local Hub branch delivery.
