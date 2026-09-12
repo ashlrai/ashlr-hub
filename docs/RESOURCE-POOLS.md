@@ -310,6 +310,37 @@ ISO `deadlineAt`, `maxScopes` (1–64, including the initial scope), and
 `pollIntervalMs` (100–60000). The configuration has `schemaVersion: 1` and a
 stable `id`. It contains no credentials or console tokens.
 
+For a **new mission**, opt into measured context by adding this top-level
+configuration field (this fragment is not a complete configuration):
+
+```json
+{
+  "proposalFeedback": "measured-outcomes-v1"
+}
+```
+
+This gives the next-objective proposer bounded evidence from the latest verified
+delivered enrollment: campaign/comparator identities, seed and selected scores,
+stage counts, recorded token subtotals and summed worker-execution timings.
+Partial observations retain their measured counts and subtotals, with explicit
+incomplete coverage and `null` totals; missing measurements are not zero usage or
+zero duration. Acceptance remains fixed-evaluator-and-local-branch-only, and
+metrics are campaign-cumulative, not causal credit for one graph invocation.
+This context does not change workers, routing, budgets, acceptance or authority,
+and does not establish product acceptance.
+
+Omitting the field preserves legacy configuration and proposal bytes. Do not add
+it to an existing mission journal: it changes the pinned configuration digest.
+The original settled-record schema is unchanged. Replay regenerates context from
+verified evidence and requires the exact retained proposal task; meaningful
+measurement changes, including partial timing, hold rather than silently rewrite
+or dispatch the old task. Context detail is bounded to 16 KiB. If valid detail
+exceeds that bound, the proposer receives an explicit unavailable envelope with
+its evidence digest, not truncated metrics. Invalid source/bounds proof can hold
+completion. Opt-in proposal prompts are bounded to 64 KiB; fixed feedback
+unavailability and prompt-bound diagnostics are retained in invocation history.
+No model, provider or real mission acceptance is implied by this option.
+
 From the repository root, check the selected configuration without starting work:
 
 ```sh

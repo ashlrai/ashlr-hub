@@ -110,6 +110,41 @@ const held = (options: ResourceEngineeringPredecessorCheckOptions, stage?: strin
 };
 
 describe('predecessor completion joins over mocked host evidence', () => {
+  it.each(['invalid-source', 'oversized-projection'])('does not publish a partial verified proof after %s failure', failure => {
+    const f = fixture();
+    if (failure === 'invalid-source') f.sources.get('child')!.source.expectedDeliveryDigest = 'invalid';
+    else hooks.outcomes.mockReturnValue({ sourceState: 'healthy', campaigns: [{ sourceState: 'healthy', reasons: [] }],
+      usage: { attempts: 1, joinedAttempts: 1 }, unexpected: 'x'.repeat(300 * 1024) });
+    const result = held({ ...f.options, proposalFeedback: 'measured-outcomes-v1' }, 'stability');
+    expect(result).not.toHaveProperty('feedback');
+  });
+  it('projects only opt-in verified tip outcomes with nullable coverage and no additional evidence scans', () => {
+    const f = fixture();
+    const usage = { attempts: 1, joinedAttempts: 1, reportedAttempts: 0, unknownAttempts: 1,
+      recordedInputTokens: 0, recordedOutputTokens: 0, totalTokens: null, complete: false };
+    const timing = { scope: 'summed-worker-execution', attempts: 1, measuredAttempts: 0,
+      recordedDurationMs: 0, totalDurationMs: null, complete: false };
+    hooks.outcomes.mockImplementation(({ enrollment }) => ({ schemaVersion: 1, enrollmentId: enrollment.id,
+      enrollmentDigest: enrollment.enrollmentDigest, sampledAt: new Date().toISOString(), sourceState: 'degraded',
+      scope: 'campaign-evaluations-and-recorded-worker-usage', authority: 'observation-only',
+      acceptanceScope: 'fixed-evaluator-and-local-branch-only', attribution: 'campaign-cumulative-not-graph-invocation',
+      productionAccepted: null, routingChanged: false, complete: false, reasons: ['outcome-evidence-incomplete'], usage, timing,
+      campaigns: [{ campaignId: enrollment.campaigns[0].id, universeId: enrollment.campaigns[0].id + '-universe',
+        definitionDigest: h(enrollment.id + '-definition'), comparatorDigest: h(enrollment.id + '-comparator'),
+        state: 'completed', sourceState: 'healthy', reasons: [], metric: { name: 'processes', direction: 'minimize', minImprovement: 1 },
+        seed: { status: 'measured', score: 150, passed: true }, usage, timing, workers: [],
+        stages: { trials: 1, evaluated: 1, passed: 1, rejected: 0, selected: 1, strictImprovements: 0, verifiedLocalDeliveries: 1 },
+        niches: [{ niche: 'verification', score: 149, deltaFromSeed: 1, artifactDigest: h(enrollment.id + '-artifact'), runId: 'run', trialId: 'trial' }] }] }));
+    const legacy = checkResourceEngineeringPredecessor(f.options); expect(legacy.status).toBe('verified');
+    expect(legacy).not.toHaveProperty('feedback'); hooks.outcomes.mockClear();
+    const checked = checkResourceEngineeringPredecessor({ ...f.options, proposalFeedback: 'measured-outcomes-v1' });
+    expect(checked.status).toBe('verified'); expect(hooks.outcomes).toHaveBeenCalledTimes(4);
+    expect(checked.feedback).toMatchObject({ availability: 'available', source: { ...checked.tip,
+      deliveryDigest: f.sources.get('child')!.source.expectedDeliveryDigest }, campaigns: [{ campaignId: 'campaign-child',
+      comparatorDigest: h('child-comparator'), usage: { coverage: 'incomplete', totalTokens: null }, timing: { totalDurationMs: null } }] });
+    expect(canonical(checked.feedback)).not.toContain('campaign-initial');
+    expect(checkResourceEngineeringPredecessor({ ...f.options, proposalFeedback: 'measured-outcomes-v1' }).feedback).toEqual(checked.feedback);
+  });
   it('verifies a complete linked chain without turning historical expiry into execution permission', () => {
     const f = fixture(); const result = checkResourceEngineeringPredecessor(f.options);
     expect(result).toMatchObject({ status: 'verified', reasons: [], continuation: 'eligible', executionAuthorized: false,

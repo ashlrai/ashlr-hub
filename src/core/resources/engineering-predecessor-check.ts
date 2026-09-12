@@ -13,6 +13,7 @@ import { portfolioControllerDirectory } from '../universe/portfolio-controller-s
 import { readResourceEngineeringAutonomousSetupEvidence, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
 import { validateResourceConsoleEngineeringPreparationConfig } from './engineering-preparation-registry.js';
 import { readResourceEngineeringOutcomes } from './engineering-outcomes.js';
+import { MISSION_MEASURED_FEEDBACK, projectEngineeringMissionFeedback, type EngineeringMissionFeedback } from './engineering-mission-feedback.js';
 import { prepareResourceConsoleEngineeringEnrollments, readResourceConsoleEngineeringGraphCompletion } from './console-engineering.js';
 import { readResourceConsoleEngineeringSupervisionState, validateResourceConsoleEngineeringSupervisionConfig } from './console-engineering-supervision-state.js';
 import { pinResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
@@ -28,6 +29,8 @@ export interface ResourceEngineeringPredecessorCheckOptions {
   expectedPlanDigest: string;
   /** Original persisted deadline from the calling mission, not a freshly calculated allowance. */
   expectedDeadlineAt: string;
+  /** Explicit proposal context only; omitted callers retain their exact proof shape. */
+  proposalFeedback?: typeof MISSION_MEASURED_FEEDBACK;
 }
 export interface ResourceEngineeringPredecessorCheck {
   schemaVersion: 1; scope: 'predecessor-completion-evidence-only';
@@ -36,6 +39,7 @@ export interface ResourceEngineeringPredecessorCheck {
   evidenceDigest: string | null;
   tip: { enrollmentId: string; enrollmentDigest: string; projectId: string; commit: string } | null;
   continuation: 'eligible' | 'stop-requested' | null;
+  feedback?: EngineeringMissionFeedback;
 }
 type Stage = 'inputs' | 'setup' | 'configuration' | 'projects' | 'queue' | 'completion' | 'custody' | 'successors' | 'lineage' | 'stability';
 function requireEvidence(value: unknown): asserts value { if (!value) throw new Error('Incomplete predecessor evidence'); }
@@ -61,7 +65,9 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
     // private registry. JSON-shaped copies and locks on unrelated scopes fail.
     requireEvidence(Array.isArray(ownedResourceLocks) && ownedResourceLocks.length <= 3 && ownedResourceLocks.every(lock => ownsLocalStoreLock(lock)));
     const locks = [...ownedResourceLocks];
-    requireEvidence(options && Object.keys(options).sort().join(',') === 'expectedDeadlineAt,expectedPlanDigest,setup' &&
+    requireEvidence(options && Object.keys(options).sort().join(',') === (options.proposalFeedback === undefined
+      ? 'expectedDeadlineAt,expectedPlanDigest,setup' : 'expectedDeadlineAt,expectedPlanDigest,proposalFeedback,setup') &&
+      (options.proposalFeedback === undefined || options.proposalFeedback === MISSION_MEASURED_FEEDBACK) &&
       typeof options.expectedPlanDigest === 'string' && /^[a-f0-9]{64}$/.test(options.expectedPlanDigest) &&
       typeof options.expectedDeadlineAt === 'string' && Number.isFinite(Date.parse(options.expectedDeadlineAt)) &&
       new Date(options.expectedDeadlineAt).toISOString() === options.expectedDeadlineAt);
@@ -215,7 +221,16 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
     };
     const first = sample(); const second = sample();
     stage = 'stability'; requireEvidence(hash(first) === hash(second) && locks.every(lock => ownsLocalStoreLock(lock)));
+    let feedback: EngineeringMissionFeedback | undefined;
+    if (options.proposalFeedback === MISSION_MEASURED_FEEDBACK) {
+      const selected = second.completed.find(row => row.graph.enrollmentId === second.tip.enrollmentId)!;
+      feedback = projectEngineeringMissionFeedback({ tip: second.tip,
+        deliveryDigest: selected.source.source.expectedDeliveryDigest, outcomes: selected.outcomes });
+    }
+    // Publish the verified result only after every requested projection has
+    // completed, so projection refusal cannot leave a partial verified proof.
     report.evidenceDigest = hash(second); report.tip = second.tip; report.continuation = second.continuation; report.status = 'verified';
+    if (feedback) report.feedback = feedback;
   } catch { report.reasons = [`${stage}-evidence-unavailable`]; }
   return report;
 }

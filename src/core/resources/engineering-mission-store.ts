@@ -7,6 +7,7 @@ import type { ResourceEngineeringAutonomousSetupOptions } from './engineering-au
 import { validateResourceTask } from './pool-runtime.js';
 import { parseResourceEngineeringSuccessorProposal } from './engineering-successor-store.js';
 import { readEngineeringMissionInvocations } from './engineering-mission-invocations.js';
+import { MISSION_MEASURED_FEEDBACK } from './engineering-mission-feedback.js';
 
 export interface ResourceEngineeringMissionConfig {
   schemaVersion: 1; id: string;
@@ -18,6 +19,8 @@ export interface ResourceEngineeringMissionConfig {
   /** Includes the initial scope, not additional scopes after it. */
   maxScopes: number;
   pollIntervalMs: number;
+  /** Opt-in for NEW mission identities; omission preserves legacy proposal bytes. */
+  proposalFeedback?: typeof MISSION_MEASURED_FEEDBACK;
 }
 export const missionHash = (value: unknown): string => digest(canonical(value));
 export function missionData<T>(input: unknown): T {
@@ -32,7 +35,9 @@ export function missionExact(value: unknown, keys: string[]): value is Record<st
 const HASH = /^[a-f0-9]{64}$/;
 export function validateResourceEngineeringMissionConfig(input: unknown): ResourceEngineeringMissionConfig {
   const config = missionData<ResourceEngineeringMissionConfig>(input);
-  if (!missionExact(config, ['schemaVersion', 'id', 'root', 'initial', 'deadlineAt', 'maxScopes', 'pollIntervalMs']) ||
+  if (!missionExact(config, ['schemaVersion', 'id', 'root', 'initial', 'deadlineAt', 'maxScopes', 'pollIntervalMs',
+    ...(Object.hasOwn(config ?? {}, 'proposalFeedback') ? ['proposalFeedback'] : [])]) ||
+      Object.hasOwn(config ?? {}, 'proposalFeedback') && config.proposalFeedback !== MISSION_MEASURED_FEEDBACK ||
       config.schemaVersion !== 1 || typeof config.id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(config.id) ||
       typeof config.root !== 'string' || !isAbsolute(config.root) || resolve(config.root) !== config.root || parse(config.root).root === config.root ||
       !missionExact(config.initial, ['setup', 'expectedPlanDigest']) || typeof config.initial.expectedPlanDigest !== 'string' || !HASH.test(config.initial.expectedPlanDigest) ||

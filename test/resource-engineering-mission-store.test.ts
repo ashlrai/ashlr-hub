@@ -28,6 +28,17 @@ function fixture() {
   return { config, write, payloads };
 }
 describe('mission configuration and immutable sequencing', () => {
+  it('opts new missions into measured feedback without retrofitting a legacy identity', () => {
+    const { config, write } = fixture();
+    const opted = { ...config, proposalFeedback: 'measured-outcomes-v1' as const };
+    expect(validateResourceEngineeringMissionConfig(opted)).toEqual(opted);
+    expect(missionHash(opted)).not.toBe(missionHash(config));
+    write('definition', 0, { configDigest: missionHash(config) });
+    expect(() => readEngineeringMissionRecords(opted)).toThrow('Mission definition changed');
+    expect(validateResourceEngineeringMissionConfig(config)).not.toHaveProperty('proposalFeedback');
+    for (const proposalFeedback of [undefined, null, true, 'measured-outcomes-v2'])
+      expect(() => validateResourceEngineeringMissionConfig({ ...config, proposalFeedback })).toThrow();
+  });
   it('detaches configuration and refuses unknown authority fields and accessors', () => {
     const { config } = fixture(); const checked = validateResourceEngineeringMissionConfig(config);
     expect(checked).toEqual(config); expect(checked).not.toBe(config);
