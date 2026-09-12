@@ -14,7 +14,10 @@ export interface PreparationMutationRequest {
   readonly options: Readonly<{ cwd: string | null; encoding: 'utf8' | 'buffer'; timeoutMs: number; maxBuffer: number; inputBase64: string | null }>;
 }
 const { readonlyCommand } = await import(new URL('../../scripts/evaluators/preparation-verification-controller.mjs', import.meta.url).href) as {
-  readonlyCommand(request: unknown, fixture: string, scratch: string): unknown;
+  readonlyCommand(request: unknown, fixture: string, scratch: string, trustedGitPath: string): unknown;
+};
+const { assertPreparationGit } = await import(new URL('../../scripts/evaluators/preparation-verification-native.mjs', import.meta.url).href) as {
+  assertPreparationGit(pin: unknown): void;
 };
 const { exact, MAX_MESSAGE_BYTES } = await import(new URL('../../scripts/evaluators/preparation-verification-protocol.mjs', import.meta.url).href) as {
   exact(value: unknown, keys: string[]): boolean; MAX_MESSAGE_BYTES: number;
@@ -66,9 +69,11 @@ export function createPreparationMutationInterceptor(options: {
       if (argv.length !== 6 || argv[0] !== '/usr/bin/sandbox-exec' || argv[1] !== '-p' ||
           typeof argv[2] !== 'string' || argv[3] !== process.execPath || argv[4] !== '--no-addons' || argv[5] !== toolPath) fail();
       const input = json(opts.input);
-      if (!exact(input, ['request', 'fixtureRoot', 'scratch']) || input.fixtureRoot !== fixtureRoot || input.scratch !== opts.cwd) fail();
+      if (!exact(input, ['request', 'fixtureRoot', 'scratch', 'gitPin']) || input.fixtureRoot !== fixtureRoot || input.scratch !== opts.cwd) fail();
+      assertPreparationGit(input.gitPin);
+      const gitPin = input.gitPin as { path: string; digest: string };
       privateDirectory(opts.cwd); if (scratchPin !== undefined && scratchPin !== opts.cwd) fail(); scratchPin = opts.cwd;
-      readonlyCommand(input.request, fixtureRoot, opts.cwd);
+      readonlyCommand(input.request, fixtureRoot, opts.cwd, gitPin.path);
       const request = input.request as PreparationMutationRequest;
       if (request.id !== lastId + 1 || request.id > 4096 || nonces.has(request.nonce)) fail();
       lastId = request.id; nonces.add(request.nonce);

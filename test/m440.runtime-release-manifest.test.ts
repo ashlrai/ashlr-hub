@@ -32,6 +32,8 @@ const PREPARATION_HELPERS = [
   'scripts/evaluators/preparation-verification-activity.mjs',
   'scripts/evaluators/preparation-verification-activity.d.mts',
   'scripts/evaluators/preparation-verification-protocol.mjs',
+  'scripts/evaluators/preparation-verification-native.mjs',
+  'scripts/evaluators/preparation-verification-native.d.mts',
 ] as const;
 
 interface ReleaseFixture {
@@ -45,8 +47,9 @@ function write(path: string, value: string, mode?: number): void {
   writeFileSync(path, value, mode === undefined ? { encoding: 'utf8' } : { encoding: 'utf8', mode });
 }
 
-function fixture(options: { legacyV2?: boolean; preparationHelpers?: boolean } = {}): ReleaseFixture {
+function fixture(options: { legacyV2?: boolean; preparationHelpers?: boolean | 'legacy' } = {}): ReleaseFixture {
   const legacyV2 = options.legacyV2 === true;
+  const preparationHelpers = options.preparationHelpers === 'legacy' ? PREPARATION_HELPERS.slice(0, 3) : PREPARATION_HELPERS;
   const packageRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-runtime-release-')));
   tempDirs.push(packageRoot);
   write(join(packageRoot, 'package.json'), `${JSON.stringify({
@@ -60,7 +63,7 @@ function fixture(options: { legacyV2?: boolean; preparationHelpers?: boolean } =
       'schema',
       'scripts/run-verify-command.mjs',
       ...(legacyV2 ? [] : ['scripts/scorecard-history-worker.mjs']),
-      ...(options.preparationHelpers ? PREPARATION_HELPERS : []),
+      ...(options.preparationHelpers ? preparationHelpers : []),
     ],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
@@ -88,7 +91,7 @@ function fixture(options: { legacyV2?: boolean; preparationHelpers?: boolean } =
   }
   const dependencyRoot = join(packageRoot, 'node_modules');
   if (options.preparationHelpers) {
-    for (const path of PREPARATION_HELPERS) write(join(packageRoot, path), 'export {};\n');
+    for (const path of preparationHelpers) write(join(packageRoot, path), 'export {};\n');
   }
   write(join(dependencyRoot, 'example', 'package.json'), `${JSON.stringify({
     name: 'example',
@@ -159,14 +162,14 @@ afterEach(() => {
 
 describe('unsigned runtime release manifest', () => {
   it('covers exact optional preparation helpers while preserving packages without them', () => {
-    for (const preparationHelpers of [false, true]) {
+    for (const preparationHelpers of [false, true, 'legacy'] as const) {
       const release = fixture({ preparationHelpers });
       const result = build(release);
       expect(result.ok).toBe(true);
       if (!result.ok) continue;
       expect(result.manifest.artifacts.filter((artifact) =>
         artifact.path.startsWith('scripts/evaluators/')).map((artifact) => artifact.path))
-        .toEqual(preparationHelpers ? [...PREPARATION_HELPERS].sort() : []);
+        .toEqual(preparationHelpers ? [...(preparationHelpers === 'legacy' ? PREPARATION_HELPERS.slice(0, 3) : PREPARATION_HELPERS)].sort() : []);
       expect(verify(release, result.canonicalJson).ok).toBe(true);
     }
   });
@@ -186,7 +189,7 @@ describe('unsigned runtime release manifest', () => {
     expect(build(release)).toEqual({ ok: false, reason: 'release preparation helper set is incomplete' });
   });
 
-  it('refuses declared helpers when all three installed files are missing', () => {
+  it('refuses declared helpers when all installed files are missing', () => {
     const release = fixture({ preparationHelpers: true });
     for (const path of PREPARATION_HELPERS) rmSync(join(release.packageRoot, path));
     expect(build(release)).toEqual({
@@ -195,14 +198,15 @@ describe('unsigned runtime release manifest', () => {
     });
   });
 
-  it('rejects a manifest with only part of the helper group', () => {
+  it.each(['missing-base', 'native-only'] as const)('rejects a manifest with an incomplete helper group: %s', kind => {
     const release = fixture({ preparationHelpers: true });
     const result = build(release);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const incomplete = jsonObject(result.canonicalJson);
     incomplete['artifacts'] = (incomplete['artifacts'] as Array<Record<string, unknown>>)
-      .filter((artifact) => artifact['path'] !== PREPARATION_HELPERS[0]);
+      .filter((artifact) => kind === 'missing-base' ? artifact['path'] !== PREPARATION_HELPERS[0]
+        : !PREPARATION_HELPERS.slice(0, 3).includes(artifact['path'] as typeof PREPARATION_HELPERS[number]));
     expect(parseUnsignedRuntimeReleaseManifest(JSON.stringify(incomplete)))
       .toEqual({ ok: false, reason: 'release preparation helper set is incomplete' });
   });

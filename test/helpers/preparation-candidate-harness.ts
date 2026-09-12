@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import type { runVerifySubprocessAsync } from '../../src/core/run/verify-commands.js';
 import { buildPreparationVerificationBridge } from './preparation-verification-bundle.js';
+import { resolvePreparationGit, assertPreparationGit } from '../../scripts/evaluators/preparation-verification-native.mjs';
 
 type Counts = { processes: number; blobProcesses: number };
 export interface PreparationCandidateSession {
@@ -45,11 +46,13 @@ export function snapshotPreparationFixture(file: string): unknown {
 }
 
 export async function createPreparationCandidateHarness(repository: string) {
+  const gitPin = Object.freeze(resolvePreparationGit());
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'preparation-mutation-')));
   const custody = createPreparationHarnessCustody();
   function close() {
     try { custody.assertSettled(); }
     catch { throw new Error(`PREPARATION_HARNESS_CUSTODY_UNSETTLED: retained ${root}`); }
+    assertPreparationGit(gitPin);
     const writable = (file: string): void => {
       const stat = lstatSync(file);
       if (!stat.isDirectory() || stat.isSymbolicLink()) return;
@@ -70,14 +73,14 @@ export async function createPreparationCandidateHarness(repository: string) {
     };
     const target = 'src/core/resources/engineering-preparation.ts';
     const source = readFileSync(join(repository, target), 'utf8');
-    return { root, source, run, toolPath: join(bundle, 'preparation-verification-tool.mjs'), close,
+    return { root, source, run, gitPin: { ...gitPin }, toolPath: join(bundle, 'preparation-verification-tool.mjs'), close,
       async session(text: string, fixtureRoot: string, runOverride: typeof runVerifySubprocessAsync = run) {
         // Separate roots preserve the controller's existing containment rules.
         const candidateRoot = mkdtempSync(join(root, 'candidate-'));
         mkdirSync(join(candidateRoot, dirname(target)), { recursive: true, mode: 0o700 });
         writeFileSync(join(candidateRoot, target), text, { mode: 0o600 });
         return custody.track(() => createPreparationCandidateSession({ bridge: { ...bridge, runVerifySubprocessAsync: runOverride },
-          bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs: 300000 }));
+          bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs: 300000, gitPin }));
       },
     };
   } catch (error) { close(); throw error; }

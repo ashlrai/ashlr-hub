@@ -8,23 +8,26 @@ import { initUniverse, manifestRecord, projectUniverse } from '../../src/core/un
 import { initUniverseCampaign, readUniverseCampaign } from '../../src/core/universe/campaign-store.js';
 import { runUniverseCampaign } from '../../src/core/universe/campaign.js';
 import { deliverCompletedUniverseCampaign } from '../../src/core/universe/campaign-delivery.js';
+import { resolvePreparationGit, assertPreparationGit, type PreparationGitPin } from './preparation-verification-native.mjs';
 import { checkResourceEngineeringSuccessorPreparation, prepareResourceEngineeringSuccessorBundle,
   type ResourceEngineeringSuccessorPreparationOptions, type ResourceEngineeringSuccessorRecipe } from '../../src/core/resources/engineering-successor-preparation.js';
 
 /** Caller owns an already-private, empty base and cleans it after every child has settled. */
-export async function preparationSuccessorFixture(base: string, signal?: AbortSignal, deadlineMonotonicMs?: number) {
+export async function preparationSuccessorFixture(base: string, signal?: AbortSignal, deadlineMonotonicMs?: number,
+  gitPin: PreparationGitPin = resolvePreparationGit()) {
+  assertPreparationGit(gitPin);
   const stat = lstatSync(base);
   assert.equal(realpathSync(base), base); assert.ok(stat.isDirectory()); assert.equal(stat.mode & 0o077, 0);
   const save = (file: string, value: unknown) => writeFileSync(file, canonical(value) + '\n', { mode: 0o600 });
   const repo = join(base, 'repo'), sourceRoot = join(base, 'source'), transport = join(base, 'transport');
   for (const directory of [repo, sourceRoot, transport]) mkdirSync(directory, { mode: 0o700 });
-  const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null',
+  const git = (...args: string[]) => execFileSync(gitPin.path, ['-c', 'core.hooksPath=/dev/null',
     '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
     encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' },
   }).trim();
   git('init', '-q', '--template=', '--initial-branch=main');
-  execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', 'init', '-q', '--template=', '--initial-branch=main', transport], {
+  execFileSync(gitPin.path, ['-c', 'core.hooksPath=/dev/null', 'init', '-q', '--template=', '--initial-branch=main', transport], {
     timeout: 10000, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' },
   });
   writeFileSync(join(repo, 'value.json'), '0\n');
@@ -79,5 +82,6 @@ export async function preparationSuccessorFixture(base: string, signal?: AbortSi
   assert.deepEqual(projectUniverse(universeDirectory).runs, []);
   assert.deepEqual(readUniverseCampaign('successor', { root: prepared.paths.universeRoot }).steps, []);
   assert.equal(git('rev-parse', 'HEAD'), revision); assert.equal(git('status', '--porcelain=v1'), '');
+  assertPreparationGit(gitPin);
   return { base, repo, options, plan, prepared, receipt, revision, git, sourceRoot, ledger, runtime, save, record };
 }

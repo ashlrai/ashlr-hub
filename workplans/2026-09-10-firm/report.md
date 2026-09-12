@@ -1,6 +1,44 @@
 # Verified local handoff
 
-## Current continuation: installed full-workflow measurement and inspection
+## Current continuation: pin developer Git and verify the selected candidate
+
+Baseline `f0d6898a4011bf0f8c861766c3902780a076ab97`, branch `auto/p00`, integration
+worktree `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Current source
+changes are uncommitted. Three agents implemented/reviewed native selection,
+registry controls and complete package-helper declarations. The original
+checkout and the candidate's live target remain unchanged.
+
+The read-only selector pins actual developer Git in one of two closed canonical
+Apple locations, verifies secure ancestry and bytes, and carries that identity
+through registration, trusted fixtures, candidate sessions and native execution.
+It does not use PATH or xcrun discovery. Changed/missing/unsafe selection refuses;
+the sandbox, warning bytes and original session deadline remain intact. This
+changes comparator identity, so previous measurements are not interchangeable.
+
+Build passed after correcting the exact release helper allowlist. Pure/mocked
+controller/native/interceptor gates passed 161 cases, registry 29 cases, and
+release-manifest 53 cases. The original strict native comparison passed 63 cases
+across four suites, zero skips, 72.39s. One-file 36/2 counts are unchanged;
+four-file check 42/8 becomes 36/2 and metadata 117/8 becomes 111/2 (broker/blob
+launches). Exact output and runtime-drift refusal pass. Every observed batch
+returned empty stderr. See the candidate artifact for the pinned Git digest and
+the preserved earlier launcher-based rejection.
+
+The full installed-runtime and regression gate 69126 passed 145 tests across
+eight suites, zero skips, in 3,916.25s. Runtime and build assets remained frozen.
+It proves repeatable baseline measurement, poison/drift/cancellation refusal,
+actual workflow behavior, binary output boundaries and package integrity under
+the new Git pin. The candidate remains unapplied;
+scoring, archive acceptance, delivery and autonomous adoption are still pending.
+No providers, account policies, services, releases or remote publications changed.
+
+Automatic queue recovery remains isolated in the separate recovery worktree.
+Its 75 pure/mock and 136 combined web tests, source/web typechecks and docs pass.
+The actual HTTP/restart gate 74134 began after the native gate exited 0; its
+result is not yet known. Merging recovery will change the trusted bundle's
+identity, so these native-only measurements are not pins for that later build.
+
+## Previous continuation: installed full-workflow measurement and inspection
 
 Baseline `948a7fa4cde76002b6029b61f588127e3f70c42e`, initially clean `auto/p00`
 at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents mapped,

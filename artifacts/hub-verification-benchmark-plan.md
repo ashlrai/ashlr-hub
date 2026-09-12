@@ -215,14 +215,44 @@ npm run build:preparation-builtin
 ```
 
 `npm run build` includes the same step. The reproducible output is
-`dist/core/universe/builtins/preparation/`: eight fixed code files plus
+`dist/core/universe/builtins/preparation/`: nine fixed code files plus
 `manifest.json`, with no timestamps in the manifest. Rebuilding restores the
 derived output; it does not activate accounts, start a service or modify a
 candidate. The bridge bundles trusted source at build time; runtime never builds
-or imports a candidate-supplied bridge. The registry pins all eight files, Node,
-the fixed Git/ls/ps/sandbox launchers, and equality with the host-imported
-activity/protocol helper bytes. A missing, stale or unsupported installation
+or imports a candidate-supplied bridge. The registry pins all nine files, Node,
+the selected actual developer Git executable, fixed ls/ps/sandbox launchers, and
+equality with the host-imported activity/native-selection/protocol helper bytes.
+A missing, stale or unsupported installation
 is refused, not replaced with an arbitrary command or source-tree fallback.
+
+The continuation based on `f0d6898a4011bf0f8c861766c3902780a076ab97`
+replaces the `/usr/bin/git` launcher pin with read-only selection from two closed
+locations, in order: `/Library/Developer/CommandLineTools/usr/bin/git`, then
+`/Applications/Xcode.app/Contents/Developer/usr/bin/git`. Selection requires
+canonical, root-owned, non-group/world-writable ancestry and a regular executable;
+only a missing preferred installation permits fallback. It never consults
+candidate PATH or `DEVELOPER_DIR`, invokes xcrun, or changes developer settings.
+The [native selection helper](../scripts/evaluators/preparation-verification-native.mjs)
+hashes actual Git bytes and rechecks the captured path/digest at execution
+boundaries. A changed installation or selection refuses instead of silently
+switching tools. Not every macOS developer installation meets these restrictions.
+
+This preserves the sandbox, stderr bytes and the candidate's warning fallback.
+The earlier launcher's successful batch exits emitted cache-write warnings, so
+that candidate correctly fell back and did not improve the measured workload.
+The new helper and executable identity change the comparator: old registrations
+cannot adopt them, and any new comparison must rerun baseline and candidate
+under the same new pins. The strict private-copy native comparison passed with
+empty batch stderr: one-file check remained 36 total / 2 blob launches;
+four-file check changed from 42 / 8 to 36 / 2, and metadata from 117 / 8 to
+111 / 2. Exact outputs and during-call runtime-drift refusal passed. Its gate
+passed 63 tests across four suites, zero skipped, in 72.39 seconds. This is a
+bounded native comparison, not an applied optimization, scoring result or
+delivery. The pinned-Git implementation's installed/native regression gate
+passed 145 tests across eight suites, zero skips, in 3,916.25 seconds, including
+two matching full baseline measurements and poison/drift/cancellation controls.
+Full installed candidate measurement, scored acceptance and delivery remain
+pending; the candidate patch is still unapplied.
 
 The explicit Universe manifest selection is:
 
@@ -285,8 +315,8 @@ groups. Final acceptance of process settlement requires their durable receipts
 and independent group-absence checks, not merely the controller's exit. Missing
 or uncertain activity remains unresolved; no process is adopted or killed from
 an unauthenticated stale PID. These controls are not arbitrary controller-crash
-recovery. Counted native launches are not an OS-wide process census, and launcher
-hashes do not pin all native transitive dependencies.
+recovery. Counted native launches are not an OS-wide process census, and selected
+executable hashes do not pin all native transitive dependencies.
 
 See the [installed registry](../src/core/universe/builtin-evaluator-registry.ts),
 [launch boundary](../src/core/universe/fixed-evaluator.ts) and

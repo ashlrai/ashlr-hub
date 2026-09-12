@@ -516,6 +516,8 @@ function rootPackageIsPortable(
     'scripts/evaluators/preparation-verification-activity.mjs',
     'scripts/evaluators/preparation-verification-activity.d.mts',
     'scripts/evaluators/preparation-verification-protocol.mjs',
+    'scripts/evaluators/preparation-verification-native.mjs',
+    'scripts/evaluators/preparation-verification-native.d.mts',
   ]);
   const requiredFiles = [
     'bin',

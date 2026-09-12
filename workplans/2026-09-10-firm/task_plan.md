@@ -1,6 +1,175 @@
 # Executable firm: package graph
 
-## Current increment — installed full-workflow measurement (baseline 948a7fa4)
+## Current increment — pinned native Git for meaningful self-improvement (baseline f0d6898a)
+
+- [x] Revalidate the clean integration worktree and explore launcher identity, scoring and delivery dependencies with three agents.
+- [x] Implement a closed read-only selector for installed Apple developer Git and carry its pinned identity through trusted dispatch.
+- [x] Verify exact native command selection, changed/missing tool refusal, unchanged confinement and the original strict candidate improvement gate.
+- [x] Rebuild and verify installed measurement under the new shared tool identity; document measured outcomes and remaining scoring/delivery work.
+
+The prior turn was progress: local commit f0d6898a contains verified installed
+measurement and report inspection plus an explicitly rejected candidate. The
+launcher warning also exposed an identity gap: hashing /usr/bin/git does not pin
+its delegated developer Git. Use closed canonical Apple tool locations, secure
+ancestry and exact bytes; no PATH/candidate selection, discovery subprocess or
+cache permission. Preserve the failed baseline record and require a fresh
+baseline/candidate comparison under the new identity. No provider, account,
+service, publication or original-checkout changes. Native gates stay serialized.
+
+Scoring-to-delivery integration remains the following product milestone, using
+the existing archive/campaign path rather than a new scheduler. A launcher repair
+does not by itself prove an accepted or delivered self-improvement.
+
+Gate 69126 finished successfully: 145 tests across eight suites, zero skips,
+3,916.25s. Two complete installed baselines have equal metrics/workflow ledgers
+(1,265.546s); poison, drift, cancellation, real workflow, binary output,
+confinement and release-package checks pass. Recovery gate 74134 started only
+after that process exited 0. It is now the sole active native test suite.
+
+### Parallel isolated queue recovery
+
+An independent Explore pass found a real unattended gap: registration can survive
+an admission failure or exit, but ordinary work needs another prepare request to
+join the queue. Implementation is isolated at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-admission-recovery`, branch
+`codex/automatic-admission-recovery`, based on f0d6898a; not merged or committed.
+Its parent-created `node_modules` symlink is an untracked dependency linkage,
+not a source artifact to stage.
+
+- Durable automatic markers share the existing ordinary registration and bind
+  the exact supervision configuration and original deadline.
+- The existing background worker performs bounded, fair revalidation; startup,
+  timer and post-prepare reconciliation use existing queue admission. Manual and
+  successor records are not retrofitted into automatic work.
+- Full capacity skips expensive proof reconstruction; read-only status exposes
+  bounded hold reasons. Main-thread controls remain available.
+- Final pure recovery/registration/manager/background/RPC tests passed 74 cases;
+  focused composer tests passed 15. Shutdown-order and conditional-copy review
+  corrections are complete. Both agents have frozen their sources.
+- Independent actual HTTP/owner restart acceptance is authored but unrun. Wait
+  for 69126 to finish before running it with the affected existing native suites.
+
+The native Git increment and queue recovery remain distinct working changes.
+Neither has activated providers, changed account allocation or published a release.
+
+Queue recovery's next serialized acceptance selection (only after 69126 ends):
+`resource-engineering-auto-admission-recovery-acceptance`,
+`resource-console-engineering-routes`,
+`resource-engineering-supervisor-admission-acceptance`,
+`resource-console-engineering-preparation-acceptance`,
+`resource-console-engineering-preparation-boundaries`,
+`resource-console-engineering-preparation-reuse`,
+`resource-engineering-preparation-registry`, and
+`resource-engineering-setup-acceptance` under `test/*.test.ts` in that worktree.
+The stopped-owner fixture is not SIGKILL survival evidence. Preserve the separate
+native-pin working changes and integrate only after the relevant gates pass.
+
+Final read-only integration review found no additional blocker. Parent added a
+zero-ledger-attempt assertion to the real restart fixture: no worker/evaluator
+calls alone would not prove that paused recovery avoided account reservations.
+Pure protection cases now exercise expired/full startup and repeated timer
+passes, plus expiry during awaited verification. Recovery documentation explains
+the authenticated read-only status endpoint, stale samples and hold reasons.
+
+### Next useful self-improvement packet
+
+While native verification remains serialized, the recovery worktree adds its
+read-only status to the existing Automatic engineering panel. Reuse that panel's
+poll and epoch/abort guards; validate the response and bind it to the observed
+queue ID/digest/deadline. Failed status reads must not hide valid supervision or
+disable pause. Show sample age and held reasons without calling idle/ready a
+running worker. No new execution controls or global design changes. Keep the
+existing Space Grotesk/control-room tokens (#0e1730 canvas, #111e3a surface,
+#edf3ff text, #8babff accent, #405b87 strong border), left-aligned evidence and
+disclosed hold details; use light-theme counterparts through existing variables.
+
+- [x] Validate and bind recovery status in a read-only client with pure tests.
+- [x] Integrate status into existing supervision polling and view with stale/error tests.
+- [ ] Verify source/web types, focused UI tests and browser geometry when the native slot is free.
+
+Parent combined web gate passed 136 tests across four existing/new files in
+900ms, covering the new decoder, supervision client/panel and objective composer.
+Full source/web typechecks pass. There is no WorkspaceEngineering.test.tsx at
+the requested filter path; that nonexistent fifth filter is not test evidence.
+Browser geometry and actual recovery HTTP/restart still await the native slot.
+The new read has a five-second deadline and caller cancellation; the panel
+publishes supervision before awaiting recovery, so independent read failure
+cannot disable otherwise valid pause. Pending rows use native collapsed details;
+retained reconciling text is explicitly last-reported, not current activity.
+
+Reuse the existing Universe trial/elite archive and campaign-to-delivery path;
+do not add another scheduler or archive layer. A separate closed scoring builtin
+must verify fresh, complete and settled full-workload results against a packaged
+same-tool baseline vector, reject every scenario regression, and sum native
+verification/workflow launches without double-counting blob subtotals or fixture
+groups. Preserve the existing diagnostic builtin. Run a real unchanged baseline
+generation followed by the exact target-only candidate in the same niche, then
+verify the existing delivery receipt and exact local branch diff. The remaining
+proof is the patched candidate's complete manager/successor workload and
+during-call controls; the strict leaf test does not substitute for it.
+
+A read-only performance review also identified per-command Node wrappers and
+repeated activity-directory scans as structural overhead. Reusing the existing
+private mailbox for one confined persistent tool is a possible later change,
+not implemented or timed. It must preserve actual native-command counts, byte
+limits, pin checks and deadline, with final group-settlement proof. Do not mix
+that transport change into the currently running native identity gate.
+
+Further source inspection found a measurement-retention gap before frozen scoring:
+the installed test compares stdout in memory, then removes its fixtures; the
+ordinary trial/campaign parsers reject diagnostic JSON and do not preserve that
+stdout as a measurement. The inspector only consumes an already supplied file.
+Do not reconstruct per-scenario baselines from process-group totals or claim the
+temporary test output is a retained artifact. An explicit one-shot diagnostic
+producer can reuse the fixed evaluator and execution lease, retaining byte-exact
+JSON with pinned artifact/manifest/comparator/tool identities and settlement,
+without emitting scored trials or accepting results. Define unfinished-run
+recovery against the existing lease before introducing this producer.
+
+Integration review: both branches share f0d6898a; only AUTONOMY-GAP.md overlaps,
+in distinct recovery/native paragraphs. Preserve both. Recovery modifies the
+trusted fixture/manager dependency graph, so a rebuilt merged builtin receives
+a new comparator identity. Gate 69126 verifies its native-only source, not the
+later merged build. Preserve evidence boundaries and exclude the dependency
+symlink from all commits/transfers.
+
+## Next milestone — renewable engineering windows (unimplemented)
+
+Continuous firm operation needs an explicitly approved renewable policy, not a
+restart that silently resets finite jobs. The current
+[engineering supervisor](../../../src/core/resources/console-engineering-supervisor.ts)
+preserves its original deadline and lifetime enrollment count; the
+[successor coordinator](../../../src/core/resources/engineering-successor-coordinator.ts)
+also retains its proposal cap. Reopening the same queue renews neither.
+
+Reuse the [existing daemon loop](../../../src/core/daemon/loop.ts) and its
+[explicit UTC daily accounting rollover](../../../src/core/daemon/state.ts)
+for an opt-in, exclusive engineering work mode, rather than another scheduler.
+The current daemon does not dispatch the console engineering workflow; reuse its
+resident lifecycle with the existing console owner, collector, preparation and
+supervision assembly. Its USD budget is separate from
+[account/scope quota evidence and reserves](../../../src/core/resources/pool-policy.ts):
+calendar rollover must never imply refreshed provider quota or clear a reserve.
+
+The proposed policy pins project/profile, workers, renewal cadence and per-window
+limits once. Each authorized window gets a deterministic durable identity and a
+new immutable deadline; never extend an old deadline, erase retained capacity,
+or repeat a settled proposal to manufacture more work. Carry verified objective
+and delivery lineage forward exactly once; unresolved receipts remain held and
+must be reconciled, not retried under fresh IDs. Full windows wait for the next
+authorized boundary, and every dispatch still requires fresh resource admission.
+
+Acceptance: execute two bounded windows without intervening human action; prove
+the first stops at its limits, the second starts only at the authorized boundary,
+and restart on either side neither duplicates work nor renews a window. Preserve
+pause, KILL, unresolved receipts, General reservations, Spark eligibility and
+stale-quota holds across rollover. This milestone first uses an explicitly
+started process. The existing
+[resident activation door](../../../src/core/daemon/runtime-activation-resident-start-runtime.ts)
+has empty trust roots and no production start broker; stopped-release activation
+is not service-start authority. Native service activation remains separate.
+
+## Previous increment — installed full-workflow measurement (baseline 948a7fa4)
 
 - [x] Revalidate source and map installed harness, trusted fixtures and process custody with three Explore agents.
 - [x] Integrate fixed shipped manager/successor fixture setup with owned subprocess settlement and one invocation deadline.

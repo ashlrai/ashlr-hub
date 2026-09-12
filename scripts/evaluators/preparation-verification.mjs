@@ -16,6 +16,7 @@ import { performance } from 'node:perf_hooks';
 import { createPreparationCandidateSession } from './preparation-verification-controller.mjs';
 import { createBuiltinActivityTracker } from './preparation-verification-activity.mjs';
 import { MAX_SESSION_DURATION_MS } from './preparation-verification-protocol.mjs';
+import { resolvePreparationGit, assertPreparationGit } from './preparation-verification-native.mjs';
 
 // Capture the actual checks before any candidate code is evaluated.
 const assert = Object.freeze(Object.fromEntries(['ok', 'equal', 'deepEqual', 'throws'].map(key => [key, strictAssert[key].bind(strictAssert)])));
@@ -23,6 +24,7 @@ const assert = Object.freeze(Object.fromEntries(['ok', 'equal', 'deepEqual', 'th
 const sha = value => createHash('sha256').update(value).digest('hex');
 let failure = 'HARNESS_INITIALIZATION_FAILED';
 let checkpoint = 'initialize';
+let gitPin;
 const stop = new globalThis.AbortController();
 const onStop = () => stop.abort();
 process.on('SIGINT', onStop); process.on('SIGTERM', onStop);
@@ -50,10 +52,8 @@ function expectedInEmptyHome(base, read) {
   }
 }
 function git(repo, ...args) {
-  // Installed invocations use the pinned native launcher. Standalone legacy
-  // fixtures retain their existing PATH Git: Apple's launcher writes an xcrun
-  // cache outside the outer sandbox even when TMPDIR points into its scratch.
-  return cp.execFileSync(activity ? '/usr/bin/git' : 'git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args],
+  // Trusted fixture setup uses the same developer Git identity as the broker.
+  return cp.execFileSync(gitPin.path, ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args],
     { encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
       GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0', GIT_AUTHOR_DATE: '2026-09-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-09-01T00:00:00Z' } }).trim();
 }
@@ -95,6 +95,12 @@ async function evaluate() {
     assert.equal(process.argv[2], bridgePath);
     if (process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY) activity = createBuiltinActivityTracker(process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY);
     if (activity) workload = 'preparation-workflows-v1';
+    if (activity) {
+      const text = process.env.ASHLR_UNIVERSE_BUILTIN_GIT;
+      assert.ok(typeof text === 'string' && Buffer.byteLength(text) <= 4096);
+      gitPin = JSON.parse(text);
+    } else gitPin = resolvePreparationGit();
+    assertPreparationGit(gitPin);
     const deadlineAt = activity ? Date.parse(activity.owner.deadlineAt) : Infinity;
     const monotonicDeadline = performance.now() + (deadlineAt - Date.now());
     const remaining = () => Math.floor(Math.min(deadlineAt - Date.now(), monotonicDeadline - performance.now()));
@@ -123,7 +129,7 @@ async function evaluate() {
       const beforeStartup = snapshot(f.root);
       const timeoutMs = activity ? Math.min(60000, remaining()) : 60000;
       session = await createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot: f.root, workRoot: base,
-        timeoutMs, signal: stop.signal, activity });
+        timeoutMs, signal: stop.signal, activity, gitPin });
       assert.deepEqual(snapshot(f.root), beforeStartup);
       failure = 'CANDIDATE_BEHAVIOR_FAILED';
       for (const [name, options, expected] of [
@@ -159,7 +165,7 @@ async function evaluate() {
         guard(); failure = 'WORKFLOW_FIXTURE_SETUP_FAILED';
         const fixtureRoot = path.join(base, kind); fs.mkdirSync(fixtureRoot, { mode: 0o700 });
         const setup = await createPreparationWorkflowFixture(kind, fixtureRoot, { activity, signal: stop.signal,
-          deadlineAt: new Date(deadlineAt).toISOString() });
+          deadlineAt: new Date(deadlineAt).toISOString() }, gitPin);
         const f = setup.fixture;
         metrics.fixture_owned_process_groups += setup.measurement.processGroups;
         guard();
@@ -181,7 +187,7 @@ async function evaluate() {
         checkpoint = `${kind}:startup`;
         guard(); failure = 'WORKFLOW_CANDIDATE_STARTUP_FAILED';
         session = await createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot: base,
-          timeoutMs: Math.min(MAX_SESSION_DURATION_MS, remaining()), signal: stop.signal, activity });
+          timeoutMs: Math.min(MAX_SESSION_DURATION_MS, remaining()), signal: stop.signal, activity, gitPin });
         assert.deepEqual(snapshot(fixtureRoot), before);
         failure = 'WORKFLOW_CANDIDATE_BEHAVIOR_FAILED';
         const observed = [];
@@ -233,6 +239,7 @@ async function evaluate() {
       metrics.workflow_processes = workflows.reduce((sum, row) => sum + row.processes, 0);
       metrics.workflow_blob_processes = workflows.reduce((sum, row) => sum + row.blobProcesses, 0);
     }
+    assertPreparationGit(gitPin);
     metrics.correctness_checks = checks;
     metrics.verification_processes = Object.entries(metrics).filter(([key]) => key.startsWith('files_') && key.endsWith('_processes') && !key.endsWith('_blob_processes')).reduce((sum, [, value]) => sum + value, 0);
     return { schemaVersion: 1, kind: 'preparation-verification-measurement', ...(activity ? { workload, workflows } : {}), checksPassed: true, metrics, diagnostics: [] };

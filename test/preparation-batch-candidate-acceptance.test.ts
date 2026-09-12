@@ -79,11 +79,11 @@ describe.runIf(supported)('selected batching candidate native diagnostic compari
   it('preserves exact behavior and drift refusal while reporting whether batching improves work', async () => {
     if (!harness) throw new Error('Candidate harness unavailable');
     const fixtureRoot = join(harness.root, 'fixture'); mkdirSync(fixtureRoot, { mode: 0o700 });
-    const fixture = await preparationManagerFixture(fixtureRoot);
+    const fixture = await preparationManagerFixture(fixtureRoot, harness.gitPin);
     const { expectedPlanDigest: _existingPlanDigest, ...oneOptions } = fixture.bundleInput;
     const baseRecipe = oneOptions.recipe as ResourceEngineeringRecipe;
     const workspace = oneOptions.workspace;
-    const git = (...args: string[]) => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
+    const git = (...args: string[]) => execFileSync(harness!.gitPin.path, ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false',
       '-c', 'commit.gpgsign=false', '-C', workspace, ...args], { env: environment, encoding: 'utf8', timeout: 10000, maxBuffer: 1024 * 1024 }).trim();
     const evaluatorFiles = ['evaluate.mjs', 'fixed-1.mjs', 'fixed-2.mjs', 'fixed-3.mjs'];
     const evaluatorBytes = readFileSync(join(workspace, evaluatorFiles[0]!));
@@ -225,7 +225,7 @@ describe.runIf(supported)('selected batching candidate native diagnostic compari
       [1, 2].every(index => baseline[index]!.measurement.blobProcesses === 8 && patched[index]!.measurement.blobProcesses === 2 &&
         baseline[index]!.measurement.processes - patched[index]!.measurement.processes === 6);
     if (process.env.ASHLR_PREPARATION_BATCH_REPORT === '1') console.info('PREPARATION_BATCH_COMPARISON', JSON.stringify({
-      baselineBlob: targetBlob, candidateDigest: hash(candidate), patchDigest, improvementAccepted,
+      baselineBlob: targetBlob, candidateDigest: hash(candidate), patchDigest, gitPin: harness.gitPin, improvementAccepted,
       samples: Object.fromEntries(Object.entries(observed).map(([kind, samples]) => [kind, samples.map(sample => sample.measurement)])),
       healthyBatches, ledgers,
     }));

@@ -16,6 +16,7 @@ export const PREPARATION_BUILTIN_FILES = Object.freeze([
   'preparation-verification-child.mjs',
   'preparation-verification-controller.mjs',
   'preparation-verification-fixtures.mjs',
+  'preparation-verification-native.mjs',
   'preparation-verification-protocol.mjs',
   'preparation-verification-tool.mjs',
   'preparation-verification.mjs',

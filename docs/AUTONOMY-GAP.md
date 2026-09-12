@@ -116,11 +116,23 @@ fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/h
 now has a closed installed `preparation-measurement-v1` launch route on
 macOS/Node 24. Its trusted controller launches the candidate separately; ordinary
 command evaluators are unchanged, and their unsupported nested-sandbox route
-still fails closed. The builtin pins its eight-file bundle, Node, fixed native
-launchers and matching host helpers. Fixed asynchronous tool workers preserve
-raw bytes, while invocation-bound activity receipts and independent group-absence
+still fails closed. The builtin pins its nine-file bundle, Node, the selected
+actual developer Git executable, fixed ls/ps/sandbox launchers and matching host
+helpers. Read-only Git selection checks only secure canonical installations at
+`/Library/Developer/CommandLineTools/usr/bin/git`, then
+`/Applications/Xcode.app/Contents/Developer/usr/bin/git`; candidate PATH and
+`DEVELOPER_DIR` cannot choose the tool. Unsafe existing paths refuse rather than
+fall back. Its path and bytes are pinned, not its transitive native libraries.
+The sandbox and raw-stderr behavior are unchanged. This new implementation
+invalidates prior comparator pins. A strict private-copy native comparison now
+verifies six fewer launches for each four-file check/metadata read, unchanged
+one-file counts and during-call drift refusal. The candidate remains unapplied;
+the pinned-Git implementation's installed/native regression gate passed 145 tests
+across eight suites with zero skips. Full installed candidate acceptance remains
+pending. Fixed asynchronous tool workers
+preserve raw bytes, while invocation-bound activity receipts and independent group-absence
 checks prevent a controller exit from claiming all inner work settled.
-The default-registry test completes two matching measurements; final focused
+The earlier default-registry test completed two matching measurements; its focused
 coverage includes 433 tests across 18 suites (see the proposal's handoff).
 The output is deliberately rejected as
 Universe evaluation evidence. A candidate-linked workflow extension now exposes

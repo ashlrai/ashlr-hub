@@ -4,14 +4,15 @@ import type { BigIntStats } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolvePreparationGit, assertPreparationGit, type PreparationGitPin } from '../../../scripts/evaluators/preparation-verification-native.mjs';
 
 export const PREPARATION_MEASUREMENT_BUILTIN = 'preparation-measurement-v1' as const;
 export type BuiltinEvaluatorId = typeof PREPARATION_MEASUREMENT_BUILTIN;
 const FILES = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs', 'preparation-verification-child.mjs',
-  'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification-protocol.mjs',
+  'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification-native.mjs', 'preparation-verification-protocol.mjs',
   'preparation-verification-tool.mjs', 'preparation-verification.mjs'] as const;
 const HASH = /^[a-f0-9]{64}$/;
-const TOOLS = ['/usr/bin/git', '/bin/ls', '/bin/ps', '/usr/bin/sandbox-exec'] as const;
+const TOOLS = ['/bin/ls', '/bin/ps', '/usr/bin/sandbox-exec'] as const;
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 const unavailable = (): Error => new Error('Installed built-in evaluator unavailable or changed');
 
@@ -22,6 +23,7 @@ export interface InstalledBuiltinEvaluator {
   command: string[];
   files: Array<{ name: string; path: string; digest: string }>;
   tools: Array<{ path: string; digest: string }>;
+  git: PreparationGitPin;
 }
 
 function exact(value: unknown, keys: string[]): value is Record<string, unknown> {
@@ -50,7 +52,7 @@ function regular(path: string, limit: number, systemTool = false): { bytes: Buff
 // bytes while this process is still executing the previously loaded helpers.
 const HOST_HELPERS = (() => {
   try {
-    return ['preparation-verification-activity.mjs', 'preparation-verification-protocol.mjs'].map(name => {
+    return ['preparation-verification-activity.mjs', 'preparation-verification-native.mjs', 'preparation-verification-protocol.mjs'].map(name => {
       const path = fileURLToPath(new URL(`../../../scripts/evaluators/${name}`, import.meta.url));
       return { name, path, digest: sha(regular(path, 256 * 1024).bytes) };
     });
@@ -78,8 +80,8 @@ export function inspectBuiltinEvaluatorBundle(directory: string): InstalledBuilt
       return { name, path, digest, stat: file.stat };
     });
     const executable = regular(process.execPath, 256 * 1024 * 1024), executableDigest = sha(executable.bytes);
-    // Apple's fixed /usr/bin/git launcher is intentionally hard-linked to other
-    // system tool launchers. Only these closed native paths permit hard links.
+    // Pin developer Git itself, not Apple's launcher or candidate-selected PATH.
+    const git = resolvePreparationGit();
     const nativeTools = TOOLS.map(path => { const file = regular(path, 256 * 1024 * 1024, true); return { path, digest: sha(file.bytes), stat: file.stat }; });
     const hostHelpers = HOST_HELPERS.map(helper => {
       const file = regular(helper.path, 256 * 1024);
@@ -91,10 +93,11 @@ export function inspectBuiltinEvaluatorBundle(directory: string): InstalledBuilt
     }
     if (!same(anchor, lstatSync(directory, { bigint: true })) || !same(executable.stat, lstatSync(process.execPath, { bigint: true }))) throw unavailable();
     const files = captured.map(({ name, path, digest }) => ({ name, path, digest }));
-    const tools = nativeTools.map(({ path, digest }) => ({ path, digest }));
+    assertPreparationGit(git);
+    const tools = [{ ...git }, ...nativeTools.map(({ path, digest }) => ({ path, digest }))];
     const command = [process.execPath, '--experimental-vm-modules', '--no-warnings',
       join(directory, 'preparation-verification.mjs'), join(directory, 'preparation-bridge.mjs')];
-    return { id: PREPARATION_MEASUREMENT_BUILTIN, executableDigest, command, files, tools,
+    return { id: PREPARATION_MEASUREMENT_BUILTIN, executableDigest, command, files, tools, git: { ...git },
       digest: sha(JSON.stringify({ schemaVersion: 1, id: PREPARATION_MEASUREMENT_BUILTIN,
         manifestDigest: sha(manifestFile.bytes), files: files.map(({ name, digest }) => ({ name, digest })),
         executable: { path: process.execPath, digest: executableDigest }, tools })) };

@@ -61,6 +61,8 @@ const PREPARATION_HELPER_PATHS = [
   'scripts/evaluators/preparation-verification-activity.mjs',
   'scripts/evaluators/preparation-verification-activity.d.mts',
   'scripts/evaluators/preparation-verification-protocol.mjs',
+  'scripts/evaluators/preparation-verification-native.mjs',
+  'scripts/evaluators/preparation-verification-native.d.mts',
 ] as const;
 const FIXED_ARTIFACT_PATHS = new Set([
   PACKAGE_MANIFEST_PATH,
@@ -500,11 +502,14 @@ function pathEntryExists(path: string): boolean {
 }
 
 function hasPreparationHelpers(paths: readonly string[]): boolean {
-  const count = PREPARATION_HELPER_PATHS.filter((path) => paths.includes(path)).length;
-  if (count !== 0 && count !== PREPARATION_HELPER_PATHS.length) {
+  const base = PREPARATION_HELPER_PATHS.slice(0, 3).filter((path) => paths.includes(path)).length;
+  const native = PREPARATION_HELPER_PATHS.slice(3).filter((path) => paths.includes(path)).length;
+  // Preserve legacy three-helper packages; native selection adds an exact pair,
+  // never an independently usable partial helper installation.
+  if ((base !== 0 && base !== 3) || (native !== 0 && (native !== 2 || base !== 3))) {
     throw new Error('release preparation helper set is incomplete');
   }
-  return count !== 0;
+  return base !== 0;
 }
 
 function discoverReleaseLayout(
@@ -832,7 +837,7 @@ function completeReleaseScan(
     artifactByPath(artifacts, SCORECARD_HISTORY_WORKER_PATH);
   }
   if (hasPreparationHelpers(declaredFiles)) {
-    for (const path of PREPARATION_HELPER_PATHS) artifactByPath(artifacts, path);
+    for (const path of PREPARATION_HELPER_PATHS.filter(path => declaredFiles.includes(path))) artifactByPath(artifacts, path);
   }
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const parsedInventory = parseRuntimeReleaseDependencyInventory(dependencyInventoryBytes);

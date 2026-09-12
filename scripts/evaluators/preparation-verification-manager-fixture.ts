@@ -10,12 +10,14 @@ import { createResourcePoolSupervisor } from '../../src/core/resources/pool-supe
 import { validateResourcePool } from '../../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../../src/core/resources/worker.js';
 import { createResourceEngineeringPreparationRegistry } from '../../src/core/resources/engineering-preparation-registry.js';
+import { resolvePreparationGit, assertPreparationGit, type PreparationGitPin } from './preparation-verification-native.mjs';
 
-export async function preparationManagerFixture(base: string) {
+export async function preparationManagerFixture(base: string, gitPin: PreparationGitPin = resolvePreparationGit()) {
+  assertPreparationGit(gitPin);
   const save = (file: string, value: unknown) => writeFileSync(file, canonical(value) + '\n', { mode: 0o600 });
   const workspace = join(base, 'repo'), transport = join(base, 'transport'), root = join(base, 'ledger');
   const outputRoot = join(base, 'prepared'); mkdirSync(outputRoot, { mode: 0o700 });
-  const git = (repo: string, ...args: string[]) => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null',
+  const git = (repo: string, ...args: string[]) => execFileSync(gitPin.path, ['-c', 'core.hooksPath=/dev/null',
     '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
     encoding: 'utf8', timeout: 10000, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null',
       GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' },
@@ -66,5 +68,5 @@ export async function preparationManagerFixture(base: string) {
     const registration = registry.registrations().find(row => row.request.id === requests[0]!.id)!;
     const bundleInput = { ...registry.objective(requests[0]).bundleOptions, expectedPlanDigest: registration.bundlePlanDigest };
     return { options, requests, plans, prepared, catalog: owner.catalog(), runtime, save, bundleInput };
-  } finally { await owner.close(); await supervisor.close(); }
+  } finally { await owner.close(); await supervisor.close(); assertPreparationGit(gitPin); }
 }

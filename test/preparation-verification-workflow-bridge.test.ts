@@ -26,7 +26,7 @@ const target = join(repository, 'src/core/resources/engineering-preparation.ts')
 const candidateSlot = 'ashlr:preparation-candidate';
 const installedFiles = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs',
   'preparation-verification-child.mjs', 'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs',
-  'preparation-verification-protocol.mjs', 'preparation-verification-tool.mjs', 'preparation-verification.mjs'];
+  'preparation-verification-native.mjs', 'preparation-verification-protocol.mjs', 'preparation-verification-tool.mjs', 'preparation-verification.mjs'];
 let root: string;
 let first: string;
 let second: string;

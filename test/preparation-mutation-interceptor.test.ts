@@ -6,6 +6,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { VerifySubprocessOptions, VerifySubprocessResult } from '../src/core/run/verify-commands.js';
 import { createPreparationMutationInterceptor } from './helpers/preparation-mutation-interceptor.js';
 
+const gitPin = vi.hoisted(() => ({ path: '/Library/Developer/CommandLineTools/usr/bin/git', digest: 'a'.repeat(64) }));
+vi.mock('../scripts/evaluators/preparation-verification-native.mjs', () => ({
+  resolvePreparationGit: () => ({ ...gitPin }),
+  assertPreparationGit: (value: unknown) => {
+    if (JSON.stringify(value) !== JSON.stringify(gitPin)) throw new Error('invalid trusted pin');
+  },
+}));
+
 let root: string, fixtureRoot: string, scratch: string, toolPath: string;
 beforeEach(() => {
   root = realpathSync(mkdtempSync(join(tmpdir(), 'preparation-injector-')));
@@ -23,7 +31,7 @@ function invocation(id = 1, nonce = id.toString(16).padStart(64, '0')) {
     options: { cwd: null, encoding: 'buffer', timeoutMs: 30000, maxBuffer: 65536, inputBase64: null } };
   const argv = ['/usr/bin/sandbox-exec', '-p', '(version 1)', process.execPath, '--no-addons', toolPath];
   const opts: VerifySubprocessOptions = { cwd: scratch, env: {}, timeoutMs: 30000, requireProcessGroupExit: true,
-    input: JSON.stringify({ request, fixtureRoot, scratch }) };
+    input: JSON.stringify({ request, fixtureRoot, scratch, gitPin }) };
   return { request, argv, opts };
 }
 function setup(value = result(), mutate = vi.fn(() => undefined), matches = vi.fn(() => true)) {
@@ -76,13 +84,16 @@ describe.runIf(process.platform !== 'win32')('test-only preparation mutation int
     expect(f.run).toHaveBeenCalledTimes(1); expect(() => f.interceptor.assertInjected()).toThrow();
   });
 
-  it.each(['foreign-fixture', 'foreign-scratch', 'extra-input', 'bad-request', 'unsafe-command', 'oversize', 'bad-json', 'wrong-argv'])(
+  it.each(['foreign-fixture', 'foreign-scratch', 'extra-input', 'bad-request', 'unsafe-command', 'oversize', 'bad-json', 'wrong-argv', 'missing-pin', 'changed-pin', 'candidate-pin'])(
     'rejects invalid tool transport %s without invoking the runner', async kind => {
       const f = setup(); f.interceptor.arm(); const call = invocation();
       const input = JSON.parse(call.opts.input!);
       if (kind === 'foreign-fixture') input.fixtureRoot = root;
       if (kind === 'foreign-scratch') input.scratch = fixtureRoot;
       if (kind === 'extra-input') input.extra = true;
+      if (kind === 'missing-pin') delete input.gitPin;
+      if (kind === 'changed-pin') input.gitPin.digest = 'b'.repeat(64);
+      if (kind === 'candidate-pin') input.request.gitPin = input.gitPin;
       if (kind === 'bad-request') input.request.nonce = 'invalid';
       if (kind === 'unsafe-command') { input.request.file = 'git'; input.request.args = ['-C', fixtureRoot, 'update-ref', 'refs/heads/main', 'a'.repeat(40)]; }
       call.opts.input = kind === 'oversize' ? ' '.repeat(262145) : kind === 'bad-json' ? '{' : JSON.stringify(input);

@@ -57,9 +57,9 @@ export async function runFixedUniverseEvaluator(record: ManifestRecord, root: st
     const owner: BuiltinActivityOwner = { schemaVersion: 1, invocationId: randomBytes(32).toString('hex'),
       implementationDigest: installed.digest, deadlineAt: new Date(Date.now() + remaining).toISOString() };
     initializeBuiltinActivity(activityRoot, owner);
-    const builtinEnv = { PATH: `/usr/bin:/bin:${dirname(process.execPath)}`, HOME: scratch, TMPDIR: scratch,
+    const builtinEnv = { PATH: `${dirname(installed.git.path)}:/usr/bin:/bin:${dirname(process.execPath)}`, HOME: scratch, TMPDIR: scratch,
       USERPROFILE: scratch, ASHLR_HOME: scratch, ASHLR_UNIVERSE_CANDIDATE: artifactPath,
-      ASHLR_UNIVERSE_BUILTIN_ACTIVITY: activityRoot, LANG: 'C', LC_ALL: 'C' };
+      ASHLR_UNIVERSE_BUILTIN_ACTIVITY: activityRoot, ASHLR_UNIVERSE_BUILTIN_GIT: JSON.stringify(installed.git), LANG: 'C', LC_ALL: 'C' };
     beforeStart?.();
     const dispatchRemaining = Math.floor(deadline - performance.now());
     if (dispatchRemaining <= 0 || signal.aborted) return { stdout: '', stderr: '', exitCode: -1, signal: null,

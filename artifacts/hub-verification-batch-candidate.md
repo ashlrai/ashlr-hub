@@ -1,10 +1,12 @@
 # Candidate: batch immutable evaluator blob reads
 
-Status: **unapplied; rejected for process-count improvement in the current
-confined Mac harness**. Native runs preserved healthy results and during-call
-drift refusal, but measured ten blob launches instead of the baseline eight.
-The platform Git launcher emitted an xcrun cache-write warning despite exit0,
-correctly triggering the candidate's complete fallback on both captures.
+Status: **unapplied; strict native process-count comparison passed with pinned
+developer Git**. The fresh comparison preserves healthy results and during-call
+drift refusal, with two blob launches instead of eight for both four-file reads.
+Earlier runs using the platform Git launcher measured ten blob launches: an
+xcrun cache-write warning despite exit 0 correctly triggered complete fallback.
+That earlier rejection remains valid for that tool identity. The new harness
+pins developer Git itself without widening confinement or discarding stderr.
 Six actual Node combined-output boundary tests and33 pure artifact controls pass.
 Full installed candidate measurement remains pending. This is not
 an accepted optimization, a scoring evaluator, or permission to promote a result.
@@ -25,8 +27,27 @@ first attempts one `git cat-file --batch` request, reusing the existing
 [Git batch parser](../src/core/universe/git-blob-batch.ts). For N distinct protected
 paths, a usable clean batch would change N blob launches to one per capture.
 N = 1 keeps the exact original per-file path, with no batch attempt. Actual
-confined measurements found no savings: fallback increases four-file blob
-launches from8 to10. No time or end-to-end savings have been measured.
+confined measurements with pinned developer Git show four-file blob launches
+falling from 8 to 2. The earlier launcher-based comparison increased them from 8
+to 10 through fallback. No wall-time or end-to-end savings are established.
+
+### Fresh strict comparison
+
+Local gate 88594 passed 63 tests across four suites with zero skips in 72.39s.
+It applies the exact patch only to a private candidate copy and uses
+`/Library/Developer/CommandLineTools/usr/bin/git`, SHA-256
+`74b90b9f97ec79bfe7886a4fc6132533b3e1014ef4195d28abd1ca9bf321f34a`.
+
+| Read | Baseline broker / blob launches | Candidate broker / blob launches |
+| --- | ---: | ---: |
+| One-file check | 36 / 2 | 36 / 2 |
+| Four-file check | 42 / 8 | 36 / 2 |
+| Four-file metadata | 117 / 8 | 111 / 2 |
+
+All observed candidate batch exits were 0 with empty stderr and no transport
+error. Exact results and the same-child runtime-drift refusal passed. The report's
+`improvementAccepted: true` describes this numerical comparison only; it is not
+archive acceptance, full installed candidate evaluation or delivery evidence.
 
 ## Preserved decisions and boundaries
 
@@ -108,16 +129,18 @@ two-blob/six-fewer-launch target for both four-file reads. A green compatibility
 test does not mean the candidate improved anything. Its report marks
 `improvementAccepted: false` unless that exact numerical target is met.
 
-Run the strict, currently failing improvement gate from the repository root:
+Run the strict improvement gate from the repository root:
 
 ```sh
 ASHLR_PREPARATION_BATCH_REPORT=1 ASHLR_REQUIRE_BATCH_IMPROVEMENT=1 npm run test:serial -- test/preparation-batch-candidate-acceptance.test.ts --reporter=verbose
 ```
 
 Use Node24 on macOS. This applies the candidate only in a private fixture and
-does not modify the live target. The confirmed failure is the launcher warning,
-not corrupted output or a lost drift refusal. Do not grant broader filesystem
-access, discard warning bytes or relax this improvement target to make it pass.
+does not modify the live target. The closed developer Git installation described
+in the [benchmark plan](hub-verification-benchmark-plan.md) is required. The old
+launcher warning caused the earlier failure, not corrupted output or a lost
+drift refusal. Do not grant broader filesystem access, discard warning bytes or
+relax this improvement target to make it pass.
 
 Read-only patch applicability has been checked:
 
@@ -133,9 +156,10 @@ It does not apply the patch or launch a native command. Strict standalone
 TypeScript and scoped lint passed. A private actual patch application, whole-source
 virtual TypeScript compilation and native comparison have now run. Exact output,
 mixed/duplicate committed content, dirty-checkout separation and during-call
-runtime drift controls passed; the improvement assertion failed twice. The
-second run recorded successful batch exits with the launcher cache warning,
-confirming fallback rather than a parser or transport failure. Before adoption,
+runtime drift controls passed. The improvement assertion failed twice under the
+old launcher, then passed under pinned developer Git. The second failed run
+recorded successful batch exits with the launcher cache warning, confirming
+fallback rather than a parser or transport failure. Before adoption,
 independently review and evaluate a
 separate candidate artifact while keeping the baseline and installed trusted
 workload fixed. Require:

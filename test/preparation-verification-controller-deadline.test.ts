@@ -6,6 +6,14 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const native = vi.hoisted(() => ({
+  pin: { path: '/Library/Developer/CommandLineTools/usr/bin/git', digest: 'a'.repeat(64) },
+  assert: vi.fn(), resolve: vi.fn(),
+}));
+vi.mock('../scripts/evaluators/preparation-verification-native.mjs', () => ({
+  assertPreparationGit: native.assert, resolvePreparationGit: native.resolve,
+}));
+
 type Result = { exitCode: number; signal: null; error?: string; timedOut: boolean; cancelled: boolean;
   outputTruncated: boolean; stdout: string; stderr: string; processGroupSettlement: string };
 type Call = { input: string; timeoutMs: number; signal: AbortSignal };
@@ -21,6 +29,7 @@ beforeAll(async () => {
   ({ publishMessage: publish, readMessage: read } = await import(new URL('../scripts/evaluators/preparation-verification-protocol.mjs', import.meta.url).href));
 });
 beforeEach(() => {
+  native.assert.mockReset(); native.resolve.mockReset().mockReturnValue(native.pin);
   root = realpathSync(mkdtempSync(join(tmpdir(), 'preparation-deadline-')));
   now = 0; vi.spyOn(performance, 'now').mockImplementation(() => now);
 });
@@ -35,7 +44,7 @@ function clean(stdout = ''): Result {
   return { exitCode: 0, signal: null, timedOut: false, cancelled: false, outputTruncated: false,
     stdout, stderr: '', processGroupSettlement: 'group-exit-confirmed' };
 }
-function fixture(onConfine: (index: number) => void = () => undefined, externalSignal?: AbortSignal) {
+function fixture(onConfine: (index: number) => void = () => undefined, externalSignal?: AbortSignal, gitPin?: unknown) {
   const candidateRoot = join(root, 'candidate'), workRoot = join(root, 'work'), fixtureRoot = join(workRoot, 'fixture');
   for (const path of [candidateRoot, workRoot, fixtureRoot]) mkdirSync(path, { mode: 0o700 });
   const bridgePath = join(root, 'bridge.mjs'); writeFileSync(bridgePath, '// fake bridge\n', { mode: 0o600 });
@@ -61,7 +70,7 @@ function fixture(onConfine: (index: number) => void = () => undefined, externalS
   };
   const f = { calls, finish, session: undefined as Session | undefined,
     async start() {
-      f.session = await createSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs: 1000, signal: externalSignal });
+      f.session = await createSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs: 1000, signal: externalSignal, gitPin });
       return f.session;
     },
     reply(id: number, value: unknown) {
@@ -78,6 +87,41 @@ function fixture(onConfine: (index: number) => void = () => undefined, externalS
 }
 
 describe.runIf(process.platform === 'darwin')('preparation controller fixed deadline boundaries', () => {
+  it('captures the trusted pin once and sends it outside the candidate request', async () => {
+    const supplied = { ...native.pin }; const f = fixture(() => undefined, undefined, supplied);
+    const session = await f.start(); supplied.digest = 'b'.repeat(64);
+    f.requestTool(); const call = session.call('check', null); f.reply(1, null); await call;
+    expect(native.resolve).not.toHaveBeenCalled();
+    const envelope = JSON.parse(f.calls[1]!.input);
+    expect(envelope.gitPin).toEqual(native.pin); expect(envelope.request.gitPin).toBeUndefined();
+    expect(native.assert.mock.calls.slice(1).every(([pin]) => Object.isFrozen(pin) && pin.digest === native.pin.digest)).toBe(true);
+    const closing = session.close(); f.reply(2, null); f.finish(clean()); await closing;
+  });
+
+  it('counts native pin resolution against the original session deadline', async () => {
+    native.resolve.mockImplementation(() => { now = 1000; return native.pin; });
+    const f = fixture(); await expect(f.start()).rejects.toThrow(); expect(f.calls).toEqual([]);
+  });
+
+  it('refuses a tool launch after the trusted pin changes during confinement', async () => {
+    const f = fixture(index => { if (index === 2) native.assert.mockImplementation(() => { throw new Error('pin drift'); }); });
+    const session = await f.start(); f.requestTool();
+    await expect(session.call('check', null)).rejects.toThrow('CANDIDATE_SESSION_FAILED'); expect(f.calls).toHaveLength(1);
+  });
+
+  it('refuses final clean settlement when the pinned executable changed', async () => {
+    const f = fixture(); const session = await f.start(); const closing = session.close(); f.reply(1, null);
+    native.assert.mockImplementation(() => { throw new Error('pin drift'); }); f.finish(clean());
+    await expect(closing).rejects.toThrow('CANDIDATE_SESSION_FAILED');
+  });
+
+  it('withholds a tool result when post-settlement executable verification fails', async () => {
+    let checks = 0;
+    native.assert.mockImplementation(() => { if (++checks === 4) throw new Error('settlement pin drift'); });
+    const f = fixture(); const session = await f.start(); f.requestTool();
+    await expect(session.call('check', null)).rejects.toThrow('CANDIDATE_SESSION_FAILED');
+    expect(f.calls).toHaveLength(2);
+  });
   it('refuses initial candidate launch when confinement reaches the original deadline', async () => {
     const f = fixture(() => { now = 1000; });
     await expect(f.start()).rejects.toThrow('CANDIDATE_SESSION_FAILED'); expect(f.calls).toEqual([]);

@@ -11,7 +11,7 @@ interface Command {
   input?: Buffer;
   blob: boolean;
 }
-let readonlyCommand: (request: unknown, fixtureRoot: string, scratch: string) => Command;
+let readonlyCommand: (request: unknown, fixtureRoot: string, scratch: string, trustedGitPath?: string) => Command;
 let createSession: (options: unknown) => Promise<unknown>;
 let maxSessionDuration: number;
 let root: string, fixture: string, repo: string, scratch: string;
@@ -37,6 +37,14 @@ function request(args: string[], input: string | null = null) {
 const parse = (value: unknown) => readonlyCommand(value, fixture, scratch);
 
 describe('closed read-only preparation Git broker', () => {
+  it('uses only the host-selected Git executable without expanding logical candidate commands', () => {
+    const trustedPath = '/Library/Developer/CommandLineTools/usr/bin/git';
+    const value = request(['cat-file', 'blob', oid]);
+    expect(readonlyCommand(value, fixture, scratch, trustedPath)).toEqual({ ...parse(value), file: trustedPath });
+    expect(() => readonlyCommand({ ...value, file: trustedPath }, fixture, scratch, trustedPath)).toThrow();
+    expect(() => readonlyCommand({ ...value, gitPin: { path: trustedPath, digest: 'a'.repeat(64) } }, fixture, scratch, trustedPath)).toThrow();
+    expect(() => readonlyCommand(request(['update-ref', 'refs/heads/main', oid]), fixture, scratch, trustedPath)).toThrow();
+  });
   it('exports an explicit upper bound matching the fifteen-minute invocation ceiling', () => {
     expect(maxSessionDuration).toBe(900000);
   });

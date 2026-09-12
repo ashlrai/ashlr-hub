@@ -7,6 +7,7 @@ import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { userInfo } from 'node:os';
 import { exact, MAX_CALLS, MAX_MESSAGE_BYTES, MAX_SESSION_DURATION_MS, publishMessage, readMessage } from './preparation-verification-protocol.mjs';
+import { assertPreparationGit, resolvePreparationGit } from './preparation-verification-native.mjs';
 
 const HASH = /^[a-f0-9]{64}$/;
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -31,7 +32,7 @@ function base64(value) {
   if (typeof value !== 'string' || value.length > MAX_MESSAGE_BYTES || Buffer.from(value, 'base64').toString('base64') !== value) throw failure();
   return Buffer.from(value, 'base64');
 }
-export function readonlyCommand(request, fixtureRoot, scratch) {
+export function readonlyCommand(request, fixtureRoot, scratch, trustedGitPath = '/usr/bin/git') {
   if (!exact(request, ['schemaVersion', 'id', 'nonce', 'api', 'file', 'args', 'options']) || request.schemaVersion !== 1 ||
       !Number.isSafeInteger(request.id) || request.id < 1 || !HASH.test(request.nonce) ||
       !['execFileSync', 'spawnSync'].includes(request.api) || typeof request.file !== 'string' ||
@@ -79,7 +80,7 @@ export function readonlyCommand(request, fixtureRoot, scratch) {
     } else throw failure();
     if (verb !== 'cat-file' && input !== undefined) throw failure();
     // Rebuild an invariant safe prefix rather than trusting candidate options.
-    file = '/usr/bin/git'; args = ['--no-replace-objects', ...GIT_CONFIG.flatMap(value => ['-c', value]), '-C', repository, verb, ...rest];
+    file = trustedGitPath; args = ['--no-replace-objects', ...GIT_CONFIG.flatMap(value => ['-c', value]), '-C', repository, verb, ...rest];
   } else if (request.file === '/bin/ls') {
     if (request.args.length < 2 || request.args[0] !== '-lde' || input !== undefined && input.length !== 0 || request.args.slice(1).some(path =>
       !isAbsolute(path) || resolve(path) !== path || !within(fixtureRoot, path) && !within(scratch, path))) throw failure();
@@ -92,9 +93,14 @@ export function readonlyCommand(request, fixtureRoot, scratch) {
   return { file, args, options, input, blob };
 }
 
-export async function createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs = 60000, signal, activity }) {
+export async function createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs = 60000, signal, activity, gitPin: suppliedGitPin }) {
   if (process.platform !== 'darwin' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_SESSION_DURATION_MS ||
       typeof bridge?.runVerifySubprocessAsync !== 'function' || typeof bridge?.confinedUniverseArgv !== 'function') throw failure();
+  const deadline = performance.now() + timeoutMs;
+  const deadlineAt = new Date(Date.now() + timeoutMs).toISOString();
+  const selectedGit = suppliedGitPin === undefined ? resolvePreparationGit() : suppliedGitPin;
+  assertPreparationGit(selectedGit);
+  const gitPin = Object.freeze({ path: selectedGit.path, digest: selectedGit.digest });
   for (const path of [candidateRoot, fixtureRoot, workRoot]) canonicalDirectory(path);
   if (within(candidateRoot, workRoot) || within(fixtureRoot, workRoot) || within(workRoot, candidateRoot)) throw failure();
   const child = fileURLToPath(new URL('./preparation-verification-child.mjs', import.meta.url));
@@ -103,8 +109,8 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
   const sessionRoot = fs.mkdtempSync(join(workRoot, 'candidate-session-'));
   const inbox = join(sessionRoot, 'inbox'), scratch = join(sessionRoot, 'child'), outbox = join(scratch, 'outbox');
   for (const path of [inbox, scratch, outbox]) fs.mkdirSync(path, { mode: 0o700 });
-  const sessionId = randomBytes(32).toString('hex'); const deadlineAt = new Date(Date.now() + timeoutMs).toISOString();
-  const deadline = performance.now() + timeoutMs; const abort = new globalThis.AbortController();
+  const sessionId = randomBytes(32).toString('hex');
+  const abort = new globalThis.AbortController();
   const onAbort = () => abort.abort();
   if (signal?.aborted) throw failure();
   const environment = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: scratch, USERPROFILE: scratch, TMPDIR: scratch,
@@ -131,6 +137,7 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
   }
   const command = confined([process.execPath, '--no-addons', '--experimental-vm-modules', '--no-warnings', child]);
   command[2] += '\n(deny process-fork)\n(deny signal)\n';
+  assertPreparationGit(gitPin);
   const launchTimeoutMs = Math.floor(deadline - performance.now());
   if (signal?.aborted || launchTimeoutMs <= 0) throw failure();
   signal?.addEventListener('abort', onAbort, { once: true });
@@ -144,24 +151,27 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
   function guard(allowTerminal = false) { if (faulted || terminal && !allowTerminal || terminalError || abort.signal.aborted || performance.now() >= deadline) throw failure(); }
   async function settle() {
     await completion;
+    assertPreparationGit(gitPin);
     if (!terminal || terminalError || terminal.exitCode !== 0 || terminal.signal !== null || terminal.error || terminal.timedOut || terminal.cancelled ||
         terminal.outputTruncated || terminal.stdout !== '' || terminal.stderr !== '' || terminal.processGroupSettlement !== 'group-exit-confirmed') throw failure();
   }
   async function discard() { faulted = true; abort.abort(); await completion; clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
   async function broker(request, measurement) {
-    const selected = readonlyCommand(request, fixtureRoot, scratch);
+    const selected = readonlyCommand(request, fixtureRoot, scratch, gitPin.path);
     if (request.id !== execId + 1 || request.id > 4096) throw failure();
     guard(); execId = request.id;
     const argv = confined([process.execPath, '--no-addons', tool]);
+    assertPreparationGit(gitPin);
     guard();
     const remaining = Math.floor(deadline - performance.now());
     if (remaining <= 0) throw failure();
     // Count observed broker launches, never child-provided counters or failed
     // pre-spawn attempts. This is not a census of trusted tool descendants.
     const result = await bridge.runVerifySubprocessAsync(argv, { cwd: scratch, env: environment,
-      input: JSON.stringify({ request, fixtureRoot, scratch }), timeoutMs: Math.min(remaining, selected.options.timeoutMs),
+      input: JSON.stringify({ request, fixtureRoot, scratch, gitPin }), timeoutMs: Math.min(remaining, selected.options.timeoutMs),
       maxOutputChars: MAX_MESSAGE_BYTES, signal: abort.signal, terminationGraceMs: 1000, requireProcessGroupExit: true,
       ...(activity ? { processGroupLifecycle: activity.lifecycle('tool') } : {}) });
+    assertPreparationGit(gitPin);
     if (result.exitCode !== 0 || result.signal !== null || result.error || result.timedOut || result.cancelled ||
         result.outputTruncated || result.stderr !== '' || result.processGroupSettlement !== 'group-exit-confirmed') throw failure();
     const output = JSON.parse(result.stdout);

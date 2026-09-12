@@ -788,6 +788,8 @@ describe('release artifact contract v1', () => {
       'scripts/evaluators/preparation-verification-activity.mjs',
       'scripts/evaluators/preparation-verification-activity.d.mts',
       'scripts/evaluators/preparation-verification-protocol.mjs',
+      'scripts/evaluators/preparation-verification-native.mjs',
+      'scripts/evaluators/preparation-verification-native.d.mts',
     ];
     for (const file of helpers) write(join(release.packageRoot, file), 'export {};\n');
     write(join(release.packageRoot, 'scripts/evaluators/private-helper.mjs'), 'export const privateOnly = true;\n');
@@ -823,11 +825,12 @@ describe('release artifact contract v1', () => {
     });
   });
 
-  it('refuses duplicate explicit builtin custody helper declarations', () => {
+  it.each(['scripts/evaluators/preparation-verification-activity.mjs',
+    'scripts/evaluators/preparation-verification-native.mjs', 'scripts/evaluators/preparation-verification-native.d.mts'])(
+    'refuses duplicate explicit builtin helper declaration %s', helper => {
     const release = fixture();
     const packagePath = join(release.packageRoot, 'package.json');
     const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
-    const helper = 'scripts/evaluators/preparation-verification-activity.mjs';
     writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...packageJson.files as string[], helper, helper] })}\n`);
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toEqual({
       ok: false, reason: 'release package files declaration is not portable',

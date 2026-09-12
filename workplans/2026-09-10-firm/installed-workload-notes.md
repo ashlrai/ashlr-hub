@@ -191,3 +191,81 @@ scoped final lint clean. Actual built inspector help works. Package dry-run
 includes all expected files; no npm publication, GitHub Actions, remote push,
 provider calls or service activation. Entire remains enabled/manual-commit with
 no checkpoint restored. Original checkout state remains preserved.
+
+## Native developer Git continuation (baseline f0d6898a)
+
+Closed helper selection chooses actual CLT or standard-Xcode Git, not the Apple
+launcher. It hashes stable executable bytes after checking root-owned secure
+ancestry and rechecks the same pin around every broker dispatch/settlement.
+Registry includes the native helper and selected executable in comparator
+identity; fixed fixtures and sessions share that pin. No sandbox widening or
+warning suppression was introduced. Actual host selection is CLT Git, SHA-256
+74b90b9f97ec79bfe7886a4fc6132533b3e1014ef4195d28abd1ca9bf321f34a.
+
+Mocked native/controller/interceptor gate 68287 passed 161 tests; registry passed 29.
+Initial build 98687 failed only release package portability allowlisting after
+compilation/assets/web succeeded. Added exactly the new helper and declaration;
+legacy zero/three-helper packages remain supported and incomplete native pairs
+are refused. Full build 68637 then passed. Release-manifest gate passed 53 tests;
+read-only inspection found five declared source helpers, nine installed code
+files, matching digests and equal host/bundle helper bytes.
+
+Strict native gate 88594 passed 63 tests/four suites/zero skips in 72.39s. It kept
+the original ASHLR_REQUIRE_BATCH_IMPROVEMENT=1 target: one-file 36/2 unchanged,
+four-file check 42/8→36/2, metadata 117/8→111/2. All six observed candidate batches
+had empty stderr, exit 0 and no transport error. The same-child runtime-drift
+case also passed. Candidate and patch bytes are unchanged from the prior record.
+This proves a bounded measured improvement, not installed candidate acceptance
+or delivery. The patch remains unapplied to live source.
+
+Serial gate 69126 now runs installed evaluation, real workflows, runtime/successor
+mutation controls, child/standalone checks, build graph and release artifact
+contracts. Runtime source and build assets are frozen during the gate.
+
+Gate 69126 repeated installed baseline passed in 1,265.546s: both full
+invocations satisfy all 19 checks, equal metrics/workflow ledgers and complete
+activity settlement. The first activity directory recorded 4,873 spawned and
+settled groups. The gate is still running; do not confuse this passed test with
+the final eight-suite result or full installed candidate evaluation.
+
+While it runs, automatic-admission recovery is isolated in a second worktree
+(`firm-admission-recovery`, branch `codex/automatic-admission-recovery`) to avoid
+editing the active runtime. Its new background retry path, marker validation,
+manager logic and mocked transport passed 53 pure tests; focused UI copy tests
+passed 15. Real HTTP/restart acceptance is authored and waits for this native
+slot. Review caught a shutdown close-order race and conditional UI wording;
+those corrections are being finalized, not silently treated as already accepted.
+
+Recovery corrections are now frozen: 74 pure/mock cases across five suites pass
+in 2.40s, including the actual in-memory RPC closed/not-invoked envelope. The
+existing background close gates RPC before recovery drains; its immediately
+observed promise remains available for final settlement checks. Conditional
+composer copy passed 15 component tests in 859ms and explicitly excludes
+unmarked registrations. Real HTTP/native acceptance remains unrun.
+
+Native 69126 also passed the installed manager-poison control in 52.975s and all
+prelaunch invalid-mode/artifact/abort/deadline/controller-drift controls. It is
+still running the full post-settlement controller-drift invocation before the
+remaining suites. Do not restart or rebuild over this active gate.
+
+At 2026-09-12 05:46 UTC, the post-settlement controller-drift test passed in
+634.243s; real-candidate cancellation passed in 3.315s. The eight-suite gate
+remains active for subsequent regressions. Parallel recovery verification now
+passes 75 pure/mock cases across five suites in 1.36s, plus source/web typechecks,
+scoped lint, diff checks and documentation links. The real recovery fixture also
+asserts zero resource-ledger attempts while paused, not only zero worker calls.
+Recovery HTTP/restart acceptance still awaits the serialized native slot.
+
+Final native gate 69126 exited 0: 145 tests across eight suites, zero skips,
+3,916.25s, started at 01:13:58 local. Additional real workflow results include
+manager repeatability 304.340s, successor repeatability 520.996s, source drift
+152.820s, during-call successor baseline/stale controls 197.215s/57.554s and
+runtime controls 32.486s/29.388s. Binary output, confinement, invalid candidate
+controls and actual package contracts pass. No active runtime/build edits were
+made during that gate.
+
+Recovery gate 74134 began only after 69126 exited 0. It is the sole native suite;
+do not run another native/HTTP gate or edit its active recovery source. That
+worktree still has the parent-owned untracked node_modules symlink, excluded
+from source delivery. No merged-build or production claim follows from these
+native-only results.

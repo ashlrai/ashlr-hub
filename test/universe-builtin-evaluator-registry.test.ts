@@ -6,11 +6,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { inspectBuiltinEvaluatorBundle, resolveBuiltinEvaluator } from '../src/core/universe/builtin-evaluator-registry.js';
 import { comparatorDigest, validateUniverseManifest, type ManifestRecord } from '../src/core/universe/store.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
+import { resolvePreparationGit } from '../scripts/evaluators/preparation-verification-native.mjs';
 
 vi.mock('node:fs', async importOriginal => ({ ...await importOriginal<typeof import('node:fs')>() }));
 
 const files = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs', 'preparation-verification-child.mjs',
-  'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification-protocol.mjs',
+  'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification-native.mjs', 'preparation-verification-protocol.mjs',
   'preparation-verification-tool.mjs', 'preparation-verification.mjs'];
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 const roots: string[] = [];
@@ -18,7 +19,7 @@ function fixture() {
   const root = fs.realpathSync(fs.mkdtempSync(join(tmpdir(), 'builtin-registry-'))); roots.push(root);
   const directory = join(root, 'installed'); fs.mkdirSync(directory, { mode: 0o700 });
   const manifest = { schemaVersion: 1, id: 'preparation-measurement-v1', files: files.map(name => {
-    const text = ['preparation-verification-activity.mjs', 'preparation-verification-protocol.mjs'].includes(name)
+    const text = ['preparation-verification-activity.mjs', 'preparation-verification-native.mjs', 'preparation-verification-protocol.mjs'].includes(name)
       ? fs.readFileSync(new URL(`../scripts/evaluators/${name}`, import.meta.url), 'utf8') : `// fixed packaged ${name}\n`;
     fs.writeFileSync(join(directory, name), text, { mode: 0o600 });
     return { name, digest: hash(text) };
@@ -73,6 +74,64 @@ describe('closed installed built-in evaluator registry', () => {
     const original = first.digest; first.files[0]!.digest = 'f'.repeat(64); first.command[0] = '/unexpected';
     expect(inspectBuiltinEvaluatorBundle(f.directory).digest).toBe(original);
   });
+  it('pins the actual selected Git bytes and returns independently detached native metadata', () => {
+    const f = fixture(), selected = resolvePreparationGit(), first = inspectBuiltinEvaluatorBundle(f.directory);
+    expect(first.git).toEqual(selected);
+    expect(first.git.digest).toBe(hash(fs.readFileSync(selected.path)));
+    expect(first.tools[0]).toEqual(selected);
+    expect(first.tools.some(row => row.path === '/usr/bin/git')).toBe(false);
+    const identity = first.digest;
+    first.git.path = '/untrusted/git'; first.git.digest = 'f'.repeat(64);
+    expect(first.tools[0]).toEqual(selected);
+    first.tools[0]!.digest = 'e'.repeat(64);
+    const next = inspectBuiltinEvaluatorBundle(f.directory);
+    expect(next.git).toEqual(selected); expect(next.tools[0]).toEqual(selected);
+    expect(next.digest).toBe(identity);
+  });
+  it('includes changed native Git content in the installed identity without changing a real executable', () => {
+    const f = fixture(), before = inspectBuiltinEvaluatorBundle(f.directory), original = fs.readSync;
+    const selected = fs.lstatSync(before.git.path, { bigint: true });
+    let changedReads = 0;
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
+      const count = Reflect.apply(original, fs, args);
+      const stat = fs.fstatSync(args[0], { bigint: true });
+      if (stat.dev === selected.dev && stat.ino === selected.ino && args[4] === 0 && count > 0) {
+        const buffer = args[1] as Buffer; buffer[0] = buffer[0]! ^ 1; changedReads++;
+      }
+      return count;
+    }) as typeof fs.readSync);
+    const after = inspectBuiltinEvaluatorBundle(f.directory);
+    expect(changedReads).toBeGreaterThanOrEqual(2);
+    expect(after.git.path).toBe(before.git.path); expect(after.git.digest).not.toBe(before.git.digest);
+    expect(after.tools[0]).toEqual(after.git); expect(after.digest).not.toBe(before.digest);
+  });
+  it('refuses native Git content changing between initial capture and final verification', () => {
+    const f = fixture(), pin = resolvePreparationGit(), original = fs.readSync;
+    const selected = fs.lstatSync(pin.path, { bigint: true }); let reads = 0;
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
+      const count = Reflect.apply(original, fs, args);
+      const stat = fs.fstatSync(args[0], { bigint: true });
+      if (stat.dev === selected.dev && stat.ino === selected.ino && args[4] === 0 && count > 0 && ++reads > 1) {
+        const buffer = args[1] as Buffer; buffer[0] = buffer[0]! ^ 1;
+      }
+      return count;
+    }) as typeof fs.readSync);
+    expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow('Installed built-in evaluator unavailable or changed');
+    expect(reads).toBeGreaterThanOrEqual(2);
+  });
+  it('ignores hostile PATH and DEVELOPER_DIR when selecting and pinning Git', () => {
+    const f = fixture(), before = inspectBuiltinEvaluatorBundle(f.directory);
+    const prior = { PATH: process.env.PATH, DEVELOPER_DIR: process.env.DEVELOPER_DIR };
+    try {
+      process.env.PATH = join(f.root, 'untrusted-bin'); process.env.DEVELOPER_DIR = join(f.root, 'untrusted-developer');
+      const after = inspectBuiltinEvaluatorBundle(f.directory);
+      expect(after.git).toEqual(before.git); expect(after.tools).toEqual(before.tools); expect(after.digest).toBe(before.digest);
+    } finally {
+      for (const [key, value] of Object.entries(prior)) {
+        if (value === undefined) delete process.env[key]; else process.env[key] = value;
+      }
+    }
+  });
   it.each(['changed', 'missing', 'extra', 'file-link', 'manifest-link', 'writable', 'manifest-fields', 'manifest-order'] as const)('refuses incomplete or altered installed bundles: %s', kind => {
     const f = fixture(), file = join(f.directory, files[0]!);
     if (kind === 'changed') fs.appendFileSync(file, '// change');
@@ -100,16 +159,16 @@ describe('closed installed built-in evaluator registry', () => {
     }) as typeof fs.readFileSync);
     expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow();
   });
-  it('refuses a self-consistent bundle whose activity helper differs from the loaded host helper', () => {
-    const f = fixture(), name = 'preparation-verification-activity.mjs', text = '// different helper\n';
+  it.each(['preparation-verification-activity.mjs', 'preparation-verification-native.mjs'])('refuses a self-consistent bundle whose %s differs from the loaded host helper', name => {
+    const f = fixture(), text = '// different helper\n';
     fs.writeFileSync(join(f.directory, name), text);
     f.manifest.files.find(row => row.name === name)!.digest = hash(text);
     fs.writeFileSync(join(f.directory, 'manifest.json'), JSON.stringify(f.manifest));
     expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow();
   });
-  it('refuses a hot-updated host helper instead of adopting different code in the running process', () => {
+  it.each(['preparation-verification-activity.mjs', 'preparation-verification-native.mjs'])('refuses hot-updated %s instead of adopting different code in the running process', name => {
     const f = fixture(), original = fs.readFileSync;
-    const helper = fs.lstatSync(new URL('../scripts/evaluators/preparation-verification-activity.mjs', import.meta.url), { bigint: true });
+    const helper = fs.lstatSync(new URL(`../scripts/evaluators/${name}`, import.meta.url), { bigint: true });
     vi.spyOn(fs, 'readFileSync').mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
       const result = Reflect.apply(original, fs, args);
       if (typeof args[0] === 'number' && fs.fstatSync(args[0], { bigint: true }).ino === helper.ino && Buffer.isBuffer(result)) {
