@@ -1,3 +1,4 @@
+export const MAX_BUILTIN_ACTIVITIES: 8192;
 export interface BuiltinActivityOwner {
   schemaVersion: 1;
   invocationId: string;

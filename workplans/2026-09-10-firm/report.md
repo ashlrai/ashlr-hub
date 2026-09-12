@@ -1,6 +1,102 @@
 # Verified local handoff
 
-## Current continuation: candidate-linked during-call drift
+## Current continuation: installed full-workflow measurement and inspection
+
+Baseline `948a7fa4cde76002b6029b61f588127e3f70c42e`, initially clean `auto/p00`
+at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agents mapped,
+implemented and independently reviewed fixed fixture packaging, ownership,
+installed acceptance tests and the next candidate. Entire resume found no
+checkpoint. Source changes in this continuation are not yet committed.
+
+The installed evaluator now runs the original eight leaf controls and eleven
+manager/successor controls through the selected candidate. A separately pinned
+fixture bundle creates real registrations and a command-only upstream delivery;
+it never requests a model or connects an account. Exact runner interception owns
+and settles detached setup workers/evaluators. Direct non-detached Git stays in
+the outer controller group and delivery receives the shared abort/deadline.
+Setup group counts are separate from candidate broker operations. The new
+`preparation-workflows-v1` report includes per-request ledgers and fixed failure
+checkpoints, but remains non-evaluation output.
+
+The first focused gate passed72 tests across4 suites. Full build, source/web
+typechecks, strict changed-test compilation, documentation checks and lint passed
+(zero errors,107 existing warnings). The local package dry-run includes all eight
+fixed code files plus the manifest. Nothing was published or activated.
+
+Actual installed testing found that the successor sequence exceeded its300s
+child allowance while the enclosing900s invocation retained time. Manager
+completed with1774 broker operations/14 blob operations; successor check and
+metadata succeeded, but full bundle did not return before the child deadline.
+All4481 recorded process groups settled. The failed report had17 checks, not
+accepted evidence. The redundant post-settlement full run was stopped cleanly;
+initial suite13 passed/2 failed,681.76s. Do not report this as a green gate.
+
+Workflow sessions now consume only the original invocation's remaining time,
+within the shared900s ceiling. The ordinary60s default and30s tool cap remain.
+After rebuilding, the fresh nine-suite serial acceptance run passed226 tests,
+zero skips, in2,043.92s. Its repeated full baseline test passed in1,229.983s: both invocations
+completed all19 checks with identical metrics/workflow ledgers and confirmed all
+recorded groups absent. The first invocation settled4,873 activities. Installed
+post-settlement drift and cancellation controls also passed. See
+`installed-workload-notes.md` for the exact correction and gates.
+
+An unapplied, single-source-file Git batching candidate now addresses the review
+finding about combined stdout/stderr limits: single-file reads keep the original
+helper; normally exited warning/error batches repeat the complete original
+sequence. Transport and frame failures do not retry. Independent source review
+found no discrepancy;33 pure artifact-backed tests passed. Native measurement
+rejected its improvement claim: both four-file calls used10 blob launches versus
+the baseline8. It is not adopted. Broader autonomous optimization, promotion, account operation and
+production readiness remain unproven.
+
+Two additional native suites have now run: a real privately
+applied candidate comparison with exact output/count and during-call drift
+checks, and six tests of actual Node combined-output limits. The candidate test
+also typechecks the actual patched target against the current project without
+emitting files. Independent review, strict selected TypeScript and scoped lint
+pass. Their first serialized gate returned166 passed/1 failed in74.57s; the only
+failure was the improvement assertion. A second diagnostic run reproduced it
+in70.55s and confirmed normal exit0 with xcrun cache-write stderr on every batch.
+The conservative fallback is behaving correctly. Do not widen the sandbox or
+suppress stderr to manufacture an improvement. The comparison now separates
+compatibility/accounting regressions from an opt-in strict improvement gate,
+which retains the original numerical target and reports rejection explicitly.
+The serialized gate started only after the nine-file installed acceptance
+selection completed. The comparison fixture combines two identical and two
+distinct committed contents, with differing executable modes and a dirty checkout.
+
+### Operator and agent measurement inspector
+
+`ashlr universe preparation-measurement --input /absolute/report.json [--json]`
+now reads bounded existing reports through the public CLI. It summarizes broker
+counts, workflow requests and fixed diagnostic codes without dispatch or store
+discovery. Unknown totals remain unknown; blob counts remain subsets. It never
+turns candidate-reported checks into scores or acceptance. Help and canonical
+Universe documentation describe the supported workload and exit codes.
+
+Pure parser/descriptor tests passed94 cases; existing CLI/help regression tests
+passed48 cases, all with zero skips. All ten actual filesystem cases passed.
+Fresh source/web typechecks, full build, lint (107 existing warnings; zero errors)
+and docs checks pass. The built command's actual help invocation succeeds.
+The final diagnostic regression rerun passed215 tests across nine suites, zero
+skips,74.49s. Its measured improvementAccepted:false is the important outcome:
+one-file check36/2 is unchanged; four-file check42/8 becomes44/10; metadata117/8
+becomes119/10 (total broker/blob launches). The two final disjoint gates cover441
+passing tests; that count does not convert the rejected candidate into a win.
+No account or resident service was activated.
+
+Package dry-run: @ashlr/hub3.4.0,12,625,602 bytes, includes inspector JS/types/maps
+and all eight fixed builtin assets plus manifest. Manifest SHA-256:
+`28c341b06dd7207afb88deb160198d4d5a4fdbae13ab1351a5ec05b149c3f26e`.
+No publication or remote push. The original checkout remains at
+`a01fc08663baab3039c4f1c084538de732a4fd0e` with its prior untracked workplans.
+
+Next implementation target: launcher-aware benchmarking that preserves warning
+and sandbox semantics, followed by an independently accepted score/delivery
+contract. Installed measurement and a report inspector are useful components,
+not proof of an activated24/7 autonomous engineering company.
+
+## Previous continuation: candidate-linked during-call drift
 
 Baseline `df44cf730f4ca4155e8c56e0a8ce1783f630a0d0`, initially clean `auto/p00`
 at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three Explore and

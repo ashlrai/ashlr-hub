@@ -2542,6 +2542,40 @@ The archive preserves raw dimensions so future comparisons can use a consistent 
 
 Niches represent meaningful differences such as task family, execution cost, or latency. A global winner can hide useful low-cost or specialized variants. A retained failure can supply correction context without becoming an archive parent.
 
+### Inspect preparation measurements
+
+Use the read-only inspector to summarize an existing installed preparation
+workload report for an operator or agent:
+
+```sh
+ashlr universe preparation-measurement --input /absolute/path/report.json
+ashlr universe preparation-measurement --input /absolute/path/report.json --json
+```
+
+The input must be one regular, nonsymlink UTF-8 JSON file, at most 24 KiB, at an
+explicit normalized absolute path. Only the
+`preparation-verification-measurement` envelope for `preparation-workflows-v1`
+is supported. Legacy standalone and pre-initialization reports are unsupported.
+This command does not accept `--root`, discover stores, run a benchmark, dispatch
+workers, or contact providers. It leaves the supplied file unchanged.
+
+The summary separates healthy leaf broker launches, workflow broker launches,
+per-request counts, and fixture-owned process groups. Blob launches are a subset,
+not an extra quantity to add. Missing totals in failed reports remain `null` in
+JSON and `unknown` in text; completed workflow rows provide only a labelled
+subtotal. Output includes fixed diagnostic codes but omits raw diagnostic
+messages and input paths.
+
+Exit status is 0 when the report says its checks were satisfied, 1 for reported
+failure or an unavailable/unsupported report, and 2 for invalid arguments. For
+status 1, inspect the fixed diagnostic code or verify the input format and path;
+the command never retries execution. JSON output is tagged `diagnostic-only`:
+neither a successful exit nor internally consistent counters authenticate the
+report, prove process settlement, assign a score, or accept a candidate. Keep the
+original evaluation and custody evidence for those decisions. See the
+[measurement benchmark plan](../artifacts/hub-verification-benchmark-plan.md)
+for the workload and remaining optimization acceptance requirements.
+
 ## Architecture that can absorb better models
 
 Keep model and harness identity together. A model upgrade, tool change, retrieval policy, memory program, or coordination topology creates a new experimental condition. Measure that condition on the intended task family before inheriting a previous configuration's performance assumptions.

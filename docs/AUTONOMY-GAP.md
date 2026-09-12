@@ -116,7 +116,7 @@ fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/h
 now has a closed installed `preparation-measurement-v1` launch route on
 macOS/Node 24. Its trusted controller launches the candidate separately; ordinary
 command evaluators are unchanged, and their unsupported nested-sandbox route
-still fails closed. The builtin pins its seven-file bundle, Node, fixed native
+still fails closed. The builtin pins its eight-file bundle, Node, fixed native
 launchers and matching host helpers. Fixed asynchronous tool workers preserve
 raw bytes, while invocation-bound activity receipts and independent group-absence
 checks prevent a controller exit from claiming all inner work settled.
@@ -126,8 +126,14 @@ The output is deliberately rejected as
 Universe evaluation evidence. A candidate-linked workflow extension now exposes
 explicit manager restoration/check/replay and successor reads for real-process
 measurement. It uses the actual manager and owner over a disclosed nonexecuting
-supervisor fixture view; the installed default measurement does not yet score
-these operations. Additional candidate-linked during-call probes challenge runtime
+supervisor fixture view. The installed `preparation-workflows-v1` workload now
+includes these operations, runtime/source drift refusals and detached setup-group
+ownership, with one invocation deadline. Real-process tests cover repeatability,
+candidate substitution, installed-runtime drift and cancellation; its output
+remains non-scoring measurement. A read-only
+[`preparation-measurement` inspector](ASHLR-UNIVERSE.md#inspect-preparation-measurements)
+summarizes explicit report files without treating reported checks as acceptance.
+Additional candidate-linked during-call probes challenge runtime
 and delivered-branch freshness using deliberately stale candidate controls;
 their trusted test-only injector preserves original native results. These are
 correctness controls, not a frozen score or a final-return-only source proof.

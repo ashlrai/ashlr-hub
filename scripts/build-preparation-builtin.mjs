@@ -15,6 +15,7 @@ export const PREPARATION_BUILTIN_FILES = Object.freeze([
   'preparation-verification-activity.mjs',
   'preparation-verification-child.mjs',
   'preparation-verification-controller.mjs',
+  'preparation-verification-fixtures.mjs',
   'preparation-verification-protocol.mjs',
   'preparation-verification-tool.mjs',
   'preparation-verification.mjs',
@@ -72,8 +73,32 @@ export async function buildPreparationVerificationBridge(repository, outfile) {
   }, bundle: true, platform: 'node', target: 'node24', format: 'esm', outfile,
   banner: { js: "import { createRequire as fixedCreateRequire } from 'node:module'; const require = fixedCreateRequire(import.meta.url);" },
   logLevel: 'silent' });
+  const runner = realpathSync(join(root, 'src/core/run/verify-commands.ts'));
+  const wrapper = realpathSync(join(root, 'scripts/evaluators/preparation-verification-fixture-runtime.ts'));
+  // Only the trusted fixture graph is rewritten. The wrapper's own imports
+  // retain the actual runner and every other export without recursive wrapping.
+  const fixtures = await build({ absWorkingDir: root,
+    entryPoints: [join(root, 'scripts/evaluators/preparation-verification-fixtures.ts')],
+    bundle: true, platform: 'node', target: 'node24', format: 'esm', metafile: true,
+    outfile: join(dirname(outfile), 'preparation-verification-fixtures.mjs'),
+    banner: { js: "import { createRequire as fixedCreateRequire } from 'node:module'; const require = fixedCreateRequire(import.meta.url);" },
+    plugins: [{ name: 'owned-fixture-runner', setup(builder) {
+      builder.onResolve({ filter: /verify-commands\.[cm]?[jt]s$/ }, async args => {
+        if (args.importer === wrapper || args.pluginData?.fixtureRunnerResolved) return;
+        const resolved = await builder.resolve(args.path, { resolveDir: args.resolveDir, kind: args.kind,
+          pluginData: { fixtureRunnerResolved: true } });
+        if (resolved.errors.length) return { errors: resolved.errors };
+        if (resolved.path && realpathSync(resolved.path) === runner) return { path: wrapper };
+      });
+    } }], logLevel: 'silent' });
+  const fixtureInputs = Object.keys(fixtures.metafile.inputs).map(file => resolve(root, file));
+  if (!fixtureInputs.includes(wrapper) || !fixtureInputs.includes(runner) ||
+      fixtureInputs.some(file => file.startsWith(join(root, 'test') + '/')) ||
+      Object.values(fixtures.metafile.outputs).flatMap(output => output.imports).some(entry => !isBuiltin(entry.path))) {
+    throw new Error('Trusted fixture has an unsupported dependency');
+  }
   for (const file of PREPARATION_BUILTIN_FILES) {
-    if (file === 'preparation-bridge.mjs' || file === 'preparation-verification.mjs') continue;
+    if (['preparation-bridge.mjs', 'preparation-verification.mjs', 'preparation-verification-fixtures.mjs'].includes(file)) continue;
     copyFileSync(join(root, 'scripts/evaluators', file), join(dirname(outfile), file));
   }
 }

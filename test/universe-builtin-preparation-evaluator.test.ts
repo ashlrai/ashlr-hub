@@ -17,18 +17,40 @@ import * as verify from '../src/core/run/verify-commands.js';
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const target = 'src/core/resources/engineering-preparation.ts';
 const supported = process.platform === 'darwin' && Number(process.versions.node.split('.')[0]) >= 24;
+const EVALUATION_TIMEOUT = 900000;
 let root: string, repo: string, universe: string, revision: string, record: ManifestRecord;
 let preserveRoot = false;
 const source = readFileSync(join(repository, target), 'utf8');
+interface Workflow { name: 'manager' | 'successor'; processes: number; blobProcesses: number;
+  requests: Array<{ id: number; method: string; processes: number; blobProcesses: number }> }
 interface Measurement { schemaVersion: 1; kind: 'preparation-verification-measurement'; checksPassed: boolean;
+  workload: 'preparation-workflows-v1'; workflows: Workflow[];
   metrics: Record<string, number>; diagnostics: Array<{ code: string; message: string }> }
 function measurement(output: string): Measurement {
   expect(Buffer.byteLength(output)).toBeLessThan(24 * 1024);
   const value = JSON.parse(output) as Measurement;
-  expect(Object.keys(value).sort()).toEqual(['checksPassed', 'diagnostics', 'kind', 'metrics', 'schemaVersion']);
+  expect(Object.keys(value).sort()).toEqual(['checksPassed', 'diagnostics', 'kind', 'metrics', 'schemaVersion', 'workflows', 'workload']);
   expect(value.schemaVersion).toBe(1); expect(value.kind).toBe('preparation-verification-measurement');
   expect(typeof value.checksPassed).toBe('boolean');
-  expect(Object.values(value.metrics).every(number => typeof number === 'number' && Number.isFinite(number))).toBe(true);
+  expect(Object.values(value.metrics).every(number => Number.isSafeInteger(number) && number >= 0)).toBe(true);
+  expect(value.workload).toBe('preparation-workflows-v1'); expect(Array.isArray(value.workflows)).toBe(true);
+  expect(value.workflows.length).toBeLessThanOrEqual(2);
+  expect(new Set(value.workflows.map(row => row.name)).size).toBe(value.workflows.length);
+  for (const row of value.workflows) {
+    expect(Object.keys(row).sort()).toEqual(['blobProcesses', 'name', 'processes', 'requests']);
+    expect(['manager', 'successor']).toContain(row.name);
+    expect(Number.isSafeInteger(row.processes) && row.processes >= 0).toBe(true);
+    expect(Number.isSafeInteger(row.blobProcesses) && row.blobProcesses >= 0 && row.blobProcesses <= row.processes).toBe(true);
+    expect(row.requests.map(request => request.id)).toEqual(row.requests.map((_, index) => index + 1));
+    for (const request of row.requests) {
+      expect(Object.keys(request).sort()).toEqual(['blobProcesses', 'id', 'method', 'processes']);
+      expect(typeof request.method).toBe('string');
+      expect(Number.isSafeInteger(request.processes) && request.processes >= 0).toBe(true);
+      expect(Number.isSafeInteger(request.blobProcesses) && request.blobProcesses >= 0 && request.blobProcesses <= request.processes).toBe(true);
+    }
+    expect(row.processes).toBe(row.requests.reduce((sum, request) => sum + request.processes, 0));
+    expect(row.blobProcesses).toBe(row.requests.reduce((sum, request) => sum + request.blobProcesses, 0));
+  }
   expect(() => parseEvaluation(output)).toThrow();
   return value;
 }
@@ -39,8 +61,8 @@ const git = (...args: string[]): string => execFileSync('git', ['-c', 'core.hook
 function manifest(id = 'builtin'): UniverseManifest {
   return { schemaVersion: 1, id, name: 'Installed preparation measurement', objective: 'Measure unchanged preparation behavior',
     seed: { repo, revision }, metric: { name: 'verification_processes', direction: 'minimize', minImprovement: 1 },
-    budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 120000, trialTimeoutMs: 120000 },
-    evaluation: { builtin: 'preparation-measurement-v1', timeoutMs: 110000 },
+    budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: EVALUATION_TIMEOUT, trialTimeoutMs: EVALUATION_TIMEOUT },
+    evaluation: { builtin: 'preparation-measurement-v1', timeoutMs: EVALUATION_TIMEOUT },
     variants: [{ id: 'fixture', niche: 'verification', hypothesis: 'Preserve the fixed checks', command: [process.execPath, '-e', 'process.exit(0)'] }] };
 }
 beforeAll(() => {
@@ -92,10 +114,45 @@ function groupAbsent(pgid: number): boolean {
   try { process.kill(-pgid, 0); return false; }
   catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
 }
+function completeWorkload(value: Measurement): void {
+  expect(value.checksPassed).toBe(true); expect(value.metrics.correctness_checks).toBe(19);
+  expect(value.diagnostics).toEqual([]);
+  expect(value.workflows.map(row => row.name)).toEqual(['manager', 'successor']);
+  expect(value.workflows[0]!.requests.map(row => row.method)).toEqual([
+    'manager-open', 'bundle', 'manager-check', 'manager-replay', 'manager-check', 'manager-replay', 'manager-close',
+  ]);
+  expect(value.workflows[1]!.requests.map(row => row.method)).toEqual([
+    'successor-check', 'successor-metadata', 'successor-bundle', 'successor-metadata',
+  ]);
+  for (const row of value.workflows) {
+    expect(row.processes).toBeGreaterThan(0); expect(row.blobProcesses).toBeGreaterThan(0);
+  }
+  expect(value.metrics.workflow_processes).toBe(value.workflows.reduce((sum, row) => sum + row.processes, 0));
+  expect(value.metrics.workflow_blob_processes).toBe(value.workflows.reduce((sum, row) => sum + row.blobProcesses, 0));
+  // Preserve the original leaf metric; workflow and fixture setup counts must
+  // not silently change the meaning of verification_processes.
+  expect(value.metrics.verification_processes).toBe(Object.entries(value.metrics)
+    .filter(([key]) => key.startsWith('files_') && key.endsWith('_processes') && !key.endsWith('_blob_processes'))
+    .reduce((sum, [, count]) => sum + count, 0));
+  expect(value.metrics.verification_processes).toBeGreaterThan(0);
+  expect(value.metrics.fixture_owned_process_groups).toBeGreaterThan(0);
+}
+function completeActivities(directory: string): void {
+  const roots = readdirSync(directory).filter(name => name.startsWith('builtin-activity-'));
+  expect(roots).toHaveLength(1);
+  const activity = join(directory, roots[0]!);
+  expect(readdirSync(activity)).toContain('complete.json');
+  const groups = spawnedActivities(activity);
+  expect(groups.some(row => row.kind === 'candidate')).toBe(true);
+  expect(groups.some(row => row.kind === 'tool')).toBe(true);
+  const absent = groups.every(row => groupAbsent(row.pgid));
+  if (!absent) preserveRoot = true;
+  expect(absent, 'Every recorded group must be absent before interpreting completed workload evidence').toBe(true);
+}
 
 describe.runIf(supported)('installed builtin preparation measurement', () => {
   it('registers explicit builtin identity and preserves exact immutable registration replay', () => {
-    expect(record.manifest.evaluation).toEqual({ builtin: 'preparation-measurement-v1', timeoutMs: 110000 });
+    expect(record.manifest.evaluation).toEqual({ builtin: 'preparation-measurement-v1', timeoutMs: EVALUATION_TIMEOUT });
     const before = artifactDigest(record.seedArtifact.path);
     expect(initUniverse(manifest(), { root: universe })).toEqual(record.manifest);
     expect(manifestRecord(universePath(universe, 'builtin'))).toEqual(record);
@@ -110,18 +167,40 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     for (let index = 0; index < 2; index++) {
       const context = scratch();
       const result = await runFixedUniverseEvaluator(record, universe, record.seedArtifact.path, before,
-        context.directory, 110000, new AbortController().signal, context.env, true);
+        context.directory, EVALUATION_TIMEOUT, new AbortController().signal, context.env, true);
       expect({ exitCode: result.exitCode, error: result.error, signal: result.signal, stderr: result.stderr,
         timedOut: result.timedOut, cancelled: result.cancelled, processGroupSettlement: result.processGroupSettlement }).toEqual({
         exitCode: 0, error: undefined, signal: null, stderr: '', timedOut: false, cancelled: false, processGroupSettlement: 'group-exit-confirmed',
       });
       const value = measurement(result.stdout); expect(value.checksPassed, JSON.stringify(value)).toBe(true);
-      expect(value.metrics.correctness_checks).toBe(8); expect(value.diagnostics).toEqual([]);
+      completeWorkload(value); completeActivities(context.directory);
       expect(value.metrics.verification_processes).toBeGreaterThan(0); results.push(value);
       expect(artifactDigest(record.seedArtifact.path)).toBe(before);
     }
     expect(results[1]!.metrics).toEqual(results[0]!.metrics);
-  }, 300000);
+    expect(results[1]!.workflows).toEqual(results[0]!.workflows);
+  }, 1860000);
+
+  it('rejects a candidate that preserves leaf reads but poisons the installed manager restoration path', async () => {
+    const anchor = 'return readPreparedBundle(input);';
+    expect(source.split(anchor)).toHaveLength(2);
+    const candidate = join(root, 'manager-poison'); copyArtifact(record.seedArtifact.path, candidate);
+    const file = join(candidate, target); chmodSync(file, 0o600);
+    writeFileSync(file, source.replace(anchor, 'throw new Error("Deliberately poisoned manager bundle reader");'));
+    const expected = artifactDigest(candidate); freezeArtifact(candidate);
+    const context = scratch();
+    const result = await runFixedUniverseEvaluator(record, universe, candidate, expected, context.directory,
+      EVALUATION_TIMEOUT, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: candidate }, true);
+    expect(result.exitCode).toBe(0); expect(result.error).toBeUndefined();
+    expect(result.signal).toBeNull(); expect(result.stderr).toBe('');
+    expect(result.timedOut).toBe(false); expect(result.cancelled).toBe(false);
+    expect(result.processGroupSettlement).toBe('group-exit-confirmed');
+    const value = measurement(result.stdout);
+    expect(value.checksPassed).toBe(false); expect(value.metrics.correctness_checks).toBe(8);
+    expect(value.diagnostics.map(row => row.code)).toEqual(['WORKFLOW_CANDIDATE_BEHAVIOR_FAILED']);
+    expect(value.workflows).toEqual([]);
+    expect(artifactDigest(candidate)).toBe(expected); completeActivities(context.directory);
+  }, 960000);
 
   it.each([
     { builtin: 'unknown', timeoutMs: 1000 },
@@ -137,7 +216,7 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     const candidate = join(root, 'changed-artifact'); const expected = copyArtifact(record.seedArtifact.path, candidate); freezeArtifact(candidate);
     const file = join(candidate, target); chmodSync(file, 0o600); writeFileSync(file, source + '\n// fixture-only drift\n');
     const context = scratch(); let reached = false;
-    await expect(runFixedUniverseEvaluator(record, universe, candidate, expected, context.directory, 110000,
+    await expect(runFixedUniverseEvaluator(record, universe, candidate, expected, context.directory, EVALUATION_TIMEOUT,
       new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: candidate }, true, () => { reached = true; })).rejects.toThrow();
     expect(reached).toBe(false);
   });
@@ -145,7 +224,7 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
   it('returns a pre-aborted invocation as not started, with no measurement', async () => {
     const context = scratch(); const abort = new AbortController(); abort.abort();
     const result = await runFixedUniverseEvaluator(record, universe, record.seedArtifact.path, record.seedArtifact.digest,
-      context.directory, 110000, abort.signal, context.env, true);
+      context.directory, EVALUATION_TIMEOUT, abort.signal, context.env, true);
     expect(result.cancelled).toBe(true); expect(result.processGroupSettlement).toBe('not-started'); expect(result.stdout).toBe('');
   });
 
@@ -155,9 +234,9 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     vi.spyOn(performance, 'now').mockImplementation(() => now() + elapsed);
     const dispatch = vi.spyOn(verify, 'runVerifySubprocessAsync').mockRejectedValue(new Error('Unexpected evaluator dispatch'));
     const result = await runFixedUniverseEvaluator(record, universe, record.seedArtifact.path, record.seedArtifact.digest,
-      context.directory, 110000, abort.signal, context.env, true, () => {
+      context.directory, EVALUATION_TIMEOUT, abort.signal, context.env, true, () => {
         reached = true;
-        if (cause === 'abort') abort.abort(); else elapsed = 120000;
+        if (cause === 'abort') abort.abort(); else elapsed = EVALUATION_TIMEOUT + 10000;
       });
     expect(reached).toBe(true); expect(dispatch).not.toHaveBeenCalled();
     expect(result.processGroupSettlement).toBe('not-started'); expect(result.stdout).toBe('');
@@ -170,7 +249,7 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
     const original = readFileSync(copied.controller, 'utf8'); writeFileSync(copied.controller, original + '\n// fixture-only drift\n');
     const context = scratch(); let reached = false;
     await expect(runFixedUniverseEvaluator(pinned, universe, pinned.seedArtifact.path, pinned.seedArtifact.digest,
-      context.directory, 110000, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: pinned.seedArtifact.path },
+      context.directory, EVALUATION_TIMEOUT, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: pinned.seedArtifact.path },
       true, () => { reached = true; })).rejects.toThrow();
     expect(reached).toBe(false);
   });
@@ -184,20 +263,21 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
       // Never execute modified code: inject drift only after the real entry
       // process has returned its strict settlement receipt.
       expect(result.processGroupSettlement).toBe('group-exit-confirmed');
-      expect(measurement(result.stdout).checksPassed).toBe(true); settled = true;
+      completeWorkload(measurement(result.stdout)); settled = true;
       writeFileSync(copied.controller, readFileSync(copied.controller, 'utf8') + '\n// post-settlement fixture drift\n');
       return result;
     });
     const context = scratch();
     await expect(runFixedUniverseEvaluator(pinned, universe, pinned.seedArtifact.path, pinned.seedArtifact.digest,
-      context.directory, 110000, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: pinned.seedArtifact.path }, true)).rejects.toThrow();
+      context.directory, EVALUATION_TIMEOUT, new AbortController().signal, { ...context.env, ASHLR_UNIVERSE_CANDIDATE: pinned.seedArtifact.path }, true)).rejects.toThrow();
     expect(run).toHaveBeenCalledOnce(); expect(settled).toBe(true);
-  }, 120000);
+    completeActivities(context.directory);
+  }, 960000);
 
   it('cancels after a real candidate registration without converting incomplete custody into accepted output', async () => {
     const context = scratch(); const abort = new AbortController();
     const pending = runFixedUniverseEvaluator(record, universe, record.seedArtifact.path, record.seedArtifact.digest,
-      context.directory, 110000, abort.signal, context.env, true);
+      context.directory, EVALUATION_TIMEOUT, abort.signal, context.env, true);
     let finished = false; void pending.then(() => { finished = true; }, () => { finished = true; });
     let activityRoot: string | undefined; let observedCandidate: number | undefined;
     try {

@@ -1,8 +1,9 @@
 # Hub verification-work benchmark proposal
 
 Status: design and local baseline observations, **not a frozen evaluator or an
-accepted optimization**. Audience: the engineer approving a real Hub campaign
-and the independent evaluator author. No candidate implementation is supplied.
+accepted optimization**. Audience: the engineer operating a real Hub campaign
+and the independent evaluator author. An [unapplied batching candidate](hub-verification-batch-candidate.md)
+is supplied for independent evaluation; the live preparation source is unchanged.
 
 ## Runnable prototype: limited measurement, not acceptance authority
 
@@ -12,8 +13,9 @@ The prototype introduced after `3a228e1b` comprises a
 and [real-fixture tests](../test/universe-preparation-verification.test.ts).
 The target remains unchanged. The first slice compares ordinary preparation
 check and metadata reads for one/four protected evaluator files, including
-committed bytes that differ from the working checkout. It does not yet cover
-the full manager, successor-source or end-to-end sequence below.
+committed bytes that differ from the working checkout. The newer installed
+workflow revision below extends those measurements to manager and successor
+paths; neither route emits acceptance authority or a frozen optimization score.
 
 Use Node 24 or newer on macOS for the actual-process development fixtures:
 
@@ -113,9 +115,11 @@ The full workflow tests explicitly request a 300-second session deadline. The
 first real manager run exhausted the earlier 120-second leaf ceiling; a complete
 successor sequence then measured 231 seconds, leaving insufficient headroom at 240.
 One deadline covers all calls and shutdown; it is never renewed by an operation.
-The normal 60-second session default, individual 30-second tool ceiling and
-110-second installed evaluator example below remain unchanged. A larger test
-budget is not evidence of speedup or permission to exceed a campaign allowance.
+The normal 60-second session default and individual 30-second tool ceiling remain
+unchanged. The original 110-second installed leaf allowance is historical; the
+expanded installed workload below declares its larger aggregate budget upfront.
+A larger test budget is not evidence of speedup or permission to exceed a
+campaign allowance.
 
 The corrected manager fixture produces identical counts in two fresh candidate
 processes, with exact output and before-startup/after-close snapshot equality:
@@ -152,10 +156,11 @@ npm run test:serial -- test/preparation-verification-workflow.test.ts test/prepa
 These tests create and remove private temporary fixtures, including a genuine
 two-generation command-only upstream delivery. They do not contact a model,
 change real account policy or launch a successor campaign. See the handoff for
-the actual verification outcome. The default installed harness still emits its
-original non-evaluation measurement; these expanded operations are not yet its
-frozen scoring workload. Completing the full correctness matrix, integrated
-workload budgeting and repeated numerical baseline precedes optimization.
+the actual verification outcome. The installed route now includes these
+operations as non-evaluation measurements, as specified below. It does not yet
+turn them into a frozen scoring workload. Candidate-specific correctness coverage
+and repeatable measured improvements remain necessary before accepting an
+optimization; broader OS census and arbitrary crash recovery are separate work.
 
 #### During-call candidate correctness probes
 
@@ -210,11 +215,11 @@ npm run build:preparation-builtin
 ```
 
 `npm run build` includes the same step. The reproducible output is
-`dist/core/universe/builtins/preparation/`: seven fixed code files plus
+`dist/core/universe/builtins/preparation/`: eight fixed code files plus
 `manifest.json`, with no timestamps in the manifest. Rebuilding restores the
 derived output; it does not activate accounts, start a service or modify a
 candidate. The bridge bundles trusted source at build time; runtime never builds
-or imports a candidate-supplied bridge. The registry pins all seven files, Node,
+or imports a candidate-supplied bridge. The registry pins all eight files, Node,
 the fixed Git/ls/ps/sandbox launchers, and equality with the host-imported
 activity/protocol helper bytes. A missing, stale or unsupported installation
 is refused, not replaced with an arbitrary command or source-tree fallback.
@@ -224,7 +229,7 @@ The explicit Universe manifest selection is:
 ```json
 "evaluation": {
   "builtin": "preparation-measurement-v1",
-  "timeoutMs": 110000
+  "timeoutMs": 900000
 }
 ```
 
@@ -234,6 +239,43 @@ Node 24 or newer; package-wide Node compatibility does not imply builtin
 availability. Registration binds its installed implementation digest into the
 comparator. Launch uses fixed installed paths and a closed environment, never
 caller-selected executable code, and rechecks comparator/artifact integrity.
+
+The continuation based on `948a7fa4cde76002b6029b61f588127e3f70c42e`
+installs workload revision `preparation-workflows-v1`: the original eight leaf
+checks plus manager restoration/full-bundle/check/replay, runtime-drift refusals,
+manager close, and successor check/metadata/full-bundle with delivered-source
+drift refusal. The standalone legacy command retains its original output shape
+and leaf-only workload. The expanded installed route is under real-process
+acceptance testing; this section describes its source contract, not a frozen
+performance result.
+
+The larger allowance must be declared in the evaluation and encompassing trial
+budgets before invocation. The existing maximum remains 900,000 ms; setup, all
+candidate sessions and shutdown consume that one deadline. Each workflow session
+uses only the invocation's remaining time, subject to the fixed 900,000 ms ceiling.
+The ordinary 60,000 ms session default is unchanged. Actual installed testing
+exhausted the earlier 300,000 ms successor-session allowance while the enclosing
+invocation still had time; that redundant internal cap is no longer applied. The
+aggregate activity bound is 8,192. Smaller explicit allowances are not enlarged
+automatically. New bundle bytes change the pinned comparator identity; existing
+registrations cannot silently adopt a rebuilt evaluator.
+
+`workflows` reports per-request validated broker counts for manager and successor
+sequences. `workflow_processes` includes their healthy reads, refusal reads and
+close, so it is not comparable with earlier healthy-only observations. The old
+`verification_processes` metric retains its leaf-only meaning.
+`fixture_owned_process_groups` separately counts confirmed async setup groups;
+it excludes synchronous Git and the non-detached delivery transaction, which
+remain in the outer owned controller group. None is an OS-wide process census.
+
+Trusted setup is a separate fixed bundle. It uses real manager registration and
+a command-only upstream campaign/delivery, never an account or model provider.
+Exact build-time runner interception adds the original deadline, cancellation,
+durable activity and confirmed group settlement to its detached worker/evaluator
+launches. Swallowed setup failures cannot yield an accepted measurement. The
+candidate never supplies fixture code, expected values or setup callbacks.
+Full reports compare every field under an empty private home, after setup owners
+close; no signing identity is copied into candidate authority.
 
 The trusted controller launches a separately confined candidate and fixed
 asynchronous tool workers. Tools return raw stdout/stderr as bounded base64;
@@ -381,6 +423,52 @@ The existing tests' exact helper-call counts are baseline observations, not a
 requirement to preserve redundant internals; replacement implementations must
 still satisfy independent final-state and fault-injection checks.
 
+## Planned next acceptance step: closed scoring adapter
+
+**Planned, not implemented.** Turn the fixed workload into accepted evidence with
+one small installed score adapter; do not add another scheduler or framework.
+Keep `preparation-measurement-v1` diagnostic-only. Add a separate closed builtin
+selection through the existing [registry](../src/core/universe/builtin-evaluator-registry.ts)
+and [build manifest](../scripts/build-preparation-builtin.mjs), with a packaged
+baseline vector and workload version. Pin the baseline source and runtime/tool
+identities; bind the resulting installed bytes through the existing comparator.
+Do not put the final bundle's own digest inside its baseline file.
+
+1. Freeze the exact scenario/request set and three repeatable baseline runs.
+   Include the [installed workload](../scripts/evaluators/preparation-verification.mjs)
+   and the [correctness matrix](#independent-correctness-matrix), especially the
+   candidate-linked [runtime](../test/preparation-verification-runtime-drift.test.ts)
+   and [successor](../test/preparation-verification-successor-drift.test.ts)
+   during-call mutation controls. Require exact outputs, expected refusals,
+   unchanged fixture evidence and complete process settlement. Existing baseline
+   unit tests alone do not prove that a substituted candidate retains those checks.
+2. Emit the existing `{passed, score, metrics, diagnostics}`
+   [evaluation format](../src/core/universe/store.ts) only after those checks.
+   Define the scored scenario total explicitly, excluding fixture setup and
+   avoiding double-counted blob subtotals. Preserve the diagnostic leaf metric's
+   existing meaning. Require every scenario count to be no worse than its pinned
+   baseline; any correctness or settlement failure must not earn a lower score.
+3. Let the unchanged baseline pass correctness at its equal score. Use integer
+   counts, `direction: minimize` and `minImprovement: 1`; existing
+   [trial selection](../src/core/universe/store.ts) enforces strict improvement.
+   For the first local delivery, run a genuine unchanged baseline generation,
+   then the target-only candidate in the same campaign. Existing
+   [campaign delivery](../src/core/universe/campaign-delivery.ts) requires the
+   selected improvement's real parent artifact and positive delta. Do not
+   fabricate a failed baseline or weaken delivery to manufacture progress.
+4. Verify the installed route with equal-baseline acceptance, an actual reduction,
+   per-scenario regression refusal, failed-correctness rejection, pin drift and
+   parent-linked local delivery. Resolve the batching draft's documented
+   [compatibility issue](hub-verification-batch-candidate.md) before accepting it.
+
+Direct Universe manifests already support the installed builtin path. The
+[console recipe type](../src/core/resources/engineering-preparation-types.ts)
+and [preparation validator](../src/core/resources/engineering-preparation.ts)
+remain command-only: automatic prepared objectives would additionally need
+narrow support for this closed scoring builtin, not arbitrary executable
+authority. This distinction does not require a new orchestration layer or an
+additional human checkpoint for work already within the authorized scope.
+
 ## Review and commissioning gates
 
 Independent reviewer approval is required for the frozen metric, subprocess
@@ -396,8 +484,8 @@ inside the evaluator.
 The initial proposal established the scope and two selected baseline tests.
 It did not build the frozen evaluator, measure total subprocesses, optimize
 production code, run a model, commission a service or alter any real account.
-The next approval is to build and independently challenge the evaluator, then
-measure and freeze its baseline before any candidate optimization.
+The next implementation step is to independently challenge the scoring adapter,
+then measure and freeze its baseline before accepting a candidate optimization.
 
 ## Later integration observation: responsiveness is a separate acceptance dimension
 

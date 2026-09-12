@@ -75,6 +75,12 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
     jsonShape: 'UniverseCampaignComparison',
   },
   {
+    usage: 'ashlr universe preparation-measurement --input <absolute-report.json> --json',
+    description: 'Read one explicit installed preparation measurement report. Diagnostic only: reported checks are not a score or acceptance evidence; unknown totals stay unknown, blob counts are subsets, and fixture groups are separate. No store discovery, execution or provider calls.',
+    safety: 'read',
+    jsonShape: '{schemaVersion:1,kind:"preparation-measurement-summary",scope:"diagnostic-only",...PreparationMeasurementSummary}',
+  },
+  {
     usage: 'ashlr universe portfolio plan --manifest <file.json> [--root <path>] --json',
     description: 'Read explicit campaign dependencies, ordering frontier, blocker roots, structural layers and downstream impact without execution. Observation only; not worker or delivery readiness, and declared priority is unchanged.',
     safety: 'read',
@@ -524,6 +530,7 @@ export const HELP_ENTRIES: HelpEntry[] = [
   { cmd: 'universe campaign <init|status|run|resume|pause|stop>', desc: 'Register, inspect, execute or request control of bounded campaigns; run/resume can pair --deliver-branch with --deliver-base for local-only delivery.', topic: 'autonomy' },
   { cmd: 'universe campaign check <id> --root <absolute> [--json]', desc: 'Read recorded recovery evidence only; exit 0 can include held or terminal snapshots and never grants permission to resume.', topic: 'autonomy' },
   { cmd: 'universe resources check --resource-runtime <private-absolute.json> [--json]', desc: 'Check explicit local resource configuration without provider contact; validity is not authentication, quota or campaign admission.', topic: 'autonomy' },
+  { cmd: 'universe preparation-measurement --input <absolute-report.json> [--json]', desc: 'Read reported preparation checks and counts from one explicit file; diagnostic only, not a score or acceptance evidence. No store discovery, execution or provider calls.', topic: 'autonomy' },
   { cmd: 'universe campaign supervise <id> [id ...] --root <absolute> --max-duration-ms <N> [--delivery-plan <private-absolute.json>]', desc: 'Bounded foreground supervision of a fixed queue; optional plan reconciles completed local branch deliveries without rerunning workers.', topic: 'autonomy' },
   { cmd: 'universe deliver <id> --trial <elite-trial-id> --branch codex/<name>', desc: 'Explicitly write the exact current elite to a local branch; no checkout change, merge, push or deployment.', topic: 'autonomy' },
   { cmd: 'universe deliveries <id> [--root <path>] [--json]', desc: 'Read local delivery receipts; pending/degraded evidence is not completed or verified delivery.', topic: 'autonomy' },

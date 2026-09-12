@@ -10,7 +10,8 @@ import { canonical, digest } from '../src/core/universe/artifacts.js';
 vi.mock('node:fs', async importOriginal => ({ ...await importOriginal<typeof import('node:fs')>() }));
 
 const files = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs', 'preparation-verification-child.mjs',
-  'preparation-verification-controller.mjs', 'preparation-verification-protocol.mjs', 'preparation-verification-tool.mjs', 'preparation-verification.mjs'];
+  'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification-protocol.mjs',
+  'preparation-verification-tool.mjs', 'preparation-verification.mjs'];
 const hash = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');
 const roots: string[] = [];
 function fixture() {

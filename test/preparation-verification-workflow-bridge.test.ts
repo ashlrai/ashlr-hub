@@ -25,7 +25,7 @@ const repository = dirname(dirname(fileURLToPath(import.meta.url)));
 const target = join(repository, 'src/core/resources/engineering-preparation.ts');
 const candidateSlot = 'ashlr:preparation-candidate';
 const installedFiles = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs',
-  'preparation-verification-child.mjs', 'preparation-verification-controller.mjs',
+  'preparation-verification-child.mjs', 'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs',
   'preparation-verification-protocol.mjs', 'preparation-verification-tool.mjs', 'preparation-verification.mjs'];
 let root: string;
 let first: string;
@@ -101,11 +101,11 @@ describe('fixed candidate-linked workflow packaging', () => {
     expect(value && ts.isStringLiteral(value) ? value.text : undefined).toBe(workflow);
   });
 
-  it('retains the fixed seven-file contract and copies only its unchanged trusted sidecars', () => {
+  it('pins both generated graphs and copies only the fixed trusted sidecars', () => {
     expect(PREPARATION_BUILTIN_FILES).toEqual(installedFiles);
     // This authoring helper leaves copying the top-level evaluator to the full packager.
     expect(readdirSync(first).sort()).toEqual(installedFiles.filter(name => name !== 'preparation-verification.mjs').sort());
-    for (const name of installedFiles.filter(name => !['preparation-bridge.mjs', 'preparation-verification.mjs'].includes(name))) {
+    for (const name of installedFiles.filter(name => !['preparation-bridge.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification.mjs'].includes(name))) {
       expect(readFileSync(join(first, name))).toEqual(readFileSync(join(repository, 'scripts/evaluators', name)));
     }
   });
@@ -114,7 +114,25 @@ describe('fixed candidate-linked workflow packaging', () => {
     expect(readdirSync(second).sort()).toEqual(readdirSync(first).sort());
     for (const name of readdirSync(first)) expect(readFileSync(join(second, name))).toEqual(readFileSync(join(first, name)));
     const graphs = builds.filter(entry => entry.options.metafile === true).map(entry => entry.result.metafile);
-    expect(graphs).toHaveLength(2);
-    expect(graphs[1]).toEqual(graphs[0]);
+    expect(graphs).toHaveLength(4);
+    expect(graphs[2]).toEqual(graphs[0]);
+    expect(graphs[3]!.inputs).toEqual(graphs[1]!.inputs);
+    expect(Object.values(graphs[3]!.outputs)).toEqual(Object.values(graphs[1]!.outputs));
+  });
+
+  it('ships baseline fixture setup separately with owned generator and evaluator imports', () => {
+    const fixtureGraph = builds.filter(entry => entry.options.metafile === true)[1]!.result.metafile!;
+    const wrapper = 'scripts/evaluators/preparation-verification-fixture-runtime.ts';
+    const runner = 'src/core/run/verify-commands.ts';
+    expect(Object.keys(fixtureGraph.inputs)).toContain(wrapper);
+    expect(Object.keys(fixtureGraph.inputs)).toContain(runner);
+    expect(Object.keys(fixtureGraph.inputs)).toContain('src/core/resources/engineering-preparation.ts');
+    expect(Object.keys(fixtureGraph.inputs).some(file => file.startsWith('test/'))).toBe(false);
+    for (const caller of ['src/core/universe/runner.ts', 'src/core/universe/fixed-evaluator.ts']) {
+      const paths = fixtureGraph.inputs[caller]!.imports.map(row => row.path);
+      expect(paths).toContain(wrapper); expect(paths).not.toContain(runner);
+    }
+    expect(fixtureGraph.inputs[wrapper]!.imports.some(row => row.path === runner)).toBe(true);
+    expect(Object.values(fixtureGraph.outputs).flatMap(output => output.imports).every(row => isBuiltin(row.path))).toBe(true);
   });
 });

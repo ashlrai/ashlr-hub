@@ -1,4 +1,4 @@
-/** FIRST-SLICE prototype, not yet a frozen numerical benchmark.
+/** Fixed candidate-linked measurement, not yet a frozen numerical benchmark.
  * node --experimental-vm-modules --no-warnings <this> <fixed-bridge.mjs>
  * Candidate execution is a separate, OS-confined process. Expected results,
  * comparisons, fixture changes and final output remain in this controller.
@@ -12,14 +12,17 @@ import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL, URL } from 'node:url';
 import { createHash } from 'node:crypto';
 import strictAssert from 'node:assert/strict';
+import { performance } from 'node:perf_hooks';
 import { createPreparationCandidateSession } from './preparation-verification-controller.mjs';
 import { createBuiltinActivityTracker } from './preparation-verification-activity.mjs';
+import { MAX_SESSION_DURATION_MS } from './preparation-verification-protocol.mjs';
 
 // Capture the actual checks before any candidate code is evaluated.
 const assert = Object.freeze(Object.fromEntries(['ok', 'equal', 'deepEqual', 'throws'].map(key => [key, strictAssert[key].bind(strictAssert)])));
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 let failure = 'HARNESS_INITIALIZATION_FAILED';
+let checkpoint = 'initialize';
 const stop = new globalThis.AbortController();
 const onStop = () => stop.abort();
 process.on('SIGINT', onStop); process.on('SIGTERM', onStop);
@@ -30,7 +33,21 @@ const save = (file, value) => fs.writeFileSync(file, canonical(value) + '\n', { 
 function snapshot(file) {
   const stat = fs.lstatSync(file, { bigint: true });
   return { mode: String(stat.mode), ino: String(stat.ino), mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs),
-    content: stat.isDirectory() ? Object.fromEntries(fs.readdirSync(file).sort().map(name => [name, snapshot(path.join(file, name))])) : sha(fs.readFileSync(file)) };
+    content: stat.isSymbolicLink() ? { symlink: fs.readlinkSync(file) }
+      : stat.isDirectory() ? Object.fromEntries(fs.readdirSync(file).sort().map(name => [name, snapshot(path.join(file, name))])) : sha(fs.readFileSync(file)) };
+}
+// Full reports must observe an uncommissioned home just like the child. Setup
+// may have created a private signing identity; never copy that authority into it.
+function expectedInEmptyHome(base, read) {
+  const home = fs.mkdtempSync(path.join(base, 'expected-home-'));
+  const keys = ['HOME', 'USERPROFILE', 'ASHLR_HOME'];
+  const prior = keys.map(key => process.env[key]);
+  try {
+    for (const key of keys) process.env[key] = home;
+    return read();
+  } finally {
+    keys.forEach((key, index) => { if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index]; });
+  }
 }
 function git(repo, ...args) {
   // Installed invocations use the pinned native launcher. Standalone legacy
@@ -70,19 +87,25 @@ function fixture(base, count) {
   return { root, runtime, options: { recipe, workspace, resourceRuntime, projectsFile, output: path.join(root, 'bundle') } };
 }
 async function evaluate() {
-  const metrics = {}; let checks = 0; let session;
+  const metrics = {}; const workflows = []; let checks = 0; let session;
+  let workload = 'preparation-leaf-v1';
   try {
     assert.equal(process.argv.length, 3);
     const bridgePath = fileURLToPath(new URL('./preparation-bridge.mjs', import.meta.url));
     assert.equal(process.argv[2], bridgePath);
     if (process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY) activity = createBuiltinActivityTracker(process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY);
+    if (activity) workload = 'preparation-workflows-v1';
+    const deadlineAt = activity ? Date.parse(activity.owner.deadlineAt) : Infinity;
+    const monotonicDeadline = performance.now() + (deadlineAt - Date.now());
+    const remaining = () => Math.floor(Math.min(deadlineAt - Date.now(), monotonicDeadline - performance.now()));
+    function guard() { if (stop.signal.aborted || remaining() <= 0) throw new Error('MEASUREMENT_CANCELLED_OR_EXPIRED'); }
     const bridge = await import(pathToFileURL(bridgePath).href);
     const candidateRoot = process.env.ASHLR_UNIVERSE_CANDIDATE;
     assert.ok(typeof candidateRoot === 'string' && path.isAbsolute(candidateRoot) && fs.realpathSync(candidateRoot) === candidateRoot);
     failure = 'FIXTURE_SETUP_FAILED';
     const base = fs.mkdtempSync(path.join(process.env.HOME, 'verification-'));
     for (const count of [1, 4]) {
-      if (stop.signal.aborted) throw new Error('MEASUREMENT_CANCELLED');
+      guard();
       failure = 'FIXTURE_SETUP_FAILED';
       const f = fixture(base, count);
       const poolRuntime = bridge.dependencies['./pool-runtime.js'];
@@ -96,9 +119,12 @@ async function evaluate() {
       const metadata = { ...prepared }; delete metadata.commissioning; delete metadata.consoleArguments;
       const expectedMetadata = { ...metadata, disposition: 'replayed' };
       failure = 'CANDIDATE_STARTUP_FAILED';
-      const timeoutMs = activity ? Math.min(60000, Date.parse(activity.owner.deadlineAt) - Date.now()) : 60000;
+      guard();
+      const beforeStartup = snapshot(f.root);
+      const timeoutMs = activity ? Math.min(60000, remaining()) : 60000;
       session = await createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot: f.root, workRoot: base,
         timeoutMs, signal: stop.signal, activity });
+      assert.deepEqual(snapshot(f.root), beforeStartup);
       failure = 'CANDIDATE_BEHAVIOR_FAILED';
       for (const [name, options, expected] of [
         ['check', f.options, expectedPlan], ['metadata', input, expectedMetadata],
@@ -121,15 +147,102 @@ async function evaluate() {
       assert.equal((await session.call('check', { recipe: null })).error, 'candidate-threw');
       assert.deepEqual(snapshot(f.root), before); checks++;
       failure = 'CANDIDATE_SHUTDOWN_FAILED'; await session.close(); session = undefined;
+      assert.deepEqual(snapshot(f.root), before); guard();
+    }
+    // The installed workload is explicit and versioned. Legacy standalone leaf
+    // measurements retain their original operation set and numeric meaning.
+    if (activity) {
+      const { createPreparationWorkflowFixture } = await import('./preparation-verification-fixtures.mjs');
+      metrics.fixture_owned_process_groups = 0;
+      for (const kind of ['manager', 'successor']) {
+        checkpoint = `${kind}:setup`;
+        guard(); failure = 'WORKFLOW_FIXTURE_SETUP_FAILED';
+        const fixtureRoot = path.join(base, kind); fs.mkdirSync(fixtureRoot, { mode: 0o700 });
+        const setup = await createPreparationWorkflowFixture(kind, fixtureRoot, { activity, signal: stop.signal,
+          deadlineAt: new Date(deadlineAt).toISOString() });
+        const f = setup.fixture;
+        metrics.fixture_owned_process_groups += setup.measurement.processGroups;
+        guard();
+        const input = kind === 'manager' ? f.bundleInput : { ...f.options, expectedPlanDigest: f.plan.planDigest };
+        const full = expectedInEmptyHome(base, () => kind === 'manager'
+          ? bridge.baseline.readPreparedResourceEngineeringBundle(input)
+          : bridge.baseline.readResourceEngineeringSuccessorBundle(input));
+        const healthy = kind === 'manager' ? [
+          ['manager-open', f.options, { catalog: f.catalog }],
+          ['bundle', input, full], ['manager-check', f.requests[0], f.plans[0]],
+          ['manager-replay', { ...f.requests[0], expectedPlanDigest: f.plans[0].planDigest }, { ...f.prepared[0], disposition: 'replayed' }],
+        ] : [
+          ['successor-check', f.options, f.plan],
+          ['successor-metadata', input, { ...Object.fromEntries(Object.entries(f.prepared)
+            .filter(([key]) => key !== 'commissioning' && key !== 'consoleArguments')), disposition: 'replayed' }],
+          ['successor-bundle', input, full],
+        ];
+        const before = snapshot(fixtureRoot);
+        checkpoint = `${kind}:startup`;
+        guard(); failure = 'WORKFLOW_CANDIDATE_STARTUP_FAILED';
+        session = await createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot: base,
+          timeoutMs: Math.min(MAX_SESSION_DURATION_MS, remaining()), signal: stop.signal, activity });
+        assert.deepEqual(snapshot(fixtureRoot), before);
+        failure = 'WORKFLOW_CANDIDATE_BEHAVIOR_FAILED';
+        const observed = [];
+        for (const [method, args, expected] of healthy) {
+          checkpoint = `${kind}:${method}`;
+          guard(); const result = await session.call(method, args);
+          assert.equal(result.error, undefined); assert.deepEqual(result.value, expected);
+          if (method !== 'manager-close') assert.ok(result.measurement.processes > 0);
+          assert.deepEqual(snapshot(fixtureRoot), before);
+          observed.push({ method, ...result.measurement }); checks++;
+        }
+        // Mutations are trusted fixture changes and never candidate work.
+        // Keep the manager open: closure must not itself explain a refusal.
+        let refusal;
+        if (kind === 'manager') {
+          save(f.options.config.resourceRuntime, { ...f.runtime, capacityWaitMs: 1000 });
+          refusal = [['manager-check', f.requests[0]],
+            ['manager-replay', { ...f.requests[0], expectedPlanDigest: f.plans[0].planDigest }]];
+        } else {
+          assert.equal(f.git('rev-parse', '--verify', 'refs/heads/codex/upstream'), f.receipt.commit);
+          f.git('update-ref', 'refs/heads/codex/upstream', f.revision);
+          assert.equal(f.git('rev-parse', '--verify', 'refs/heads/codex/upstream'), f.revision);
+          refusal = [['successor-metadata', input]];
+        }
+        const changed = snapshot(fixtureRoot); assert.ok(canonical(changed) !== canonical(before));
+        for (const [method, args] of refusal) {
+          checkpoint = `${kind}:${method}:changed-evidence`;
+          guard(); const result = await session.call(method, args);
+          assert.equal(result.error, 'candidate-threw'); assert.equal(Object.hasOwn(result, 'value'), false);
+          assert.deepEqual(snapshot(fixtureRoot), changed);
+          observed.push({ method, ...result.measurement }); checks++;
+        }
+        if (kind === 'manager') {
+          checkpoint = 'manager:close';
+          const result = await session.call('manager-close', null);
+          assert.equal(result.error, undefined); assert.equal(result.value, null);
+          assert.deepEqual(snapshot(fixtureRoot), changed);
+          observed.push({ method: 'manager-close', ...result.measurement }); checks++;
+        }
+        const ledger = session.measurementLedger();
+        assert.deepEqual(ledger.requests, observed.map((row, index) => ({ id: index + 1, ...row })));
+        assert.equal(ledger.processes, observed.reduce((sum, row) => sum + row.processes, 0));
+        assert.equal(ledger.blobProcesses, observed.reduce((sum, row) => sum + row.blobProcesses, 0));
+        checkpoint = `${kind}:shutdown`;
+        failure = 'WORKFLOW_CANDIDATE_SHUTDOWN_FAILED'; await session.close(); session = undefined;
+        assert.deepEqual(snapshot(fixtureRoot), changed); guard();
+        workflows.push({ name: kind, ...ledger });
+      }
+      metrics.workflow_processes = workflows.reduce((sum, row) => sum + row.processes, 0);
+      metrics.workflow_blob_processes = workflows.reduce((sum, row) => sum + row.blobProcesses, 0);
     }
     metrics.correctness_checks = checks;
-    metrics.verification_processes = Object.entries(metrics).filter(([key]) => key.endsWith('_processes') && !key.endsWith('_blob_processes')).reduce((sum, [, value]) => sum + value, 0);
-    return { schemaVersion: 1, kind: 'preparation-verification-measurement', checksPassed: true, metrics, diagnostics: [] };
+    metrics.verification_processes = Object.entries(metrics).filter(([key]) => key.startsWith('files_') && key.endsWith('_processes') && !key.endsWith('_blob_processes')).reduce((sum, [, value]) => sum + value, 0);
+    return { schemaVersion: 1, kind: 'preparation-verification-measurement', ...(activity ? { workload, workflows } : {}), checksPassed: true, metrics, diagnostics: [] };
   } catch (error) {
     if (error?.code === 'CANDIDATE_CONFINEMENT_UNAVAILABLE') failure = 'CANDIDATE_CONFINEMENT_UNAVAILABLE';
     if (session) { try { await session.close(); } catch { /* A cleanup failure can never become an accepted measurement. */ } }
-    return { schemaVersion: 1, kind: 'preparation-verification-measurement', checksPassed: false,
-      metrics: { correctness_checks: checks }, diagnostics: [{ code: failure, message: 'Pinned verification prototype did not satisfy its fixed checks.' }] };
+    return { schemaVersion: 1, kind: 'preparation-verification-measurement', ...(activity ? { workload, workflows } : {}), checksPassed: false,
+      metrics: { correctness_checks: checks }, diagnostics: [{ code: failure, message: activity
+        ? `Pinned verification workload did not satisfy its fixed checks at ${checkpoint}.`
+        : 'Pinned verification prototype did not satisfy its fixed checks.' }] };
   }
 }
 const measurement = await evaluate();

@@ -4,7 +4,9 @@ import { join, isAbsolute, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
 import { exact, readMessage, publishMessage } from './preparation-verification-protocol.mjs';
 
-const LIMIT = 4096;
+// Aggregate invocation custody, including candidate and detached tool groups.
+// This is not an exhaustive native-process count or a renewed time budget.
+export const MAX_BUILTIN_ACTIVITIES = 8192;
 const HASH = /^[a-f0-9]{64}$/;
 const fail = () => { throw new Error('BUILTIN_ACTIVITY_UNAVAILABLE'); };
 function owner(value) {
@@ -31,7 +33,7 @@ function sameFile(left, right) {
     left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.nlink === right.nlink;
 }
 function names(root) {
-  const result = fs.readdirSync(root); if (result.length > LIMIT * 3 + 2) fail(); return result.sort();
+  const result = fs.readdirSync(root); if (result.length > MAX_BUILTIN_ACTIVITIES * 3 + 2) fail(); return result.sort();
 }
 
 export function initializeBuiltinActivity(root, value) {
@@ -70,7 +72,7 @@ export function createBuiltinActivityTracker(root) {
     lifecycle(kind) {
       if (kind !== 'candidate' && kind !== 'tool') invalid();
       return { prepare() {
-        guard(); if (Date.now() >= Date.parse(capturedOwner.deadlineAt) || activities.size >= LIMIT) invalid();
+        guard(); if (Date.now() >= Date.parse(capturedOwner.deadlineAt) || activities.size >= MAX_BUILTIN_ACTIVITIES) invalid();
         const id = activities.size + 1;
         const base = { schemaVersion: 1, ownerDigest: capturedDigest, id, kind };
         write(`prepared-${id}.json`, { ...base, phase: 'prepared' });
@@ -108,7 +110,7 @@ export function inspectBuiltinActivity(root, expectedOwner) {
     if (ownerDigest(read('owner.json')) !== expectedDigest) fail();
     const complete = read('complete.json');
     if (!exact(complete, ['schemaVersion', 'ownerDigest', 'count']) || complete.schemaVersion !== 1 || complete.ownerDigest !== expectedDigest ||
-        !Number.isSafeInteger(complete.count) || complete.count < 0 || complete.count > LIMIT) fail();
+        !Number.isSafeInteger(complete.count) || complete.count < 0 || complete.count > MAX_BUILTIN_ACTIVITIES) fail();
     const expectedNames = ['owner.json', 'complete.json']; const pgids = new Set();
     for (let id = 1; id <= complete.count; id++) {
       const preparedName = `prepared-${id}.json`, settledName = `settled-${id}.json`;

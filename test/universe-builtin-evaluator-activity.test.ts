@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createBuiltinActivityTracker, initializeBuiltinActivity, inspectBuiltinActivity, type BuiltinActivityOwner } from '../scripts/evaluators/preparation-verification-activity.mjs';
+import { MAX_BUILTIN_ACTIVITIES, createBuiltinActivityTracker, initializeBuiltinActivity, inspectBuiltinActivity, type BuiltinActivityOwner } from '../scripts/evaluators/preparation-verification-activity.mjs';
 
 const roots: string[] = [];
 function fixture() {
@@ -22,6 +22,38 @@ function absent(): void { vi.spyOn(process, 'kill').mockImplementation(() => { t
 afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true }); });
 
 describe('built-in evaluator durable process activity', () => {
+  it.each([4096, 8191])('allows a new activity after %i occupied slots under the fixed aggregate limit', occupied => {
+    expect(MAX_BUILTIN_ACTIVITIES).toBe(8192);
+    const f = fixture(), tracker = createBuiltinActivityTracker(f.root);
+    // Simulate occupancy only: exercising thousands of immutable publications
+    // would turn this boundary check into a quadratic filesystem workload.
+    const size = vi.spyOn(Map.prototype, 'size', 'get').mockReturnValue(occupied);
+    try { tracker.lifecycle('tool').prepare(); } finally { size.mockRestore(); }
+    const row = JSON.parse(fs.readFileSync(join(f.root, `prepared-${occupied + 1}.json`), 'utf8')) as { id: number };
+    expect(row.id).toBe(occupied + 1);
+    expect(inspectBuiltinActivity(f.root, f.owner)).toBe(false);
+  });
+  it('refuses activity 8193 before publication and preserves the poisoned refusal', () => {
+    const f = fixture(), tracker = createBuiltinActivityTracker(f.root), before = snapshot(f.root);
+    const size = vi.spyOn(Map.prototype, 'size', 'get').mockReturnValue(MAX_BUILTIN_ACTIVITIES);
+    let failure: unknown;
+    try { tracker.lifecycle('candidate').prepare(); } catch (error) { failure = error; } finally { size.mockRestore(); }
+    expect(failure).toBeInstanceOf(Error);
+    expect(snapshot(f.root)).toBe(before);
+    expect(() => tracker.lifecycle('tool').prepare()).toThrow();
+    expect(() => tracker.complete()).toThrow();
+  });
+  it.each([8192, 8193])('never accepts a forged completion count of %i without exact activity records', count => {
+    const f = fixture(), tracker = createBuiltinActivityTracker(f.root);
+    tracker.complete();
+    const path = join(f.root, 'complete.json');
+    const complete = JSON.parse(fs.readFileSync(path, 'utf8')) as Record<string, unknown>;
+    fs.writeFileSync(path, JSON.stringify({ ...complete, count }));
+    const before = snapshot(f.root);
+    expect(inspectBuiltinActivity(f.root, f.owner)).toBe(false);
+    // Neither an in-range count nor an overflow replaces settlement evidence.
+    expect(snapshot(f.root)).toBe(before);
+  });
   it('initializes once without replacing or adopting existing state', () => {
     const f = fixture(), before = snapshot(f.root);
     expect(() => initializeBuiltinActivity(f.root, f.owner)).toThrow(); expect(snapshot(f.root)).toBe(before);

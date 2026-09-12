@@ -37,8 +37,8 @@ function request(args: string[], input: string | null = null) {
 const parse = (value: unknown) => readonlyCommand(value, fixture, scratch);
 
 describe('closed read-only preparation Git broker', () => {
-  it('exports an explicit fixed five-minute upper bound', () => {
-    expect(maxSessionDuration).toBe(300000);
+  it('exports an explicit upper bound matching the fifteen-minute invocation ceiling', () => {
+    expect(maxSessionDuration).toBe(900000);
   });
 
   it.runIf(process.platform === 'darwin')('accepts the exact session cap before inspecting the bridge, without launching', async () => {
@@ -49,7 +49,7 @@ describe('closed read-only preparation Git broker', () => {
     await expect(createSession({ bridge })).rejects.toBe(marker); // unchanged default is still accepted
   });
 
-  it.each([300001, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('refuses invalid session duration %s before bridge access', async timeoutMs => {
+  it.each([900001, 0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])('refuses invalid session duration %s before bridge access', async timeoutMs => {
     let inspected = false;
     const bridge = { get runVerifySubprocessAsync() { inspected = true; throw new Error('must not inspect'); } };
     await expect(createSession({ timeoutMs, bridge })).rejects.toThrow('CANDIDATE_SESSION_FAILED');

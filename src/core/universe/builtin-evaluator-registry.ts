@@ -8,8 +8,8 @@ import { fileURLToPath } from 'node:url';
 export const PREPARATION_MEASUREMENT_BUILTIN = 'preparation-measurement-v1' as const;
 export type BuiltinEvaluatorId = typeof PREPARATION_MEASUREMENT_BUILTIN;
 const FILES = ['preparation-bridge.mjs', 'preparation-verification-activity.mjs', 'preparation-verification-child.mjs',
-  'preparation-verification-controller.mjs', 'preparation-verification-protocol.mjs', 'preparation-verification-tool.mjs',
-  'preparation-verification.mjs'] as const;
+  'preparation-verification-controller.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification-protocol.mjs',
+  'preparation-verification-tool.mjs', 'preparation-verification.mjs'] as const;
 const HASH = /^[a-f0-9]{64}$/;
 const TOOLS = ['/usr/bin/git', '/bin/ls', '/bin/ps', '/usr/bin/sandbox-exec'] as const;
 const sha = (value: string | Buffer): string => createHash('sha256').update(value).digest('hex');

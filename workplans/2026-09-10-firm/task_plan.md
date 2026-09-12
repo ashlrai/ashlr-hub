@@ -1,6 +1,66 @@
 # Executable firm: package graph
 
-## Current increment — candidate-linked during-call drift (baseline df44cf73)
+## Current increment — installed full-workflow measurement (baseline 948a7fa4)
+
+- [x] Revalidate source and map installed harness, trusted fixtures and process custody with three Explore agents.
+- [x] Integrate fixed shipped manager/successor fixture setup with owned subprocess settlement and one invocation deadline.
+- [x] Wire the real workflows through the installed candidate-linked controller with structured measurements; verify execution in the next gate.
+- [x] Verify real installed execution, candidate substitution, resource bounds and packaging; preserve non-scoring status.
+- [x] Record verified outcomes and the next self-improvement acceptance gaps.
+
+Current evidence: both full installed baselines completed all19 checks, with
+equal metrics and workflow ledgers; the repeatability test passed in1,229.983s.
+Serial session52945 finished: 226 tests across nine suites passed with zero
+skips in2,043.92s. Three parallel agents revised
+the unapplied batching artifact, reviewed its compatibility, mapped the scoring
+path and added33 passing pure artifact tests. Full lint and source/web typechecks
+pass. The batching candidate remains unapplied; its native comparison runs next.
+
+Native candidate gate executed: the actual batching patch is applied only
+in a private copy, typechecked through a virtual compiler host, and compared to
+the pinned baseline through the existing confined controller. It covers one-file
+parity, four-file exact output and the six-launch reduction target per healthy read, and
+same-child during-call runtime-drift refusal. A separate six-case Node suite
+checks real combined stdout/stderr bounds. Both files are in the real-I/O lane;
+the original nine-file selection completed before these ran. The strict target
+failed: sandboxed Git launcher cache warnings correctly trigger fallback, giving
+ten blob launches instead of eight. Preserve this rejected candidate; do not
+widen filesystem access or suppress stderr. Diagnostic compatibility regression
+and strict improvement acceptance are now separate, explicitly reported outcomes.
+
+## Parallel observability increment — read-only measurement reports
+
+- [x] Explore the current emitted schema, failure shapes and existing bounded CLI read conventions.
+- [x] Implement a pure decoder/summary and focused unit tests in new, unloaded files.
+- [x] Add a read-only CLI adapter and tests; connect the lazy route after the active evaluator gate.
+- [x] Verify complete/failed reports, unknown counters, bounded files and absence of dispatch; document the supported command.
+
+This inspector consumes explicitly supplied diagnostic JSON. It does not create
+stores, rerun benchmarks, accept scores or infer process settlement. Existing
+failure envelopes and unknown measurements must remain visible. No execution,
+registry or installed evaluator imports are needed. This supports the requested
+operator/agent observability; native acceptance remains serialized.
+
+Parent combined verification: 94 pure/mocked-I/O inspector tests passed with
+zero skips. Independent review found no additional reader/accounting defects;
+the public CLI route and both help tables are now wired. All ten real-filesystem
+cases and48 CLI/help cases passed. The installed copied-runtime
+post-settlement drift test passed in609.789s and cancellation passed in3.560s;
+the complete installed gate passed226 cases. Source/web typechecks, full build,
+lint and docs pass; the package contains the inspector and eight fixed assets.
+The final diagnostic compatibility rerun passed215 tests across nine suites,
+zero skips,74.49s (session19441). It explicitly reports improvementAccepted:false;
+the optimization was not adopted. Next: resolve launcher-aware benchmarking and
+complete independent scoring/delivery acceptance before commissioning autonomous
+self-improvement. Broad north-star completion remains open.
+
+The previous committed increment passed178 tests and produced a local commit.
+Current scope targets the actual installed runtime, not additional test-only
+coverage. Setup workers/evaluators must be owned before source-delivery fixtures
+can ship. Existing personal-account policy, providers, services and publication
+state are not changed. No GitHub Actions; native tests remain serialized.
+
+## Previous increment — candidate-linked during-call drift (baseline df44cf73)
 
 - [x] Revalidate clean source and use three Explore agents to map semantic injection boundaries.
 - [x] Build a test-only call-through interceptor; preserve real tool results and distinguish harness faults.
