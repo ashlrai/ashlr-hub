@@ -169,13 +169,40 @@ describe('closed installed built-in evaluator registry', () => {
     expect(() => inspectBuiltinEvaluatorBundle(link)).toThrow();
   });
   it('detects an earlier file changing during a later file read', () => {
-    const f = fixture(), original = fs.readFileSync; let count = 0;
-    vi.spyOn(fs, 'readFileSync').mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
-      const result = Reflect.apply(original, fs, args);
-      if (++count === 3) fs.appendFileSync(join(f.directory, files[0]!), '// concurrent change');
-      return result;
-    }) as typeof fs.readFileSync);
+    const f = fixture(), original = fs.readSync;
+    const later = fs.lstatSync(join(f.directory, files[1]!), { bigint: true });
+    let mutated = false;
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
+      const count = Reflect.apply(original, fs, args), stat = fs.fstatSync(args[0], { bigint: true });
+      if (!mutated && stat.dev === later.dev && stat.ino === later.ino && count > 0) {
+        mutated = true; fs.appendFileSync(join(f.directory, files[0]!), '// concurrent change');
+      }
+      return count;
+    }) as typeof fs.readSync);
     expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow();
+    expect(mutated).toBe(true);
+  });
+  it('bounds descriptor reads to captured size plus one and refuses growth without consuming it', () => {
+    const f = fixture(), original = fs.readSync;
+    const selected = fs.lstatSync(join(f.directory, 'manifest.json'), { bigint: true });
+    const bound = Number(selected.size) + 1;
+    const reads: Array<{ capacity: number; offset: number; length: number }> = [];
+    let selectedFd: number | undefined;
+    const close = vi.spyOn(fs, 'closeSync');
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
+      const stat = fs.fstatSync(args[0], { bigint: true });
+      if (stat.dev !== selected.dev || stat.ino !== selected.ino) return Reflect.apply(original, fs, args);
+      selectedFd = args[0];
+      const buffer = args[1] as Buffer;
+      reads.push({ capacity: buffer.length, offset: args[2], length: args[3] });
+      // Model an arbitrarily growing descriptor while forcing short reads.
+      const count = Math.min(17, args[3]); buffer.fill(0x61, args[2], args[2] + count); return count;
+    }) as typeof fs.readSync);
+    expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow('Installed built-in evaluator unavailable or changed');
+    expect(reads.length).toBeGreaterThan(1);
+    expect(reads.every(row => row.capacity === bound && row.offset + row.length === bound)).toBe(true);
+    expect(reads.reduce((sum, row) => sum + Math.min(17, row.length), 0)).toBe(bound);
+    expect(close).toHaveBeenCalledWith(selectedFd);
   });
   it.each(['preparation-verification-activity.mjs', 'preparation-verification-native.mjs'])('refuses a self-consistent bundle whose %s differs from the loaded host helper', name => {
     const f = fixture(), text = '// different helper\n';
@@ -185,15 +212,15 @@ describe('closed installed built-in evaluator registry', () => {
     expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow();
   });
   it.each(['preparation-verification-activity.mjs', 'preparation-verification-native.mjs'])('refuses hot-updated %s instead of adopting different code in the running process', name => {
-    const f = fixture(), original = fs.readFileSync;
+    const f = fixture(), original = fs.readSync;
     const helper = fs.lstatSync(new URL(`../scripts/evaluators/${name}`, import.meta.url), { bigint: true });
-    vi.spyOn(fs, 'readFileSync').mockImplementation(((...args: Parameters<typeof fs.readFileSync>) => {
-      const result = Reflect.apply(original, fs, args);
-      if (typeof args[0] === 'number' && fs.fstatSync(args[0], { bigint: true }).ino === helper.ino && Buffer.isBuffer(result)) {
-        const changed = Buffer.from(result); changed[0] = changed[0]! ^ 1; return changed;
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: [number, NodeJS.ArrayBufferView, number, number, number | null]) => {
+      const count = Reflect.apply(original, fs, args), stat = fs.fstatSync(args[0], { bigint: true });
+      if (stat.dev === helper.dev && stat.ino === helper.ino && args[4] === 0 && count > 0) {
+        const buffer = args[1] as Buffer; buffer[0] = buffer[0]! ^ 1;
       }
-      return result;
-    }) as typeof fs.readFileSync);
+      return count;
+    }) as typeof fs.readSync);
     expect(() => inspectBuiltinEvaluatorBundle(f.directory)).toThrow();
   });
   it('never resolves an arbitrary identifier or executable', () => {

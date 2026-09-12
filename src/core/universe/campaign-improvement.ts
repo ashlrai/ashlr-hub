@@ -1,4 +1,4 @@
-/** Recorded initial-repair proof only; never evaluates, reads artifacts or changes selection. */
+/** Recorded seed/initial-repair proofs; never evaluate, read artifacts or change selection. */
 import { canonical, digest } from './artifacts.js';
 import { scheduledVariants } from './store.js';
 import type { UniverseCampaignStep, UniverseCampaignSummary, UniverseRun, UniverseSummary, UniverseTrial } from './types.js';
@@ -16,6 +16,13 @@ export type VerifiedInitialCampaignRepair = VerifiedFailedTrialRepair | {
   baselineArtifactDigest: string;
   delta: number;
 };
+export interface VerifiedInitialCampaignSeedImprovement {
+  kind: 'passed-seed-evaluation';
+  seedIntentDigest: string;
+  seedResultDigest: string;
+  baselineArtifactDigest: string;
+  delta: number;
+}
 const HASH = /^[a-f0-9]{64}$/;
 const REJECTED_BY_EVALUATOR = 'Fixed evaluator rejected the candidate';
 const finite = (value: number | null): value is number => typeof value === 'number' && Number.isFinite(value);
@@ -34,6 +41,22 @@ function timestamp(value: string | null): number | null {
  */
 export function verifiedInitialCampaignRepair(universe: UniverseSummary, campaign: UniverseCampaignSummary,
   trial: UniverseTrial, seedDigest: string): VerifiedInitialCampaignRepair | null {
+  const proof = verifiedInitialCampaignComparison(universe, campaign, trial, seedDigest, 'repair');
+  return proof && !('kind' in proof && proof.kind === 'passed-seed-evaluation') ? proof : null;
+}
+
+/** Genuine improvement over a passed measured seed, separate from archive
+ * parentage and failed-seed repair. Explicit measureSeed is required; callers
+ * still own delivery authority and must freshly verify durable/byte custody. */
+export function verifiedInitialCampaignSeedImprovement(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string): VerifiedInitialCampaignSeedImprovement | null {
+  const proof = verifiedInitialCampaignComparison(universe, campaign, trial, seedDigest, 'passed-seed');
+  return proof && 'kind' in proof && proof.kind === 'passed-seed-evaluation' ? proof : null;
+}
+
+function verifiedInitialCampaignComparison(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string, mode: 'repair' | 'passed-seed'):
+  VerifiedInitialCampaignRepair | VerifiedInitialCampaignSeedImprovement | null {
   const generationSucceeded = (value: UniverseTrial): boolean => {
     const variant = universe.manifest.variants.find(row => row.id === value.variantId);
     return !!variant && Boolean(variant.generation) === Boolean(value.generation) &&
@@ -91,14 +114,16 @@ export function verifiedInitialCampaignRepair(universe: UniverseSummary, campaig
         }) && result.schemaVersion === 1 && result.intentDigest === intentDigest && result.status === 'measured' &&
         result.processGroupSettlement === 'group-exit-confirmed' && result.reason === null &&
         Number.isFinite(result.durationMs) && result.durationMs >= 0 && result.durationMs <= 86_400_000 &&
-        result.measurement?.passed === false && finite(result.measurement.score)) {
+        result.measurement?.passed === (mode === 'passed-seed') && finite(result.measurement.score)) {
       const delta = (universe.manifest.metric.direction === 'maximize' ? 1 : -1) * (trial.score - result.measurement.score);
       if (Number.isFinite(delta) && delta > 0 && delta >= universe.manifest.metric.minImprovement) {
-        return { kind: 'seed-evaluation', seedIntentDigest: intentDigest, seedResultDigest: digest(canonical(result)),
-          baselineArtifactDigest: seedDigest, delta };
+        const proof = { seedIntentDigest: intentDigest, seedResultDigest: digest(canonical(result)), baselineArtifactDigest: seedDigest, delta };
+        return mode === 'passed-seed' ? { kind: 'passed-seed-evaluation', ...proof } : { kind: 'seed-evaluation', ...proof };
       }
     }
   }
+  // A failed trial is never substituted for the explicitly measured passed seed.
+  if (mode === 'passed-seed') return null;
   const candidates: Array<VerifiedFailedTrialRepair & { ordinal: number; generation: number }> = [];
   for (const run of universe.runs) {
     const step = linkedStep(run);

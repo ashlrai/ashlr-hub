@@ -50,7 +50,10 @@ export function validWorkspaceEngineeringEnrollment(v: unknown): v is Enrollment
     if (!object(c) || !exact(c, ['id', 'dependsOn', 'objective', 'branch', 'budget', 'campaignBudget']) || !id(c.id) || known.has(c.id) ||
       !text(c.objective, 8192) || !text(c.branch, 1024) || !c.branch.startsWith('codex/') ||
       !Array.isArray(c.dependsOn) || c.dependsOn.length >= 64 || !c.dependsOn.every(id) || new Set(c.dependsOn).size !== c.dependsOn.length ||
-      !object(c.budget) || !exact(c.budget, ['maxTrials', 'maxDurationMs', 'trialTimeoutMs', 'maxParallel']) ||
+      !object(c.budget) || !exact(c.budget, ['maxTrials', 'maxDurationMs', 'trialTimeoutMs', 'maxParallel',
+        ...(Object.hasOwn(c.budget, 'workerTimeoutMs') ? ['workerTimeoutMs'] : [])]) ||
+      Object.hasOwn(c.budget, 'workerTimeoutMs') && (!integer(c.budget.workerTimeoutMs, 900_000) ||
+        !integer(c.budget.trialTimeoutMs, 2_700_000) || Number(c.budget.workerTimeoutMs) > Number(c.budget.trialTimeoutMs)) ||
       !Object.values(c.budget).every((n) => integer(n)) || !object(c.campaignBudget) ||
       !exact(c.campaignBudget, ['maxGenerations', 'maxDurationMs', 'maxModelRequests', 'maxStagnantGenerations', 'maxReportedTokens']) ||
       !integer(c.campaignBudget.maxGenerations, 128) || !integer(c.campaignBudget.maxDurationMs, 86_400_000) ||

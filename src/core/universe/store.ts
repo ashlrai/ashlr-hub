@@ -49,7 +49,7 @@ function command(value: unknown): value is string[] {
 function builtinEvaluation(value: Record<string, unknown>): boolean {
   return Reflect.ownKeys(value).length === 2 && ['builtin', 'timeoutMs'].every(key =>
     Object.hasOwn(Object.getOwnPropertyDescriptor(value, key) ?? {}, 'value')) &&
-    value.builtin === 'preparation-measurement-v1';
+    (value.builtin === 'preparation-measurement-v1' || value.builtin === 'preparation-process-score-v1');
 }
 
 export function validateUniverseManifest(value: unknown): UniverseManifest {
@@ -60,9 +60,10 @@ export function validateUniverseManifest(value: unknown): UniverseManifest {
       !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.seed.revision) ||
       !object(value.metric) || !exact(value.metric, ['name', 'direction', 'minImprovement']) || !text(value.metric.name, 120) ||
       !['maximize', 'minimize'].includes(String(value.metric.direction)) || !finite(value.metric.minImprovement) || value.metric.minImprovement < 0 ||
-      !object(value.budget) || !exact(value.budget, ['maxTrials', 'maxDurationMs', 'trialTimeoutMs', 'maxParallel']) ||
+      !object(value.budget) || !exact(value.budget, ['maxTrials', 'maxDurationMs', 'trialTimeoutMs', 'maxParallel', 'workerTimeoutMs']) ||
       !integer(value.budget.maxTrials, 1, 64) || !integer(value.budget.maxParallel, 1, 8) ||
-      !integer(value.budget.maxDurationMs, 1, 86_400_000) || !integer(value.budget.trialTimeoutMs, 1, 900_000) ||
+      !integer(value.budget.maxDurationMs, 1, 86_400_000) ||
+      !integer(value.budget.trialTimeoutMs, 1, Object.hasOwn(value.budget, 'workerTimeoutMs') ? 2_700_000 : 900_000) ||
       !object(value.evaluation) || !(exact(value.evaluation, ['command', 'timeoutMs']) && command(value.evaluation.command) ||
         builtinEvaluation(value.evaluation)) ||
       // The fixed diagnostic spans several separately bounded native sessions.
@@ -70,6 +71,19 @@ export function validateUniverseManifest(value: unknown): UniverseManifest {
       !integer(value.evaluation.timeoutMs, 1, builtinEvaluation(value.evaluation) ? 1_800_000 : 900_000) ||
       !Array.isArray(value.variants) || value.variants.length < 1 || value.variants.length > 64) {
     throw new Error('Invalid Universe manifest: expected bounded version 1 identity, objective, seed, metric, budget, evaluator, and variants');
+  }
+  if (Object.hasOwn(value.budget, 'workerTimeoutMs')) {
+    const descriptor = Object.getOwnPropertyDescriptor(value.budget, 'workerTimeoutMs');
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value') || value.evaluation.builtin !== 'preparation-process-score-v1' ||
+        !integer(descriptor.value, 1, 900_000) || descriptor.value > Number(value.budget.trialTimeoutMs) ||
+        Number(value.evaluation.timeoutMs) > Number(value.budget.trialTimeoutMs)) {
+      throw new Error('Invalid Universe split trial budget: only the closed scored evaluator permits bounded worker and evaluator phases');
+    }
+  }
+  if (value.evaluation.builtin === 'preparation-process-score-v1' &&
+      (value.metric.name !== 'preparation_processes' || value.metric.direction !== 'minimize' ||
+        !integer(value.metric.minImprovement, 1, Number.MAX_SAFE_INTEGER))) {
+    throw new Error('Invalid preparation score metric: expected preparation_processes, minimize, and a positive integer improvement');
   }
   const ids = new Set<string>();
   for (const variant of value.variants) {

@@ -13,7 +13,7 @@ export interface BuiltinTrialIntent {
   startedAt: string;
   manifestDigest: string;
   comparatorDigest: string;
-  evaluatorId: 'preparation-measurement-v1';
+  evaluatorId: 'preparation-measurement-v1' | 'preparation-process-score-v1';
   evaluatorDigest: string;
   artifactPath: string;
   artifactDigest: string;
@@ -48,7 +48,7 @@ function codec(directory: string): ImmutablePrivateRecordCodec<BuiltinTrialCusto
       if (intent.schemaVersion !== 1 || !matches(intent.universeId, /^[a-z0-9][a-z0-9_-]{0,63}$/) ||
         !matches(intent.runId, UUID) || !matches(intent.trialId, UUID) || !timestamp(intent.startedAt) ||
         !['manifestDigest', 'comparatorDigest', 'evaluatorDigest', 'artifactDigest'].every(key => matches(intent[key], HASH)) ||
-        intent.evaluatorId !== 'preparation-measurement-v1' || join(directory, '..', intent.universeId) !== directory ||
+        (intent.evaluatorId !== 'preparation-measurement-v1' && intent.evaluatorId !== 'preparation-process-score-v1') || join(directory, '..', intent.universeId) !== directory ||
         intent.artifactPath !== join(directory, 'artifacts', intent.runId, intent.trialId) ||
         intent.scratchPath !== join(directory, 'scratch', intent.runId, intent.trialId) ||
         typeof row.kind !== 'string' || !['intent', 'settlement'].includes(row.kind) || row.id !== `${intent.trialId}.${row.kind}`) return null;
