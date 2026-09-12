@@ -243,3 +243,70 @@ reconciliation and bounded commissioning, retaining the account ceiling and
 personal General reservation. That authorization is still pending; the global
 stop remains active. No recovery, fresh provider observation, account migration,
 service cutover or activation occurred in this audit.
+
+## Authorized account commissioning — September 12, 2026
+
+This continuation supersedes the pending authorization above. Starting source:
+`525ae8020d3b1a9eaf932c75fd82603ee5d2fbd5`, integration branch `auto/p00`,
+same worktree, initially clean. Runtime assets were
+not rebuilt. Three parallel agent roles supplied implementation, independent
+review, and focused enrollment/policy regression verification.
+
+Implemented a one-time, explicit operator legacy-collector quarantine driver.
+It requires a healthy active global stop, exact marker SHA256, private canonical
+paths, empty same-filesystem evidence destination and exclusive collector lock.
+It preserves raw marker bytes and ledger inventory, uses durable same-filesystem
+rename, and refuses automatic retry or rollback after partial failure. An
+incomplete result requires inspection before any further commissioning; the
+global stop does not block native metadata collectors. This is not automatic
+recovery of an unknown historical owner.
+
+Verified and applied locally:
+
+- Recovery driver: 27 tests passed, 1.86 seconds; syntax, strict test-import
+  TypeScript, scoped ESLint and real-IO lane classification passed.
+- Existing evolution, Spark and scope-access regressions: 190 tests across
+  eight files passed, 16.72 seconds. These are isolated tests, not provider proof.
+- Legacy quarantine exited 0. Private evidence directory:
+  `/Users/masonwyatt/.codex/artifacts/ashlr-legacy-collector-recovery.NowYZy`.
+  Receipt SHA256:
+  `e59b8b7fc8d44bd0662ab7ca4bd3b9b073cb67ed586d46665ee97367c941fc60`.
+  Pool-state and shared-evidence bytes were unchanged immediately after recovery.
+- Evolution plan
+  `949b76cb2d163352d4a5940956580a842447a6fdeb027053933bff83dbb4d1c4`
+  applied to the existing ledger, retaining all three completed attempt receipts
+  and two configuration identities. Spark was added; no conversation was invented.
+- Personal General exclusion was durably installed at revision 1 and read back
+  before the shared personal-account pause was removed at revision 2. Spark is
+  not excluded. Allocation remains 75%, revision 3, with original timestamp.
+
+Use the reviewed `pool.json`, `bindings.json` and `quota-config.json` under
+`/Users/masonwyatt/.codex/artifacts/ashlr-spark-enrollment.ndJdDt/proposal`
+for the upgraded ledger. Evolution intentionally did not overwrite original
+configuration inputs. Older inputs/binaries must not be used to reset or bypass
+the upgraded ledger. The proposal manifest still describes preparation-time
+state; live enrollment/policy evidence is the ledger and its evolution journal.
+
+### Native quota collection remains unresolved
+
+Both bounded one-shot quota calls are terminal: handles 93780 and 49757. The
+first left a v4 marker with a registered process-group reservation. Independent
+read-only checks confirmed the recorded owner and group absent; the existing
+same-boot recorded-group recovery then reconciled it without provider contact.
+One final 45-second-budget collection ended with
+`Resource quota refresh cleanup unconfirmed`. No further provider retry occurred.
+
+The final retained activity has sequence 13 and a registered group. Source
+analysis shows sequential alias dispatch, so this is not evidence of concurrent
+General/Spark calls. It proves missing durable settlement, not an authentication
+or quota refusal and not successful observations. Current owner/group absence
+does not retroactively prove absence at the earlier settlement instant.
+Keep the current v4 marker/activity for diagnosis; do not use the v1 quarantine
+driver for it. Supported recovery must independently recheck its recorded
+identity, boot, owner and group custody.
+
+All account history and the 75%/General policies remained intact after both
+collection attempts. Global KILL remains active; no model task, service cutover,
+public deployment, npm publication, GitHub Actions or remote push occurred.
+Fresh quota health, Claude admission quota, genuine calibration and unattended
+engineering acceptance are not established by this increment.

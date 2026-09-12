@@ -262,3 +262,47 @@ reconciliation/quarantine command. Source must not claim automatic recovery for
 this record, and live history must not be deleted or replaced to bypass it.
 The audit is new evidence that changes the next action; no prior native test
 handle was restarted, no runtime was rebuilt and no account/service was changed.
+
+## Authorized continuation: history-preserving account commissioning
+
+The user approved the previously requested controlled legacy collector recovery
+and bounded commissioning. This supersedes the pending-approval status above.
+Preserve the 75% ceiling, all historical attempts, and personal General Codex
+reservation; personal Spark is permitted. Keep the global stop active through
+ledger recovery, enrollment and quota metadata checks.
+
+- [x] Fresh read-only ownership census and independent existing-API audit.
+- [ ] Implement and independently test an explicit operator-authorized legacy
+  marker quarantine; never label unknown historical ownership as proven dead.
+- [ ] Execute recovery with exact marker digest, durable retained evidence and
+  byte-for-byte verification of unrelated ledger history.
+- [ ] Apply digest-pinned existing-ledger Spark evolution; reserve General before
+  lifting the shared personal-account pause. Verify unchanged 75% allocation.
+- [ ] Perform bounded quota metadata collection and report actual readiness.
+- [ ] Record residual genuine calibration and operational acceptance gates.
+
+No runtime evaluator assets are changed by the recovery driver. No GitHub Actions,
+remote publication, replacement ledger or unrestricted fleet launch is planned.
+
+### Commissioning result
+
+- [x] Driver independently reviewed; 27 isolated recovery tests passed, plus
+  strict test-import types, syntax, scoped lint and lane classification.
+- [x] Legacy marker quarantined successfully with exact history/shared-evidence
+  byte hashes unchanged and durable private receipt. No unknown-owner-dead claim.
+- [x] Digest-pinned Spark evolution applied; all three completed attempts and
+  both configuration identities retained. General exclusion revision 1 was
+  verified before account-wide pause changed to revision 2. Ceiling remains
+  75%, revision 3; no task was dispatched.
+- [x] Bounded native quota collection attempted and actual failure recorded.
+  First collection left registered-group custody; after independently confirming
+  owner/group absence, supported v4 recovery completed without provider contact.
+  One final bounded collection also failed with cleanup unconfirmed. No further
+  provider retries. The new v4 marker/activity remain for diagnosis.
+- [ ] Fresh trustworthy quota health, collector cleanup reliability, genuine
+  calibration and unattended engineering acceptance remain unfinished.
+
+Global KILL remains active. Enrollment/policy completion is not fleet activation
+or full production acceptance. Both quota-call handles are terminal. The original
+input files remain unchanged by evolution; consumers must use the retained
+reviewed proposal configuration for the upgraded ledger, not the old pool files.

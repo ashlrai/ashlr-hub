@@ -297,3 +297,33 @@ clearing it cannot release other work. No account/provider mutation, credential
 read, marker removal, new ledger, collector refresh, service restart, KILL override,
 installation or remote publication occurred. Failed path/glob discovery reads
 were corrected with named source-file discovery; no user data was changed.
+
+## Approved commissioning: implementation and preflight
+
+The user approved controlled recovery and bounded commissioning. Independent
+review established that global KILL need not be cleared for pool policy changes
+or native quota metadata collection; keep it engaged during these operations.
+No console durable state exists, so evolution uses the canonical Hub workspace
+and preserves absent console state rather than inventing conversations.
+
+The retained Spark proposal's four file hashes match its manifest. Proposed pool
+digest is e7f622e0aaada69cc295cd225297d9c3cd18d79dc60095f00bb66faadf9c05dd.
+The first read-only evolve check returns uncertain-work because the selected
+legacy pending marker is present. All three stored attempts are completed;
+the refusal is not evidence of an interrupted engineering attempt.
+
+The dedicated operator driver preserves the original marker by same-filesystem
+quarantine with a raw copy, ledger inventory, intent and receipt. It does not
+assert the unknown historical owner is dead. Any incomplete result, including
+lock-release failure after rename, requires manual inspection and no further
+commissioning; global KILL does not itself block native metadata collectors.
+
+Independent review added cancellation yields and moved the final marker identity
+check after inventory immediately before rename. Live custody is independently
+censused; this driver is not a defense against arbitrary same-user filesystem
+tampering or a generic automatic legacy recovery mechanism.
+
+Independent regression: 190 tests passed across eight evolution, Spark preparation
+and quota-scope access files in 16.72 seconds. These are isolated local fixtures,
+not real account quota or end-to-end operational acceptance. A guessed shared-
+evidence source filename was corrected with rg discovery; no state changed.
