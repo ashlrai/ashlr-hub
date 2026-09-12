@@ -215,3 +215,23 @@ Full-project packaged compiler remains separately proven by2 real cases. Runtime
 current/stale native controls passed33865/28417ms; source controls remain live.
 Fresh compiled policy read still reports healthy/active global stop. No actual
 calibration driver, provider, model, or resident-fleet operation has started.
+
+## Native gate complete; combined recipe integration
+
+Native15864 is TERMINAL exit0: all5cases passed, zero skipped,1261.59seconds.
+Exact evidence is in rebuilt-bundle-qualification.json; preserved4937844f... bytes
+remain under ashlr-preparation-runtime-pin.HJhKaA (full path in that record).
+The old handle must not be polled or restarted. Source control cases passed
+190846/65330ms. Parent then cherry-picked600c099c asf0606832 without conflicts;
+the combined local build and regression gate are now underway. The merged target
+59a46145... and new bundle require fresh native acceptance before calibration.
+
+Combined f0606832 build passed. Parent397tests/12files/zero skipped59.29s;
+full-project compiler2/2passed25.93s (baseline6121ms, TS2322 refusal6035ms), confirmed
+process absence and unchanged identities. Docs/lane check passed344real-IO/705unit.
+Current diagnostic aggregate3a711953b85b5c3b51435743a5ddb0a9fcabf871a22f2087e53a7265d16c72b5
+is undergoing fresh five-case qualification on live parent handle10612.
+Agent explore_next_execution owns live strict rebased candidate comparison31973.
+Both are test-only, not genuine capture or accepted delivery. Keep runtime source,
+artifact patch, tests under those runs and dist frozen. Do not restart live handles.
+Primary auto/p00 remains unchanged until the combined source acceptance is ready.
