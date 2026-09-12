@@ -1,7 +1,7 @@
 /** Prototype packaging + real OS-confined measurement. No model transport,
  * provider, live account edits, or optimization of the production target. */
 import { execFile, execFileSync } from 'node:child_process';
-import { chmodSync, copyFileSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -46,7 +46,9 @@ beforeAll(async () => {
   if (!confinementSupported) return;
   root = realpathSync(mkdtempSync(join(tmpdir(), 'preparation-verification-test-'))); repo = join(root, 'seed'); universe = join(root, 'universe');
   mkdirSync(repo, { mode: 0o700 }); mkdirSync(join(repo, dirname(target)), { recursive: true, mode: 0o700 });
-  writeFileSync(join(repo, target), source); copyFileSync(join(repository, 'scripts/evaluators', evaluator), join(repo, evaluator));
+  writeFileSync(join(repo, target), source);
+  // The shared builder embeds the source-only workload into the fixed entry.
+  // Copying the raw entry would leave an unshipped workload import in the seed.
   await buildPreparationVerificationBridge(repository, join(repo, bridge));
   git('init', '-q', '--template=', '--initial-branch=main'); git('add', '.');
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'pinned prototype evaluator');

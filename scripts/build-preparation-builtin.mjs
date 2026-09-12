@@ -23,6 +23,25 @@ export const PREPARATION_BUILTIN_FILES = Object.freeze([
 ]);
 const sourceRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
+/** Embed shared execution in the existing entry asset; no tenth runtime file. */
+export async function buildPreparationVerificationEntry(repository, outfile) {
+  const root = realpathSync(repository);
+  const entry = join(root, 'scripts/evaluators/preparation-verification.mjs');
+  const workload = join(root, 'scripts/evaluators/preparation-workload.mjs');
+  const sidecars = ['preparation-verification-controller.mjs', 'preparation-verification-activity.mjs',
+    'preparation-verification-protocol.mjs', 'preparation-verification-native.mjs', 'preparation-verification-fixtures.mjs'];
+  const external = sidecars.map(name => `./${name}`);
+  const result = await build({ absWorkingDir: root, entryPoints: [entry], bundle: true,
+    platform: 'node', target: 'node24', format: 'esm', outfile, metafile: true,
+    external, logLevel: 'silent' });
+  const inputs = Object.keys(result.metafile.inputs).map(file => resolve(root, file));
+  if (inputs.length !== 2 || !inputs.includes(entry) || !inputs.includes(workload) ||
+      Object.values(result.metafile.outputs).flatMap(output => output.imports)
+        .some(item => !isBuiltin(item.path) && !external.includes(item.path))) {
+    throw new Error('Trusted workload has an unsupported dependency');
+  }
+}
+
 /** Shared with private test packaging. repository is trusted authoring source,
  * not an argument accepted by the installed evaluator or the build CLI. */
 export async function buildPreparationVerificationBridge(repository, outfile) {
@@ -102,13 +121,13 @@ export async function buildPreparationVerificationBridge(repository, outfile) {
     if (['preparation-bridge.mjs', 'preparation-verification.mjs', 'preparation-verification-fixtures.mjs'].includes(file)) continue;
     copyFileSync(join(root, 'scripts/evaluators', file), join(dirname(outfile), file));
   }
+  await buildPreparationVerificationEntry(root, join(dirname(outfile), 'preparation-verification.mjs'));
 }
 
 /** A fixed content manifest: no timestamps, absolute build paths or self-hash. */
 export async function buildPreparationBuiltin() {
   const output = join(sourceRoot, 'dist/core/universe/builtins/preparation');
   await buildPreparationVerificationBridge(sourceRoot, join(output, 'preparation-bridge.mjs'));
-  copyFileSync(join(sourceRoot, 'scripts/evaluators/preparation-verification.mjs'), join(output, 'preparation-verification.mjs'));
   const manifest = { schemaVersion: 1, id: PREPARATION_BUILTIN_ID, files: PREPARATION_BUILTIN_FILES.map(name => ({
     name, digest: createHash('sha256').update(readFileSync(join(output, name))).digest('hex'),
   })) };

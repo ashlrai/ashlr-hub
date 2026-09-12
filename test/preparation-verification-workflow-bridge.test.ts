@@ -101,10 +101,9 @@ describe('fixed candidate-linked workflow packaging', () => {
     expect(value && ts.isStringLiteral(value) ? value.text : undefined).toBe(workflow);
   });
 
-  it('pins both generated graphs and copies only the fixed trusted sidecars', () => {
+  it('pins all three generated graphs and copies only the fixed trusted sidecars', () => {
     expect(PREPARATION_BUILTIN_FILES).toEqual(installedFiles);
-    // This authoring helper leaves copying the top-level evaluator to the full packager.
-    expect(readdirSync(first).sort()).toEqual(installedFiles.filter(name => name !== 'preparation-verification.mjs').sort());
+    expect(readdirSync(first).sort()).toEqual(installedFiles.slice().sort());
     for (const name of installedFiles.filter(name => !['preparation-bridge.mjs', 'preparation-verification-fixtures.mjs', 'preparation-verification.mjs'].includes(name))) {
       expect(readFileSync(join(first, name))).toEqual(readFileSync(join(repository, 'scripts/evaluators', name)));
     }
@@ -114,10 +113,27 @@ describe('fixed candidate-linked workflow packaging', () => {
     expect(readdirSync(second).sort()).toEqual(readdirSync(first).sort());
     for (const name of readdirSync(first)) expect(readFileSync(join(second, name))).toEqual(readFileSync(join(first, name)));
     const graphs = builds.filter(entry => entry.options.metafile === true).map(entry => entry.result.metafile);
-    expect(graphs).toHaveLength(4);
-    expect(graphs[2]).toEqual(graphs[0]);
-    expect(graphs[3]!.inputs).toEqual(graphs[1]!.inputs);
-    expect(Object.values(graphs[3]!.outputs)).toEqual(Object.values(graphs[1]!.outputs));
+    expect(graphs).toHaveLength(6);
+    expect(graphs[3]).toEqual(graphs[0]);
+    for (const index of [1, 2]) {
+      expect(graphs[index + 3]!.inputs).toEqual(graphs[index]!.inputs);
+      expect(Object.values(graphs[index + 3]!.outputs)).toEqual(Object.values(graphs[index]!.outputs));
+    }
+  });
+
+  it('embeds the source-only workload into the installed entry without a tenth file', () => {
+    const entryGraph = builds.filter(entry => entry.options.metafile === true)[2]!.result.metafile!;
+    expect(Object.keys(entryGraph.inputs).sort()).toEqual([
+      'scripts/evaluators/preparation-verification.mjs', 'scripts/evaluators/preparation-workload.mjs',
+    ]);
+    const sidecars = new Set(['./preparation-verification-controller.mjs', './preparation-verification-activity.mjs',
+      './preparation-verification-protocol.mjs', './preparation-verification-native.mjs', './preparation-verification-fixtures.mjs']);
+    const external = Object.values(entryGraph.outputs).flatMap(output => output.imports);
+    expect(external.every(row => row.external && (isBuiltin(row.path) || sidecars.has(row.path)))).toBe(true);
+    const entry = readFileSync(join(first, 'preparation-verification.mjs'), 'utf8');
+    expect(entry).not.toEqual(readFileSync(join(repository, 'scripts/evaluators/preparation-verification.mjs'), 'utf8'));
+    expect(imports(entry).some(row => row.path === './preparation-workload.mjs')).toBe(false);
+    expect(readdirSync(first)).not.toContain('preparation-workload.mjs');
   });
 
   it('ships baseline fixture setup separately with owned generator and evaluator imports', () => {
