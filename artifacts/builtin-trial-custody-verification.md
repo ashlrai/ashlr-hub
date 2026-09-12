@@ -68,6 +68,17 @@ fixed throughout native testing; corrections affected only test observation and
 its expectations of preexisting best-effort cleanup. There were no provider
 calls, quota changes, GitHub Actions, resident activation or public deployment.
 
+## Integration verification
+
+Implementation commit `9d09e2a01cc066a9c7f355fd8c1f99c27cd56d4e`
+was integrated onto `auto/p00` as
+`c78bbea917ec54fadc424679135014670afe5b25`. The primary rebuild passed.
+The complete focused gate then passed **204 tests, ten files, zero skips,
+25.74s** on that integration source. Documentation, lane classification, driver
+lint and diff checks also passed. No native test process remains active.
+Subsequent handoff changes affect documentation and the explicit diagnostic
+driver, not the runtime or tests verified by this gate.
+
 ## Separate native baseline attempt
 
 The retained full-success capture driver stopped at preflight after 67ms:

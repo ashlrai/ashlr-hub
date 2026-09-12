@@ -1,6 +1,27 @@
 # Executable firm: package graph
 
-## Current handoff — recovery and durable diagnostic capture
+## Current handoff — ordinary builtin trial custody
+
+Integrated code revision `c78bbea917ec54fadc424679135014670afe5b25` adds
+immutable per-trial evaluator custody, retained uncertain scratch, same-Universe
+restart and same-lease fences, and cancellation/drain before promotion. The
+isolated source passed 185 regression tests plus 19 serialized native tests;
+source/web types, strict new-test types, lint, docs, lane checks and build passed.
+The primary rebuild and combined 204-test / ten-file gate then passed in 25.74s,
+with zero skips. All native test handles are terminal.
+See [custody verification](../../artifacts/builtin-trial-custody-verification.md)
+and the [current workplan](../2026-09-12-frozen-improvement/task_plan.md).
+
+The retained full-success capture was withheld at preflight by the real active
+global KILL switch. It was not cleared or bypassed. No full-success report,
+frozen scoring builtin, accepted improvement, provider activation or production
+publication is claimed. A separate native test proved that a lost evaluator
+return holds a new attempt; confirmed failures permit the next generation.
+Native testing also exposed preexisting best-effort scratch reclamation limits
+around protected fixture directories. A storage lifecycle remains necessary for
+long-running operation. The overall goal remains active, not complete.
+
+## Previous handoff — recovery and durable diagnostic capture
 
 Integrated code revision `91b5d1272a0e684e26916f38a458e532b8a9642d` includes:
 
