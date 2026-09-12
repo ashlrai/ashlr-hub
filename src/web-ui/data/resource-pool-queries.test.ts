@@ -158,6 +158,37 @@ describe('explicit engineering supervision capability', () => {
   });
 });
 
+describe('passive collector record inspection boundary', () => {
+  const base = { scope: 'local-record-inspection', sampledAt: NOW, state: 'pending', markerVersion: 1,
+    reasonCode: 'legacy-owner-evidence-missing', recoveryAttempted: false };
+  async function inspect(value: unknown) {
+    const { snapshot } = resourceFixture(); read.mockResolvedValue({ ...snapshot, collectorInspection: value });
+    return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
+  }
+  it.each([undefined, base,
+    ...[2, 3, 4].map(markerVersion => ({ ...base, markerVersion, reasonCode: 'recovery-not-evaluated' })),
+    { ...base, state: 'absent', markerVersion: null, reasonCode: 'no-pending-record' },
+    { ...base, state: 'unavailable', markerVersion: null, reasonCode: 'pending-evidence-unavailable' },
+  ])('accepts only passive consistent records and legacy absence %#', async value => {
+    await expect(inspect(value)).resolves.toMatchObject({ collectorInspection: value }); expect(write).not.toHaveBeenCalled();
+  });
+  it.each([null, {}, { ...base, scope: 'collector-running' }, { ...base, recoveryAttempted: true },
+    { ...base, sampledAt: '2026-02-30T12:00:00.000Z' }, { ...base, sampledAt: 'PRIVATE' },
+    { ...base, state: 'running' }, { ...base, markerVersion: '1' }, { ...base, markerVersion: 5 },
+    { ...base, markerVersion: null }, { ...base, markerVersion: 4 }, { ...base, reasonCode: 'recovery-not-evaluated' },
+    { ...base, state: 'absent' }, { ...base, state: 'unavailable' }, { ...base, ownerToken: 'PRIVATE' },
+    { ...base, reasonCode: 'PRIVATE_REASON' },
+  ])('rejects malformed or contradictory records with a fixed redacted error %#', async value => {
+    await expect(inspect(value)).rejects.toThrow('The resource response did not match the selected pool.');
+    expect(write).not.toHaveBeenCalled();
+  });
+  it('does not invoke a supplied inspection getter', async () => {
+    const getter = vi.fn(() => 'PRIVATE'); const value = { ...base };
+    Object.defineProperty(value, 'reasonCode', { enumerable: true, get: getter });
+    await expect(inspect(value)).rejects.toThrow('selected pool'); expect(getter).not.toHaveBeenCalled();
+  });
+});
+
 describe('configured metadata collector lifecycle', () => {
   async function lifecycle(value: unknown) {
     const { snapshot } = resourceFixture(); read.mockResolvedValue({ ...snapshot, metadataCollector: value });

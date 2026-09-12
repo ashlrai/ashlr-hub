@@ -43,3 +43,31 @@ pending marker exists and is independently sufficient for refusal. No apply ran.
   checks, lane classifier and documentation link checker passed.
 - TypeScript emission in this isolated worktree passed; compiled CLI help passed.
   No full web/native-bundle build was performed here; primary dist stayed fixed.
+
+## Passive collector inspection follow-through
+
+Existing acquisition fallback was not an inspection-only operation: when valid
+it can start native clients. The new collectorInspection projection is separate
+from metadataCollector and exists only in no-execution, no-native-config snapshots.
+It reuses the private marker codec without lease acquisition or recovery. Valid
+v2+ records say recovery-not-evaluated; v1 explains missing original custody;
+absence never establishes readiness. Strict web decoding rejects contradictory
+states/versions and private-valued or extra fields. Historical UI uses existing
+polling rather than another timer or request.
+
+Existing recovery cannot reconstruct v1 original host/process identity from a
+timestamp or missing lock. Cold exploration proposed a possible pre-reboot
+custody witness plus later verified same-host different-boot reconciliation;
+that is not implemented, not authorized as a machine reboot, and not permission
+to clear current records. Actual global/account controls remain independent.
+
+Visual acceptance used a temporary loopback, read-only server with actual saved
+account configuration and no native metadata flags/control token. The real legacy
+diagnosis, saved75%ceiling and whole-personal pause rendered correctly. Screenshot
+artifacts are private and not committed. The server and temporary tab were closed
+after testing stale-state behavior. This was a preview, not a fleet activation.
+
+The frontend-design skill kept the addition in the existing theme and typography;
+the React review kept existing polling, direct imports, semantic headings and
+no new effects/controls. Engineering-documentation guidance separates passive
+inspection from collector startup and configuration from provider readiness.

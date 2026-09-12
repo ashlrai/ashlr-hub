@@ -13,6 +13,18 @@ function absolutePath(value: unknown): value is string {
 }
 
 const QUOTA_STATES = new Set(['pending', 'refreshing', 'observed', 'failed', 'timed-out', 'cancelled', 'uncertain', 'expired', 'closed']);
+/** Passive local evidence, deliberately separate from an owning collector's lifecycle. */
+export function validResourceCollectorInspection(value: unknown): value is NonNullable<ResourceConsoleSnapshot['collectorInspection']> {
+  if (!record(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const keys = ['scope', 'sampledAt', 'state', 'markerVersion', 'reasonCode', 'recoveryAttempted'];
+  if (Reflect.ownKeys(value).length !== keys.length || !Reflect.ownKeys(value).every(key => typeof key === 'string' &&
+    keys.includes(key) && 'value' in Object.getOwnPropertyDescriptor(value, key)!) ||
+    value.scope !== 'local-record-inspection' || !timestamp(value.sampledAt) || value.recoveryAttempted !== false) return false;
+  return value.state === 'absent' && value.markerVersion === null && value.reasonCode === 'no-pending-record' ||
+    value.state === 'pending' && (value.markerVersion === 1 && value.reasonCode === 'legacy-owner-evidence-missing' ||
+      [2, 3, 4].some(version => version === value.markerVersion) && value.reasonCode === 'recovery-not-evaluated') ||
+    value.state === 'unavailable' && value.markerVersion === null && value.reasonCode === 'pending-evidence-unavailable';
+}
 function validMetadataCollector(value: unknown): boolean {
   if (value === undefined) return true;
   if (!record(value) || !exact(value, ['state', 'reasonCode', 'sampledAt', ...(Object.hasOwn(value, 'recovery') ? ['recovery'] : [])])) return false;
@@ -213,6 +225,7 @@ export function resourceConsoleSnapshotQuery(poolId: string): QueryDef<ResourceC
         !validNativeDiagnostics(snapshot.activeAttempts, snapshot.pool.workers) ||
         !validNativeDiagnostics(snapshot.recentAttempts, snapshot.pool.workers) ||
         !validQuotaRefresh(snapshot.quotaRefresh, snapshot.pool.workers) || !validConnections(snapshot.connections) || !validMetadataCollector(snapshot.metadataCollector) ||
+        snapshot.collectorInspection !== undefined && !validResourceCollectorInspection(snapshot.collectorInspection) ||
         snapshot.allocation !== undefined && !validAllocation(snapshot.allocation) ||
         snapshot.workerAccess !== undefined && (!validWorkerAccess(snapshot.workerAccess) ||
           snapshot.workerAccess.pausedWorkerIds.some((id) => !snapshot.pool.workers.some((worker) => worker.id === id))) ||

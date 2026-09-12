@@ -141,6 +141,15 @@ export interface ResourceCollectorRecoveryDiagnosis {
   reasonCode: typeof RESOURCE_COLLECTOR_RECOVERY_REASONS[number];
   markerVersion: 1 | 2 | 3 | 4 | null;
 }
+/** Sampled local marker facts only; no ownership, process or recovery assessment. */
+export interface ResourceCollectorInspection {
+  scope: 'local-record-inspection';
+  sampledAt: string;
+  state: 'absent' | 'pending' | 'unavailable';
+  markerVersion: 1 | 2 | 3 | 4 | null;
+  reasonCode: 'no-pending-record' | 'legacy-owner-evidence-missing' | 'recovery-not-evaluated' | 'pending-evidence-unavailable';
+  recoveryAttempted: false;
+}
 /** Versions supported by each diagnosis; prevents contradictory recovery advice. */
 export const RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS = {
   'legacy-owner-evidence-missing': [1],
@@ -159,6 +168,8 @@ export const RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS = {
 
 export interface ResourceConsoleSnapshot extends ResourceConsoleEvidence {
   supervisor: ResourceSupervisorSnapshot | null;
+  /** Independent read-only local record inspection, not collector activity or quota. */
+  collectorInspection?: ResourceCollectorInspection;
   /** Local collector lifecycle, not a provider health or quota observation. */
   metadataCollector?: {
     state: 'running' | 'blocked';

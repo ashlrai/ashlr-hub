@@ -9,7 +9,8 @@ import { validateResourceQuotaScopeExclusions, excludedResourceQuotaScopeWorkerI
 import { validateResourceBindings } from '../resources/worker.js';
 import { createResourcePoolSupervisor, ResourceSupervisorError } from '../resources/pool-supervisor.js';
 import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, type ResourceQuotaRefresher } from '../resources/quota-refresh.js';
-import { acquireResourceQuotaRefreshLease, ResourceQuotaRefreshLeaseError, type ResourceQuotaRefreshLease } from '../resources/quota-refresh-lease.js';
+import { acquireResourceQuotaRefreshLease, inspectResourceQuotaRefreshPending, ResourceQuotaRefreshLeaseError,
+  type ResourceQuotaRefreshLease } from '../resources/quota-refresh-lease.js';
 import { publishSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
 import { expandResourceQuotaDenials } from '../resources/quota-scope.js';
 import { validateResourceConsoleProjects } from '../resources/console-projects.js';
@@ -520,6 +521,11 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             evidence = withholdResourceConsoleWorkers(evidence, [], expandResourceQuotaDenials(pool, bindings, quotaUnavailable));
           }
           sendSnapshot(res, { ...evidence, supervisor: supervisor?.snapshot() ?? null,
+            // Passive local evidence is not an acquisition attempt or provider
+            // health. Keep configured/executing collector lifecycle unchanged.
+            ...(!options.execute && !quotaConfigFile && !connectionsConfigFile ? {
+              collectorInspection: inspectResourceQuotaRefreshPending(root),
+            } : {}),
             ...(metadataCollector ? { metadataCollector: collectorLifecycle() } : {}),
             ...(quotaRefresher ? { quotaRefresh: quotaRefresher.snapshot() } : {}),
             ...(connectionMonitor ? { connections: connectionMonitor.snapshot() } : {}),

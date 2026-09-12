@@ -1771,6 +1771,31 @@ reload identifies previously loaded text as an older read, and changing console
 instances clears session-local output. The map itself never starts workers,
 probes accounts or changes scheduling policy.
 
+### Inspect collector records without starting collection
+
+A plain read-only console, with neither `--quota-config` nor
+`--connections-config`, includes **Collector record inspection** in the resource
+view. Authenticated snapshot reads inspect the existing private pending record;
+they do not acquire a collector lease, attempt recovery, query boot/process
+identity or contact providers. No execution or recovery control is added.
+
+This is a separate `collectorInspection` projection, not `metadataCollector`
+startup lifecycle. The panel distinguishes:
+
+- No pending record observed: not proof of readiness or fresh quota.
+- Legacy ownership evidence missing: preserve the v1 record; a restart or reboot
+  alone cannot reconstruct missing original ownership evidence.
+- Pending record observed: the versioned marker exists, but recovery has not
+  been evaluated. It is not declared unrecoverable.
+- Inspection unavailable: unsafe, malformed, missing-root or changing evidence
+  cannot establish presence or contents.
+
+The sample timestamp is local inspection time, never a provider capture time.
+After polling fails, the original sample remains explicitly historical. Account
+pauses, General/Spark reservations and usage ceilings remain unchanged. Configured
+native collection and execution consoles retain their separate lifecycle path;
+adding either metadata configuration is still an explicit opt-in to native work.
+
 ### Keep Codex quota evidence fresh in the foreground
 
 Create a private `0600` quota configuration using the exact `poolDigest` and

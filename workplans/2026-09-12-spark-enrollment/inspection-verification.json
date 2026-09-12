@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-12",
+  "baseSource": "af5d02bd8e5f58996ac174bce78504d622e7f9df",
+  "branch": "codex/spark-enrollment-preparation",
+  "backendGate": {"handle":8159,"files":4,"passed":104,"skipped":0,"durationSeconds":9.38,"exitCode":0},
+  "webGate": {"handle":84746,"files":4,"passed":421,"skipped":0,"durationSeconds":3.85,"exitCode":0},
+  "build": {"handle":61573,"scope":"isolated TypeScript and web","modules":257,"exitCode":0},
+  "actualInspection": {"scope":"local-record-inspection","sampledAt":"2026-09-12T10:28:21.022Z","state":"pending","markerVersion":1,"reasonCode":"legacy-owner-evidence-missing","recoveryAttempted":false},
+  "visualPreview": {
+    "handle":96314,"port":63764,"state":"closed","exitCode":0,
+    "readOnly":true,"controlTokenAvailable":false,
+    "mobileViewport":{"width":390,"height":844,"documentWidth":390,"panelWidth":358},
+    "viewportReset":true,"createdTabClosed":true,
+    "historicalOriginalSample":"2026-09-12T10:31:51Z",
+    "desktopImage":"/Users/masonwyatt/.codex/artifacts/ashlr-inspection-preview.gTXKD8/desktop.png",
+    "mobileImage":"/Users/masonwyatt/.codex/artifacts/ashlr-inspection-preview.gTXKD8/mobile.png",
+    "historicalImage":"/Users/masonwyatt/.codex/artifacts/ashlr-inspection-preview.gTXKD8/historical.png"
+  },
+  "collectorStarted":false,"recoveryAttempted":false,"quotaRefreshed":false,
+  "accountPolicyChanged":false,"engineeringActivated":false,"deployed":false,
+  "primaryNativeGate":{"handle":73003,"state":"running","firstTestProgressObserved":true}
+}

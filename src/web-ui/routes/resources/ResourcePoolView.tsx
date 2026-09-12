@@ -12,6 +12,7 @@ import { CapacityBoard, resourceNumber, resourceTime, WorkerInspector } from './
 import { TaskComposer } from './TaskComposer.js';
 import { PerformancePanel } from './PerformancePanel.js';
 import { QuotaRefreshPanel } from './QuotaRefreshPanel.js';
+import { CollectorInspectionPanel } from './CollectorInspectionPanel.js';
 import { AccountConnections } from './AccountConnections.js';
 import { AllocationControl } from './AllocationControl.js';
 import { WorkerAccessControl } from './WorkerAccessControl.js';
@@ -308,6 +309,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
         <AccountConnections connections={snapshot.connections} historical={historical} ceilingPercent={snapshot.allocation?.ceilingPercent} />
         <QuotaRefreshPanel refresh={snapshot.quotaRefresh} collector={snapshot.metadataCollector} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
           historical={historical} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
+        <CollectorInspectionPanel inspection={snapshot.collectorInspection} historical={historical} />
         <CapacityBoard snapshot={snapshot} selectedWorkerId={selection?.kind === 'worker' ? selection.id : null}
           historical={historical} onSelect={(id) => inspectSelection({ kind: 'worker', id })} />
       </section>
