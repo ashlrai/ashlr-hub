@@ -4,6 +4,7 @@ import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStore
 import { defaultUniverseRoot, inspectPrivateDirectory } from './artifacts.js';
 import { universePath } from './store.js';
 import { assertCampaignSeedEvaluatorsSettled } from './campaign-store.js';
+import { assertPreparationMeasurementsSettled } from './preparation-measurement-capture-store.js';
 import type { UniverseStoreOptions } from './types.js';
 
 /** Acquire experiment ownership; distinguish verified live contention from unavailable ownership. */
@@ -14,7 +15,7 @@ export function acquireUniverseExecution(id: string, options: UniverseStoreOptio
   const outcome = acquireLocalStoreLockWithOutcome(join(directory, '.execution.lock'), 0,
     { anchorPath: directory, exactPrivateStorage: true });
   if (outcome.state === 'acquired') {
-    try { assertCampaignSeedEvaluatorsSettled(id, { root }); }
+    try { assertCampaignSeedEvaluatorsSettled(id, { root }); assertPreparationMeasurementsSettled(directory); }
     catch (error) { releaseLocalStoreLock(outcome.lock); throw error; }
   }
   return outcome;
