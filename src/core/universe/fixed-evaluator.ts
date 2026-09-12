@@ -1,10 +1,14 @@
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
+import { performance } from 'node:perf_hooks';
 import { buildSandboxLauncher, escapeSbplPath } from '../sandbox/confine.js';
 import { runVerifySubprocessAsync, type VerifySubprocessResult } from '../run/verify-commands.js';
 import { artifactDigest, digest } from './artifacts.js';
 import { assertComparatorUnchanged, type ManifestRecord } from './store.js';
+import { resolveBuiltinEvaluator } from './builtin-evaluator-registry.js';
+import { initializeBuiltinActivity, inspectBuiltinActivity, type BuiltinActivityOwner } from '../../../scripts/evaluators/preparation-verification-activity.mjs';
 
 /** Shared bounded evaluator confinement for ordinary trials and integration candidates. */
 export function confinedUniverseArgv(command: string[], writable: string, scratch: string, readable: string[], root: string): string[] {
@@ -36,8 +40,42 @@ export function confinedUniverseArgv(command: string[], writable: string, scratc
 export async function runFixedUniverseEvaluator(record: ManifestRecord, root: string, artifactPath: string,
   expectedArtifactDigest: string, scratch: string, timeoutMs: number, signal: AbortSignal, env: NodeJS.ProcessEnv,
   requireProcessGroupExit = false, beforeStart?: () => void): Promise<VerifySubprocessResult> {
+  const deadline = performance.now() + timeoutMs;
   assertComparatorUnchanged(record);
   if (artifactDigest(artifactPath) !== expectedArtifactDigest) throw new Error('Scored artifact changed before evaluation');
+  if (record.manifest.evaluation.builtin !== undefined) {
+    const installed = resolveBuiltinEvaluator(record.manifest.evaluation.builtin);
+    if (installed.digest !== record.evaluationBuiltinDigest || JSON.stringify(installed.command) !== JSON.stringify(record.evaluationCommand)) {
+      throw new Error('Installed built-in evaluator changed');
+    }
+    const remaining = Math.floor(deadline - performance.now());
+    if (remaining <= 0 || signal.aborted) return { stdout: '', stderr: '', exitCode: -1, signal: null,
+      timedOut: remaining <= 0, cancelled: signal.aborted, processGroupSettlement: 'not-started' };
+    // Only the closed installed implementation runs outside an evaluator
+    // sandbox. Neither seed command bytes nor supplied environment select code.
+    const activityRoot = mkdtempSync(join(scratch, 'builtin-activity-'));
+    const owner: BuiltinActivityOwner = { schemaVersion: 1, invocationId: randomBytes(32).toString('hex'),
+      implementationDigest: installed.digest, deadlineAt: new Date(Date.now() + remaining).toISOString() };
+    initializeBuiltinActivity(activityRoot, owner);
+    const builtinEnv = { PATH: `/usr/bin:/bin:${dirname(process.execPath)}`, HOME: scratch, TMPDIR: scratch,
+      USERPROFILE: scratch, ASHLR_HOME: scratch, ASHLR_UNIVERSE_CANDIDATE: artifactPath,
+      ASHLR_UNIVERSE_BUILTIN_ACTIVITY: activityRoot, LANG: 'C', LC_ALL: 'C' };
+    beforeStart?.();
+    const dispatchRemaining = Math.floor(deadline - performance.now());
+    if (dispatchRemaining <= 0 || signal.aborted) return { stdout: '', stderr: '', exitCode: -1, signal: null,
+      timedOut: dispatchRemaining <= 0, cancelled: signal.aborted, processGroupSettlement: 'not-started' };
+    const result = await runVerifySubprocessAsync(installed.command, { cwd: scratch, env: builtinEnv,
+      timeoutMs: dispatchRemaining, signal, requireProcessGroupExit: true });
+    // A controller's group alone says nothing about its separately owned
+    // candidate/tool groups. Keep all activity evidence on any uncertainty.
+    if (!['not-started', 'group-exit-confirmed'].includes(result.processGroupSettlement ?? '')) return result;
+    if (result.processGroupSettlement !== 'not-started' && !inspectBuiltinActivity(activityRoot, owner)) {
+      return { ...result, error: 'Built-in evaluator process settlement unconfirmed', processGroupSettlement: 'unconfirmed' };
+    }
+    assertComparatorUnchanged(record);
+    if (artifactDigest(artifactPath) !== expectedArtifactDigest) throw new Error('Scored artifact changed during evaluation');
+    return result;
+  }
   const evaluator = record.evaluationCommand;
   if (digest(readFileSync(evaluator[0]!)) !== record.evaluationExecutableDigest) throw new Error('Evaluator executable changed');
   const argv = confinedUniverseArgv(evaluator, scratch, scratch, [record.seedArtifact.path, artifactPath], root);

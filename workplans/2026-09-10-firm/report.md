@@ -1,6 +1,83 @@
 # Verified local handoff
 
-## Current continuation: independently owned candidate measurement
+## Current continuation: installed evaluator with aggregate process custody
+
+Baseline `f00b4f01c44ab9b44e9f7e7c0eaeda377310d3f8`, initially clean branch
+`auto/p00` at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.
+Three agents delivered registry/activity contracts, reproducible packaging,
+actual integration tests and independent reviews. Parent integrated dispatch,
+asynchronous readonly tool transport and verification. Entire resume found no
+checkpoint. The original working checkout was preserved.
+
+The closed `preparation-measurement-v1` evaluator runs shipped controller code
+outside the ordinary evaluator sandbox, while candidate code remains a separate
+OS-confined child. Manifests cannot supply host module paths or mix command and
+builtin modes. All seven installed code files, Node and fixed native launchers
+are comparator-bound; host-imported activity/protocol helpers must match loaded
+and installed bytes. Legacy command evaluator serialization and confinement are
+preserved. Resource preparation recipes remain explicitly command-only.
+
+Candidate and readonly tool launches publish invocation-bound prepare/spawn/settle
+records. Aggregate settlement requires complete records and independently absent
+process groups. Missing or uncertain custody is not a successful result, and
+the controller never adopts or kills a stale group based on a recorded PID.
+Fixed asynchronous tool workers preserve binary Git output through bounded base64.
+Inner shutdown gets a bounded one-second grace before escalation, below the
+outer controller's unchanged five-second default. Existing infrastructure-error
+semantics for lost termination ownership are preserved.
+
+Independent review found and fixed a final-dispatch deadline edge: if the last
+guard exhausts the original budget or aborts, no evaluator is spawned. Review
+also corrected the recipe type to stop advertising unsupported builtin recipes.
+The native Git launcher permits its legitimate Apple system hard links; bundle
+files still require one link. Native launcher hashes do not pin all transitive
+runtime dependencies.
+
+Expanded regression initially passed 219/220 checks; the sole failure exposed
+Apple Git's out-of-scratch xcrun-cache writes during legacy fixture setup.
+Propagating TMPDIR did not fix it. Standalone fixtures retain their original PATH
+Git, while validated installed invocations and candidate tools use pinned native
+launchers. The exact legacy refusal test then passed without changing assertions
+or confinement. This preserves diagnostic compatibility, not a nested execution
+success claim.
+
+Initial integration gate: **87 passing tests across four files, zero skips,
+131.09s**, on macOS/Node 24.18.0. Two real default-registry measurements agree;
+installed drift is refused before launch and after real process settlement;
+active cancellation follows independently observed candidate startup. Registry,
+activity and shutdown-grace negative controls pass. Additional legacy, isolation,
+binary transport and packaging checks are now complete.
+
+Final coverage is **433 distinct tests across 18 files, zero skips**. The
+combined run passed 431 tests in 449.51s. Two harness issues were diagnosed,
+not ignored: direct Vitest lacked the npm launch context required by one
+package test, and a seed fixture used separate start/deadline clock reads that
+could cross a millisecond boundary. The latter now derives its deadline from
+the exact start instant; production guards are unchanged. Both full affected
+suites then passed **93/93 in 106.12s** via `npm run test:serial`. The other
+sixteen suites passed in the combined run. Real binary Git round-trip,
+candidate isolation, legacy evaluator and release byte-coverage cases pass.
+
+The full local build passes, including release dependency inventory generation.
+Source/web typechecks, strict compilation of changed tests, documentation checks,
+real-IO membership and lint pass (zero errors, 107 existing warnings). The initial
+packaging failure revealed that new host helpers needed exact declaration and
+release-manifest coverage; all three are now byte-covered as an optional closed
+set, including missing/changed/link/directory-race refusal. Older packages with no
+helpers retain their schema. Independent review found no broader script-path
+admission. Compiled registry resolution verifies seven code files and four fixed
+native tools. An actual local npm pack dry-run includes all eleven required
+bundle/manifest/host-helper files; none are missing. Final committed build
+identity is checked at handoff.
+
+This remains deliberately non-evaluation output: `parseEvaluation` rejects it.
+The full manager/successor correctness matrix, frozen competitive reward,
+independent complete process census, controller-crash recovery and an accepted
+useful Hub optimization remain unfinished. No providers, account policies, real
+KILL marker, services, remote repositories, npm publication or production
+deployment were changed by this increment.
+
+## Previous continuation: independently owned candidate measurement
 
 Baseline `96e9a6e82402b337532fcbb1a934a3cca52a0fb7`, initially clean branch
 `auto/p00` at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.

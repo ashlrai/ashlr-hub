@@ -1,0 +1,137 @@
+/** Trusted built-in invocation custody. Never imported from a candidate tree. */
+import * as fs from 'node:fs';
+import { join, isAbsolute, resolve } from 'node:path';
+import { createHash } from 'node:crypto';
+import { exact, readMessage, publishMessage } from './preparation-verification-protocol.mjs';
+
+const LIMIT = 4096;
+const HASH = /^[a-f0-9]{64}$/;
+const fail = () => { throw new Error('BUILTIN_ACTIVITY_UNAVAILABLE'); };
+function owner(value) {
+  if (!exact(value, ['schemaVersion', 'invocationId', 'implementationDigest', 'deadlineAt']) || value.schemaVersion !== 1 ||
+      typeof value.invocationId !== 'string' || !HASH.test(value.invocationId) ||
+      typeof value.implementationDigest !== 'string' || !HASH.test(value.implementationDigest) ||
+      typeof value.deadlineAt !== 'string' || !Number.isFinite(Date.parse(value.deadlineAt)) ||
+      new Date(value.deadlineAt).toISOString() !== value.deadlineAt) fail();
+  return { schemaVersion: 1, invocationId: value.invocationId, implementationDigest: value.implementationDigest, deadlineAt: value.deadlineAt };
+}
+function ownerDigest(value) {
+  return createHash('sha256').update(JSON.stringify(owner(value))).digest('hex');
+}
+function rootIdentity(root) {
+  if (typeof root !== 'string' || !isAbsolute(root) || resolve(root) !== root || fs.realpathSync(root) !== root) fail();
+  const stat = fs.lstatSync(root, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink() || (stat.mode & 0o777n) !== 0o700n ||
+      typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid())) fail();
+  return stat;
+}
+function sameRoot(left, right) { return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode && left.uid === right.uid; }
+function sameFile(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mode === right.mode &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.nlink === right.nlink;
+}
+function names(root) {
+  const result = fs.readdirSync(root); if (result.length > LIMIT * 3 + 2) fail(); return result.sort();
+}
+
+export function initializeBuiltinActivity(root, value) {
+  const identity = rootIdentity(root), captured = owner(value);
+  if (names(root).length !== 0) fail();
+  publishMessage(join(root, 'owner.json'), captured);
+  if (!sameRoot(identity, rootIdentity(root)) || JSON.stringify(names(root)) !== JSON.stringify(['owner.json']) ||
+      ownerDigest(readMessage(join(root, 'owner.json'))) !== ownerDigest(captured)) fail();
+}
+
+export function createBuiltinActivityTracker(root) {
+  const identity = rootIdentity(root);
+  const ownerStat = fs.lstatSync(join(root, 'owner.json'), { bigint: true });
+  const capturedOwner = owner(readMessage(join(root, 'owner.json')));
+  const capturedDigest = ownerDigest(capturedOwner);
+  if (!sameFile(ownerStat, fs.lstatSync(join(root, 'owner.json'), { bigint: true })) ||
+      JSON.stringify(names(root)) !== JSON.stringify(['owner.json'])) fail();
+  let poisoned = false, completed = false;
+  const activities = new Map();
+  const expectedNames = new Set(['owner.json']);
+  function invalid() { poisoned = true; fail(); }
+  function guard() {
+    try {
+      if (poisoned || completed || !sameRoot(identity, rootIdentity(root)) ||
+          !sameFile(ownerStat, fs.lstatSync(join(root, 'owner.json'), { bigint: true })) ||
+          ownerDigest(readMessage(join(root, 'owner.json'))) !== capturedDigest ||
+          JSON.stringify(names(root)) !== JSON.stringify([...expectedNames].sort())) invalid();
+    } catch { invalid(); }
+  }
+  function write(name, value) {
+    try { guard(); publishMessage(join(root, name), value); expectedNames.add(name); guard(); }
+    catch { invalid(); }
+  }
+  return {
+    owner: Object.freeze({ ...capturedOwner }),
+    lifecycle(kind) {
+      if (kind !== 'candidate' && kind !== 'tool') invalid();
+      return { prepare() {
+        guard(); if (Date.now() >= Date.parse(capturedOwner.deadlineAt) || activities.size >= LIMIT) invalid();
+        const id = activities.size + 1;
+        const base = { schemaVersion: 1, ownerDigest: capturedDigest, id, kind };
+        write(`prepared-${id}.json`, { ...base, phase: 'prepared' });
+        activities.set(id, 'prepared');
+        return {
+          spawned(pgid) {
+            if (activities.get(id) !== 'prepared' || !Number.isSafeInteger(pgid) || pgid < 1 || pgid > 2 ** 31 - 1) invalid();
+            write(`spawned-${id}.json`, { ...base, phase: 'spawned', pgid }); activities.set(id, 'spawned');
+          },
+          settled(settlement) {
+            if (!(settlement === 'not-started' && activities.get(id) === 'prepared' ||
+                settlement === 'group-exit-confirmed' && activities.get(id) === 'spawned')) invalid();
+            write(`settled-${id}.json`, { ...base, phase: 'settled', settlement }); activities.set(id, 'settled');
+          },
+        };
+      } };
+    },
+    complete() {
+      guard(); if ([...activities.values()].some(state => state !== 'settled')) invalid();
+      write('complete.json', { schemaVersion: 1, ownerDigest: capturedDigest, count: activities.size }); completed = true;
+    },
+  };
+}
+
+/** Read-only proof. Signal 0 checks absence; this function never kills or repairs. */
+export function inspectBuiltinActivity(root, expectedOwner) {
+  try {
+    const identity = rootIdentity(root), expectedDigest = ownerDigest(expectedOwner);
+    const captured = new Map();
+    function read(name) {
+      const path = join(root, name), before = fs.lstatSync(path, { bigint: true }), value = readMessage(path);
+      if (value === null || !sameFile(before, fs.lstatSync(path, { bigint: true }))) fail();
+      captured.set(path, before); return value;
+    }
+    if (ownerDigest(read('owner.json')) !== expectedDigest) fail();
+    const complete = read('complete.json');
+    if (!exact(complete, ['schemaVersion', 'ownerDigest', 'count']) || complete.schemaVersion !== 1 || complete.ownerDigest !== expectedDigest ||
+        !Number.isSafeInteger(complete.count) || complete.count < 0 || complete.count > LIMIT) fail();
+    const expectedNames = ['owner.json', 'complete.json']; const pgids = new Set();
+    for (let id = 1; id <= complete.count; id++) {
+      const preparedName = `prepared-${id}.json`, settledName = `settled-${id}.json`;
+      const prepared = read(preparedName), settled = read(settledName);
+      const base = value => value.schemaVersion === 1 && value.ownerDigest === expectedDigest && value.id === id && value.kind === prepared.kind;
+      if (!exact(prepared, ['schemaVersion', 'ownerDigest', 'id', 'kind', 'phase']) || !base(prepared) || prepared.phase !== 'prepared' ||
+          !['candidate', 'tool'].includes(prepared.kind) || !exact(settled, ['schemaVersion', 'ownerDigest', 'id', 'kind', 'phase', 'settlement']) ||
+          !base(settled) || settled.phase !== 'settled') fail();
+      expectedNames.push(preparedName, settledName);
+      if (settled.settlement === 'group-exit-confirmed') {
+        const name = `spawned-${id}.json`, spawned = read(name);
+        if (!exact(spawned, ['schemaVersion', 'ownerDigest', 'id', 'kind', 'phase', 'pgid']) || !base(spawned) || spawned.phase !== 'spawned' ||
+            !Number.isSafeInteger(spawned.pgid) || spawned.pgid < 1 || spawned.pgid > 2 ** 31 - 1) fail();
+        expectedNames.push(name); pgids.add(spawned.pgid);
+      } else if (settled.settlement !== 'not-started') fail();
+    }
+    if (JSON.stringify(names(root)) !== JSON.stringify(expectedNames.sort())) fail();
+    for (const pgid of pgids) {
+      try { process.kill(-pgid, 0); return false; }
+      catch (error) { if (error?.code !== 'ESRCH') return false; }
+    }
+    for (const [path, stat] of captured) if (!sameFile(stat, fs.lstatSync(path, { bigint: true }))) fail();
+    if (!sameRoot(identity, rootIdentity(root)) || JSON.stringify(names(root)) !== JSON.stringify(expectedNames.sort())) fail();
+    return true;
+  } catch { return false; }
+}

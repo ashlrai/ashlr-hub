@@ -141,6 +141,8 @@ export interface VerifySubprocessOptions {
   /** Windows package-manager shims only; ignored on POSIX. */
   windowsShell?: boolean;
   signal?: AbortSignal;
+  /** Bounded cooperative shutdown before escalation; defaults to five seconds. */
+  terminationGraceMs?: number;
   /** Require an explicit receipt that this invocation's POSIX process group is absent. */
   requireProcessGroupExit?: boolean;
   /** Durable per-invocation process registration; requires strict group receipts. */
@@ -609,6 +611,10 @@ export async function runVerifySubprocessAsync(
   if (opts.requireProcessGroupExit !== undefined && typeof opts.requireProcessGroupExit !== 'boolean') {
     return emptyResult({ error: 'invalid process-group receipt option: expected a boolean' });
   }
+  if (opts.terminationGraceMs !== undefined && (!Number.isSafeInteger(opts.terminationGraceMs) ||
+      opts.terminationGraceMs < 250 || opts.terminationGraceMs > 30000)) {
+    return emptyResult({ error: 'invalid termination grace: expected 250..30000 milliseconds' });
+  }
   if (opts.processGroupLifecycle !== undefined && (opts.requireProcessGroupExit !== true ||
       !isVerifyProcessGroupLifecycle(opts.processGroupLifecycle))) {
     return emptyResult({ error: 'invalid process-group lifecycle option' });
@@ -944,7 +950,7 @@ export async function runVerifySubprocessAsync(
           }
         }
         beginTerminationDrain();
-      }, opts._terminationGraceMs ?? ASYNC_TERMINATION_GRACE_MS);
+      }, opts._terminationGraceMs ?? opts.terminationGraceMs ?? ASYNC_TERMINATION_GRACE_MS);
       // Deliberately referenced so graceful termination always escalates.
     }
 

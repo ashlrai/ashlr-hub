@@ -39,7 +39,7 @@ afterEach(async () => {
 });
 afterAll(() => { if (root) rmSync(root, { recursive: true, force: true }); });
 
-async function candidate(source: string, timeoutMs = 10000): Promise<Session> {
+async function candidate(source: string, timeoutMs = 10000, prepareFixture?: (fixtureRoot: string) => void): Promise<Session> {
   // Catch payload syntax errors independently of startup/protocol rejection.
   execFileSync(process.execPath, ['--check', '--input-type=module'], {
     input: source, timeout: 5000, maxBuffer: 16384, encoding: 'utf8',
@@ -50,12 +50,38 @@ async function candidate(source: string, timeoutMs = 10000): Promise<Session> {
   const target = join(candidateRoot, 'src/core/resources');
   mkdirSync(target, { recursive: true, mode: 0o700 }); mkdirSync(workRoot, { mode: 0o700 });
   const fixtureRoot = join(workRoot, 'readonly'); mkdirSync(fixtureRoot, { mode: 0o700 });
+  prepareFixture?.(fixtureRoot);
   writeFileSync(join(target, 'engineering-preparation.ts'), source, { mode: 0o600 });
   const session = await createSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs });
   sessions.push(session); return session;
 }
 
 describe.runIf(supported)('actual preparation candidate result boundary', () => {
+  it('preserves non-UTF8 Git blob bytes through the actual tool worker and candidate execFileSync', async () => {
+    const original = Buffer.concat([Buffer.from(Array.from({ length: 256 }, (_, index) => index)),
+      Buffer.from([0xff, 0xc0, 0xaf, 0xed, 0xa0, 0x80, 0, 13, 10, 0])]);
+    let repo = '', oid = '';
+    const session = await candidate(`import { execFileSync } from 'node:child_process';
+export function checkResourceEngineeringPreparation(input) {
+  const bytes = execFileSync('/usr/bin/git', ['-C', input.repo, 'cat-file', 'blob', input.oid],
+    {encoding:'buffer', timeout:3000, maxBuffer:65536});
+  return {bytes:Array.from(bytes), base64:bytes.toString('base64')};
+}
+export function readPreparedResourceEngineeringMetadata(){return null;}`, 10000, fixtureRoot => {
+      repo = fixtureRoot;
+      const options = { timeout: 5000, maxBuffer: 65536,
+        env: { PATH: '/usr/bin:/bin', GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } };
+      execFileSync('/usr/bin/git', ['-C', repo, 'init', '--bare', '-q', '--template='], options);
+      oid = execFileSync('/usr/bin/git', ['-C', repo, 'hash-object', '-w', '--stdin'],
+        { ...options, input: original, encoding: 'utf8' }).trim();
+    });
+    expect(await session.call('check', { repo, oid })).toEqual({
+      value: { bytes: [...original], base64: original.toString('base64') },
+      measurement: { processes: 1, blobProcesses: 1 },
+    });
+    await session.close();
+  }, 15000);
+
   it('accepts plain and null-prototype data while preserving the same candidate across calls', async () => {
     const session = await candidate(`let calls = 0;
 export function checkResourceEngineeringPreparation(input) {

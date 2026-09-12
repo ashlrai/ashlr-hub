@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonical } from '../src/core/universe/artifacts.js';
 import { checkResourceEngineeringPreparation, prepareResourceEngineeringBundle, type ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation.js';
 import * as commissioning from '../src/core/resources/console-engineering-check.js';
+import * as poolRuntime from '../src/core/resources/pool-runtime.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -48,6 +49,15 @@ function fixture() {
   return { base, ledger, observationsPath, options: { recipe, workspace, resourceRuntime, projectsFile, output: join(base, 'bundle') } };
 }
 describe('evaluated engineering preparation bridge', () => {
+  it('refuses a raw built-in evaluator recipe before output creation or worker dispatch', () => {
+    const f = fixture();
+    const dispatch = vi.spyOn(poolRuntime, 'runResourceTask').mockImplementation(() => { throw new Error('Unexpected worker dispatch during preparation'); });
+    // Simulate untyped JSON input; the authored recipe type is command-only.
+    const recipe: unknown = { ...f.options.recipe, evaluation: { builtin: 'preparation-measurement-v1', timeoutMs: 1000 } };
+    expect(() => checkResourceEngineeringPreparation({ ...f.options, recipe })).toThrow('Preparation recipes require a command evaluator');
+    expect(existsSync(f.options.output)).toBe(false); expect(existsSync(f.ledger)).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
   it('derives multiple confined hypotheses and one measured campaign on the existing ledger', () => {
     const f = fixture(); const plan = checkResourceEngineeringPreparation(f.options);
     const result = prepareResourceEngineeringBundle({ ...f.options, expectedPlanDigest: plan.planDigest });

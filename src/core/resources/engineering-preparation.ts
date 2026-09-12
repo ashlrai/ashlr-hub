@@ -143,9 +143,11 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
   }
   // Match the artifact reader's shared capacity limits, including directories.
   if (entries.size + directories.size > MAX_ARTIFACT_ENTRIES || seedBytes > MAX_ARTIFACT_BYTES) fail('INVALID_INPUT', 'Preparation seed exceeds artifact bounds');
-  const command = executable(manifest.evaluation.command, seed.repo);
+  const evaluationCommand = manifest.evaluation.command;
+  if (!evaluationCommand) fail('INVALID_INPUT', 'Preparation recipes require a command evaluator');
+  const command = executable(evaluationCommand, seed.repo);
   const protectedFiles: string[] = [];
-  for (const [index, arg] of manifest.evaluation.command.entries()) {
+  for (const [index, arg] of evaluationCommand.entries()) {
     if (index === 0) { if (contains(seed.repo, command[0]!)) protectedFiles.push(relative(seed.repo, command[0]!)); continue; }
     if (arg.split(/[\\/]/).includes('..')) fail('INVALID_INPUT', 'Evaluator paths cannot escape the pinned source');
     const target = /^([^=]+=)(.*)$/.exec(arg)?.[2] ?? arg;

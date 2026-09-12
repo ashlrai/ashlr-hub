@@ -112,12 +112,22 @@ without constructing an execution owner or starting work. This closes the static
 catalog-to-successor registration gap. Exact completed replay does not rewrite
 account history or renew deadlines; changed or incomplete setup is held.
 The generated command still needs actual account capacity and an appropriate
-fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md)
-now has a separately confined candidate measurement prototype, but is not a
-frozen acceptance evaluator or evidence of useful self-improvement. The verified
-Mac rejects its nested sandbox inside the existing Universe evaluator; that path
-fails closed, with no unconfined fallback. Production launch integration, the
-full correctness workload and independently graded improvement remain open.
+fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md#installed-builtin-measurement-route)
+now has a closed installed `preparation-measurement-v1` launch route on
+macOS/Node 24. Its trusted controller launches the candidate separately; ordinary
+command evaluators are unchanged, and their unsupported nested-sandbox route
+still fails closed. The builtin pins its seven-file bundle, Node, fixed native
+launchers and matching host helpers. Fixed asynchronous tool workers preserve
+raw bytes, while invocation-bound activity receipts and independent group-absence
+checks prevent a controller exit from claiming all inner work settled.
+The default-registry test completes two matching measurements; final focused
+coverage includes 433 tests across 18 suites (see the proposal's handoff).
+The output is deliberately rejected as
+Universe evaluation evidence. The full manager/successor correctness workload,
+frozen competitive reward, OS-wide process census, native transitive dependency
+pins and arbitrary controller-crash recovery remain open. This is neither an
+accepted Hub optimization nor provider/account/service activation. Build and
+manifest configuration are documented in the linked proposal.
 Actual-process setup testing also exposed a responsiveness gap: a status GET
 reset after waiting about 73 seconds during successor preparation, while the
 console remained alive and a fresh connection returned 200. Source inspection

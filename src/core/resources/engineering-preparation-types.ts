@@ -4,7 +4,7 @@ import type { UniverseCampaignDeliveryOrigin, UniverseCampaignDeliverySource } f
 
 export interface ResourceEngineeringRecipe {
   schemaVersion: 1; id: string; name: string; objective: string; projectId: string; seedRevision: string;
-  metric: UniverseManifest['metric']; evaluation: UniverseManifest['evaluation'];
+  metric: UniverseManifest['metric']; evaluation: Extract<UniverseManifest['evaluation'], { command: string[] }>;
   trialBudget: UniverseManifest['budget']; campaignBudget: UniverseCampaignDefinition['budget'];
   generation: { files: string[]; contextFiles: string[]; allowedWorkerIds: string[]; maxOutputTokens: number;
     hypotheses: Array<{ id: string; niche: string; hypothesis: string }> };

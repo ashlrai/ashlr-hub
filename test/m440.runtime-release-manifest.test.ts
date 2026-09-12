@@ -28,6 +28,11 @@ import { buildLegacyRuntimeReleaseManifestV2 } from './helpers/runtime-release-l
 
 const tempDirs: string[] = [];
 const REVISION = 'a'.repeat(40);
+const PREPARATION_HELPERS = [
+  'scripts/evaluators/preparation-verification-activity.mjs',
+  'scripts/evaluators/preparation-verification-activity.d.mts',
+  'scripts/evaluators/preparation-verification-protocol.mjs',
+] as const;
 
 interface ReleaseFixture {
   dependencyRoot: string;
@@ -40,7 +45,7 @@ function write(path: string, value: string, mode?: number): void {
   writeFileSync(path, value, mode === undefined ? { encoding: 'utf8' } : { encoding: 'utf8', mode });
 }
 
-function fixture(options: { legacyV2?: boolean } = {}): ReleaseFixture {
+function fixture(options: { legacyV2?: boolean; preparationHelpers?: boolean } = {}): ReleaseFixture {
   const legacyV2 = options.legacyV2 === true;
   const packageRoot = realpathSync(mkdtempSync(join(tmpdir(), 'ashlr-runtime-release-')));
   tempDirs.push(packageRoot);
@@ -55,6 +60,7 @@ function fixture(options: { legacyV2?: boolean } = {}): ReleaseFixture {
       'schema',
       'scripts/run-verify-command.mjs',
       ...(legacyV2 ? [] : ['scripts/scorecard-history-worker.mjs']),
+      ...(options.preparationHelpers ? PREPARATION_HELPERS : []),
     ],
     dependencies: { example: '1.0.0' },
     bundledDependencies: ['example'],
@@ -81,6 +87,9 @@ function fixture(options: { legacyV2?: boolean } = {}): ReleaseFixture {
     write(join(packageRoot, 'scripts', 'scorecard-history-worker.mjs'), 'export const worker = true;\n');
   }
   const dependencyRoot = join(packageRoot, 'node_modules');
+  if (options.preparationHelpers) {
+    for (const path of PREPARATION_HELPERS) write(join(packageRoot, path), 'export {};\n');
+  }
   write(join(dependencyRoot, 'example', 'package.json'), `${JSON.stringify({
     name: 'example',
     version: '1.0.0',
@@ -149,6 +158,88 @@ afterEach(() => {
 });
 
 describe('unsigned runtime release manifest', () => {
+  it('covers exact optional preparation helpers while preserving packages without them', () => {
+    for (const preparationHelpers of [false, true]) {
+      const release = fixture({ preparationHelpers });
+      const result = build(release);
+      expect(result.ok).toBe(true);
+      if (!result.ok) continue;
+      expect(result.manifest.artifacts.filter((artifact) =>
+        artifact.path.startsWith('scripts/evaluators/')).map((artifact) => artifact.path))
+        .toEqual(preparationHelpers ? [...PREPARATION_HELPERS].sort() : []);
+      expect(verify(release, result.canonicalJson).ok).toBe(true);
+    }
+  });
+
+  it.each(PREPARATION_HELPERS)('detects changed optional helper bytes: %s', (path) => {
+    const release = fixture({ preparationHelpers: true });
+    const result = build(release);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    writeFileSync(join(release.packageRoot, path), 'export const changed = true;\n');
+    expect(verify(release, result.canonicalJson).ok).toBe(false);
+  });
+
+  it.each(PREPARATION_HELPERS)('refuses an incomplete installed helper set: %s', (path) => {
+    const release = fixture({ preparationHelpers: true });
+    rmSync(join(release.packageRoot, path));
+    expect(build(release)).toEqual({ ok: false, reason: 'release preparation helper set is incomplete' });
+  });
+
+  it('refuses declared helpers when all three installed files are missing', () => {
+    const release = fixture({ preparationHelpers: true });
+    for (const path of PREPARATION_HELPERS) rmSync(join(release.packageRoot, path));
+    expect(build(release)).toEqual({
+      ok: false,
+      reason: `required release artifact is missing: ${PREPARATION_HELPERS[0]}`,
+    });
+  });
+
+  it('rejects a manifest with only part of the helper group', () => {
+    const release = fixture({ preparationHelpers: true });
+    const result = build(release);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const incomplete = jsonObject(result.canonicalJson);
+    incomplete['artifacts'] = (incomplete['artifacts'] as Array<Record<string, unknown>>)
+      .filter((artifact) => artifact['path'] !== PREPARATION_HELPERS[0]);
+    expect(parseUnsignedRuntimeReleaseManifest(JSON.stringify(incomplete)))
+      .toEqual({ ok: false, reason: 'release preparation helper set is incomplete' });
+  });
+
+  it.skipIf(process.platform === 'win32')('rejects a linked helper and linked helper directory', () => {
+    const fileRelease = fixture({ preparationHelpers: true });
+    const path = join(fileRelease.packageRoot, PREPARATION_HELPERS[0]);
+    rmSync(path);
+    symlinkSync(join(fileRelease.packageRoot, PREPARATION_HELPERS[1]), path);
+    expect(build(fileRelease)).toEqual({ ok: false, reason: 'release artifact is not a regular file' });
+
+    const directoryRelease = fixture({ preparationHelpers: true });
+    const directory = join(directoryRelease.packageRoot, 'scripts/evaluators');
+    renameSync(directory, `${directory}-original`);
+    symlinkSync(`${directory}-original`, directory, 'dir');
+    expect(build(directoryRelease)).toEqual({ ok: false, reason: 'release tree contains an unsafe directory' });
+  });
+
+  it('observes helper directory identity through the complete scan', () => {
+    const release = fixture({ preparationHelpers: true });
+    const options = {
+      ...release,
+      declaredInterpreterPath: release.interpreterPath,
+      declaredInterpreterVersion: 'v22.0.0',
+      expectedRevision: REVISION,
+      __testHooks: {
+        afterReleaseLayoutDiscovery: () => {
+          const directory = join(release.packageRoot, 'scripts/evaluators');
+          renameSync(directory, `${directory}-original`);
+          for (const path of PREPARATION_HELPERS) write(join(release.packageRoot, path), 'export {};\n');
+        },
+      },
+    } as Parameters<typeof buildUnsignedRuntimeReleaseManifest>[0];
+    expect(buildUnsignedRuntimeReleaseManifest(options))
+      .toEqual({ ok: false, reason: 'release directory changed during complete scan' });
+  });
+
   it('builds deterministic canonical identity with explicit observation coverage', () => {
     const release = fixture();
     const rollbackTargetDigest = createHash('sha256').update('previous release').digest('hex');

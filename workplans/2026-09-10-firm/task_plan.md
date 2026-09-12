@@ -1,6 +1,38 @@
 # Executable firm: package graph
 
-## Current increment — isolated candidate correctness (baseline 96e9a6e8)
+## Current increment — installed controller integration (baseline f00b4f01)
+
+- [x] Revalidate source and explore the launch, comparator and workload gaps with three agents.
+- [x] Choose a closed version-pinned installed controller, never an unconfined project command.
+- [x] Package reproducible trusted code and bind its identity into new explicit builtin manifests.
+- [x] Preserve legacy command confinement and verify real builtin execution through the common evaluator path.
+- [x] Track every candidate/tool process group and refuse unresolved aggregate settlement.
+- [x] Test drift, cancellation, real isolation, binary transport, old contracts and local build.
+- [x] Update evidence and next useful-improvement requirements; do not promote the measurement into a reward.
+
+Previous turn is progress: independent candidate measurement passes 176 local
+checks and exposes actual nested-sandbox refusal. The production-compatible
+route runs only a closed installed controller outside that outer sandbox; all
+candidate code stays separately confined. Ordinary command evaluators keep
+their exact existing path. The descriptor fingerprints the installed controller,
+bridge, helpers and native executables. Account policies, providers and services
+are unchanged. This is still a non-evaluation measurement, not accepted useful
+self-improvement; the full correctness matrix and frozen reward remain required.
+
+Resource agent owns manifest/registry identity and activity receipts; cold agent
+owns reproducible packaging; execution agent owns independent runtime tests;
+parent owns common dispatch, owned tool transport, cancellation and integration.
+Actual process tests remain serialized. No public push, publication or activation.
+
+Final coverage: 433 distinct tests across 18 files. Sixteen suites passed in the
+combined run; the remaining two full suites passed 93/93 after correcting a
+fixture clock rollover and using the required npm launch context. No production
+deadline, sandbox or cancellation invariant was weakened. Build, source/web
+typechecks, strict selected-test compilation, lint and documentation checks pass.
+The installed non-evaluation route now works; full-workflow reward freezing and
+useful independently evaluated optimization remain the next North Star work.
+
+## Previous increment — isolated candidate correctness (baseline 96e9a6e8)
 
 - [x] Revalidate clean source and explore process, confinement and measurement boundaries with three agents.
 - [x] Split the measurement controller from a persistent candidate process.

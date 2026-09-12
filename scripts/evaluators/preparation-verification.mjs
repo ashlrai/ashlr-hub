@@ -9,16 +9,21 @@
 import cp from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL, URL } from 'node:url';
 import { createHash } from 'node:crypto';
 import strictAssert from 'node:assert/strict';
 import { createPreparationCandidateSession } from './preparation-verification-controller.mjs';
+import { createBuiltinActivityTracker } from './preparation-verification-activity.mjs';
 
 // Capture the actual checks before any candidate code is evaluated.
 const assert = Object.freeze(Object.fromEntries(['ok', 'equal', 'deepEqual', 'throws'].map(key => [key, strictAssert[key].bind(strictAssert)])));
 
 const sha = value => createHash('sha256').update(value).digest('hex');
 let failure = 'HARNESS_INITIALIZATION_FAILED';
+const stop = new globalThis.AbortController();
+const onStop = () => stop.abort();
+process.on('SIGINT', onStop); process.on('SIGTERM', onStop);
+let activity;
 const canonical = value => JSON.stringify(value, (_key, item) => item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 const save = (file, value) => fs.writeFileSync(file, canonical(value) + '\n', { mode: 0o600 });
@@ -28,8 +33,11 @@ function snapshot(file) {
     content: stat.isDirectory() ? Object.fromEntries(fs.readdirSync(file).sort().map(name => [name, snapshot(path.join(file, name))])) : sha(fs.readFileSync(file)) };
 }
 function git(repo, ...args) {
-  return cp.execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args],
-    { encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH, HOME: process.env.HOME,
+  // Installed invocations use the pinned native launcher. Standalone legacy
+  // fixtures retain their existing PATH Git: Apple's launcher writes an xcrun
+  // cache outside the outer sandbox even when TMPDIR points into its scratch.
+  return cp.execFileSync(activity ? '/usr/bin/git' : 'git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args],
+    { encoding: 'utf8', timeout: 10_000, maxBuffer: 1024 * 1024, env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR,
       GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0', GIT_AUTHOR_DATE: '2026-09-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-09-01T00:00:00Z' } }).trim();
 }
 function fixture(base, count) {
@@ -65,13 +73,16 @@ async function evaluate() {
   const metrics = {}; let checks = 0; let session;
   try {
     assert.equal(process.argv.length, 3);
-    const bridgePath = process.argv[2]; assert.ok(path.isAbsolute(bridgePath));
+    const bridgePath = fileURLToPath(new URL('./preparation-bridge.mjs', import.meta.url));
+    assert.equal(process.argv[2], bridgePath);
+    if (process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY) activity = createBuiltinActivityTracker(process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY);
     const bridge = await import(pathToFileURL(bridgePath).href);
     const candidateRoot = process.env.ASHLR_UNIVERSE_CANDIDATE;
     assert.ok(typeof candidateRoot === 'string' && path.isAbsolute(candidateRoot) && fs.realpathSync(candidateRoot) === candidateRoot);
     failure = 'FIXTURE_SETUP_FAILED';
     const base = fs.mkdtempSync(path.join(process.env.HOME, 'verification-'));
     for (const count of [1, 4]) {
+      if (stop.signal.aborted) throw new Error('MEASUREMENT_CANCELLED');
       failure = 'FIXTURE_SETUP_FAILED';
       const f = fixture(base, count);
       const poolRuntime = bridge.dependencies['./pool-runtime.js'];
@@ -85,7 +96,9 @@ async function evaluate() {
       const metadata = { ...prepared }; delete metadata.commissioning; delete metadata.consoleArguments;
       const expectedMetadata = { ...metadata, disposition: 'replayed' };
       failure = 'CANDIDATE_STARTUP_FAILED';
-      session = await createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot: f.root, workRoot: base });
+      const timeoutMs = activity ? Math.min(60000, Date.parse(activity.owner.deadlineAt) - Date.now()) : 60000;
+      session = await createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot: f.root, workRoot: base,
+        timeoutMs, signal: stop.signal, activity });
       failure = 'CANDIDATE_BEHAVIOR_FAILED';
       for (const [name, options, expected] of [
         ['check', f.options, expectedPlan], ['metadata', input, expectedMetadata],
@@ -119,4 +132,8 @@ async function evaluate() {
       metrics: { correctness_checks: checks }, diagnostics: [{ code: failure, message: 'Pinned verification prototype did not satisfy its fixed checks.' }] };
   }
 }
-process.stdout.write(JSON.stringify(await evaluate()) + '\n');
+const measurement = await evaluate();
+try { activity?.complete(); }
+catch { measurement.checksPassed = false; measurement.diagnostics = [{ code: 'PROCESS_SETTLEMENT_UNCONFIRMED', message: 'Owned process settlement remains unconfirmed.' }]; }
+process.removeListener('SIGINT', onStop); process.removeListener('SIGTERM', onStop);
+process.stdout.write(JSON.stringify(measurement) + '\n');

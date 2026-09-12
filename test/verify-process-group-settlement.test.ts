@@ -7,7 +7,7 @@ import { runVerifySubprocessAsync, type VerifySubprocessOptions } from '../src/c
 const absent = (): never => { throw Object.assign(new Error('absent'), { code: 'ESRCH' }); };
 function fixture(pid: number | undefined = 24_680) {
   const child = Object.assign(new EventEmitter(), {
-    pid, stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(), unref: vi.fn(),
+    pid: pid as number | undefined, stdout: new PassThrough(), stderr: new PassThrough(), kill: vi.fn(), unref: vi.fn(),
   });
   const spawnFake = vi.fn(() => child);
   const processKill = vi.fn<(_: number, signal: NodeJS.Signals | 0) => void>();
@@ -138,5 +138,26 @@ describe('opt-in subprocess group settlement receipt', () => {
     child.emit('exit', 0, null); child.emit('close', 0, null);
     expect(await pending).not.toHaveProperty('processGroupSettlement');
     expect(processKill).not.toHaveBeenCalled();
+  });
+
+  it.each([null, 0, 249, 30001, 250.5, '1000', Infinity])('rejects invalid shutdown grace %j before spawn', async value => {
+    const { opts, spawnFake } = fixture();
+    const result = await runVerifySubprocessAsync(['fixture'], { ...opts, terminationGraceMs: value } as VerifySubprocessOptions);
+    expect(result).toMatchObject({ processGroupSettlement: 'not-started', error: expect.stringContaining('termination grace') });
+    expect(spawnFake).not.toHaveBeenCalled();
+  });
+
+  it('uses the public bounded grace before escalation without changing group ownership', async () => {
+    vi.useFakeTimers();
+    const { opts, child, processKill } = fixture(); const controller = new AbortController();
+    const pending = runVerifySubprocessAsync(['fixture'], { ...opts, timeoutMs: 10000,
+      _terminationGraceMs: undefined, terminationGraceMs: 250, signal: controller.signal });
+    controller.abort(); await vi.advanceTimersByTimeAsync(249);
+    expect(processKill.mock.calls).toEqual([[-24680, 'SIGINT']]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(processKill.mock.calls).toEqual([[-24680, 'SIGINT'], [-24680, 'SIGKILL']]);
+    processKill.mockImplementation(absent); child.emit('exit', null, 'SIGKILL'); child.emit('close', null, 'SIGKILL');
+    await vi.advanceTimersByTimeAsync(20);
+    expect(await pending).toMatchObject({ cancelled: true, processGroupSettlement: 'group-exit-confirmed' });
   });
 });

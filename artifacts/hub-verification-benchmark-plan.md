@@ -8,7 +8,7 @@ and the independent evaluator author. No candidate implementation is supplied.
 
 The prototype introduced after `3a228e1b` comprises a
 [standalone prototype](../scripts/evaluators/preparation-verification.mjs), a
-[test-only frozen dependency packager](../test/helpers/preparation-verification-bundle.ts)
+[shared trusted dependency packager](../scripts/build-preparation-builtin.mjs)
 and [real-fixture tests](../test/universe-preparation-verification.test.ts).
 The target remains unchanged. The first slice compares ordinary preparation
 check and metadata reads for one/four protected evaluator files, including
@@ -37,14 +37,15 @@ counts measure those actual broker launches, not a complete OS process census.
 OS-resolved user-home read denial is independent of the fixture's `HOME`.
 The inherited system-read profile is not a universal filesystem or VM boundary.
 
-Do **not** enroll this prototype as a trusted improvement evaluator. On the
-verified Mac, applying its child sandbox inside the existing Universe evaluator
-sandbox fails with `sandbox_apply: Operation not permitted`. That path emits
-`CANDIDATE_CONFINEMENT_UNAVAILABLE`, with zero accepted checks and no unconfined
-fallback. A production-compatible controller/worker launch architecture remains
-necessary; widening an inherited scratch grant would not isolate the candidate.
-Ordinary deadline/close settlement does not establish arbitrary controller-crash
-recovery. The full correctness workload and competitive reward remain unfinished.
+Do **not** enroll this prototype as a trusted improvement evaluator. The ordinary
+command-evaluator route still refuses the nested sandbox on the verified Mac:
+`sandbox_apply: Operation not permitted`, classified as
+`CANDIDATE_CONFINEMENT_UNAVAILABLE`, with no unconfined fallback. The separate
+installed builtin route below now launches its candidate sandbox directly from
+the trusted controller. This is not permission to execute arbitrary seed scripts
+outside confinement or to widen the candidate's scratch grant. Ordinary
+deadline/close settlement does not establish arbitrary controller-crash recovery.
+The full correctness workload and competitive reward remain unfinished.
 
 Numeric results are development diagnostics, not evidence authorizing acceptance,
 rewards, promotion or autonomous delivery. The `preparation-verification-measurement`
@@ -75,6 +76,67 @@ unexpected shell call are negative controls. Payload syntax is checked separatel
 so parse failures cannot masquerade as behavioral coverage. The prior outer
 confined success does not carry forward to nested candidate confinement. See the
 [local handoff](../workplans/2026-09-10-firm/report.md) for current checks and gaps.
+
+### Installed builtin measurement route
+
+The continuation based on `f00b4f01c44ab9b44e9f7e7c0eaeda377310d3f8`
+adds the closed builtin `preparation-measurement-v1`. The first actual
+default-registry test completed two measurements successfully in approximately
+87 seconds on macOS/Node 24. Final coverage includes 433 distinct tests across
+18 suites, with two full suites rerun after test-harness corrections; consult
+the handoff above for exact evidence. Neither this
+result nor the prototype counts establish a frozen reward or a useful Hub change.
+
+From an authorized development checkout with its existing dependencies, the
+following authoring command regenerates only the installed builtin build output:
+
+```sh
+npm run build:preparation-builtin
+```
+
+`npm run build` includes the same step. The reproducible output is
+`dist/core/universe/builtins/preparation/`: seven fixed code files plus
+`manifest.json`, with no timestamps in the manifest. Rebuilding restores the
+derived output; it does not activate accounts, start a service or modify a
+candidate. The bridge bundles trusted source at build time; runtime never builds
+or imports a candidate-supplied bridge. The registry pins all seven files, Node,
+the fixed Git/ls/ps/sandbox launchers, and equality with the host-imported
+activity/protocol helper bytes. A missing, stale or unsupported installation
+is refused, not replaced with an arbitrary command or source-tree fallback.
+
+The explicit Universe manifest selection is:
+
+```json
+"evaluation": {
+  "builtin": "preparation-measurement-v1",
+  "timeoutMs": 110000
+}
+```
+
+This replaces, and cannot accompany, `evaluation.command`. Ordinary command
+evaluators keep their existing execution path. The builtin requires macOS and
+Node 24 or newer; package-wide Node compatibility does not imply builtin
+availability. Registration binds its installed implementation digest into the
+comparator. Launch uses fixed installed paths and a closed environment, never
+caller-selected executable code, and rechecks comparator/artifact integrity.
+
+The trusted controller launches a separately confined candidate and fixed
+asynchronous tool workers. Tools return raw stdout/stderr as bounded base64;
+the current prototype caps native output at 64 KiB per stream and mailbox
+messages at 256 KiB. Invocation-bound activity records track candidate/tool
+groups. Final acceptance of process settlement requires their durable receipts
+and independent group-absence checks, not merely the controller's exit. Missing
+or uncertain activity remains unresolved; no process is adopted or killed from
+an unauthenticated stale PID. These controls are not arbitrary controller-crash
+recovery. Counted native launches are not an OS-wide process census, and launcher
+hashes do not pin all native transitive dependencies.
+
+See the [installed registry](../src/core/universe/builtin-evaluator-registry.ts),
+[launch boundary](../src/core/universe/fixed-evaluator.ts) and
+[actual builtin tests](../test/universe-builtin-preparation-evaluator.test.ts).
+The measurement envelope still deliberately fails `parseEvaluation`; it cannot
+authorize campaign selection, promotion or delivery. The full manager/successor
+matrix below and an independently reviewed frozen scoring contract remain next.
 
 ## Decision and scope
 
@@ -209,13 +271,14 @@ still satisfy independent final-state and fault-injection checks.
 Independent reviewer approval is required for the frozen metric, subprocess
 instrumentation coverage, mutation timing, and candidate diff. Reject bypassing
 the counter, recognizing fixture names, moving unmeasured work outside the scored
-region, weakening file checks, or retaining stale authority. Validate within the
-actual confined Universe evaluator before commissioning: a Vitest pass alone
-does not prove its subprocess/fixture needs fit confinement. Pin Node, Git,
+region, weakening file checks, or retaining stale authority. Validate through the
+actual selected Universe launch route before commissioning, including its
+candidate confinement: a Vitest pass alone does not prove its subprocess/fixture
+needs fit that boundary. Pin Node, Git,
 dependency versions and evaluator executable digest; do not install tools from
 inside the evaluator.
 
-This task established the proposed scope and the two selected baseline tests.
+The initial proposal established the scope and two selected baseline tests.
 It did not build the frozen evaluator, measure total subprocesses, optimize
 production code, run a model, commission a service or alter any real account.
 The next approval is to build and independently challenge the evaluator, then
@@ -232,9 +295,10 @@ precise cause. Source inspection identifies synchronous preparation/proof work
 on the same event loop as a plausible contributor.
 
 Reducing subprocess counts alone therefore is not sufficient operational
-acceptance. A future frozen responsiveness evaluator should independently probe
-read latency and stop responsiveness while real verification is in progress,
-without letting a candidate skip source checks or return a fabricated snapshot.
-Read reconnection can establish workflow continuity, but cannot earn a latency
-improvement score. These probes and a baseline still need implementation; this
-observation does not silently change the proposed candidate allowlist or metric.
+acceptance. The separate
+[control-room responsiveness gate](../benchmarks/resource-engineering-responsiveness.test.ts)
+now probes read latency and stop responsiveness during real verification.
+Its results must remain distinct from subprocess-count improvements; candidates
+cannot skip source checks or return fabricated snapshots. Read reconnection can
+establish workflow continuity, but cannot earn a latency improvement score.
+This observation does not change the proposed candidate allowlist or metric.

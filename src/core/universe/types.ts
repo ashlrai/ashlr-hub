@@ -13,7 +13,8 @@ export interface UniverseManifest {
   seed: { repo: string; revision: string };
   metric: { name: string; direction: 'maximize' | 'minimize'; minImprovement: number };
   budget: { maxTrials: number; maxDurationMs: number; trialTimeoutMs: number; maxParallel: number };
-  evaluation: { command: string[]; timeoutMs: number };
+  evaluation: { command: string[]; timeoutMs: number; builtin?: never } |
+    { builtin: 'preparation-measurement-v1'; timeoutMs: number; command?: never };
   variants: UniverseVariant[];
 }
 

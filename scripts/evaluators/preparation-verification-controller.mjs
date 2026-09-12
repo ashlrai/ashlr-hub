@@ -4,7 +4,6 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { fileURLToPath, URL } from 'node:url';
 import { setTimeout, clearTimeout } from 'node:timers';
 import { randomBytes } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
 import { performance } from 'node:perf_hooks';
 import { userInfo } from 'node:os';
 import { exact, MAX_CALLS, MAX_MESSAGE_BYTES, publishMessage, readMessage } from './preparation-verification-protocol.mjs';
@@ -23,7 +22,7 @@ function base64(value) {
   if (typeof value !== 'string' || value.length > MAX_MESSAGE_BYTES || Buffer.from(value, 'base64').toString('base64') !== value) throw failure();
   return Buffer.from(value, 'base64');
 }
-function readonlyCommand(request, fixtureRoot, scratch) {
+export function readonlyCommand(request, fixtureRoot, scratch) {
   if (!exact(request, ['schemaVersion', 'id', 'nonce', 'api', 'file', 'args', 'options']) || request.schemaVersion !== 1 ||
       !Number.isSafeInteger(request.id) || request.id < 1 || !HASH.test(request.nonce) ||
       !['execFileSync', 'spawnSync'].includes(request.api) || typeof request.file !== 'string' ||
@@ -74,18 +73,21 @@ function readonlyCommand(request, fixtureRoot, scratch) {
   return { file, args, options, input, blob };
 }
 
-export async function createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs = 60000 }) {
+export async function createPreparationCandidateSession({ bridge, bridgePath, candidateRoot, fixtureRoot, workRoot, timeoutMs = 60000, signal, activity }) {
   if (process.platform !== 'darwin' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000 ||
       typeof bridge?.runVerifySubprocessAsync !== 'function' || typeof bridge?.confinedUniverseArgv !== 'function') throw failure();
   for (const path of [candidateRoot, fixtureRoot, workRoot]) canonicalDirectory(path);
   if (within(candidateRoot, workRoot) || within(fixtureRoot, workRoot) || within(workRoot, candidateRoot)) throw failure();
   const child = fileURLToPath(new URL('./preparation-verification-child.mjs', import.meta.url));
-  for (const file of [bridgePath, child]) if (!isAbsolute(file) || fs.realpathSync(file) !== file || !fs.lstatSync(file).isFile()) throw failure();
+  const tool = fileURLToPath(new URL('./preparation-verification-tool.mjs', import.meta.url));
+  for (const file of [bridgePath, child, tool]) if (!isAbsolute(file) || fs.realpathSync(file) !== file || !fs.lstatSync(file).isFile()) throw failure();
   const sessionRoot = fs.mkdtempSync(join(workRoot, 'candidate-session-'));
   const inbox = join(sessionRoot, 'inbox'), scratch = join(sessionRoot, 'child'), outbox = join(scratch, 'outbox');
   for (const path of [inbox, scratch, outbox]) fs.mkdirSync(path, { mode: 0o700 });
   const sessionId = randomBytes(32).toString('hex'); const deadlineAt = new Date(Date.now() + timeoutMs).toISOString();
   const deadline = performance.now() + timeoutMs; const abort = new globalThis.AbortController();
+  const onAbort = () => abort.abort();
+  if (signal?.aborted) throw failure();
   const environment = { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: scratch, USERPROFILE: scratch, TMPDIR: scratch,
     ASHLR_HOME: scratch, ASHLR_UNIVERSE_CANDIDATE: candidateRoot, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_OPTIONAL_LOCKS: '0', GIT_TERMINAL_PROMPT: '0', LANG: 'C', LC_ALL: 'C' };
@@ -109,10 +111,12 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
   }
   const command = confined([process.execPath, '--no-addons', '--experimental-vm-modules', '--no-warnings', child]);
   command[2] += '\n(deny process-fork)\n(deny signal)\n';
+  signal?.addEventListener('abort', onAbort, { once: true });
   let terminal, terminalError, closePromise, busy = false, closed = false, faulted = false, callId = 0, execId = 0;
   const completion = bridge.runVerifySubprocessAsync(command, { cwd: scratch, env: environment, timeoutMs,
     input: JSON.stringify({ schemaVersion: 1, sessionId, inbox, outbox, candidateRoot, bridgePath, deadlineAt }),
-    maxOutputChars: 4096, signal: abort.signal, requireProcessGroupExit: true }).then(result => { terminal = result; return result; }, error => { terminalError = error; });
+    maxOutputChars: 4096, signal: abort.signal, terminationGraceMs: 1000, requireProcessGroupExit: true,
+    ...(activity ? { processGroupLifecycle: activity.lifecycle('candidate') } : {}) }).then(result => { terminal = result; return result; }, error => { terminalError = error; });
   const timer = setTimeout(() => abort.abort(), timeoutMs);
   function guard(allowTerminal = false) { if (faulted || terminal && !allowTerminal || terminalError || abort.signal.aborted || performance.now() >= deadline) throw failure(); }
   async function settle() {
@@ -120,22 +124,28 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
     if (!terminal || terminalError || terminal.exitCode !== 0 || terminal.signal !== null || terminal.error || terminal.timedOut || terminal.cancelled ||
         terminal.outputTruncated || terminal.stdout !== '' || terminal.stderr !== '' || terminal.processGroupSettlement !== 'group-exit-confirmed') throw failure();
   }
-  async function discard() { faulted = true; abort.abort(); await completion; clearTimeout(timer); }
-  function broker(request, measurement) {
+  async function discard() { faulted = true; abort.abort(); await completion; clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
+  async function broker(request, measurement) {
     const selected = readonlyCommand(request, fixtureRoot, scratch);
     if (request.id !== execId + 1 || request.id > 4096) throw failure();
     guard(); execId = request.id;
-    const argv = confined([selected.file, ...selected.args]);
+    const argv = confined([process.execPath, '--no-addons', tool]);
     const remaining = Math.max(1, Math.floor(deadline - performance.now()));
     // Count observed broker launches, never child-provided counters or failed
     // pre-spawn attempts. This is not a census of trusted tool descendants.
-    const result = spawnSync(argv[0], argv.slice(1), { cwd: selected.options.cwd ?? fixtureRoot, env: environment,
-      input: selected.input, encoding: 'buffer', timeout: Math.min(remaining, selected.options.timeoutMs),
-      maxBuffer: Math.min(selected.options.maxBuffer, 64 * 1024), stdio: ['pipe', 'pipe', 'pipe'], shell: false });
-    if (!Number.isSafeInteger(result.pid) || result.pid < 1) throw failure();
+    const result = await bridge.runVerifySubprocessAsync(argv, { cwd: scratch, env: environment,
+      input: JSON.stringify({ request, fixtureRoot, scratch }), timeoutMs: Math.min(remaining, selected.options.timeoutMs),
+      maxOutputChars: MAX_MESSAGE_BYTES, signal: abort.signal, terminationGraceMs: 1000, requireProcessGroupExit: true,
+      ...(activity ? { processGroupLifecycle: activity.lifecycle('tool') } : {}) });
+    if (result.exitCode !== 0 || result.signal !== null || result.error || result.timedOut || result.cancelled ||
+        result.outputTruncated || result.stderr !== '' || result.processGroupSettlement !== 'group-exit-confirmed') throw failure();
+    const output = JSON.parse(result.stdout);
+    if (!exact(output, ['started', 'status', 'signal', 'stdoutBase64', 'stderrBase64', 'error']) || output.started !== true ||
+        output.status !== null && !Number.isSafeInteger(output.status) || output.signal !== null && typeof output.signal !== 'string' ||
+        output.error !== null && (!exact(output.error, ['code']) || typeof output.error.code !== 'string')) throw failure();
+    base64(output.stdoutBase64); base64(output.stderrBase64);
     measurement.processes++; if (selected.blob) measurement.blobProcesses++;
-    const output = { status: result.status, signal: result.signal, stdoutBase64: (result.stdout ?? Buffer.alloc(0)).toString('base64'),
-      stderrBase64: (result.stderr ?? Buffer.alloc(0)).toString('base64'), error: result.error ? { code: ['ETIMEDOUT', 'ENOBUFS', 'ENOENT', 'EACCES', 'EPERM'].includes(result.error.code) ? result.error.code : 'BROKER_PROCESS_FAILED' } : null };
+    delete output.started;
     guard(); publishMessage(join(inbox, `exec-reply-${execId}.json`), { schemaVersion: 1, id: execId, nonce: request.nonce, ok: true, result: output });
   }
   async function exchange(method, input) {
@@ -144,7 +154,7 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
     while (true) {
       guard(method === 'close');
       const request = readMessage(join(outbox, `exec-${execId + 1}.json`));
-      if (request !== null) { if (method === 'close') throw failure(); broker(request, measurement); continue; }
+      if (request !== null) { if (method === 'close') throw failure(); await broker(request, measurement); continue; }
       const reply = readMessage(join(outbox, `reply-${id}.json`));
       if (reply !== null) {
         if (!(exact(reply, ['schemaVersion', 'id', 'nonce', 'ok', 'value']) && reply.ok === true ||
@@ -193,7 +203,7 @@ export async function createPreparationCandidateSession({ bridge, bridgePath, ca
           if (busy || faulted) { await discard(); throw failure(); }
           await exchange('close', null); await settle();
         } catch { await discard(); throw failure(); }
-        finally { clearTimeout(timer); }
+        finally { clearTimeout(timer); signal?.removeEventListener('abort', onAbort); }
       })();
       return closePromise;
     },

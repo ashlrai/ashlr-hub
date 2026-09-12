@@ -46,7 +46,9 @@ function fixture() {
   initUniverseCampaign({ schemaVersion: 1, id: 'campaign', universeId: 'seed', measureSeed: true, feedback: true,
     budget: { maxGenerations: 1, maxDurationMs: 60_000, maxModelRequests: 0, maxStagnantGenerations: 1, maxReportedTokens: null } }, { root });
   const directory = campaignDirectory('campaign', { root }); const at = new Date().toISOString();
-  appendCampaignEvent(directory, { kind: 'started', at, deadlineAt: new Date(Date.now() + 60_000).toISOString(), owner: { pid: process.pid, startRef: 'fixture' } });
+  // The persisted deadline is derived from the same start instant, never a
+  // second clock read that can cross a millisecond boundary under load.
+  appendCampaignEvent(directory, { kind: 'started', at, deadlineAt: new Date(Date.parse(at) + 60_000).toISOString(), owner: { pid: process.pid, startRef: 'fixture' } });
   const controller = new AbortController();
   const execute = (extra = {}) => withUniverseExecution('seed', { root }, lock => runCampaignSeedEvaluationOwned('campaign',
     { root, signal: controller.signal, deadlineMonotonicMs: performance.now() + 30_000, ...extra }, lock));

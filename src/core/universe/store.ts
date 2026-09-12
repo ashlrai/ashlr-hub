@@ -21,6 +21,7 @@ import { MAX_UNIVERSE_RECORD_BYTES } from './evidence-size.js';
 import type { UniverseIntegrationOrigin } from './integration-handoff-types.js';
 import type { UniverseCampaignDeliveryOrigin } from './campaign-handoff-types.js';
 import { buildUniverseFileOperationsContext, fileOperationsContextDigest, verifyUniverseFileOperationOutcome } from './file-operations-context.js';
+import { resolveBuiltinEvaluator } from './builtin-evaluator-registry.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
@@ -45,6 +46,11 @@ function command(value: unknown): value is string[] {
   return Array.isArray(value) && value.length > 0 && value.length <= 64 && value.every((part) =>
     typeof part === 'string' && part.length <= 8_192 && !part.includes('\0')) && text(value[0], 4_096);
 }
+function builtinEvaluation(value: Record<string, unknown>): boolean {
+  return Reflect.ownKeys(value).length === 2 && ['builtin', 'timeoutMs'].every(key =>
+    Object.hasOwn(Object.getOwnPropertyDescriptor(value, key) ?? {}, 'value')) &&
+    value.builtin === 'preparation-measurement-v1';
+}
 
 export function validateUniverseManifest(value: unknown): UniverseManifest {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'name', 'objective', 'seed', 'metric', 'budget', 'evaluation', 'variants']) ||
@@ -57,7 +63,8 @@ export function validateUniverseManifest(value: unknown): UniverseManifest {
       !object(value.budget) || !exact(value.budget, ['maxTrials', 'maxDurationMs', 'trialTimeoutMs', 'maxParallel']) ||
       !integer(value.budget.maxTrials, 1, 64) || !integer(value.budget.maxParallel, 1, 8) ||
       !integer(value.budget.maxDurationMs, 1, 86_400_000) || !integer(value.budget.trialTimeoutMs, 1, 900_000) ||
-      !object(value.evaluation) || !exact(value.evaluation, ['command', 'timeoutMs']) || !command(value.evaluation.command) ||
+      !object(value.evaluation) || !(exact(value.evaluation, ['command', 'timeoutMs']) && command(value.evaluation.command) ||
+        builtinEvaluation(value.evaluation)) ||
       !integer(value.evaluation.timeoutMs, 1, 900_000) || !Array.isArray(value.variants) || value.variants.length < 1 || value.variants.length > 64) {
     throw new Error('Invalid Universe manifest: expected bounded version 1 identity, objective, seed, metric, budget, evaluator, and variants');
   }
@@ -81,6 +88,7 @@ export interface ManifestRecord {
   id: 'manifest'; kind: 'manifest'; manifest: UniverseManifest; manifestDigest: string;
   comparatorDigest: string; seedArtifact: UniverseArtifact; evaluationCommand: string[];
   evaluationExecutableDigest: string;
+  evaluationBuiltinDigest?: string;
   integrationOrigin?: UniverseIntegrationOrigin;
   campaignDeliveryOrigin?: UniverseCampaignDeliveryOrigin;
 }
@@ -178,10 +186,13 @@ function parseRecord(value: unknown): UniverseRecord | null {
   if (value.kind === 'manifest') {
     try {
       const manifest = validateUniverseManifest(value.manifest);
-      if (!exact(value, ['id', 'kind', 'manifest', 'manifestDigest', 'comparatorDigest', 'seedArtifact', 'evaluationCommand', 'evaluationExecutableDigest', 'integrationOrigin', 'campaignDeliveryOrigin']) ||
+      if (!exact(value, ['id', 'kind', 'manifest', 'manifestDigest', 'comparatorDigest', 'seedArtifact', 'evaluationCommand', 'evaluationExecutableDigest', 'evaluationBuiltinDigest', 'integrationOrigin', 'campaignDeliveryOrigin']) ||
           value.id !== 'manifest' || digest(canonical(manifest)) !== value.manifestDigest ||
           !text(value.comparatorDigest, 64) || !HASH.test(value.comparatorDigest) || !validArtifact(value.seedArtifact) ||
           !command(value.evaluationCommand) || !text(value.evaluationExecutableDigest, 64) || !HASH.test(value.evaluationExecutableDigest) ||
+          (manifest.evaluation.builtin !== undefined
+            ? typeof value.evaluationBuiltinDigest !== 'string' || !HASH.test(value.evaluationBuiltinDigest)
+            : Object.hasOwn(value, 'evaluationBuiltinDigest')) ||
           (Object.hasOwn(value, 'integrationOrigin') && !validIntegrationOrigin(value.integrationOrigin, manifest, value.seedArtifact)) ||
           (Object.hasOwn(value, 'campaignDeliveryOrigin') && (!validCampaignDeliveryOrigin(value.campaignDeliveryOrigin, manifest, value.seedArtifact) ||
             Object.hasOwn(value, 'integrationOrigin')))) return null;
@@ -241,10 +252,12 @@ export function comparatorDigest(record: Omit<ManifestRecord, 'comparatorDigest'
   return digest(canonical({ objective: record.manifest.objective, metric: record.manifest.metric,
     seed: record.manifest.seed, seedDigest: record.seedArtifact.digest,
     evaluation: record.manifest.evaluation, evaluationCommand: record.evaluationCommand,
-    evaluationExecutableDigest: record.evaluationExecutableDigest }));
+    evaluationExecutableDigest: record.evaluationExecutableDigest,
+    ...(record.evaluationBuiltinDigest !== undefined ? { evaluationBuiltinDigest: record.evaluationBuiltinDigest } : {}) }));
 }
 
 function pinnedEvaluationCommand(manifest: UniverseManifest, seedPath: string): string[] {
+  if (manifest.evaluation.builtin !== undefined) return resolveBuiltinEvaluator(manifest.evaluation.builtin).command;
   const args = manifest.evaluation.command.map((arg, index) => {
     if (index === 0) return arg;
     if (arg.split(/[\\/]/).includes('..')) throw new Error('Evaluator arguments cannot escape the pinned source');
@@ -311,6 +324,7 @@ function initUniverseRecord(input: UniverseManifest, options: UniverseStoreOptio
     if (existsSync(join(directory, 'ledger'))) {
       const current = manifestRecord(directory);
       if (current.manifestDigest !== digest(canonical(manifest))) throw new Error('Universe manifest is immutable; use a new id for a changed objective or comparator');
+      if (manifest.evaluation.builtin !== undefined) assertComparatorUnchanged(current);
       if (handoff) {
         if (canonical(origin ? current.integrationOrigin ?? null : current.campaignDeliveryOrigin ?? null) !== canonical(handoff)) {
           throw new Error(origin ? 'Universe integration origin differs from existing registration' : 'Universe campaign origin differs from existing registration');
@@ -326,10 +340,12 @@ function initUniverseRecord(input: UniverseManifest, options: UniverseStoreOptio
     if (existsSync(seedPath)) throw new Error('Interrupted initialization exists; choose a new Universe id');
     const seedDigest = materializeSeed(manifest.seed, seedPath);
     if (handoff && seedDigest !== handoff.artifactDigest) throw new Error(origin ? 'Universe integration seed differs from delivered artifact' : 'Universe campaign seed differs from delivered artifact');
-    const evalCommand = pinnedEvaluationCommand(manifest, seedPath);
+    const builtin = manifest.evaluation.builtin === undefined ? null : resolveBuiltinEvaluator(manifest.evaluation.builtin);
+    const evalCommand = builtin?.command ?? pinnedEvaluationCommand(manifest, seedPath);
     const partial: Omit<ManifestRecord, 'comparatorDigest'> = { id: 'manifest', kind: 'manifest', manifest,
       manifestDigest: digest(canonical(manifest)), seedArtifact: { path: seedPath, digest: seedDigest, revision: manifest.seed.revision },
       evaluationCommand: evalCommand, evaluationExecutableDigest: digest(readFileSync(evalCommand[0]!)),
+      ...(builtin ? { evaluationBuiltinDigest: builtin.digest } : {}),
       ...(origin ? { integrationOrigin: origin } : {}), ...(campaignOrigin ? { campaignDeliveryOrigin: campaignOrigin } : {}) };
     freezeArtifact(seedPath);
     const record = { ...partial, comparatorDigest: comparatorDigest(partial) };
@@ -339,12 +355,20 @@ function initUniverseRecord(input: UniverseManifest, options: UniverseStoreOptio
     }
     // A campaign source may drift while the destination record is staged.
     // This guard reads only source stores while the destination writer is held.
-    appendRecord(directory, record, campaignOrigin ? checkOriginSource : undefined);
+    appendRecord(directory, record, builtin ? () => {
+      assertComparatorUnchanged(record);
+      if (campaignOrigin) checkOriginSource();
+    } : campaignOrigin ? checkOriginSource : undefined);
     return record;
   } finally { releaseLocalStoreLock(lock); }
 }
 
 export function assertComparatorUnchanged(record: ManifestRecord): void {
+  if (record.manifest.evaluation.builtin !== undefined) {
+    const builtin = resolveBuiltinEvaluator(record.manifest.evaluation.builtin);
+    if (record.evaluationBuiltinDigest !== builtin.digest || record.evaluationExecutableDigest !== builtin.executableDigest ||
+        canonical(record.evaluationCommand) !== canonical(builtin.command)) throw new Error('Universe installed evaluator changed');
+  } else if (record.evaluationBuiltinDigest !== undefined) throw new Error('Universe evaluator kind changed');
   if (artifactDigest(record.seedArtifact.path) !== record.seedArtifact.digest ||
       digest(readFileSync(record.evaluationCommand[0]!)) !== record.evaluationExecutableDigest ||
       record.comparatorDigest !== comparatorDigest(record)) throw new Error('Universe evaluator or seed comparator changed');

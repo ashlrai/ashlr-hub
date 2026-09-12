@@ -511,6 +511,11 @@ function rootPackageIsPortable(
     'schema',
     'scripts/run-verify-command.mjs',
     'scripts/scorecard-history-worker.mjs',
+    // Fixed host imports for builtin custody; never admit the scripts directory
+    // or candidate/controller entrypoints through a wildcard declaration.
+    'scripts/evaluators/preparation-verification-activity.mjs',
+    'scripts/evaluators/preparation-verification-activity.d.mts',
+    'scripts/evaluators/preparation-verification-protocol.mjs',
   ]);
   const requiredFiles = [
     'bin',
