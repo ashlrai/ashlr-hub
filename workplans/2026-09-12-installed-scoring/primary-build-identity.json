@@ -20,6 +20,6 @@
     { "name": "preparation-verification-tool.mjs", "digest": "5e42f135f463c13f777e2ceef6751fabd252a02c2c11266dac550f13713e33e3" },
     { "name": "preparation-verification.mjs", "digest": "f20673014df460b54f915ad7a1ade2b3b1e5f6ecf67521c58fd5308124444062" }
   ],
-  "nativeAcceptance": { "session": 73003, "stateAtRecord": "live", "passed": null },
+  "nativeAcceptance": { "session": 73003, "stateAtRecord": "terminal", "passed": 489, "filesPassed": 17, "skipped": 0, "exitCode": 0, "durationSeconds": 3042.59, "record": "primary-native-acceptance.json" },
   "exclusions": ["calibrated scoring installation", "accepted campaign", "provider activation", "production deployment"]
 }

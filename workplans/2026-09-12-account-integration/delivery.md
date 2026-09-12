@@ -1,7 +1,10 @@
 # Account integration readiness
 
-The Spark preparation and passive collector inspection commits apply cleanly to
-primary. They remain isolated while the original native acceptance runs finish.
+The Spark preparation, passive collector inspection and test cleanup fix are
+integrated locally on primary throughcfbbd491. The original native acceptance
+finished before integration:489tests/17files/zero skips3042.59s on73003. The
+four separate stale-result controls passed on3245. Primary rebuild and focused
+combined acceptance are the remaining local integration steps.
 
 Fixed one independently identified native test cleanup defect: each actual
 invocation now owns a cleanup ticket. Missing settlement, thrown dispatch and
@@ -26,8 +29,9 @@ No production evaluator semantics or numerical acceptance criteria changed.
   `25d5787412e177238745216d259a9167768ca6460bfed126cc453eb714d0f953`.
 - Independent source reviews found no integration or cleanup-fix blocker.
 
-Native primary sessions73003 and3245 were still live at this checkpoint. Their
-eventual terminal results must be recorded separately before primary integration.
+Native primary sessions73003 and3245 are terminal, with exact results retained in
+`../2026-09-12-installed-scoring/primary-native-acceptance.json` and
+`stale-controls.json`. Neither terminal handle should be polled or restarted.
 These tests and the build do not prove real calibration, quota freshness, account
 commissioning, accepted engineering work or production deployment.
 

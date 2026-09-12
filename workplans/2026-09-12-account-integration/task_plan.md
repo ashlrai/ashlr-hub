@@ -10,10 +10,10 @@ identify the shortest real path to account operation.
 
 - [x] Confirm primary and isolated branch identities and existing native handle.
 - [x] Dispatch independent integration, account-operation and native-coverage reviews.
-- [ ] Finish the existing native gate and record its actual outcome.
+- [x] Finish the existing native gate and record its actual outcome.
 - [x] Fix isolated native test evidence retention and independently review it.
 - [x] Run the four missing same-call native stale-result controls against the frozen bundle.
-- [ ] Integrate the two ordered changes after the gate terminates.
+- [x] Integrate Spark, inspection and cleanup changes after the gate terminates.
 - [ ] Run combined local acceptance and retain exact remaining activation blockers.
 
 ## Decisions
@@ -40,6 +40,11 @@ identify the shortest real path to account operation.
   registry request or validator relaxation.
 
 ## Status
+
+Current:primary73003is terminal0 with489tests/17files/zero skips3042.59s.
+Primary3245is terminal0 with4passed/1filtered362.58s. Source commits were then
+integrated on primary throughcfbbd491; the combined primary build and focused
+acceptance remain to run. Earlier live-handle notes below are historical.
 
 Three read-only reviews are running. Native session 73003 remains live; its test
 progress is not terminal acceptance. No integration has occurred yet.

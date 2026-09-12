@@ -2,6 +2,15 @@
 
 ## Implemented, not commissioned
 
+Current integration update:primary native73003finished489tests/17files/zero skips
+in3042.59seconds; separate current/stale packaged controls3245passed4cases with
+one explicitly filtered full-workload case. Exact receipts are in
+`primary-native-acceptance.json` and
+`../2026-09-12-account-integration/stale-controls.json`. The tested evaluator
+remains25d57874. Spark preparation, passive inspection and test-evidence retention
+are now integrated locally throughcfbbd491; primary rebuild is next. Earlier
+live-session labels below describe the earlier checkpoint, not current state.
+
 Primary acceptance update: the413-test focused gate passed (12files,zero skips,
 64.97s), along with full-inventory compiler acceptance (2/2,27.20s). The latter
 uses2731real committed files at3d32d708 but explicitly synthetic scoring data;
