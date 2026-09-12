@@ -266,3 +266,41 @@ Main native10612 still qualifies only frozen3a711953... bytes. Do not cherry-pic
 these corrections into main or rebuild it while that handle is live. After its
 terminal result, commit/preserve exact evidence, integrate corrected source and
 recheck resulting measured identities. No calibration or provider activation yet.
+
+## Primary integration continuation
+
+Previous goal turn classified as progress: two source-provenance corrections
+were committed at8e448d83 with131regression/52packaging tests passing; primary
+integration and actual commissioned operation were not claimed. Fresh entry
+checks found scoring3cc61869 and isolated8e448d83 clean; native10612 is confirmed
+live on the same handle. It will not be restarted.
+
+- Parent: preserve the running main source/build; integrate corrected source into
+  primary only after independent cross-worktree ownership review permits it.
+- Explore: check actual native dependencies for independent primary integration.
+- Native reviewer: strict/report-enabled comparison of frozen8e448d83 candidate
+  in the isolated tree, handle46217; no repeated run or provider calls.
+- Readiness reviewer: locate already-recorded runtime/project/stop configuration
+  and remaining activation requirements without inspecting credentials or writing
+  account configuration.
+
+The earlier serialization rule was conservative. A separate primary checkout
+may advance without altering the live test's source, dist or private fixtures;
+the review must establish that separation before any cherry-pick/build. A new
+primary identity would need its own acceptance, not reuse of changed old bytes.
+
+Review established separation and parent integrated all nine selected local
+commits into primary, now f16acb07 (then acceptance checkpoint3d32d708). Main
+scoring source/dist stayed unchanged throughout. Primary built successfully;
+its new25d57874... runtime is undergoing the extended native gate73003. The
+primary workplan/evidence directory is now authoritative for the ongoing work.
+
+Main native10612 is TERMINAL exit0:5/5passed,0skips,1268.67s. Full case937937ms,
+report SHA2d880501... matches prior qualified report;23checks/2quals/15regions,
+4828benchmark processes and confirmed settlement. Current/stale runtime controls
+33657/28294ms and source controls190987/71665ms passed. Exact receipt is retained
+in primary workplans/2026-09-12-installed-scoring/recipe-bundle-qualification.json.
+The3a711953... bytes were preserved and digest-verified at
+/Users/masonwyatt/.codex/artifacts/ashlr-preparation-recipe-qualified.l5cTqq/preparation.
+Do not poll or restart10612. This checkout is retained as tested historical code;
+do not overwrite its evidence with the corrected primary identity.
