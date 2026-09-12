@@ -2,6 +2,23 @@
 
 ## Implemented, not commissioned
 
+Primary acceptance update: the413-test focused gate passed (12files,zero skips,
+64.97s), along with full-inventory compiler acceptance (2/2,27.20s). The latter
+uses2731real committed files at3d32d708 but explicitly synthetic scoring data;
+it is not a genuine calibration. Exact evidence lives in
+`full-inventory-compiler-acceptance.json` and `primary-build-identity.json`.
+Extended native73003 remains live; source/dist are frozen pending its result.
+The older scoring10612 gate is terminal5/5passed, not live; its distinct bundle
+and receipt are retained in `recipe-bundle-qualification.json`.
+
+The real account console configuration has now been located under
+`/Users/masonwyatt/.ashlr/account-connections/`, with accounting in `ledger/`.
+Stored metadata confirms a75%ceiling, personal Codex paused and three workers
+(personal,CMP,Claude), but no Spark enrollment or per-scope reservation record.
+The prior console was read-only without an execution workspace; engineering
+runtime/project catalog setup remains necessary. These observations do not prove
+current provider capacity. No policy, provider, quota or service mutation occurred.
+
 Primary integration update: the tested source corrections are now integrated
 locally on `auto/p00` at `f16acb0708a1a3b7016c069fab8abbbb21b4b38b`, preserving
 the previous primary qualification notes. The full build and source/web types,

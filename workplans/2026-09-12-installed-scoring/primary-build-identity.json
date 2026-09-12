@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "scope": "built-local-not-commissioned",
+  "sourceCommit": "f16acb0708a1a3b7016c069fab8abbbb21b4b38b",
+  "checkout": "/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00",
+  "buildSession": 1924,
+  "buildExitCode": 0,
+  "evaluatorId": "preparation-measurement-v1",
+  "digest": "25d5787412e177238745216d259a9167768ca6460bfed126cc453eb714d0f953",
+  "node": { "path": "/opt/homebrew/Cellar/node@24/24.18.0/bin/node", "digest": "72c18e2eeda260f67a5b2b66e96fa9b5ad82864676ebb54925695d87120cae3f" },
+  "git": { "path": "/Library/Developer/CommandLineTools/usr/bin/git", "digest": "74b90b9f97ec79bfe7886a4fc6132533b3e1014ef4195d28abd1ca9bf321f34a" },
+  "files": [
+    { "name": "preparation-bridge.mjs", "digest": "1575fe69cebd906344af09927c977147086955c7cb296058a157987413834d83" },
+    { "name": "preparation-verification-activity.mjs", "digest": "02d0f8a3d9addb899266859c6eaf110286e9dedc2bef9da9e4efe6e304188dce" },
+    { "name": "preparation-verification-child.mjs", "digest": "f89798b6b43006c72e00f53a2fabea8b27c121d4f4a55e081783974851b0ef37" },
+    { "name": "preparation-verification-controller.mjs", "digest": "4c7e80cb73a7f3b6df7a40301544273e9d08cdb28ee4d904223ae4e029c873bf" },
+    { "name": "preparation-verification-fixtures.mjs", "digest": "6621d1e29022caa3d2a7a0c9b414a820cdc9790263c0cf80393691d7f0d922e5" },
+    { "name": "preparation-verification-native.mjs", "digest": "f61520b2dc6d3fb6d7e99afc167865ecefd0bb548df307166c32e2cac4787a5c" },
+    { "name": "preparation-verification-protocol.mjs", "digest": "9b9664097862c2391d0d9c12060905517a285e1fb8862e079e880bcb2ebb56c6" },
+    { "name": "preparation-verification-tool.mjs", "digest": "5e42f135f463c13f777e2ceef6751fabd252a02c2c11266dac550f13713e33e3" },
+    { "name": "preparation-verification.mjs", "digest": "f20673014df460b54f915ad7a1ade2b3b1e5f6ecf67521c58fd5308124444062" }
+  ],
+  "nativeAcceptance": { "session": 73003, "stateAtRecord": "live", "passed": null },
+  "exclusions": ["calibrated scoring installation", "accepted campaign", "provider activation", "production deployment"]
+}

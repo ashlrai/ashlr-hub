@@ -310,3 +310,30 @@ has a listener. The compiled global stop reader still reports healthy/active.
 Tracked instructions contain placeholder resource paths, not enough evidence to
 select real account/runtime configuration. No broader home/credential scan,
 quota refresh, provider call, KILL override or service activation was performed.
+
+### Acceptance and account discovery results
+
+Old scoring gate10612 is now TERMINAL exit0:5/5passed,0skips,1268.67s. Retained
+recipe-bundle-qualification.json records its exact3a711953... identity, matching
+report SHA,23checks/2qualifications/15regions and confirmed process settlement.
+Preserved bytes were copied and independently re-inspected at the recorded path.
+Do not poll10612 again; this is not proof for corrected primary25d57874... .
+
+Primary clean-source compiler gate33880 is terminal0:2/2passed,0skips,27.20s.
+It bound2731committed files/50,903,379bytes at3d32d708 to actual compiler authoring;
+baseline and TS2322 refusal both settled under the original60s/1GiB heap bound.
+full-inventory-compiler-acceptance.json preserves identity and limitations.
+Correctly selected primary quick gate60237 passed413tests/12files/0skips64.97s.
+This overlaps gate73003; do not add counts as unique tests. Extended native73003
+remains live, with corrected runtime source/dist frozen and no duplicate launch.
+
+App-scoped metadata inspection located the former57294 console's actual files:
+/Users/masonwyatt/.ashlr/account-connections/{pool.json,bindings.json,
+observations.json,quota-config.json,connections.json}, accounting root ledger/.
+Allowlisted startup fields identify pool ashlr-subscriptions, readOnly:true and
+no execution workspace. Selected persisted policy fields show ceiling75(rev3),
+personal Codex paused(rev1), workers codex-personal/codex-cmp/claude, no Spark
+worker and no quotaScopeAccess. These are stored policy facts, not live quota or
+authenticated account availability. The local engineering runtime/project catalog
+has not been found/created there. Raw auth, keys, tokens and provider bodies were
+not read or exposed; no allocation, account pause or service state was changed.
