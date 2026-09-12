@@ -2083,6 +2083,14 @@ Read-only group-absence checks never restore signaling authority over an exited
 or recycled process. A budget expiring before native contact settles its local
 reservation without inventing a provider sample.
 
+For a normal helper close, the runner can observe a briefly lingering group for
+up to one second, within the original execution deadline. These are signal-zero
+checks only; no termination signal is sent after the leader exits. Fixed
+monotonic and wall-clock bounds prevent a delayed event-loop callback from
+accepting a late absence result. Persistent groups, permission errors, expired
+cleanup bounds and failed lifecycle publication remain unconfirmed. A helper's
+exit code alone still cannot release its metadata reservation.
+
 A later acquisition may recover v4 on the same boot when the machine and boot
 match, the former owner PID is proven absent with `ESRCH`, no reservation is
 `preparing`, and every `registered` group is also proven absent with `ESRCH`.
@@ -2108,6 +2116,15 @@ peers, and refuse clean closure so the pending marker survives. This includes
 one-shot quota captures. Pre-contact adapter refusals and explicit settled failures
 keep their existing behavior. These checks do not certify the absence of detached
 or daemonized descendants; an idle counter alone cannot authorize same-boot recovery.
+
+Programmatic one-shot callers can inspect `ResourceQuotaRefreshError.workerDiagnostics`
+after awaited cleanup fails. Its bounded, frozen records contain the pinned
+worker ID, probe status, a fixed cleanup failure class, group-settlement state,
+and timeout/cancellation flags. Unknown evidence is labeled unknown. The existing
+error message remains compatible. These records contain no raw native output,
+exception cause, account hints or partial observations; they cannot authorize
+admission or refresh quota timestamps. A prior worker's `observed` status in an
+otherwise failed pass does not make its readings available for execution.
 
 Universe resource generation can reuse this pinned configuration through its
 optional private [`quotaConfigPath`](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool).

@@ -306,3 +306,37 @@ Global KILL remains active. Enrollment/policy completion is not fleet activation
 or full production acceptance. Both quota-call handles are terminal. The original
 input files remain unchanged by evolution; consumers must use the retained
 reviewed proposal configuration for the upgraded ledger, not the old pool files.
+
+## Continuation: native collector cleanup reliability
+
+Previous goal turn was progress: live Spark enrollment and scoped reservation,
+history-preserving recovery, and a reproducible commissioning failure changed
+the next action. No new provider retries until the failure is understood.
+
+- [ ] Explore helper/runner/coordinator lifecycle and build inert local reproduction.
+- [ ] Identify the exact failing boundary and implement a source-backed correction
+  without granting signaling authority after leader exit or accepting partial quota.
+- [ ] Independently verify focused cleanup, quota, lifecycle and regression cases.
+- [ ] Record actual build identity and remaining live commissioning gates.
+
+Three agents own independent reproduction, lifecycle review and focused regression
+verification. Parent integrates. Global stop, account policy and retained live
+marker are unchanged during local investigation.
+
+### Local correction verified
+
+- [x] Reproduced the complete native collector failure with inert child processes.
+- [x] Added fixed <=1s read-only group-absence observation after normal close,
+  bounded by the original deadline; no delayed signaling or late success.
+- [x] Added bounded sanitized worker cleanup diagnostics to one-shot errors;
+  existing messages and admission/uncertainty semantics remain intact.
+- [x] Final combined local gate 65467: 299 tests across nine files passed,
+  26.48 seconds. Includes actual lease/General/Spark success and long-group refusal.
+- [x] Independent runner, diagnostic privacy and integration-fixture review passed.
+- [ ] Build exact source and perform a new bounded, evidence-pinned commissioning
+  check. Earlier evaluator qualification does not automatically qualify a rebuild.
+
+The native fixture startup handshake was made explicit to remove startup latency
+from asserted descendant lifetime. A parent fixture syntax typo failed 14927;
+fixed before final gate, with nested source validation added. Final two-case
+58001 passed in 5.14 seconds. No production bounds were loosened to pass fixtures.

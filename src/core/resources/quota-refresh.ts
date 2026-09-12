@@ -6,7 +6,8 @@ import { canonical, digest } from '../universe/artifacts.js';
 import { mergeResourceObservations, readResourcePoolAllocation } from './pool-runtime.js';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
-import { probeCodexResourceAccount, type CodexResourceProbeOptions, type CodexResourceProbeResult } from './codex-account-probe.js';
+import { probeCodexResourceAccount, sanitizeCodexProbeCleanupDiagnostics, type CodexProbeCleanupDiagnostics,
+  type CodexResourceProbeOptions, type CodexResourceProbeResult } from './codex-account-probe.js';
 import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from './quota-refresh-lease.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from './metadata-coordinator.js';
 import { resourceQuotaBuckets, expandResourceQuotaDenials } from './quota-scope.js';
@@ -17,6 +18,27 @@ const MAX_BACKOFF_MS = 300_000;
 const PROBE_TIMEOUT_MS = 10_000;
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
+
+export interface ResourceQuotaWorkerCleanupDiagnostics {
+  readonly workerId: string;
+  readonly probeStatus: 'observed' | 'failed' | 'timed-out' | 'cancelled' | 'uncertain' | 'unknown' | 'rejected';
+  readonly cleanupDiagnostics: CodexProbeCleanupDiagnostics;
+}
+/** Failure evidence only: never attach partial observations or admission decisions to an error. */
+export class ResourceQuotaRefreshError extends Error {
+  readonly workerDiagnostics: readonly ResourceQuotaWorkerCleanupDiagnostics[];
+  constructor(message: string, diagnostics: readonly ResourceQuotaWorkerCleanupDiagnostics[]) {
+    super(message);
+    this.workerDiagnostics = Object.freeze(diagnostics.slice(0, 64).map((row) => Object.freeze({
+      workerId: row.workerId, probeStatus: row.probeStatus,
+      cleanupDiagnostics: sanitizeCodexProbeCleanupDiagnostics(row.cleanupDiagnostics) ?? Object.freeze({
+        failure: 'diagnostics-unavailable' as const, processGroupSettlement: 'unknown' as const,
+        timedOut: 'unknown' as const, cancelled: 'unknown' as const,
+      }),
+    })));
+    Object.defineProperty(this, 'workerDiagnostics', { writable: false, configurable: false });
+  }
+}
 
 /** Local pre-contact cancellation: no provider sample or successful read is asserted. */
 function cancelledBeforeNativeContact(workerId: string, poolDigest: string, startedAt = new Date().toISOString()): CodexResourceProbeResult {
@@ -435,6 +457,28 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
   let preservePending = false;
   let result: { observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] } | undefined;
   let failure: Error | undefined;
+  const workerDiagnostics: ResourceQuotaWorkerCleanupDiagnostics[] = [];
+  const captureDiagnostics = (workerId: string, value: unknown, rejected = false): void => {
+    let diagnostic: CodexProbeCleanupDiagnostics | undefined;
+    let probeStatus: ResourceQuotaWorkerCleanupDiagnostics['probeStatus'] = rejected ? 'rejected' : 'unknown';
+    try {
+      if (value !== null && typeof value === 'object') {
+        const status = Object.getOwnPropertyDescriptor(value, 'status');
+        if (status && 'value' in status && typeof status.value === 'string' &&
+          ['observed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(status.value)) {
+          probeStatus = status.value as ResourceQuotaWorkerCleanupDiagnostics['probeStatus'];
+        }
+        const property = Object.getOwnPropertyDescriptor(value, 'cleanupDiagnostics');
+        if (property && 'value' in property) diagnostic = sanitizeCodexProbeCleanupDiagnostics(property.value);
+      }
+    } catch { /* Uninspectable injected evidence cannot add diagnostic authority. */ }
+    // The identity comes from pinned enrollment, never from the injected result.
+    if (workerDiagnostics.length === 64) workerDiagnostics.shift();
+    workerDiagnostics.push({ workerId, probeStatus, cleanupDiagnostics: diagnostic ?? Object.freeze({
+      failure: rejected ? 'probe-rejected' : 'diagnostics-unavailable',
+      processGroupSettlement: 'unknown', timedOut: 'unknown', cancelled: 'unknown',
+    }) });
+  };
   try {
     const available = remaining();
     if (available < 1 || controller.signal.aborted) throw new Error();
@@ -452,12 +496,19 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
       coordinator = createNativeMetadataCoordinator({ signal: controller.signal,
         beginNativeActivity: () => lease!.beginNativeActivity() });
       const pass = createRefresher({ ...checked, signal: AbortSignal.any([controller.signal, coordinator.signal]), assertOwnership, coordinator,
-        probe: (probeOptions) => {
+        probe: async (probeOptions) => {
           const available = remaining();
           if (available < 1 || controller.signal.aborted) {
             return Promise.resolve(cancelledBeforeNativeContact(probeOptions.workerId, checked.config.poolDigest));
           }
-          return checked.probe({ ...probeOptions, timeoutMs: Math.min(PROBE_TIMEOUT_MS, available) });
+          try {
+            const value = await checked.probe({ ...probeOptions, timeoutMs: Math.min(PROBE_TIMEOUT_MS, available) });
+            captureDiagnostics(probeOptions.workerId, value);
+            return value;
+          } catch {
+            captureDiagnostics(probeOptions.workerId, undefined, true);
+            throw new Error('Native quota settlement unavailable');
+          }
         } }, true);
       refresher = pass.refresher;
       await pass.completed;
@@ -479,6 +530,6 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
     catch { failure = new Error('Resource quota refresh lease cleanup unconfirmed'); }
     clearTimeout(timer); checked.signal?.removeEventListener('abort', cancel);
   }
-  if (failure) throw failure;
+  if (failure) throw new ResourceQuotaRefreshError(failure.message, workerDiagnostics);
   return result!;
 }

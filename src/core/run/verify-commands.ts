@@ -20,6 +20,7 @@
  */
 
 import { spawn, spawnSync } from 'node:child_process';
+import { performance } from 'node:perf_hooks';
 import type { SpawnSyncOptionsWithStringEncoding } from 'node:child_process';
 import { existsSync, mkdtempSync, realpathSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -682,6 +683,14 @@ export async function runVerifySubprocessAsync(
     let timeoutTimer: ReturnType<typeof setTimeout> | null = null;
     let escalationTimer: ReturnType<typeof setTimeout> | null = null;
     let drainTimer: ReturnType<typeof setTimeout> | null = null;
+    let normalCloseTimer: ReturnType<typeof setTimeout> | null = null;
+    let normalCloseLimitTimer: ReturnType<typeof setTimeout> | null = null;
+    let normalCloseActive = false;
+    let normalCloseExpired = false;
+    let normalCloseDeadlineMono = Infinity;
+    let normalCloseDeadlineWall = Infinity;
+    let executionDeadlineMono = Infinity;
+    let executionDeadlineWall = Infinity;
     let lifecycle: ReturnType<VerifyProcessGroupLifecycle['prepare']> | undefined;
     let lifecycleRegistered = false;
     let lifecycleFailed = false;
@@ -766,26 +775,65 @@ export async function runVerifySubprocessAsync(
       child.unref();
     }
 
-    function settle(result: VerifySubprocessResult, noProcessStarted = false): void {
+    function settle(result: VerifySubprocessResult, noProcessStarted = false, allowNormalCloseDrain = false): void {
       if (settled) return;
-      settled = true;
-      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
-      if (escalationTimer !== null) clearTimeout(escalationTimer);
-      if (drainTimer !== null) clearTimeout(drainTimer);
-      opts.signal?.removeEventListener('abort', onAbort);
+      const stopNormalClose = () => {
+        if (!allowNormalCloseDrain) return false;
+        if (opts.signal?.aborted) { requestTermination('cancelled'); return true; }
+        if (performance.now() >= executionDeadlineMono || Date.now() >= executionDeadlineWall) {
+          requestTermination('timeout'); return true;
+        }
+        return false;
+      };
+      if (stopNormalClose()) return;
+      const expireNormalClose = () => {
+        if (allowNormalCloseDrain && (performance.now() >= normalCloseDeadlineMono || Date.now() >= normalCloseDeadlineWall)) normalCloseExpired = true;
+      };
+      expireNormalClose();
+      let receipt: NonNullable<VerifySubprocessResult['processGroupSettlement']> = noProcessStarted ? 'not-started' : 'unconfirmed';
+      let groupPresent = false;
       if (opts.requireProcessGroupExit) {
-        let receipt: NonNullable<VerifySubprocessResult['processGroupSettlement']> =
-          noProcessStarted ? 'not-started' : 'unconfirmed';
-        if (originalPgid !== null) {
+        if (originalPgid !== null && !normalCloseExpired) {
           // This check cannot kill a recycled group and never restores authority
           // for a later signal. Only kernel-reported absence grants settlement.
-          try { processKill(-originalPgid, 0); }
+          try { processKill(-originalPgid, 0); groupPresent = true; }
           catch (err) {
             if (typeof err === 'object' && err !== null && 'code' in err && err.code === 'ESRCH') {
               receipt = 'group-exit-confirmed';
             }
           }
         }
+        if (settled || stopNormalClose()) return;
+        expireNormalClose();
+        if (normalCloseExpired) receipt = 'unconfirmed';
+        if (allowNormalCloseDrain && !normalCloseExpired && groupPresent && !lifecycleFailed && (!lifecycle || lifecycleRegistered)) {
+          // A closed leader may leave short-lived descendants without inherited
+          // pipes. Observe only: never regain signaling authority over its PID.
+          // The original timeout stays armed; this additional drain is bounded.
+          if (normalCloseLimitTimer === null) {
+            const duration = Math.min(opts._terminationDrainMs ?? ASYNC_TERMINATION_DRAIN_MS, ASYNC_TERMINATION_DRAIN_MS);
+            normalCloseDeadlineMono = performance.now() + duration;
+            normalCloseDeadlineWall = Date.now() + duration;
+            normalCloseLimitTimer = setTimeout(() => {
+              normalCloseLimitTimer = null;
+              normalCloseExpired = true;
+              if (!stopNormalClose()) settle(result, noProcessStarted);
+            }, duration);
+          }
+          normalCloseTimer = setTimeout(() => {
+            normalCloseTimer = null; settle(result, noProcessStarted, true);
+          }, 25);
+          return;
+        }
+      }
+      settled = true;
+      if (timeoutTimer !== null) clearTimeout(timeoutTimer);
+      if (escalationTimer !== null) clearTimeout(escalationTimer);
+      if (drainTimer !== null) clearTimeout(drainTimer);
+      if (normalCloseTimer !== null) clearTimeout(normalCloseTimer);
+      if (normalCloseLimitTimer !== null) clearTimeout(normalCloseLimitTimer);
+      opts.signal?.removeEventListener('abort', onAbort);
+      if (opts.requireProcessGroupExit) {
         if (lifecycle) {
           // A numeric PID with no spawn event is not a registered invocation,
           // even if that group happens to be absent by the time close arrives.
@@ -915,6 +963,14 @@ export async function runVerifySubprocessAsync(
           : `\n[verify-runner] timed out after ${opts.timeoutMs}ms; terminating process group`,
       );
 
+      if (normalCloseActive) {
+        // Normal close already revoked leader ownership. An observation drain
+        // cannot extend execution deadlines or authorize delayed signals.
+        settle(emptyResult({ ...captured(), exitCode: reason === 'timeout' ? 124 : exitCode ?? -1,
+          signal: exitSignal, timedOut: reason === 'timeout', cancelled: reason === 'cancelled' }));
+        return;
+      }
+
       if (ownsProcessGroup) {
         if (leaderExited) {
           authorityFailure = 'process-group ownership identity lost after leader exit; refusing termination signal';
@@ -1013,11 +1069,12 @@ export async function runVerifySubprocessAsync(
       }
 
       ownedPgid = null;
+      normalCloseActive = opts.requireProcessGroupExit === true;
       settle(emptyResult({
         ...captured(),
         exitCode: code ?? (signal ? 1 : -1),
         signal,
-      }));
+      }), false, normalCloseActive);
     });
 
     function deliverInput(): void {
@@ -1051,6 +1108,8 @@ export async function runVerifySubprocessAsync(
     opts.signal?.addEventListener('abort', onAbort, { once: true });
     if (opts.signal?.aborted) onAbort();
 
+    executionDeadlineMono = performance.now() + opts.timeoutMs;
+    executionDeadlineWall = Date.now() + opts.timeoutMs;
     timeoutTimer = setTimeout(() => requestTermination('timeout'), opts.timeoutMs);
     timeoutTimer.unref?.();
   });

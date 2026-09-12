@@ -327,3 +327,32 @@ Independent regression: 190 tests passed across eight evolution, Spark preparati
 and quota-scope access files in 16.72 seconds. These are isolated local fixtures,
 not real account quota or end-to-end operational acceptance. A guessed shared-
 evidence source filename was corrected with rg discovery; no state changed.
+
+## Local reproduction of native cleanup uncertainty
+
+Continuation starts at clean e7eea9b09464919946a7887c94b31d5219df6566.
+Entire resume reports no checkpoint for auto/p00. Previous turn is progress,
+not an unchanged blocker: live enrollment and scope policies are applied.
+
+Independent source review confirms lifecycle forwarding is intact through
+quota-refresh's wrapper, native probe and verify runner. A retained registered
+reservation independently demonstrates prepare/spawn registration occurred.
+Normal child close currently performs only one kernel group-absence probe.
+
+Agent baseline 15309: three inert reproduction tests passed, 4.30 seconds.
+A normal-exit helper with a lingering same-group descendant returns unconfirmed;
+later ESRCH does not change that result. The actual native protocol helper
+reproduces the same difference with/without a descendant. This establishes a
+mechanism, not definitive attribution of the earlier real Codex failures.
+
+Parent baseline 42456: the new full native lifecycle integration test failed
+with Resource quota refresh cleanup unconfirmed, 766 ms test time. It exercises
+refreshResourceQuotaOnce, a real private ledger lease, the actual native helper,
+and an inert protocol child with a 350 ms descendant. No injected probe or
+external provider is involved. It also pins General/Spark scope and a 75% ceiling.
+
+Existing baseline regressions passed: 190 tests across native probe, one-shot
+quota, coordinator and process-group lifecycle suites, 14.10 seconds. Their
+separate mocks did not cover the full lease-to-native-helper integration above.
+An attempted read of nonexistent scripts/build.mjs was corrected by inspecting
+package.json and discovering the actual build scripts; no files changed.

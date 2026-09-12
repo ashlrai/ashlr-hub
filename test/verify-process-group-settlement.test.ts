@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
+import { performance } from 'node:perf_hooks';
 import type { spawn } from 'node:child_process';
 import { runVerifySubprocessAsync, type VerifySubprocessOptions } from '../src/core/run/verify-commands.js';
 
@@ -19,7 +20,7 @@ function fixture(pid: number | undefined = 24_680) {
   };
   return { child, spawnFake, processKill, opts };
 }
-afterEach(() => vi.useRealTimers());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('opt-in subprocess group settlement receipt', () => {
   it.each([
@@ -86,7 +87,68 @@ describe('opt-in subprocess group settlement receipt', () => {
     expect(await pending).toMatchObject({
       processGroupSettlement: 'unconfirmed', error: 'required process-group exit receipt unconfirmed',
     });
-    expect(processKill.mock.calls).toEqual([[-24_680, 0]]);
+    expect(processKill).toHaveBeenCalled();
+    expect(processKill.mock.calls.every(([pid, signal]) => pid === -24_680 && signal === 0)).toBe(true);
+    expect(child.kill).not.toHaveBeenCalled();
+  });
+
+  it('observes a briefly present group after normal close without renewing signaling authority', async () => {
+    vi.useFakeTimers();
+    const { opts, child, processKill } = fixture(); let gone = false;
+    processKill.mockImplementation(() => { if (gone) absent(); });
+    const pending = runVerifySubprocessAsync(['fixture'], { ...opts, _terminationDrainMs: 60 });
+    child.emit('exit', 0, null); child.emit('close', 0, null);
+    await vi.advanceTimersByTimeAsync(10); gone = true; await vi.advanceTimersByTimeAsync(20);
+    expect(await pending).toMatchObject({ exitCode: 0, timedOut: false, cancelled: false, processGroupSettlement: 'group-exit-confirmed' });
+    expect(processKill.mock.calls.every(([, signal]) => signal === 0)).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['cancelled', 'timeout'] as const)('cannot report normal success after %s during read-only close drain', async reason => {
+    vi.useFakeTimers();
+    const { opts, child, processKill } = fixture(); const controller = new AbortController(); let gone = false;
+    processKill.mockImplementation(() => { if (gone) absent(); });
+    const pending = runVerifySubprocessAsync(['fixture'], { ...opts, signal: controller.signal, timeoutMs: 20, _terminationDrainMs: 100 });
+    child.emit('exit', 0, null); child.emit('close', 0, null);
+    gone = true;
+    if (reason === 'cancelled') controller.abort(); else await vi.advanceTimersByTimeAsync(20);
+    expect(await pending).toMatchObject({ processGroupSettlement: 'group-exit-confirmed',
+      timedOut: reason === 'timeout', cancelled: reason === 'cancelled' });
+    expect(processKill.mock.calls.every(([, signal]) => signal === 0)).toBe(true); expect(child.kill).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(['wall', 'monotonic'] as const)('refuses absence after a stalled close budget measured by %s', async clock => {
+    vi.useFakeTimers();
+    const { opts, child, processKill } = fixture(); let gone = false;
+    let wall = 10_000; let mono = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => wall);
+    vi.spyOn(performance, 'now').mockImplementation(() => mono);
+    const settled = vi.fn();
+    processKill.mockImplementation(() => { if (gone) absent(); });
+    const pending = runVerifySubprocessAsync(['fixture'], { ...opts, timeoutMs: 10_000, _terminationDrainMs: 60,
+      processGroupLifecycle: { prepare: () => ({ spawned() {}, settled }) } });
+    child.emit('spawn'); child.emit('exit', 0, null); child.emit('close', 0, null);
+    // Advance sampled clocks without running timers: the first queued poll runs
+    // after the fixed drain budget, before its separately queued limit callback.
+    if (clock === 'wall') wall += 61; else { mono += 61; wall -= 500; }
+    gone = true; await vi.advanceTimersToNextTimerAsync();
+    expect(await pending).toMatchObject({ exitCode: 0, timedOut: false, cancelled: false, processGroupSettlement: 'unconfirmed' });
+    expect(processKill).toHaveBeenCalledTimes(1);
+    expect(settled).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('refuses lifecycle publication failure after a brief normal-close drain', async () => {
+    vi.useFakeTimers();
+    const { opts, child, processKill } = fixture(); let gone = false;
+    const settled = vi.fn(() => { throw Error('fixture publication refused'); });
+    processKill.mockImplementation(() => { if (gone) absent(); });
+    const pending = runVerifySubprocessAsync(['fixture'], { ...opts, _terminationDrainMs: 60,
+      processGroupLifecycle: { prepare: () => ({ spawned() {}, settled }) } });
+    child.emit('spawn'); child.emit('exit', 0, null); child.emit('close', 0, null);
+    gone = true; await vi.advanceTimersByTimeAsync(25);
+    expect(await pending).toMatchObject({ processGroupSettlement: 'unconfirmed', error: 'process-group lifecycle publication failed' });
+    expect(settled).toHaveBeenCalledExactlyOnceWith('group-exit-confirmed'); expect(vi.getTimerCount()).toBe(0);
   });
 
   it('does not treat close without a PID as proof of no-start', async () => {

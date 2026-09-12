@@ -36,6 +36,34 @@ export interface CodexResourceProbeResult {
   accountHint: string | null;
   planType: string | null;
   observation: ResourceObservation | null;
+  /** Sanitized subprocess evidence only; never usable as quota or admission evidence. */
+  cleanupDiagnostics?: CodexProbeCleanupDiagnostics;
+}
+export interface CodexProbeCleanupDiagnostics {
+  readonly failure: 'runner-rejected' | 'probe-rejected' | 'lifecycle-publication-failed' | 'group-exit-unconfirmed' |
+    'native-timed-out' | 'native-cancelled' | 'process-failed' | 'diagnostics-unavailable';
+  readonly processGroupSettlement: 'not-started' | 'group-exit-confirmed' | 'unconfirmed' | 'unknown';
+  readonly timedOut: boolean | 'unknown';
+  readonly cancelled: boolean | 'unknown';
+}
+
+/** Project only own data properties; injected diagnostics cannot execute getters or carry private text. */
+export function sanitizeCodexProbeCleanupDiagnostics(value: unknown): CodexProbeCleanupDiagnostics | undefined {
+  try {
+    if (value === null || typeof value !== 'object') return undefined;
+    const read = (key: string): unknown => {
+      const property = Object.getOwnPropertyDescriptor(value, key);
+      return property && 'value' in property ? property.value : undefined;
+    };
+    const failure = read('failure'); const processGroupSettlement = read('processGroupSettlement');
+    const timedOut = read('timedOut'); const cancelled = read('cancelled');
+    if (!['runner-rejected', 'probe-rejected', 'lifecycle-publication-failed', 'group-exit-unconfirmed',
+      'native-timed-out', 'native-cancelled', 'process-failed', 'diagnostics-unavailable'].includes(failure as string) ||
+      !['not-started', 'group-exit-confirmed', 'unconfirmed', 'unknown'].includes(processGroupSettlement as string) ||
+      !(typeof timedOut === 'boolean' || timedOut === 'unknown') ||
+      !(typeof cancelled === 'boolean' || cancelled === 'unknown')) return undefined;
+    return Object.freeze({ failure, processGroupSettlement, timedOut, cancelled }) as CodexProbeCleanupDiagnostics;
+  } catch { return undefined; }
 }
 export interface CodexProbeProcessInput {
   schemaVersion: 1;
@@ -151,11 +179,13 @@ export async function probeCodexResourceAccount(options: CodexResourceProbeOptio
   let pinned: ReturnType<typeof configuration>;
   try { pinned = configuration(options); } catch { throw new Error('Invalid Codex resource probe configuration'); }
   const started = performance.now(); const startedAt = new Date().toISOString();
+  let cleanupDiagnostics: CodexProbeCleanupDiagnostics | undefined;
   const result = (status: CodexResourceProbeResult['status'], reason: string,
     metadata?: Pick<CodexProbeProcessOutput, 'accountHint' | 'planType' | 'observation'>): CodexResourceProbeResult => ({
     schemaVersion: 1, scope: 'codex-native-metadata', workerId: pinned.workerId, poolDigest: pinned.poolDigest,
     status, reason, startedAt, finishedAt: new Date().toISOString(),
     accountHint: metadata?.accountHint ?? null, planType: metadata?.planType ?? null, observation: metadata?.observation ?? null,
+    ...(cleanupDiagnostics ? { cleanupDiagnostics } : {}),
   });
   if (pinned.signal?.aborted) return result('cancelled', 'probe-cancelled');
   if (process.platform === 'win32') return result('failed', 'probe-platform-unsupported');
@@ -173,6 +203,15 @@ export async function probeCodexResourceAccount(options: CodexResourceProbeOptio
     // A rejected runner call provides no teardown witness, even if it threw synchronously.
     invocationAttempted = true;
     const executed = await runVerifySubprocessAsync(argv, executionOptions);
+    const failure: CodexProbeCleanupDiagnostics['failure'] | undefined =
+      executed.error === 'process-group lifecycle publication failed' ? 'lifecycle-publication-failed' :
+      executed.processGroupSettlement !== 'not-started' && executed.processGroupSettlement !== 'group-exit-confirmed'
+        ? 'group-exit-unconfirmed' : executed.cancelled ? 'native-cancelled' : executed.timedOut ? 'native-timed-out' :
+          executed.error || executed.exitCode !== 0 || executed.signal || executed.outputTruncated ? 'process-failed' : undefined;
+    if (failure) cleanupDiagnostics = sanitizeCodexProbeCleanupDiagnostics({ failure,
+      processGroupSettlement: executed.processGroupSettlement ?? 'unknown',
+      timedOut: typeof executed.timedOut === 'boolean' ? executed.timedOut : 'unknown',
+      cancelled: typeof executed.cancelled === 'boolean' ? executed.cancelled : 'unknown' });
     // Exit status and output are not evidence that native descendants have stopped.
     if (executed.processGroupSettlement !== 'not-started' && executed.processGroupSettlement !== 'group-exit-confirmed') {
       return result('uncertain', 'probe-termination-uncertain');
@@ -185,8 +224,12 @@ export async function probeCodexResourceAccount(options: CodexResourceProbeOptio
     }
     const metadata = checkedOutput(executed.stdout, pinned.pool, pinned.workerId, startedAt, pinned.expectedAccountHint);
     return metadata ? result(metadata.status, metadata.reason, metadata) : result('failed', 'probe-process-output-invalid');
-  } catch { return invocationAttempted && !cleanupConfirmed
-    ? result('uncertain', 'probe-termination-uncertain') : result('failed', 'probe-process-failed'); }
+  } catch {
+    if (invocationAttempted && !cleanupConfirmed && !cleanupDiagnostics) cleanupDiagnostics = Object.freeze({
+      failure: 'runner-rejected', processGroupSettlement: 'unknown', timedOut: 'unknown', cancelled: 'unknown' });
+    return invocationAttempted && !cleanupConfirmed
+      ? result('uncertain', 'probe-termination-uncertain') : result('failed', 'probe-process-failed');
+  }
   finally {
     // Never recursively remove native-created data, nor remove the cwd while
     // teardown is unconfirmed. A nonempty/uncertain scratch is left private.

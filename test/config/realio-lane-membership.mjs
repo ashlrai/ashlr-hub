@@ -43,6 +43,9 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/resource-quota-cleanup-diagnostics.test.ts', // private real collector leases with inert failure witnesses
+  'test/resource-quota-native-lifecycle.test.ts', // real inert native protocol, shared quota lease and group settlement
+  'test/collector-cleanup-reproduction.test.ts', // inert inherited descendants and actual native helper cleanup
   'test/legacy-collector-reconciliation-driver.test.ts', // operator quarantine in private fixtures with real lock custody
   'test/resource-engineering-mission-store.test.ts', // private immutable mission records and configuration replay
   'test/resource-engineering-mission-invocations.test.ts', // private immutable invocation observations and timing

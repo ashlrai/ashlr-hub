@@ -310,3 +310,44 @@ collection attempts. Global KILL remains active; no model task, service cutover,
 public deployment, npm publication, GitHub Actions or remote push occurred.
 Fresh quota health, Claude admission quota, genuine calibration and unattended
 engineering acceptance are not established by this increment.
+
+## Native collector cleanup correction
+
+Starting source e7eea9b09464919946a7887c94b31d5219df6566, clean auto/p00.
+Three agent roles investigated reproduction, implementation, independent review
+and regression coverage; parent integrated the complete native-lease tests.
+
+The original runner made a single group-absence check at normal helper close.
+A local inert descendant reproduced the same cleanup exception through the real
+quota refresher, native helper and private ledger lease. This proves a failure
+mechanism, not conclusive attribution of previous live Codex failures.
+
+The runner now observes normal-close group absence for at most one second and
+within the original execution deadline, with fixed monotonic/wall-clock bounds.
+It never restores signaling authority after leader exit. Persistent groups,
+permission errors, late absence and failed durable publication remain unconfirmed.
+One-shot errors now retain sanitized frozen worker diagnostics, without usable
+partial observations, raw native text or altered admission behavior.
+
+Final combined local gate 65467 passed 299 tests across nine files in 26.48 seconds.
+Coverage includes actual General/Spark native fixture calls with a real lease,
+unchanged 75% policy/General reservation, persistent group refusal before the next
+alias, clocks moving/blocked callbacks, timeout/cancellation and diagnostic privacy.
+Independent source review, scoped lint and source documentation checks passed.
+
+An earlier helper fixture's unexpected short-descendant failure was not silently
+discarded: its exact diagnostic was unavailable. A readiness/release handshake now
+defines lifetime separately from process startup. A separate parent nested-fixture
+syntax mistake caused 14927 to fail; source validation corrected it, and 58001
+passed both final integration cases before the combined gate. These were local
+fixture failures; no live account state changed during their investigation.
+
+At this source checkpoint, no runtime rebuild or further provider contact has
+occurred. The retained v4 live marker and global stop are unchanged. Rebuilding
+changes runtime identity and requires fresh verification; prior qualification is
+not transferred by assertion. This correction is not unattended fleet acceptance.
+
+Additional shared-runner gate 88847 passed 241 Claude/Grok metadata tests across
+three files in 16.51 seconds. Source type check 84198 passed. Together with the
+299-case combined gate, 540 focused tests passed on the final source. No provider
+was contacted by these fixtures. Real-IO classification and final diff checks pass.
