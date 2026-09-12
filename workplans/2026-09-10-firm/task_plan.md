@@ -1,6 +1,26 @@
 # Executable firm: package graph
 
-## Current handoff — ordinary builtin trial custody
+## Current handoff — retained calibration and candidate comparison
+
+Integrated source `713bff6c2f787861975c4e1243beb0275bfa1e4c` connects three
+retained captures to a deterministic baseline descriptor and a scope-checked
+captured-candidate comparison, through CLI and SDK. Lower aggregate process use
+cannot hide a region process/blob regression. Exact evaluator launch semantics,
+whole artifact identity and non-target inventory are checked.
+
+Final rebuilt integration gate: 474 tests / 15 files / zero skips / 16.68 seconds.
+Typechecks, builds, scoped lint, full lint (107 unrelated warnings), docs and lane
+checks passed. All native handles are terminal. See
+[verification](../../artifacts/preparation-calibration-verification.md) and
+[continuation plan](../2026-09-12-trusted-improvement/delivery.md).
+
+This is diagnostic evidence, not installed scoring authority or an accepted
+optimization. The real global KILL switch remains healthy/active and untouched.
+Next: candidate-linked during-call qualification, final workload baseline captures,
+installed scoring, and a real accepted improvement through existing delivery.
+No provider/account changes, resident activation, remote push or publication.
+
+## Previous handoff — ordinary builtin trial custody
 
 Integrated code revision `c78bbea917ec54fadc424679135014670afe5b25` adds
 immutable per-trial evaluator custody, retained uncertain scratch, same-Universe
