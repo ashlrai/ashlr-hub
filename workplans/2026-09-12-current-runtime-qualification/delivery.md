@@ -24,7 +24,13 @@ receipts become ineligible handoff evidence without deleting records or branches
 - Adjacent delivery, repair and portfolio 27652: 105/105, 111.87 seconds.
 - Source and changed-test types, scoped lint, docs and lane checks passed.
 - Independent source and parent acceptance review found no remaining blocker.
-- Full resource-accounted successor-chain 31303: running; result not yet claimed.
+- Full resource-accounted successor-chain 31303: 1 selected case passed in 233.34
+  seconds; two other cases filtered. This verifies quota deferral/recovery followed
+  by two evaluated local deliveries and no repeat work after restart.
+
+The correction is committed at f8cd6f1e3bbed0bb0eb50ea6a5936903ed21ddea. There are
+192 distinct passing tests across ten files. Exact handles and scope are retained
+in verification.json. No build of this newer source has been run yet.
 
 The real worker cases verify 150 → 149 delivery, 140 → 145 → 144 withholding, and
 140 → 145 → 139 delivery. They retain exact generation ancestry, original deadlines,
@@ -35,7 +41,8 @@ unchanged checkout/index/seed and byte-equal journals on replay.
 Native handle 76456 runs the fixed build from 29f3e055 with evaluator 9a051509.
 Node is 24.18.0 at /opt/homebrew/Cellar/node@24/24.18.0/bin/node. Its selected full
 case covers 23 checks, 15 benchmark regions and two qualification probes; four control
-cases are filtered. Do not claim its result while it is running. Do not rebuild
+cases are unselected by the filter. The last poll around 11:24 UTC confirmed the
+same session is running. Do not claim its result while it is running. Do not rebuild
 the installed assets underneath it, or restart solely after a silent poll.
 
 The new source correction is not in that frozen installed build. After 76456 is
@@ -45,7 +52,8 @@ optimization, account readiness or production activation.
 
 ## Commissioning
 
-The selected legacy v1 collector marker still has no owner/boot/PID or activity
+At 2026-09-12T11:23:59Z, the global stop was healthy and active, and the selected
+legacy v1 collector marker still had no owner/boot/PID or activity
 evidence; no existing recovery protocol can reacquire its original live lease.
 An optional prospective restart-verified recovery path was raised for direction,
 not implemented or activated. No real collector state, account reserve, global
