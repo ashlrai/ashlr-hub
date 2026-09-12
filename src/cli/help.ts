@@ -76,7 +76,7 @@ export const AGENT_COMMANDS: AgentCommandDoc[] = [
   },
   {
     usage: 'ashlr universe preparation-measurement --input <absolute-report.json> --json',
-    description: 'Read one explicit installed preparation measurement report. Diagnostic only: reported checks are not a score or acceptance evidence; unknown totals stay unknown, blob counts are subsets, and fixture groups are separate. No store discovery, execution or provider calls.',
+    description: 'Read one explicit installed preparation measurement report, including workload version and separate during-call qualification status/counts. Diagnostic only: reported checks are not a score or acceptance evidence; unknown totals stay unknown, blob counts are subsets, and fixture groups are separate. No store discovery, execution or provider calls.',
     safety: 'read',
     jsonShape: '{schemaVersion:1,kind:"preparation-measurement-summary",scope:"diagnostic-only",...PreparationMeasurementSummary}',
   },

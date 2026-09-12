@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL, URL } from 'node:url';
 import { createHash } from 'node:crypto';
 import strictAssert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
-import { createPreparationCandidateSession } from './preparation-verification-controller.mjs';
+import { createPreparationCandidateSession, qualifyPreparationCandidate } from './preparation-verification-controller.mjs';
 import { createBuiltinActivityTracker } from './preparation-verification-activity.mjs';
 import { MAX_SESSION_DURATION_MS } from './preparation-verification-protocol.mjs';
 import { resolvePreparationGit, assertPreparationGit } from './preparation-verification-native.mjs';
@@ -87,14 +87,14 @@ function fixture(base, count) {
   return { root, runtime, options: { recipe, workspace, resourceRuntime, projectsFile, output: path.join(root, 'bundle') } };
 }
 async function evaluate() {
-  const metrics = {}; const workflows = []; let checks = 0; let session;
+  const metrics = {}; const workflows = []; const qualifications = []; const qualificationFixtures = []; let checks = 0; let session;
   let workload = 'preparation-leaf-v1';
   try {
     assert.equal(process.argv.length, 3);
     const bridgePath = fileURLToPath(new URL('./preparation-bridge.mjs', import.meta.url));
     assert.equal(process.argv[2], bridgePath);
     if (process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY) activity = createBuiltinActivityTracker(process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY);
-    if (activity) workload = 'preparation-workflows-v1';
+    if (activity) workload = 'preparation-workflows-v2';
     if (activity) {
       const text = process.env.ASHLR_UNIVERSE_BUILTIN_GIT;
       assert.ok(typeof text === 'string' && Buffer.byteLength(text) <= 4096);
@@ -235,18 +235,29 @@ async function evaluate() {
         failure = 'WORKFLOW_CANDIDATE_SHUTDOWN_FAILED'; await session.close(); session = undefined;
         assert.deepEqual(snapshot(fixtureRoot), changed); guard();
         workflows.push({ name: kind, ...ledger });
+        qualificationFixtures.push({ name: kind === 'manager' ? 'runtime-drift' : 'source-drift', fixture: f, fixtureRoot });
       }
       metrics.workflow_processes = workflows.reduce((sum, row) => sum + row.processes, 0);
       metrics.workflow_blob_processes = workflows.reduce((sum, row) => sum + row.blobProcesses, 0);
+      // Preserve the original nineteen operations and their ledgers. Each
+      // qualifier restores only our known mutation after that old session closed.
+      for (const item of qualificationFixtures) {
+        checkpoint = `qualification:${item.name}`; failure = 'CANDIDATE_QUALIFICATION_FAILED'; guard();
+        const row = await qualifyPreparationCandidate({ ...item, bridge, bridgePath, candidateRoot, workRoot: base,
+          activity, signal: stop.signal, gitPin, deadlineAt, deadlineMonotonicMs: monotonicDeadline });
+        guard(); qualifications.push(row); checks += 2;
+      }
+      metrics.qualification_processes = qualifications.reduce((sum, row) => sum + row.processes, 0);
+      metrics.qualification_blob_processes = qualifications.reduce((sum, row) => sum + row.blobProcesses, 0);
     }
     assertPreparationGit(gitPin);
     metrics.correctness_checks = checks;
     metrics.verification_processes = Object.entries(metrics).filter(([key]) => key.startsWith('files_') && key.endsWith('_processes') && !key.endsWith('_blob_processes')).reduce((sum, [, value]) => sum + value, 0);
-    return { schemaVersion: 1, kind: 'preparation-verification-measurement', ...(activity ? { workload, workflows } : {}), checksPassed: true, metrics, diagnostics: [] };
+    return { schemaVersion: 1, kind: 'preparation-verification-measurement', ...(activity ? { workload, workflows, qualifications } : {}), checksPassed: true, metrics, diagnostics: [] };
   } catch (error) {
     if (error?.code === 'CANDIDATE_CONFINEMENT_UNAVAILABLE') failure = 'CANDIDATE_CONFINEMENT_UNAVAILABLE';
     if (session) { try { await session.close(); } catch { /* A cleanup failure can never become an accepted measurement. */ } }
-    return { schemaVersion: 1, kind: 'preparation-verification-measurement', ...(activity ? { workload, workflows } : {}), checksPassed: false,
+    return { schemaVersion: 1, kind: 'preparation-verification-measurement', ...(activity ? { workload, workflows, qualifications } : {}), checksPassed: false,
       metrics: { correctness_checks: checks }, diagnostics: [{ code: failure, message: activity
         ? `Pinned verification workload did not satisfy its fixed checks at ${checkpoint}.`
         : 'Pinned verification prototype did not satisfy its fixed checks.' }] };

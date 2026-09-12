@@ -15,6 +15,13 @@ function fixture() {
     } as Record<string, number>, diagnostics: [] as Array<{ code: string; message: string }> };
 }
 const parse = (value: unknown) => parsePreparationMeasurementReport(JSON.stringify(value));
+function qualified() {
+  const base = fixture();
+  const qualifications = ['runtime-drift', 'source-drift'].map((name, index) => ({ name, processes: 6, blobProcesses: 2,
+    requests: [1, 2].map(id => ({ id, method: index ? 'successor-metadata' : 'metadata', processes: 3, blobProcesses: 1 })), injections: 1 }));
+  return { ...base, workload: 'preparation-workflows-v2', qualifications,
+    metrics: { ...base.metrics, correctness_checks: 23, qualification_processes: 12, qualification_blob_processes: 4 } as Record<string, number> };
+}
 function failed() {
   const value = fixture(); value.checksPassed = false;
   value.diagnostics = [{ code: 'WORKFLOW_CANDIDATE_BEHAVIOR_FAILED', message: 'Fixed workload refused.' }];
@@ -23,6 +30,56 @@ function failed() {
 }
 
 describe('preparation measurement report', () => {
+  it('preserves the exact v1 report shape and identifies qualification as absent rather than passed', () => {
+    expect(parse(fixture())).toEqual(fixture());
+    expect(summarizePreparationMeasurementReport(parse(fixture()))).toMatchObject({ workload: 'preparation-workflows-v1',
+      qualificationStatus: 'not-in-workload', qualificationProcesses: null, qualificationBlobProcesses: null, qualifications: [] });
+  });
+  it('decodes v2 qualification independently of the unchanged measured region totals', () => {
+    const value = qualified(); expect(parse(value)).toEqual(value);
+    const summary = summarizePreparationMeasurementReport(parse(value));
+    expect(summary).toMatchObject({ workload: 'preparation-workflows-v2', qualificationStatus: 'complete', correctnessChecks: 23,
+      qualificationProcesses: 12, qualificationBlobProcesses: 4, leafProcesses: 4, workflowProcesses: 11 });
+    summary.qualifications[0]!.requests[0]!.processes = 100;
+    expect(value.qualifications[0]!.requests[0]!.processes).toBe(3);
+  });
+  it.each([0, 1])('retains %s completed qualification pairs with unknown aggregate metrics on failure', pairs => {
+    const value = qualified(); value.qualifications = value.qualifications.slice(0, pairs);
+    value.checksPassed = false; value.metrics = { correctness_checks: 19 + 2 * pairs };
+    value.diagnostics = [{ code: 'CANDIDATE_QUALIFICATION_FAILED', message: 'Fixed qualification failed.' }];
+    expect(summarizePreparationMeasurementReport(parse(value))).toMatchObject({ qualificationStatus: 'incomplete',
+      qualificationProcesses: null, qualificationBlobProcesses: null, qualifications: value.qualifications });
+  });
+  it('retains v2 pre-qualification failure and marks full post-settlement failure incomplete', () => {
+    const early = { ...failed(), workload: 'preparation-workflows-v2', qualifications: [] };
+    expect(parse(early).metrics.correctness_checks).toBe(16);
+    const full = qualified(); full.checksPassed = false;
+    full.diagnostics = [{ code: 'PROCESS_SETTLEMENT_UNCONFIRMED', message: 'Unconfirmed.' }];
+    expect(summarizePreparationMeasurementReport(parse(full))).toMatchObject({ qualificationStatus: 'incomplete', qualificationProcesses: 12 });
+  });
+  it.each(['absent', 'extra', 'reordered', 'injection', 'method', 'request-id', 'subtotal', 'aggregate', 'zero', 'checks', 'overflow', 'partial-claim'])(
+    'rejects v2 qualification %s corruption', kind => {
+      const value = qualified();
+      if (kind === 'absent') delete (value as { qualifications?: unknown }).qualifications;
+      if (kind === 'extra') Object.assign(value.qualifications[0]!, { accepted: true });
+      if (kind === 'reordered') value.qualifications.reverse();
+      if (kind === 'injection') value.qualifications[0]!.injections = 0;
+      if (kind === 'method') value.qualifications[0]!.requests[1]!.method = 'check';
+      if (kind === 'request-id') value.qualifications[0]!.requests[1]!.id = 1;
+      if (kind === 'subtotal') value.qualifications[0]!.processes++;
+      if (kind === 'aggregate') value.metrics.qualification_processes++;
+      if (kind === 'zero') value.qualifications[0]!.requests[0]!.processes = 0;
+      if (kind === 'checks') value.metrics.correctness_checks = 19;
+      if (kind === 'overflow') value.qualifications[0]!.requests[0]!.processes = Number.MAX_SAFE_INTEGER;
+      if (kind === 'partial-claim') { value.qualifications = []; value.workflows = []; value.checksPassed = false;
+        value.metrics = { correctness_checks: 23 }; value.diagnostics = [{ code: 'CANDIDATE_QUALIFICATION_FAILED', message: 'False claim.' }]; }
+      expect(() => parse(value)).toThrow();
+    });
+  it('does not accept v2 fields or qualification-only diagnostic codes on historical v1', () => {
+    expect(() => parse({ ...fixture(), qualifications: [] })).toThrow();
+    const value = failed(); value.diagnostics[0]!.code = 'CANDIDATE_QUALIFICATION_FAILED';
+    expect(() => parse(value)).toThrow();
+  });
   it('summarizes emitted counts without an acceptance or provenance field', () => {
     const summary = summarizePreparationMeasurementReport(parse(fixture()));
     expect(summary).toMatchObject({ reportedChecksSatisfied: true, correctnessChecks: 19, leafProcesses: 4,

@@ -31,6 +31,18 @@ function captured(): PreparationMeasurementCapture {
       outcome: 'captured', reason: null, processGroupSettlement: 'group-exit-confirmed', identityVerified: true,
       report: { stdout, bytes: Buffer.byteLength(stdout), sha256: createHash('sha256').update(stdout).digest('hex'), checksPassed: true } } };
 }
+function qualifiedCapture(): PreparationMeasurementCapture {
+  const value = captured(), report = JSON.parse(stdout);
+  report.workload = 'preparation-workflows-v2'; report.metrics.correctness_checks = 23;
+  report.qualifications = ['runtime-drift', 'source-drift'].map((name, index) => ({ name, injections: 1,
+    processes: 20, blobProcesses: 2, requests: [1, 2].map(id => ({ id,
+      method: index ? 'successor-metadata' : 'metadata', processes: 10, blobProcesses: 1 })) }));
+  report.metrics.qualification_processes = 40; report.metrics.qualification_blob_processes = 4;
+  const text = JSON.stringify(report) + '\n';
+  value.receipt!.report = { stdout: text, bytes: Buffer.byteLength(text),
+    sha256: createHash('sha256').update(text).digest('hex'), checksPassed: true };
+  return value;
+}
 let output: ReturnType<typeof vi.spyOn>, errors: ReturnType<typeof vi.spyOn>, raw: ReturnType<typeof vi.spyOn>;
 let signals: { interrupt: Array<(signal: NodeJS.Signals) => void>; terminate: Array<(signal: NodeJS.Signals) => void> };
 beforeEach(() => {
@@ -50,6 +62,16 @@ afterEach(() => {
 });
 
 describe('one-shot preparation diagnostic capture CLI', () => {
+  it.each([true, false])('identifies recorded v2 qualification separately from capture identity (json=%s)', async json => {
+    backend.capture.mockResolvedValue(qualifiedCapture());
+    expect(await cmdUniversePreparationMeasurementCapture([...args, ...(json ? ['--json'] : [])])).toBe(0);
+    if (json) expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({ scope: 'diagnostic-only',
+      identityVerificationScope: 'recorded-attempt-only', report: { workload: 'preparation-workflows-v2',
+        qualificationStatus: 'complete', reportedChecksSatisfied: true } });
+    else expect(output.mock.calls[0]![0]).toContain('Recorded workload: preparation-workflows-v2 · during-call qualification: complete');
+    expect(backend.capture).toHaveBeenCalledOnce();
+  });
+
   it.each([
     [], ['--json'], ['example'], ['example', '--root', '/private'], ['example', '--capture', 'one'],
     ...['relative', '/', '/private/../other', '/private/\nroot', '/private/\u007froot', `/${'x'.repeat(4096)}`].map(root => ['example', '--root', root, '--capture', 'one']),

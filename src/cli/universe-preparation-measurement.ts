@@ -9,6 +9,8 @@ const USAGE = `usage: ashlr universe preparation-measurement --input <absolute r
 
 Read one regular UTF-8 installed preparation measurement report, at most 24 KiB.
 Diagnostic only: reported checks and counts are not a score or acceptance evidence.
+Workload v1 has 19 checks; v2 has 23 including two during-call qualification pairs.
+Qualification counters are separate from the existing 15 measured regions.
 No store discovery, execution, registration or provider access occurs.
 Exit codes: 0 reported checks satisfied, 1 failed/unavailable report, 2 invalid arguments.
 `;
@@ -66,13 +68,18 @@ function human(summary: PreparationMeasurementSummary): string {
   const count = (value: number | null) => value === null ? 'unknown' : String(value);
   return [
     'Preparation measurement · diagnostic only; not a score or acceptance evidence.',
+    `Workload: ${summary.workload}`,
     `Reported checks: ${summary.reportedChecksSatisfied ? 'satisfied' : 'not satisfied'} (${summary.correctnessChecks})`,
+    `During-call qualification: ${summary.qualificationStatus}`,
     `Leaf broker processes: ${count(summary.leafProcesses)}`,
     `Workflow broker processes: ${count(summary.workflowProcesses)}`,
     `Workflow blob processes (subset, not added): ${count(summary.workflowBlobProcesses)}`,
     `Recorded workflow subtotal: ${summary.recordedWorkflowSubtotal === null ? 'unknown' :
       `${summary.recordedWorkflowSubtotal.processes} processes; ${summary.recordedWorkflowSubtotal.blobProcesses} blob subset`}`,
     `Fixture-owned process groups (separate): ${count(summary.fixtureOwnedProcessGroups)}`,
+    `Qualification broker processes (excluded from comparison total): ${count(summary.qualificationProcesses)}`,
+    `Qualification blob processes (subset, not added): ${count(summary.qualificationBlobProcesses)}`,
+    ...summary.qualifications.map(row => `Qualification ${row.name}: ${row.injections} observed mutation; ${row.processes} processes; ${row.blobProcesses} blob subset`),
     ...summary.workflows.flatMap(row => [
       `${row.name}: ${row.processes} processes; ${row.blobProcesses} blob subset`,
       ...row.requests.map(request => `  ${request.id}. ${request.method}: ${request.processes} processes; ${request.blobProcesses} blob subset`),

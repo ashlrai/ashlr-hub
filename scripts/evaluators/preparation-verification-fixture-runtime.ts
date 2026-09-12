@@ -10,6 +10,9 @@ export interface PreparationFixtureScope {
   deadlineAt: string;
 }
 type Run = typeof originalRun;
+// Whole installed diagnostic setup shares its caller's original deadline.
+// This ceiling does not change candidate-session or individual tool limits.
+const MAX_FIXTURE_DURATION_MS = 1_800_000;
 const refused = () => new Error('Preparation fixture execution unavailable or unsettled');
 
 /** Injectable only for pure wrapper tests; the shipped fixture entry uses originalRun. */
@@ -61,7 +64,7 @@ export function createPreparationFixtureRuntime(run: Run = originalRun) {
     if (active || !(options.signal instanceof AbortSignal) || typeof options.deadlineAt !== 'string') throw refused();
     const wallDeadline = Date.parse(options.deadlineAt), duration = wallDeadline - Date.now();
     if (!Number.isFinite(wallDeadline) || new Date(wallDeadline).toISOString() !== options.deadlineAt ||
-        duration <= 0 || duration > 900000 || options.signal.aborted) throw refused();
+        duration <= 0 || duration > MAX_FIXTURE_DURATION_MS || options.signal.aborted) throw refused();
     const abort = new AbortController();
     const context = { abort, signal: AbortSignal.any([options.signal, abort.signal]), deadline: performance.now() + duration,
       wallDeadline, ...(options.activity ? { activity: options.activity } : {}), pending: new Set<Promise<unknown>>(),

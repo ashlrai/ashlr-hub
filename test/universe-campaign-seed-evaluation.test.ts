@@ -15,6 +15,7 @@ import type { VerifySubprocessResult } from '../src/core/run/verify-commands.js'
 import * as immutableStore from '../src/core/util/immutable-private-record-store.js';
 import { runUniverseCampaign } from '../src/core/universe/campaign.js';
 import { runUniverse } from '../src/core/universe/runner.js';
+import { parsePreparationMeasurementReport } from '../src/core/universe/preparation-measurement-report.js';
 vi.mock('../src/core/universe/fixed-evaluator.js', () => ({ runFixedUniverseEvaluator: vi.fn() }));
 vi.mock('../src/core/sandbox/policy.js', async (original) => ({ ...await original<object>(), readKillSwitch: vi.fn() }));
 const roots: string[] = [];
@@ -31,7 +32,7 @@ afterEach(() => {
     chmodSync(path, 0o700); for (const entry of readdirSync(path)) writable(join(path, entry)); };
   for (const root of roots.splice(0)) { writable(root); rmSync(root, { recursive: true, force: true }); }
 });
-function fixture() {
+function fixture(longDiagnostic = false) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'seed-runtime-'))); roots.push(root);
   const repo = join(root, 'repo'); mkdirSync(repo, { mode: 0o700 });
   writeFileSync(join(repo, 'value'), '0'); writeFileSync(join(repo, 'evaluate.mjs'), 'console.log("unused")');
@@ -41,7 +42,8 @@ function fixture() {
   git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'seed');
   initUniverse({ schemaVersion: 1, id: 'seed', name: 'Seed measurement', objective: 'Measure immutable seed', seed: { repo, revision: git('rev-parse', 'HEAD') },
     metric: { name: 'quality', direction: 'maximize', minImprovement: 0 }, budget: { maxTrials: 1, maxDurationMs: 5000, trialTimeoutMs: 1000, maxParallel: 1 },
-    evaluation: { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 1000 },
+    evaluation: longDiagnostic ? { builtin: 'preparation-measurement-v1', timeoutMs: 1_800_000 }
+      : { command: [process.execPath, 'evaluate.mjs'], timeoutMs: 1000 },
     variants: [{ id: 'change', niche: 'quality', hypothesis: 'Improve', command: [process.execPath, '-e', 'void 0'] }] }, { root });
   initUniverseCampaign({ schemaVersion: 1, id: 'campaign', universeId: 'seed', measureSeed: true, feedback: true,
     budget: { maxGenerations: 1, maxDurationMs: 60_000, maxModelRequests: 0, maxStagnantGenerations: 1, maxReportedTokens: null } }, { root });
@@ -54,6 +56,63 @@ function fixture() {
     { root, signal: controller.signal, deadlineMonotonicMs: performance.now() + 30_000, ...extra }, lock));
   return { root, directory, controller, execute, read: () => readUniverseCampaign('campaign', { root }) };
 }
+describe('campaign seed long diagnostic deadline contract', () => {
+  it('holds a valid full v2 diagnostic rather than accepting it as scored seed evidence', async () => {
+    const f = fixture(true);
+    // Synthetic diagnostic bytes exercise ingestion, not actual qualification execution.
+    const workflows = [
+      { name: 'manager', methods: ['manager-open', 'bundle', 'manager-check', 'manager-replay', 'manager-check', 'manager-replay', 'manager-close'] },
+      { name: 'successor', methods: ['successor-check', 'successor-metadata', 'successor-bundle', 'successor-metadata'] },
+    ].map(({ name, methods }) => ({ name, processes: methods.length, blobProcesses: methods.length,
+      requests: methods.map((method, index) => ({ id: index + 1, method, processes: 1, blobProcesses: 1 })) }));
+    const qualifications = ['runtime-drift', 'source-drift'].map((name, index) => ({ name, processes: 2, blobProcesses: 2,
+      requests: [1, 2].map(id => ({ id, method: index ? 'successor-metadata' : 'metadata', processes: 1, blobProcesses: 1 })), injections: 1 }));
+    const stdout = JSON.stringify({ schemaVersion: 1, kind: 'preparation-verification-measurement', workload: 'preparation-workflows-v2',
+      checksPassed: true, workflows, qualifications, diagnostics: [], metrics: {
+        correctness_checks: 23, verification_processes: 4, workflow_processes: 11, workflow_blob_processes: 11,
+        fixture_owned_process_groups: 4, qualification_processes: 4, qualification_blob_processes: 4,
+        ...Object.fromEntries(['files_1_check', 'files_1_metadata', 'files_4_check', 'files_4_metadata']
+          .flatMap(key => [[`${key}_processes`, 1], [`${key}_blob_processes`, 1]])),
+      } });
+    expect(parsePreparationMeasurementReport(stdout)).toMatchObject({ workload: 'preparation-workflows-v2',
+      checksPassed: true, metrics: { correctness_checks: 23 }, qualifications });
+    evaluator.mockImplementation(async (...args) => { args[9]?.(); return response({ stdout }); });
+    expect(await f.execute()).toMatchObject({ status: 'held' });
+    expect(evaluator.mock.calls[0]![0].manifest.evaluation).toEqual({ builtin: 'preparation-measurement-v1', timeoutMs: 1_800_000 });
+    expect(f.read().seedEvaluation?.result).toMatchObject({ status: 'failed', reason: 'evaluator-invalid-result',
+      measurement: null, processGroupSettlement: 'group-exit-confirmed' });
+    expect(await f.execute()).toMatchObject({ status: 'held' });
+    expect(evaluator).toHaveBeenCalledTimes(1);
+    expect(projectUniverse(universePath(f.root, 'seed')).runs).toEqual([]);
+  });
+  function clockFixture() {
+    const f = fixture(true);
+    let wall = Date.now(), monotonic = 1000;
+    const wallDeadline = Date.parse(f.read().deadlineAt!), deadlineMonotonicMs = monotonic + 5000;
+    vi.spyOn(Date, 'now').mockImplementation(() => wall);
+    vi.spyOn(performance, 'now').mockImplementation(() => monotonic);
+    return { ...f, wallDeadline, deadlineMonotonicMs,
+      expire: (clock: 'wall' | 'monotonic') => { if (clock === 'wall') wall = wallDeadline; else monotonic = deadlineMonotonicMs; },
+      run: () => f.execute({ deadlineMonotonicMs }) };
+  }
+  it('clamps a selected 1800000ms diagnostic to the original 5000ms campaign remainder', async () => {
+    const f = clockFixture();
+    expect(await f.run()).toEqual({ status: 'measured', reason: null });
+    expect(evaluator).toHaveBeenCalledTimes(1);
+    expect(evaluator.mock.calls[0]![0].manifest.evaluation.timeoutMs).toBe(1_800_000);
+    expect(evaluator.mock.calls[0]![5]).toBe(5000);
+    expect(f.read().seedEvaluation?.intent.deadlineAt).toBe(new Date(f.wallDeadline).toISOString());
+  });
+  it.each(['wall', 'monotonic'] as const)('refuses a valid settled response after original %s expiry', async clock => {
+    const f = clockFixture();
+    evaluator.mockImplementation(async (...args) => { args[9]?.(); f.expire(clock); return response({ stdout: '{"passed":true,"score":1}' }); });
+    expect(await f.run()).toMatchObject({ status: 'held' });
+    expect(evaluator.mock.calls[0]![5]).toBe(5000);
+    expect(evaluator).toHaveBeenCalledTimes(1);
+    expect(f.read().seedEvaluation?.result).toMatchObject({ status: 'timed-out', reason: 'evaluation-timed-out',
+      measurement: null, processGroupSettlement: 'group-exit-confirmed' });
+  });
+});
 describe('campaign seed evaluation runtime', () => {
   it.each([false, true])('records passed=%s without a trial, generation environment or model reservation; reuses exact evidence', async (passed) => {
     const f = fixture(); evaluator.mockImplementation(async (...args) => { args[9]?.(); return response({ stdout: JSON.stringify({ passed, score: 3 }) }); });

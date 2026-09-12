@@ -56,6 +56,27 @@ beforeEach(() => {
 });
 
 describe('independent diagnostic capture receipt codec', () => {
+  it('accepts the explicit closed diagnostic allowance at 1,800,000 ms', () => {
+    const parent = { ...intent(), timeoutMs: 1_800_000, deadlineAt: '2026-09-12T12:30:00.000Z' };
+    const input = { id: 'capture.intent', kind: 'intent', intent: parent, receipt: null };
+    expect(codec.parse(input)).toEqual(input);
+    expect(mocks.write).not.toHaveBeenCalled();
+  });
+  it('rejects an allowance above 1,800,000 ms even with a matching deadline', () => {
+    const parent = { ...intent(), timeoutMs: 1_800_001, deadlineAt: '2026-09-12T12:30:00.001Z' };
+    expect(codec.parse({ id: 'capture.intent', kind: 'intent', intent: parent, receipt: null })).toBeNull();
+  });
+  it.each(['2026-09-12T12:29:59.999Z', '2026-09-12T12:30:00.001Z'])(
+    'refuses a deadline inconsistent with the recorded allowance: %s', deadlineAt => {
+      const parent = { ...intent(), timeoutMs: 1_800_000, deadlineAt };
+      expect(codec.parse({ id: 'capture.intent', kind: 'intent', intent: parent, receipt: null })).toBeNull();
+    });
+  it('does not extend the larger allowance to another evaluator identity', () => {
+    const parent = { ...intent(), timeoutMs: 1_800_000, deadlineAt: '2026-09-12T12:30:00.000Z' };
+    const input = { id: 'capture.intent', kind: 'intent', receipt: null,
+      intent: { ...parent, evaluator: { ...parent.evaluator, id: 'another-evaluator' } } };
+    expect(codec.parse(input)).toBeNull();
+  });
   it('retains exact valid failed-report bytes without creating score evidence', () => {
     const report = validReport(), input = records({ ...receipt(), report })[1]!;
     expect(codec.parse(JSON.parse(JSON.stringify(input)))).toEqual(input);

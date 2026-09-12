@@ -4,6 +4,7 @@ import { ownCaptureData, preparationCaptureDirectory, projectPreparationCapture,
 import { parsePreparationMeasurementCalibration, preparationCalibrationWorkload } from './preparation-measurement-calibration.js';
 import { comparePreparationScenarioVectors, extractPreparationScenarioVector,
   type PreparationMeasurementComparison } from './preparation-measurement-comparison.js';
+import { parsePreparationMeasurementReport } from './preparation-measurement-report.js';
 
 const TARGET = 'src/core/resources/engineering-preparation.ts';
 
@@ -55,7 +56,7 @@ export function compareCapturedPreparationMeasurement(input: CapturedPreparation
     reason = 'workload-mismatch';
     const candidateVector = extractPreparationScenarioVector(receipt.report.stdout);
     const evaluator = intent.evaluator;
-    const candidateWorkload = preparationCalibrationWorkload(evaluator);
+    const candidateWorkload = preparationCalibrationWorkload(evaluator, parsePreparationMeasurementReport(receipt.report.stdout).workload);
     // The registry aggregate omits bundle installation paths, but binds the
     // manifest, code files and native executable identities. Preserve that pin.
     if (canonical(candidateWorkload) !== canonical(calibration.workload)) return refused('workload-mismatch');

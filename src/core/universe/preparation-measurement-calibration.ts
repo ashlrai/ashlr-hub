@@ -5,6 +5,7 @@ import { ownCaptureData, preparationCaptureDirectory, projectPreparationCapture,
   validatePreparationMeasurementCaptureRequest } from './preparation-measurement-capture-store.js';
 import { extractPreparationScenarioVector, PREPARATION_SCENARIO_KEYS } from './preparation-measurement-comparison.js';
 import type { PreparationMeasurementCaptureIntent } from './preparation-measurement-capture-types.js';
+import { parsePreparationMeasurementReport, type PreparationMeasurementWorkload } from './preparation-measurement-report.js';
 
 const TARGET = 'src/core/resources/engineering-preparation.ts';
 const HASH = /^[a-f0-9]{64}$/;
@@ -24,7 +25,7 @@ export interface PreparationMeasurementCalibration {
   universeId: string; manifestDigest: string; comparatorDigest: string;
   baseline: { artifactDigest: string; revision: string; source: PreparationCalibrationPin;
     files: Array<{ path: string; executable: boolean; bytes: number; sha256: string }> };
-  workload: { id: 'preparation-workflows-v1'; evaluatorId: 'preparation-measurement-v1'; digest: string;
+  workload: { id: PreparationMeasurementWorkload; evaluatorId: 'preparation-measurement-v1'; digest: string;
     files: Array<{ name: string; sha256: string }>; node: PreparationCalibrationPin;
     tools: PreparationCalibrationPin[]; git: PreparationCalibrationPin };
   provenance: Array<{ captureId: string; intentDigest: string; receiptDigest: string; reportDigest: string;
@@ -34,7 +35,9 @@ export interface PreparationMeasurementCalibration {
 }
 
 /** Normalize verified capture pins without carrying installed bundle directory locations. */
-export function preparationCalibrationWorkload(input: PreparationMeasurementCaptureIntent['evaluator']): PreparationMeasurementCalibration['workload'] {
+export function preparationCalibrationWorkload(input: PreparationMeasurementCaptureIntent['evaluator'],
+  version: PreparationMeasurementWorkload = 'preparation-workflows-v1'): PreparationMeasurementCalibration['workload'] {
+  if (version !== 'preparation-workflows-v1' && version !== 'preparation-workflows-v2') return fail();
   const evaluator = own(input, ['id', 'digest', 'executableDigest', 'command', 'files', 'tools', 'git']);
   if (evaluator.id !== 'preparation-measurement-v1') return fail();
   const command = list(evaluator.command, 8).map(text);
@@ -50,7 +53,7 @@ export function preparationCalibrationWorkload(input: PreparationMeasurementCapt
   if (command.length !== 5 || command[1] !== '--experimental-vm-modules' || command[2] !== '--no-warnings' ||
     command[3] !== files.find(file => file.name === 'preparation-verification.mjs')!.path ||
     command[4] !== files.find(file => file.name === 'preparation-bridge.mjs')!.path) return fail();
-  return { id: 'preparation-workflows-v1', evaluatorId: 'preparation-measurement-v1', digest: hash(evaluator.digest),
+  return { id: version, evaluatorId: 'preparation-measurement-v1', digest: hash(evaluator.digest),
     files: files.map(({ name, sha256 }) => ({ name, sha256 })),
     node: pin({ path: command[0], sha256: evaluator.executableDigest }),
     tools: list(evaluator.tools, 16).map(normalizePin).sort((a, b) => a.path.localeCompare(b.path)), git: normalizePin(evaluator.git) };
@@ -112,7 +115,7 @@ export function parsePreparationMeasurementCalibration(input: string): Preparati
     files.find(file => file.path === TARGET)?.sha256 !== hash(source.sha256) ||
     digest(canonical(files.map(file => ({ path: file.path, executable: file.executable, size: file.bytes, digest: file.sha256 })))) !== hash(baseline.artifactDigest)) return fail();
   const workload = own(row.workload, ['id', 'evaluatorId', 'digest', 'files', 'node', 'tools', 'git']);
-  if (workload.id !== 'preparation-workflows-v1' || workload.evaluatorId !== 'preparation-measurement-v1') return fail();
+  if ((workload.id !== 'preparation-workflows-v1' && workload.id !== 'preparation-workflows-v2') || workload.evaluatorId !== 'preparation-measurement-v1') return fail();
   const implementation = list(workload.files, 32).map(input => {
     const file = own(input, ['name', 'sha256']);
     if (typeof file.name !== 'string' || !/^[a-z0-9-]+\.mjs$/.test(file.name)) return fail();
@@ -145,7 +148,7 @@ export function parsePreparationMeasurementCalibration(input: string): Preparati
   return { schemaVersion: 1, kind: 'preparation-measurement-calibration', scope: 'diagnostic-only', universeId: row.universeId,
     manifestDigest: hash(row.manifestDigest), comparatorDigest: hash(row.comparatorDigest),
     baseline: { artifactDigest: hash(baseline.artifactDigest), revision: baseline.revision, source: { path: TARGET, sha256: hash(source.sha256) }, files },
-    workload: { id: 'preparation-workflows-v1', evaluatorId: 'preparation-measurement-v1', digest: hash(workload.digest),
+    workload: { id: workload.id, evaluatorId: 'preparation-measurement-v1', digest: hash(workload.digest),
       files: implementation, node: pin(workload.node), tools, git }, provenance, scenarios, totalProcesses: count(row.totalProcesses) };
 }
 
@@ -163,12 +166,13 @@ export function calibratePreparationMeasurements(input: PreparationMeasurementCa
     if (!intent || !receipt || capture.state !== 'recorded' || receipt.outcome !== 'captured' || receipt.reason !== null ||
       !receipt.identityVerified || receipt.processGroupSettlement !== 'group-exit-confirmed' || !receipt.report?.checksPassed) return fail();
     const scenarios = extractPreparationScenarioVector(receipt.report.stdout);
-    return { intent, receipt, report: receipt.report, scenarios };
+    const version = parsePreparationMeasurementReport(receipt.report.stdout).workload;
+    return { intent, receipt, report: receipt.report, scenarios, version };
   });
   const first = selected[0]!;
   const identity = (item: typeof first) => ({ manifestDigest: item.intent.manifestDigest, comparatorDigest: item.intent.comparatorDigest,
     artifact: item.intent.artifact, evaluator: item.intent.evaluator });
-  if (selected.some(item => canonical(identity(item)) !== canonical(identity(first)) || canonical(item.scenarios) !== canonical(first.scenarios))) return fail();
+  if (selected.some(item => item.version !== first.version || canonical(identity(item)) !== canonical(identity(first)) || canonical(item.scenarios) !== canonical(first.scenarios))) return fail();
   const snapshot = readArtifactSnapshot(first.intent.artifact.path);
   const target = snapshot.entries.find(entry => entry.path === TARGET);
   if (snapshot.digest !== first.intent.artifact.digest || !target || digest(target.data) !== expectedSourceDigest) return fail();
@@ -179,7 +183,7 @@ export function calibratePreparationMeasurements(input: PreparationMeasurementCa
     baseline: { artifactDigest: snapshot.digest, revision: first.intent.artifact.revision,
       source: { path: TARGET, sha256: expectedSourceDigest }, files: snapshot.entries.map(entry => ({ path: entry.path,
         executable: entry.executable, bytes: entry.data.length, sha256: digest(entry.data) })).sort((a, b) => a.path.localeCompare(b.path)) },
-    workload: preparationCalibrationWorkload(first.intent.evaluator),
+    workload: preparationCalibrationWorkload(first.intent.evaluator, first.version),
     provenance: selected.map(item => ({ captureId: item.intent.captureId, intentDigest: digest(canonical(item.intent)),
       receiptDigest: digest(canonical(item.receipt)), reportDigest: item.report.sha256, reportBytes: item.report.bytes,
       startedAt: item.intent.startedAt, finishedAt: item.receipt.finishedAt })).sort((a, b) => a.captureId.localeCompare(b.captureId)),
