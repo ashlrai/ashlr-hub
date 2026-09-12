@@ -11,8 +11,8 @@ existing fixed-build native qualification.
 - [x] Inspect clean primary, prior commits and live qualification handle.
 - [x] Explore execution feedback, waiting visibility and commissioning in parallel.
 - [x] Select and implement a source-backed operational gap.
-- [ ] Verify source, UI where changed, and independent review.
-- [ ] Record exact progress and remaining live gates.
+- [x] Verify source, UI where changed, and independent review.
+- [x] Record exact progress and remaining live gates.
 
 ## State and constraints
 
@@ -22,6 +22,12 @@ qualification handle 76456 is confirmed running against fixed build 29f3e055 and
 evaluator 9a051509. Do not rebuild installed assets or restart the native test while
 that handle is live. Preserve account reservations, KILL and collector custody.
 No providers, account-policy changes, service activation or publication in discovery.
+
+Completed: native handle terminated before the rebuild. Clean source c3c2f1ab
+built successfully (49084), including prior seed-floor correction. New evaluator
+31050b48 has not inherited the previous build's native qualification. Current
+read-only sample 2026-09-12T11:33:10.885Z still shows active global stop and v1
+collector ownership evidence missing. The full autonomous-fleet goal remains open.
 
 ## Ownership
 
