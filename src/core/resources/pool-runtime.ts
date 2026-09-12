@@ -457,6 +457,43 @@ function scope(poolValue: ResourcePool, bindingsValue: ResourceBinding[]): { poo
   return { pool, bindings, poolDigest: digest(canonical({ pool, bindings })) };
 }
 
+/** Apply fresh invocation evidence to an owned or read-only in-memory state. */
+function freshAdmission(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[], allowedWorkerIds: string[],
+  current: unknown, unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]) {
+  if (!object(current) || !exact(current, ['observations', 'unavailableWorkerIds',
+    ...(Object.hasOwn(current, 'quotaUnavailableWorkerIds') ? ['quotaUnavailableWorkerIds'] : [])])) {
+    throw new Error('Invalid synchronous resource admission evidence');
+  }
+  const observations = validateResourceObservations(current.observations, pool);
+  const currentGates = validateUnavailableResourceWorkerIds(current.unavailableWorkerIds, pool);
+  const currentQuotaGates = validateUnavailableResourceWorkerIds(current.quotaUnavailableWorkerIds === undefined ? [] : current.quotaUnavailableWorkerIds, pool);
+  const unavailable = new Set([...unavailableWorkerIds, ...currentGates]);
+  const quotaUnavailable = new Set([...quotaUnavailableWorkerIds, ...currentQuotaGates]);
+  // A current collector refusal must survive a newer external zero reading.
+  // Occupancy/task caps remain waitable in the final plan, not converted into
+  // an invocation-only health refusal. Both admission paths use this policy.
+  const currentPlan = plan({ ...state, observations }, pool, bindings, allowedWorkerIds, Date.now(), currentGates, currentQuotaGates);
+  for (const exclusion of currentPlan.exclusions) {
+    if (exclusion.reasons.some((reason) => !['worker-not-allowed', 'concurrency-exhausted',
+      'operator-task-cap-reached', 'operator-quota-scope-excluded'].includes(reason))) quotaUnavailable.add(exclusion.workerId);
+  }
+  state.observations = mergeResourceObservations(state.observations, observations);
+  return { unavailableWorkerIds: [...unavailable], quotaUnavailableWorkerIds: [...quotaUnavailable] };
+}
+
+/** Read-only eligibility sample, not a reservation. Final transaction admission
+ * must still recheck current evidence; no directory, lock or observation is written. */
+export function resourceAdmissionPreflight(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[],
+  allowedWorkerIds: string[], evidence: unknown): ResourceAssignmentPlan {
+  const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
+  const allowed = validateUnavailableResourceWorkerIds(allowedWorkerIds, pool);
+  if (!allowed.length) throw new Error('Invalid resource admission workers');
+  const state = inspectRoot(root, false) ? loadState(root, pool, bindings, poolDigest)
+    : { schemaVersion: 1 as const, poolDigest, observations: [], attempts: [] };
+  const gates = freshAdmission(state, pool, bindings, allowed, evidence, [], []);
+  return plan(state, pool, bindings, allowed, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds);
+}
+
 /** Read-only: no directory, lock, observation, or assignment is published. */
 export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[], incoming: ResourceObservation[],
   unavailableWorkerIds: string[] = [], quotaUnavailableWorkerIds: string[] = []) {
@@ -597,32 +634,12 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
       if (previous.taskDigest !== taskDigest) throw new Error('Resource task identity conflict');
       return { receipt: previous, plan: null, replayed: true };
     }
-    const currentUnavailable = new Set(unavailable);
-    const currentQuotaUnavailable = new Set(quotaUnavailable);
+    let gates = { unavailableWorkerIds: unavailable, quotaUnavailableWorkerIds: quotaUnavailable };
     if (options.readAdmissionEvidence) {
-      const current: unknown = options.readAdmissionEvidence();
-      if (!object(current) || !exact(current, ['observations', 'unavailableWorkerIds',
-        ...(Object.hasOwn(current, 'quotaUnavailableWorkerIds') ? ['quotaUnavailableWorkerIds'] : [])])) {
-        throw new Error('Invalid synchronous resource admission evidence');
-      }
-      const observations = validateResourceObservations(current.observations, pool);
-      const currentGates = validateUnavailableResourceWorkerIds(current.unavailableWorkerIds, pool);
-      const currentQuotaGates = validateUnavailableResourceWorkerIds(current.quotaUnavailableWorkerIds === undefined ? [] : current.quotaUnavailableWorkerIds, pool);
-      for (const id of currentQuotaGates) currentQuotaUnavailable.add(id);
-      for (const id of currentGates) currentUnavailable.add(id);
-      // A current collector refusal must survive a newer external zero reading.
-      // Reuse the same planner (including allocation and capacity aliases) rather
-      // than duplicating quota math. Occupancy/task caps remain waitable in the
-      // final plan, not converted into an invocation-only health refusal.
-      const currentPlan = plan({ ...state, observations }, pool, bindings, task.allowedWorkerIds, Date.now(), currentGates, currentQuotaGates);
-      for (const exclusion of currentPlan.exclusions) {
-        if (exclusion.reasons.some((reason) => !['worker-not-allowed', 'concurrency-exhausted',
-          'operator-task-cap-reached', 'operator-quota-scope-excluded'].includes(reason))) currentQuotaUnavailable.add(exclusion.workerId);
-      }
-      state.observations = mergeResourceObservations(state.observations, observations);
+      gates = freshAdmission(state, pool, bindings, task.allowedWorkerIds, options.readAdmissionEvidence(), unavailable, quotaUnavailable);
       if (signal?.aborted) throw new Error('Resource task cancelled before reservation');
     }
-    const assignment = plan(state, pool, bindings, task.allowedWorkerIds, Date.now(), [...currentUnavailable], [...currentQuotaUnavailable]);
+    const assignment = plan(state, pool, bindings, task.allowedWorkerIds, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds);
     if (!assignment.selectedWorkerId) return { receipt: null, plan: assignment, replayed: false };
     if (state.attempts.length >= MAX_ATTEMPTS) throw new Error('Resource ledger capacity reached');
     const binding = bindings.find((row) => row.workerId === assignment.selectedWorkerId)!;

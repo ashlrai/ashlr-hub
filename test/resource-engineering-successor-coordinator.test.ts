@@ -39,7 +39,15 @@ function fixture() {
   const bindings = [{ workerId: 'worker', capacityKey: 'shared', kind: 'local-chat' as const, endpoint: 'http://127.0.0.1:9/v1' }];
   const attempts: runtime.ResourceTaskReceipt[] = [];
   const provider = vi.fn();
-  const status = vi.spyOn(runtime, 'resourcePoolStatus').mockImplementation(() => ({ attempts }) as ReturnType<typeof runtime.resourcePoolStatus>);
+  const eligiblePlan = { schemaVersion: 1 as const, poolId: pool.id, sampledAt: new Date().toISOString(), nextEligibleAt: null,
+    selectedWorkerId: 'worker', exclusions: [], candidates: [{ workerId: 'worker', provider: 'local' as const, model: 'fixture',
+      priority: 1, reason: 'eligible' as const, usedPercent: null, activeCount: 0, taskReservationCount: 0, pressure: 0 }] };
+  // Only these read-only ledger fields are consumed by the coordinator.
+  const status = vi.spyOn(runtime, 'resourcePoolStatus').mockImplementation(() => ({ attempts, plan: eligiblePlan }) as unknown as ReturnType<typeof runtime.resourcePoolStatus>);
+  vi.spyOn(runtime, 'resourceAdmissionPreflight').mockImplementation((store, definition, transports, _allowed, value) => {
+    const evidence = value as ReturnType<ResourceEngineeringSuccessorCoordinatorOptions['readAdmissionEvidence']>;
+    return status(store, definition, transports, evidence.observations, evidence.unavailableWorkerIds, evidence.quotaUnavailableWorkerIds ?? []).plan;
+  });
   const run = vi.spyOn(runtime, 'runResourceTask').mockImplementation(async options => {
     inPoolLock = true; try { options.readAdmissionEvidence?.(); } finally { inPoolLock = false; }
     const allowed = options.beforeWorkerDispatch?.() === true;
@@ -77,6 +85,90 @@ const until = (owner: ReturnType<typeof createResourceEngineeringSuccessorCoordi
   vi.waitFor(() => expect(owner.snapshot().entries[0]?.state).toBe(state), { timeout: 5000, interval: 20 });
 
 describe('bounded engineering successor coordinator', () => {
+  it('defers quota-held new intent without spending a slot, then freshly proposes once under the original deadline', async () => {
+    const f = fixture(); f.options.config = { ...config, maxSuccessors: 1 };
+    const deadline = f.state.deadlineAt; let held = true;
+    const evidence = vi.fn(() => ({ observations: [], unavailableWorkerIds: [], quotaUnavailableWorkerIds: held ? ['worker'] : [] }));
+    f.options.readAdmissionEvidence = evidence;
+    const source = vi.spyOn(f.options.host, 'source');
+    const status = f.status.getMockImplementation()!;
+    f.status.mockImplementation((...args) => {
+      const result = status(...args);
+      return args[5]?.includes('worker') ? { ...result, plan: { ...result.plan, candidates: [], selectedWorkerId: null,
+        exclusions: [{ workerId: 'worker', reasons: ['quota-reserve-reached'], nextEligibleAt: null }] } } : result;
+    });
+    const owner = f.create(); const initialized = f.files(); owner.start();
+    await vi.waitFor(() => expect(evidence.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(f.files()).toEqual(initialized); expect(owner.snapshot().entries).toEqual([]);
+    expect(f.state.admission!.remainingEnrollments).toBe(2); expect(f.run).not.toHaveBeenCalled();
+    expect(f.prepare).not.toHaveBeenCalled(); expect(f.options.supervision.admit).not.toHaveBeenCalled();
+    expect(source).not.toHaveBeenCalled();
+    expect(f.status.mock.calls.some(args => args[4]?.length === 0 && args[5]?.includes('worker'))).toBe(true);
+    held = false; await until(owner, 'admitted'); await new Promise(resolve => setTimeout(resolve, 150));
+    expect(f.run).toHaveBeenCalledTimes(1); expect(f.provider).toHaveBeenCalledTimes(1);
+    expect(f.prepare).toHaveBeenCalledTimes(1); expect(f.options.supervision.admit).toHaveBeenCalledTimes(1);
+    expect(Object.keys(f.files()).filter(name => name.startsWith('intent-'))).toHaveLength(1);
+    expect(f.state.admission!.remainingEnrollments).toBe(1); expect(owner.snapshot().deadlineAt).toBe(deadline);
+    expect(f.state.deadlineAt).toBe(deadline); await owner.close();
+    const restarted = f.create(); restarted.start(); await new Promise(resolve => setTimeout(resolve, 150));
+    expect(f.run).toHaveBeenCalledTimes(1); expect(restarted.snapshot().deadlineAt).toBe(deadline);
+  });
+  it('does not spend a successor slot on an eligible worker outside the proposal allowlist', async () => {
+    const f = fixture(); const status = f.status.getMockImplementation()!;
+    const source = vi.spyOn(f.options.host, 'source');
+    f.options.pool.workers.push({ ...f.options.pool.workers[0]!, id: 'unrelated' });
+    f.options.bindings.push({ ...f.options.bindings[0]!, workerId: 'unrelated', capacityKey: 'other' });
+    f.status.mockImplementation((...args) => { const result = status(...args); return { ...result,
+      plan: { ...result.plan, selectedWorkerId: 'unrelated', candidates: result.plan.candidates.map(row => ({ ...row, workerId: 'unrelated' })) } }; });
+    const owner = f.create(); const initialized = f.files(); owner.start();
+    await vi.waitFor(() => expect(f.status.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(f.files()).toEqual(initialized); expect(owner.snapshot().entries).toEqual([]);
+    expect(source).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled(); expect(f.options.supervision.admit).not.toHaveBeenCalled();
+  });
+  it.each(['read-failure', 'plan-failure', 'malformed-evidence'] as const)('defers %s before intent and recovers on a later fresh poll', async mode => {
+    const f = fixture(); let held = true;
+    const source = vi.spyOn(f.options.host, 'source');
+    const read = vi.fn(() => {
+      if (held && mode === 'read-failure') throw Error('PRIVATE_READ_FAILURE');
+      if (held && mode === 'malformed-evidence') return null as unknown as ReturnType<typeof f.options.readAdmissionEvidence>;
+      return { observations: [], unavailableWorkerIds: [], quotaUnavailableWorkerIds: [] };
+    });
+    f.options.readAdmissionEvidence = read;
+    const status = f.status.getMockImplementation()!;
+    f.status.mockImplementation((...args) => { if (held && mode === 'plan-failure') throw Error('PRIVATE_PLAN_FAILURE'); return status(...args); });
+    const owner = f.create(); const initialized = f.files(); owner.start();
+    await vi.waitFor(() => expect(read.mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(f.files()).toEqual(initialized); expect(f.run).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled();
+    expect(source).not.toHaveBeenCalled();
+    expect(f.options.supervision.admit).not.toHaveBeenCalled();
+    held = false; await until(owner, 'admitted'); expect(f.run).toHaveBeenCalledTimes(1);
+  });
+  it.each([
+    ['pause', 'reader'], ['kill', 'reader'], ['deadline', 'reader'],
+    ['pause', 'planner'], ['kill', 'planner'], ['deadline', 'planner'],
+  ] as const)('rechecks %s after preflight %s before writing a new intent', async (mode, stage) => {
+    const f = fixture(); let clock = performance.now(); vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const source = vi.spyOn(f.options.host, 'source');
+    const hold = () => {
+      if (mode === 'pause') f.state.paused = true;
+      else if (mode === 'kill') f.stop(true);
+      else clock += 60_001;
+    };
+    const read = vi.fn(() => {
+      if (stage === 'reader') hold();
+      return { observations: [], unavailableWorkerIds: [], quotaUnavailableWorkerIds: [] };
+    });
+    f.options.readAdmissionEvidence = read;
+    const status = f.status.getMockImplementation()!;
+    f.status.mockImplementation((...args) => { const result = status(...args); if (stage === 'planner') hold(); return result; });
+    const owner = f.create(); const initialized = f.files(); owner.start();
+    await vi.waitFor(() => expect(read).toHaveBeenCalled()); await new Promise(resolve => setTimeout(resolve, 120));
+    expect(f.files()).toEqual(initialized); expect(owner.snapshot().entries).toEqual([]);
+    expect(source).not.toHaveBeenCalled();
+    expect(f.run).not.toHaveBeenCalled(); expect(f.prepare).not.toHaveBeenCalled(); expect(f.options.supervision.admit).not.toHaveBeenCalled();
+    expect(f.state.admission!.remainingEnrollments).toBe(2);
+  });
   it('reports monotonic deduplicated idle/running/held/resumed/closed transitions without execution', async () => {
     const f = fixture(); const reports: EngineeringCoordinatorLifecycleReport[] = [];
     f.options.onLifecycle = row => reports.push(row); f.stop(true); f.state.entries = [];
@@ -174,9 +266,11 @@ describe('bounded engineering successor coordinator', () => {
     expect(f.run).toHaveBeenCalledTimes(1); expect(f.prepare).not.toHaveBeenCalled();
   });
   it('rechecks the source after ledger admission and prevents provider contact on drift', async () => {
-    const f = fixture(); let reads = 0;
+    const f = fixture();
     f.options.readAdmissionEvidence = () => {
-      if (++reads === 2) f.source.commit = 'f'.repeat(40);
+      // Change only after intent publication, at the mock ledger admission read;
+      // preliminary eligibility reads must not turn this into a pre-intent test.
+      if (f.run.mock.calls.length > 0) f.source.commit = 'f'.repeat(40);
       return { observations: [], unavailableWorkerIds: [] };
     };
     const owner = f.create(); owner.start(); await vi.waitFor(() => expect(f.attempts).toHaveLength(1));
@@ -186,7 +280,11 @@ describe('bounded engineering successor coordinator', () => {
   it('avoids duplicate preliminary proof inside the proposal budget but preserves final dispatch proof', async () => {
     const f = fixture(); let admissionWindow = false; let sourceReads = 0; let preliminaryReads = -1; let finalReads = -1;
     const status = f.status.getMockImplementation()!;
-    f.status.mockImplementation((...args) => { admissionWindow = true; return status(...args); });
+    f.status.mockImplementation((...args) => {
+      // The read-only pre-intent plan is outside the existing proposal budget.
+      if (Object.keys(f.files()).some(name => name.startsWith('intent-'))) admissionWindow = true;
+      return status(...args);
+    });
     const source = f.options.host.source;
     f.options.host.source = (id, pin) => { if (admissionWindow) sourceReads++; return source(id, pin); };
     const run = f.run.getMockImplementation()!;

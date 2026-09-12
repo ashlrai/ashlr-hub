@@ -21,7 +21,7 @@ import type { ResourceEngineeringRecipe } from '../src/core/resources/engineerin
 import { createResourceConsoleEngineeringPreparation } from '../src/core/resources/console-engineering-preparation.js';
 import { createResourceConsoleEngineeringSuccessors } from '../src/core/resources/console-engineering-successors.js';
 import type { ResourceConsoleEngineeringPreparationConfig } from '../src/core/resources/console-engineering-preparation-types.js';
-import type { ResourceEngineeringSuccessorCoordinatorConfig } from '../src/core/resources/engineering-successor-coordinator-types.js';
+import type { ResourceEngineeringSuccessorCoordinatorConfig, ResourceEngineeringSuccessorCoordinatorOptions } from '../src/core/resources/engineering-successor-coordinator-types.js';
 import * as privateRecords from '../src/core/util/immutable-private-record-store.js';
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -178,7 +178,9 @@ function proof(f: Fixture, id: string) {
   return { root, campaign, delivery, receipt: receipt! };
 }
 
-function coordinate(f: Fixture, ownedState: Awaited<ReturnType<typeof owned>>) {
+function coordinate(f: Fixture, ownedState: Awaited<ReturnType<typeof owned>>,
+  readAdmissionEvidence: ResourceEngineeringSuccessorCoordinatorOptions['readAdmissionEvidence'] = () =>
+    ({ observations: f.observations, unavailableWorkerIds: [], quotaUnavailableWorkerIds: [] })) {
   // Install call-through spies before the adapter captures its private methods.
   // Measure existing calls only; do not add evidence reads for diagnostics.
   if (vi.isMockFunction(ownedState.preparation.successorSource)) vi.mocked(ownedState.preparation.successorSource).mockRestore();
@@ -200,21 +202,40 @@ function coordinate(f: Fixture, ownedState: Awaited<ReturnType<typeof owned>>) {
     projectId: 'default', preparation: ownedState.preparation, supervisor: ownedState.supervisor,
     acceptance: f.config.profiles[0]!.acceptance,
     supervision: ownedState.supervision, config: f.successorConfig, configFile: f.files.successorsFile, isClosing: () => false,
-    readAdmissionEvidence: () => ({ observations: f.observations, unavailableWorkerIds: [], quotaUnavailableWorkerIds: [] }) });
+    readAdmissionEvidence });
   cleanups.push(() => coordinator.close()); return { coordinator, stats, get preparedIds() { return prepared.mock.calls.map(([input]) => input.id); } };
 }
 
 describe.runIf(process.platform === 'darwin')('verified delivery to accounted automatic successor', () => {
-  it('automatically proposes and delivers B from A passing receipt, retaining seed context, accounting and restart identity', async () => {
+  it('waits for eligible quota then automatically delivers B from A, retaining context, accounting and restart identity', async () => {
     const f = await timed('fixture', fixture); const state = await timed('owner-initial', () => owned(f));
-    const driver = coordinate(f, state); const initial = state.supervision.snapshot();
+    let eligible = false, admissionReads = 0;
+    const driver = coordinate(f, state, () => {
+      admissionReads++;
+      return { observations: f.observations, unavailableWorkerIds: [], quotaUnavailableWorkerIds: eligible ? [] : ['repair'] };
+    });
+    const initial = state.supervision.snapshot();
     expect(driver.coordinator.snapshot().entries).toEqual([]); expect(f.generations).toEqual([]); expect(f.proposals).toEqual([]);
+    const observationDeadline = performance.now() + 200_000;
     driver.coordinator.start(); state.supervision.start();
+    await timed('quota-deferred', () => vi.waitFor(() => {
+      expect(state.supervision.snapshot().entries[0]?.state).toBe('completed');
+      expect(admissionReads).toBeGreaterThanOrEqual(2);
+    }, { timeout: Math.max(1, observationDeadline - performance.now()), interval: 100 }));
+    expect(driver.coordinator.snapshot().entries).toEqual([]);
+    expect(driver.preparedIds).toEqual([]); expect(f.proposals).toEqual([]);
+    expect(driver.stats.sourceCalls).toBe(0); // Known denial must not repeat expensive source proofs.
+    expect(f.ledger().attempts).toHaveLength(2); // Only A's two completed generation requests.
+    expect(f.ledger()).toMatchObject({ allocation: f.allocation, workerAccess: f.workerAccess });
+    expect(state.supervision.snapshot().deadlineAt).toBe(initial.deadlineAt);
+    // Change only test-owned quota evidence. No Run action, new coordinator,
+    // new proposal identity or renewed observation/supervision allowance.
+    eligible = true;
     await timed('both-deliveries', () => vi.waitFor(() => {
       const snapshot = state.supervision.snapshot();
       expect(snapshot.entries.length, JSON.stringify({ supervision: snapshot, successor: driver.coordinator.snapshot(), errors: f.errors, preparationErrors: driver.stats.errors })).toBe(2);
       expect(snapshot.entries.every(row => row.state === 'completed')).toBe(true);
-    }, { timeout: 200_000, interval: 300 }));
+    }, { timeout: Math.max(1, observationDeadline - performance.now()), interval: 300 }));
     expect(driver.preparedIds).toHaveLength(1); const bId = driver.preparedIds[0]!;
     const aProof = timed('proof-a', () => proof(f, f.recipe.id)); const bProof = timed('proof-b', () => proof(f, bId));
     expect(aProof.receipt.status).toBe('delivered'); expect(bProof.receipt.status).toBe('delivered');

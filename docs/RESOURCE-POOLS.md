@@ -702,9 +702,13 @@ configuration does not connect accounts or change their reservations.
 
 The coordinator follows this sequence:
 
-1. Select a completed, preparation-registered objective in the configured project and verify its
-   campaign, evaluation and local branch-delivery evidence.
-2. Persist a deterministic proposal intent, then use the existing resource ledger
+1. Select a completed, preparation-registered objective in the configured project.
+2. Check fresh admission evidence against the existing resource planner before
+   proving the source or publishing a new intent. If no allowed worker is eligible,
+   or evidence cannot be read, reconsider on a later poll within the **same original
+   deadline**, without consuming a proposal intent or successor slot. Then
+   verify its campaign, evaluation and local branch-delivery evidence, persist a
+   deterministic proposal intent and use the existing resource ledger
    for one read-only proposal task. Context includes the profile acceptance text,
    seed and delivered scores, measured parent delta, and bounded text from the
    **delivered artifact**, not the possibly older working checkout.
@@ -757,10 +761,15 @@ the next action. `stop` ends follow-up for that source, not unrelated queued wor
 Every retained intent, including stopped or held proposals, consumes the successor
 cap. Restart does not replenish the cap or renew the deadline.
 
+Pre-intent eligibility is read-only, not a reservation: final dispatch still
+checks admission atomically. Cached observations cannot override a fresh quota
+refusal. Capacity or evidence can change during source verification; this check
+does not promise atomic eligibility through intent publication.
+
 An explicit no-reservation capacity denial may wait within the original deadline.
 Unknown ownership, invalid output, missing paid output, incomplete preparation,
-source drift and quota denial remain held. Restart reconciles exact persisted
-results and registrations; it never invents another proposal identity to recover
+source drift and quota denial **after intent publication** remain held. Restart
+reconciles exact persisted results and registrations; it never invents another proposal identity to recover
 lost paid output. Inspect the retained evidence and underlying quota/source issue;
 do not delete journals, reset counters or create new IDs to conceal uncertainty.
 This is bounded autonomous follow-up, not an unlimited resident company or an

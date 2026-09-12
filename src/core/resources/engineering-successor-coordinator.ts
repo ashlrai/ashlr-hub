@@ -8,7 +8,7 @@ import { canonical, digest, inspectPrivateDirectory } from '../universe/artifact
 import { writeImmutablePrivateRecord } from '../util/immutable-private-record-store.js';
 import { pinResourceConsoleProject, matchesResourceConsoleProject } from './console-projects.js';
 import { validateResourcePool } from './pool-policy.js';
-import { resourcePoolStatus, runResourceTask, validateResourceTask } from './pool-runtime.js';
+import { resourceAdmissionPreflight, resourcePoolStatus, runResourceTask, validateResourceTask } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import { validateResourceBindings } from './worker.js';
 import { waitForResourceCapacity } from './capacity-wait.js';
@@ -233,6 +233,18 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
     for (const candidate of snapshot.entries.filter(row => row.state === 'completed')) {
       if (rows.some(row => row.kind === 'intent' && row.source.enrollmentId === candidate.enrollmentId)) continue;
       if (rows.filter(row => row.kind === 'intent').length >= config.maxSuccessors || current().admission!.remainingEnrollments < 1 || !cheapGuard()) break;
+      let eligible = false;
+      try {
+        const admission = data<ReturnType<Options['readAdmissionEvidence']>>(readAdmissionEvidence());
+        if (!cheapGuard()) { reportStopped(); return; }
+        const plan = resourceAdmissionPreflight(root, pool, bindings, config.allowedWorkerIds, admission);
+        eligible = plan.candidates.some(row => config.allowedWorkerIds.includes(row.workerId));
+      } catch {
+        // Unavailable preflight evidence must not consume an intent or successor
+        // slot. The existing poll can reconsider before any proposal is invoked.
+      }
+      if (!cheapGuard()) { reportStopped(); return; }
+      if (!eligible) continue;
       const sourceValue = host.source(candidate.enrollmentId, candidate.enrollmentDigest); if (sourceValue === null) continue;
       const source = evidence(sourceValue);
       if (source.enrollmentId !== candidate.enrollmentId || source.enrollmentDigest !== candidate.enrollmentDigest || !fresh(source)) continue;
