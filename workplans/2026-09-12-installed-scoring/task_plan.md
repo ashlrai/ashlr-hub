@@ -331,6 +331,18 @@ workplans/2026-09-12-spark-enrollment/ and docs/RESOURCE-POOLS.md.
 Integrate only after preserving terminal evidence from the current native gate;
 do not poll any of the completed isolated handles again.
 
+The same isolated branch now additionally contains commit
+1ff4184384c57a340babddedc9b2dfad9aacbb17: provider-free collector record inspection,
+separate from acquisition lifecycle, with strict decoding and historical UI.
+Its104backend/HTTP tests and421web tests passed; types/lint/docs/lane checks and
+isolated TypeScript/web build passed. Actual saved-account local preview on63764
+was verified at desktop and390pxmobile, then closed (96314terminal0); polling
+failure retained the original inspection timestamp. No collector or engineering
+service started, and no account policy was changed. Screenshots/evidence are in
+the isolated workplan. Primary's9recorded runtime files still match their hashes.
+Native73003 remains live with additional passing-test progress; do not treat
+individual progress dots as terminal qualification or restart this handle.
+
 ### Acceptance and account discovery results
 
 Old scoring gate10612 is now TERMINAL exit0:5/5passed,0skips,1268.67s. Retained
