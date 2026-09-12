@@ -43,8 +43,38 @@ delayed restart until376.41s and exceeded the encompassing360s test timeout.
 Final tests move offline inspection after original restart verification and
 expand only the overall test budget; product runtime/deadline policy is unchanged.
 Per-check timing is now required. Inspection responsiveness is a known limitation.
+Static call-graph review identified three committed-metadata reconstructions per
+enrollment per sample: setup verification, catalog construction, and delivered
+source derivation. For two enrollments/two samples that is12 reconstructions.
+The proposed optimization is a private call-local setup evidence bundle reused
+by catalog/source derivation, rebuilt independently for each outer sample and
+retaining existing source/evaluator end guards. No persistent cache or reduced
+receipt/outcome verification is proposed. No speedup has been implemented or
+measured in this pass.
 
-Final actual source-CLI setup acceptance is still in progress. No provider, service, account, global
+Reordered scoped78819 completed original effect/restart/replay by246.66s and
+the direct predecessor check passed in98.074s. During the new isolated CLI
+assertion the outer test exited143 without a final Vitest result; source/tool
+cause remains unknown. No surviving fixture process was observed; existing
+resource/evaluator custody readers found5 completed receipts and2 settled
+entries, with all evaluator/run/control custody settled. Do not count this run
+as a passing test. The fixture is retained, not removed or repaired.
+
+The newly added predecessor CLI test's90s child limit was independently too
+short for the observed98s check. Only that read-only child limit is180s now;
+existing setup CLI90s and actual runtime360s limits remain unchanged.
+
+Separate retained-fixture source CLI28249 passed: child76678 returned0 with no
+signal/error/stderr in114.041s. It reported verified/eligible with exact delivered
+B commit f9291b5b40a80ecfd7c911e3954e83f8681850d4 and evidence digest
+7fa51230a881fde2f34892a0aac92826d63f7d68ca12511d2de571c8f36084f2.
+All240 fixture entries and4 original private HOME entries were unchanged.
+The original HOME was verified by successfully reading both signed completed
+graph journals under its existing key; no key was generated or printed.
+Supplemental missing-generation/restoration controls remain in progress. These
+standalone assertions do not convert interrupted78819 into a passing Vitest run.
+
+No provider, service, account, global
 stop, collector recovery, public site, registry or remote Git mutation occurred.
 
 ## Next executable increment (proposal, not implemented)

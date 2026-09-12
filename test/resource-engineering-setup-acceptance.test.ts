@@ -129,7 +129,9 @@ async function predecessorCli(f: Fixture, expectedPlanDigest: string, expectedDe
     'resources', 'pool', 'engineering', 'predecessor', 'check', '--recipe', f.files.recipe, '--policy', f.files.policy,
     '--output', f.output, '--resource-runtime', f.files.runtime, '--workspace', f.repo, '--projects', f.files.projects,
     '--expected-plan-digest', expectedPlanDigest, '--expected-deadline-at', expectedDeadlineAt, '--json'],
-  { timeout: 90_000, maxBuffer: 256 * 1024, env: childEnv() });
+  // Offline proof took ~98s in the measured two-enrollment fixture. This
+  // child limit does not extend the original console execution deadline.
+  { timeout: 180_000, maxBuffer: 256 * 1024, env: childEnv() });
   expect(stderr).toBe(''); return JSON.parse(stdout) as ReturnType<typeof checkResourceEngineeringPredecessor>;
 }
 async function until(check: (deadlineMonotonicMs: number) => Promise<boolean>, timeoutMs: number) {
