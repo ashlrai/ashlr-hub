@@ -178,6 +178,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-lifecycle.test.ts', // actual effect worker caught coordinator fault and independent journal observation
   'test/universe-preparation-verification.test.ts', // pinned evaluator prototype, real Git fixtures and OS confinement
   'test/preparation-verification-workflow.test.ts', // real candidate-linked manager restoration and successor delivery fixtures
+  'test/preparation-verification-runtime-drift.test.ts', // real candidate reads with trusted during-call runtime mutation
+  'test/preparation-verification-successor-drift.test.ts', // real delivered source with trusted during-call branch mutation
   'test/preparation-verification-workflow-bridge.test.ts', // real fixed workflow bundle construction and graph checks
   'test/universe-builtin-preparation-evaluator.test.ts', // installed builtin through real Universe registration and isolated measurement
   'test/preparation-verification-child.test.ts', // actual OS-confined persistent candidate processes and deadline settlement

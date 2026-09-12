@@ -127,7 +127,11 @@ Universe evaluation evidence. A candidate-linked workflow extension now exposes
 explicit manager restoration/check/replay and successor reads for real-process
 measurement. It uses the actual manager and owner over a disclosed nonexecuting
 supervisor fixture view; the installed default measurement does not yet score
-these operations. The full manager/successor correctness workload,
+these operations. Additional candidate-linked during-call probes challenge runtime
+and delivered-branch freshness using deliberately stale candidate controls;
+their trusted test-only injector preserves original native results. These are
+correctness controls, not a frozen score or a final-return-only source proof.
+The full manager/successor correctness workload,
 frozen competitive reward, OS-wide process census, native transitive dependency
 pins and arbitrary controller-crash recovery remain open. This is neither an
 accepted Hub optimization nor provider/account/service activation. Build and

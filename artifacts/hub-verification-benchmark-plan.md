@@ -157,6 +157,41 @@ original non-evaluation measurement; these expanded operations are not yet its
 frozen scoring workload. Completing the full correctness matrix, integrated
 workload budgeting and repeated numerical baseline precedes optimization.
 
+#### During-call candidate correctness probes
+
+The continuation based on `df44cf730f4ca4155e8c56e0a8ce1783f630a0d0`
+adds two paired controls: runtime configuration drift and delivered-source branch
+drift inside an already-running metadata read. Each candidate first returns exact
+expected metadata in the same child with unchanged evidence. The trusted test
+bridge then arms one mutation at the ACL read of that bundle's exact `intent.json`,
+after initial capture and receipt comparison. It awaits the real native result,
+mutates only the private fixture and returns the identical original result.
+No callback is exposed to candidate code and no production injection hook is added.
+
+The runtime stale control removes only the final capture/digest comparison. The
+source stale control retains initial origin verification but omits subsequent
+source revalidation. Tests require the real baseline to refuse drift and the
+deliberately broken candidate to demonstrate stale success. This is not a
+final-return-only source-guard proof or a numerical performance comparison.
+
+The interceptor validates transport, real settlement and bounded native output;
+a failed/missing trigger, duplicate request or mutation failure invalidates the
+harness instead of counting as candidate refusal. Snapshots include startup,
+the healthy call, deliberate mutation and confirmed shutdown. Injection work is
+outside candidate broker counts. Failed opens or unconfirmed closes retain the
+private root; do not remove retained evidence without resolving process custody.
+
+Run these local controls on macOS/Node 24 with:
+
+```sh
+npm run test:serial -- test/preparation-verification-runtime-drift.test.ts test/preparation-verification-successor-drift.test.ts test/preparation-mutation-interceptor.test.ts test/preparation-harness-custody.test.ts
+```
+
+Pool/binding/project replacement, same-size byte mutations, final-return-only
+source proof, richer quota contexts and full installed workload integration
+remain separate unfinished matrix entries. These tests do not change scoring,
+grant account capacity, launch a successor or activate autonomous operation.
+
 #### Installed invocation
 
 The continuation based on `f00b4f01c44ab9b44e9f7e7c0eaeda377310d3f8`

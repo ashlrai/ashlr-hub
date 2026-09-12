@@ -1,6 +1,64 @@
 # Verified local handoff
 
-## Current continuation: candidate-linked full-workflow measurement
+## Current continuation: candidate-linked during-call drift
+
+Baseline `df44cf730f4ca4155e8c56e0a8ce1783f630a0d0`, initially clean `auto/p00`
+at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three Explore and
+implementation/review agents mapped and built the runtime control, successor
+control and test-only native interceptor. Parent integrated the shared candidate
+harness, custody fix, local verification and documentation. Entire resume found
+no checkpoint. The original working checkout and account/service state are
+preserved.
+
+The new probes mutate private fixture evidence while a real candidate is blocked
+waiting for its original native result. The semantic trigger is the exact bundle
+intent-file ACL read, after initial capture and receipt verification. The earlier
+directory-ACL proposal was corrected from source evidence: directory inspection
+does not produce that broker operation. No fixed global launch ordinal or new
+production hook selects the mutation.
+
+Each candidate first returns exact healthy metadata in the same process. Runtime
+drift is then detected by the real implementation, while a control omitting only
+the final capture returns stale success. Delivered-source branch drift is detected
+by the real successor path; a control retaining initial origin verification but
+omitting subsequent source checks returns stale success. This proves why those
+freshness checks matter, not that the complete acceptance matrix is finished.
+It does not isolate the final-return-only source guard.
+
+The interceptor returns the identical original tool result and forwards original
+runner arguments. Transport/result errors, duplicate requests, absent triggers,
+callback errors and asynchronous callback results cannot masquerade as candidate
+refusal. Mutation witnesses and whole-fixture snapshots preserve the intentional
+change while checking for additional effects. These are correctness tests; host
+mutation work is not added to candidate performance counts or used as a score.
+
+Independent review fixed teardown custody in the new harness. Every attempted
+session remains outstanding until its shared close promise succeeds. Failed opens
+and failed/unconfirmed closes retain the private root before any chmod/removal;
+repeated close cannot release another session. Eleven fake-session controls cover
+this separately from real native execution.
+
+Final fresh verification passed **178 tests across eight suites, zero skips**,
+in 271.12s on macOS/Node 24.18.0, including the custody integration and all four
+real candidate drift controls. The earlier seven-suite run passed 167 tests;
+it is superseded by this complete rerun. Full build, source/web
+typechecks, strict compilation of the new tests, documentation checks and lint
+pass (zero errors, 107 existing warnings). Lane classification contains 330
+real-IO files and 681 unit files. The rebuilt builtin manifest remains
+`c204cc7d483b504c035e4273b739d3c3950d89ed26d4ea5b0cb966946fe19ab3`;
+no runtime source or evaluator script changed. The only static issue was a
+test mock inferred as a zero-argument tuple; explicit runner argument types fixed
+it without changing test behavior. Runtime production source and installed
+measurement/scoring are unchanged. During-call pool/binding/project replacement,
+same-size byte tampering, richer quota context and full installed workload
+integration remain open. No provider execution, account allocation changes,
+service activation, GitHub Actions, remote push, publication or deployment occurs
+in this increment. Entire remains enabled in manual-commit mode. The parent
+delivers this as a local commit on `auto/p00`; the rollback baseline is
+`df44cf730f4ca4155e8c56e0a8ce1783f630a0d0`. The original checkout remains at
+`a01fc08663baab3039c4f1c084538de732a4fd0e` with its existing untracked workplans.
+
+## Previous continuation: candidate-linked full-workflow measurement
 
 Baseline `2acf37714ee01135550de75d33de0a648ac4ce54`, initially clean branch
 `auto/p00` at `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`.

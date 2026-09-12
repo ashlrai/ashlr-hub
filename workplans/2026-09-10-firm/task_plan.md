@@ -1,6 +1,28 @@
 # Executable firm: package graph
 
-## Current increment — faithful full-workflow measurement (baseline 2acf3771)
+## Current increment — candidate-linked during-call drift (baseline df44cf73)
+
+- [x] Revalidate clean source and use three Explore agents to map semantic injection boundaries.
+- [x] Build a test-only call-through interceptor; preserve real tool results and distinguish harness faults.
+- [x] Implement runtime and delivered-source freshness challenges with healthy and deliberately stale candidate controls.
+- [x] Verify exact mutation evidence, unchanged remaining fixture state, normal cleanup and local regressions.
+- [x] Record acceptance gaps and deliver a verified local commit without activating providers or services.
+
+Final fresh gate: 178 tests across eight suites, zero skips, 271.12s. Full build,
+source/web typechecks, strict new-test compilation, docs and lint pass (zero
+errors, 107 existing warnings). Installed runtime and builtin manifest are
+unchanged. Complete candidate-linked correctness coverage and installed workload
+integration still precede frozen scoring and an accepted useful optimization.
+
+The previous turn is progress: real candidate workflows and 352 tests passed.
+This increment targets an actual acceptance gap, not a new scheduler boundary:
+evidence can change after initial verification inside the same call. The exact
+intent-file ACL read follows receipt validation and provides a semantic trigger.
+No production hooks or numeric native-call ordinals are needed. Test-only stale
+candidates must succeed on unchanged fixtures before their missed drift matters.
+Runtime/child authority, installed workload and default scoring remain unchanged.
+
+## Previous increment — faithful full-workflow measurement (baseline 2acf3771)
 
 - [x] Map manager replay, restart and successor paths with three Explore agents.
 - [x] Extend candidate substitution so nested workflow calls exercise candidate code, not the baseline.
