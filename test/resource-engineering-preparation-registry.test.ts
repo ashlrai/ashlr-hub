@@ -1,11 +1,12 @@
 /** Real private Git/configuration/registration; no execution owner, evaluator or worker. */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
-import { createResourceEngineeringPreparationRegistry } from '../src/core/resources/engineering-preparation-registry.js';
+import { createResourceEngineeringPreparationRegistry, readResourceEngineeringPreparationRegistrations,
+  resourceEngineeringPreparationRegistrationRoot, validateResourceConsoleEngineeringPreparationConfig } from '../src/core/resources/engineering-preparation-registry.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
 import type { ResourceConsoleEngineeringPreparationConfig } from '../src/core/resources/console-engineering-preparation-types.js';
 import * as preparation from '../src/core/resources/engineering-preparation.js';
@@ -25,7 +26,7 @@ function tree(file: string): unknown {
     content: stat.isFile() ? digest(readFileSync(file)) : Object.fromEntries(readdirSync(file).sort().map(name => [name, tree(join(file, name))])) };
 }
 const request = { id: 'objective', profileId: 'profile', name: 'Measured work', objective: 'Improve value under fixed checks.' };
-function fixture() {
+function fixture(registrationScope?: string) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'engineering-registry-boundary-'))); roots.push(base);
   const workspace = join(base, 'repo'); const transport = join(base, 'transport'); const root = join(base, 'ledger'); const outputRoot = join(base, 'prepared');
   for (const dir of [workspace, transport, root, outputRoot]) mkdirSync(dir, { mode: 0o700 });
@@ -53,6 +54,7 @@ function fixture() {
     execution: { maxDurationMs: 30_000, constitutionVersion: 'fixture', policyEpoch: 1 },
     supervision: { maxDurationMs: 60_000, pollIntervalMs: 1000, maxAttemptsPerEnrollment: 2 } };
   const config: ResourceConsoleEngineeringPreparationConfig = { schemaVersion: 1, outputRoot, resourceRuntime,
+    ...(registrationScope === undefined ? {} : { registrationScope }),
     profiles: [{ id: 'profile', label: 'Fixed checks', acceptance: 'Change value only.', recipe }] };
   const configFile = join(base, 'profiles.json'); save(configFile, config);
   const options = { configFile, config, root, workspace, projectsFile, poolFile, bindingsFile, observationsFile };
@@ -60,6 +62,110 @@ function fixture() {
 }
 
 describe('owner-independent preparation registry boundaries', () => {
+  it('isolates scoped records and exact replay while retaining the shared accounting anchor and legacy path', () => {
+    const f = fixture('first');
+    const plan = f.registry.materialize(request).plan;
+    const prepared = f.registry.prepare({ ...request, expectedPlanDigest: plan.planDigest }, { beforeNew() {}, beforePublication() {} });
+    const first = f.registry.registrations()[0]!;
+    const firstRoot = resourceEngineeringPreparationRegistrationRoot(f.root, 'first');
+    expect(firstRoot).toBe(join(f.root, 'console-engineering-preparations-scope-first'));
+    expect(resourceEngineeringPreparationRegistrationRoot(f.root)).toBe(join(f.root, 'console-engineering-preparations'));
+    const firstTree = tree(firstRoot);
+    const outputRoot = join(f.base, 'prepared-second'); mkdirSync(outputRoot, { mode: 0o700 });
+    const config = { ...f.config, outputRoot, registrationScope: 'second' };
+    const configFile = join(f.base, 'profiles-second.json'); save(configFile, config);
+    const second = createResourceEngineeringPreparationRegistry({ ...f.options, configFile, config });
+    expect(second.registrations()).toEqual([]);
+    expect(readResourceEngineeringPreparationRegistrations(f.root)).toEqual([]);
+    const guard = vi.fn(); const before = tree(f.base);
+    expect(() => second.publish(first, guard)).toThrow('context changed');
+    expect(guard).not.toHaveBeenCalled(); expect(tree(f.base)).toEqual(before);
+    const secondPlan = second.materialize(request).plan;
+    second.prepare({ ...request, expectedPlanDigest: secondPlan.planDigest }, { beforeNew() {}, beforePublication() {} });
+    expect(second.registrations()).toHaveLength(1);
+    expect(second.registrations()[0]!.configDigest).not.toBe(first.configDigest);
+    expect(tree(firstRoot)).toEqual(firstTree);
+    const restored = createResourceEngineeringPreparationRegistry(f.options);
+    const replayBefore = tree(f.base);
+    const replay = restored.prepare({ ...request, expectedPlanDigest: plan.planDigest }, {
+      beforeNew() { throw Error('Must not create'); }, beforePublication() {},
+    });
+    expect(replay.disposition).toBe('replayed'); expect(replay.enrollmentDigest).toBe(prepared.enrollmentDigest);
+    expect(tree(f.base)).toEqual(replayBefore);
+    expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
+  }, 30_000);
+
+  it('keeps missing reads side-effect free and binds scope even when every other context field is identical', () => {
+    const f = fixture(); const before = tree(f.base);
+    expect(readResourceEngineeringPreparationRegistrations(f.root)).toEqual([]);
+    expect(readResourceEngineeringPreparationRegistrations(f.root, 'empty')).toEqual([]);
+    expect(tree(f.base)).toEqual(before);
+    const scoped = createResourceEngineeringPreparationRegistry({ ...f.options, config: { ...f.config, registrationScope: 'scope' } });
+    expect(scoped.contextDigest).not.toBe(f.registry.contextDigest);
+    expect(scoped.contextDigest).toBe(digest(canonical({ outputRoot: f.config.outputRoot, resourceRuntime: f.config.resourceRuntime,
+      root: f.root, workspace: f.options.workspace, projectsFile: f.options.projectsFile, poolFile: f.options.poolFile,
+      bindingsFile: f.options.bindingsFile, observationsFile: f.options.observationsFile, quotaConfigFile: null, registrationScope: 'scope' })));
+    expect(tree(f.base)).toEqual(before);
+  });
+
+  it('rejects malformed scope and accessors before filesystem effects or getter invocation', () => {
+    const f = fixture(); const before = tree(f.base); const getter = vi.fn(() => 'scope');
+    for (const registrationScope of ['', '.', '..', '../escape', '/absolute', 'a/b', 'UPPER', 'a'.repeat(65), null, 1, {}]) {
+      expect(() => resourceEngineeringPreparationRegistrationRoot(f.root, registrationScope as string)).toThrow();
+      expect(() => readResourceEngineeringPreparationRegistrations(f.root, registrationScope as string)).toThrow();
+      expect(() => validateResourceConsoleEngineeringPreparationConfig({ ...f.config, registrationScope })).toThrow();
+    }
+    const config = Object.defineProperty({ ...f.config }, 'registrationScope', { enumerable: true, get: getter });
+    expect(() => validateResourceConsoleEngineeringPreparationConfig(config)).toThrow();
+    expect(getter).not.toHaveBeenCalled(); expect(tree(f.base)).toEqual(before);
+  });
+
+  it('refuses a live symlink namespace without following it or changing another scope', () => {
+    const f = fixture('safe'); const target = join(f.base, 'foreign'); mkdirSync(target, { mode: 0o700 });
+    const before = tree(target);
+    symlinkSync(target, resourceEngineeringPreparationRegistrationRoot(f.root, 'linked'));
+    expect(() => readResourceEngineeringPreparationRegistrations(f.root, 'linked')).toThrow('unavailable');
+    expect(readResourceEngineeringPreparationRegistrations(f.root, 'safe')).toEqual([]);
+    expect(readResourceEngineeringPreparationRegistrations(f.root)).toEqual([]);
+    expect(tree(target)).toEqual(before);
+  });
+
+  it.each([undefined, 'dangling'])('refuses dangling namespace links for scope %s without creating the target', registrationScope => {
+    const f = fixture(); const target = join(f.base, 'never-created');
+    const storeRoot = resourceEngineeringPreparationRegistrationRoot(f.root, registrationScope);
+    symlinkSync(target, storeRoot);
+    const before = lstatSync(storeRoot, { bigint: true });
+    expect(() => readResourceEngineeringPreparationRegistrations(f.root, registrationScope)).toThrow('unavailable');
+    expect(lstatSync(storeRoot, { bigint: true })).toEqual(before);
+    expect(existsSync(target)).toBe(false);
+  });
+
+  it.each([undefined, 'bounded'])('retains the exact 32-record read bound for scope %s independently of other namespaces', registrationScope => {
+    const f = fixture(registrationScope);
+    const storeRoot = resourceEngineeringPreparationRegistrationRoot(f.root, registrationScope);
+    for (const dir of [storeRoot, join(storeRoot, 'records'), join(storeRoot, 'staging')]) mkdirSync(dir, { mode: 0o700 });
+    // Synthetic valid-shaped records exercise the real private reader's census,
+    // not bundle acceptance: no claim is made that these records have bundles.
+    for (let i = 0; i < 32; i++) save(join(storeRoot, 'records', `objective-${i}.json`), {
+      schemaVersion: 1, configDigest: f.registry.contextDigest, request: { ...request, id: `objective-${i}` },
+      planDigest: 'a'.repeat(64), bundlePlanDigest: 'b'.repeat(64), enrollmentDigest: 'c'.repeat(64),
+    });
+    expect(f.registry.registrations()).toHaveLength(32);
+    expect(readResourceEngineeringPreparationRegistrations(f.root, 'independent')).toEqual([]);
+    const plan = f.registry.materialize(request).plan;
+    const before = tree(f.base);
+    const beforeNew = vi.fn();
+    expect(() => f.registry.prepare({ ...request, expectedPlanDigest: plan.planDigest }, { beforeNew, beforePublication() {} }))
+      .toThrow('Engineering enrollment capacity reached');
+    expect(beforeNew).not.toHaveBeenCalled(); expect(tree(f.base)).toEqual(before);
+    save(join(storeRoot, 'records', 'overflow.json'), { schemaVersion: 1, configDigest: f.registry.contextDigest,
+      request: { ...request, id: 'overflow' }, planDigest: 'a'.repeat(64), bundlePlanDigest: 'b'.repeat(64), enrollmentDigest: 'c'.repeat(64) });
+    const overflow = tree(f.base);
+    expect(() => f.registry.registrations()).toThrow('unavailable');
+    expect(readResourceEngineeringPreparationRegistrations(f.root, 'independent')).toEqual([]);
+    expect(tree(f.base)).toEqual(overflow);
+  });
+
   it('keeps fresh full bundle evidence at all writer boundaries without repeating unused commissioning reports', () => {
     const f = fixture(); const plan = f.registry.materialize(request).plan;
     const metadata = vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata');

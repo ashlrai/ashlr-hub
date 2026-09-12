@@ -4,6 +4,8 @@ import type { ResourceEngineeringSuccessorCoordinatorConfig } from './engineerin
 export interface ResourceEngineeringAutonomousSetupPolicy {
   schemaVersion: 1; id: string; profileId: string; label: string; acceptance: string;
   maxEnrollments: number; maxConcurrent: number; autoAdmitPrepared?: true;
+  /** Explicit preparation-history partition; accounting and execution ownership remain shared. */
+  registrationScope?: string;
   successors: Omit<ResourceEngineeringSuccessorCoordinatorConfig, 'schemaVersion' | 'supervisionId' | 'profileId'>;
 }
 export interface ResourceEngineeringAutonomousSetupOptions {

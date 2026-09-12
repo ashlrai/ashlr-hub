@@ -19,6 +19,7 @@ import type { ResourceEngineeringRecipe } from '../src/core/resources/engineerin
 import type { ResourceConsoleEngineeringCatalog } from '../src/core/resources/console-engineering.js';
 import type { ResourceConsoleEngineeringSupervisionSnapshot } from '../src/core/resources/console-engineering-supervisor-types.js';
 import type { ResourceEngineeringSuccessorCoordinatorSnapshot } from '../src/core/resources/engineering-successor-coordinator-types.js';
+import { resourceEngineeringPreparationRegistrationRoot } from '../src/core/resources/engineering-preparation-registry.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 const point = (phase: string, details?: Record<string, number>) => { if (process.env.ASHLR_ENGINEERING_SETUP_PHASE_TIMING === '1') console.log('SETUP_PHASE ' + JSON.stringify({ phase, monotonicMs: performance.now(), ...details })); };
@@ -41,7 +42,7 @@ type SetupReport = { status: 'planned' | 'prepared'; disposition?: 'created' | '
 type Generation = { generation: number; parentTrialId: string | null; files: Array<{ path: string; content: string }>;
   seedContext: { source: { campaignId: string }; measurement: { passed: boolean; score: number } }; feedback?: unknown };
 
-async function fixture() {
+async function fixture(registrationScope?: string) {
   expect(process.env.ASHLR_VITEST_REAL_HOME).toBeTruthy(); expect(homedir()).not.toBe(process.env.ASHLR_VITEST_REAL_HOME);
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'engineering-setup-acceptance-')));
   const repo = join(base, 'project'); const transport = join(base, 'transport'); const root = join(base, 'ledger'); const output = join(base, 'setup');
@@ -109,6 +110,7 @@ async function fixture() {
     execution: { maxDurationMs: 100_000, constitutionVersion: 'fixture-v1', policyEpoch: 1 },
     supervision: { maxDurationMs: 360_000, pollIntervalMs: 100, maxAttemptsPerEnrollment: 3 } };
   save(files.recipe, recipe); save(files.policy, { schemaVersion: 1, id: 'setup-queue', profileId: 'fixed-profile', label: 'Fixed integer experiment',
+    ...(registrationScope === undefined ? {} : { registrationScope }),
     acceptance: 'Only value.json may change; the fixed integer evaluator applies.', maxEnrollments: 2, maxConcurrent: 1,
     successors: { allowedWorkerIds: ['repair'], maxOutputTokens: 256, proposalTimeoutMs: 30_000, maxSuccessors: 1, pollIntervalMs: 100 } });
   return { base, root, repo, transport, output, revision, files, recipe, pool, bindings, observations, allocation, workerAccess, generations, proposals, errors };
@@ -206,9 +208,10 @@ function delivered(f: Fixture, id: string) {
 }
 
 describe.runIf(process.platform === 'darwin')('offline autonomous engineering setup actual CLI', () => {
-  it('checks without effects, registers a coherent seed, executes emitted arguments and restarts without replay', async () => {
+  for (const registrationScope of [undefined, 'standing-window'] as const) {
+  it(`${registrationScope === undefined ? '' : 'scoped registration: '}checks without effects, registers a coherent seed, executes emitted arguments and restarts without replay`, async () => {
     const recovery = { count: 0, deadlineMonotonicMs: performance.now() + 360_000 };
-    const f = await fixture(); const before = tree(f.base); const homeBefore = tree(homedir());
+    const f = await fixture(registrationScope); const before = tree(f.base); const homeBefore = tree(homedir());
     point('check.start'); const plan = await setupCli(f, ['--check']); point('check.end');
     expect(plan).toMatchObject({ status: 'planned', output: f.output, projectId: 'default', seedRevision: f.revision, initialEnrollmentDigest: null,
       executionStarted: false, providerContacted: false });
@@ -217,6 +220,14 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     point('prepare.start'); const prepared = await setupCli(f, ['--expected-plan-digest', plan.planDigest]); point('prepare.end');
     expect(prepared).toMatchObject({ status: 'prepared', disposition: 'created', planDigest: plan.planDigest, executionStarted: false, providerContacted: false });
     expect(prepared.initialEnrollmentDigest).toMatch(/^[a-f0-9]{64}$/); const argv = prepared.consoleArguments!;
+    const registrationRoot = resourceEngineeringPreparationRegistrationRoot(f.root, registrationScope);
+    expect(prepared.paths.registration).toBe(join(registrationRoot, 'records', `${f.recipe.id}.json`));
+    const profiles = JSON.parse(readFileSync(argv[argv.indexOf('--engineering-preparation') + 1]!, 'utf8'));
+    if (registrationScope === undefined) expect(Object.hasOwn(profiles, 'registrationScope')).toBe(false);
+    else {
+      expect(profiles.registrationScope).toBe(registrationScope);
+      expect(existsSync(resourceEngineeringPreparationRegistrationRoot(f.root))).toBe(false);
+    }
     expect(JSON.parse(readFileSync(prepared.paths.registration, 'utf8'))).toMatchObject({ request: { id: f.recipe.id }, enrollmentDigest: prepared.initialEnrollmentDigest });
     expect(argv.slice(0, 3)).toEqual(['resources', 'pool', 'console']);
     for (const flag of ['--execute', '--engineering-preparation', '--engineering-supervision', '--engineering-successors']) expect(argv).toContain(flag);
@@ -255,6 +266,11 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     expect(successors.observation!.recordsDigest).toBe(digest(canonical(journalRecords)));
     expect(successors.deadlineAt).toBe(originalDeadline); const successorId = successors.entries[0]!.successorId;
     await first.close();
+    // A is registered by setup; B by the background preparation worker. Both
+    // must use the same emitted scope without creating legacy registration state.
+    expect(readdirSync(join(registrationRoot, 'records')).sort()).toEqual([`${f.recipe.id}.json`, `${successorId}.json`].sort());
+    const registrationsAfterDelivery = tree(registrationRoot);
+    if (registrationScope !== undefined) expect(existsSync(resourceEngineeringPreparationRegistrationRoot(f.root))).toBe(false);
     const a = delivered(f, f.recipe.id); const b = delivered(f, successorId);
     expect(b.universe.manifest.seed.revision).toBe(a.receipt.commit);
     expect([a, b].reduce((sum, row) => sum + (row.campaign.seedEvaluation?.result?.status === 'measured' ? 1 : 0) +
@@ -292,8 +308,10 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     expect(Date.parse(observedAgain.observation!.coordinator!.reportedAt)).toBeGreaterThanOrEqual(restartStartedAt);
     expect(Date.parse(observedAgain.observation!.coordinator!.reportedAt)).toBeLessThanOrEqual(restartSampleFinishedAt);
     await restarted.close(); expect(f.generations).toHaveLength(4); expect(f.proposals).toHaveLength(1); expect(tree(f.output)).toEqual(after);
+    expect(tree(registrationRoot)).toEqual(registrationsAfterDelivery);
     expect(resourcePoolStatus(f.root, f.pool, f.bindings, f.observations).attempts).toEqual(ledger.attempts);
     const finalBefore = tree(f.base); expect((await setupCli(f, ['--expected-plan-digest', plan.planDigest])).disposition).toBe('replayed');
     expect(tree(f.base)).toEqual(finalBefore);
   }, 360_000);
+  }
 });

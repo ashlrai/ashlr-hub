@@ -14,7 +14,11 @@ accounting, or the exact completed setup for replay. The resource ledger must
 contain valid persisted accounting. Setup refuses active or uncertain console,
 resource and collector ownership; stop their owners normally rather than
 deleting locks or accounting history. Existing preparation history needs its
-original configuration context, not a second setup.
+original configuration context. An optional policy registrationScope selects a
+separate bounded preparation history while retaining this same account ledger.
+Use unique objective and queue identities and a new private output; never change
+scope to recover uncertain work. Scoping does not verify predecessor settlement
+or automatically start another campaign.
 
 --check reads and returns a plan digest without writing or registering anything.
 Without --check, setup prepares the initial objective and its real registration,

@@ -36,6 +36,9 @@ Engineering shares this pool's ledger and limits; acceptance means fixed checks
 and delivery to an enrolled local branch, not merge, push or deployment.
 --engineering-preparation requires --execute and --projects. Its private JSON
 pins {schemaVersion:1,outputRoot,resourceRuntime,profiles:[{id,label,acceptance,recipe}]}.
+Optional registrationScope selects one separate preparation history, still capped
+at 32 registrations. It is host configuration, never an objective request field.
+Account usage, reservations, global ownership and stop controls remain shared.
 Profiles fix the project, seed commit, evaluator, files, workers and budgets.
 The workspace supplies only an objective ID, profile ID, name and objective text;
 delivery uses a new codex/<objective-id> branch. Check is read-only. By default,

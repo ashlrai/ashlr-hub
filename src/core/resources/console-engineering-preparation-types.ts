@@ -6,6 +6,8 @@ export interface ResourceConsoleEngineeringPreparationConfig {
   schemaVersion: 1;
   outputRoot: string;
   resourceRuntime: string;
+  /** Host-pinned finite-envelope registry; absent preserves the legacy store. */
+  registrationScope?: string;
   profiles: Array<{ id: string; label: string; acceptance: string; recipe: ResourceEngineeringRecipe }>;
 }
 /** IDs max 64 ASCII identifier characters; name 120 and objective 4000 UTF-8 bytes. */

@@ -1,5 +1,6 @@
 /** Shared owner-free objective registration. Execution owners supply additional live publication checks. */
 import { isAbsolute, join, parse, resolve } from 'node:path';
+import { lstatSync } from 'node:fs';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
@@ -32,7 +33,9 @@ const hash = (value: unknown) => digest(canonical(value));
 
 export function validateResourceConsoleEngineeringPreparationConfig(input: unknown): ResourceConsoleEngineeringPreparationConfig {
   const config = copy<ResourceConsoleEngineeringPreparationConfig>(input);
-  if (!exact(config, ['schemaVersion', 'outputRoot', 'resourceRuntime', 'profiles']) || config.schemaVersion !== 1 ||
+  if (!exact(config, ['schemaVersion', 'outputRoot', 'resourceRuntime', 'profiles',
+    ...(Object.hasOwn(config ?? {}, 'registrationScope') ? ['registrationScope'] : [])]) || config.schemaVersion !== 1 ||
+    Object.hasOwn(config, 'registrationScope') && (typeof config.registrationScope !== 'string' || !ID.test(config.registrationScope)) ||
     !path(config.outputRoot) || !path(config.resourceRuntime) || !Array.isArray(config.profiles) ||
     config.profiles.length < 1 || config.profiles.length > 16 || config.profiles.some(row =>
       !exact(row, ['id', 'label', 'acceptance', 'recipe']) || typeof row.id !== 'string' || !ID.test(row.id) ||
@@ -83,16 +86,32 @@ function decodeRegistration(value: unknown): ResourceEngineeringPreparationRegis
       return value as unknown as ResourceEngineeringPreparationRegistration;
     } catch { return null; }
 }
-function records(root: string): ImmutablePrivateRecordStoreConfig<ResourceEngineeringPreparationRegistration> {
+/** A fixed child of the accounting anchor, never a caller-selected path. */
+export function resourceEngineeringPreparationRegistrationRoot(root: string, registrationScope?: string): string {
+  if (!path(root) || registrationScope !== undefined && (typeof registrationScope !== 'string' || !ID.test(registrationScope))) {
+    fail('INVALID_INPUT', 'Invalid engineering registration scope');
+  }
+  return join(root, registrationScope === undefined ? 'console-engineering-preparations'
+    : `console-engineering-preparations-scope-${registrationScope}`);
+}
+function records(root: string, registrationScope?: string): ImmutablePrivateRecordStoreConfig<ResourceEngineeringPreparationRegistration> {
   const codec = { parse: decodeRegistration, serialize: (value: ResourceEngineeringPreparationRegistration) => canonical(value) + '\n', recordId: (value: ResourceEngineeringPreparationRegistration) => value.request.id,
     recordFileName: (value: ResourceEngineeringPreparationRegistration) => `${value.request.id}.json`, isRecordFileName: (name: string) => /^[a-z0-9][a-z0-9_-]{0,63}\.json$/.test(name),
     stageToken: hash, equivalent: (a: ResourceEngineeringPreparationRegistration, b: ResourceEngineeringPreparationRegistration) => canonical(a) === canonical(b) };
-  return { label: 'Engineering objective registration', anchorPath: root, rootPath: join(root, 'console-engineering-preparations'),
+  return { label: 'Engineering objective registration', anchorPath: root, rootPath: resourceEngineeringPreparationRegistrationRoot(root, registrationScope),
     lockFileName: '.records.lock', maxRecordBytes: 16 * 1024, defaultMaxFiles: 32, hardMaxFiles: 32,
     defaultMaxBytes: 512 * 1024, hardMaxBytes: 512 * 1024, codecForRead: () => codec, codecForWrite: () => codec };
 }
-export function readResourceEngineeringPreparationRegistrations(root: string): ResourceEngineeringPreparationRegistration[] {
-  const result = readImmutablePrivateRecords(records(root), { requireComplete: true });
+export function readResourceEngineeringPreparationRegistrations(root: string, registrationScope?: string): ResourceEngineeringPreparationRegistration[] {
+  const store = records(root, registrationScope);
+  // existsSync in the generic reader treats a dangling link as missing. A
+  // registration namespace must not turn unsafe retained history into empty.
+  try {
+    if (lstatSync(store.rootPath).isSymbolicLink()) fail('UNAVAILABLE', 'Objective registration history is unavailable');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') fail('UNAVAILABLE', 'Objective registration history is unavailable');
+  }
+  const result = readImmutablePrivateRecords(store, { requireComplete: true });
   if (result.sourceState === 'degraded' || result.sourceState !== 'missing' && !result.complete) fail('UNAVAILABLE', 'Objective registration history is unavailable');
   return result.records;
 }
@@ -118,10 +137,11 @@ export function createResourceEngineeringPreparationRegistry(input: {
     if (value && typeof value === 'object') { Object.values(value).forEach(freeze); Object.freeze(value); }
   };
   freeze(config);
-  const configDigest = hash(config); const store = records(options.root);
+  const configDigest = hash(config); const store = records(options.root, config.registrationScope);
   const contextDigest = hash({ outputRoot: config.outputRoot, resourceRuntime: config.resourceRuntime, root: options.root,
     workspace: options.workspace, projectsFile: options.projectsFile, poolFile: options.poolFile, bindingsFile: options.bindingsFile,
-    observationsFile: options.observationsFile, quotaConfigFile: options.quotaConfigFile ?? null });
+    observationsFile: options.observationsFile, quotaConfigFile: options.quotaConfigFile ?? null,
+    ...(config.registrationScope === undefined ? {} : { registrationScope: config.registrationScope }) });
   inspectPrivateDirectory(config.outputRoot);
   const runtime = validateResourceGenerationRuntime(readResourceJson(config.resourceRuntime));
   if (runtime.root !== options.root || runtime.poolPath !== options.poolFile || runtime.bindingsPath !== options.bindingsFile ||
@@ -130,7 +150,7 @@ export function createResourceEngineeringPreparationRegistry(input: {
     if (hash(validateResourceConsoleEngineeringPreparationConfig(readResourceJson(options.configFile))) !== configDigest) fail('CONFLICT', 'Preparation profiles changed; restart with reviewed configuration');
   }
   function registrations() {
-    const rows = readResourceEngineeringPreparationRegistrations(options.root);
+    const rows = readResourceEngineeringPreparationRegistrations(options.root, config.registrationScope);
     if (rows.some(row => row.configDigest !== contextDigest)) fail('CONFLICT', 'Objective registration context changed');
     return rows;
   }

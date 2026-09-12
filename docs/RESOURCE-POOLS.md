@@ -163,8 +163,10 @@ branch rather than silently substituting one. The ledger must contain valid
 persisted accounting; an empty replacement directory is not accepted. Stop the
 owning console, direct resource work and quota collector normally before setup.
 Unresolved dispatches or collector state must be investigated. Existing objective
-registration history requires its original preparation context, not a second
-setup with new configuration. Do not remove locks or reset accounting to proceed.
+registration history requires its original preparation context. An explicit
+`registrationScope` in the private setup policy can instead select a separate
+preparation history, as described below. Do not remove locks or reset accounting
+to proceed; a new scope is not recovery of unresolved old work.
 
 The private policy selects the bounded operating window's queue/profile identity
 and proposal resources. It does not contain credentials or change account reserves:
@@ -362,6 +364,28 @@ queue entry, so an already admitted plan is not duplicated.
 Incomplete bundles/staging remain held for inspection, not deleted or repaired
 automatically.
 The combined static and prepared enrollment catalog is bounded to 32 entries.
+By default, preparation uses the original `console-engineering-preparations`
+store and preserves its existing digests. A host can explicitly select a separate
+history using optional `registrationScope` in the private preparation config, or
+in the setup policy that generates it. The scope is a 1–64 character lowercase
+identifier matching `[a-z0-9][a-z0-9_-]*`, not a path or an objective-request field.
+It selects `console-engineering-preparations-scope-<id>` beneath the **same account
+ledger root** and is included in the checked context and plan identity. Each
+scope retains its own 32-registration limit. Reads, replay, startup restoration
+and automatic-admission recovery inspect only the selected history, never merge
+or fall back to another scope. Changing a running configuration remains refused.
+
+For an explicitly configured subsequent campaign, close the previous console
+normally, retain its output and records, and use a new scope, private output and
+unique objective/supervision identities. Shared usage receipts, task-window caps,
+account pauses, General/Spark reservations and allocation ceilings still apply.
+The scope does not start work, verify that previous obligations are settled,
+renew a deadline or authorize continuous campaign rollover. Do not switch scopes
+to bypass uncertain preparation, delivery or ownership. An automatic standing
+mission must separately prove predecessor settlement before selecting a new
+scope; that caller is not yet implemented. The shared pool ledger also retains
+its existing attempt/storage bounds, so this is not an unlimited-history claim.
+
 For bounded, model-proposed follow-up work at a verified delivered commit, see
 [automatic successors](#automatic-successors-from-verified-deliveries). Accumulation
 into an existing integration branch and production deployment remain separate capabilities.

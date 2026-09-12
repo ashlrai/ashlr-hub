@@ -10,7 +10,7 @@ import { validateResourceGenerationRuntime } from '../universe/resource-generati
 import { checkResourceEngineeringPreparation } from './engineering-preparation.js';
 import type { ResourceEngineeringRecipe } from './engineering-preparation-types.js';
 import { createResourceEngineeringPreparationRegistry, readResourceEngineeringPreparationRegistrations,
-  validateResourceConsoleEngineeringPreparationConfig } from './engineering-preparation-registry.js';
+  resourceEngineeringPreparationRegistrationRoot, validateResourceConsoleEngineeringPreparationConfig } from './engineering-preparation-registry.js';
 import { validateResourceConsoleEngineeringSupervisionConfig } from './console-engineering-supervisor.js';
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from './engineering-successor-coordinator.js';
 import { prepareResourceConsoleEngineeringEnrollments, type ResourceConsoleEngineeringCatalog } from './console-engineering.js';
@@ -48,9 +48,11 @@ function path(value: unknown): value is string {
 export function validateResourceEngineeringAutonomousSetupPolicy(input: unknown): Policy {
   const value = data<Policy>(input);
   if (!exact(value, ['schemaVersion', 'id', 'profileId', 'label', 'acceptance', 'maxEnrollments', 'maxConcurrent', 'successors',
-    ...(Object.hasOwn(value ?? {}, 'autoAdmitPrepared') ? ['autoAdmitPrepared'] : [])]) || value.schemaVersion !== 1 ||
+    ...(Object.hasOwn(value ?? {}, 'autoAdmitPrepared') ? ['autoAdmitPrepared'] : []),
+    ...(Object.hasOwn(value ?? {}, 'registrationScope') ? ['registrationScope'] : [])]) || value.schemaVersion !== 1 ||
     typeof value.id !== 'string' || !ID.test(value.id) || typeof value.profileId !== 'string' || !ID.test(value.profileId) ||
     Object.hasOwn(value, 'autoAdmitPrepared') && value.autoAdmitPrepared !== true ||
+    Object.hasOwn(value, 'registrationScope') && (typeof value.registrationScope !== 'string' || !ID.test(value.registrationScope)) ||
     !Number.isSafeInteger(value.maxEnrollments) || value.maxEnrollments < 2 || value.maxEnrollments > 32 ||
     !Number.isSafeInteger(value.maxConcurrent) || value.maxConcurrent < 1 || value.maxConcurrent > 8 ||
     !exact(value.successors, ['allowedWorkerIds', 'maxOutputTokens', 'proposalTimeoutMs', 'maxSuccessors', 'pollIntervalMs'])) fail('Invalid autonomous setup policy');
@@ -82,13 +84,14 @@ function capture(input: Options, internal = false) {
   if (!preview.bindings || !preview.projects) fail('Setup requires explicit project bindings');
   const paths: Plan['paths'] = { profiles: join(options.output, 'profiles.json'), supervision: join(options.output, 'supervision.json'),
     successors: join(options.output, 'successors.json'), intent: join(options.output, 'setup-intent.json'), receipt: join(options.output, 'setup-receipt.json'),
-    initialBundle: join(options.output, recipe.id), registration: join(runtime.root, 'console-engineering-preparations', 'records', `${recipe.id}.json`) };
+    initialBundle: join(options.output, recipe.id), registration: join(resourceEngineeringPreparationRegistrationRoot(runtime.root, policy.registrationScope), 'records', `${recipe.id}.json`) };
   const controls = [options.resourceRuntime, options.projectsFile, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath,
     ...(runtime.quotaConfigPath ? [runtime.quotaConfigPath] : [])];
   for (const other of [runtime.root, runtime.workspace, ...preview.bindings.map(row => row.workspace), ...controls]) {
     if (contains(options.output, other) || contains(other, options.output)) fail('Setup output must be outside projects, runtime and accounting controls');
   }
   const profileConfig = validateResourceConsoleEngineeringPreparationConfig({ schemaVersion: 1, outputRoot: options.output, resourceRuntime: options.resourceRuntime,
+    ...(policy.registrationScope === undefined ? {} : { registrationScope: policy.registrationScope }),
     profiles: [{ id: policy.profileId, label: policy.label, acceptance: policy.acceptance, recipe }] });
   const successorConfig = validateResourceEngineeringSuccessorCoordinatorConfig({ schemaVersion: 1, supervisionId: policy.id, profileId: policy.profileId, ...policy.successors });
   if (successorConfig.allowedWorkerIds.some(id => !pool.workers.some(row => row.id === id))) fail('Unknown proposal worker');
@@ -115,7 +118,7 @@ function capture(input: Options, internal = false) {
   if (!internal && !completed) {
     if (readdirSync(options.output).length) fail('Incomplete setup requires inspection; no automatic repair');
     if (holds.some(reason => reason.endsWith('-ownership-present') || reason.endsWith('-work-unresolved'))) fail('Setup requires stopped, resolved console ownership');
-    if (readResourceEngineeringPreparationRegistrations(runtime.root).length) fail('Existing preparation history requires its original setup context');
+    if (readResourceEngineeringPreparationRegistrations(runtime.root, policy.registrationScope).length) fail('Existing preparation history requires its original setup context');
     if (present(join(runtime.root, 'engineering-supervision', policy.id)) || present(join(runtime.root, 'engineering-successors', policy.id))) fail('Setup policy identity already exists');
   }
   const planDigest = hash({ schemaVersion: 1, options, outputBinding, runtimeDigest: hash(runtime), poolDigest: hash({ pool, bindings }),
@@ -193,7 +196,7 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
       if (fresh.plan.planDigest !== expectedPlanDigest || fresh.plan.holds.some(reason => reason.endsWith('-work-unresolved'))) fail('Setup inputs or resource ownership changed');
     };
     guard();
-    if (readdirSync(options.output).length || readResourceEngineeringPreparationRegistrations(current.runtime.root).length) fail('Setup target changed before publication');
+    if (readdirSync(options.output).length || readResourceEngineeringPreparationRegistrations(current.runtime.root, current.policy.registrationScope).length) fail('Setup target changed before publication');
     writePrivate(current.paths.intent, { schemaVersion: 1, planDigest: expectedPlanDigest }, guard);
     writePrivate(current.paths.profiles, current.profileConfig, guard);
     writePrivate(current.paths.successors, current.successorConfig, guard);

@@ -12,6 +12,7 @@ import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervi
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
 import type { ResourceEngineeringOutcomes } from '../src/core/resources/engineering-outcomes-types.js';
+import { resourceEngineeringPreparationRegistrationRoot } from '../src/core/resources/engineering-preparation-registry.js';
 import { startResourceConsoleServer, type ResourceConsoleServerHandle } from '../src/core/web/resource-console-server.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import * as evaluator from '../src/core/universe/fixed-evaluator.js';
@@ -38,7 +39,7 @@ function inventory(root: string): Record<string, unknown> | null {
   };
   visit(root, ''); return result;
 }
-async function fixture() {
+async function fixture(taskLimits = { maxTasksPerWindow: 4, taskWindowMs: 60_000 }) {
   expect(process.env.ASHLR_VITEST_REAL_HOME).toBeTruthy(); expect(homedir()).not.toBe(process.env.ASHLR_VITEST_REAL_HOME);
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'console-preparation-acceptance-')));
   const repo = join(base, 'project'); const otherProject = join(base, 'other-project'); const transport = join(base, 'transport');
@@ -74,7 +75,7 @@ console.log(JSON.stringify({passed:value===1,score:value===1?1:0,metrics:{value}
   });
   const address = worker.address(); if (!address || typeof address === 'string') throw new Error('Fixture listener unavailable');
   const pool = validateResourcePool({ schemaVersion: 1, id: 'console-preparation', workers: ['repair', 'spare'].map(id => ({
-    id, provider: 'local', model: 'fixture', maxConcurrent: 1, maxTasksPerWindow: 4, taskWindowMs: 60_000, reservePercent: 0, priority: 1,
+    id, provider: 'local', model: 'fixture', maxConcurrent: 1, ...taskLimits, reservePercent: 0, priority: 1,
   })) });
   const bindings = validateResourceBindings(pool.workers.map(row => ({ workerId: row.id, capacityKey: `${row.id}-account`,
     kind: 'local-chat', endpoint: `http://127.0.0.1:${address.port}/v1` })), pool);
@@ -124,8 +125,8 @@ async function start(f: Fixture) {
     engineeringPreparationFile: f.files.engineeringPreparationFile });
   cleanups.push(() => server.close()); return server;
 }
-async function configured() {
-  const f = await fixture();
+async function configured(taskLimits?: { maxTasksPerWindow: number; taskWindowMs: number }) {
+  const f = await fixture(taskLimits);
   const config: ResourceConsoleEngineeringPreparationConfig = { schemaVersion: 1, outputRoot: f.outputRoot,
     resourceRuntime: f.files.runtimeFile, profiles: [{ id: 'value-profile', label: 'Pinned value repair',
       acceptance: 'Fixed evaluator requires value.json to contain one; evaluator is not mutable.', recipe: f.recipe }] };
@@ -138,6 +139,78 @@ async function jsonResponse<T>(response: Response, status = 200): Promise<T> {
 }
 
 describe.runIf(process.platform === 'darwin')('same-console objective preparation and explicit engineering execution', () => {
+  it('isolates sequential registration scopes while retaining account reservations, policy and both local deliveries', async () => {
+    // Two explicit finite consoles, not autonomous renewal. Both use one account
+    // ledger, so a new registration namespace cannot replenish its task window.
+    const f = await configured({ maxTasksPerWindow: 2, taskWindowMs: 240_000 });
+    const scopes = ['window-one', 'window-two'] as const;
+    const inputs = scopes.map(scope => objective(`${scope}-correction`));
+    const outputs = scopes.map(scope => join(f.outputRoot, scope));
+    const initialPolicy = f.ledger();
+    let oldRecords: ReturnType<typeof inventory>; let oldBundle: ReturnType<typeof inventory>; let oldCommit = '';
+    let firstReceipt: ReturnType<Fixture['ledger']>['attempts'][number] | undefined;
+    for (const [index, registrationScope] of scopes.entries()) {
+      const input = inputs[index]!; const outputRoot = outputs[index]!;
+      mkdirSync(outputRoot, { mode: 0o700 });
+      save(f.files.engineeringPreparationFile, { ...f.config, outputRoot, registrationScope });
+      const server = await start(f);
+      expect(await jsonResponse(await api(server, 'engineering', undefined, server.readToken))).toEqual([]);
+      expect(f.ledger().attempts).toHaveLength(index);
+      expect(f.ledger()).toMatchObject({ allocation: initialPolicy.allocation, workerAccess: initialPolicy.workerAccess,
+        quotaScopeAccess: initialPolicy.quotaScopeAccess });
+      if (index === 1) {
+        expect(f.ledger().attempts[0]).toEqual(firstReceipt);
+        expect(f.ledger().plan.candidates).toContainEqual(expect.objectContaining({ workerId: 'repair', taskReservationCount: 1 }));
+        expect((await api(server, `engineering/${inputs[0]!.id}`, undefined, server.readToken)).status).toBe(404);
+      }
+      const beforeCheck = inventory(f.base);
+      const plan = await jsonResponse<ResourceConsoleEngineeringObjectivePlan>(await api(server, 'engineering/prepare/check', input));
+      expect(plan).toMatchObject({ seedRevision: f.revision, executionStarted: false, providerContacted: false });
+      expect(inventory(f.base)).toEqual(beforeCheck);
+      const prepared = await jsonResponse<ResourceConsoleEngineeringObjectivePrepared>(await api(server, 'engineering/prepare', { ...input, expectedPlanDigest: plan.planDigest }));
+      expect(prepared.disposition).toBe('created');
+      expect(f.requests).toHaveLength(index); expect(f.ledger().attempts).toHaveLength(index);
+      const catalog = await jsonResponse<Array<{ id: string }>>(await api(server, 'engineering', undefined, server.readToken));
+      expect(catalog.map(row => row.id)).toEqual([input.id]);
+      expect((await api(server, 'engineering/start', { enrollmentId: input.id, expectedEnrollmentDigest: prepared.enrollment.enrollmentDigest })).status).toBe(202);
+      await vi.waitFor(async () => {
+        expect(await jsonResponse(await api(server, `engineering/${input.id}`, undefined, server.readToken))).toMatchObject({ state: 'completed' });
+      }, { timeout: 45_000, interval: 100 });
+      const outcomes = await jsonResponse<ResourceEngineeringOutcomes>(await api(server, `engineering/${input.id}/outcomes`, undefined, server.readToken));
+      expect(outcomes).toMatchObject({ complete: true, usage: { attempts: 1, totalTokens: 30, complete: true },
+        campaigns: [{ stages: { verifiedLocalDeliveries: 1 } }] });
+      expect(git(f.repo, 'show', `codex/${input.id}:value.json`)).toBe('1');
+      expect(git(f.repo, 'diff', '--name-only', f.revision, `codex/${input.id}`)).toBe('value.json');
+      await server.close();
+      if (index === 0) {
+        firstReceipt = f.ledger().attempts[0];
+        oldRecords = inventory(resourceEngineeringPreparationRegistrationRoot(f.root, registrationScope));
+        expect(oldRecords).not.toBeNull(); oldBundle = inventory(outputRoot);
+        oldCommit = git(f.repo, 'rev-parse', `codex/${input.id}`);
+      }
+    }
+    const final = f.ledger();
+    expect(f.protocolErrors).toEqual([]); expect(f.requests).toHaveLength(2);
+    expect(f.evaluations).toHaveBeenCalledTimes(4); expect(f.publications()).toBe(2);
+    expect(final.attempts).toHaveLength(2); expect(final.attempts[0]).toEqual(firstReceipt);
+    for (const receipt of final.attempts) expect(receipt).toMatchObject({ workerId: 'repair', capacityKey: 'repair-account', status: 'completed', inputTokens: 20, outputTokens: 10 });
+    expect(new Set(final.attempts.map(row => row.id)).size).toBe(2);
+    expect(final.attempts.reduce((total, row) => total + row.inputTokens! + row.outputTokens!, 0)).toBe(60);
+    expect(final).toMatchObject({ allocation: initialPolicy.allocation, workerAccess: initialPolicy.workerAccess,
+      quotaScopeAccess: initialPolicy.quotaScopeAccess });
+    expect(final.plan.candidates).toEqual([]);
+    expect(final.plan.exclusions).toContainEqual(expect.objectContaining({ workerId: 'repair', reasons: expect.arrayContaining(['operator-task-cap-reached']) }));
+    expect(final.workerAccess.pausedWorkerIds).toEqual(['spare']);
+    expect(inventory(resourceEngineeringPreparationRegistrationRoot(f.root, scopes[0]))).toEqual(oldRecords!);
+    expect(inventory(outputs[0]!)).toEqual(oldBundle!);
+    expect(git(f.repo, 'rev-parse', `codex/${inputs[0]!.id}`)).toBe(oldCommit);
+    for (const [index, scope] of scopes.entries()) {
+      expect(readdirSync(join(resourceEngineeringPreparationRegistrationRoot(f.root, scope), 'records'))).toEqual([`${inputs[index]!.id}.json`]);
+    }
+    expect(existsSync(resourceEngineeringPreparationRegistrationRoot(f.root))).toBe(false);
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.repo, 'status', '--porcelain=v1')).toBe('');
+  }, 150_000);
+
   it('checks without effects, registers without execution, runs only on explicit request, and reloads the durable enrollment without replay', async () => {
     const f = await configured(); const server = await start(f); const input = objective();
     const beforeCheck = inventory(f.base); const home = inventory(homedir());

@@ -8,7 +8,9 @@ import { canonical } from '../src/core/universe/artifacts.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
 import { checkResourceEngineeringAutonomousSetup as check, prepareResourceEngineeringAutonomousSetup as prepare,
   type ResourceEngineeringAutonomousSetupPolicy } from '../src/core/resources/engineering-autonomous-setup.js';
-import { createResourceEngineeringPreparationRegistry, readResourceEngineeringPreparationRegistrations } from '../src/core/resources/engineering-preparation-registry.js';
+import { validateResourceEngineeringAutonomousSetupPolicy } from '../src/core/resources/engineering-autonomous-setup.js';
+import { createResourceEngineeringPreparationRegistry, readResourceEngineeringPreparationRegistrations,
+  resourceEngineeringPreparationRegistrationRoot } from '../src/core/resources/engineering-preparation-registry.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/local-store-lock.js';
 import * as ownership from '../src/core/fleet/local-store-lock.js';
 import * as bundle from '../src/core/resources/engineering-preparation.js';
@@ -69,6 +71,44 @@ function evidence(directory: string): string {
   visit(directory); return JSON.stringify(rows);
 }
 describe('offline autonomous setup', () => {
+  it('prepares explicitly separate histories against one unchanged ledger and replays each original setup', () => {
+    const f = fixture(); const accounting = readFileSync(join(f.ledger, 'pool-state.json'));
+    f.policy.registrationScope = 'mission-first';
+    const first = prepare({ ...f.options, expectedPlanDigest: check(f.options).planDigest });
+    expect(first.paths.registration).toBe(join(resourceEngineeringPreparationRegistrationRoot(f.ledger, 'mission-first'), 'records', 'repair.json'));
+    expect(readResourceJson(first.paths.profiles)).toHaveProperty('registrationScope', 'mission-first');
+    const firstHistory = evidence(resourceEngineeringPreparationRegistrationRoot(f.ledger, 'mission-first'));
+    const firstOutput = evidence(f.options.output);
+    const output = join(f.base, 'next-bundle'); mkdirSync(output, { mode: 0o700 });
+    const secondOptions = { ...f.options, output, policy: { ...f.policy, id: 'fleet-next', registrationScope: 'mission-next' },
+      recipe: { ...f.options.recipe, id: 'repair-next', delivery: { ...f.options.recipe.delivery, branch: 'codex/repair-next' } } };
+    const beforeCheck = evidence(f.base); const plan = check(secondOptions); expect(evidence(f.base)).toBe(beforeCheck);
+    const second = prepare({ ...secondOptions, expectedPlanDigest: plan.planDigest });
+    expect(second.initialEnrollmentDigest).not.toBe(first.initialEnrollmentDigest);
+    expect(readResourceEngineeringPreparationRegistrations(f.ledger)).toEqual([]);
+    expect(readResourceEngineeringPreparationRegistrations(f.ledger, 'mission-first').map(row => row.request.id)).toEqual(['repair']);
+    expect(readResourceEngineeringPreparationRegistrations(f.ledger, 'mission-next').map(row => row.request.id)).toEqual(['repair-next']);
+    expect(evidence(resourceEngineeringPreparationRegistrationRoot(f.ledger, 'mission-first'))).toBe(firstHistory);
+    expect(evidence(f.options.output)).toBe(firstOutput);
+    expect(readFileSync(join(f.ledger, 'pool-state.json'))).toEqual(accounting);
+    const completed = evidence(f.base);
+    expect(prepare({ ...f.options, expectedPlanDigest: first.planDigest }).disposition).toBe('replayed');
+    expect(prepare({ ...secondOptions, expectedPlanDigest: second.planDigest }).disposition).toBe('replayed');
+    expect(evidence(f.base)).toBe(completed);
+    expect(() => check({ ...secondOptions, policy: { ...secondOptions.policy, registrationScope: 'mission-first' } })).toThrow();
+    expect(evidence(f.base)).toBe(completed);
+  }, 120_000);
+  it.each(['', '../escape', 'UPPER', 'x'.repeat(65), null, false])('rejects invalid history scope %j before setup effects', registrationScope => {
+    const f = fixture(); const before = evidence(f.base);
+    expect(() => validateResourceEngineeringAutonomousSetupPolicy({ ...f.policy, registrationScope })).toThrow('Invalid autonomous setup');
+    expect(evidence(f.base)).toBe(before);
+  });
+  it('does not use a new history scope to bypass unresolved shared collector ownership', () => {
+    const f = fixture(); f.policy.registrationScope = 'mission-next';
+    save(join(f.ledger, '.resource-quota-refresh-pending.json'), { unresolved: true });
+    const before = evidence(f.base); expect(() => check(f.options)).toThrow(); expect(evidence(f.base)).toBe(before);
+    expect(existsSync(resourceEngineeringPreparationRegistrationRoot(f.ledger, 'mission-next'))).toBe(false);
+  });
   it('checks without effects, registers the exact manager row, and replays without any writes', () => {
     const f = fixture(); const before = evidence(f.base);
     const accounting = readFileSync(join(f.ledger, 'pool-state.json'), 'utf8');
