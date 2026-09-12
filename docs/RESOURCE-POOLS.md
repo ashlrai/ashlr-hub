@@ -334,6 +334,15 @@ URL; the final report goes to stdout. Exit `0` means checked or the configured
 mission finished, `1` means held/stopped/unavailable, and `2` means invalid arguments.
 Finished does not mean the broader product vision or production deployment is complete.
 
+For a fast, read-only journal view, run
+`node bin/ashlr resources pool engineering mission status --config /absolute/private/mission.json --json`.
+It reports recorded phase, reserved/settled scope counts, the original remaining
+time, completion reason and recorded delivered tip. It does not start an owner,
+read provider usage or rerun Git proof. `ownerState: "not-observed"` and
+`deliveryState: "not-revalidated"` prevent recorded progress being mistaken for
+current liveness or branch integrity. Status exits `0` for a valid observation,
+including an unstarted or expired mission; unreadable/drifted history exits `1`.
+
 SIGINT/SIGTERM, global KILL, deadline expiry, lost ownership or a `STOP` entry in
 the mission root prevent further execution and drain owned work. Existing account
 and queue pauses are not cleared. Immutable `mission-events` retain reservations,

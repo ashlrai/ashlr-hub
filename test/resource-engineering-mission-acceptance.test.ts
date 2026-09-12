@@ -135,10 +135,13 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(json(join(f.root, 'resource-console-state.json')).paused).toBe(false);
     // Completed history remains inspectable under an explicit stop; replay must
     // neither restart a console nor propose a replacement task on any scope.
-    const stopped = new AbortController(); stopped.abort(); const replayPhases: string[] = [];
+    const stopped = new AbortController(); stopped.abort(); const replayPhases: string[] = []; const replayUrls: Array<string | null> = [];
     const replay = await runResourceEngineeringMission(f.config, { signal: stopped.signal,
-      onProgress(value) { replayPhases.push(`${value.scope}:${value.phase}`); expect(value.consoleUrl).toBeNull(); } });
+      onProgress(value) { replayPhases.push(`${value.scope}:${value.phase}`); replayUrls.push(value.consoleUrl); } });
     expect(replay).toEqual(second); expect(replayPhases).toContain('2:reconciling');
+    // Observer exceptions are intentionally isolated by the runner, so assertions
+    // belong outside that callback where a regression can actually fail the test.
+    expect(replayUrls.every(url => url === null)).toBe(true);
     expect(f.calls).toEqual({ generation: 3, successor: 2, mission: 1 });
     expect(readEngineeringMissionRecords(f.config)).toEqual(final);
   }, 1800_000);

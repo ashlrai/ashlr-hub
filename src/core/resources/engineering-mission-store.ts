@@ -47,6 +47,7 @@ const KINDS: MissionRecordKind[] = ['definition', 'reserved', 'prepared', 'runni
 const isHash = (value: unknown): value is string => typeof value === 'string' && HASH.test(value);
 const isDate = (value: unknown): value is string => typeof value === 'string' && Number.isFinite(Date.parse(value)) && new Date(value).toISOString() === value;
 const nonempty = (value: unknown): value is string => typeof value === 'string' && value.length > 0;
+const identifier = (value: unknown): value is string => typeof value === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
 function validPayload(kind: MissionRecordKind, value: unknown): boolean {
   switch (kind) {
     case 'definition': return missionExact(value, ['configDigest']) && isHash(value.configDigest);
@@ -70,7 +71,7 @@ function validPayload(kind: MissionRecordKind, value: unknown): boolean {
       value.executionAuthorized === false && value.effectsExecuted === false && value.providerContacted === false &&
       isHash(value.evidenceDigest) && ['eligible', 'stop-requested'].includes(value.continuation as string) &&
       missionExact(value.tip, ['enrollmentId', 'enrollmentDigest', 'projectId', 'commit']) &&
-      nonempty(value.tip.enrollmentId) && isHash(value.tip.enrollmentDigest) && nonempty(value.tip.projectId) &&
+      identifier(value.tip.enrollmentId) && isHash(value.tip.enrollmentDigest) && identifier(value.tip.projectId) &&
       typeof value.tip.commit === 'string' && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(value.tip.commit);
   }
 }
@@ -117,4 +118,23 @@ export function readEngineeringMissionRecords(config: ResourceEngineeringMission
   const finished = rows.filter(row => row.kind === 'finished');
   if (finished.length > 1 || finished.some(row => reserved.some(scope => scope.index > row.index))) throw new Error('Work follows a terminal mission');
   return rows;
+}
+
+/** Journal projection, not a fresh delivery proof or a claim that an owner is alive. */
+export function readResourceEngineeringMissionStatus(input: unknown, now = Date.now()) {
+  if (!Number.isFinite(now)) throw new Error('Invalid mission observation time');
+  const config = validateResourceEngineeringMissionConfig(input);
+  const rows = readEngineeringMissionRecords(config, true);
+  const scopes = rows.filter(row => row.kind === 'reserved');
+  const index = scopes.length;
+  const order: MissionRecordKind[] = ['finished', 'result', 'proposal', 'settled', 'running', 'prepared', 'reserved'];
+  const latest = order.find(kind => rows.some(row => row.index === index && row.kind === kind)) ?? 'not-started';
+  const settled = rows.filter(row => row.kind === 'settled').sort((a, b) => a.index - b.index);
+  const last = settled.at(-1)?.payload as { tip: { enrollmentId: string; enrollmentDigest: string; projectId: string; commit: string } } | undefined;
+  const finished = rows.find(row => row.kind === 'finished')?.payload as { reason: string } | undefined;
+  return { schemaVersion: 1, scope: 'recorded-mission-evidence-only', missionId: config.id, configDigest: missionHash(config),
+    sampledAt: new Date(now).toISOString(), recordedPhase: latest, scopesReserved: scopes.length, scopesSettled: settled.length,
+    maxScopes: config.maxScopes, deadlineAt: config.deadlineAt, remainingMs: Math.max(0, Date.parse(config.deadlineAt) - now),
+    recordedCompletion: finished?.reason ?? null, recordedTip: last?.tip ?? null,
+    ownerState: 'not-observed', deliveryState: 'not-revalidated', executionAuthorized: false, effectsExecuted: false, providerContacted: false };
 }

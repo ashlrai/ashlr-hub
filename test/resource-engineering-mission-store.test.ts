@@ -1,10 +1,10 @@
 /** Private immutable records, with no worker, evaluator, account or console startup. */
-import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { engineeringMissionRecordStore, missionHash, missionRecord, readEngineeringMissionRecords, type MissionRecordKind,
-  validateResourceEngineeringMissionConfig, type ResourceEngineeringMissionConfig } from '../src/core/resources/engineering-mission-store.js';
+  validateResourceEngineeringMissionConfig, readResourceEngineeringMissionStatus, type ResourceEngineeringMissionConfig } from '../src/core/resources/engineering-mission-store.js';
 import { writeImmutablePrivateRecord } from '../src/core/util/immutable-private-record-store.js';
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
@@ -73,5 +73,33 @@ describe('mission configuration and immutable sequencing', () => {
     expect(write('settled', 1, { ...(payloads.settled as object), status: 'held' })).toBe('invalid');
     const proposal = payloads.proposal as { task: object; poolDigest: string };
     expect(write('proposal', 1, { ...proposal, task: { ...proposal.task, mode: 'workspace-write' } })).toBe('invalid');
+  });
+  it('observes an unstarted mission without initializing any files', () => {
+    const { config } = fixture(); const now = Date.parse(config.deadlineAt) - 500;
+    expect(readResourceEngineeringMissionStatus(config, now)).toMatchObject({ recordedPhase: 'not-started', scopesReserved: 0,
+      scopesSettled: 0, remainingMs: 500, recordedCompletion: null, recordedTip: null, ownerState: 'not-observed',
+      deliveryState: 'not-revalidated', executionAuthorized: false, effectsExecuted: false, providerContacted: false });
+    expect(readdirSync(config.root)).toEqual([]);
+  });
+  it('shows recorded progress and completion after deadline without claiming live delivery or revealing proposal text', () => {
+    const { config, write, payloads } = fixture(); write('definition', 0); write('reserved', 1); write('prepared', 1); write('running', 1);
+    expect(readResourceEngineeringMissionStatus(config).recordedPhase).toBe('running');
+    write('settled', 1); write('proposal', 1); write('result', 1); write('finished', 1);
+    const rows = readEngineeringMissionRecords(config); const files = readdirSync(config.root, { recursive: true });
+    const status = readResourceEngineeringMissionStatus(config, Date.parse(config.deadlineAt) + 1000);
+    expect(status).toMatchObject({ recordedPhase: 'finished', scopesReserved: 1, scopesSettled: 1, remainingMs: 0,
+      recordedCompletion: 'stop-requested', recordedTip: (payloads.settled as { tip: unknown }).tip, ownerState: 'not-observed', deliveryState: 'not-revalidated' });
+    expect(JSON.stringify(status)).not.toContain('Propose.'); expect(JSON.stringify(status)).not.toContain(config.root);
+    expect(readEngineeringMissionRecords(config)).toEqual(rows); expect(readdirSync(config.root, { recursive: true })).toEqual(files);
+  });
+  it('withholds status when the retained mission definition differs', () => {
+    const { config, write } = fixture(); write('definition', 0);
+    expect(() => readResourceEngineeringMissionStatus({ ...config, maxScopes: 3 })).toThrow('Mission definition changed');
+  });
+  it('rejects path-shaped or oversized identifiers in recorded delivery tips', () => {
+    const { write, payloads } = fixture(); const settled = payloads.settled as { tip: object };
+    for (const patch of [{ projectId: '/private/path' }, { enrollmentId: 'x'.repeat(65) }]) {
+      expect(write('settled', 1, { ...settled, tip: { ...settled.tip, ...patch } })).toBe('invalid');
+    }
   });
 });

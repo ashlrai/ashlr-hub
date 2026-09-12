@@ -113,9 +113,9 @@ quota-limited; prior Explore mappings are used, with current source rechecked.
 
 - [x] Carry a synchronous host execution veto through ordinary and engineering dispatch and setup publication.
 - [x] Persist mission identity, original absolute deadline, scope reservations and exact proposal/results.
-- [x] Implement automatic existing-console scope execution, drain, proof and delivered-tip rollover in source; full acceptance is still running.
+- [x] Implement automatic existing-console scope execution, drain, proof and delivered-tip rollover; full built acceptance passed.
 - [x] Test fresh and restarted operation with isolated accounting and local workers: actual two-scope acceptance passed in 465.89s.
-- [ ] Integrate CLI/operator documentation and verify local build.
+- [x] Integrate mission CLI/operator documentation and verify local build at 1d68373e. The additive status command awaits its final rebuild below.
 
 No new execution engine or provider SDK. Use explicit mission limits, the same
 resource runtime/ledger, deterministic identities, retained proposal history and
@@ -142,3 +142,27 @@ existing stop semantics. Owner shutdown and historical completion are distinct.
   gate: 45 tests. Actual mission acceptance: one passing test. Total 349 distinct
   tests across eleven files, with no real-account traffic. An additional assertion
   for completed-chain replay under a pre-aborted signal is pending the final rerun.
+
+### Read-only observability completion
+
+Add a bounded mission `status` projection of the existing immutable journal while
+the built acceptance gate runs. It must not start a console, inspect providers,
+revalidate expensive Git delivery, imply current ownership, or reveal proposal
+text. Show recorded phase/scopes, original remaining time and recorded tip, with
+explicit observation-only flags. Test via actual private journal fixtures and
+the existing CLI boundary; update the canonical runbook and rebuild after the
+active acceptance finishes (never replace its pinned bundle in flight).
+
+- Built source `1d68373e000b46af050bd1af73f85ce9e2b580df` passed the complete
+  acceptance with pre-aborted completed-chain replay: session 68074, one test,
+  511.62s test time. No additional provider-fixture calls occurred on replay.
+- Status/configuration/console-read tests pass: 71 tests across three files,
+  including seven additional cases since the earlier 349-test aggregate.
+  Together with unchanged focused gates, 356 distinct cases have passed.
+- The acceptance test's URL assertion was moved outside its deliberately
+  exception-isolated progress callback after that run started. The completed
+  report, pre-aborted signal and unchanged worker-call assertions were exercised
+  in the built run; the extra URL assertion placement was statically reviewed.
+- The initial package-doc command used unsupported `--package`; corrected to
+  `--mode package`, which passed. A read of an expired/removed test fixture and
+  one wrong working-directory lookup failed without changing user data.

@@ -191,3 +191,20 @@ The full mission gate (session 64689) terminated successfully: one test,
 one mission-level proposal, six completed receipts, exact delivered-tip seed
 lineage, unchanged account allocation/exclusions, and released owner locks.
 The subsequent completed-chain replay assertion is pending a fresh built rerun.
+
+### Built replay and fast status
+
+Source `1d68373e000b46af050bd1af73f85ce9e2b580df` built cleanly with 257 web
+modules. The second real acceptance (68074) passed in 511.62s test time,
+including pre-aborted completed-chain reconciliation and no duplicate worker
+calls. This is the same one acceptance case, not another distinct test count.
+It uses real temporary Git delivery and test-owned loopback responses, not
+actual Codex/Claude/Grok accounts or a resident-service commissioning.
+
+The additive `mission status` command projects only the immutable journal. It
+does not read provider quota, prove a live owner or revalidate delivered Git.
+Its payload contains recorded phase, scope counts, original remaining time,
+recorded completion and tip, with observation-only flags and no raw proposals.
+Actual private-record fixtures and CLI boundary tests pass (71 tests across the
+three mission-focused files, seven more cases than before). TypeScript, lint
+and source documentation checks pass. No build was replaced during acceptance.

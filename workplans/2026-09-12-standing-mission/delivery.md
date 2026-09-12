@@ -115,3 +115,35 @@ validation also passed. The nine-file builtin measurement bundle has digest
 `e41419e9fabaef5844c0aebe2504b980c4e4b1c60f72c174373b0c67c293d864`.
 Its bytes were inspected, not natively qualified or executed. Older bundle
 qualification does not transfer. All verification process handles are terminal.
+
+## Standing mission continuation — September 12, 2026
+
+Implemented a foreground mission owner on the existing quota-aware console:
+execute, drain, verify delivered lineage, obtain an accounted proposal and
+automatically prepare/run the next bounded scope. Mission configuration,
+deadlines, reservations and exact results persist across owner restarts.
+Stop/deadline/ownership vetoes reach execution and setup publication; account
+reserves and exclusions are not changed. Snapshot-only HTTP 503 recovery uses
+the original clock and never retries mutation or quota/authentication refusals.
+
+The built `1d68373e` execution gate passed with three real evaluated Git changes,
+six completed loopback-worker receipts, interrupted-owner recovery, a second
+scope seeded at the delivered commit, explicit stop and pre-aborted final replay
+without new worker calls. The loopback content is a deterministic fixture, not
+evidence of real-model ideation quality or native-account commissioning.
+
+The additive read-only `mission status` reports recorded progress and remaining
+time without asserting liveness or current delivery integrity. The canonical
+operator instructions are in `docs/RESOURCE-POOLS.md`; readiness distinctions are
+updated in `docs/AUTONOMY-GAP.md`. Focused gates total 356 distinct cases across
+eleven files (overlapping reruns are not added), with TypeScript, lint and
+documentation checks passing. Final additive-status artifact verification is
+recorded below after its build.
+
+This remains a local implementation on `auto/p00`, not production activation.
+Persistent service operation, actual account commissioning, long-duration native
+soak, retention/compaction, useful-objective benchmarks and release qualification
+remain open. Cross-scope proof checking also has substantial local overhead.
+The overarching autonomous-company goal remains active. Two workers were quota
+limited; parent continued without retrying them or switching accounts. Entire is
+enabled in manual-commit mode; branch resume found no checkpoint.
