@@ -256,6 +256,17 @@ describe.runIf(process.platform === 'darwin')('actual console responsiveness dur
     for (const sample of [admissionHealthResult, admissionStatusResult, sourceHealthResult, sourceStatusResult, health, status, pause]) {
       expect.soft(sample.error).toBeNull(); expect.soft(sample.status).toBe(200); expect.soft(sample.elapsedMs).toBeLessThanOrEqual(2000);
     }
+    // A quick 200 alone is insufficient: each independently requested journal
+    // sample must include the durable milestone that triggered that request.
+    for (const [sample, recordedState] of [[admissionStatusResult, 'intent-recorded'], [sourceStatusResult, 'proposed'], [status, 'proposed']] as const) {
+      const observed = sample.body as ResourceEngineeringSuccessorCoordinatorSnapshot | null;
+      expect.soft(observed).toMatchObject({ schemaVersion: 1, supervisionId: 'setup-queue', deadlineAt: initial.deadlineAt,
+        state: 'observing', observation: { kind: 'durable-journal', workerState: 'connected',
+          recordsDigest: expect.stringMatching(/^[a-f0-9]{64}$/), sampledAt: expect.any(String) },
+        entries: [{ sourceEnrollmentId: f.recipe.id, proposalTaskId: `proposal-${key}`, successorId, state: recordedState, reason: null }] });
+      const sampledAt = observed?.observation?.sampledAt;
+      expect.soft(typeof sampledAt === 'string' && Number.isFinite(Date.parse(sampledAt)) && new Date(sampledAt).toISOString() === sampledAt).toBe(true);
+    }
     expect(afterResponse.status).toBe(200); expect(after.paused).toBe(true); expect(after.deadlineAt).toBe(initial.deadlineAt);
     expect(after.entries).toHaveLength(1); expect(phases.entries[0]?.state).not.toBe('admitted');
     expect(f.errors).toEqual([]); expect(f.generations).toHaveLength(2); expect(f.proposals).toHaveLength(1);

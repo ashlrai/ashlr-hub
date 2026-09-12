@@ -8,9 +8,53 @@ const fixture = (): Snapshot => ({ schemaVersion: 1, supervisionId: 'fleet', pro
   deadlineAt: '2026-09-11T00:00:00.000Z', state: 'running', maxSuccessors: 2,
   entries: [{ sourceEnrollmentId: 'source', proposalTaskId: `proposal-${'b'.repeat(48)}`, successorId: `successor-${'b'.repeat(48)}`,
     state: 'proposing', reason: null }] });
+const journal = (): Snapshot => ({ ...fixture(), state: 'observing', entries: [{ ...fixture().entries[0]!, state: 'intent-recorded' }],
+  observation: { kind: 'durable-journal', sampledAt: '2026-09-10T23:59:00.000Z', recordsDigest: 'c'.repeat(64), workerState: 'connected' } });
 beforeEach(() => vi.resetAllMocks());
 
 describe('successor metadata read boundary', () => {
+  it.each(['intent-recorded', 'proposed', 'prepared', 'admitted', 'stopped'] as const)('accepts the recorded %s milestone without live activity', state => {
+    const value = journal(); value.entries[0]!.state = state;
+    expect(decodeEngineeringSuccessors(value)).toEqual(value);
+  });
+  it.each([
+    ['connected', 'observing', '2026-09-10T23:59:00.000Z'],
+    ['connected', 'timed-out', '2026-09-11T00:00:00.000Z'],
+    ['closing', 'closed', '2026-09-11T00:01:00.000Z'],
+    ['exited', 'unavailable', '2026-09-10T23:59:00.000Z'],
+    ['faulted', 'unavailable', '2026-09-11T00:01:00.000Z'],
+  ] as const)('checks lifecycle %s / %s against the sampled deadline', (workerState, state, sampledAt) => {
+    const value = journal(); value.state = state; Object.assign(value.observation!, { workerState, sampledAt });
+    expect(decodeEngineeringSuccessors(value)).toEqual(value);
+  });
+  it.each([null, false, undefined, {}, { kind: 'activity' }, { sampledAt: '2026-09-10' }, { sampledAt: 'invalid' },
+    { recordsDigest: 'x'.repeat(64) }, { workerState: 'running' }, { workerState: {} }, { path: '/private' },
+    { output: 'private' }, { command: 'private' }, { workerId: 'private' }, { complete: true }])('refuses malformed/private journal metadata %j', patch => {
+    const value = journal(); Object.assign(value, { observation: patch === null || typeof patch !== 'object' || Object.keys(patch).length === 0 ? patch : { ...value.observation, ...patch } });
+    expect(() => decodeEngineeringSuccessors(value)).toThrow('could not be verified');
+  });
+  it.each(['idle', 'running', 'closed', 'timed-out', 'unavailable'] as const)('refuses contradictory connected pre-deadline %s', state => {
+    expect(() => decodeEngineeringSuccessors({ ...journal(), state })).toThrow('could not be verified');
+  });
+  it.each(['proposing', 'waiting-for-capacity', 'preparing', 'admitting', 'held'] as const)('refuses a fabricated live %s phase in journal evidence', state => {
+    const value = journal(); value.entries[0]!.state = state;
+    expect(() => decodeEngineeringSuccessors(value)).toThrow('could not be verified');
+  });
+  it('requires journal provenance for new states and refuses unrecorded explanations', () => {
+    expect(() => decodeEngineeringSuccessors({ ...fixture(), state: 'observing' })).toThrow('could not be verified');
+    const legacy = fixture(); legacy.entries[0]!.state = 'intent-recorded';
+    expect(() => decodeEngineeringSuccessors(legacy)).toThrow('could not be verified');
+    const value = journal(); value.entries[0]!.reason = 'proposal-output-unresolved';
+    expect(() => decodeEngineeringSuccessors(value)).toThrow('could not be verified');
+  });
+  it('rejects accessor, inherited and symbol journal metadata without executing getters', () => {
+    const getter = vi.fn(() => 'durable-journal'); const accessor = { ...journal().observation };
+    Object.defineProperty(accessor, 'kind', { get: getter, enumerable: true });
+    const inherited = Object.assign(Object.create({ private: 'secret' }), journal().observation);
+    const symbol = { ...journal().observation, [Symbol('private')]: 'secret' };
+    for (const observation of [accessor, inherited, symbol]) expect(() => decodeEngineeringSuccessors({ ...journal(), observation })).toThrow('could not be verified');
+    expect(getter).not.toHaveBeenCalled();
+  });
   it.each(['idle', 'running', 'closed', 'timed-out', 'unavailable'] as const)('accepts bounded %s status without inventing freshness or completion', state => {
     const value = { ...fixture(), state }; expect(decodeEngineeringSuccessors(value)).toEqual(value);
     expect(decodeEngineeringSuccessors({ ...value, entries: [] }).entries).toEqual([]);

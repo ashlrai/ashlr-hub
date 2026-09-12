@@ -720,11 +720,27 @@ it must not automatically replay with a new revision or replace the worker.
 Inspect retained evidence if shutdown reports uncertainty. The API, private
 configuration and account-reserve settings are unchanged.
 
-This isolation does not yet make every status read responsive. Successor status
-still asks the same worker for its current projection and can queue behind a
-long proof. Parent-owned projections can also be expensive. Do not substitute
-an old display snapshot for fresh execution authority or claim full latency
-acceptance from a fast health or pause response alone.
+Successor status uses a separate read-only worker, prewarmed before execution.
+Each request reads the immutable journal against the original startup pins and
+rechecks the selected configuration file. Overlapping requests receive distinct
+read jobs, not a shared earlier sample. A missing enrollment, incomplete writer
+stage, corrupt record or mismatched attribution makes the read unavailable;
+observation never acquires a lease, repairs records or dispatches work.
+
+A coherent record set marked only as changing can be sampled again within the
+same request: at most ten attempts, with new attempts admitted only within a
+500 ms window. Each attempt repeats the configuration and full journal checks.
+This does not retry malformed/staged/unsafe evidence or treat a lock as proof of
+a live owner. It is not a hard completion deadline for a synchronous proof.
+
+The console labels this evidence **Verified journal** and displays its sample
+time and worker connection separately. An intent without a result means only
+that the intent was recorded, not that the response was lost. Recorded proposal,
+preparation and admission milestones are not live activity reports, current
+accounting verification or proof of downstream delivery. A late response after
+worker exit, fault or console close is rejected. Parent-owned projections can
+still be expensive; verify the independent gate below before making latency
+or always-on claims.
 
 Run the independent control-room responsiveness gate on macOS from the repository:
 

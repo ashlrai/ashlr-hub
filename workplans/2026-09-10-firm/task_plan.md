@@ -1,6 +1,39 @@
 # Executable firm: package graph
 
-## Current increment — nonblocking autonomous control (baseline 82b2c881)
+## Current increment — independent verified successor status (baseline d56309ce)
+
+- [x] Revalidate clean source and explore journal, worker and browser contracts with three agents.
+- [x] Extract one unchanged journal codec and complete attribution validator.
+- [x] Add a prewarmed, bounded read-only worker with startup-pinned scope.
+- [x] Separate recorded milestones from connection/activity claims in the console.
+- [x] Independently test drift, staging, privacy, lifecycle, unchanged delivery/restart and latency.
+- [x] Record exact results, remaining North Star work and tested local build identity at handoff.
+
+Previous turn is progress: d56309ce isolates effectful verification, passes 1,771
+correctness tests and makes pause succeed in 71ms without B admission. The
+unchanged responsiveness gate still fails three status reads. This increment
+targets those actual reads, not a larger timeout or a cached successful proof.
+
+Design: the initialized coordinator exports a detached observation scope, not
+lease authority. A separate fixed reader validates the existing immutable journal
+against those original pins. Missing, staged, corrupt or changed records remain
+unavailable. Recorded milestones are observation only; connected is not executing,
+an intent without result is not a failed proposal, and journal admission is not
+successor delivery. Parent lifecycle is checked after the asynchronous read.
+
+Resource agent owns shared store/types/coordinator extraction; execution agent
+owns browser contract and labels; cold reviewer owns independent acceptance
+review; parent owns read worker, lifecycle, packaging and integration. No provider,
+account-policy, real KILL, persistent service or public-release changes.
+
+Verified outcome: all seven original two-second probes pass with stronger body
+checks (journal19–114ms, pause67ms). Two-delivery/restart acceptance passes with
+exact journal digest, original accounting and zero read recoveries. Corrected
+source has1,789 passing tests/94files, zero skips. This does not prove coordinator
+activity from worker connection, useful autonomous product judgment, authenticated
+provider commissioning or production operation; those remain North Star work.
+
+## Previous increment — nonblocking autonomous control (baseline 82b2c881)
 
 - [x] Revalidate the committed build, ownership and previous progress.
 - [x] Attribute individual blocking costs with isolated actual-process profiling.

@@ -1,5 +1,96 @@
 # Firm build notes
 
+## September 11: independent successor observation (baseline d56309ce)
+
+- Revalidated clean auto/p00 at d56309ce; Entire resume found no checkpoint.
+  Previous goal turn made verified control progress; the status latency gate
+  remains the next concrete functional gap. Three independent agent streams
+  explored shared journal validation, cold failure semantics and strict UI state.
+- Reuse the existing immutable journal codec and complete attribution fold.
+  The effect worker exports detached startup pins, not leases. A separately
+  prewarmed fixed reader verifies complete fresh records and the selected config
+  before returning only recorded milestones, digest and sampling time.
+- Parent retains lifecycle control and rejects responses after close/fault/exit.
+  The UI separates verified records from worker connection; neither implies
+  current execution, current pool accounting or delivered successor work.
+- Independent review caught two gaps during implementation: an existing empty
+  journal without enrollment must be unavailable to observers (while legacy
+  initialization retains its explicit allowMissing path); overlapping reads
+  must not coalesce into a sample begun before the newer request. Both are
+  corrected, with unique internal read tokens and request-window sample checks.
+- Initial parent mocked HTTP/background/packaging regression passed 58 tests /
+  three files, zero skips, 4.99s. Shared store18 and legacy coordinator29 passed;
+  store strict import/typecheck and scoped lint passed. Independent real reader
+  14 tests passed in 2.79s, including fresh changes while another worker is busy,
+  privacy sentinels and complete file metadata/hash no-write checks.
+- UI focused tests: 123 passed across decoder/panel/workspace acceptance; web
+  typecheck and scoped lint passed. These do not replace actual-CLI performance
+  and unchanged autonomous delivery/restart acceptance.
+- Final parent freshness/protocol/reader/background regression: 33 passed /
+  three files, zero skips, 3.85s. Non-overlapping focused backend total is
+  127 tests / seven files. Full web passed 1,649 tests / 85 files, zero skips,
+  10.68s. Source/web typechecks, full lint (zero errors / 107 existing warnings),
+  lane classification (322 real-IO / 673 unit), local build and docs passed.
+- Source frozen for actual-CLI acceptance. The original seven probes, two-second
+  limits, no-retry behavior, deadlines and resource fixtures are unchanged;
+  stronger assertions now also require correct recorded milestones in each
+  phase response and exact journal digest/fresh sampling on delivery and restart.
+- First integrated actual-CLI gate failed availability, not latency: one failed,
+  zero skips, 83.29s. Admission health/status 1.217/24.237ms, but status returned
+  503; source health/status 0.906/27.024ms and preparation health/status
+  0.947/117.284ms returned 200 with correct proposed facts. Pause accepted in
+  69.231ms. A-only accounting remained exact (three completed fixture receipts,
+  90 reported tokens), no B admission or refs; close13.026s/exit0/stderr0.
+  Exact refusal cause was not instrumented; publication contention is a hypothesis.
+- Inspection found that the immutable reader classifies a coherent record set
+  with a writer marker or concurrent namespace change as source-mutated. The
+  follow-up change permits bounded fresh read-only sampling only for that sole
+  stop reason with no invalid files or limit violation. Corrupt, staged, unsafe,
+  missing and misattributed evidence remain immediately unavailable. No records,
+  locks or ownership are repaired; neither latency limits nor HTTP retries change.
+- Corrected source: store26 and independent reader17 passed without skips;
+  reader tests include genuine writer lease release/publication during the same
+  read, current config drift while waiting and bounded no-write refusal for a
+  persistent lease. Strict import/source checks and scoped lint passed. The
+  retry-admission deadline is rechecked after timer delays before any new proof.
+  Parent background/protocol19 tests also passed. Corrected source is frozen for
+  a new actual-CLI gate; none of this presumes the earlier 503's precise cause.
+- Corrected-source responsiveness passed1/1, zero skips,75.46s total/74.28s test.
+  Seven HTTP200 responses: admission health/status1.094/18.958ms (intent-recorded),
+  source0.912/21.709ms (proposed), preparation1.062/114.282ms (proposed), pause
+  66.519ms. Original queue one entry/paused, A2+proposal1, three completed
+  receipts90tokens, no B admission/execution/refs; close11.524s/exit0/stderr0.
+  No threshold, HTTP-retry, fixture budget or dispatch assertion was weakened.
+  Strengthened two-delivery/restart acceptance started sequentially on the same
+  frozen source with fresh sample windows and exact actual-journal digest checks.
+- Final strengthened setup passed1/1, zero skips,155.90s total/154.77s test.
+  Five fixture requests/six evaluations/two refs/150tokens exact; both delivered
+  at118.44s, restart17.06s. Fresh samples lie inside GET windows; digest equals
+  actual five journal records; restart preserves journal/config/deadline/entries.
+  Seed context, account policy, ledger and read-only replay unchanged. Zero
+  recovery events; all children, listeners and private fixtures cleaned.
+  Passed responsiveness initial supervision read was1228.910ms outside its seven
+  target probes; do not generalize the journal times to every parent-owned route.
+- Final integrated backend run passed138/7files, zero skips,23.06s. Together with
+  web1649/85 and the two actual-CLI gates, corrected-source total is1789/94files,
+  zero skips. Documentation/lane/diff checks pass. No full autonomous Bun/native
+  run in this increment; packaging tests verify its fixed sibling entry only.
+- Cold next-work review: the coordinator's tick catch may set its local faulted
+  flag and stop the loop while the worker stays connected. The new journal
+  intentionally cannot diagnose this; a separate closed, timestamped lifecycle
+  signal remains necessary, without treating connection as execution or stopping
+  independent work. No such signal is claimed implemented here.
+- The existing artifacts/hub-verification-benchmark-plan.md is still a proposal,
+  not a runnable frozen evaluator. Its protected-evaluator capture path still
+  launches one Git blob process per file in engineering-preparation.ts. Measure
+  actual launch counts on current source before allowing a genuine model-generated
+  candidate to optimize that path. Already shipped seed batching/registry reuse
+  must not earn new improvement credit; fixture proposals prove plumbing only.
+- Lookup error: an unmatched components/*Successor* shell glob aborted a read
+  command; corrected to the actual routes/workspace paths. No source effects.
+- A benchmark lookup under test/ and a guessed .performance path found nothing;
+  corrected to the tracked benchmarks/resource-engineering-responsiveness.test.ts.
+
 ## September 11: isolated autonomous verification (baseline 82b2c881)
 
 - Previous turn made verified progress, but both baseline and candidate failed

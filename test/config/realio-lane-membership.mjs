@@ -173,6 +173,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-autonomous-setup.test.ts', // private Git fixtures and offline registration publication
   'test/resource-engineering-preparation-registry.test.ts', // immutable configuration and legacy registration identity
   'test/resource-engineering-worker-rpc.test.ts', // actual worker-thread authority calls and timeout/close races
+  'test/resource-engineering-successor-store.test.ts', // private immutable journal records and drift/staging refusal
+  'test/resource-engineering-successor-reader.test.ts', // fixed actual read worker, private journal and concurrent busy worker
   'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication
   'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures
   'test/resource-console-pool-evolution.test.ts', // pinned console origins across private ledger epochs

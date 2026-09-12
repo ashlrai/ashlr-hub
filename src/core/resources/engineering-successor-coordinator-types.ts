@@ -32,7 +32,8 @@ export interface ResourceEngineeringSuccessorCoordinatorOptions {
 export type ResourceEngineeringSuccessorProposal = { action: 'stop' } | { action: 'propose'; name: string; objective: string };
 export interface ResourceEngineeringSuccessorCoordinatorSnapshot {
   schemaVersion: 1; supervisionId: string; profileId: string; configDigest: string; deadlineAt: string;
-  state: 'idle' | 'running' | 'closed' | 'timed-out' | 'unavailable'; maxSuccessors: number;
+  state: 'observing' | 'idle' | 'running' | 'closed' | 'timed-out' | 'unavailable'; maxSuccessors: number;
+  observation?: { kind: 'durable-journal'; sampledAt: string; recordsDigest: string; workerState: 'connected' | 'closing' | 'exited' | 'faulted' };
   entries: Array<{ sourceEnrollmentId: string; proposalTaskId: string; successorId: string;
-    state: 'proposing' | 'waiting-for-capacity' | 'preparing' | 'admitting' | 'held' | 'proposed' | 'prepared' | 'admitted' | 'stopped'; reason: string | null }>;
+    state: 'intent-recorded' | 'proposing' | 'waiting-for-capacity' | 'preparing' | 'admitting' | 'held' | 'proposed' | 'prepared' | 'admitted' | 'stopped'; reason: string | null }>;
 }

@@ -77,7 +77,7 @@ async function execute(kind: string, input: unknown): Promise<unknown> {
         supervision: supervision as ResourceConsoleEngineeringSupervisor, supervisor: supervisor as ResourcePoolSupervisor,
         readAdmissionEvidence: () => hostCall('readAdmissionEvidence', []),
         isClosing: () => rpc.isClosed() || hostCall<boolean>('isClosing', []), signal: abort.signal });
-      return null;
+      return successors.observationScope();
     }
     case 'start': {
       if (!successors || startRequested) throw new Error('Engineering successor start unavailable');

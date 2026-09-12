@@ -233,8 +233,20 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     let state = initial;
     await until(async deadline => { state = await first.read('/api/resources/engineering-supervision', deadline); return state.entries.length === 2 && state.entries.every(row => row.state === 'completed'); }, 300_000);
     point('both-delivered');
+    const sampleStartedAt = Date.now();
     const successors = await first.read<ResourceEngineeringSuccessorCoordinatorSnapshot>('/api/resources/engineering-successors');
+    const sampleFinishedAt = Date.now();
     expect(successors.entries).toHaveLength(1); expect(successors.entries[0]).toMatchObject({ sourceEnrollmentId: f.recipe.id, state: 'admitted' });
+    expect(successors).toMatchObject({ state: 'observing', supervisionId: 'setup-queue',
+      observation: { kind: 'durable-journal', workerState: 'connected' } });
+    const sampledAt = Date.parse(successors.observation!.sampledAt);
+    expect(new Date(sampledAt).toISOString()).toBe(successors.observation!.sampledAt);
+    expect(sampledAt).toBeGreaterThanOrEqual(sampleStartedAt); expect(sampledAt).toBeLessThanOrEqual(sampleFinishedAt);
+    expect(successors.entries[0]!.reason).toBeNull();
+    const journalDirectory = join(f.root, 'engineering-successors', 'setup-queue', 'events', 'records');
+    const journalRecords = readdirSync(journalDirectory).sort().map(name => JSON.parse(readFileSync(join(journalDirectory, name), 'utf8')));
+    expect(journalRecords.map(row => row.kind)).toEqual(['admitted', 'enrollment', 'intent', 'prepared', 'result']);
+    expect(successors.observation!.recordsDigest).toBe(digest(canonical(journalRecords)));
     expect(successors.deadlineAt).toBe(originalDeadline); const successorId = successors.entries[0]!.successorId;
     await first.close();
     const a = delivered(f, f.recipe.id); const b = delivered(f, successorId);
@@ -257,7 +269,14 @@ describe.runIf(process.platform === 'darwin')('offline autonomous engineering se
     const after = tree(f.output); point('restart.start'); const restarted = await consoleCli(argv, recovery); point('restart.end');
     const again = await restarted.read<ResourceConsoleEngineeringSupervisionSnapshot>('/api/resources/engineering-supervision');
     expect(again.deadlineAt).toBe(originalDeadline); expect(again.entries).toEqual(state.entries);
-    expect((await restarted.read<ResourceEngineeringSuccessorCoordinatorSnapshot>('/api/resources/engineering-successors')).entries).toEqual(successors.entries);
+    const restartSampleStartedAt = Date.now();
+    const observedAgain = await restarted.read<ResourceEngineeringSuccessorCoordinatorSnapshot>('/api/resources/engineering-successors');
+    const restartSampleFinishedAt = Date.now();
+    expect(observedAgain.entries).toEqual(successors.entries);
+    expect(observedAgain).toMatchObject({ state: 'observing', configDigest: successors.configDigest, deadlineAt: originalDeadline,
+      observation: { kind: 'durable-journal', workerState: 'connected', recordsDigest: successors.observation!.recordsDigest } });
+    expect(Date.parse(observedAgain.observation!.sampledAt)).toBeGreaterThanOrEqual(restartSampleStartedAt);
+    expect(Date.parse(observedAgain.observation!.sampledAt)).toBeLessThanOrEqual(restartSampleFinishedAt);
     await restarted.close(); expect(f.generations).toHaveLength(4); expect(f.proposals).toHaveLength(1); expect(tree(f.output)).toEqual(after);
     expect(resourcePoolStatus(f.root, f.pool, f.bindings, f.observations).attempts).toEqual(ledger.attempts);
     const finalBefore = tree(f.base); expect((await setupCli(f, ['--expected-plan-digest', plan.planDigest])).disposition).toBe('replayed');

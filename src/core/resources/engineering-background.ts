@@ -2,11 +2,14 @@
 import { Worker } from 'node:worker_threads';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { ResourceSupervisorError, type ResourcePoolSupervisor } from './pool-supervisor.js';
 import type { ResourceConsoleEngineeringOwner } from './console-engineering.js';
 import type { ResourceConsoleEngineeringSupervisor } from './console-engineering-supervisor.js';
 import { createEngineeringWorkerRpcHost } from './engineering-worker-rpc.js';
+import { createEngineeringSuccessorReader, type EngineeringSuccessorReader } from './engineering-successor-reader.js';
+import type { ResourceEngineeringSuccessorJournalScope } from './engineering-successor-store.js';
 import { ENGINEERING_BACKGROUND_HOST_METHODS, type EngineeringBackground, type EngineeringBackgroundHost,
   type EngineeringBackgroundPreparation } from './engineering-background-types.js';
 
@@ -49,6 +52,7 @@ export async function createEngineeringBackground(input: {
   const projectMethods = { projectFileBinding: method(supervisor, 'projectFileBinding'), projectExecutionBinding: method(supervisor, 'projectExecutionBinding') };
   let supervisionMethods: Pick<ResourceConsoleEngineeringSupervisor, 'snapshot' | 'admit' | 'isExecutionStopped'> | undefined;
   let admission: Parameters<EngineeringBackground['configureSuccessors']>[2] | undefined;
+  let observationReader: EngineeringSuccessorReader | undefined;
   let closing = false; let faulted = false; let exited = false; let configured = false;
   const closeFlag = new Int32Array(new SharedArrayBuffer(4));
   const assertOpen = () => { if (closing || faulted || signal?.aborted || isClosing()) throw unavailable(); };
@@ -115,23 +119,43 @@ export async function createEngineeringBackground(input: {
     async configureSuccessors(value, supervision, readAdmissionEvidence) {
       assertOpen(); if (configured) throw unavailable();
       if (typeof readAdmissionEvidence !== 'function') throw unavailable();
-      const captured = copy(value);
+      const captured = copy<Parameters<EngineeringBackground['configureSuccessors']>[0]>(value);
       supervisionMethods = { snapshot: method(supervision, 'snapshot'), admit: method(supervision, 'admit'),
         isExecutionStopped: method(supervision, 'isExecutionStopped') };
       admission = readAdmissionEvidence; configured = true;
-      await command('configure-successors', captured);
+      const scope = await command<ResourceEngineeringSuccessorJournalScope>('configure-successors', captured);
+      assertOpen();
+      if (scope.directory !== join(captured.root, 'engineering-successors', captured.config.supervisionId) ||
+          canonicalEvidencePackJsonV3(scope.config) !== canonicalEvidencePackJsonV3(captured.config)) throw unavailable();
+      observationReader = createEngineeringSuccessorReader({ scope, configFile: captured.configFile });
+      // Pay module loading and verify the original journal before execution
+      // starts. This sample is never reused for later operator reads.
+      await observationReader.read(); assertOpen();
     },
-    start: () => command('start'), snapshot: () => command('snapshot'),
+    start: () => command('start'),
+    async snapshot() {
+      assertOpen(); if (!observationReader) throw unavailable();
+      const observed = await observationReader.read();
+      // A read begun before close/exit/fault cannot resurrect the old owner.
+      assertOpen(); if (exited) throw unavailable();
+      return { ...observed.snapshot,
+        state: Date.parse(observed.sampledAt) >= Date.parse(observed.snapshot.deadlineAt) ? 'timed-out' : 'observing',
+        observation: { kind: 'durable-journal', sampledAt: observed.sampledAt, recordsDigest: observed.recordsDigest,
+          workerState: 'connected' } };
+    },
     close() {
       if (closePromise) return closePromise;
       closing = true; Atomics.store(closeFlag, 0, 1); Atomics.notify(closeFlag, 0); rpc.close();
       signal?.removeEventListener('abort', onAbort);
       // No timeout termination: existing provider execution and metadata owners must drain first.
-      closePromise = (async () => { if (exited) throw unavailable();
+      closePromise = (async () => {
         // A protocol fault is not proof of worker exit. Still request the one
         // cleanup operation, then retain uncertainty even after a clean drain.
-        await command('close', null, true); await worker.terminate();
-        if (faulted) throw unavailable(); })();
+        const results = await Promise.allSettled([
+          observationReader?.close(),
+          (async () => { if (exited) throw unavailable(); await command('close', null, true); await worker.terminate(); })(),
+        ]);
+        if (faulted || results.some(result => result.status === 'rejected')) throw unavailable(); })();
       return closePromise;
     },
   };

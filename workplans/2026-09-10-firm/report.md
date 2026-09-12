@@ -1,6 +1,73 @@
 # Verified local handoff
 
-## Current continuation: isolated autonomous verification
+## Current continuation: independent successor journal observation
+
+Baseline `d56309ce2027976b4145dbe4954f4dd51e3c8aed`, clean branch `auto/p00` at
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agent streams
+implemented shared journal validation, the strict browser contract and independent
+read-worker acceptance; parent integrates lifecycle and packaging. Entire resume
+found no checkpoint. No provider/account/service or public-release changes.
+
+Successor observations no longer wait behind the effectful worker. A separate
+fixed bounded worker reads the same complete immutable journal against detached
+startup pins and a freshly checked configuration file. The shared codec and
+attribution checks preserve the existing disk format. Missing, staged, corrupt
+or changed evidence is unavailable, not a healthy empty result. Unique internal
+request tokens prevent overlapping requests from sharing an older sample.
+
+The console displays recorded milestones, sampling time and worker connection
+separately. It does not invent live activity or a failed proposal from an intent
+without a result. Journal facts do not revalidate current resource receipts or
+successor delivery. Parent checks lifecycle after each read; late success cannot
+resurrect a closed or failed worker. The binary build includes the fixed reader.
+
+The first integrated actual-CLI gate met every two-second latency limit but
+failed status availability: an admission-phase read returned 503 in 24ms.
+Source/preparation status returned correct facts in 27/117ms; pause succeeded
+in 69ms and withheld B. A follow-up read-only settling path now permits at most
+ten full fresh samples within a 500ms retry-admission window, only when a valid
+record set is classified solely as changing. It never accepts partial data or
+repairs storage. Independent tests reproduce transient writer settlement and
+bounded persistent-lock refusal; the original 503's exact cause was not logged.
+
+Corrected-source responsiveness passed: one test, zero skips, 75.46s. All seven
+requests returned HTTP200 within the unchanged two-second limits, and each
+status response contained the expected fresh recorded milestone:
+
+| Phase | Health | Journal status |
+| --- | ---: | ---: |
+| Proposal admission | 1.094ms | 18.958ms, intent recorded |
+| Source verification | 0.912ms | 21.709ms, proposal recorded |
+| Preparation | 1.062ms | 114.282ms, proposal recorded |
+
+Authenticated pause succeeded in 66.519ms. The original one-entry queue remained
+paused: two A generations and one proposal, three completed fixture receipts and
+90 reported tokens; B had no admission, execution or delivery ref. Close drained
+in 11.524s, exit zero/no stderr, with complete fixture cleanup. This is a local
+measured pass, not a universal latency or immediate-cancellation guarantee.
+
+The strengthened full delivery/restart acceptance passed separately: one test,
+zero skips, 155.90s. Five model-fixture requests, six evaluations, two verified
+local delivery refs and 150 reported tokens remained exact. Both deliveries
+finished at 118.44s; restart took 17.06s. Fresh HTTP samples were inside their
+request windows, and the returned digest matched all five actual immutable
+journal records. Restart preserved those records, configuration, original
+deadline and entries. Seed context, account policy, accounting and read-only
+setup replay were intact, with zero read-recovery events and complete cleanup.
+
+Full web passed 1,649 tests / 85 files (10.68s); the final focused backend run
+passed 138 tests / seven files (23.06s). With both actual-CLI gates, this is
+**1,789 passing tests / 94 files**, zero skips on the corrected source. Source/web
+typechecks, local build, lint (zero errors / 107 existing warnings), documentation
+and lane checks passed. Clean committed build identity is recorded at handoff.
+The packaging tests cover the new fixed sibling entry; a complete autonomous
+Bun/native run was not performed in this increment. No production
+or always-on acceptance is claimed. Coordinator lifecycle/fault reporting remains
+separate unfinished work: a connected worker does not prove its inner loop is
+still running. Useful autonomous Hub yield also needs a current frozen evaluator
+and genuinely model-generated accepted improvement, not another plumbing fixture.
+
+## Previous continuation: isolated autonomous verification
 
 Baseline `82b2c88128d9decd1032558ec579700baf5e59dc`, branch `auto/p00`,
 `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. Three agent streams

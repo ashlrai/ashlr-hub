@@ -146,6 +146,22 @@ acceptance passed separately with exact accounting and zero read recoveries.
 Independent status projection and expensive parent owner checks remain open;
 these local results do not establish always-on or production readiness.
 
+The independent-journal-reader continuation (based on `d56309ce`) passed the
+same seven two-second probes, strengthened to verify the returned milestones.
+On this local run, fresh successor status took 19–114 ms, health about 1 ms,
+and accepted pause 67 ms; B was neither admitted nor executed. A prior run of
+the new reader returned one 503 near publication despite meeting latency limits.
+Bounded fresh sampling now handles a coherent record set classified solely as
+changing, without accepting partial records or touching locks. These are measured
+single-host runs, not a universal SLA. The UI separates recorded milestones from
+worker connection; coordinator lifecycle/fault reporting and current useful
+model-generated Hub improvement remain outstanding. A connected worker is not
+proof that its inner coordinator loop is running.
+The strengthened two-delivery/restart fixture also passed, including exact
+accounting, fresh request-window samples and a digest matched to the actual
+immutable journal. This remains controlled-fixture evidence, not authenticated
+provider commissioning or proof of autonomous product judgment.
+
 The [offline pool upgrade](RESOURCE-POOLS.md#upgrade-a-pool-without-resetting-history)
 removes the need to discard accounting or conversations when adding workers.
 Its explicit digest-pinned transition preserves prior identity and has a held

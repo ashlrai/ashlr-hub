@@ -15,6 +15,8 @@ const entry = (state: Snapshot['entries'][number]['state'] = 'proposing'): Snaps
 });
 const snapshot = (patch: Partial<Snapshot> = {}): Snapshot => ({ schemaVersion: 1, supervisionId: 'queue', profileId: 'fixed-checks',
   configDigest: 'b'.repeat(64), deadlineAt: '2026-09-20T00:00:00.000Z', state: 'running', maxSuccessors: 4, entries: [entry()], ...patch });
+const journal = (state: Snapshot['entries'][number]['state'] = 'intent-recorded'): Snapshot => snapshot({ state: 'observing', entries: [entry(state)],
+  observation: { kind: 'durable-journal', sampledAt: '2026-09-19T00:00:00.000Z', recordsDigest: 'd'.repeat(64), workerState: 'connected' } });
 const plan = (id: string, projectId = 'default') => ({ ...engineeringEnrollment(projectId), id });
 const props = () => ({ available: true, projectId: 'default', catalog: [plan('source')],
   onInspectEnrollment: vi.fn(), onRegisteredEnrollments: vi.fn() });
@@ -25,6 +27,40 @@ beforeEach(() => { vi.useFakeTimers(); read.mockReset().mockResolvedValue(snapsh
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('successor planning observation panel', () => {
+  it('distinguishes verified journal milestones from worker activity and downstream proof', async () => {
+    read.mockResolvedValue(journal()); const input = props(); render(<EngineeringSuccessors {...input} />); await flush();
+    expect(screen.getByText('Verified journal')).toBeInTheDocument(); expect(screen.getByText('Worker connected')).toBeInTheDocument();
+    expect(screen.getByText('Proposal intent recorded')).toBeInTheDocument(); expect(screen.getByText('Reserved successor ID')).toBeInTheDocument();
+    expect(document.querySelector('time[datetime="2026-09-19T00:00:00.000Z"]')).toBeInTheDocument();
+    expect(screen.getByText(/connected worker does not mean work is executing/)).toBeInTheDocument();
+    expect(screen.getByText(/does not reverify worker accounting or local delivery/)).toBeInTheDocument();
+    expect(screen.getByText(/does not establish that a request is running or held/)).toBeInTheDocument();
+    expect(screen.queryByText('Coordinator running')).not.toBeInTheDocument(); expect(screen.queryByText('Requesting proposal')).not.toBeInTheDocument();
+    expect(input.onRegisteredEnrollments).not.toHaveBeenCalled(); expect(input.onInspectEnrollment).not.toHaveBeenCalled();
+  });
+  it.each(['proposed', 'stopped', 'prepared', 'admitted'] as const)('uses only recorded %s evidence for catalog refresh', async state => {
+    read.mockResolvedValue(journal(state)); const input = props(); render(<EngineeringSuccessors {...input} />); await flush();
+    if (state === 'prepared' || state === 'admitted') expect(input.onRegisteredEnrollments).toHaveBeenCalledExactlyOnceWith([next]);
+    else expect(input.onRegisteredEnrollments).not.toHaveBeenCalled();
+    if (state === 'admitted') expect(screen.getByText(/Admission is not execution, evaluation, or delivery/)).toBeInTheDocument();
+    expect(screen.queryByText('Preparing plan')).not.toBeInTheDocument(); expect(screen.queryByText('Queue admission in progress')).not.toBeInTheDocument();
+  });
+  it('accepts new journal samples without changing identity, then retains them as stale on disconnect', async () => {
+    read.mockResolvedValue(journal('proposed')); const input = props(); const view = render(<EngineeringSuccessors {...input} />); await flush();
+    const later = journal('prepared'); later.observation = { ...later.observation!, sampledAt: '2026-09-19T00:01:00.000Z', recordsDigest: 'e'.repeat(64) };
+    read.mockResolvedValue(later); await tick(); expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(input.onRegisteredEnrollments).toHaveBeenCalledExactlyOnceWith([next]);
+    expect(document.querySelector('time[datetime="2026-09-19T00:01:00.000Z"]')).toBeInTheDocument();
+    view.rerender(<EngineeringSuccessors {...input} available={false} />);
+    expect(screen.getByText('Plan prepared')).toBeInTheDocument(); expect(screen.getByRole('button', { name: 'Inspect source' })).toBeDisabled();
+    expect(screen.getByText(/Displayed evidence may be stale/)).toBeInTheDocument();
+  });
+  it.each(['exited', 'faulted'] as const)('does not promote prepared observations from an %s worker to catalog refresh', async workerState => {
+    const value = journal('prepared'); value.state = 'unavailable'; value.observation!.workerState = workerState;
+    read.mockResolvedValue(value); const input = props(); render(<EngineeringSuccessors {...input} />); await flush();
+    expect(screen.getByRole('button', { name: 'Inspect source' })).toBeDisabled(); expect(input.onRegisteredEnrollments).not.toHaveBeenCalled();
+    expect(screen.getByText(workerState === 'exited' ? 'Worker exited' : 'Worker unavailable')).toBeInTheDocument();
+  });
   it('shows original limits and an honest empty coordinator without mutation callbacks', async () => {
     read.mockResolvedValue(snapshot({ entries: [] })); const input = props();
     render(<EngineeringSuccessors {...input} />); await flush();
