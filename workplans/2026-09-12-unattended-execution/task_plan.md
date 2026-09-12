@@ -11,7 +11,7 @@ General reservation, account history, deadlines and resource limits.
 - [x] Verify the prior integration and current worktree; classify prior turn as progress.
 - [x] Map automatic admission, execution, succession and recovery with three agents.
 - [x] Select one concrete missing execution behavior, if present, and implement it.
-- [ ] Verify behavior and independent review; retain exact commissioning blockers.
+- [x] Verify behavior and independent review; retain exact commissioning blockers.
 
 ## Constraints
 
@@ -60,5 +60,16 @@ share fresh-only admission planning; ordinary status behavior is unchanged.
 Coordinator and new preflight tests passed 72/72; final precise-zero helper rerun
 passed 24/24. Adjacent admission/account tests passed 253/253, and builtin structural,
 registry and lifecycle checks passed 67/67. Types, scoped lint, docs and lane checks
-passed. Real loopback acceptance is running at handle 80608; do not infer its result.
-Clean build and changed evaluator identity capture follow the implementation commit.
+passed. Real loopback acceptance handle 80608 completed successfully: 3/3 tests in
+315.70 seconds. It proved automatic quota recovery followed by two local deliveries,
+accounting and seed continuity, restart identity, and lost-output/source-drift holds.
+The clean build at 29f3e055 passed (96245); all nine asset hashes were verified.
+The new evaluator identity is 9a051509b3eccea7e562a3b5d525bdc5e1beae1bdfe5bc2f83edad8c8306fe46.
+Bridge and fixture bytes changed; prior 25d57874 native qualification does not
+qualify this new identity. Full current native qualification and genuine scoring
+calibration remain separate next gates, not claims of this increment.
+
+Final read-only runtime sample at 2026-09-12T11:08:34Z: healthy active global stop;
+collector pending v1 with legacy-owner-evidence-missing, recovery not attempted.
+No live account work, policy changes, activation, push or publication occurred.
+See verification.json and delivery.md for bounded completed scope and next work.
