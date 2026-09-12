@@ -193,6 +193,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-preparation-measurement-candidate-comparison.test.ts', // real private journals and calibration-to-comparison CLI; synthetic measurement contents
   'test/preparation-qualified-workload-acceptance.test.ts', // installed v2 workload and fixed packaged same-call stale-guard controls
   'test/preparation-score-packaging.test.ts', // private package fixtures, real esbuild/import and pinned native identity reads; no candidate dispatch
+  'test/preparation-typecheck-authoring.test.ts', // private compiler graph snapshots and real closed full-program baseline verification
   'test/preparation-verification-child.test.ts', // actual OS-confined persistent candidate processes and deadline settlement
   'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication
   'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures

@@ -130,3 +130,41 @@ the expensive workload and any passing score. No scoring activation yet.
 
 Read-only closure probe: TypeScript5.9.3,723 root files,1038 full-program sources,
 21106352 UTF-8 bytes, no source paths outside this checkout; compiler9112572bytes.
+
+## Compiler verification implementation packet
+
+Local checkpoint3ba66addc87029f08586dea7017a428e03034cef retains the tested
+scoring/delivery increment. No integration, build, publication or activation
+follows from that checkpoint. All native handles are terminal now.
+
+- Compiler agent: bounded virtual-project codec and full-program checker plus
+  pure tests; no host filesystem fallback or candidate execution.
+- Authoring agent: deterministic compiler-project capture with package-resolution
+  metadata, clean baseline proof and exact target/source identity; authoring only.
+- Parent: fixed owned compiler child and scoring owner lifecycle, using the same
+  original allowance and settlement evidence before the native workload.
+- Registry/package agent: after shared interfaces settle, add fixed compiler child
+  and project asset to outer score manifest and packaging tests. Preserve the nine
+  diagnostic assets; no calibration defaults or provider calls.
+
+The full graph checks reverse consumers, not only target syntax. Compiler and
+project bytes are separately pinned by the outer manifest. The virtual host must
+resolve only packaged files and replace exactly the selected target. Any compile
+error, changed pin, timeout, cancellation or unconfirmed child settlement refuses
+the score before running the expensive workload.
+
+## Compiler source packet verified
+
+Three agents completed implementation and independent review. Parent final Node24
+gate:241tests/6files/zero skipped/11.19seconds. Full local build, source/web types,
+scoped lint, docs and lane check passed (342real-IO/705unit files). Real packaged
+tiny compiler cases prove valid/BOM acceptance, type-error refusal and settlement
+before the synthetic workload; fourteen isolated deadline cases prove phase and
+original allowance handling. No genuine scoring capture or provider work ran.
+
+The old qualified460b5f... bundle was copied and its aggregate verified at
+`/Users/masonwyatt/.codex/artifacts/ashlr-preparation-qualified-backup.O0qP0h/preparation`.
+Rebuilt diagnostic aggregate4937844f46bbd3965694fa9deef6b18132899b09b8025d31a16b79764bd531f1
+is NOT qualified yet. Next: exact-byte native qualification and full-project
+packaged compiler budget acceptance, followed by real-stop resolution and genuine
+calibration. No remote push, activation or public release is claimed.
