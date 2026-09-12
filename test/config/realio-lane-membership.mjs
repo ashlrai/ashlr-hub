@@ -171,6 +171,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-supervisor-boundaries.test.ts', // independent supervisor ownership and restart boundary checks
   'test/resource-engineering-supervisor-acceptance.test.ts', // actual unattended console queue and local evaluated delivery
   'test/resource-engineering-preparation.test.ts', // private linked campaign preparation and replay
+  'test/resource-engineering-preparation-builtin.test.ts', // closed scoring recipes, pinned Git scope and mocked installed identity
   'test/resource-engineering-preparation-metadata.test.ts', // verified metadata reads and real source drift
   'test/resource-engineering-preparation-boundaries.test.ts', // independent private preparation boundary checks
   'test/resource-engineering-preparation-acceptance.test.ts', // actual prepared campaign to evaluated local delivery

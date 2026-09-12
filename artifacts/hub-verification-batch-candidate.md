@@ -1,14 +1,16 @@
 # Candidate: batch immutable evaluator blob reads
 
-Status: **unapplied; strict native process-count comparison passed with pinned
-developer Git**. The fresh comparison preserves healthy results and during-call
+Status: **unapplied; rebased for builtin recipes, native revalidation pending**.
+The historical candidate's strict native process-count comparison passed with
+pinned developer Git. That comparison preserved healthy results and during-call
 drift refusal, with two blob launches instead of eight for both four-file reads.
 Earlier runs using the platform Git launcher measured ten blob launches: an
 xcrun cache-write warning despite exit 0 correctly triggered complete fallback.
 That earlier rejection remains valid for that tool identity. The new harness
 pins developer Git itself without widening confinement or discarding stderr.
-Six actual Node combined-output boundary tests and33 pure artifact controls pass.
-Full installed candidate measurement remains pending. This is not
+The historical gate included six actual Node combined-output boundary tests.
+All 33 pure artifact controls also pass against the rebased helper. Native
+comparison and full installed measurement of the rebased candidate remain pending. This is not
 an accepted optimization, a scoring evaluator, or permission to promote a result.
 The [candidate patch](hub-verification-batch-candidate.patch) changes only
 `src/core/resources/engineering-preparation.ts`. Production source, the installed
@@ -16,12 +18,29 @@ evaluator, its bridge and tests are unchanged by this artifact.
 
 ## Baseline and purpose
 
-Prepared against source commit `948a7fa4cde76002b6029b61f588127e3f70c42e`, target
-Git blob `a5a6fcf36dd6990f309ee1f0e15072c63cce16d4`, on branch `auto/p00` in
-`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`. The shared worktree has
-in-progress installed-workload changes; the target source itself is unchanged.
+Originally prepared against source commit `948a7fa4cde76002b6029b61f588127e3f70c42e`,
+target Git blob `a5a6fcf36dd6990f309ee1f0e15072c63cce16d4`. The native measurements
+below apply only to that historical target and candidate, not the rebase.
 
-The current `capture()` hashes each protected evaluator file through a separate
+Rebased on 2026-09-12 against the frozen, uncommitted builtin-recipe target in
+`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-builtin-recipes`, whose checkout
+base is `d44c99115c11bb183b41e816ff5b80588401646f`. The exact target Git blob is
+`59a46145ddd662d7ded903316c7e6925a858eacc`; the base commit alone does not contain
+that target. Patch SHA-256:
+`9d56c0eff2480549cc1c1923463f459a379716d16f0782e6573a2c061fd9c765`.
+Applying it produces candidate Git blob `1ad0490a16df02748c4806eac752fef89ec515e4`
+and SHA-256 `c2d1fe431a0dec8c36f166ffa64c4848133dd5c9c14e4d8b21623bb59b23e144`.
+
+Only import context and the existing command-evaluator branch were rebased.
+The batch helper is unchanged; the builtin branch and every `assertEvaluator`
+freshness fence remain byte-identical. The acceptance fixture now pins this
+new target blob without changing its behavior, process-count or custody checks.
+Read-only `git apply --check` passed. Actual application to a private scratch
+copy followed by a no-emit full-project compile passed with 725 roots, 1,041
+source files and zero diagnostics; the live target was unchanged. The 33 pure
+artifact controls passed. These checks do not renew the historical native proof.
+
+The command-evaluator branch of `capture()` hashes each protected evaluator file through a separate
 `git cat-file blob <OID>` invocation. For multiple protected paths, the candidate
 first attempts one `git cat-file --batch` request, reusing the existing
 [Git batch parser](../src/core/universe/git-blob-batch.ts). For N distinct protected
@@ -31,7 +50,7 @@ confined measurements with pinned developer Git show four-file blob launches
 falling from 8 to 2. The earlier launcher-based comparison increased them from 8
 to 10 through fallback. No wall-time or end-to-end savings are established.
 
-### Fresh strict comparison
+### Historical strict comparison (before rebase)
 
 Local gate 88594 passed 63 tests across four suites with zero skips in 72.39s.
 It applies the exact patch only to a private candidate copy and uses

@@ -53,8 +53,9 @@ and enrollment digests from your existing runtime and project catalog. It does
 **not** run the objective, connect an account or start supervision.
 
 Prerequisites are a built source checkout, existing private resource runtime and
-project catalog, and an enabled project with a full Git seed commit containing
-an independently reviewed evaluator. Preserve the existing accounting directory,
+project catalog, and an enabled project with a full Git seed commit. A command
+recipe must contain an independently reviewed evaluator; the closed scoring
+builtin described below instead uses its separately installed package. Preserve the existing accounting directory,
 allocation, account pauses and receipt history. The new output needs an existing
 private `0700` parent outside projects, transport workspaces and shared accounting.
 Do not move the prepared bundle: experiment evidence contains absolute paths.
@@ -72,6 +73,20 @@ mutable scope. The preparer enables seed measurement, retained feedback and
 confined file operations; it does not invent an evaluator or choose a valuable
 objective. `delivery.allowInitialRepair: true` still requires measured failing-seed
 evidence before first-pass delivery.
+
+Preparation also accepts `evaluation: { builtin: "preparation-process-score-v1",
+timeoutMs: 1800000 }` when the [calibrated scorer](ASHLR-UNIVERSE.md#calibrated-preparation-scoring)
+is already installed. It does not install or calibrate that evaluator. This closed
+route requires the `preparation_processes` minimizing metric, integer improvement
+threshold, compatible budgets, and exactly one mutable path:
+`src/core/resources/engineering-preparation.ts`. The complete committed seed must
+match the calibration's protected inventory; a one-file private calibration cannot
+enroll a full Hub repository. All context paths must be tracked. The plan pins the
+installed evaluator and rechecks it during preparation, replay and receipt
+publication. Replacement invalidates the plan rather than silently adopting new
+acceptance rules. Diagnostic-only and arbitrary builtins are refused. Existing
+automatic admission and supervision can consume the resulting bundle, but a
+prepared recipe alone does not establish account capacity or running autonomy.
 
 1. Write a reviewed recipe as private `0600` JSON, including a new `codex/`
    delivery branch and explicit budgets. The [historical marker-filter recipe](FIRM-DEMO.md#a-real-hub-source-campaign)
