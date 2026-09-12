@@ -218,3 +218,28 @@ stop overrides, service activation, GitHub Actions, remote pushes, publication
 or deployment occurred. Two agent roles remained quota-blocked; the available
 agent completed journal implementation and independent review. No quota bypass.
 The global north-star goal is still active, not achieved by this increment.
+
+## Commissioning audit: remaining live prerequisites
+
+Source baseline `efbbec2d97e6d05ffafea534bf8599ab874d4866`, same integration
+worktree/branch. Independent review proved Spark enrollment preparation and
+passive collector-history UI are already integrated; no duplicate merge or
+runtime change was needed. The qualified build was not replaced.
+
+Fresh saved-account inspection confirmed the 75% ceiling and personal-account
+pause are intact. Spark is not yet enrolled, the current observations file is
+empty, and the existing collector marker is version 1 with missing owner evidence.
+The existing source has no replacement-owner recovery/quarantine command for
+that legacy record. This prevents safe evolution/commissioning; merely preparing
+Spark files or deleting the marker would not resolve the custody gap.
+
+Legacy Hub serve and Pulse processes are running. After an initial observation
+timeout, a bounded live snapshot returned HTTP 200 and dispatchEnabled:false.
+Pulse source describes telemetry collection, not proof of the installed binary. The
+absence of loaded daemon/fleet labels alone does not prove an isolated activation.
+
+Next decision: authorize a coordinated, history-preserving legacy collector
+reconciliation and bounded commissioning, retaining the account ceiling and
+personal General reservation. That authorization is still pending; the global
+stop remains active. No recovery, fresh provider observation, account migration,
+service cutover or activation occurred in this audit.

@@ -253,3 +253,47 @@ Independent handoff review corrected a documentation overclaim: write failure
 can follow publication, and the generic writer can leave its lock behind without
 returning failure. A missing finish means unknown; failed finalization alone does
 not prove absence. No generic storage recovery or authority semantics were changed.
+
+### Commissioning preflight after efbbec2d
+
+The isolated Spark workplan was historical, not current integration authority.
+Independent graph and patch-ID inspection found af5d02bd equivalent to primary
+f8a300ff, and 1ff41843 equivalent to eb6d3725; both primary commits precede
+efbbec2d. Feature implementation and checked backend tests are byte-identical.
+The later primary server differences retain mission stop propagation. Reapplying
+the isolated branch would be redundant and could overwrite newer behavior.
+
+Read-only saved-account inspection at September 12, approximately 20:42 UTC:
+pool `ashlr-subscriptions`; workers `codex-personal`, `codex-cmp`, `claude`;
+no Spark; allocation ceiling 75/revision 3; paused personal worker/revision 1.
+The current observations file contains zero entries. Two historical observations
+and three attempts in pool-state are not fresh provider availability. The saved
+console startup is read-only and has no execution workspace.
+
+The compiled passive inspector returned pending/schemaVersion 1 with
+`legacy-owner-evidence-missing` and `recoveryAttempted:false`. Independent source
+review confirmed v1 is refused before boot/owner recovery checks, including after
+reboot. Only its original still-live owner can normally close its own marker.
+There is no replacement-owner reconciliation/quarantine command; the runbook's
+operator-reconciliation wording is not an implemented CLI. Preserve this marker
+and the shared ledger pending an explicit, history-preserving recovery decision.
+
+Loaded launchd census and process arguments identified legacy Hub serve on 4317,
+release 18a60269037009d20162f3339236af35221e25d2, and pulse-agent. Hub's daemon/fleet
+plists exist but their labels were not loaded in that census. Installed serve
+source defaults dispatch off and its observed arguments omit --allow-dispatch;
+the first live snapshot request timed out after five seconds. A second bounded
+request returned HTTP 200 with dispatchEnabled:false, confirming the live server's
+dispatch setting without any mutation. The initial timeout did not mean the
+process terminated. This does not certify unrelated launchd jobs or providers.
+
+Pulse's checked source (e77f91d0, dirty unrelated server work preserved) starts
+telemetry tailers/exporters, not Hub engineering dispatch. The running binary was
+not proven identical to that source, and no Pulse configuration/PAT was read or
+connectivity doctor invoked. No Pulse files/services were modified.
+
+The real global stop remained healthy/active. This audit does not prove that
+clearing it cannot release other work. No account/provider mutation, credential
+read, marker removal, new ledger, collector refresh, service restart, KILL override,
+installation or remote publication occurred. Failed path/glob discovery reads
+were corrected with named source-file discovery; no user data was changed.

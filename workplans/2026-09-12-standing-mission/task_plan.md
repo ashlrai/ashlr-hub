@@ -220,3 +220,45 @@ The goal remains active. This completes this bounded local reliability increment
 not genuine calibration, scoring-package authoring, account-fleet commissioning,
 resident service installation or production release. All verification sessions
 are terminal. The real global stop remains active and unchanged.
+
+## Continuation: commissioning preflight and isolated Spark integration
+
+The previous turn was verified progress, not a blocked turn: d9b604c9 diagnostics,
+116 focused cases, real mission replay, five-case native qualification and clean
+build/compiled smoke. Approval to clear the real global stop is still pending.
+
+- [ ] Read-only census of relevant registered services and saved-account state;
+  do not clear KILL, acquire operational ownership or contact providers.
+- [ ] Explore the existing isolated Spark enrollment/collector-inspection commits
+  against current primary; identify conflicts, missing capability and bundle impact.
+- [ ] Integrate only supported, reviewed source changes with preserved primary
+  invariants; verify in proportion to touched execution/UI paths.
+- [ ] Record actual readiness and the remaining external activation decision.
+
+The existing isolated branch is a concrete route toward the requested multi-account
+intelligence balancer while stop-sensitive commissioning remains pending. Discovery
+does not authorize live enrollment, quota-scope changes, personal unpause, refresh,
+service activation, remote publication or a global-stop override.
+
+### Fresh discovery supersedes the historical integration note
+
+- [x] Independent Explore verified stable patch-ID equality: isolated af5d02bd
+  and 1ff41843 already landed as f8a300ff and eb6d3725, both ancestors of efbbec2d.
+  Spark planner/CLI and passive collector UI are present. No merge is needed.
+- [x] Read-only live census: legacy serve and Pulse processes are running;
+  daemon/fleet launchd definitions exist but were absent from the loaded-label
+  census. This is not proof that no deferred or unrelated work can start.
+- [x] Saved policy remains 75% ceiling revision 3, personal Codex paused revision 1;
+  only personal/CMP Codex and Claude workers are enrolled, with no Spark worker.
+  The current observation file is empty; saved history is not fresh quota.
+- [x] Compiled passive collector inspection reports version 1 pending record,
+  `legacy-owner-evidence-missing`, no recovery attempted. The prior owner's
+  authority cannot be reconstructed by a replacement process.
+- [ ] Commissioning remains withheld pending the user's recovery/stop decision.
+
+No implementation gap was found in the already-integrated Spark/UI changes.
+A different gap is confirmed: there is no explicit legacy-v1 operator
+reconciliation/quarantine command. Source must not claim automatic recovery for
+this record, and live history must not be deleted or replaced to bypass it.
+The audit is new evidence that changes the next action; no prior native test
+handle was restarted, no runtime was rebuilt and no account/service was changed.
