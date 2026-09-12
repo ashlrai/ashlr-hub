@@ -123,6 +123,7 @@ describe('engineering preparation authority and publication boundaries', () => {
     const f = fixture(); const input = options(f);
     const executable = join(f.base, 'never-executed-evaluator');
     if (mode === 'evaluator-executable') {
+      if (!input.recipe.evaluation.command) throw new Error('This fixture requires a command evaluator');
       writeFileSync(executable, '#!/bin/sh\nexit 99\n', { mode: 0o700 }); input.recipe.evaluation.command[0] = executable;
     }
     const plan = checkResourceEngineeringPreparation(input);

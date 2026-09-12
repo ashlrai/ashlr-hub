@@ -5,6 +5,11 @@ import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:p
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { canonical, digest, executable, inspectPrivateDirectory, pinSeed, MAX_ARTIFACT_BYTES, MAX_ARTIFACT_ENTRIES } from '../universe/artifacts.js';
 import { assertComparatorUnchanged, initUniverse, initUniverseWithCampaignDeliveryOrigin, manifestRecord, universePath, validateUniverseManifest } from '../universe/store.js';
+import { PREPARATION_PROCESS_SCORE_BUILTIN, resolveBuiltinEvaluator } from '../universe/builtin-evaluator-registry.js';
+import { PREPARATION_TYPECHECK_TARGET } from '../universe/preparation-typecheck-project.js';
+import { assertPreparationProcessScope } from '../universe/preparation-process-score.js';
+import { deliveryGit } from '../universe/delivery-git.js';
+import { readStableRegularFile } from '../util/stable-file-read.js';
 import { readUniverseCampaignDeliverySource, validateUniverseCampaignDeliverySource } from '../universe/campaign-handoff.js';
 import type { UniverseCampaignDeliveryOrigin, UniverseCampaignDeliverySource } from '../universe/campaign-handoff-types.js';
 import { assertUniverseExecution, withUniverseExecution } from '../universe/execution.js';
@@ -144,22 +149,55 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
   // Match the artifact reader's shared capacity limits, including directories.
   if (entries.size + directories.size > MAX_ARTIFACT_ENTRIES || seedBytes > MAX_ARTIFACT_BYTES) fail('INVALID_INPUT', 'Preparation seed exceeds artifact bounds');
   const evaluationCommand = manifest.evaluation.command;
-  if (!evaluationCommand) fail('INVALID_INPUT', 'Preparation recipes require a command evaluator');
-  const command = executable(evaluationCommand, seed.repo);
-  const protectedFiles: string[] = [];
-  for (const [index, arg] of evaluationCommand.entries()) {
-    if (index === 0) { if (contains(seed.repo, command[0]!)) protectedFiles.push(relative(seed.repo, command[0]!)); continue; }
-    if (arg.split(/[\\/]/).includes('..')) fail('INVALID_INPUT', 'Evaluator paths cannot escape the pinned source');
-    const target = /^([^=]+=)(.*)$/.exec(arg)?.[2] ?? arg;
-    if (isAbsolute(target) && !contains(seed.repo, target)) fail('INVALID_INPUT', 'Evaluator file arguments must belong to the pinned source');
-    const local = isAbsolute(target) ? relative(seed.repo, target) : target.replace(/^\.\//, '');
-    if (entries.has(local)) protectedFiles.push(local);
-    else if (isAbsolute(target) || target.includes('/') && !target.startsWith('-')) fail('INVALID_INPUT', 'Evaluator file is absent from the pinned source');
+  let assertEvaluator = () => {};
+  let evaluatorPins;
+  if (!evaluationCommand) {
+    // Diagnostic reports are deliberately not Evaluation evidence. Only the
+    // installed closed scorer may replace a tracked command evaluator here.
+    if (manifest.evaluation.builtin !== PREPARATION_PROCESS_SCORE_BUILTIN) fail('INVALID_INPUT', 'Preparation recipes require a command evaluator');
+    if (recipe.generation.files.length !== 1 || recipe.generation.files[0] !== PREPARATION_TYPECHECK_TARGET ||
+        !entries.has(PREPARATION_TYPECHECK_TARGET) || recipe.generation.contextFiles.some(file => !entries.has(file))) {
+      fail('INVALID_INPUT', 'Preparation scoring requires the fixed target and tracked context paths');
+    }
+    const installed = resolveBuiltinEvaluator(PREPARATION_PROCESS_SCORE_BUILTIN);
+    const captured = canonical(installed);
+    const calibration = installed.files.find(file => file.name === 'calibration.json');
+    if (!calibration) fail('UNAVAILABLE', 'Preparation scoring calibration is unavailable');
+    const read = readStableRegularFile(calibration.path, { anchorPath: dirname(calibration.path),
+      maxFileBytes: 2 * 1024 * 1024, remainingBytes: 2 * 1024 * 1024 });
+    if (!read.ok || digest(read.text) !== calibration.digest) fail('UNAVAILABLE', 'Preparation scoring calibration changed');
+    // Check the complete immutable Git seed, not the dirty checkout or only its
+    // editable file. A private small calibration cannot enroll a larger project.
+    const reader = deliveryGit(seed.repo);
+    const files = reader.readEntries(reader.entries(seed.revision)).map(entry => ({ path: entry.path,
+      executable: entry.executable, bytes: entry.data.length, sha256: digest(entry.data) }))
+      .sort((a, b) => a.path.localeCompare(b.path));
+    const inventory = { files, digest: sha(files.map(file => ({ path: file.path, executable: file.executable,
+      size: file.bytes, digest: file.sha256 }))) };
+    try { assertPreparationProcessScope(read.text, inventory); }
+    catch { fail('CONFLICT', 'Preparation seed does not match the installed scoring scope'); }
+    evaluatorPins = { builtin: installed };
+    assertEvaluator = () => {
+      if (canonical(resolveBuiltinEvaluator(PREPARATION_PROCESS_SCORE_BUILTIN)) !== captured) fail('CONFLICT', 'Preparation installed evaluator changed');
+    };
+  } else {
+    // Preserve the historical command pin shape and ordering for saved recipes.
+    const command = executable(evaluationCommand, seed.repo);
+    const protectedFiles: string[] = [];
+    for (const [index, arg] of evaluationCommand.entries()) {
+      if (index === 0) { if (contains(seed.repo, command[0]!)) protectedFiles.push(relative(seed.repo, command[0]!)); continue; }
+      if (arg.split(/[\\/]/).includes('..')) fail('INVALID_INPUT', 'Evaluator paths cannot escape the pinned source');
+      const target = /^([^=]+=)(.*)$/.exec(arg)?.[2] ?? arg;
+      if (isAbsolute(target) && !contains(seed.repo, target)) fail('INVALID_INPUT', 'Evaluator file arguments must belong to the pinned source');
+      const local = isAbsolute(target) ? relative(seed.repo, target) : target.replace(/^\.\//, '');
+      if (entries.has(local)) protectedFiles.push(local);
+      else if (isAbsolute(target) || target.includes('/') && !target.startsWith('-')) fail('INVALID_INPUT', 'Evaluator file is absent from the pinned source');
+    }
+    if (!protectedFiles.length || protectedFiles.some(file => recipe.generation.files.includes(file)) ||
+      recipe.generation.contextFiles.some(file => !entries.has(file))) fail('INVALID_INPUT', 'Fixed evaluator must be tracked and outside mutable paths');
+    evaluatorPins = { executable: command[0], executableDigest: digest(readFileSync(command[0]!)),
+      files: [...new Set(protectedFiles)].sort().map(file => ({ path: file, digest: digest(git(seed.repo, ['cat-file', 'blob', entries.get(file)!])) })) };
   }
-  if (!protectedFiles.length || protectedFiles.some(file => recipe.generation.files.includes(file)) ||
-    recipe.generation.contextFiles.some(file => !entries.has(file))) fail('INVALID_INPUT', 'Fixed evaluator must be tracked and outside mutable paths');
-  const evaluatorPins = { executable: command[0], executableDigest: digest(readFileSync(command[0]!)),
-    files: [...new Set(protectedFiles)].sort().map(file => ({ path: file, digest: digest(git(seed.repo, ['cat-file', 'blob', entries.get(file)!])) })) };
   const runtimeCheck = checkResourceGenerationRuntime({ resourceRuntime: options.resourceRuntime, expectedRuntimeDigest: runtimeDigest });
   if (runtimeCheck.status !== 'valid') fail('UNAVAILABLE', 'Preparation resource runtime is invalid');
   const quotaDigest = runtime.quotaConfigPath ? sha(readResourceJson(runtime.quotaConfigPath)) : null;
@@ -172,7 +210,9 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
       row.dev === project.dev && row.ino === project.ino) ? 'persisted' : 'would-register', executionStarted: false,
     providerContacted: false, paths, ids, seedRevision: seed.revision, runtimeDigest, poolDigest };
   successor?.assertSource();
+  assertEvaluator();
   return { options, recipe, runtime, preview, paths, plan, manifest, campaign, definition, deliveryPlan, supervisionBase,
+    assertEvaluator,
     ...(successor ? { campaignDeliveryOrigin: successor.origin } : {}) };
 }
 
@@ -240,7 +280,7 @@ export function readPreparedResourceEngineeringBundle(input: ResourceEngineering
 }
 function readPreparedBundle(input: ResourceEngineeringPreparationOptions & { expectedPlanDigest: string }, successor?: SuccessorContext): ResourceEngineeringPreparationReport {
   const { current, bundle } = inspectPreparedBundle(input, successor);
-  const result = report(current, bundle, 'replayed'); successor?.assertSource(); return result;
+  const result = report(current, bundle, 'replayed'); successor?.assertSource(); current.assertEvaluator(); return result;
 }
 /** One-call verification shared by full reporting and private source metadata reads.
  * No positive proof is cached or accepted back as authority at another boundary. */
@@ -265,7 +305,7 @@ function preparedMetadata(input: ResourceEngineeringPreparationOptions & { expec
   const { current, bundle } = inspectPreparedBundle(input, successor);
   const result: ResourceEngineeringPreparationMetadata = { ...current.plan, status: 'prepared', disposition: 'replayed',
     enrollmentDigest: bundle.enrollmentDigest };
-  successor?.assertSource(); return result;
+  successor?.assertSource(); current.assertEvaluator(); return result;
 }
 /** Host-only source lookup. Same bundle/pin verification as full read, without
  * computing unused commissioning diagnostics or console command suggestions. */
@@ -316,17 +356,19 @@ function prepareBundle(input: ResourceEngineeringPreparationOptions & { expected
     if (!sameStage()) fail('CONFLICT', 'Successor receipt stage changed');
     successor.assertSource();
     if (!sameStage()) fail('CONFLICT', 'Successor receipt stage changed during source verification');
+    current.assertEvaluator();
     linkSync(stage, current.paths.receipt);
     const installed = lstatSync(current.paths.receipt, { bigint: true }); const linked = lstatSync(stage, { bigint: true });
     if (!installed.isFile() || installed.dev !== identity.dev || installed.ino !== identity.ino || installed.nlink !== 2n ||
         linked.dev !== identity.dev || linked.ino !== identity.ino) fail('CONFLICT', 'Successor receipt publication changed');
     unlinkSync(stage); fsyncDirectory(options.output);
-  } else writePrivate(current.paths.receipt, receipt);
+  } else { current.assertEvaluator(); writePrivate(current.paths.receipt, receipt); }
   const result = report(current, bundle, 'created');
   if (successor) {
     successor.assertSource();
     if (canonical(readResourceJson(current.paths.receipt)) !== canonical(receipt)) fail('CONFLICT', 'Successor receipt changed after publication');
   }
+  current.assertEvaluator();
   return result;
 }
 
