@@ -2576,6 +2576,53 @@ original evaluation and custody evidence for those decisions. See the
 [measurement benchmark plan](../artifacts/hub-verification-benchmark-plan.md)
 for the workload and remaining optimization acceptance requirements.
 
+### Capture preparation measurements
+
+The explicit capture command runs the installed diagnostic against an existing
+Universe's frozen seed and retains its evidence privately:
+
+```sh
+ashlr universe preparation-measurement-capture hub-verification \
+  --root /absolute/private/universe --capture baseline-001 --json
+```
+
+The registered manifest must select `preparation-measurement-v1`. Its pinned
+evaluator and timeout apply; this command cannot select another executable,
+candidate artifact, environment or provider. It launches local fixture and
+verification processes, unlike the read-only inspector above. It does not make
+model requests, create a scored trial, select an elite, deliver into the user's
+registered repository or start a resident service. The installed workload may
+create branches inside its isolated test fixtures.
+
+Use a stable capture ID. The durable intent records the original deadline,
+manifest/comparator digests, seed revision and artifact digest, installed bundle,
+Node and native-tool identities. Exact completed replay returns the recorded
+result without running again. An unfinished or uncertain attempt is held rather
+than retried, including under a different capture ID. The same Universe's
+execution remains fenced while process custody is unresolved; independent
+Universes are unaffected. A settled failure does not authorize an automatic retry.
+
+Valid partial or failed diagnostic reports remain useful evidence. Retained
+report text preserves whitespace and is bound to its byte length and SHA-256;
+missing or malformed output is not replaced with invented metrics. The receipt
+distinguishes outcome, identity verification and actual process-group settlement.
+Capture success is not a score, causal improvement or independent acceptance.
+Summaries include start/finish timestamps and label identity verification as
+`recorded-attempt-only`: replay reads historical evidence without revalidating
+the current runtime, comparator or account health.
+
+An explicit `--report` mode emits only the retained report bytes, with no added
+newline or summary. Use the same capture ID to export an already completed report
+for the existing inspector. A new ID requests a new diagnostic execution, not a
+read-only export. Raw reports can contain diagnostic prose and should remain
+private; default and JSON summaries do not substitute for their custody evidence.
+There is no `--output` option; filesystem redirection is a separate caller-owned
+write. Exit status is 0 only for a recorded, identity-verified, settled capture
+whose report says its checks passed; 1 for failed, held or unavailable capture;
+and 2 for invalid arguments. `--report` can emit valid failed or held diagnostic
+bytes while returning 1. If no valid report is retained, stdout stays empty and
+a fixed error goes to stderr. A nonzero exit never authorizes replaying the work.
+
 ## Architecture that can absorb better models
 
 Keep model and harness identity together. A model upgrade, tool change, retrieval policy, memory program, or coordination topology creates a new experimental condition. Measure that condition on the intended task family before inheriting a previous configuration's performance assumptions.

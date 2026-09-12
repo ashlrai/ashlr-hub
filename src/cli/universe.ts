@@ -31,6 +31,8 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
                                Compare two explicit campaigns (read-only)
   preparation-measurement --input <absolute report.json>
                                Inspect diagnostic measurements (read-only; no score)
+  preparation-measurement-capture <id> --root <absolute> --capture <safe id>
+                               Run and retain one installed diagnostic (no score)
   help                         Show this help
 
 Candidate and evaluator commands run with network access denied. An optional
@@ -51,6 +53,7 @@ experiments, not accepted production changes. --root defaults to ~/.ashlr/univer
 Delivery creates only a local branch; it never pushes, merges, or deploys.
 Console requires an explicit absolute root; --port defaults to 0 (ephemeral).
 Preparation-measurement requires --input instead of --root and never runs work.
+Preparation-measurement-capture executes local verification; use --report for retained raw report bytes.
 Exit codes: 0 success, 1 failed/degraded execution, 2 invalid arguments.
 `;
 
@@ -161,6 +164,10 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'preparation-measurement-capture') {
+    const { cmdUniversePreparationMeasurementCapture } = await import('./universe-preparation-measurement-capture.js');
+    return cmdUniversePreparationMeasurementCapture(args.slice(1));
+  }
   if (args[0] === 'preparation-measurement') {
     const { cmdUniversePreparationMeasurement } = await import('./universe-preparation-measurement.js');
     return cmdUniversePreparationMeasurement(args.slice(1));

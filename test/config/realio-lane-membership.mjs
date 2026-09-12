@@ -109,6 +109,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-outcomes-review.test.ts', // independent overflow, changed-sample and incomplete-proof regressions
   'test/resource-engineering-supervisor-admission.test.ts', // durable bounded queue admission and restart over private state
   'test/resource-engineering-supervisor-admission-acceptance.test.ts', // actual prepare-to-queue evaluation, delivery and restart
+  'test/universe-preparation-measurement-capture-acceptance.test.ts', // actual installed failed diagnostic, immutable custody and CLI report replay
   'test/resource-console-engineering-inspect.test.ts', // read-only commissioning through real CLI, Git and history fixtures
   'test/resource-console-state-inspection.test.ts', // strict persisted-state decoding and pinned-directory previews
   'test/universe-backlog-marker-evaluator.test.ts', // real bounded Node evaluator processes over fixed source cases
