@@ -111,6 +111,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-supervisor-admission-acceptance.test.ts', // actual prepare-to-queue evaluation, delivery and restart
   'test/resource-engineering-auto-admission-recovery-acceptance.test.ts', // ordinary registration gap recovery, paused restart and delivery
   'test/universe-preparation-measurement-capture-acceptance.test.ts', // actual installed failed diagnostic, immutable custody and CLI report replay
+  'test/universe-builtin-trial-custody-acceptance.test.ts', // actual installed failed diagnostics, private trial custody, and injected return-loss hold
   'test/resource-console-engineering-inspect.test.ts', // read-only commissioning through real CLI, Git and history fixtures
   'test/resource-console-state-inspection.test.ts', // strict persisted-state decoding and pinned-directory previews
   'test/universe-backlog-marker-evaluator.test.ts', // real bounded Node evaluator processes over fixed source cases

@@ -5,7 +5,7 @@ import { performance } from 'node:perf_hooks';
 import { runVerifySubprocessAsync, type VerifySubprocessResult } from '../run/verify-commands.js';
 import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, verifiedProcessStartRef } from '../fleet/local-store-lock.js';
 import type { LocalStoreLock } from '../fleet/local-store-lock.js';
-import { artifactDigest, canonical, copyArtifact, ensureUniverseRoot, executable, freezeArtifact, privateDirectory } from './artifacts.js';
+import { artifactDigest, canonical, copyArtifact, digest, ensureUniverseRoot, executable, freezeArtifact, privateDirectory } from './artifacts.js';
 import { appendRecord, assertComparatorUnchanged, manifestRecord, newRun, parseEvaluation,
   projectUniverse, readRecords, universePath, type ManifestRecord, type UniverseRecord } from './store.js';
 import { scheduledVariants, selectWinners } from './store.js';
@@ -23,6 +23,7 @@ import type { UniverseFileOperationsContext } from './file-operations-types.js';
 import { assertUniverseExecution, withUniverseExecution } from './execution.js';
 import { assertRunEvidenceBudget, assertTrialEvidenceBudget, preflightTrialEvidenceBudget } from './evidence-size.js';
 import { confinedUniverseArgv, runFixedUniverseEvaluator } from './fixed-evaluator.js';
+import { assertBuiltinTrialEvaluatorsSettled, writeBuiltinTrialCustody, type BuiltinTrialIntent } from './builtin-trial-custody.js';
 
 function shortError(error: unknown): string {
   return (error instanceof Error ? error.message : String(error)).slice(0, 1_024) || 'Experiment failed';
@@ -101,7 +102,8 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
   parent: UniverseElite | undefined, directory: string, root: string, signal: AbortSignal, deadline: number,
   feedback?: UniverseFeedback, searchContext?: UniverseSearchContext,
   fileOperationsContext?: UniverseFileOperationsContext, resourceRuntime?: string,
-  expectedResourceRuntimeDigest?: string, isExecutionStopped?: () => boolean): Promise<UniverseTrial> {
+  expectedResourceRuntimeDigest?: string, isExecutionStopped?: () => boolean,
+  custodyGuard?: () => void, onUnresolvedEvaluator?: () => void): Promise<UniverseTrial> {
   const started = performance.now();
   const trialId = randomUUID();
   const scratch = join(directory, 'scratch', run.id, trialId);
@@ -110,6 +112,8 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
   const archivePath = join(directory, 'artifacts', run.id, trialId);
   const workerScratch = privateDirectory(join(scratch, 'worker'));
   const evaluatorScratch = privateDirectory(join(scratch, 'evaluator'));
+  let custodyPending = false;
+  let custodyIntent: BuiltinTrialIntent | undefined;
   const trial: UniverseTrial = { id: trialId, variantId: variant.id, niche: variant.niche,
     parentTrialId: parent?.trialId ?? null, status: 'failed', score: null, metrics: {}, artifact: null,
     durationMs: 0, delta: null, selected: false,
@@ -205,7 +209,41 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
     if (phaseExpired()) { trial.status = 'timed-out'; trial.error = 'Trial budget exhausted before evaluator'; return trial; }
     const evaluation = await runFixedUniverseEvaluator(record, root, archivePath, snapshotDigest, evaluatorScratch,
       Math.max(1, Math.min(record.manifest.evaluation.timeoutMs, remaining())), signal,
-      phaseEnvironment(record, run.generation, archivePath, evaluatorScratch, parent));
+      phaseEnvironment(record, run.generation, archivePath, evaluatorScratch, parent),
+      record.manifest.evaluation.builtin !== undefined,
+      record.manifest.evaluation.builtin === undefined ? undefined : () => {
+        if (!custodyGuard || custodyIntent) throw new Error('Built-in trial evaluator custody unavailable');
+        const beforeDispatch = (): void => {
+          custodyGuard!();
+          if (signal.aborted || isExecutionStopped?.() || phaseExpired()) throw new Error('Built-in trial evaluator stopped before dispatch');
+          // Parent stop checks may themselves perform synchronous proof work.
+          if (signal.aborted || phaseExpired()) throw new Error('Built-in trial evaluator stopped before dispatch');
+        };
+        beforeDispatch();
+        custodyIntent = { schemaVersion: 1, universeId: record.manifest.id, runId: run.id, trialId,
+          startedAt: new Date().toISOString(), manifestDigest: record.manifestDigest, comparatorDigest: record.comparatorDigest,
+          evaluatorId: record.manifest.evaluation.builtin!, evaluatorDigest: record.evaluationBuiltinDigest!,
+          artifactPath: archivePath, artifactDigest: snapshotDigest, scratchPath: scratch };
+        // A failed publication may have left durable evidence: preserve it even
+        // though the dispatch callback did not return successfully.
+        custodyPending = true;
+        writeBuiltinTrialCustody(directory, { id: `${trialId}.intent`, kind: 'intent', intent: custodyIntent,
+          settlement: null }, beforeDispatch);
+        beforeDispatch();
+      });
+    if (record.manifest.evaluation.builtin !== undefined) {
+      const settlement = evaluation.processGroupSettlement;
+      if (settlement !== 'not-started' && settlement !== 'group-exit-confirmed') {
+        throw new Error('Built-in trial evaluator settlement unconfirmed; execution is held');
+      }
+      if (custodyIntent) {
+        writeBuiltinTrialCustody(directory, { id: `${trialId}.settlement`, kind: 'settlement', intent: custodyIntent,
+          settlement: { intentDigest: digest(canonical(custodyIntent)),
+            finishedAt: new Date(Math.max(Date.now(), Date.parse(custodyIntent.startedAt))).toISOString(), state: settlement } }, custodyGuard!);
+        custodyPending = false;
+      } else if (settlement !== 'not-started') throw new Error('Built-in trial evaluator dispatch lacked custody');
+      if (settlement === 'not-started') throw new Error('Built-in trial evaluator did not start; no score was recorded');
+    }
     const evaluationError = commandResultError(evaluation, 'Evaluator');
     if (evaluationError) {
       trial.error = evaluationError;
@@ -243,8 +281,14 @@ async function runTrial(record: ManifestRecord, run: UniverseRun, variant: Unive
         (trial.status === 'cancelled' || trial.status === 'timed-out')) {
       trial.generation.status = trial.status;
     }
-    // This exact path was created for this invocation, never the archive or seed.
-    try { rmSync(scratch, { recursive: true, force: true }); } catch { /* Evidence remains readable if scratch cleanup is delayed. */ }
+    if (custodyPending) {
+      // Abort siblings, but the owning batch still awaits their settlement.
+      // Never remove activity receipts while process absence is uncertain.
+      onUnresolvedEvaluator?.();
+    } else {
+      // This exact path was created for this invocation, never the archive or seed.
+      try { rmSync(scratch, { recursive: true, force: true }); } catch { /* Evidence remains readable if scratch cleanup is delayed. */ }
+    }
   }
 }
 
@@ -273,6 +317,7 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
   const root = ensureUniverseRoot(options.root);
   const directory = universePath(root, id);
   assertUniverseExecution(directory, execution);
+  assertBuiltinTrialEvaluatorsSettled(directory);
   if (options.runId !== undefined && !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(options.runId)) {
     throw new Error('Invalid reserved Universe run identity');
   }
@@ -344,6 +389,7 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
     for (let index = 0; index < variants.length && !controller.signal.aborted; index += record.manifest.budget.maxParallel) {
       assertUniverseExecution(directory, execution);
       if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost');
+      assertBuiltinTrialEvaluatorsSettled(directory);
       const batch = variants.slice(index, index + record.manifest.budget.maxParallel);
       const results = await Promise.allSettled(batch.map(async (variant) => {
         const trial = await runTrial(record, run!, variant, overview.elites.find((elite) => elite.niche === variant.niche),
@@ -352,7 +398,10 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
           run!.feedbackVersion === 2 && variant.generation ? buildUniverseSearchContext(overview, variant) : undefined,
           variant.generation?.fileOperations ? buildUniverseFileOperationsContext(overview, variant, directory,
             record.seedArtifact, run!.feedbackEnabled ? { feedback: true } : undefined) : undefined, options.resourceRuntime,
-          options.expectedResourceRuntimeDigest, options.isExecutionStopped);
+          options.expectedResourceRuntimeDigest, options.isExecutionStopped, () => {
+            assertUniverseExecution(directory, execution);
+            if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost before evaluator custody write');
+          }, () => controller.abort());
         assertUniverseExecution(directory, execution);
         if (!ownsLocalStoreLock(lock)) throw new Error('Universe run ownership lost before evidence write');
         appendRecord(directory, { id: `${run!.id}.trial.${trial.id}`, kind: 'trial', runId: run!.id, trial });
@@ -361,6 +410,7 @@ export async function runUniverseOwned(id: string, options: UniverseOwnedRunOpti
       for (const result of results) if (result.status === 'fulfilled') run.trials.push(result.value);
       const failed = results.find((result) => result.status === 'rejected');
       if (failed?.status === 'rejected') throw failed.reason;
+      assertBuiltinTrialEvaluatorsSettled(directory);
     }
     if (controller.signal.aborted) {
       run.status = 'interrupted';

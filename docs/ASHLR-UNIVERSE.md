@@ -2626,6 +2626,38 @@ and 2 for invalid arguments. `--report` can emit valid failed or held diagnostic
 bytes while returning 1. If no valid report is retained, stdout stays empty and
 a fixed error goes to stderr. A nonzero exit never authorizes replaying the work.
 
+### Built-in trial shutdown custody
+
+New ordinary trials using the installed builtin also retain a private dispatch
+intent before starting their evaluator. The intent binds the Universe, run,
+trial, frozen candidate, manifest, comparator and installed implementation.
+This is process custody, not an evaluation score or acceptance receipt.
+
+Only an explicit `not-started` or `group-exit-confirmed` result can settle the
+intent. A missing result, uncertain controller or inner process group, thrown
+post-dispatch integrity check, or failed settlement publication retains the
+trial scratch and activity evidence. The current batch cancels cooperatively
+and drains its siblings before returning; it does not select winners or start
+another batch. New execution for that same Universe is held, including a new
+generation under an already-held campaign lease. Separately acquired Universes
+remain independent; enclosing portfolio ownership rules are unchanged.
+
+Confirmed failure or malformed output can settle custody without passing the
+trial. Scratch removal remains best-effort: installed fixture seeds contain
+read-only directories that can prevent recursive removal even after confirmed
+shutdown. Retained scratch alone is not an unresolved invocation; the custody
+journal distinguishes these states. Automatic reclamation of those settled
+fixtures is not implemented by this change. `not-started` can never supply a
+score. Records are bounded, immutable,
+and kept under `builtin-trial-custody` in that Universe's private store. No
+automatic evidence deletion or uncertain retry is provided. Preserve unresolved
+records and scratch for investigation; removing a journal or extending a budget
+does not prove that the original process groups stopped.
+
+Legacy command evaluators keep their existing behavior. A missing journal on
+older stores remains compatible, but does not retrospectively attest older
+builtin trials whose scratch may already have been removed.
+
 ## Architecture that can absorb better models
 
 Keep model and harness identity together. A model upgrade, tool change, retrieval policy, memory program, or coordination topology creates a new experimental condition. Measure that condition on the intended task family before inheriting a previous configuration's performance assumptions.
