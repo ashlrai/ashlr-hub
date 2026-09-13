@@ -704,6 +704,21 @@ ledger with no reserved or uncertain attempts, checked after ordinary task drain
 An unrelated unresolved attempt can conservatively withhold clean shutdown; the
 diagnosis does not claim that engineering created it.
 
+New Universe generations record `origin` on the resource task and its reserved
+receipt before worker dispatch. The closed shape is
+`{kind: "universe-generation", universeId, runId, variantId}`. It must match the
+existing deterministic task ID, and the full task digest includes it. Settlement
+and exact replay retain that provenance even when no final trial is published.
+It records the host's dispatch origin, not completion, acceptance, or permission
+to release a worker or advance a successor.
+
+Legacy tasks and receipts without origin remain readable and are not backfilled.
+Adding, stripping, or changing origin on an existing task conflicts; do not edit
+the ledger or create replacement IDs to bypass that conflict. An old pending
+generation cannot silently acquire the new envelope during restart. The shared
+shutdown fence above remains in force until independently scoped mission
+lifecycle and complete ownership checks are implemented and accepted.
+
 ### Read engineering outcomes and resource use
 
 Select an enrolled plan in Workspace → **Engineering runs**, then choose

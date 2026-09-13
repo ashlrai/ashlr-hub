@@ -42,6 +42,7 @@ function returned(options: TaskOptions, patch: Partial<ResourceTaskReceipt> = {}
     poolDigest: digest(canonical({ pool: options.pool, bindings: options.bindings })), workerId: 'native', capacityKey: 'account',
     status: 'completed', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
     outputDigest: digest(output), inputTokens: 7, outputTokens: 3, reason: 'worker-completed', verifiedAccepted: false,
+    ...(options.task.origin ? { origin: { ...options.task.origin } } : {}),
     execution: { schemaVersion: 1, scope: 'worker-execution', durationMs: 1, usageScope: 'codex-turn' }, ...patch };
   return { receipt, output: text, replayed, plan: null };
 }
@@ -110,6 +111,7 @@ describe('host-pinned resource runtime consumption', () => {
     const f = fixture();
     expect(await f.run({ expectedRuntimeDigest: digest(canonical(f.runtime)) })).toMatchObject({ status: 'succeeded' });
     expect(runResourceTask).toHaveBeenCalledOnce();
+    expect(vi.mocked(runResourceTask).mock.calls[0]![0].task.origin).toEqual({ kind: 'universe-generation', ...identity });
   });
   it.each(['different', 'malformed'])('withholds a %s runtime pin before quota or task contact', async (kind) => {
     const f = fixture();
@@ -558,7 +560,8 @@ describe.skipIf(process.platform === 'win32')('resource candidate transport boun
     expect(runResourceTask).toHaveBeenCalledTimes(1);
   });
   it.each([{ id: 'different' }, { taskDigest: '0'.repeat(64) }, { poolDigest: '0'.repeat(64) }, { workerId: 'other' },
-    { capacityKey: 'other' }, { verifiedAccepted: true }, { status: 'reserved' }])('rejects mismatched handoff identity %#', async (patch) => {
+    { capacityKey: 'other' }, { verifiedAccepted: true }, { status: 'reserved' }, { origin: undefined },
+    { origin: { kind: 'universe-generation', ...identity, variantId: 'foreign' } }])('rejects mismatched handoff identity %#', async (patch) => {
     const f = fixture(); vi.mocked(runResourceTask).mockImplementation(async (options) => returned(options, patch as Partial<ResourceTaskReceipt>));
     expect(await f.run()).toMatchObject({ status: 'failed', content: null, resource: { dispatch: 'unavailable', taskDigest: null } });
   });

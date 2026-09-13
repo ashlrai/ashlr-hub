@@ -315,7 +315,8 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     // binds this call's effective budget, workspace and prompt: a changed
     // envelope conflicts rather than replaying or creating another invocation.
     const task: ResourceTask = { schemaVersion: 1, id: taskId, allowedWorkerIds: [...validated.allowedWorkerIds],
-      prompt, cwd: runtime.workspace, timeoutMs: context.timeoutMs, maxOutputTokens: validated.maxOutputTokens, mode: 'read-only' };
+      prompt, cwd: runtime.workspace, timeoutMs: context.timeoutMs, maxOutputTokens: validated.maxOutputTokens, mode: 'read-only',
+      origin: { kind: 'universe-generation', ...context.resourceIdentity } };
     let handoff: Awaited<ReturnType<typeof runResourceTask>>;
     while (true) {
       let current: ReturnType<typeof readEvidence>;
@@ -366,6 +367,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     const binding = bindings.find((row) => row.workerId === receipt.workerId);
     if (!worker || !binding || !validated.allowedWorkerIds.includes(worker.id) || receipt.id !== taskId ||
       receipt.taskDigest !== digest(canonical(task)) || receipt.poolDigest !== validated.poolDigest ||
+      canonical(receipt.origin ?? null) !== canonical(task.origin ?? null) ||
       receipt.capacityKey !== binding.capacityKey || receipt.verifiedAccepted !== false ||
       !handoff.replayed && receipt.status === 'reserved') throw new Error();
     const knownUsage = !handoff.replayed && receipt.inputTokens !== null && receipt.outputTokens !== null &&

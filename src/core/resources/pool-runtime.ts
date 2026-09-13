@@ -1,5 +1,6 @@
 /** Foreground, explicitly enrolled resource tasks. No daemon or Universe authority is inferred. */
 import { randomUUID } from 'node:crypto';
+import { validResourceTaskOrigin, type ResourceTaskOrigin } from './task-origin.js';
 import { expandResourceQuotaDenials, sharesResourceQuota } from './quota-scope.js';
 import { excludedResourceQuotaScopeWorkerIds, validateResourceQuotaScopeExclusions,
   type ResourceQuotaScopeAccess, type ResourceQuotaScopeExclusion } from './quota-scope-access.js';
@@ -32,6 +33,8 @@ export interface ResourceTask extends ResourceWorkerTask {
   schemaVersion: 1;
   id: string;
   allowedWorkerIds: string[];
+  /** Optional host provenance, bound into task identity; absent on legacy tasks. */
+  origin?: ResourceTaskOrigin;
 }
 export interface ResourceTaskReceipt {
   schemaVersion: 1;
@@ -48,6 +51,8 @@ export interface ResourceTaskReceipt {
   outputTokens: number | null;
   reason: string;
   verifiedAccepted: false;
+  /** Persisted atomically at reservation, before execution or trial publication. */
+  origin?: ResourceTaskOrigin;
   /** Absent on legacy receipts. No wall-clock-derived timing is backfilled. */
   execution?: ResourceExecutionMeasurement;
   /** Optional native invocation facts. Legacy receipts are never reconstructed from current host state. */
@@ -145,7 +150,9 @@ export function validateUnavailableResourceWorkerIds(value: unknown, pool: Resou
 /** Owner-controlled task text; never accepted from a provider response or stored in the ledger. */
 export function validateResourceTask(value: unknown): ResourceTask {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'allowedWorkerIds', 'prompt', 'cwd',
-    'timeoutMs', 'maxOutputTokens', 'mode']) || value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
+    'timeoutMs', 'maxOutputTokens', 'mode', ...(Object.hasOwn(value, 'origin') ? ['origin'] : [])]) ||
+    value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
+    Object.hasOwn(value, 'origin') && !validResourceTaskOrigin(value.origin, value.id) ||
     !Array.isArray(value.allowedWorkerIds) || !value.allowedWorkerIds.length || value.allowedWorkerIds.length > 32 ||
     !value.allowedWorkerIds.every((id) => typeof id === 'string' && ID.test(id)) ||
     new Set(value.allowedWorkerIds).size !== value.allowedWorkerIds.length ||
@@ -156,7 +163,7 @@ export function validateResourceTask(value: unknown): ResourceTask {
     typeof value.mode !== 'string' || !['read-only', 'workspace-write'].includes(value.mode)) throw new Error('Invalid resource task');
   return { schemaVersion: 1, id: value.id, allowedWorkerIds: [...value.allowedWorkerIds] as string[],
     prompt: value.prompt, cwd: value.cwd, timeoutMs: value.timeoutMs, maxOutputTokens: value.maxOutputTokens,
-    mode: value.mode as ResourceTask['mode'] };
+    mode: value.mode as ResourceTask['mode'], ...(Object.hasOwn(value, 'origin') ? { origin: { ...value.origin as ResourceTaskOrigin } } : {}) };
 }
 
 /** Bounded descriptor read, private regular file only; no credential-file discovery. */
@@ -202,9 +209,11 @@ function inspectRoot(root: string, create: boolean): boolean {
 function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceBinding[], pool: ResourcePool): value is ResourceTaskReceipt {
   if (!object(value) || !exact(value, ['schemaVersion', 'id', 'taskDigest', 'poolDigest', 'workerId', 'capacityKey',
     'status', 'startedAt', 'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted',
+    ...(Object.hasOwn(value, 'origin') ? ['origin'] : []),
     ...(Object.hasOwn(value, 'execution') ? ['execution'] : []),
     ...(Object.hasOwn(value, 'nativeProcess') ? ['nativeProcess'] : [])]) ||
     value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
+    Object.hasOwn(value, 'origin') && !validResourceTaskOrigin(value.origin, value.id) ||
     typeof value.taskDigest !== 'string' || !HASH.test(value.taskDigest) || value.poolDigest !== stateDigest ||
     !bindings.some((binding) => binding.workerId === value.workerId && binding.capacityKey === value.capacityKey) ||
     typeof value.status !== 'string' || !['reserved', ...TERMINAL, 'uncertain'].includes(value.status) || !iso(value.startedAt) ||
@@ -631,7 +640,9 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
     state.observations = mergeResourceObservations(state.observations, incoming);
     const previous = state.attempts.find((row) => row.id === task.id);
     if (previous) {
-      if (previous.taskDigest !== taskDigest) throw new Error('Resource task identity conflict');
+      if (previous.taskDigest !== taskDigest || canonical(previous.origin ?? null) !== canonical(task.origin ?? null)) {
+        throw new Error('Resource task identity conflict');
+      }
       return { receipt: previous, plan: null, replayed: true };
     }
     let gates = { unavailableWorkerIds: unavailable, quotaUnavailableWorkerIds: quotaUnavailable };
@@ -645,7 +656,8 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
     const binding = bindings.find((row) => row.workerId === assignment.selectedWorkerId)!;
     const receipt: ResourceTaskReceipt = { schemaVersion: 1, id: task.id, taskDigest, poolDigest,
       workerId: binding.workerId, capacityKey: binding.capacityKey, status: 'reserved', startedAt: new Date().toISOString(),
-      finishedAt: null, outputDigest: null, inputTokens: null, outputTokens: null, reason: 'task-reserved', verifiedAccepted: false };
+      finishedAt: null, outputDigest: null, inputTokens: null, outputTokens: null, reason: 'task-reserved', verifiedAccepted: false,
+      ...(task.origin ? { origin: { ...task.origin } } : {}) };
     state.attempts.push(receipt);
     requireResourcePoolSettlementHeadroom(state, pool);
     return { receipt, plan: assignment, replayed: false };

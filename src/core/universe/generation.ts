@@ -1,7 +1,7 @@
 import { normalizeNumericLoopbackOllamaBaseUrl } from '../run/ollama-identity.js';
 import { resourceUsageScopeForProvider } from '../resources/performance.js';
-import { canonical, digest } from './artifacts.js';
 import { validSeedContextReceipt } from './seed-context.js';
+export { resourceGenerationTaskId } from '../resources/task-origin.js';
 import type { UniverseGenerationConfig, UniverseGenerationReceipt, UniverseGenerationUsage, UniverseResourceGenerationEvidence,
   UniverseRun, UniverseTrial } from './types.js';
 
@@ -37,16 +37,6 @@ function resourceWorkers(value: unknown): value is string[] {
   return denseArray(value, 1, 32) && value.every(resourceId) && new Set(value).size === value.length;
 }
 
-/** Deterministic within the durable run/variant scope, independent of scratch UUIDs. */
-export function resourceGenerationTaskId(identity: { universeId: string; runId: string; variantId: string }): string {
-  if (!dataObject(identity, ['universeId', 'runId', 'variantId']) ||
-    !Object.values(identity).every((value) => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(value))) {
-    throw new Error('Invalid Universe resource generation identity');
-  }
-  const identityDigest = digest(canonical(identity));
-  // Keep each segment below the public scrubber's token-shaped string bound.
-  return `u-${identityDigest.slice(0, 30)}-${identityDigest.slice(30, 60)}`;
-}
 export function validGenerationPath(value: unknown): value is string {
   return boundedText(value, 512) && !value.includes('\\') && !value.startsWith('/') &&
     !value.includes(':') && value.split('/').every((part) => part !== '' && part !== '.' && part !== '..' &&

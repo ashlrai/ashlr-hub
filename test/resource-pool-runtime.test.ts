@@ -7,7 +7,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { mergeResourceObservations, readResourceJson, resourcePoolStatus, runResourceTask, validateUnavailableResourceWorkerIds,
-  type ResourceTask } from '../src/core/resources/pool-runtime.js';
+  validateResourceTask, type ResourceTask } from '../src/core/resources/pool-runtime.js';
+import { resourceGenerationTaskId, type ResourceTaskOrigin } from '../src/core/resources/task-origin.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 import { validateResourceObservations, type ResourceObservation, type ResourcePool, type ResourceWorker } from '../src/core/resources/pool-policy.js';
 import { mergeClaudeResourceObservation } from '../src/core/resources/provider-observations.js';
@@ -91,6 +92,68 @@ async function quotaFixture(provider: 'codex' | 'claude' = 'codex', allowUnknown
 }
 
 describe.skipIf(process.platform === 'win32')('durable resource task runtime acceptance', () => {
+  const origin: ResourceTaskOrigin = { kind: 'universe-generation', universeId: 'fixture', runId: 'run-one', variantId: 'edit' };
+  const originId = resourceGenerationTaskId({ universeId: origin.universeId, runId: origin.runId, variantId: origin.variantId });
+
+  it('records generation origin atomically before the dispatch guard, including a refused launch', async () => {
+    const f = await fixture(); let observed: unknown;
+    const result = await runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings, observations: f.observations,
+      task: f.task(originId, { origin }), beforeWorkerDispatch: () => {
+        observed = JSON.parse(f.ledger()).attempts[0]; return false;
+      } });
+    expect(observed).toMatchObject({ id: originId, origin, status: 'reserved', taskDigest: digest(canonical(f.task(originId, { origin }))) });
+    expect(result.receipt).toMatchObject({ id: originId, origin });
+    expect(result.receipt?.status).not.toBe('reserved');
+    expect(f.status().attempts[0]?.origin).toEqual(origin); expect(f.requests).toHaveLength(0);
+  });
+
+  it('retains origin after real worker settlement and exact replay without trial publication', async () => {
+    const f = await fixture(); const result = await f.run(originId, { origin });
+    expect(result.receipt).toMatchObject({ status: 'completed', origin });
+    const before = f.ledger();
+    expect((await f.run(originId, { origin })).replayed).toBe(true);
+    expect(f.status().attempts[0]?.origin).toEqual(origin); expect(f.ledger()).toBe(before);
+    expect(f.requests).toHaveLength(1); expect(before).not.toContain('TASK_REQUEST_KEEP_PRIVATE');
+  });
+
+  it('keeps legacy tasks unlabelled and refuses adding provenance to a prior task', async () => {
+    const f = await fixture(); await f.run(originId);
+    expect(f.status().attempts[0]).not.toHaveProperty('origin'); const before = f.ledger();
+    await expect(f.run(originId, { origin })).rejects.toThrow('identity conflict');
+    expect(f.ledger()).toBe(before); expect(f.requests).toHaveLength(1);
+  });
+
+  it('refuses stripped origin on replay even when the original task digest remains', async () => {
+    const f = await fixture(); await f.run(originId, { origin });
+    const state = JSON.parse(f.ledger()); delete state.attempts[0].origin;
+    writeJson(join(f.root, 'pool-state.json'), state); const before = f.ledger();
+    await expect(f.run(originId, { origin })).rejects.toThrow('identity conflict');
+    expect(f.ledger()).toBe(before); expect(f.requests).toHaveLength(1);
+  });
+
+  it.each([undefined, null, {}, { ...origin, extra: true }, { ...origin, runId: '../run' },
+    { ...origin, kind: 'console' }, { ...origin, variantId: 'another' }])('rejects malformed or mismatched origin before reservation: %#', async value => {
+    const f = await fixture();
+    await expect(f.run(originId, { origin: value as ResourceTaskOrigin })).rejects.toThrow('Invalid resource task');
+    expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+  });
+
+  it('detaches validated origin and refuses accessor metadata without invoking getters', async () => {
+    const f = await fixture(); const input = f.task(originId, { origin: { ...origin } });
+    const validated = validateResourceTask(input); input.origin!.runId = 'changed'; expect(validated.origin).toEqual(origin);
+    const getter = vi.fn(() => origin.runId); const accessor = { ...origin };
+    Object.defineProperty(accessor, 'runId', { get: getter });
+    expect(() => validateResourceTask(f.task(originId, { origin: accessor }))).toThrow('Invalid resource task');
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it('rejects a persisted origin that disagrees with the task ID', async () => {
+    const f = await fixture(); await f.run(originId, { origin });
+    const state = JSON.parse(f.ledger()); state.attempts[0].origin.variantId = 'foreign';
+    writeJson(join(f.root, 'pool-state.json'), state);
+    expect(() => f.status()).toThrow(); expect(f.requests).toHaveLength(1);
+  });
+
   it.each([null, 'local-a', ['missing'], ['local-a', 'local-a'], Array(1), Array(33).fill('local-a')])(
     'rejects malformed admission constraints before store initialization or worker contact: %#', async (value) => {
       const f = await fixture();
