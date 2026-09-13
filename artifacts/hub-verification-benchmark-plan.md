@@ -333,7 +333,7 @@ objective check/replay, console registration restoration and successor source
 inspection. It is a useful Hub improvement, unlike replaying the already-fixed
 marker-filter defect or incrementing a synthetic value.
 
-Reviewed checkout: `/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00`, branch
+Reviewed checkout: isolated Hub integration worktree, branch
 `auto/p00`, source `f543e3627adbbe979c5b4a826d5e1036ab745edb`. Initial working tree
 was clean. Entire reported no checkpoint for this branch in the preceding audit.
 This proposal is the only file changed by this workstream; concurrent parent

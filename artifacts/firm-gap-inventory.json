@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "packageId": "P01",
   "source": {
-    "repository": "/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p21",
+    "repository": "ashlr-hub repository checkout",
     "branch": "auto/p21",
     "baseCommit": "5c270bc73890e474463c31764d51e76196ad2e3f",
     "dirtyState": "P21 owned files uncommitted; this inventory adds only P01 artifacts",
-    "directionSource": "user attachment f726d14c-98a5-4b55-bcff-50fcfc71aad9/pasted-text.txt"
+    "directionSource": "user-provided direction attachment (private original retained)"
   },
   "scope": "Read-only source/call-site inventory; no private state, provider probes, resident service inspection or activation.",
   "classificationLegend": {

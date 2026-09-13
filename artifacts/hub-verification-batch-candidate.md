@@ -23,7 +23,7 @@ target Git blob `a5a6fcf36dd6990f309ee1f0e15072c63cce16d4`. The native measureme
 below apply only to that historical target and candidate, not the rebase.
 
 Rebased on 2026-09-12 against the frozen, uncommitted retained-seed fix in
-`/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-builtin-recipes`, whose checkout
+the isolated preparation-batch candidate worktree, whose checkout
 base is `600c099cdd5c67dde7bfd74e0a858835940ba4d1`. The exact target Git blob is
 `c0fa8821cc81e73ef9cc03d006cbffc08f8c6933`; the base commit alone does not contain
 that target. Patch SHA-256:
