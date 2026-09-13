@@ -286,7 +286,7 @@ describe('predecessor completion joins over mocked host evidence', () => {
     const owner = vi.spyOn(workspaceProof, 'readResourceWorkspaceProof').mockReturnValue({
       root: f.runtime.root, workspace: f.options.setup.workspace, poolDigest: h('pool'),
       stateDigest: hash({ schemaVersion: 1, paused: false, jobs: [] }), lockPaths: [],
-      metadataPending: false, ownsReceipt: () => false,
+      metadataPending: false, ownsReceipt: () => false, isPoolAvailable: () => true,
     });
     hooks.accounting.mockImplementation(() => ({ sourceState: 'healthy', attempts: structuredClone(f.attempts),
       observations: [{ sample: ++calls }] }));
@@ -300,7 +300,7 @@ describe('predecessor completion joins over mocked host evidence', () => {
     const owner = vi.spyOn(workspaceProof, 'readResourceWorkspaceProof').mockReturnValue({
       root: f.runtime.root, workspace: f.options.setup.workspace, poolDigest: h('pool'),
       stateDigest: hash({ schemaVersion: 1, paused: false, jobs: [] }), lockPaths: [],
-      metadataPending: false, ownsReceipt: () => false,
+      metadataPending: false, ownsReceipt: () => false, isPoolAvailable: () => true,
     });
     hooks.accounting.mockImplementation(() => ({ sourceState: 'healthy', attempts: structuredClone(f.attempts),
       observations: [], [field]: { revision: ++calls } }));

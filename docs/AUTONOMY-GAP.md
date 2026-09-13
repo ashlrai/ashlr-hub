@@ -107,10 +107,16 @@ publication proof remain synchronous; full standing-mission responsiveness is
 not yet established by the read-worker change.
 Live proof replies also reconcile an exact prior human reservation against its
 proven terminal receipt, so ordinary completion during a read does not become
-false unresolved work. This does not recover uncertain workers. Effectful setup
-isolation must also shorten its shared pool-lock hold: settlement transactions
-currently have a bounded lock wait, so moving the existing long critical section
-to a thread unchanged would interfere with human completion.
+false unresolved work. This does not recover uncertain workers. Live setup now
+uses a separate publication lease rather than holding the ledger transaction
+lock; real ledger writes can proceed at publication while genuine console and
+collector ownership remain enforced. Stopped/offline setup retains its original
+resource-lock contract. Effectful setup still needs cooperative worker isolation
+and measured human-task/HTTP responsiveness during materialization; lock
+separation alone does not establish that result.
+Read workers also obtain ledger availability from the live owner after its
+synchronous transactions finish; external locks and revoked custody still hold
+the proof. A vacancy sample never grants transaction ownership.
 Terminal/browser panels, conversation compaction and native desktop bootstrap
 remain separate gaps.
 

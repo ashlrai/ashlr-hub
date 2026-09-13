@@ -16,7 +16,7 @@ import { acquireLocalStoreLock, releaseLocalStoreLock } from '../src/core/fleet/
 import * as ownership from '../src/core/fleet/local-store-lock.js';
 import * as bundle from '../src/core/resources/engineering-preparation.js';
 import * as deliveredSource from '../src/core/resources/engineering-delivered-source.js';
-import { setResourcePoolAllocation, readResourceJson } from '../src/core/resources/pool-runtime.js';
+import { setResourcePoolAllocation, readResourceJson, resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
 import type { ResourceObservation } from '../src/core/resources/pool-policy.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
@@ -79,6 +79,49 @@ function evidence(directory: string): string {
   visit(directory); return JSON.stringify(rows);
 }
 describe('offline autonomous setup', () => {
+  it.each(['released', 'retained', 'revoked'] as const)('samples live-owner ledger availability with %s transaction custody', async mode => {
+    const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+      bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool), readObservations: () => [] });
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+    let transaction: ownership.LocalStoreLock | null = null; let injected = false;
+    const rpcHost = proofRpc.createEngineeringWorkerRpcHost;
+    vi.spyOn(proofRpc, 'createEngineeringWorkerRpcHost').mockImplementation(options => {
+      for (const invalid of [null, 0, -1, 1, 0.5, '1', { sampleId: 1, root: f.ledger }]) {
+        expect(() => options.handlers['custody.poolAvailable']!(invalid)).toThrow('Mission proof');
+      }
+      const host = rpcHost(options);
+      return { ...host, handle(message: unknown) {
+        // Model the worker receiving its scope sample while the parent begins
+        // a ledger transaction. The parent can answer its next message only
+        // after the synchronous transaction releases its real lock.
+        if (transaction && mode !== 'retained') { expect(releaseLocalStoreLock(transaction)).toBe(true); transaction = null; }
+        if (mode === 'revoked' && (message as { method?: string })?.method === 'custody.poolAvailable') supervisor.setPaused(true);
+        if (!injected && (message as { method?: string })?.method === 'custody.sample') {
+          injected = true; transaction = acquireLocalStoreLock(join(f.ledger, '.pool.lock'), 0,
+            { anchorPath: f.ledger, exactPrivateStorage: true });
+          expect(transaction).not.toBeNull();
+        }
+        return host.handle(message);
+      } };
+    });
+    try {
+      const reading = readEngineeringMissionProof({ kind: 'setup', input: f.options },
+        { custody, lifetime: { deadlineAt: new Date(Date.now() + 60_000).toISOString() } });
+      if (mode !== 'released') {
+        await expect(reading).rejects.toThrow('Mission proof');
+        expect(injected).toBe(true);
+        if (mode === 'retained') expect(ownership.ownsLocalStoreLock(transaction)).toBe(true);
+        else expect(supervisor.snapshot().paused).toBe(true);
+        return;
+      }
+      const plan = await reading;
+      expect(injected).toBe(true);
+      expect(plan.holds).not.toContain('pool-ownership-present');
+      expect(plan).toEqual(check(f.options, custody));
+    } finally { if (transaction) releaseLocalStoreLock(transaction); await supervisor.close(); }
+  });
   it.each(['append', 'pause'] as const)('handles %s between the worker read and live ownership sample without changing scope', async change => {
     const f = fixture(); const plan = check(f.options); prepare({ ...f.options, expectedPlanDigest: plan.planDigest });
     const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
@@ -201,14 +244,35 @@ describe('offline autonomous setup', () => {
       const plan = check(f.options, custody);
       expect(plan.holds).not.toContain('ordinary-queued-work-retained');
       const result = prepare({ ...f.options, expectedPlanDigest: plan.planDigest }, { workspaceCustody: custody,
-        beforePublication: locks => { expect(locks).toHaveLength(3); expect(locks.every(ownership.ownsLocalStoreLock)).toBe(true); } });
+        beforePublication: locks => {
+          expect(locks).toHaveLength(2); expect(locks.every(ownership.ownsLocalStoreLock)).toBe(true);
+          expect(existsSync(join(f.ledger, '.resource-engineering-setup.lock'))).toBe(true);
+          // Use the real ledger transaction, not just a filesystem absence
+          // assertion: setup must not monopolize ordinary settlement's lock.
+          const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
+          const revision = resourcePoolStatus(f.ledger, pool, bindings, []).allocation.revision;
+          setResourcePoolAllocation(f.ledger, pool, bindings, 75, revision);
+        } });
       expect(result.disposition).toBe('created');
+      expect(existsSync(join(f.ledger, '.resource-engineering-setup.lock'))).toBe(false);
       expect(readResourceWorkspaceCustody(custody).metadataPending).toBe(true);
       expect(supervisor.snapshot().jobs.find(row => row.id === 'human')?.state).toBe('queued');
       expect(existsSync(join(f.ledger, '.pool.lock'))).toBe(false);
       expect(existsSync(join(f.ledger, '.resource-console.lock'))).toBe(true);
       expect(existsSync(join(f.ledger, '.resource-quota-refresh.lock'))).toBe(true);
       expect(check(f.options, custody).initialEnrollmentDigest).toBe(result.initialEnrollmentDigest);
+      const nextSetupLease = acquireLocalStoreLock(join(f.ledger, '.resource-engineering-setup.lock'), 0,
+        { anchorPath: f.ledger, exactPrivateStorage: true });
+      expect(nextSetupLease).not.toBeNull();
+      try {
+        // A successor's preparation ownership must not invalidate the already
+        // completed setup used by its historical predecessor check.
+        const historical = check(f.options, custody);
+        expect(historical.initialEnrollmentDigest).toBe(result.initialEnrollmentDigest);
+        expect(historical.holds.some(reason => reason.endsWith('-ownership-present'))).toBe(false);
+        expect(prepare({ ...f.options, expectedPlanDigest: plan.planDigest }, { workspaceCustody: custody }).disposition).toBe('replayed');
+        expect(ownership.ownsLocalStoreLock(nextSetupLease)).toBe(true);
+      } finally { releaseLocalStoreLock(nextSetupLease); }
       // Real proof worker reads the same files while live parent custody answers
       // only ownership questions. This does not delegate execution credentials.
       const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
@@ -238,6 +302,63 @@ describe('offline autonomous setup', () => {
         reading = false; await probing; health.closeAllConnections(); await new Promise<void>(resolve => health.close(() => resolve()));
       }
     } finally { quota.close(); await supervisor.close(); }
+  });
+  it.each(['publication-failure', 'pause', 'lease-loss', 'lease-replacement'] as const)('cleans up live setup after %s without releasing workspace ownership', async failure => {
+    const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+      bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool), readObservations: () => [] });
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+    const setupPath = join(f.ledger, '.resource-engineering-setup.lock');
+    let setupLock: ownership.LocalStoreLock | undefined;
+    let replacementLock: ownership.LocalStoreLock | null = null;
+    const acquire = ownership.acquireLocalStoreLockWithOutcome;
+    vi.spyOn(ownership, 'acquireLocalStoreLockWithOutcome').mockImplementation((...args) => {
+      const result = acquire(...args);
+      if (args[0] === setupPath && result.state === 'acquired') setupLock = result.lock;
+      return result;
+    });
+    try {
+      const expectedPlanDigest = check(f.options, custody).planDigest;
+      const beforePublication = vi.fn((locks: readonly ownership.LocalStoreLock[]) => {
+        expect(locks).toHaveLength(2); expect(locks.every(ownership.ownsLocalStoreLock)).toBe(true);
+        if (failure === 'publication-failure') throw Error('fixture publication failure');
+        if (failure === 'pause') supervisor.setPaused(true);
+        if (failure === 'lease-loss' || failure === 'lease-replacement') expect(releaseLocalStoreLock(setupLock)).toBe(true);
+        if (failure === 'lease-replacement') {
+          replacementLock = acquireLocalStoreLock(setupPath, 0, { anchorPath: f.ledger, exactPrivateStorage: true });
+          expect(replacementLock).not.toBeNull();
+        }
+      });
+      const message = failure === 'publication-failure' ? 'fixture publication failure' : failure === 'pause' ?
+        'Resource supervisor custody unavailable' : failure === 'lease-replacement' ? 'Setup ownership cleanup could not be confirmed' : 'Setup ownership changed';
+      expect(() => prepare({ ...f.options, expectedPlanDigest }, { workspaceCustody: custody, beforePublication })).toThrow(message);
+      expect(beforePublication).toHaveBeenCalled();
+      expect(existsSync(join(f.options.output, 'setup-intent.json'))).toBe(true);
+      expect(existsSync(join(f.options.output, 'setup-receipt.json'))).toBe(false);
+      expect(existsSync(setupPath)).toBe(failure === 'lease-replacement');
+      if (replacementLock) expect(ownership.ownsLocalStoreLock(replacementLock)).toBe(true);
+      expect(supervisor.snapshot().paused).toBe(failure === 'pause');
+      expect(existsSync(join(f.ledger, '.pool.lock'))).toBe(false);
+      expect(existsSync(join(f.ledger, '.resource-quota-refresh.lock'))).toBe(false);
+      expect(existsSync(join(f.ledger, '.resource-console.lock'))).toBe(true);
+    } finally { if (replacementLock) releaseLocalStoreLock(replacementLock); await supervisor.close(); }
+  });
+  it('refuses a competing live setup lease without writing output or reclaiming ownership', async () => {
+    const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+      bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool), readObservations: () => [] });
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+    const expectedPlanDigest = check(f.options, custody).planDigest;
+    const lock = acquireLocalStoreLock(join(f.ledger, '.resource-engineering-setup.lock'), 0, { anchorPath: f.ledger, exactPrivateStorage: true });
+    expect(lock).not.toBeNull();
+    try {
+      const before = evidence(f.base);
+      expect(() => prepare({ ...f.options, expectedPlanDigest }, { workspaceCustody: custody })).toThrow('Setup publication ownership unavailable');
+      expect(evidence(f.base)).toBe(before);
+      expect(ownership.ownsLocalStoreLock(lock)).toBe(true);
+    } finally { releaseLocalStoreLock(lock); await supervisor.close(); }
   });
   it('refuses forged or revoked workspace custody before publishing a setup', async () => {
     const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };

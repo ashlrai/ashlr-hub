@@ -126,7 +126,10 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     const observeProof = vi.spyOn(missionProof, 'readEngineeringMissionProof').mockImplementation(async (request, host) => {
       try {
         const result = await readProof(request, host);
-        if (result.status === 'held') proofFailures.push(`${request.kind}:held:${result.reasons.join(',')}`);
+        if (result.status === 'held') {
+          const reason = `${request.kind}:held:${result.reasons.join(',')}`;
+          proofFailures.push(reason); console.error('MISSION_PROOF_HELD', reason);
+        }
         return result;
       }
       catch (error) { proofFailures.push(`${request.kind}:${error instanceof Error ? error.message : 'unavailable'}`); throw error; }
@@ -175,6 +178,10 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     const workspace = await startResourceConsoleServer({ root: f.root, workspace: f.project, poolFile: f.paths.pool,
       bindingsFile: f.paths.bindings, observationsFile: f.paths.observations, projectsFile: f.paths.projects, execute: true, port: 0 });
     cleanup.push(() => workspace.close());
+    // A failed assertion can bypass the normal human response below. Release
+    // this test-owned held transport before draining the workspace, otherwise
+    // cleanup can obscure the actual proof failure for the full task timeout.
+    cleanup.push(async () => { for (const response of f.humanResponses) response.destroy(); });
     // A deliberately unavailable human task must stay queued, not be cancelled
     // or consume a disabled worker, while the mission advances on the same owner.
     workspace.submitTask({ id: 'human-queued', prompt: 'Keep my private human work', allowedWorkerIds: ['spare'],

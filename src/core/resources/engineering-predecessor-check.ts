@@ -171,7 +171,10 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       stage = 'custody';
       for (const name of ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock', '.resource-quota-refresh-pending.json']) {
         if (name === '.resource-quota-refresh-pending.json' && owner?.metadataPending) continue;
-        if (!owned(name)) absent(join(runtime.root, name));
+        if (!owned(name)) {
+          if (name === '.pool.lock' && owner) requireEvidence(owner.isPoolAvailable());
+          else absent(join(runtime.root, name));
+        }
       }
       absent(join(runtime.root, 'engineering-supervision', supervision.id, '.execution.lock'));
       absent(join(runtime.root, 'engineering-successors', successor.supervisionId, '.execution.lock'));

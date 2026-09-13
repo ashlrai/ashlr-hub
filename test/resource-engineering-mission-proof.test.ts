@@ -90,7 +90,7 @@ describe('mission read-only proof lifecycle', () => {
   it('omits only job rows from an explicitly issued read-only scope projection', () => {
     const original = { schemaVersion: 7, originPoolDigest: 'a'.repeat(64), scopeDigest: 'b'.repeat(64), paused: false, projects: [], jobs: [] };
     const sample: ResourceWorkspaceProofSample = { root: '/fixture', workspace: '/project', poolDigest: 'c'.repeat(64),
-      stateDigest: digest(canonical(original)), lockPaths: [], metadataPending: false, ownsReceipt: () => false };
+      stateDigest: digest(canonical(original)), lockPaths: [], metadataPending: false, ownsReceipt: () => false, isPoolAvailable: () => true };
     const changed = { ...original, jobs: [{ id: 'human-new' }] };
     expect(matchesWorkspaceProofState(sample, changed)).toBe(false);
     sample.consoleScopeDigest = digest(canonical(original));

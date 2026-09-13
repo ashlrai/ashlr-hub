@@ -213,6 +213,12 @@ live quota observations and owner-proven ordinary task receipts. It still compar
 allocation, account-access policy and every engineering or unknown receipt.
 Every new dispatch independently checks fresh quota; historical verification
 never authorizes execution. Ownerless reads retain exact observation comparison.
+Live proof workers ask the actual workspace owner for a fresh ledger-lock
+availability sample. The parent handles that query after its synchronous ledger
+transactions finish, avoiding a stale busy result captured by the worker.
+External or unknown locks still withhold the proof. This sample does not acquire
+or lend a lock, retry work, or authorize a transaction; scope, stop and double-read
+evidence checks remain required.
 If a human task finishes between the worker's receipt read and the host's reply,
 the host can join the old reservation to its exact current terminal receipt.
 The live owner, task identity, worker/capacity, start time and complete reservation
@@ -227,6 +233,18 @@ deadline and action-time guards still govern all effects. Setup materialization
 and its final predecessor publication check remain synchronous: isolated reads
 do not yet establish a fully responsive standing-mission workspace.
 
+New setup under genuine live workspace custody uses a separate root-local
+`.resource-engineering-setup.lock`, leaving `.pool.lock` available to ordinary
+ledger transactions. The existing console owner continues to fence pool-epoch
+changes. Setup retains collector ownership, rechecks its own lease and current
+workspace/source evidence at publication, and releases only leases it acquired.
+Competing new preparation is refused; completed setup history remains readable
+and replayable while another setup holds that lease. Unknown or replaced leases
+are not reclaimed, and partial output is retained for inspection. Offline setup
+without live custody still acquires all three resource locks. This separates
+publication ownership from accounting ownership; it does not itself move
+materialization off the event loop or prove human-task latency during setup.
+
 Predecessor snapshot mismatches name a fixed evidence field (for example,
 `stability-accounting-allocation-evidence-unavailable`). They never include
 account values, prompts, raw provider messages or local paths.
@@ -234,10 +252,10 @@ account values, prompts, raw provider messages or local paths.
 Component close is not a durable fleet-wide STOP; do not
 use it as a substitute for global KILL. These in-process APIs do not install an
 always-on service or provide a browser control for starting a standing mission.
-Setup and predecessor proof are still synchronous host calls. Preserving worker
-lifetime does not prove responsive HTTP/UI latency during those filesystem/Git
-joins; moving expensive verification off the workspace event loop remains
-separate work.
+New setup and its final predecessor publication proof are still synchronous
+host calls. Preserving worker lifetime does not prove responsive HTTP/UI latency
+during those filesystem/Git joins; isolating that effectful work remains separate
+from the already-isolated read-only checks.
 
 ## Engineering workspace
 

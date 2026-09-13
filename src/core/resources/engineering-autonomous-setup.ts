@@ -30,6 +30,7 @@ export type * from './engineering-autonomous-setup-types.js';
 const hash = (value: unknown) => digest(canonical(value));
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
+const SETUP_LOCK = '.resource-engineering-setup.lock';
 function fail(message: string): never { throw new ResourceSupervisorError('CONFLICT', message); }
 function data<T>(value: unknown): T {
   const json = canonicalEvidencePackJsonV3(value);
@@ -117,13 +118,14 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspacePr
   if (!owner && state?.jobs.some(row => row.state === 'dispatching' || row.state === 'unresolved')) holds.push('console-work-unresolved');
   const lockPath = join(runtime.root, '.resource-console.lock');
   if (!owner && present(lockPath)) holds.push('console-ownership-present');
-  if (present(join(runtime.root, '.pool.lock'))) holds.push('pool-ownership-present');
+  if (owner ? !owner.isPoolAvailable() : present(join(runtime.root, '.pool.lock'))) holds.push('pool-ownership-present');
   if (!owner?.lockPaths.includes(join(runtime.root, '.resource-quota-refresh.lock')) &&
     present(join(runtime.root, '.resource-quota-refresh.lock'))) holds.push('quota-ownership-present');
   if (!owner?.metadataPending && present(join(runtime.root, '.resource-quota-refresh-pending.json'))) holds.push('quota-work-unresolved');
   if (poolState.attempts.some(row => row.status === 'uncertain' || row.status === 'reserved' && !owner?.ownsReceipt(row))) holds.push('resource-work-unresolved');
   const completed = present(paths.receipt);
   if (!internal && !completed) {
+    if (present(join(runtime.root, SETUP_LOCK))) fail('Setup publication ownership unavailable');
     if (readdirSync(options.output).length) fail('Incomplete setup requires inspection; no automatic repair');
     if (holds.some(reason => reason.endsWith('-ownership-present') || reason.endsWith('-work-unresolved'))) fail('Setup requires stopped, resolved console ownership');
     if (readResourceEngineeringPreparationRegistrations(runtime.root, policy.registrationScope).length) fail('Existing preparation history requires its original setup context');
@@ -224,9 +226,22 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
   if (hostStopped()) fail('Host setup publication stopped');
   const locks = custody ? [...readResourceWorkspaceCustody(custody).locks] : [];
   const acquiredLocks: LocalStoreLock[] = [];
+  let setupLock: LocalStoreLock | undefined;
   let result: Report;
   try {
-    for (const name of ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock']) {
+    if (custody) {
+      // The live console fences pool-epoch changes. Serialize preparation
+      // separately so ordinary receipt settlement can still transact on the
+      // ledger. This lease is not a resource lock lent to predecessor proofs.
+      const file = join(current.runtime.root, SETUP_LOCK);
+      if (present(file)) fail('Setup publication ownership unavailable');
+      const next = acquireLocalStoreLockWithOutcome(file, 0, { anchorPath: current.runtime.root, exactPrivateStorage: true });
+      if (next.state !== 'acquired') fail('Setup publication ownership unavailable');
+      setupLock = next.lock; acquiredLocks.push(next.lock);
+    }
+    const resourceLocks = custody ? ['.resource-console.lock', '.resource-quota-refresh.lock'] :
+      ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock'];
+    for (const name of resourceLocks) {
       const file = join(current.runtime.root, name);
       if (locks.some(lock => lock.path === file)) continue;
       if (present(file)) fail('Setup requires stopped resource ownership');
@@ -236,9 +251,11 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
     }
     const guard = () => {
       if (hostStopped()) fail('Host setup publication stopped');
-      if (locks.some(lock => !ownsLocalStoreLock(lock)) || !matchesResourceConsoleProject(current.outputBinding)) fail('Setup ownership changed');
+      if (locks.some(lock => !ownsLocalStoreLock(lock)) || setupLock && !ownsLocalStoreLock(setupLock) ||
+        !matchesResourceConsoleProject(current.outputBinding)) fail('Setup ownership changed');
       const fresh = capture(options, true, custody);
-      if (fresh.plan.planDigest !== expectedPlanDigest || fresh.plan.holds.some(reason => reason.endsWith('-work-unresolved'))) fail('Setup inputs or resource ownership changed');
+      if (fresh.plan.planDigest !== expectedPlanDigest || fresh.plan.holds.some(reason => reason.endsWith('-work-unresolved') ||
+        custody && reason === 'pool-ownership-present')) fail('Setup inputs or resource ownership changed');
       if (hostStopped()) fail('Host setup publication stopped');
     };
     guard();
@@ -273,8 +290,8 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
     result = report(current, verified(current).initialEnrollmentDigest, 'created');
   } finally {
     let released = true;
-    // Borrowed workspace/collector locks outlive this setup. Release only our
-    // short publication locks, including on partial preparation failure.
+    // Borrowed workspace/collector locks outlive this setup. Release only the
+    // leases acquired here, including on partial preparation failure.
     for (const lock of acquiredLocks.reverse()) if (!releaseLocalStoreLock(lock)) released = false;
     if (!released) fail('Setup ownership cleanup could not be confirmed');
   }

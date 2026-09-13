@@ -10,6 +10,7 @@ import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } 
 import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
 import { readResourceJson, type ResourceTaskReceipt } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
+import { isWorkspacePoolAvailable } from './workspace-proof-context.js';
 import type { ResourceEngineeringAutonomousSetupOptions, ResourceEngineeringAutonomousSetupPlan } from './engineering-autonomous-setup-types.js';
 import type { ResourceEngineeringPredecessorCheck, ResourceEngineeringPredecessorCheckOptions } from './engineering-predecessor-check.js';
 
@@ -78,6 +79,15 @@ export async function readEngineeringMissionProof(request: EngineeringMissionPro
       // but use fresh genuine ownership when an ordinary task has progressed.
       const fresh = readResourceWorkspaceCustody(custody!, owner);
       return fresh.ownsReceipt(value.receipt) || fresh.ownsSettledReservation(value.receipt);
+    },
+    'custody.poolAvailable': input => {
+      assertActive();
+      if (!Number.isSafeInteger(input)) throw unavailable();
+      const owner = samples.get(input as number); if (!owner || !custody) throw unavailable();
+      // Parent ledger transactions are synchronous. This message is processed
+      // after they release the lock, avoiding a stale worker-side busy sample.
+      // External/unknown ownership still returns false; no lease is borrowed.
+      return isWorkspacePoolAvailable(readResourceWorkspaceCustody(custody, owner).root);
     },
   } });
   const worker = new Worker(entrypoint(), { workerData: { schemaVersion: 1, request: captured,
