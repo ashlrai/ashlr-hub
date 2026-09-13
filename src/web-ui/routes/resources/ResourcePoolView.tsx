@@ -21,6 +21,7 @@ import { TaskInspector, taskOwnership, taskState, taskTone } from './TaskInspect
 import { FleetMap } from './FleetMap.js';
 import { buildResourceFleet } from './fleet-model.js';
 import { WorkspaceView } from '../workspace/WorkspaceView.js';
+import { EngineeringLifecycle } from '../workspace/EngineeringLifecycle.js';
 import styles from './ResourcePoolView.module.css';
 
 export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
@@ -30,6 +31,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
   const hold = useMutationHold();
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [engineeringReady, setEngineeringReady] = useState(scope.engineeringLifecycle === undefined);
   const [allocationBusy, setAllocationBusy] = useState(false);
   const [workerAccessBusy, setWorkerAccessBusy] = useState(false);
   const [workerAccessError, setWorkerAccessError] = useState<string | null>(null);
@@ -211,6 +213,8 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
           onClick={() => hold.hasHold ? hold.clear() : setUnlockOpen(true)}>{hold.hasHold ? 'Lock controls' : 'Unlock controls'}</button> : null}
       </div>
     </header>
+    {scope.engineeringLifecycle !== undefined ? <EngineeringLifecycle scope={scope} unlocked={hold.hasHold}
+      onUnlock={() => setUnlockOpen(true)} onReadyChange={setEngineeringReady} /> : null}
     <div className={styles.statusBar}><div className={styles.freshness}>
       <strong>{scope.poolId}</strong>{snapshot ? <span>{historical ? 'Last successful read' : 'Observed'} {resourceTime(snapshot.sampledAt)}</span> : null}
       <span>Refreshes every 3 seconds while visible</span>{query.status === 'refreshing' ? <RefreshIndicator /> : null}
@@ -229,6 +233,7 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
       <div hidden={surface !== 'workspace'} id="resource-workspace">
         {workspaceVisited ? <WorkspaceView key={`${scope.root}:${scope.poolId}:${scope.workspace ?? ''}`} scope={scope} snapshot={snapshot}
           surfaceActive={surface === 'workspace'}
+          engineeringControlsAvailable={engineeringReady}
           historical={historical} enabled={enabled} stopEnabled={stopEnabled} busy={busy} unlocked={hold.hasHold}
           onUnlock={() => setUnlockOpen(true)} onSubmit={submit} onCancel={(id) => { void cancel(id); }} onDeleteHistory={deleteHistory} /> : null}
       </div>

@@ -26,6 +26,13 @@ beforeEach(() => {
 });
 
 describe('automatic admission recovery observation', () => {
+  it('retains supervision evidence without mutation controls when the component closes', async () => {
+    render(<EngineeringSupervision available unlocked controlsAvailable={false} />);
+    await screen.findByText('hub-repair');
+    const pause = screen.getByRole('button', { name: 'Pause automatic launches' });
+    expect(pause).toBeDisabled(); expect(screen.getByRole('button', { name: 'Refresh supervision' })).toBeEnabled();
+    fireEvent.click(pause); expect(writes).toHaveLength(0);
+  });
   function setup() {
     value.deadlineAt = new Date(Date.now() + 60_000).toISOString();
     value.admission = { maxEnrollments: 3, remainingEnrollments: 2, autoAdmitPrepared: true };

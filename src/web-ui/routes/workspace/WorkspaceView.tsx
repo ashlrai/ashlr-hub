@@ -14,6 +14,7 @@ import { WorkspaceEngineering } from './WorkspaceEngineering.js';
 
 export interface WorkspaceViewProps {
   surfaceActive?: boolean;
+  engineeringControlsAvailable?: boolean;
   scope: ResourceConsoleScope; snapshot: ResourceConsoleSnapshot; historical: boolean;
   enabled: boolean; stopEnabled: boolean; busy: boolean; unlocked: boolean;
   onUnlock(): void; onSubmit(input: ResourceConsoleTaskInput): Promise<boolean>; onCancel(id: string): void;
@@ -54,7 +55,7 @@ function ProjectWorkspaces(props: WorkspaceViewProps) {
   })}</>;
 }
 
-function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy, unlocked, onUnlock, onSubmit, onCancel, onDeleteHistory,
+function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy, unlocked, onUnlock, onSubmit, onCancel, onDeleteHistory, engineeringControlsAvailable,
   project, projects, onSelectProject, active = true }: WorkspaceViewProps & {
     project?: ResourceConsoleProject; projects?: ResourceConsoleProject[]; onSelectProject?(id: string): void; active?: boolean;
   }) {
@@ -259,6 +260,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
 
     {engineering && scope.engineeringSupported ? <div className={styles.engineeringPane} data-mobile-visible={mobilePane === 'task'}>
       {active && mobilePane !== 'tasks' ? <WorkspaceEngineering key={`${session}:${project?.id ?? 'default'}`} projectId={project?.id ?? 'default'}
+        controlsAvailable={engineeringControlsAvailable}
         projectName={projectName} available={!historical && snapshot.sourceState === 'healthy'}
         supervisionSupported={scope.engineeringSupervisionSupported === true}
         successorsSupported={scope.engineeringSuccessorsSupported === true}

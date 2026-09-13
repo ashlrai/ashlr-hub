@@ -26,9 +26,10 @@ const recoveryReasons: Record<Recovery['pending'][number]['reason'], string> = {
   'admission-unavailable': 'Queue admission was not confirmed',
 };
 
-export function EngineeringSupervision({ available, unlocked, selectedPlan, onUnlock, onSelectedEvidenceChange }: {
+export function EngineeringSupervision({ available, unlocked, selectedPlan, onUnlock, onSelectedEvidenceChange, controlsAvailable = true }: {
   available: boolean; unlocked: boolean; selectedPlan?: Enrollment | null; onUnlock?(): void;
   onSelectedEvidenceChange?(): void;
+  controlsAvailable?: boolean;
 }) {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -87,7 +88,7 @@ export function EngineeringSupervision({ available, unlocked, selectedPlan, onUn
     return () => { if (mutating.current) interrupt(); };
   }, [available, unlocked]);
   async function toggle() {
-    if (!snapshot || !available || !unlocked || error || mutating.current || snapshot.sourceState !== 'healthy') return;
+    if (!controlsAvailable || !snapshot || !available || !unlocked || error || mutating.current || snapshot.sourceState !== 'healthy') return;
     const abort = new AbortController(); mutation.current = abort;
     epoch.current++; mutating.current = true; setBusy(true); setRecoveryStale(true);
     try {
@@ -104,7 +105,7 @@ export function EngineeringSupervision({ available, unlocked, selectedPlan, onUn
     ['running', 'completed'].includes(snapshot.state) && snapshot.entries.every(row => row.state === 'completed');
   const waitingForPlans = completedAppendableQueue && snapshot.admission!.remainingEnrollments > 0;
   const admissionLimitReached = completedAppendableQueue && snapshot.admission!.remainingEnrollments === 0;
-  const admissionBlocked = !selectedPlan || !snapshot?.admission || snapshot.admission.remainingEnrollments === 0 || !!included ||
+  const admissionBlocked = !controlsAvailable || !selectedPlan || !snapshot?.admission || snapshot.admission.remainingEnrollments === 0 || !!included ||
     !available || busy || !!error || !!admissionError || snapshot.sourceState !== 'healthy' || !!terminal || !!expired;
   async function admit() {
     if (admissionBlocked || !selectedPlan || !snapshot || mutating.current) return;
@@ -160,7 +161,7 @@ export function EngineeringSupervision({ available, unlocked, selectedPlan, onUn
     {admissionError ? <p role="alert">{admissionError} Refresh supervision before trying again.</p> : null}
     {notice ? <p role="status">{notice}</p> : null}
     <div className={styles.actions}><button type="button" disabled={!available || busy} onClick={() => { setSnapshot(null); setRecovery(null); setRecoveryError(false); setRecoveryStale(false); setAdmissionError(null); setNotice(null); refresh(value => value + 1); }}>Refresh supervision</button>
-      <button type="button" disabled={!snapshot || !available || !unlocked && !onUnlock || busy || !!error || !!terminal}
+      <button type="button" disabled={!controlsAvailable || !snapshot || !available || !unlocked && !onUnlock || busy || !!error || !!terminal}
         onClick={() => { if (!unlocked) onUnlock?.(); else void toggle(); }}>{busy ? 'Saving…' : !unlocked ? 'Unlock supervision controls' : snapshot?.paused ? 'Resume automatic launches' : 'Pause automatic launches'}</button></div>
   </section>;
 }

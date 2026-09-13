@@ -259,6 +259,19 @@ async function control<T>(path: string, body: unknown, disabledMessage = 'Task e
 }
 
 export const submitResourceTask = (task: ResourceConsoleTaskInput) => control<{ job: ResourceSupervisorJob }>('/api/resources/tasks', task);
+export async function readResourceEngineeringLifecycle(scope: Pick<ResourceConsoleScope, 'root' | 'poolId' | 'workspace'>, signal?: AbortSignal) {
+  const current = await resourceConsoleScopeQuery.fetch(signal);
+  if (signal?.aborted || current.root !== scope.root || current.poolId !== scope.poolId || current.workspace !== scope.workspace ||
+    current.engineeringLifecycle === undefined) throw new Error('Engineering lifecycle scope could not be verified.');
+  return current.engineeringLifecycle;
+}
+export async function closeResourceEngineering(): Promise<'closed'> {
+  const result = await control<unknown>('/api/resources/engineering-runtime/close', {}, 'Engineering close is unavailable for this console.');
+  if (!record(result) || Object.keys(result).length !== 1 || result.engineeringLifecycle !== 'closed') {
+    throw new Error('Engineering close was not confirmed. Check its status before acting.');
+  }
+  return 'closed';
+}
 export const cancelResourceTask = (id: string) => control<{ job: ResourceSupervisorJob }>(`/api/resources/tasks/${encodeURIComponent(id)}/cancel`, {});
 export const setResourceQueuePaused = (paused: boolean) => control<{ supervisor: ResourceSupervisorSnapshot }>('/api/resources/queue', { paused });
 

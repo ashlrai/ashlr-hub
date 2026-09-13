@@ -25,6 +25,18 @@ is not implemented there; the local HTTP worker remains supported.
 
 ## Close engineering without closing the workspace
 
+Engineering-enabled consoles show an **Engineering runtime** panel above both
+Workspace and Resources. **Close engineering** uses the existing control unlock;
+unlocking alone never submits the close. Status reads continue independently of
+project drafts. The panel distinguishes closing, confirmed closed, held and
+unavailable states; a lost response never automatically repeats a mutation.
+A status read that stalls for ten seconds becomes unavailable, rather than
+keeping a previously running sample actionable indefinitely.
+New engineering controls stay withheld after a close attempt, even if a later
+sample still says running. Ordinary task submission remains independent, and
+recorded engineering evidence remains readable. The control applies to every
+engineering plan in this console, not just the selected project.
+
 For an engineering-enabled console, a control-authenticated request to
 `POST /api/resources/engineering-runtime/close` with an explicit matching
 `Origin` and an empty JSON object closes the engineering component for this

@@ -34,6 +34,28 @@ function setup() {
 }
 
 describe('resource dispatch desk', () => {
+  it('preserves a human workspace draft and submission when engineering closes', async () => {
+    const f = setup(); f.scope.engineeringSupported = true; f.scope.engineeringLifecycle = 'running';
+    f.scope.defaultProjectId = 'default'; f.scope.projects = [{ id: 'default', label: 'Hub', workspace: f.scope.workspace!, enabled: true }];
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (path, init) => {
+      if (path === '/api/resources/console') return json(f.scope);
+      if (path === '/api/resources/engineering-runtime/close') { f.scope.engineeringLifecycle = 'closed'; return json({ engineeringLifecycle: 'closed' }); }
+      return original(path, init);
+    });
+    window.history.replaceState(null, '', '/resources/#resource-workspace'); setMutationToken('a'.repeat(64));
+    const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await within(screen.getByRole('region', { name: 'Engineering lifecycle' })).findByText('Running');
+    await user.type(await screen.findByLabelText('Task prompt'), 'Keep my human task while engineering closes.');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Task worker' }), 'local-a');
+    await user.click(screen.getByRole('button', { name: 'Close engineering' }));
+    await within(screen.getByRole('region', { name: 'Engineering lifecycle' })).findByText('Closed');
+    expect(screen.getByLabelText('Task prompt')).toHaveValue('Keep my human task while engineering closes.');
+    expect(screen.getByRole('button', { name: 'Send task' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Send task' }));
+    await waitFor(() => expect(f.request.mock.calls.some(([path, init]) => path === '/api/resources/tasks' && init?.method === 'POST')).toBe(true));
+  });
+
   it('shows passive inspection on the existing read-only poll and keeps failed samples historical', async () => {
     const f = setup(); f.scope.readOnly = true; f.scope.workspace = null; f.scope.maxParallel = 0; f.scope.maxQueued = 0;
     f.snapshot.supervisor = null;

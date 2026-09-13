@@ -25,6 +25,16 @@ beforeEach(() => { setMutationToken('b'.repeat(64)); });
 afterEach(() => { act(() => clearMutationToken()); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('engineering local admission UX', () => {
+  it('keeps evidence readable while component closure withholds engineering mutations', async () => {
+    const f = transport();
+    const view = render(<WorkspaceEngineering {...props} />); await screen.findByText('Local checks passed');
+    view.rerender(<WorkspaceEngineering {...props} controlsAvailable={false} />);
+    const run = screen.getByRole('button', { name: 'Run enrolled plan' }); expect(run).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Refresh evidence' })).toBeEnabled();
+    fireEvent.click(run); expect(f.posts()).toHaveLength(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh evidence' }));
+    await screen.findByText('Local checks passed'); expect(run).toBeDisabled(); expect(f.posts()).toHaveLength(0);
+  });
   it('discloses effectful continuation and requires its exact readiness action and an explicit click', async () => {
     const selected = { ...row, allowPendingContinuation: true as const };
     const f = transport(engineeringReadiness(selected), engineeringJob(selected, { state: 'incomplete', launched: true,

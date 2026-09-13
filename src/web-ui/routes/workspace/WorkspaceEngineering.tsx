@@ -17,7 +17,7 @@ const label = (state: Job['state']) => state === 'completed' ? 'Recorded deliver
 const errorText = (cause: unknown) => cause instanceof Error ? cause.message : 'Engineering evidence is unavailable.';
 
 /** Observation can poll; launch/cancel only come from explicit user events. */
-export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, successorsSupported, preparationSupported, preparationAvailable, outcomesSupported, autoAdmission }: {
+export function WorkspaceEngineering({ projectId, projectName, available, canStart, canStop, unlocked, onUnlock, startBlockedReason, supervisionSupported, successorsSupported, preparationSupported, preparationAvailable, outcomesSupported, autoAdmission, controlsAvailable = true }: {
   projectId: string; projectName: string; available: boolean; canStart: boolean; canStop: boolean; unlocked: boolean; onUnlock(): void; startBlockedReason?: string;
   supervisionSupported?: boolean;
   successorsSupported?: boolean;
@@ -25,6 +25,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
   preparationAvailable?: boolean;
   outcomesSupported?: boolean;
   autoAdmission?: boolean;
+  controlsAvailable?: boolean;
 }) {
   const [allEnrollments, setCatalog] = useState<Enrollment[] | null>(null);
   const catalog = allEnrollments?.filter(row => row.projectId === projectId) ?? null;
@@ -127,12 +128,12 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
   const currentReadiness = readiness?.enrollmentId === selected?.id && readiness?.enrollmentDigest === selected?.enrollmentDigest ? readiness : null;
   const reconcile = currentJob?.state === 'incomplete';
   const continuePending = selected?.allowPendingContinuation === true;
-  const launchable = available && canStart && !catalogError && !readError && !readinessError && !actionError && !busy && !loading &&
+  const launchable = controlsAvailable && available && canStart && !catalogError && !readError && !readinessError && !actionError && !busy && !loading &&
     currentReadiness?.status === 'ready' && currentReadiness.action === (reconcile ? continuePending ? 'continue' : 'reconcile' : 'launch') &&
     currentJob && !currentJob.cancelled && (currentJob.state === 'ready' || reconcile && currentJob.nodes.some((n) => n.state === 'unresolved') && currentJob.nodes.every((n) => n.state !== 'pending'));
 
   async function act(action: 'start' | 'cancel') {
-    if (!selected || mutating.current || (action === 'start' ? !launchable : !canStop || !currentJob?.cancellable)) return;
+    if (!controlsAvailable || !selected || mutating.current || (action === 'start' ? !launchable : !canStop || !currentJob?.cancellable)) return;
     if (!unlocked) { onUnlock(); return; }
     const key = identity; const abort = new AbortController(); mutation.current = abort;
     reading.current?.abort(); mutating.current = true; setBusy(true); setActionError(null); setNotice(null); setLoading(false);
@@ -155,13 +156,13 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
     <header className={styles.header}><div><p className={styles.eyebrow}>ASHLRVERSE / ENGINEERING</p><h2>From objective to evidence.</h2>
       <p>{projectName} · Evaluated changes, explicit local delivery.</p></div>
       <button type="button" className={styles.button} disabled={!available || busy || loading} onClick={refresh}>Refresh evidence</button></header>
-    {supervisionSupported ? <EngineeringSupervision available={available} unlocked={unlocked} selectedPlan={selected} onUnlock={onUnlock}
+    {supervisionSupported ? <EngineeringSupervision available={available} controlsAvailable={controlsAvailable} unlocked={unlocked} selectedPlan={selected} onUnlock={onUnlock}
       onSelectedEvidenceChange={refreshSelectedEvidence} /> : null}
     {successorsSupported ? <EngineeringSuccessors available={available} projectId={projectId} catalog={allEnrollments}
       onRegisteredEnrollments={refreshRegisteredEnrollments} onInspectEnrollment={id => {
         if (available && catalog?.some(row => row.id === id)) setSelection(id);
       }} /> : null}
-    {preparationSupported ? <EngineeringObjectiveComposer projectId={projectId} available={available && preparationAvailable !== false} unlocked={unlocked} autoAdmission={autoAdmission}
+    {preparationSupported ? <EngineeringObjectiveComposer projectId={projectId} available={controlsAvailable && available && preparationAvailable !== false} unlocked={unlocked} autoAdmission={autoAdmission}
       onUnlock={onUnlock} onRefresh={refresh} onPrepared={({ enrollment }) => {
         setCatalog(rows => [...(rows ?? []).filter(row => row.id !== enrollment.id), enrollment]);
         setSelection(enrollment.id); setCatalogRevision(n => n + 1); setRevision(n => n + 1);
@@ -222,7 +223,7 @@ export function WorkspaceEngineering({ projectId, projectName, available, canSta
         </aside></div>
       <footer className={styles.controls}><div><strong>{reconcile ? continuePending ? 'Recover delivery. Continue pending work.' : 'Recover evidence, not repeat work.' : 'One plan. One shared resource ledger.'}</strong>
         <p>{reconcile ? continuePending ? 'May start never-started campaigns using enrolled workers and shared quota after verifying completed work. Original deadlines and account reserves still apply; uncertain work stays held.' : 'Only exact completed-child proof can reconcile this graph, within its original deadline. Unfinished work stays held.' : 'Uses enrolled workers under existing quota and account-reserve policies. No accounts are connected by this action.'}</p></div>
-        <div className={styles.actions}><button type="button" className={styles.button} disabled={!canStop || !currentJob?.cancellable || busy} onClick={() => { void act('cancel'); }}>{unlocked ? 'Stop engineering run' : 'Unlock to stop'}</button>
+        <div className={styles.actions}><button type="button" className={styles.button} disabled={!controlsAvailable || !canStop || !currentJob?.cancellable || busy} onClick={() => { void act('cancel'); }}>{unlocked ? 'Stop engineering run' : 'Unlock to stop'}</button>
           <button type="button" className={styles.primary} disabled={!launchable} onClick={() => { void act('start'); }}>{busy ? 'Submitting…' : unlocked ? reconcile ? continuePending ? 'Continue pending work' : 'Reconcile completed work' : 'Run enrolled plan' : 'Unlock to run'}</button></div></footer>
       {outcomesSupported ? <EngineeringOutcomes key={`${projectId}:${identity}`} enrollment={selected} available={available} /> : null}
       {loading ? <p role="status" className={styles.message}>Reading graph evidence…</p> : null}
