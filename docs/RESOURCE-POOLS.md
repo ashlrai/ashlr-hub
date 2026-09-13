@@ -118,6 +118,12 @@ cleanup uncertainty remains held. Use that capability's `state()` or authenticat
 `GET /api/resources/console` for current lifecycle, not the handle's initial
 `scope` snapshot.
 
+The current browser lifecycle panel is not yet attachment-aware: it retains a
+close attempt within the mounted view and does not distinguish a replacement
+component from a stale running response. Host attachment is supported, but
+seamless browser capability refresh without losing drafts remains UI integration
+work. Do not treat this host API as a completed in-browser restart workflow.
+
 The standing mission controller does not yet use this attachment API to share a
 persistent human workspace. Its setup/predecessor ownership joins and mission
 integration remain separate work. Component close is also not a durable
