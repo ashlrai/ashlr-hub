@@ -74,6 +74,14 @@ browser-supplied policy and do not renew deadlines or alter account reserves.
 An embedding host must retain its mission's original deadline/ownership checks
 inside that child control, not forward them as the whole-console stop signal.
 
+The server composes these owners through `engineering-component.ts`: worker,
+preparation, supervision and admission handles belong to that exact component.
+Shutdown waits for pending initialization and drains any worker returned after
+cancellation. Component callbacks cannot switch their drain target to another
+component. Cleanup failures retain a held result while still attempting the
+remaining owners' drains; the workspace supervisor and collectors remain outside
+component-only shutdown.
+
 There is no same-console engineering restart operation yet. A new explicitly
 started console lifetime still reconciles its existing durable queues and graph
 records; component close does not erase work, renew deadlines, or bypass held
