@@ -107,6 +107,28 @@ describe.skipIf(process.platform === 'win32')('durable resource task runtime acc
     expect(f.status().attempts[0]?.origin).toEqual(origin); expect(f.requests).toHaveLength(0);
   });
 
+  it('records successor proposal origin before a real worker request and preserves exact replay', async () => {
+    const f = await fixture(); const proposalKey = 'a'.repeat(48);
+    const successorOrigin: ResourceTaskOrigin = { kind: 'engineering-successor-proposal', scopeDigest: 'b'.repeat(64), proposalKey };
+    const task = f.task(`proposal-${proposalKey}`, { origin: successorOrigin }); let reserved = false;
+    const result = await runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings, observations: f.observations, task,
+      beforeWorkerDispatch: () => {
+        expect(JSON.parse(f.ledger()).attempts[0]).toMatchObject({ origin: successorOrigin, status: 'reserved' });
+        expect(f.requests).toHaveLength(0); reserved = true; return true;
+      } });
+    expect(reserved).toBe(true); expect(result.receipt).toMatchObject({ status: 'completed', origin: successorOrigin });
+    expect((await f.run(task.id, { origin: successorOrigin })).replayed).toBe(true); expect(f.requests).toHaveLength(1);
+    await expect(f.run(task.id, { origin: { ...successorOrigin, scopeDigest: 'c'.repeat(64) } })).rejects.toThrow('identity conflict');
+  });
+
+  it.each([{ scopeDigest: 'short' }, { proposalKey: 'a'.repeat(47) }, { proposalKey: 'c'.repeat(48) },
+    { unexpected: true }, { kind: 'unknown' }])('refuses malformed or mismatched successor origin before contact: %#', async patch => {
+    const f = await fixture(); const proposalKey = 'a'.repeat(48);
+    const candidate = { kind: 'engineering-successor-proposal', scopeDigest: 'b'.repeat(64), proposalKey, ...patch };
+    await expect(f.run(`proposal-${proposalKey}`, { origin: candidate as ResourceTaskOrigin })).rejects.toThrow('Invalid resource task');
+    expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+  });
+
   it('retains origin after real worker settlement and exact replay without trial publication', async () => {
     const f = await fixture(); const result = await f.run(originId, { origin });
     expect(result.receipt).toMatchObject({ status: 'completed', origin });
@@ -140,7 +162,9 @@ describe.skipIf(process.platform === 'win32')('durable resource task runtime acc
 
   it('detaches validated origin and refuses accessor metadata without invoking getters', async () => {
     const f = await fixture(); const input = f.task(originId, { origin: { ...origin } });
-    const validated = validateResourceTask(input); input.origin!.runId = 'changed'; expect(validated.origin).toEqual(origin);
+    const validated = validateResourceTask(input);
+    if (input.origin?.kind === 'universe-generation') input.origin.runId = 'changed';
+    expect(validated.origin).toEqual(origin);
     const getter = vi.fn(() => origin.runId); const accessor = { ...origin };
     Object.defineProperty(accessor, 'runId', { get: getter });
     expect(() => validateResourceTask(f.task(originId, { origin: accessor }))).toThrow('Invalid resource task');

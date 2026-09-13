@@ -6,9 +6,15 @@ export interface ResourceGenerationIdentity {
   runId: string;
   variantId: string;
 }
-export interface ResourceTaskOrigin extends ResourceGenerationIdentity {
+export interface ResourceGenerationTaskOrigin extends ResourceGenerationIdentity {
   kind: 'universe-generation';
 }
+export interface ResourceSuccessorTaskOrigin {
+  kind: 'engineering-successor-proposal';
+  scopeDigest: string;
+  proposalKey: string;
+}
+export type ResourceTaskOrigin = ResourceGenerationTaskOrigin | ResourceSuccessorTaskOrigin;
 function fields(value: unknown, keys: string[]): value is Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
@@ -30,6 +36,11 @@ export function resourceGenerationTaskId(identity: ResourceGenerationIdentity): 
 }
 
 export function validResourceTaskOrigin(value: unknown, taskId: string): value is ResourceTaskOrigin {
+  if (fields(value, ['kind', 'scopeDigest', 'proposalKey'])) {
+    return value.kind === 'engineering-successor-proposal' && typeof value.scopeDigest === 'string' &&
+      /^[a-f0-9]{64}$/.test(value.scopeDigest) && typeof value.proposalKey === 'string' &&
+      /^[a-f0-9]{48}$/.test(value.proposalKey) && taskId === `proposal-${value.proposalKey}`;
+  }
   return fields(value, ['kind', ...identityKeys]) && value.kind === 'universe-generation' && identifiers(value) &&
     resourceGenerationTaskId({ universeId: value.universeId as string, runId: value.runId as string,
       variantId: value.variantId as string }) === taskId;

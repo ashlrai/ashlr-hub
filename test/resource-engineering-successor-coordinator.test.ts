@@ -55,7 +55,8 @@ function fixture() {
     const receipt: runtime.ResourceTaskReceipt = { schemaVersion: 1, id: options.task.id, taskDigest: hash(options.task), poolDigest: hash({ pool, bindings }),
       workerId: 'worker', capacityKey: 'shared', status: allowed ? 'completed' : 'failed', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
       outputDigest: allowed ? digest(proposal) : null, inputTokens: allowed ? 10 : null, outputTokens: allowed ? 20 : null,
-      reason: allowed ? 'fixture-completed' : 'worker-dispatch-precondition-failed', verifiedAccepted: false };
+      reason: allowed ? 'fixture-completed' : 'worker-dispatch-precondition-failed', verifiedAccepted: false,
+      ...(options.task.origin ? { origin: { ...options.task.origin } } : {}) };
     attempts.push(receipt); return { receipt, plan: null, replayed: false, output: allowed ? proposal : null };
   });
   const prepare = vi.fn<ResourceEngineeringSuccessorCoordinatorOptions['host']['prepare']>(async input => ({ id: input.id, projectId: source.projectId,
@@ -85,6 +86,32 @@ const until = (owner: ReturnType<typeof createResourceEngineeringSuccessorCoordi
   vi.waitFor(() => expect(owner.snapshot().entries[0]?.state).toBe(state), { timeout: 5000, interval: 20 });
 
 describe('bounded engineering successor coordinator', () => {
+  it('persists scope-bound proposal origin before calling the accounted task runtime', async () => {
+    const f = fixture(); const run = f.run.getMockImplementation()!; let sawOrigin = false;
+    f.run.mockImplementation(async options => {
+      const rows = Object.values(f.files()).map(text => JSON.parse(text));
+      const enrollment = rows.find(row => row.kind === 'enrollment'); const intent = rows.find(row => row.kind === 'intent');
+      expect(options.task.origin).toEqual({ kind: 'engineering-successor-proposal', scopeDigest: hash(enrollment), proposalKey: intent.key });
+      expect(intent.task).toEqual(options.task); sawOrigin = true; return run(options);
+    });
+    const owner = f.create(); owner.start(); await until(owner, 'admitted');
+    expect(sawOrigin).toBe(true); expect(f.attempts[0]?.origin).toEqual(f.run.mock.calls[0]![0].task.origin);
+    await owner.close();
+  });
+  it.each(['missing', 'changed'] as const)('withholds a proposal with %s receipt origin and reports unresolved close', async kind => {
+    const f = fixture(); const run = f.run.getMockImplementation()!;
+    f.run.mockImplementation(async options => {
+      const result = await run(options);
+      if (kind === 'missing') delete result.receipt!.origin;
+      else result.receipt!.origin = { kind: 'engineering-successor-proposal', scopeDigest: '0'.repeat(64),
+        proposalKey: options.task.id.slice('proposal-'.length) };
+      return result;
+    });
+    const owner = f.create(); owner.start(); await until(owner, 'held');
+    expect(f.run).toHaveBeenCalledTimes(1); expect(f.prepare).not.toHaveBeenCalled();
+    expect(f.options.supervision.admit).not.toHaveBeenCalled();
+    await expect(owner.close()).rejects.toThrow('unresolved proposal execution');
+  });
   it.each(['proposal-workers-ineligible', 'proposal-admission-unavailable'] as const)(
     'reports deduplicated %s before intent and real progress on recovery', async reason => {
       const f = fixture(); let held = true; const reports: EngineeringCoordinatorLifecycleReport[] = [];

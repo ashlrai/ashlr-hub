@@ -8,7 +8,7 @@ import { acquireLocalStoreLockWithOutcome, releaseLocalStoreLock } from '../src/
 import { createResourceEngineeringSuccessorCoordinator } from '../src/core/resources/engineering-successor-coordinator.js';
 import { writeImmutablePrivateRecord } from '../src/core/util/immutable-private-record-store.js';
 import { EngineeringSuccessorJournalReadError, engineeringSuccessorKey, engineeringSuccessorPrompt, engineeringSuccessorRecordStore, hash,
-  projectEngineeringSuccessorJournal, readEngineeringSuccessorJournal,
+  projectEngineeringSuccessorJournal, readEngineeringSuccessorJournal, engineeringSuccessorTaskOrigin,
   type JournalScope, type DurableRecord, type Intent, type Result, type Prepared, type Admitted } from '../src/core/resources/engineering-successor-store.js';
 
 const roots: string[] = [];
@@ -45,6 +45,19 @@ function fixture(enroll = true) {
 }
 
 describe('shared successor journal observation', () => {
+  it('binds new proposal origin to the full enrollment without rewriting legacy intents', () => {
+    const f = fixture(); f.intent.task.origin = engineeringSuccessorTaskOrigin(f.scope, f.intent.source); f.write(f.intent);
+    const before = f.bytes(); const read = readEngineeringSuccessorJournal(f.scope);
+    expect(read.records.find(row => row.kind === 'intent')).toEqual(f.intent); expect(f.bytes()).toEqual(before);
+    expect(f.intent.task.origin).toEqual({ kind: 'engineering-successor-proposal',
+      scopeDigest: hash(f.scope.expectedEnrollment), proposalKey: f.intent.key });
+    expect(JSON.stringify(f.intent.task.origin)).not.toContain(f.scope.expectedEnrollment.cwd.workspace);
+  });
+  it('refuses a structurally valid origin from a different enrollment', () => {
+    const f = fixture(); f.intent.task.origin = { ...engineeringSuccessorTaskOrigin(f.scope, f.intent.source), scopeDigest: '0'.repeat(64) };
+    f.write(f.intent); const before = f.bytes();
+    expect(() => readEngineeringSuccessorJournal(f.scope)).toThrow('Successor intent changed'); expect(f.bytes()).toEqual(before);
+  });
   it('classifies only a pure writer mutation as retryable and rereads after the writer releases', () => {
     const f = fixture(); f.write(f.intent);
     const events = join(f.scope.directory, 'events');

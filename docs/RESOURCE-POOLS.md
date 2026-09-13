@@ -719,6 +719,16 @@ generation cannot silently acquire the new envelope during restart. The shared
 shutdown fence above remains in force until independently scoped mission
 lifecycle and complete ownership checks are implemented and accepted.
 
+Successor-coordinator proposals similarly record
+`{kind: "engineering-successor-proposal", scopeDigest, proposalKey}`. The scope
+digest binds the full coordinator enrollment (including its pool, deadline and
+pinned workspace); the proposal key preserves its existing task ID. Journal
+readback verifies that scope, and receipt readback requires the same origin as
+the retained task intent. Legacy proposal intents keep their original envelope.
+This does not yet attribute mission-level proposals submitted as ordinary console
+tasks. Older binaries reject origin-bearing receipts: coordinate reader upgrades
+before using a shared live ledger, and never strip provenance as a rollback.
+
 ### Read engineering outcomes and resource use
 
 Select an enrolled plan in Workspace → **Engineering runs**, then choose

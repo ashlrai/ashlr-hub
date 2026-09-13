@@ -15,7 +15,7 @@ import { waitForResourceCapacity } from './capacity-wait.js';
 import type { EngineeringCoordinatorLifecycleReport, ResourceEngineeringSuccessorCoordinatorOptions as Options,
   ResourceEngineeringSuccessorCoordinatorSnapshot as Snapshot, ResourceEngineeringSuccessorEvidence as Evidence } from './engineering-successor-coordinator-types.js';
 export type * from './engineering-successor-coordinator-types.js';
-import { data, hash, evidence, engineeringSuccessorRecordStore, engineeringSuccessorKey, engineeringSuccessorPrompt,
+import { data, hash, evidence, engineeringSuccessorRecordStore, engineeringSuccessorKey, engineeringSuccessorPrompt, engineeringSuccessorTaskOrigin,
   readEngineeringSuccessorJournal, validateResourceEngineeringSuccessorCoordinatorConfig, parseResourceEngineeringSuccessorProposal,
   type JournalScope, type DurableRecord, type EnrollmentRecord, type Intent, type Result, type Prepared } from './engineering-successor-store.js';
 export { validateResourceEngineeringSuccessorCoordinatorConfig, parseResourceEngineeringSuccessorProposal } from './engineering-successor-store.js';
@@ -132,7 +132,8 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
   }
   function receipt(intent: Intent) {
     const row = resourcePoolStatus(root, pool, bindings, []).attempts.find(row => row.id === intent.task.id);
-    if (row && (row.taskDigest !== hash(intent.task) || row.poolDigest !== poolDigest || !config.allowedWorkerIds.includes(row.workerId))) fail('Successor task identity changed');
+    if (row && (row.taskDigest !== hash(intent.task) || row.poolDigest !== poolDigest || !config.allowedWorkerIds.includes(row.workerId) ||
+      canonical(row.origin ?? null) !== canonical(intent.task.origin ?? null))) fail('Successor task identity changed');
     return row;
   }
   async function advanceWork(intent: Intent, dispatch: boolean): Promise<void> {
@@ -254,6 +255,7 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
       if (source.enrollmentId !== candidate.enrollmentId || source.enrollmentDigest !== candidate.enrollmentDigest || !fresh(source)) continue;
       const key = keyFor(source);
       const task = validateResourceTask({ schemaVersion: 1, id: `proposal-${key}`, mode: 'read-only', cwd, prompt: prompt(source),
+        origin: engineeringSuccessorTaskOrigin(observationScope(), source),
         allowedWorkerIds: config.allowedWorkerIds, maxOutputTokens: config.maxOutputTokens,
         timeoutMs: Math.max(1, Math.min(config.proposalTimeoutMs, Math.floor(deadline - Date.now()), Math.floor(monotonicDeadline - performance.now()))) });
       const intent: Intent = { id: `intent-${key}`, kind: 'intent', key, source, task, successorId: `successor-${key}` };
