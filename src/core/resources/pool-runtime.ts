@@ -462,8 +462,8 @@ export function resourceAdmissionPreflight(root: string, poolValue: ResourcePool
   return plan(state, pool, bindings, allowed, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds, receipts);
 }
 
-/** Read-only: no directory, lock, observation, or assignment is published. */
-export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[], incoming: ResourceObservation[],
+/** One coherent receipt/accounting snapshot; no directory, lock or observation is published. */
+function readPoolStatus(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[], incoming: ResourceObservation[],
   unavailableWorkerIds: string[] = [], quotaUnavailableWorkerIds: string[] = []) {
   const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
   const unavailable = validateUnavailableResourceWorkerIds(unavailableWorkerIds, pool);
@@ -472,11 +472,30 @@ export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindin
   const exists = inspectRoot(root, false);
   const state = exists ? loadState(root, pool, bindings, poolDigest) : { schemaVersion: 1 as const, poolDigest, observations: [], attempts: [] };
   state.observations = mergeResourceObservations(state.observations, observed);
+  const receipts = createResourcePoolReceiptQuery(state.attempts);
   return { schemaVersion: 1 as const, sourceState: exists ? 'healthy' as const : 'missing' as const,
-    poolId: pool.id, plan: plan(state, pool, bindings, pool.workers.map((row) => row.id), Date.now(), unavailable, quotaUnavailable),
+    poolId: pool.id, plan: plan(state, pool, bindings, pool.workers.map((row) => row.id), Date.now(), unavailable, quotaUnavailable, receipts),
     ...(state.schemaVersion === 2 ? { configurationDigests: state.configurationHistory!.map(row => row.poolDigest) } : {}),
-    observations: state.observations, attempts: state.attempts, allocation: allocation(state), workerAccess: workerAccess(state),
+    observations: state.observations, attempts: state.attempts, receipts, allocation: allocation(state), workerAccess: workerAccess(state),
     quotaScopeAccess: quotaScopeAccess(state) };
+}
+
+/** Legacy complete-history observation. Never replace attempts with a recent page. */
+export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[], incoming: ResourceObservation[],
+  unavailableWorkerIds: string[] = [], quotaUnavailableWorkerIds: string[] = []) {
+  const { receipts: _receipts, ...status } = readPoolStatus(root, poolValue, bindingsValue, incoming, unavailableWorkerIds, quotaUnavailableWorkerIds);
+  return status;
+}
+
+/**
+ * Operational readers use exact receipt queries from the same snapshot as the
+ * plan. This read-only hint does not grant dispatch authority: final reservation
+ * still revalidates the current ledger under its writer lock.
+ */
+export function resourcePoolQueryStatus(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[], incoming: ResourceObservation[],
+  unavailableWorkerIds: string[] = [], quotaUnavailableWorkerIds: string[] = []) {
+  const { attempts: _attempts, ...status } = readPoolStatus(root, poolValue, bindingsValue, incoming, unavailableWorkerIds, quotaUnavailableWorkerIds);
+  return status;
 }
 
 /** Missing policy is not permission to bypass account-wide health, pauses, or reserves. */

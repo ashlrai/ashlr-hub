@@ -11,6 +11,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Query-backed fleet receipt readers
+
+- Moves capacity waiting, generation handoff and supervisor recovery to coherent
+  exact-receipt queries, preserving bounded waits, replay and ownership checks.
+- Requires explicit matching absence before treating work as new; malformed or
+  unavailable query evidence cannot start collectors or recover abandoned work.
+- Adds private terminal-receipt archive staging with exact payloads, account-time
+  indexes and originating-epoch validation. This does not activate an archived
+  ledger or change the existing live receipt limit.
+- Adds active/archive query composition with disjoint receipt identities,
+  complete unresolved occupancy and fixed-root batching for large ID requests.
+
 ### Receipt-query accounting foundation
 
 - Routes resource admission and exact task replay through a captured receipt-query

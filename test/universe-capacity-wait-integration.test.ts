@@ -61,7 +61,7 @@ const argv=process.argv.slice(2);const mode=argv[0]==='app-server'?'metadata':ar
 log({kind:'start',mode,pid:process.pid});
 if(mode==='unexpected'){log({kind:'unexpected'});process.exit(30);}
 if(mode==='metadata'){
-  if(JSON.stringify(argv)!==JSON.stringify(['app-server','--stdio','-c','analytics.enabled=false']))process.exit(31);
+  if(JSON.stringify(argv)!==JSON.stringify(['app-server','--stdio','-c','analytics.enabled=false','-c','features.plugins=false','-c','features.remote_plugin=false']))process.exit(31);
   const reader=readline.createInterface({input:process.stdin});
   const write=(id,result)=>process.stdout.write(JSON.stringify({id,result})+'\\n');
   reader.on('line',async line=>{
@@ -146,7 +146,7 @@ if(mode==='metadata'){
 
 function watchContention(value: ReturnType<typeof fixture>) {
   let quota = 0; let slots = 0;
-  const acquire = localLocks.acquireLocalStoreLock; const status = poolRuntime.resourcePoolStatus;
+  const acquire = localLocks.acquireLocalStoreLock; const status = poolRuntime.resourcePoolQueryStatus;
   const acquireOutcome = localLocks.acquireLocalStoreLockWithOutcome;
   vi.spyOn(localLocks, 'acquireLocalStoreLock').mockImplementation((...args) => {
     const result = acquire(...args);
@@ -158,7 +158,7 @@ function watchContention(value: ReturnType<typeof fixture>) {
     if (args[0] === value.quotaLock && result.state === 'contended') quota++;
     return result;
   });
-  vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => {
+  vi.spyOn(poolRuntime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
     const result = status(...args);
     if (args[0] === value.ledgerRoot && value.contacts('metadata').length === 2 &&
       value.events().filter((event) => event.kind === 'close' && event.mode === 'metadata').length === 2 &&
@@ -253,7 +253,9 @@ describe.runIf(process.platform === 'darwin')('bounded capacity waiting across a
       await until(() => value.contacts('metadata').length === 1 && observed.quota() > 0 &&
         ['a', 'b'].some((name) => readUniverseCampaign(`campaign-${name}`, value).state === 'paused'));
       value.releaseMetadata(); value.releaseExec(); const result = await pending;
-      expect(result.status).toBe('incomplete'); expect(result.outcomes.map((outcome) => outcome.status).sort()).toEqual(['completed', 'paused']);
+      expect(result.status).toBe('incomplete');
+      expect(result.outcomes.map((outcome) => outcome.status).sort(), JSON.stringify(readUniverseOverview(value).universes
+        .flatMap((universe) => universe.runs[0]!.trials.map((trial) => trial.generation)))).toEqual(['completed', 'paused']);
       expect(value.contacts('metadata')).toHaveLength(1); expect(value.contacts('exec')).toHaveLength(1); expect(value.status().attempts).toHaveLength(1);
       const stopped = readUniverseOverview(value).universes.flatMap((universe) => universe.runs[0]!.trials)
         .find((trial) => trial.generation!.resource!.dispatch === 'not-started')!;

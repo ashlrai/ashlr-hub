@@ -80,7 +80,7 @@ describe.skipIf(process.platform === 'win32')('global stop preserves queued work
       if (state === 'throws') throw new Error('PRIVATE_SOURCE_ERROR');
       return state === 'active'
         ? { state: 'active', sourceState: 'healthy', reason: 'present', path: '/PRIVATE/KILL' }
-        : { state: 'unknown', sourceState: 'degraded', reason: 'uninspectable', path: '/PRIVATE/KILL' };
+        : { state: 'unknown', sourceState: 'degraded', reason: 'uninspectable', path: '/PRIVATE/KILL', errorCode: null };
     });
     const f = await fixture(); const supervisor = await f.start();
     const dispatched = vi.spyOn(runtime, 'runResourceTask');
@@ -226,6 +226,15 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     await closing; expect(f.state().jobs).toEqual([]); expect(f.requests).toEqual([]);
   });
   it('recovers repeated abandoned proposals with an immutable chain and only one actual dispatch', async () => {
+    const fullStatus = vi.spyOn(runtime, 'resourcePoolStatus');
+    const originalStatus = runtime.resourcePoolQueryStatus;
+    const chains: string[][] = [];
+    vi.spyOn(runtime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
+      const status = originalStatus(...args); const originalGetMany = status.receipts.getMany;
+      return { ...status, receipts: { ...status.receipts, getMany(ids) {
+        chains.push([...ids]); return originalGetMany(ids);
+      } } };
+    });
     const f = await fixture(); const original = f.task('mission', { retainHistory: true });
     const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
     let owner = await f.start(); owner.setPaused(true); owner.submit(original, lifetime); await owner.close();
@@ -249,6 +258,44 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     await owner.close(); owner = await f.start();
     expect(owner.recover(original, lifetime)).toMatchObject({ id: recovered.id, state: 'settled' });
     expect(f.requests).toHaveLength(1);
+    expect(chains.some(ids => ids.length === 4 && new Set(ids).size === 4 && ids.at(-1) === 'mission')).toBe(true);
+    expect(fullStatus).not.toHaveBeenCalled();
+  });
+  it.each(['unknown', 'foreign', 'throws'] as const)('does not admit a task when exact query evidence is %s', async kind => {
+    const f = await fixture(); const owner = await f.start(); owner.setPaused(true);
+    const originalStatus = runtime.resourcePoolQueryStatus;
+    vi.spyOn(runtime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
+      const status = originalStatus(...args);
+      return { ...status, receipts: { ...status.receipts, get(id) {
+        if (kind === 'throws') throw new Error('Unavailable fixture snapshot');
+        return (kind === 'foreign' ? { status: 'proven-absent', id: 'different-task' } : { status: 'unknown', id }) as ReturnType<typeof status.receipts.get>;
+      } } };
+    });
+    const before = canonical(f.state());
+    expect(() => owner.submit(f.task())).toThrow('Resource task evidence unavailable');
+    expect(canonical(f.state())).toBe(before); expect(f.requests).toEqual([]);
+  });
+  it.each(['missing', 'sparse', 'foreign', 'unknown', 'throws'] as const)('refuses recovery with %s referenced-chain query evidence', async kind => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task(), lifetime); await owner.close(); owner = await f.start(); owner.setPaused(false);
+    const originalStatus = runtime.resourcePoolQueryStatus;
+    const batch = vi.fn((ids: readonly string[]) => {
+      if (kind === 'throws') throw new Error('Unavailable fixture snapshot');
+      if (kind === 'missing') return [];
+      if (kind === 'sparse') return new Array(ids.length);
+      return ids.map(id => kind === 'foreign' ? { status: 'proven-absent', id: 'different-task' } : { status: 'unknown', id });
+    });
+    vi.spyOn(runtime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
+      const status = originalStatus(...args);
+      return { ...status, receipts: { ...status.receipts,
+        getMany: batch as typeof status.receipts.getMany } };
+    });
+    const before = canonical(f.state());
+    expect(() => owner.recover(f.task(), lifetime)).toThrow('recovery evidence unavailable');
+    expect(batch).toHaveBeenCalledWith(['task-a']);
+    expect(canonical(f.state())).toBe(before); expect(f.requests).toEqual([]);
+    await owner.close();
   });
   it('never recovers an explicit cancellation or changes the original proposal limits', async () => {
     const f = await fixture(); let owner = await f.start(); owner.setPaused(true);

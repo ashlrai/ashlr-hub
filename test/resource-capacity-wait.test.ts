@@ -16,7 +16,7 @@ import type { ResourceBinding } from '../src/core/resources/worker.js';
 let base: string; let root: string; let cwd: string; let clock: number;
 let pool: ResourcePool; let bindings: ResourceBinding[]; let task: ResourceTask;
 let observations: ResourceObservation[];
-let readEvidence: ReturnType<typeof vi.fn>;
+let readEvidence: ReturnType<typeof vi.fn<ResourceCapacityWaitOptions['readEvidence']>>;
 const now = Date.parse('2026-09-07T12:00:00.000Z');
 const iso = (offset: number) => new Date(now + offset).toISOString();
 const ledgerPath = () => join(root, 'pool-state.json');
@@ -66,6 +66,28 @@ describe.skipIf(process.platform === 'win32')('bounded read-only resource capaci
     expect(result).toEqual({ ready: true, observations, unavailableWorkerIds: [] });
     expect(readEvidence).toHaveBeenCalledTimes(1); expect(existsSync(root)).toBe(false);
     expect(readdirSync(base)).toEqual(['workspace']);
+  });
+
+  it.each(['get', 'unresolved'] as const)('does not treat unavailable receipt %s evidence as absence or free capacity', async (method) => {
+    seed([receipt()]); const before = ledger();
+    const actual = runtime.resourcePoolQueryStatus(root, pool, bindings, observations);
+    vi.spyOn(runtime, 'resourcePoolQueryStatus').mockReturnValue({ ...actual, receipts: { ...actual.receipts,
+      [method]: () => { throw new Error('Resource receipt query unavailable'); } } });
+    const legacy = vi.spyOn(runtime, 'resourcePoolStatus');
+    await expect(waitForResourceCapacity(options())).rejects.toThrow('Resource receipt query unavailable');
+    expect(legacy).not.toHaveBeenCalled(); expect(readEvidence).toHaveBeenCalledTimes(1);
+    expect(ledger()).toBe(before); expect(clock).toBe(0);
+  });
+
+  it.each(['unknown', 'foreign-envelope', 'foreign-receipt', 'foreign-absence'] as const)('rejects %s lookup evidence instead of allowing replay or new work', async failure => {
+    const actual = runtime.resourcePoolQueryStatus(root, pool, bindings, observations);
+    const get = vi.fn(() => (failure === 'unknown' ? { status: 'unavailable', id: task.id } : failure === 'foreign-absence'
+      ? { status: 'proven-absent', id: 'foreign' }
+      : { status: 'found', id: failure === 'foreign-envelope' ? 'foreign' : task.id,
+        receipt: receipt('reserved', 'a', failure === 'foreign-receipt' ? 'foreign' : task.id) }) as ReturnType<typeof actual.receipts.get>);
+    vi.spyOn(runtime, 'resourcePoolQueryStatus').mockReturnValue({ ...actual, receipts: { ...actual.receipts, get } });
+    await expect(waitForResourceCapacity(options())).rejects.toThrow('Resource receipt query unavailable');
+    expect(get).toHaveBeenCalledOnce(); expect(existsSync(root)).toBe(false); expect(clock).toBe(0);
   });
 
   it('does one immediate check, without waiting or writing, when zero budget is occupied', async () => {
@@ -151,8 +173,8 @@ describe.skipIf(process.platform === 'win32')('bounded read-only resource capaci
   });
 
   it('does not accept an eligible status without an allowed candidate or invent reserved occupancy', async () => {
-    const actual = runtime.resourcePoolStatus(root, pool, bindings, observations);
-    vi.spyOn(runtime, 'resourcePoolStatus').mockReturnValue({ ...actual, plan: { ...actual.plan,
+    const actual = runtime.resourcePoolQueryStatus(root, pool, bindings, observations);
+    vi.spyOn(runtime, 'resourcePoolQueryStatus').mockReturnValue({ ...actual, plan: { ...actual.plan,
       candidates: actual.plan.candidates.filter((candidate) => candidate.workerId !== 'a'),
       exclusions: [{ workerId: 'a', reasons: ['concurrency-exhausted'], nextEligibleAt: iso(100) }] } });
     expect((await waitForResourceCapacity(options())).ready).toBe(false);
@@ -203,7 +225,7 @@ describe.skipIf(process.platform === 'win32')('bounded read-only resource capaci
   it('honors cancellation from a synchronous evidence read before a ready result', async () => {
     const controller = new AbortController();
     readEvidence.mockImplementation(() => { controller.abort(); return { observations, unavailableWorkerIds: [] }; });
-    const status = vi.spyOn(runtime, 'resourcePoolStatus');
+    const status = vi.spyOn(runtime, 'resourcePoolQueryStatus');
     await expect(waitForResourceCapacity(options({ signal: controller.signal }))).rejects.toThrow('Resource capacity wait cancelled');
     expect(status).not.toHaveBeenCalled();
   });
@@ -250,7 +272,7 @@ describe.skipIf(process.platform === 'win32')('bounded read-only resource capaci
     'does not retry invalid or unavailable %s evidence', async (kind) => {
       seed([receipt()]); const pending = waitForResourceCapacity(options());
       const assertion = expect(pending).rejects.toThrow();
-      if (kind === 'observations') readEvidence.mockReturnValue({ observations: [{}], unavailableWorkerIds: [] });
+      if (kind === 'observations') readEvidence.mockReturnValue({ observations: [{} as ResourceObservation], unavailableWorkerIds: [] });
       if (kind === 'veto') readEvidence.mockReturnValue({ observations, unavailableWorkerIds: ['unknown'] });
       if (kind === 'throw') readEvidence.mockImplementation(() => { throw new Error('Fixture read unavailable'); });
       if (kind === 'ledger') writeFileSync(ledgerPath(), '{}');

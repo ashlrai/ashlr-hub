@@ -2,7 +2,7 @@
 import { isAbsolute, parse, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
-import { resourcePoolStatus, validateResourceTask, validateUnavailableResourceWorkerIds, type ResourceTask } from './pool-runtime.js';
+import { resourcePoolQueryStatus, validateResourceTask, validateUnavailableResourceWorkerIds, type ResourceTask } from './pool-runtime.js';
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
 
 export interface ResourceCapacityEvidence {
@@ -71,9 +71,12 @@ export async function waitForResourceCapacity(options: ResourceCapacityWaitOptio
     const evidence = { observations, unavailableWorkerIds,
       ...(source.quotaUnavailableWorkerIds === undefined ? {} : { quotaUnavailableWorkerIds }) };
     cancelled(signal);
-    const status = resourcePoolStatus(root, pool, bindings, observations, unavailableWorkerIds, quotaUnavailableWorkerIds);
+    const status = resourcePoolQueryStatus(root, pool, bindings, observations, unavailableWorkerIds, quotaUnavailableWorkerIds);
     cancelled(signal);
-    if (status.attempts.some((receipt) => receipt.id === task.id)) return { ready: true, ...evidence };
+    const prior = status.receipts.get(task.id);
+    if (prior?.id !== task.id || prior.status === 'found' && prior.receipt?.id !== task.id) throw new Error('Resource receipt query unavailable');
+    if (prior.status === 'found') return { ready: true, ...evidence };
+    if (prior.status !== 'proven-absent') throw new Error('Resource receipt query unavailable');
     // A zero budget still performs one useful check. Later samples cannot turn
     // an expired bounded wait into renewed permission to contact a worker.
     if (waitMs > 0 && performance.now() >= deadline) return { ready: false, ...evidence };
@@ -82,7 +85,7 @@ export async function waitForResourceCapacity(options: ResourceCapacityWaitOptio
       if (!allowed.has(exclusion.workerId) || exclusion.reasons.length !== 1 ||
         exclusion.reasons[0] !== 'concurrency-exhausted') return false;
       const capacity = bindings.find((binding) => binding.workerId === exclusion.workerId)!.capacityKey;
-      const occupied = status.attempts.filter((receipt) => receipt.capacityKey === capacity);
+      const occupied = status.receipts.unresolved(capacity);
       return occupied.some((receipt) => receipt.status === 'reserved') &&
         !occupied.some((receipt) => receipt.status === 'uncertain');
     });

@@ -4,7 +4,7 @@ import { lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { mergeResourceObservations, readResourceJson, readResourcePoolAllocation, resourcePoolStatus, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
+import { mergeResourceObservations, readResourceJson, readResourcePoolAllocation, resourcePoolQueryStatus, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
 import { refreshResourceQuotaOnce, validateResourceQuotaRefreshConfig } from '../resources/quota-refresh.js';
 import { readSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
 import { waitForResourceCapacity, type ResourceCapacityEvidence } from '../resources/capacity-wait.js';
@@ -53,6 +53,14 @@ export interface ResourceGenerationCompletion {
   resource: UniverseResourceGenerationEvidence;
   usage: UniverseGenerationReceipt['usage'];
   error?: string;
+}
+
+function hasReceipt(status: ReturnType<typeof resourcePoolQueryStatus>, id: string): boolean {
+  const prior = status.receipts.get(id);
+  if (prior?.id !== id || prior.status === 'found' && prior.receipt?.id !== id) throw new Error('Resource receipt query unavailable');
+  if (prior.status === 'found') return true;
+  if (prior.status === 'proven-absent') return false;
+  throw new Error('Resource receipt query unavailable');
 }
 
 function path(value: unknown): value is string {
@@ -200,14 +208,13 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     // Replay must not depend on a collector still being alive. The final locked
     // handoff still compares the entire immutable task digest, including conflicts.
     const sharedCollector = runtime.quotaEvidenceMode === 'shared-collector';
-    const priorReceipt = sharedCollector && resourcePoolStatus(runtime.root, pool, bindings, fileObservations)
-      .attempts.some((attempt) => attempt.id === taskId);
+    const priorReceipt = sharedCollector && hasReceipt(resourcePoolQueryStatus(runtime.root, pool, bindings, fileObservations), taskId);
     let sharedOwner: string | undefined;
     if (quotaConfig && !sharedCollector) {
       // Existing receipts must not cause fresh metadata contact. The eventual
       // transaction still enforces the full task digest and replay semantics.
-      const prior = resourcePoolStatus(runtime.root, pool, bindings, fileObservations);
-      if (!prior.attempts.some((attempt) => attempt.id === taskId)) {
+      const prior = resourcePoolQueryStatus(runtime.root, pool, bindings, fileObservations);
+      if (!hasReceipt(prior, taskId)) {
         const quotaTimeoutMs = remaining();
         const quotaCapacityWaitMs = runtime.capacityWaitMs ? capacityRemaining() : undefined;
         if (quotaCapacityWaitMs !== undefined && quotaCapacityWaitMs < 1) return withheld();
@@ -230,8 +237,8 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       }
     }
     if (localConfig) {
-      const prior = resourcePoolStatus(runtime.root, pool, bindings, observations, managedUnavailable);
-      if (!prior.attempts.some((attempt) => attempt.id === taskId)) {
+      const prior = resourcePoolQueryStatus(runtime.root, pool, bindings, observations, managedUnavailable);
+      if (!hasReceipt(prior, taskId)) {
         const timeoutMs = remaining();
         const waitMs = runtime.capacityWaitMs ? capacityRemaining() : undefined;
         if (waitMs !== undefined && waitMs < 1) return withheld();
@@ -328,9 +335,9 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
           // Derived zero is not the operator's legacy no-wait setting. After
           // expiry only an existing identity may reach atomic replay/conflict.
           current = readEvidence();
-          const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
+          const prior = resourcePoolQueryStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
           remaining();
-          if (!prior.attempts.some((attempt) => attempt.id === taskId)) return withheld();
+          if (!hasReceipt(prior, taskId)) return withheld();
         } else {
           const capacity = await waitForResourceCapacity({ root: runtime.root, pool, bindings, task,
             waitMs, signal: controller.signal, readEvidence });
@@ -343,9 +350,9 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       } else current = readEvidence();
       remaining();
       if (runtime.capacityWaitMs && capacityRemaining() < 1) {
-        const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
+        const prior = resourcePoolQueryStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
         remaining();
-        if (!prior.attempts.some((attempt) => attempt.id === taskId)) return withheld();
+        if (!hasReceipt(prior, taskId)) return withheld();
       }
       evidence.taskId = taskId; evidence.dispatch = 'unavailable';
       handoff = await runResourceTask({ root: runtime.root, pool, bindings, ...current, task, signal: controller.signal,

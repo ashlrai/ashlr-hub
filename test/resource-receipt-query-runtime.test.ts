@@ -1,11 +1,11 @@
 /** Independent real ledger and loopback execution; seeded time cases are explicitly labelled. */
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
-import { resourcePoolStatus, runResourceTask, type ResourceTask, type ResourceTaskReceipt } from '../src/core/resources/pool-runtime.js';
+import { resourcePoolQueryStatus, resourcePoolStatus, runResourceTask, type ResourceTask, type ResourceTaskReceipt } from '../src/core/resources/pool-runtime.js';
 import { planResourceAssignment, type ResourceObservation, type ResourcePool } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 
@@ -44,11 +44,51 @@ async function fixture(options: { respond?: (res: ServerResponse) => void; tempo
     pending.push(promise); void promise.catch(() => {}); return promise;
   };
   const status = () => resourcePoolStatus(root, pool, bindings, []);
-  return { root, pool, bindings, observations, requests, task, run, status, now,
+  const queryStatus = () => resourcePoolQueryStatus(root, pool, bindings, []);
+  return { root, pool, bindings, observations, requests, task, run, status, queryStatus, now,
     bytes: () => readFileSync(join(root, 'pool-state.json'), 'utf8') };
 }
 
 describe('query-backed runtime accounting retains complete receipt semantics', () => {
+  it('reads missing receipt evidence without creating storage or exposing a partial attempts array', async () => {
+    const f = await fixture(); const query = f.queryStatus();
+    expect(query.sourceState).toBe('missing'); expect(query).not.toHaveProperty('attempts');
+    expect(query.receipts.getMany(['first', 'second', 'first'])).toEqual([
+      { status: 'proven-absent', id: 'first' }, { status: 'proven-absent', id: 'second' }, { status: 'proven-absent', id: 'first' },
+    ]);
+    expect(query.receipts.unresolved()).toEqual([]);
+    expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+  });
+
+  it('keeps detached query evidence coherent while a real reservation settles', async () => {
+    const held: ServerResponse[] = []; const f = await fixture({ respond: res => held.push(res) });
+    const running = f.run(f.task('query-snapshot'));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    const before = f.bytes(); const query = f.queryStatus();
+    expect(f.bytes()).toBe(before);
+    expect(query.plan.exclusions.find(row => row.workerId === 'alias-b')?.reasons).toContain('concurrency-exhausted');
+    const found = query.receipts.get('query-snapshot');
+    expect(found.status).toBe('found');
+    if (found.status !== 'found') throw new Error('Fixture reservation missing');
+    found.receipt.reason = 'changed-returned-copy';
+    expect(query.receipts.unresolved('shared')[0]?.reason).not.toBe('changed-returned-copy');
+    held[0]!.end(completion()); await running;
+    expect(query.receipts.get('query-snapshot')).toMatchObject({ receipt: { status: 'reserved' } });
+    expect(query.receipts.accountWindow('shared', 60_000, Date.now()).inFlightCount).toBe(1);
+    const current = f.queryStatus();
+    expect(current.receipts.get('query-snapshot')).toMatchObject({ receipt: { status: 'completed' } });
+    expect(current.receipts.unresolved()).toEqual([]);
+    expect(f.status().attempts).toHaveLength(1); expect(f.status()).not.toHaveProperty('receipts');
+  });
+
+  it('refuses corrupt ledger evidence instead of returning proven absence', async () => {
+    const f = await fixture(); await f.run(f.task('before-corruption'));
+    writeFileSync(join(f.root, 'pool-state.json'), '{"schemaVersion":1}\n');
+    const before = f.bytes();
+    expect(() => f.queryStatus()).toThrow(); expect(() => f.status()).toThrow();
+    expect(f.bytes()).toBe(before); expect(f.requests).toHaveLength(1);
+  });
+
   it('conserves a real shared reservation while permitting an independent capacity and exact blocked replay', async () => {
     const held: ServerResponse[] = []; const f = await fixture({ respond: res => held.push(res) });
     const task = f.task('held'); const running = f.run(task);

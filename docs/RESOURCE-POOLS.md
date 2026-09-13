@@ -3170,6 +3170,15 @@ eligible for fresh admission only when its absence is established against that
 complete snapshot, never a recent-history page. This query boundary prepares
 indexed storage; it does not activate receipt archival or raise the limits below.
 
+Capacity waiting, generation handoff and supervisor recovery use
+`resourcePoolQueryStatus`: its plan and receipt queries describe one captured
+ledger snapshot, and it deliberately has no `attempts` array. New work requires
+explicit absence for the requested identity; missing, foreign or unavailable
+query results cannot authorize collector contact or recovery. A successful read
+remains a hint: final admission rechecks the ledger under its writer lock.
+The legacy `resourcePoolStatus` complete-history DTO remains unchanged for public
+metrics and proof consumers that have not yet migrated.
+
 The internal ordered immutable index is a storage foundation, not an alternate
 ledger selected by this release. It supports exact keys, bounded ordered pages
 and range counts against a pinned root. A count authenticates the root's subtree
@@ -3177,6 +3186,19 @@ summaries; it does not prove that every unread historical file is available.
 Its private store stages durable nodes but never publishes an authoritative
 ledger root. A future migration must preserve receipt identity, account
 accounting, configuration history and provenance before activating that store.
+
+The internal terminal-receipt archive stores immutable receipt payloads plus
+task-ID and capacity/start-time indexes. It preserves originating configurations,
+exact replay identity and cooldown-qualified failure pointers across epochs.
+Reserved and uncertain receipts are not terminal archive entries. Archive reads
+require the host's pinned complete root, including its failure pointers; checking
+the shape of an arbitrary supplied root does not establish accounting completeness.
+Staging returns a candidate root without replacing the active ledger. Public
+metrics, evolution journals and root-custody migration remain activation gates.
+The active/archive query adapter combines these two disjoint sets, refuses
+duplicate identities between them and retains all unresolved occupancy. Large
+exact-ID requests use bounded batches against the same captured archive root;
+batching does not change the meaning of absence or reset accounting.
 
 Each observation holds at most eight windows. If successive valid snapshots
 exceed that inventory, the ledger retains seven strongest readings and a

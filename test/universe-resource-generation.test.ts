@@ -10,6 +10,7 @@ import { generateResourceCompletion, type ResourceGenerationContext } from '../s
 import { generateModelCandidate } from '../src/core/universe/model-candidate.js';
 import { resourceGenerationTaskId, validGenerationReceipt } from '../src/core/universe/generation.js';
 import { runResourceTask, type ResourceTaskReceipt } from '../src/core/resources/pool-runtime.js';
+import { createResourcePoolReceiptQuery } from '../src/core/resources/pool-receipt-query.js';
 import { validateResourcePool, type ResourceObservation } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { refreshResourceQuotaOnce } from '../src/core/resources/quota-refresh.js';
@@ -173,10 +174,35 @@ describe.skipIf(process.platform === 'win32')('pinned local inventory before res
     expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'withheld' } });
     expect(refreshResourceLocalModelsOnce).toHaveBeenCalledOnce();
   });
+  it.each(['throws', 'unknown', 'foreign-envelope', 'foreign-receipt', 'foreign-absence'] as const)('withholds before inventory or worker contact when exact receipt lookup %s', async (failure) => {
+    const f = localFixture(); const original = poolRuntime.resourcePoolQueryStatus;
+    const get = vi.fn(() => {
+      if (failure === 'throws') throw new Error('PRIVATE_RECEIPT_LOOKUP_FAILURE');
+      const id = resourceGenerationTaskId(identity);
+      return (failure === 'unknown' ? { status: 'unavailable', id } : failure === 'foreign-absence'
+        ? { status: 'proven-absent', id: 'foreign' }
+        : { status: 'found', id: failure === 'foreign-envelope' ? 'foreign' : id,
+          receipt: { id: failure === 'foreign-receipt' ? 'foreign' : id } }) as unknown as ReturnType<ReturnType<typeof original>['receipts']['get']>;
+    });
+    vi.spyOn(poolRuntime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
+      const status = original(...args);
+      return { ...status, receipts: { ...status.receipts, get } };
+    });
+    const legacy = vi.spyOn(poolRuntime, 'resourcePoolStatus');
+    const result = await f.run();
+    expect(result).toMatchObject({ status: 'failed', content: null });
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_RECEIPT_LOOKUP_FAILURE');
+    expect(refreshResourceLocalModelsOnce).not.toHaveBeenCalled(); expect(runResourceTask).not.toHaveBeenCalled();
+    expect(get).toHaveBeenCalledOnce(); expect(legacy).not.toHaveBeenCalled(); expect(existsSync(f.runtime.root)).toBe(false);
+  });
   it('skips inventory contact for an existing task identity', async () => {
-    const f = localFixture(); const original = poolRuntime.resourcePoolStatus;
-    vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => ({ ...original(...args),
-      attempts: [{ id: resourceGenerationTaskId(identity) } as ResourceTaskReceipt] }));
+    const f = localFixture(); const original = poolRuntime.resourcePoolQueryStatus;
+    vi.spyOn(poolRuntime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
+      const status = original(...args); const id = resourceGenerationTaskId(identity);
+      // Existence-only fixture; final receipt validation remains in the handoff.
+      return { ...status, receipts: { ...status.receipts,
+        get: () => ({ status: 'found', id, receipt: { id } as ResourceTaskReceipt }) } };
+    });
     vi.mocked(runResourceTask).mockImplementation(async (options) => returned(options, {}, null, true));
     expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'replayed' }, usage: { state: 'unavailable' } });
     expect(refreshResourceLocalModelsOnce).not.toHaveBeenCalled(); expect(runResourceTask).toHaveBeenCalledOnce();
@@ -350,8 +376,8 @@ describe.skipIf(process.platform === 'win32')('resource candidate transport boun
     save(f.runtimePath, { ...f.runtime, quotaConfigPath, capacityWaitMs: 1000 });
     let afterPreflight = false; let reads = 0;
     vi.spyOn(performance, 'now').mockImplementation(() => afterPreflight ? ++reads <= 2 ? 999 : 1001 : 0);
-    const original = poolRuntime.resourcePoolStatus;
-    vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => {
+    const original = poolRuntime.resourcePoolQueryStatus;
+    vi.spyOn(poolRuntime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
       const status = original(...args); afterPreflight = true; return status;
     });
     vi.mocked(refreshResourceQuotaOnce).mockResolvedValue({ observations: f.observations, unavailableWorkerIds: [] });
@@ -412,8 +438,8 @@ describe.skipIf(process.platform === 'win32')('resource candidate transport boun
       workers: [{ workerId: 'native', accountHint: 'a'.repeat(64), bucketIds: ['weekly'] }] });
     save(f.runtimePath, { ...f.runtime, quotaConfigPath, capacityWaitMs: 1000 });
     let elapsed = 0; vi.spyOn(performance, 'now').mockImplementation(() => elapsed);
-    const status = poolRuntime.resourcePoolStatus;
-    vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => {
+    const status = poolRuntime.resourcePoolQueryStatus;
+    vi.spyOn(poolRuntime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
       const value = status(...args); if (phase === 'preflight') elapsed = 1001; return value;
     });
     vi.mocked(refreshResourceQuotaOnce).mockImplementation(async () => {
@@ -436,10 +462,10 @@ describe.skipIf(process.platform === 'win32')('resource candidate transport boun
     vi.mocked(waitForResourceCapacity).mockImplementation(async (options) => {
       task = options.task; elapsed = 1001; return { ...options.readEvidence(), ready: true };
     });
-    const read = poolRuntime.resourcePoolStatus;
-    vi.spyOn(poolRuntime, 'resourcePoolStatus').mockImplementation((...args) => ({ ...read(...args),
-      attempts: [returned({ root: f.runtime.root, pool: f.pool, bindings: f.bindings, observations: f.observations, task },
-        { status }, null, true).receipt!] }));
+    const read = poolRuntime.resourcePoolQueryStatus;
+    vi.spyOn(poolRuntime, 'resourcePoolQueryStatus').mockImplementation((...args) => ({ ...read(...args),
+      receipts: createResourcePoolReceiptQuery([returned({ root: f.runtime.root, pool: f.pool, bindings: f.bindings, observations: f.observations, task },
+        { status }, null, true).receipt!]) }));
     vi.mocked(runResourceTask).mockImplementation(async (options) => returned(options, { status }, null, true));
     expect(await f.run()).toMatchObject({ status: 'failed', usage: { state: 'unavailable' },
       resource: { dispatch: 'replayed', taskStatus: status } });

@@ -9,7 +9,7 @@ import { canonical, digest, inspectPrivateDirectory } from '../universe/artifact
 import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
-import { readResourceJson, readResourcePoolHistory, resourcePoolStatus, runResourceTask, validateUnavailableResourceWorkerIds,
+import { readResourceJson, readResourcePoolHistory, resourcePoolQueryStatus, runResourceTask, validateUnavailableResourceWorkerIds,
   type ResourcePoolConfigSnapshot, type ResourceTaskReceipt } from './pool-runtime.js';
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
 import { resourceConsoleTranscriptDigest, validateResourceConsoleContext } from './console-conversation.js';
@@ -236,7 +236,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     pool = validateResourcePool(options.pool); bindings = validateResourceBindings(options.bindings, pool);
     validateResourceObservations(readObservations(), pool);
     // Read validates an existing ledger but never initializes a missing one.
-    resourcePoolStatus(root, pool, bindings, []);
+    resourcePoolQueryStatus(root, pool, bindings, []);
   } catch { throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource supervisor scope or evidence'); }
   const scopeDigest = digest(canonical({ pool, bindings, workspace }));
   const poolDigest = digest(canonical({ pool, bindings }));
@@ -398,8 +398,16 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     if (closing || error) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor unavailable');
     own(); historyJobs();
   }
-  function receiptFor(job: DurableJob, receipts: ResourceTaskReceipt[]): ResourceTaskReceipt | undefined {
-    const receipt = receipts.find((row) => row.id === job.id);
+  function exactReceipt(query: ReturnType<typeof resourcePoolQueryStatus>['receipts'], id: string): ResourceTaskReceipt | undefined {
+    const result = query.get(id);
+    if (result?.id === id && result.status === 'proven-absent') return undefined;
+    if (result?.id !== id || result.status !== 'found' || result.receipt?.id !== id) {
+      throw new ResourceSupervisorError('UNAVAILABLE', 'Task receipt evidence unavailable');
+    }
+    return result.receipt;
+  }
+  function receiptFor(job: DurableJob, receipts: ReturnType<typeof resourcePoolQueryStatus>['receipts']): ResourceTaskReceipt | undefined {
+    const receipt = exactReceipt(receipts, job.id);
     if (receipt && (receipt.taskDigest !== job.taskDigest || receipt.poolDigest !== originFor(job).poolDigest ||
       !job.allowedWorkerIds.includes(receipt.workerId))) throw new ResourceSupervisorError('CONFLICT', 'Task receipt identity mismatch');
     return receipt;
@@ -462,7 +470,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
           input: controller.signal.aborted || closing ? null : job.input, reason: admissionProjectHold ?? 'no-eligible-capacity',
           ...((controller.signal.aborted || closing) && job.parent && !job.history ? { context: null } : {}) });
       } else {
-        const recorded = resourcePoolStatus(root, pool, bindings, []).attempts;
+        const recorded = resourcePoolQueryStatus(root, pool, bindings, []).receipts;
         const receipt = receiptFor(job, recorded);
         if (!receipt || canonical(receipt) !== canonical(result.receipt)) throw new Error('Settlement evidence mismatch');
         settle(job, receipt, 'settlement-unavailable', !result.replayed && result.output !== null ? result.output : undefined);
@@ -470,7 +478,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       }
     }).catch(() => {
       if (error) return;
-      try { settle(job, receiptFor(job, resourcePoolStatus(root, pool, bindings, []).attempts), 'dispatch-settlement-unavailable'); }
+      try { settle(job, receiptFor(job, resourcePoolQueryStatus(root, pool, bindings, []).receipts), 'dispatch-settlement-unavailable'); }
       catch (cause) {
         if (cause instanceof ResourceSupervisorError && cause.code === 'CONFLICT') {
           dispatched.delete(job.id);
@@ -479,7 +487,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       }
     }).finally(() => { active.delete(job.id); schedule(0); });
     try {
-      const reserved = receiptFor(job, resourcePoolStatus(root, pool, bindings, []).attempts);
+      const reserved = receiptFor(job, resourcePoolQueryStatus(root, pool, bindings, []).receipts);
       if (reserved?.status === 'reserved') update(job.id, { workerId: reserved.workerId });
     } catch (cause) {
       // The attached settlement handler isolates a competing runtime identity.
@@ -529,9 +537,9 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
           const unavailableWorkerIds = admissionConstraint();
           if (unavailableWorkerIds === null || closing || error || state.paused) break;
           if (state.jobs.find((row) => row.id === job.id)?.state !== 'queued') continue;
-          const status = resourcePoolStatus(root, pool, bindings, observations, unavailableWorkerIds.account, unavailableWorkerIds.quota);
+          const status = resourcePoolQueryStatus(root, pool, bindings, observations, unavailableWorkerIds.account, unavailableWorkerIds.quota);
           let receipt: ResourceTaskReceipt | undefined;
-          try { receipt = receiptFor(job, status.attempts); }
+          try { receipt = receiptFor(job, status.receipts); }
           catch (cause) {
             if (!(cause instanceof ResourceSupervisorError && cause.code === 'CONFLICT')) throw cause;
             settle(job, undefined, 'task-identity-conflict'); continue;
@@ -556,15 +564,22 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   function recoveryHold(recoveryOf?: string): string | null {
     if (!recoveryOf) return null;
     try {
-      const attempts = resourcePoolStatus(root, pool, bindings, []).attempts;
       const jobs = historyJobs();
       const seen = new Set<string>(); let id: string | undefined = recoveryOf;
       while (id) {
         const prior = jobs.find(row => row.id === id);
         if (seen.has(id) || !prior || prior.state !== 'cancelled' || prior.reason !== 'task-owner-unavailable' ||
           prior.executionOwnerId === undefined || prior.mode !== 'read-only' || prior.parent ||
-          originFor(prior).poolDigest !== poolDigest || attempts.some(row => row.id === id)) return 'task-recovery-evidence-unavailable';
+          originFor(prior).poolDigest !== poolDigest) return 'task-recovery-evidence-unavailable';
         seen.add(id); id = prior.recoveryOf;
+      }
+      // Prove absence for the complete referenced chain in one coherent ledger
+      // snapshot. Missing, foreign or unknown lookup results are not absence.
+      const ids = [...seen];
+      const results = resourcePoolQueryStatus(root, pool, bindings, []).receipts.getMany(ids);
+      if (!Array.isArray(results) || results.length !== ids.length ||
+        ids.some((taskId, index) => results[index]?.id !== taskId || results[index]?.status !== 'proven-absent')) {
+        return 'task-recovery-evidence-unavailable';
       }
       return null;
     } catch { return 'task-recovery-evidence-unavailable'; }
@@ -629,7 +644,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       }
       const taskDigest = digest(canonical(taskFor(input, context)));
       let previousRuntime: ResourceTaskReceipt | undefined;
-      try { previousRuntime = resourcePoolStatus(root, pool, bindings, []).attempts.find((row) => row.id === input.id); }
+      try { previousRuntime = exactReceipt(resourcePoolQueryStatus(root, pool, bindings, []).receipts, input.id); }
       catch { throw new ResourceSupervisorError('UNAVAILABLE', 'Resource task evidence unavailable'); }
       if (previousRuntime && (previousRuntime.taskDigest !== taskDigest || previousRuntime.poolDigest !== poolDigest)) {
         throw new ResourceSupervisorError('CONFLICT', 'Resource task identity already used');
@@ -798,7 +813,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       if (!job || job.taskDigest !== expectedTaskDigest || active.has(id) || !['settled', 'cancelled'].includes(job.state)) {
         throw new ResourceSupervisorError('UNAVAILABLE', 'Resource task settlement unconfirmed');
       }
-      const receipt = receiptFor(job, resourcePoolStatus(root, pool, bindings, []).attempts);
+      const receipt = receiptFor(job, resourcePoolQueryStatus(root, pool, bindings, []).receipts);
       if (receipt ? ['reserved', 'uncertain'].includes(receipt.status) || job.state !== 'settled' ||
         receipt.status !== job.outcome || receipt.workerId !== job.workerId : dispatched.has(id) || job.state === 'settled') {
         throw new ResourceSupervisorError('UNAVAILABLE', 'Resource task settlement unconfirmed');
@@ -859,7 +874,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         outputs.clear(); outputBytes = 0;
         try {
           if (dispatched.size) {
-            const receipts = resourcePoolStatus(root, pool, bindings, []).attempts;
+            const receipts = resourcePoolQueryStatus(root, pool, bindings, []).receipts;
             const jobs = historyJobs();
             for (const id of dispatched) {
               const job = jobs.find(row => row.id === id)!; const receipt = receiptFor(job, receipts);
@@ -880,7 +895,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       const source = readResourceJson(statePath, MAX_STATE_BYTES); loaded = decode(source);
       state = loaded.hotState; projectBindings = state.projects; persistedDigest = loaded.sourceDigest;
     }
-    const receipts = resourcePoolStatus(root, pool, bindings, []).attempts;
+    const receipts = resourcePoolQueryStatus(root, pool, bindings, []).receipts;
     const recovered = detached(state);
     // A committed deletion can precede a failed root publication. The adapter
     // suppresses that old plaintext immediately; the next owner also removes
@@ -952,7 +967,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
             // never infer settlement from a task ID, elapsed time or old sample.
             const fresh = readResourceSupervisorCustody(supervisor);
             if (receipt.status !== 'reserved' || receipt.origin !== undefined) return false;
-            const terminal = resourcePoolStatus(root, pool, bindings, []).attempts.find(row => row.id === receipt.id);
+            const terminal = exactReceipt(resourcePoolQueryStatus(root, pool, bindings, []).receipts, receipt.id);
             if (!terminal || !['completed', 'failed', 'timed-out', 'cancelled'].includes(terminal.status) ||
               !fresh.ownsReceipt(terminal)) return false;
             const { execution: _execution, nativeProcess: _nativeProcess, ...base } = terminal;

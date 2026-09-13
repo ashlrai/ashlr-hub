@@ -65,7 +65,7 @@ const argv=process.argv.slice(2);const transport=argv[0]==='app-server'?'metadat
 log({kind:'start',mode:transport,pid:process.pid});
 if(transport==='unexpected'){log({kind:'unexpected'});process.exit(30);}
 if(transport==='metadata'){
-  if(JSON.stringify(argv)!==JSON.stringify(['app-server','--stdio','-c','analytics.enabled=false']))process.exit(31);
+  if(JSON.stringify(argv)!==JSON.stringify(['app-server','--stdio','-c','analytics.enabled=false','-c','features.plugins=false','-c','features.remote_plugin=false']))process.exit(31);
   const reader=readline.createInterface({input:process.stdin});
   const write=(id,result)=>process.stdout.write(JSON.stringify({id,result})+'\\n');
   reader.on('line',line=>{

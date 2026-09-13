@@ -167,6 +167,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-pool-runtime.test.ts', // durable admission, concurrent tasks, and replay
   'test/resource-receipt-query-runtime.test.ts', // real receipt queries preserve alias accounting, rollback, cooldown and replay
   'test/ordered-immutable-index-store.test.ts', // private disk staging, cold index reads and interrupted publication recovery
+  'test/resource-pool-receipt-archive.test.ts', // real terminal payload/index staging, epoch accounting and interrupted archive recovery
   'test/resource-admission-preflight.test.ts', // read-only admission parity against private persisted ledgers
   'test/resource-performance-runtime.test.ts', // monotonic measurements in the private task ledger
   'test/resource-review-benchmark.test.ts', // fixed calibration through real ledger and loopback transport
