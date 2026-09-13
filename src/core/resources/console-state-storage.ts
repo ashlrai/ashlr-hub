@@ -25,9 +25,19 @@ export interface ResourceConsoleStorageView {
   /** Archive freshness only; callers must separately bind the active root and owner. */
   isCurrent(): boolean;
 }
-type Capture = { sourceJson: string; optionsJson: string; hotState: State;
+export interface ResourceConsoleStorageProof {
+  readonly sourceDigest: string; readonly scopeDigest: string; readonly identityDigest: string;
+  readonly requiresStorageProof: boolean;
+}
+type Capture = { sourceJson: string; optionsJson: string; hotState: State; proof: ResourceConsoleStorageProof;
   jobs: readonly Job[]; archivedRecords: Array<[string, string]> };
 const captures = new WeakMap<ResourceConsoleStorageView, Capture>();
+/** A read-only evidence projection, never an execution grant. Public view fields are not trusted. */
+export function resourceConsoleStorageProof(view: ResourceConsoleStorageView): ResourceConsoleStorageProof {
+  const captured = captures.get(view);
+  if (!captured || !view.isCurrent()) fail();
+  return { ...captured.proof };
+}
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 function fail(): never { throw new ResourceSupervisorError('UNAVAILABLE', 'Resource console storage unavailable'); }
 function present(file: string): boolean {
@@ -77,12 +87,14 @@ export function readResourceConsoleStorage(value: unknown, options: ResourceCons
   const source = JSON.parse(sourceJson) as ResourceConsoleStoredState;
   const sourceDigest = digest(sourceJson);
   let hotState: State; let jobs: readonly Job[]; let fresh: () => boolean;
+  let archiveProofDigest: string | null = null;
+  const deletedHot: Array<{ id: string; taskDigest: string }> = [];
   const archivedRecords = new Map<string, string>();
   if (isDescriptor(source)) {
     const history = readResourceConsoleHistoryView(source, { ...validation,
       archiveRoot: resourceConsoleArchiveRoot(root), expectedDescriptorDigest: sourceDigest });
     hotState = { ...structuredClone(source.console), jobs: structuredClone(source.currentJobs) };
-    jobs = history.getJobs(); fresh = history.isCurrent;
+    jobs = history.getJobs(); fresh = history.isCurrent; archiveProofDigest = history.archiveProofDigest;
     source.order.forEach((row, index) => { if (row.source === 'archive') archivedRecords.set(jobs[index]!.id, row.recordId); });
   } else {
     hotState = decodeResourceConsoleState(source, validation);
@@ -93,7 +105,8 @@ export function readResourceConsoleStorage(value: unknown, options: ResourceCons
   // sanitized hot projection. The original source bytes/digest remain exact.
   const archiveRoot = resourceConsoleArchiveRoot(root);
   const graphFresh = fresh;
-  if (present(archiveRoot)) {
+  const archivePresent = present(archiveRoot);
+  if (archivePresent) {
     const store = createResourceConsoleHistoryArchiveStore({ root: archiveRoot, scopeDigest: hotState.scopeDigest });
     const snapshot = store.readSnapshot([]);
     if (snapshot.status !== 'complete') fail();
@@ -104,7 +117,8 @@ export function readResourceConsoleStorage(value: unknown, options: ResourceCons
       if (status === 'unavailable') fail();
       if (status === 'deleted') {
         if (!['settled', 'cancelled'].includes(job.state)) fail();
-        deleted.add(job.id); job.history = null; if (job.parent) job.context = null;
+        deleted.add(job.id); deletedHot.push({ id: job.id, taskDigest: job.taskDigest });
+        job.history = null; if (job.parent) job.context = null;
       }
     }
     if (deleted.size) jobs = jobs.map(job => deleted.has(job.id)
@@ -125,7 +139,15 @@ export function readResourceConsoleStorage(value: unknown, options: ResourceCons
       try { assertResourceConsoleArchiveData(source, new Set(), 0, { nodes: 0 }, MAX_STATE_BYTES); return canonical(source) === sourceJson && fresh(); }
       catch { return false; }
     } });
-  captures.set(view, { sourceJson, optionsJson: canonical(options), hotState: structuredClone(hotState),
+  // Ordinary hot progress may overlap a read-only proof. Control state, archived
+  // evidence and deletion overlays may not: none is represented by jobs: [] alone.
+  const { jobs: _hotJobs, ...header } = hotState;
+  const proofScopeDigest = digest(canonical({ domain: 'ashlr-console-storage-proof-scope-v1',
+    header, archiveProofDigest, archivePresent, deletedHot }));
+  const proof = { sourceDigest, scopeDigest: proofScopeDigest,
+    identityDigest: digest(canonical({ domain: 'ashlr-console-storage-proof-identity-v1', sourceDigest, scopeDigest: proofScopeDigest })),
+    requiresStorageProof: isDescriptor(source) || archivePresent };
+  captures.set(view, { sourceJson, optionsJson: canonical(options), hotState: structuredClone(hotState), proof,
     jobs: structuredClone(jobs), archivedRecords: [...archivedRecords] });
   return view;
 }

@@ -16,13 +16,15 @@ export function createWorkspaceProofHandlers(custody: ResourceWorkspaceCustody |
     'custody.sample': (input: unknown) => {
       assertActive(); if (input !== null || !custody || samples.size >= maxSamples) throw unavailable();
       const owner = readResourceWorkspaceCustody(custody);
-      // Validate FULL durable state before excluding ordinary job rows from
-      // the read-only scope projection. Pause, projects and epoch remain exact.
+      // Custody validates the full storage union and archive snapshot. Keep its
+      // exact active-file pin as well; never derive archive proof from a raw
+      // descriptor with a synthetic jobs: [] property.
       const state = readResourceJson(join(owner.root, 'resource-console-state.json'), 4 * 1024 * 1024) as object;
       if (digest(canonical(state)) !== owner.stateDigest) throw unavailable();
       samples.set(++sampleId, owner);
       return { sampleId, root: owner.root, workspace: owner.workspace, poolDigest: owner.poolDigest,
-        stateDigest: owner.stateDigest, consoleScopeDigest: digest(canonical({ ...state, jobs: [] })),
+        stateDigest: owner.stateDigest, consoleStorageScopeDigest: owner.consoleStorageScopeDigest,
+        ...(!Object.hasOwn(state, 'kind') ? { consoleScopeDigest: digest(canonical({ ...state, jobs: [] })) } : {}),
         lockPaths: owner.locks.map(lock => lock.path), metadataPending: owner.metadataPending };
     },
     'custody.receipt': (input: unknown) => {

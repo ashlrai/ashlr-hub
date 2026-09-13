@@ -6,6 +6,7 @@ import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './w
 import type { ResourceTaskReceipt } from './pool-runtime.js';
 import type { createEngineeringWorkerRpcClient } from './engineering-worker-rpc.js';
 import { canonical, digest } from '../universe/artifacts.js';
+import { resourceConsoleStorageProof, type ResourceConsoleStorageView } from './console-state-storage.js';
 
 export interface ResourceWorkspaceProofContext { readonly kind: 'workspace-proof-reader' }
 export type ResourceWorkspaceProofSource = ResourceWorkspaceCustody | ResourceWorkspaceProofContext;
@@ -13,6 +14,8 @@ export interface ResourceWorkspaceProofSample {
   root: string; workspace: string; poolDigest: string; stateDigest: string;
   /** Worker reads may overlap known human rows; scope/pause/epoch remain exact. */
   consoleScopeDigest?: string;
+  /** Validated control header plus archived evidence and effective hot deletions. */
+  consoleStorageScopeDigest?: string;
   lockPaths: string[]; metadataPending: boolean;
   ownsReceipt(receipt: ResourceTaskReceipt): boolean;
   isPoolAvailable(): boolean;
@@ -26,8 +29,17 @@ export function isWorkspacePoolAvailable(root: string): boolean {
 }
 
 export function matchesWorkspaceProofState(sample: ResourceWorkspaceProofSample, state: object): boolean {
+  if (Object.hasOwn(state, 'kind')) return false;
   return digest(canonical(state)) === sample.stateDigest || sample.consoleScopeDigest !== undefined &&
     digest(canonical({ ...state, jobs: [] })) === sample.consoleScopeDigest;
+}
+
+export function matchesWorkspaceProofStorage(sample: ResourceWorkspaceProofSample, view: ResourceConsoleStorageView): boolean {
+  try {
+    const proof = resourceConsoleStorageProof(view);
+    if (sample.consoleStorageScopeDigest !== undefined) return sample.consoleStorageScopeDigest === proof.scopeDigest;
+    return !proof.requiresStorageProof && matchesWorkspaceProofState(sample, view.source);
+  } catch { return false; }
 }
 
 /** Only the fixed proof worker calls this. Its RPC peer must hold real custody.
@@ -49,7 +61,8 @@ export function readResourceWorkspaceProof(source: ResourceWorkspaceProofSource,
   const sample = remote ? remote() : (() => {
     const owner = readResourceWorkspaceCustody(source as ResourceWorkspaceCustody);
     return { root: owner.root, workspace: owner.workspace, poolDigest: owner.poolDigest,
-      stateDigest: owner.stateDigest, lockPaths: owner.locks.map(lock => lock.path),
+      stateDigest: owner.stateDigest, consoleStorageScopeDigest: owner.consoleStorageScopeDigest,
+      lockPaths: owner.locks.map(lock => lock.path),
       metadataPending: owner.metadataPending, ownsReceipt: owner.ownsReceipt,
       isPoolAvailable: () => isWorkspacePoolAvailable(readResourceWorkspaceCustody(source as ResourceWorkspaceCustody, owner).root) };
   })();

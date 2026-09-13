@@ -17,7 +17,7 @@ import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResou
   validateResourceConsoleProjects, type ResourceConsoleProjectBinding } from './console-projects.js';
 import type { ResourceConsoleContextTurn, ResourceConsoleOutput, ResourceConsoleTaskInput, ResourceConsoleTranscript,
   ResourceConsoleProject, ResourceConsoleProjectInput, ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
-import { readResourceConsoleStorage, prepareResourceConsoleStorage, compactResourceConsoleStorage, deleteResourceConsoleStoredHistory,
+import { readResourceConsoleStorage, prepareResourceConsoleStorage, compactResourceConsoleStorage, deleteResourceConsoleStoredHistory, resourceConsoleStorageProof,
   type ResourceConsoleStorageView } from './console-state-storage.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
 import { readResourceExecutionStop } from './execution-stop.js';
@@ -78,6 +78,7 @@ export interface ResourcePoolSupervisor {
 /** Host-only live ownership, issued by the actual constructor, never by a wire descriptor. */
 export interface ResourceSupervisorCustody {
   root: string; workspace: string; poolDigest: string; lock: LocalStoreLock; stateDigest: string;
+  consoleStorageScopeDigest: string;
   ownsReceipt(receipt: ResourceTaskReceipt): boolean;
   /** Read-only historical join: exact reservation prefix of a proven owned settlement. */
   ownsSettledReservation(receipt: ResourceTaskReceipt): boolean;
@@ -913,6 +914,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       // from a task prefix or from the absence of an engineering origin alone.
       const jobs = detached(historyJobs());
       return Object.freeze({ root, workspace, poolDigest, lock, stateDigest: persistedDigest,
+        consoleStorageScopeDigest: resourceConsoleStorageProof(loaded).scopeDigest,
         ownsReceipt(receipt: ResourceTaskReceipt) {
           if (receipt.origin !== undefined || receipt.status === 'uncertain') return false;
           if (receipt.status === 'reserved') return ownsActiveReceipt(receipt);

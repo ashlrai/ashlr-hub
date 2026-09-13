@@ -20,11 +20,12 @@ import { validateUniversePortfolioDefinition } from '../universe/portfolio-plan.
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { checkResourceGenerationRuntime } from '../universe/resource-runtime-check.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { readResourceConsoleStorage } from './console-state-storage.js';
 import { readResourceJson, readResourcePoolHistory } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
-import { decodeResourceConsoleState, previewResourceConsoleProjects, ResourceSupervisorError } from './pool-supervisor.js';
+import { previewResourceConsoleProjects, ResourceSupervisorError } from './pool-supervisor.js';
 import { prepareResourceConsoleEngineeringEnrollments, type ResourceConsoleEngineeringCatalog } from './console-engineering.js';
 import { checkResourceConsoleEngineering } from './console-engineering-check.js';
 import { validateResourceConsoleEngineeringSupervisionConfig } from './console-engineering-supervisor.js';
@@ -117,8 +118,9 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
   if (!exact(projectsDocument, ['schemaVersion', 'projects']) || projectsDocument.schemaVersion !== 1) fail('INVALID_INPUT', 'Invalid preparation project catalog');
   const projects = validateResourceConsoleProjects(projectsDocument.projects);
   const stateFile = join(runtime.root, 'resource-console-state.json');
-  const state = present(stateFile) ? decodeResourceConsoleState(readResourceJson(stateFile, 4 * 1024 * 1024), {
-    pool, bindings, workspace: options.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) }) : undefined;
+  const consoleStorage = present(stateFile) ? readResourceConsoleStorage(readResourceJson(stateFile, 4 * 1024 * 1024), {
+    root: runtime.root, pool, bindings, workspace: options.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) }) : undefined;
+  const state = consoleStorage?.hotState;
   const preview = previewResourceConsoleProjects({ workspace: options.workspace, projects, state });
   const project = preview.bindings?.find(row => row.id === recipe.projectId);
   if (!project || !preview.projects?.find(row => row.id === recipe.projectId)?.enabled || !matchesResourceConsoleProject(project)) {
@@ -243,6 +245,7 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
     providerContacted: false, paths, ids, seedRevision: seed.revision, runtimeDigest, poolDigest };
   successor?.assertSource();
   assertEvaluator();
+  if (consoleStorage && !consoleStorage.isCurrent()) fail('CONFLICT', 'Preparation console history changed while inspecting');
   return { options, recipe, runtime, preview, paths, plan, manifest, campaign, definition, deliveryPlan, supervisionBase,
     assertEvaluator, expectedSeedArtifactDigest,
     ...(successor ? { campaignDeliveryOrigin: successor.origin } : {}) };

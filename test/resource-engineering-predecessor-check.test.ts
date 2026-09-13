@@ -6,7 +6,8 @@ import * as workspaceProof from '../src/core/resources/workspace-proof-context.j
 
 const hooks = vi.hoisted(() => ({ stat: vi.fn(), setup: vi.fn(), json: vi.fn(), registry: vi.fn(), prepared: vi.fn(),
   graph: vi.fn(), source: vi.fn(), queue: vi.fn(), preview: vi.fn(), console: vi.fn(), project: vi.fn(),
-  accounting: vi.fn(), history: vi.fn(), journal: vi.fn(), campaign: vi.fn(), universe: vi.fn(), outcomes: vi.fn(), seed: vi.fn(), capture: vi.fn(), builtin: vi.fn() }));
+  accounting: vi.fn(), history: vi.fn(), journal: vi.fn(), campaign: vi.fn(), universe: vi.fn(), outcomes: vi.fn(), seed: vi.fn(), capture: vi.fn(), builtin: vi.fn(),
+  storageFresh: vi.fn(), storageScope: vi.fn() }));
 vi.mock('node:fs', async original => ({ ...await original<object>(), lstatSync: hooks.stat }));
 vi.mock('../src/core/resources/engineering-autonomous-setup.js', async original => ({ ...await original<object>(), readResourceEngineeringAutonomousSetupEvidence: hooks.setup }));
 vi.mock('../src/core/resources/engineering-preparation-registry.js', async original => ({ ...await original<object>(), createResourceEngineeringPreparationRegistry: hooks.registry }));
@@ -14,7 +15,21 @@ vi.mock('../src/core/resources/console-engineering.js', async original => ({ ...
 vi.mock('../src/core/resources/engineering-outcomes.js', () => ({ readResourceEngineeringOutcomes: hooks.outcomes }));
 vi.mock('../src/core/resources/console-engineering-supervision-state.js', async original => ({ ...await original<object>(), readResourceConsoleEngineeringSupervisionState: hooks.queue }));
 vi.mock('../src/core/resources/console-projects.js', async original => ({ ...await original<object>(), pinResourceConsoleProject: hooks.project }));
-vi.mock('../src/core/resources/pool-supervisor.js', async original => ({ ...await original<object>(), previewResourceConsoleProjects: hooks.preview, decodeResourceConsoleState: hooks.console }));
+vi.mock('../src/core/resources/pool-supervisor.js', async original => ({ ...await original<object>(), previewResourceConsoleProjects: hooks.preview }));
+// These are explicitly synthetic host projections; real private storage and
+// archive custody are covered by the storage/proof acceptance suites.
+vi.mock('../src/core/resources/console-state-storage.js', async original => ({ ...await original<object>(),
+  readResourceConsoleStorage: () => {
+    const state = hooks.console();
+    return { source: state, hotState: state, jobs: state.jobs, isCurrent: hooks.storageFresh };
+  },
+  resourceConsoleStorageProof: (view: { source: object; isCurrent(): boolean }) => {
+    if (!view.isCurrent()) throw new Error('Synthetic storage changed');
+    const sourceDigest = digest(canonical(view.source));
+    const scopeDigest = hooks.storageScope(view.source) as string;
+    return { sourceDigest, scopeDigest, identityDigest: digest(canonical({ sourceDigest, scopeDigest })), requiresStorageProof: false };
+  },
+}));
 vi.mock('../src/core/resources/pool-runtime.js', async original => ({ ...await original<object>(), readResourceJson: hooks.json,
   resourcePoolStatus: hooks.accounting, readResourcePoolHistory: hooks.history }));
 vi.mock('../src/core/resources/engineering-successor-store.js', async original => ({ ...await original<object>(), readEngineeringSuccessorJournal: hooks.journal }));
@@ -92,6 +107,8 @@ function fixture() {
   hooks.queue.mockImplementation(() => structuredClone(queue));
   hooks.preview.mockReturnValue({ bindings: [project], projects: [project] }); hooks.project.mockReturnValue(project);
   hooks.console.mockReturnValue({ schemaVersion: 1, paused: false, jobs: [] }); hooks.history.mockReturnValue([]);
+  hooks.storageFresh.mockReturnValue(true);
+  hooks.storageScope.mockImplementation((state: object) => hash({ ...state, jobs: [] }));
   hooks.accounting.mockImplementation(() => ({ sourceState: 'healthy', attempts: structuredClone(attempts) }));
   hooks.journal.mockImplementation(() => ({ records: structuredClone(rows), recordsDigest: hash(rows) }));
   hooks.campaign.mockImplementation((id: string) => ({ definition: { id, universeId: id + '-universe' }, definitionDigest: h(id), steps: [] }));
@@ -293,6 +310,36 @@ describe('predecessor completion joins over mocked host evidence', () => {
     try {
       const result = checkResourceEngineeringPredecessor(f.options, [], { kind: 'workspace-proof-reader' });
       expect(result, JSON.stringify(result)).toMatchObject({ status: 'verified', executionAuthorized: false, effectsExecuted: false });
+    } finally { owner.mockRestore(); }
+  });
+  it('refuses final archive freshness loss after the completion join', () => {
+    const f = fixture(); hooks.storageFresh.mockReturnValue(false);
+    held(f.options, 'lineage');
+    expect(hooks.source).toHaveBeenCalledTimes(2);
+    expect(hooks.storageFresh).toHaveBeenCalledOnce();
+  });
+  it('includes archive proof changes in ownerless identity despite identical root state', () => {
+    const f = fixture(); let sample = 0;
+    hooks.storageScope.mockImplementation(() => h('archive-' + ++sample));
+    held(f.options, 'stability-consolestate');
+    expect(hooks.console).toHaveBeenCalledTimes(2);
+  });
+  it('tolerates only hot progress under a matching live storage scope', () => {
+    const f = fixture(); let sample = 0;
+    hooks.console.mockImplementation(() => ({ schemaVersion: 1, paused: false, jobs: [{ fixtureProgress: ++sample }] }));
+    const scopeDigest = hash({ schemaVersion: 1, paused: false, jobs: [] });
+    const owner = vi.spyOn(workspaceProof, 'readResourceWorkspaceProof').mockReturnValue({
+      root: f.runtime.root, workspace: f.options.setup.workspace, poolDigest: h('pool'), stateDigest: h('older-root'),
+      consoleStorageScopeDigest: scopeDigest, lockPaths: [], metadataPending: false,
+      ownsReceipt: () => false, isPoolAvailable: () => true,
+    });
+    try {
+      expect(checkResourceEngineeringPredecessor(f.options, [], { kind: 'workspace-proof-reader' }).status).toBe('verified');
+      expect(hooks.console).toHaveBeenCalledTimes(2);
+      hooks.storageScope.mockReturnValue(h('changed-archive'));
+      expect(checkResourceEngineeringPredecessor(f.options, [], { kind: 'workspace-proof-reader' })).toMatchObject({
+        status: 'held', reasons: ['projects-evidence-unavailable'],
+      });
     } finally { owner.mockRestore(); }
   });
   it.each(['allocation', 'workerAccess', 'quotaScopeAccess'] as const)('still holds changing %s with a live owner', field => {

@@ -11,7 +11,8 @@ import { assertStateHeadroom, decodeResourceConsoleState, type ResourceConsoleDu
 import { resourceConsoleConversationPrompt, resourceConsoleTranscriptDigest } from '../src/core/resources/console-conversation.js';
 import { createResourceConsoleHistoryArchiveStore } from '../src/core/resources/console-history-archive-store.js';
 import { compactResourceConsoleStorage, deleteResourceConsoleStoredHistory, prepareResourceConsoleStorage, readResourceConsoleStorage,
-  resourceConsoleArchiveRoot, type ResourceConsoleStorageView } from '../src/core/resources/console-state-storage.js';
+  resourceConsoleArchiveRoot, resourceConsoleStorageProof, type ResourceConsoleStorageView } from '../src/core/resources/console-state-storage.js';
+import { matchesWorkspaceProofStorage, matchesWorkspaceProofState, type ResourceWorkspaceProofSample } from '../src/core/resources/workspace-proof-context.js';
 
 type Job = ResourceConsoleDurableState['jobs'][number];
 const workspace = '/private/fixture/state-storage-workspace';
@@ -81,6 +82,52 @@ function followup(parent: Job, id = 'child'): Job {
 }
 
 describe('resource console active-state storage adapter', () => {
+  it('binds private storage proofs to archived evidence while allowing ordinary hot progress', () => {
+    const original = initial(state([terminal('old'), queued('pending')]));
+    const compacted = compactResourceConsoleStorage(original, ['old'], options(), guardFor(original));
+    persistFixture(compacted.source);
+    const proof = resourceConsoleStorageProof(compacted);
+    const sample: ResourceWorkspaceProofSample = { root, workspace, poolDigest, stateDigest: proof.sourceDigest,
+      consoleStorageScopeDigest: proof.scopeDigest, lockPaths: [], metadataPending: false,
+      ownsReceipt: () => false, isPoolAvailable: () => false };
+    const appended = prepareResourceConsoleStorage({ ...compacted.hotState,
+      jobs: [...compacted.hotState.jobs, queued('next')] }, compacted, options());
+    expect(resourceConsoleStorageProof(appended).scopeDigest).toBe(proof.scopeDigest);
+    expect(resourceConsoleStorageProof(appended).identityDigest).not.toBe(proof.identityDigest);
+    expect(matchesWorkspaceProofStorage(sample, appended)).toBe(true);
+    const paused = prepareResourceConsoleStorage({ ...compacted.hotState, paused: false }, compacted, options());
+    expect(matchesWorkspaceProofStorage(sample, paused)).toBe(false);
+    expect(matchesWorkspaceProofState(sample, compacted.source)).toBe(false);
+    const { consoleStorageScopeDigest: _scope, ...oldSample } = sample;
+    expect(matchesWorkspaceProofStorage(oldSample, compacted)).toBe(false);
+    expect(() => resourceConsoleStorageProof({ ...compacted })).toThrow();
+    // Detached public projections cannot alter the proof that custody sampled.
+    compacted.hotState.paused = false;
+    expect(resourceConsoleStorageProof(compacted)).toEqual(proof);
+    archive().deleteTaskText('old', compacted.getJob('old')!.taskDigest);
+    expect(() => resourceConsoleStorageProof(compacted)).toThrow();
+    const deleted = readResourceConsoleStorage(readResourceJson(statePath), options());
+    expect(deleted.sourceDigest).toBe(proof.sourceDigest);
+    expect(matchesWorkspaceProofStorage(sample, deleted)).toBe(false);
+    expect(deleted.getJob('old')?.history).toBeNull();
+  });
+
+  it('requires new proof when a hot tombstone changes effective history without changing the root', () => {
+    const original = initial(state([terminal('old')]));
+    compactResourceConsoleStorage(original, ['old'], options(), guardFor(original));
+    // Staging is intentionally not published: the active root is still legacy.
+    const hot = readResourceConsoleStorage(readResourceJson(statePath), options());
+    const before = resourceConsoleStorageProof(hot);
+    expect(before.requiresStorageProof).toBe(true);
+    archive().deleteTaskText('old', hot.getJob('old')!.taskDigest);
+    const deleted = readResourceConsoleStorage(readResourceJson(statePath), options());
+    const after = resourceConsoleStorageProof(deleted);
+    expect(after.sourceDigest).toBe(before.sourceDigest);
+    expect(after.scopeDigest).not.toBe(before.scopeDigest);
+    expect(after.identityDigest).not.toBe(before.identityDigest);
+    expect(deleted.getJob('old')?.history).toBeNull();
+  });
+
   it('rejects non-string lookup IDs without invoking their coercion hooks', () => {
     const view = initial(state([terminal('old')])); let calls = 0;
     const id = { toString() { calls++; return 'old'; } };

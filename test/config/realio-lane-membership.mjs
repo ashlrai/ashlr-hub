@@ -112,6 +112,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-compaction-acceptance.test.ts', // actual public task admission, archive/restart and quota continuity
   'test/resource-console-compaction-deadline.test.ts', // real archive publication followed by deadline/host/reentrancy vetoes
   'test/resource-console-state-storage.test.ts', // versioned private source projection and guarded archive staging
+  'test/resource-engineering-compacted-proof-acceptance.test.ts', // genuine workspace custody and worker proofs over archived history
+  'test/resource-pool-evolution-archive.test.ts', // versioned migration journal and archived history replay
+  'test/private-file-publication-guard.test.ts', // exact private-file publication veto and temporary identity checks
   'test/resource-console-history-deletion-failure.test.ts', // real completed output withheld after exact root publication failure
   'test/resource-console-history-acceptance.test.ts', // independent restart, deletion and receipt reconciliation
   'test/resource-console-followup.test.ts', // context headroom and corrupted durable-state refusal

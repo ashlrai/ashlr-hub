@@ -17,11 +17,12 @@ import { MISSION_MEASURED_FEEDBACK, projectEngineeringMissionFeedback, type Engi
 import { prepareResourceConsoleEngineeringEnrollments, readResourceConsoleEngineeringGraphCompletion } from './console-engineering.js';
 import { readResourceConsoleEngineeringSupervisionState, validateResourceConsoleEngineeringSupervisionConfig } from './console-engineering-supervision-state.js';
 import { pinResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
-import { decodeResourceConsoleState, previewResourceConsoleProjects } from './pool-supervisor.js';
+import { previewResourceConsoleProjects } from './pool-supervisor.js';
+import { readResourceConsoleStorage, resourceConsoleStorageProof } from './console-state-storage.js';
 import { readResourceJson, resourcePoolStatus, readResourcePoolHistory } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
-import { matchesWorkspaceProofState, readResourceWorkspaceProof, type ResourceWorkspaceProofSource } from './workspace-proof-context.js';
+import { matchesWorkspaceProofStorage, readResourceWorkspaceProof, type ResourceWorkspaceProofSource } from './workspace-proof-context.js';
 import { hash, readEngineeringSuccessorJournal, parseResourceEngineeringSuccessorProposal,
   validateResourceEngineeringSuccessorCoordinatorConfig, type Intent, type Result, type Prepared, type Admitted } from './engineering-successor-store.js';
 
@@ -115,9 +116,10 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       const projectsDocument = readResourceJson(options.setup.projectsFile, 256 * 1024) as { schemaVersion: unknown; projects: unknown };
       requireEvidence(projectsDocument?.schemaVersion === 1 && Object.keys(projectsDocument).sort().join(',') === 'projects,schemaVersion');
       const projects = validateResourceConsoleProjects(projectsDocument.projects);
-      const consoleState = decodeResourceConsoleState(readResourceJson(join(runtime.root, 'resource-console-state.json'), 4 * 1024 * 1024),
-        { pool, bindings, workspace: options.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
-      requireEvidence(!owner || matchesWorkspaceProofState(owner, consoleState));
+      const consoleStorage = readResourceConsoleStorage(readResourceJson(join(runtime.root, 'resource-console-state.json'), 4 * 1024 * 1024),
+        { root: runtime.root, pool, bindings, workspace: options.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
+      const consoleState = consoleStorage.hotState;
+      requireEvidence(!owner || matchesWorkspaceProofStorage(owner, consoleStorage));
       const preview = previewResourceConsoleProjects({ workspace: options.setup.workspace, projects, state: consoleState });
       requireEvidence(preview.bindings && preview.projects);
       const project = preview.bindings.find(row => row.id === plan.projectId);
@@ -228,8 +230,10 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       // A verified live owner may progress ordinary human tasks between samples.
       // Keep project/epoch state and every engineering/unknown receipt in the
       // join; unrelated prompt history and collector timestamps are not delivery.
+      requireEvidence(consoleStorage.isCurrent());
+      const consoleProof = resourceConsoleStorageProof(consoleStorage);
       return { planDigest: plan.planDigest, runtime, config, supervision, successor, project,
-        consoleState: owner ? { ...consoleState, jobs: [] } : consoleState,
+        consoleState: owner ? consoleProof.scopeDigest : consoleProof.identityDigest,
         registrations, durable, completed, journal,
         // Scheduling previews use wall-clock quota freshness. Compare persisted
         // accounting facts, not a time-varying plan, during the second sample.

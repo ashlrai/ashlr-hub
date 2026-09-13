@@ -15,14 +15,15 @@ import { validateResourceConsoleEngineeringSupervisionConfig } from './console-e
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from './engineering-successor-coordinator.js';
 import { prepareResourceConsoleEngineeringEnrollments, type ResourceConsoleEngineeringCatalog } from './console-engineering.js';
 import { readResourceEngineeringDeliveredRegistration, type ResourceEngineeringDeliveredRegistration } from './engineering-delivered-source.js';
-import { decodeResourceConsoleState, previewResourceConsoleProjects, ResourceSupervisorError } from './pool-supervisor.js';
+import { previewResourceConsoleProjects, ResourceSupervisorError } from './pool-supervisor.js';
 import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
+import { readResourceConsoleStorage } from './console-state-storage.js';
 import { readResourceJson, readResourcePoolHistory, resourcePoolStatus } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
 import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
-import { matchesWorkspaceProofState, readResourceWorkspaceProof, type ResourceWorkspaceProofSource } from './workspace-proof-context.js';
+import { matchesWorkspaceProofStorage, readResourceWorkspaceProof, type ResourceWorkspaceProofSource } from './workspace-proof-context.js';
 import { takeWorkerSetupExecutionContext, type EngineeringSetupExecutionContext } from './engineering-setup-context.js';
 import type { ResourceEngineeringAutonomousSetupOptions as Options, ResourceEngineeringAutonomousSetupPolicy as Policy,
   ResourceEngineeringAutonomousSetupPlan as Plan, ResourceEngineeringAutonomousSetupReport as Report } from './engineering-autonomous-setup-types.js';
@@ -84,8 +85,9 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspacePr
   if (!exact(projectsDocument, ['schemaVersion', 'projects']) || projectsDocument.schemaVersion !== 1) fail('Invalid setup projects');
   const projects = validateResourceConsoleProjects(projectsDocument.projects);
   const statePath = join(runtime.root, 'resource-console-state.json');
-  const state = present(statePath) ? decodeResourceConsoleState(readResourceJson(statePath, 4 * 1024 * 1024), {
-    pool, bindings, workspace: options.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) }) : undefined;
+  const consoleStorage = present(statePath) ? readResourceConsoleStorage(readResourceJson(statePath, 4 * 1024 * 1024), {
+    root: runtime.root, pool, bindings, workspace: options.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) }) : undefined;
+  const state = consoleStorage?.hotState;
   const preview = previewResourceConsoleProjects({ workspace: options.workspace, projects, state });
   if (!preview.bindings || !preview.projects) fail('Setup requires explicit project bindings');
   const paths: Plan['paths'] = { profiles: join(options.output, 'profiles.json'), supervision: join(options.output, 'supervision.json'),
@@ -110,7 +112,7 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspacePr
   const poolState = resourcePoolStatus(runtime.root, pool, bindings, []);
   const owner = custody === undefined ? null : readResourceWorkspaceProof(custody,
     { root: runtime.root, workspace: options.workspace, poolDigest: hash({ pool, bindings }) });
-  if (owner && (!state || !matchesWorkspaceProofState(owner, state))) fail('Workspace state changed during setup');
+  if (owner && (!consoleStorage || !matchesWorkspaceProofStorage(owner, consoleStorage))) fail('Workspace state changed during setup');
   const holds: string[] = [];
   const kill = readKillSwitch(); if (kill.state !== 'inactive' || kill.sourceState !== 'healthy') holds.push('global-kill-active-or-unavailable');
   if (!loadExistingProvenanceKeyReadOnly()) holds.push('provenance-unavailable');
@@ -136,6 +138,7 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspacePr
     projectBindings: preview.bindings, projects: preview.projects, bundlePlanDigest: bundlePlan.planDigest, profileConfig, successorConfig });
   const plan: Plan = { schemaVersion: 1, status: 'planned', scope: 'local-autonomous-setup-only', planDigest, output: options.output,
     projectId: recipe.projectId, seedRevision: recipe.seedRevision, initialEnrollmentDigest: null, executionStarted: false, providerContacted: false, paths, holds };
+  if (consoleStorage && !consoleStorage.isCurrent()) fail('Console history changed during setup');
   return { options, policy, recipe, runtime, pool, bindings, preview, paths, plan, completed, outputBinding, lockPath, profileConfig, successorConfig, supervision, custody };
 }
 function registry(current: ReturnType<typeof capture>) {

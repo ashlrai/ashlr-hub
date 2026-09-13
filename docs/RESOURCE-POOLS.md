@@ -1622,10 +1622,22 @@ compaction burst; changed or expired authority cannot enqueue a new task.
 
 This option defaults to `false` and is **not exposed as a production CLI/UI
 switch**. A supervisor can reopen an already migrated root without the flag;
-further compaction requires the opt-in. Mission raw-state readers, workspace
-source-proof projections and versioned pool-evolution journals still require
-integration before public rollout. Do not enable the constructor experiment on
-an operational workspace that uses those paths. Archive capacity remains bounded
+further compaction requires the opt-in. Mission preparation, setup, predecessor
+checks, continuation and enrollment inspection now read the persisted union
+through the same storage adapter. Continuation uses joined history; project and
+startup checks use the current-job projection without serializing archived rows
+back into a legacy state document.
+
+Read-only workspace proofs bind the validated control header, archived evidence
+and effective hot-text deletion markers. Ordinary human queue progress may
+overlap a proof, but archive, pause, project and configuration changes require
+fresh evidence. A matching active-file digest alone cannot accept an archive
+change. This proof is issued from actual supervisor custody; it does not grant
+execution authority. Legacy job-only proof matching is not accepted for a
+descriptor or an archive-bearing workspace.
+
+Public CLI/UI rollout and end-to-end operational commissioning remain separate
+from this constructor experiment. Archive capacity remains bounded
 at 4,096 records, hot jobs at 256, the active file at 4 MiB including settlement
 reserve, and joined history at 64 MiB. The resource ledger has its own independent
 limits; this is not unlimited lifetime storage.
@@ -2015,6 +2027,22 @@ immutable job identities. Explicit resume can remove only its exact, complete,
 private temporary console file; partial, changed or multiply linked files remain
 held for inspection. This is not a secure-erasure guarantee for operating-system
 backups or other copies outside this store.
+
+New plans and journals use schema version 2. Recorded version-1 journals retain
+their original hash algorithm, request directory and resume/replay semantics;
+they are not rewritten into version 2. Version 2 supports the ordered current
+and archived console history and includes execution-owner, deadline and recovery
+identity in its job proofs. It preserves the stored descriptor and origin epochs
+instead of flattening archived jobs into a legacy file. Completed replay allows
+later text deletion and independent new jobs, but refuses changed original
+identities or terminal outcomes.
+
+Archive evidence is rechecked during planning, resume and immediately before
+publication, including removal of the admission barrier. Detected changes withhold
+publication; these point-in-time checks are not a cross-store database transaction
+or protection against a hostile process running as the same operating-system user.
+Journal proof bounds are 4,096 identities for recorded version 1 and 4,352 for
+version 2. The independent ledger and archive byte/identity limits still apply.
 
 CLI JSON failures expose bounded hold codes when known: `ownership-present`,
 `uncertain-work`, `incomplete-journal` or `state-conflict`. Other failures are

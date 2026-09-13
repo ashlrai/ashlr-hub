@@ -19,6 +19,8 @@ import { assurePrivateStoragePath } from './private-storage.js';
 export interface PrivateFileWriteOptions {
   anchorPath: string;
   label: string;
+  /** Synchronous authority/evidence check after fsync, immediately before publication. */
+  prepublish?: () => void;
 }
 
 function ownedByCurrentUser(stat: BigIntStats): boolean {
@@ -89,6 +91,15 @@ export function writePrivateFileAtomically(
     fchmodSync(fd, 0o600);
     fsyncSync(fd);
 
+    if (options.prepublish !== undefined) {
+      if (typeof options.prepublish !== 'function') throw new Error(`${options.label} publication guard is invalid`);
+      const result: unknown = options.prepublish();
+      if (result instanceof Promise) void result.catch(() => {});
+      if (result !== undefined) throw new Error(`${options.label} publication guard must finish synchronously`);
+    }
+
+    // Recheck our exact temporary after the callback as well. The callback is
+    // a point-in-time veto, not permission to substitute a publication source.
     const namedBeforePublish = lstatSync(temporaryPath, { bigint: true });
     const openedBeforePublish = fstatSync(fd, { bigint: true });
     if (!safeRegularFile(namedBeforePublish) || !safeRegularFile(openedBeforePublish) ||

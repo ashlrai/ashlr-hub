@@ -11,7 +11,8 @@ import { portfolioControllerDirectory } from '../universe/portfolio-controller-s
 import { checkResourceGenerationRuntime, type ResourceGenerationRuntimeCheck } from '../universe/resource-runtime-check.js';
 import { prepareResourceConsoleEngineeringEnrollments, validateResourceConsoleEngineeringCatalog } from './console-engineering.js';
 import { matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
-import { decodeResourceConsoleState, previewResourceConsoleProjects } from './pool-supervisor.js';
+import { previewResourceConsoleProjects } from './pool-supervisor.js';
+import { readResourceConsoleStorage } from './console-state-storage.js';
 import { readResourceJson, resourcePoolStatus, readResourcePoolHistory } from './pool-runtime.js';
 import { validateResourcePool, validateResourceObservations } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
@@ -81,12 +82,13 @@ export function checkResourceConsoleEngineering(input: ResourceConsoleEngineerin
     const inspected = stage('supervisor', () => {
       const value = read(join(options.root, 'resource-console-state.json'), 4 * 1024 * 1024, true);
       read(join(options.root, 'pool-state.json'), 4 * 1024 * 1024, true);
-      const state = value === undefined ? undefined : decodeResourceConsoleState(value, { pool, bindings, workspace: options.workspace,
+      const storage = value === undefined ? undefined : readResourceConsoleStorage(value, { root: options.root, pool, bindings, workspace: options.workspace,
         configHistory: readResourcePoolHistory(options.root, pool, bindings) });
+      const state = storage?.hotState;
       const preview = previewResourceConsoleProjects({ workspace: options.workspace, projects, state });
       resourcePoolStatus(options.root, pool, bindings, []);
       if (!preview.bindings || !preview.projects) throw new Error();
-      return { state, preview };
+      return { state, preview, storage };
     });
     stage('enrollment', () => {
       const catalog = validateResourceConsoleEngineeringCatalog(read(options.engineeringFile, 1024 * 1024));
@@ -154,6 +156,7 @@ export function checkResourceConsoleEngineering(input: ResourceConsoleEngineerin
         const value = present(file) ? readResourceJson(file, sample.bytes) : undefined;
         if ((value === undefined ? null : digest(canonical(value))) !== sample.hash) throw new Error();
       }
+      if (inspected.storage && !inspected.storage.isCurrent()) throw new Error();
     });
     report.status = report.enrollments.some(row => row.status === 'configured') ? 'configured' : 'held';
   } catch {

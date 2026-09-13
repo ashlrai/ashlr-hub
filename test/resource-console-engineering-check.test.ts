@@ -1,12 +1,13 @@
 /** Pure orchestration tests: all filesystem/evidence projections are inert, explicit fixtures. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const seams = vi.hoisted(() => ({ read: vi.fn(), stat: vi.fn(), poolStatus: vi.fn(), preview: vi.fn(), decode: vi.fn(),
+const seams = vi.hoisted(() => ({ read: vi.fn(), stat: vi.fn(), poolStatus: vi.fn(), preview: vi.fn(), storage: vi.fn(),
   prepare: vi.fn(), catalog: vi.fn(), runtime: vi.fn(), graph: vi.fn(), campaign: vi.fn(), universe: vi.fn(), readiness: vi.fn(),
   key: vi.fn(), kill: vi.fn(), matches: vi.fn(), forbidden: vi.fn(() => { throw new Error('Execution is forbidden'); }) }));
 vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>(), lstatSync: seams.stat }));
 vi.mock('../src/core/resources/pool-runtime.js', () => ({ readResourceJson: seams.read, resourcePoolStatus: seams.poolStatus,
-  runResourceTask: seams.forbidden }));
-vi.mock('../src/core/resources/pool-supervisor.js', () => ({ decodeResourceConsoleState: seams.decode,
+  readResourcePoolHistory: () => [], runResourceTask: seams.forbidden }));
+vi.mock('../src/core/resources/console-state-storage.js', () => ({ readResourceConsoleStorage: seams.storage }));
+vi.mock('../src/core/resources/pool-supervisor.js', () => ({
   previewResourceConsoleProjects: seams.preview, createResourcePoolSupervisor: seams.forbidden }));
 vi.mock('../src/core/resources/console-engineering.js', () => ({ prepareResourceConsoleEngineeringEnrollments: seams.prepare,
   validateResourceConsoleEngineeringCatalog: seams.catalog, createResourceConsoleEngineeringOwner: seams.forbidden }));
@@ -89,6 +90,14 @@ describe('standalone commissioning check orchestration', () => {
     const report = checkResourceConsoleEngineering(options);
     expect(report).toMatchObject({ status: 'unavailable', reasons: ['commissioning-snapshot-stability-unavailable'], enrollments: [] });
     expect(report.checks.find(check => check.code === 'snapshot-stability')?.status).toBe('failed');
+  });
+  it('rejects final archive drift even when the captured root document is unchanged', () => {
+    files.set('/fixture/ledger/resource-console-state.json', { fixture: 'unchanged-root' });
+    const isCurrent = vi.fn(() => false);
+    seams.storage.mockReturnValue({ hotState: { jobs: [], paused: false }, isCurrent });
+    const report = checkResourceConsoleEngineering(options);
+    expect(report).toMatchObject({ status: 'unavailable', reasons: ['commissioning-snapshot-stability-unavailable'], enrollments: [] });
+    expect(seams.runtime).toHaveBeenCalledOnce(); expect(isCurrent).toHaveBeenCalledOnce();
   });
   it('does not reuse a runtime result across distinct expected digests on the same path', () => {
     seams.prepare.mockReturnValue([enrollment(), enrollment('second', 'd'.repeat(64))]);

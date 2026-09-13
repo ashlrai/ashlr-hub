@@ -9,7 +9,8 @@ import { fsyncDirectory } from '../util/durability.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
 import { decodeResourcePoolState, readResourceJson, requireResourcePoolSettlementHeadroom, type ResourcePoolState } from './pool-runtime.js';
-import { decodeResourceConsoleState, previewResourceConsolePoolEvolution, type ResourceConsoleDurableState } from './pool-supervisor.js';
+import { previewResourceConsolePoolEvolution, type ResourceConsoleDurableState } from './console-state-codec.js';
+import { readResourceConsoleStorage, type ResourceConsoleStoredState, type ResourceConsoleStorageView } from './console-state-storage.js';
 import { MAX_RESOURCE_POOL_CONFIGURATIONS, resourcePoolConfigSnapshot, validateResourcePoolAdditiveEvolution,
   validateResourcePoolConfigHistory } from './pool-evolution-policy.js';
 import type { ResourcePoolEvolutionOptions, ResourcePoolEvolutionPlan, ResourcePoolEvolutionReport } from './pool-evolution-types.js';
@@ -52,7 +53,8 @@ function capture(input: ResourcePoolEvolutionOptions) {
 }
 type Captured = ReturnType<typeof capture>;
 interface Staged {
-  beforePool: unknown; afterPool: ResourcePoolState; afterConsole?: ResourceConsoleDurableState | null;
+  beforePool: unknown; afterPool: ResourcePoolState; afterConsole?: ResourceConsoleStoredState | null;
+  assertConsoleCurrent?: () => void;
   stateDigests: { beforePool: string; afterPool: string; beforeConsole: string; afterConsole: string };
   consoleProof: ConsoleProof; plan: ResourcePoolEvolutionPlan;
 }
@@ -62,32 +64,38 @@ interface ConsoleProof {
     inputDigest: string | null; terminalDigest: string | null; queued: boolean }>;
 }
 const STAGES = ['beforePool', 'afterPool'] as const;
-function consoleProof(state: ResourceConsoleDurableState | null): ConsoleProof {
+type JournalVersion = 1 | 2;
+type LogicalConsole = Omit<ResourceConsoleDurableState, 'jobs'> & { jobs: readonly ResourceConsoleDurableState['jobs'][number][] };
+function consoleProof(state: LogicalConsole | null, version: JournalVersion): ConsoleProof {
   return { scopeDigest: state ? sha({ scopeDigest: state.scopeDigest, originPoolDigest: state.originPoolDigest }) : null,
     jobs: state?.jobs.map(job => ({ id: job.id, identityDigest: sha({ id: job.id, taskDigest: job.taskDigest,
       submissionDigest: job.submissionDigest ?? null, parent: job.parent ?? null, projectId: job.projectId ?? 'default',
       allowedWorkerIds: job.allowedWorkerIds, mode: job.mode, enqueuedAt: job.enqueuedAt,
-      originPoolDigest: job.originPoolDigest ?? state.originPoolDigest, retainHistory: job.retainHistory ?? false }),
+      originPoolDigest: job.originPoolDigest ?? state.originPoolDigest, retainHistory: job.retainHistory ?? false,
+      // Keep the recorded v1 hash domain byte-for-byte compatible.
+      ...(version === 2 ? { executionOwnerId: job.executionOwnerId ?? null, executionDeadlineAt: job.executionDeadlineAt ?? null,
+        recoveryOf: job.recoveryOf ?? null } : {}) }),
     historyDigest: job.history == null ? null : sha(job.history), contextDigest: job.context == null ? null : sha(job.context),
     inputDigest: job.input === null ? null : sha(job.input), queued: job.state === 'queued',
     terminalDigest: job.state === 'queued' ? null : sha({ state: job.state, outcome: job.outcome, workerId: job.workerId }) })) ?? [] };
 }
-function validConsoleProof(value: unknown): value is ConsoleProof {
+function validConsoleProof(value: unknown, version: JournalVersion): value is ConsoleProof {
   const hash = (v: unknown) => typeof v === 'string' && /^[a-f0-9]{64}$/.test(v);
   if (!exact(value, ['scopeDigest', 'jobs']) || value.scopeDigest !== null && !hash(value.scopeDigest) ||
-    !Array.isArray(value.jobs) || value.jobs.length > 4096 || value.scopeDigest === null && value.jobs.length !== 0) return false;
+    !Array.isArray(value.jobs) || value.jobs.length > (version === 1 ? 4096 : 4352) || value.scopeDigest === null && value.jobs.length !== 0) return false;
   return value.jobs.every(row => exact(row, ['id', 'identityDigest', 'historyDigest', 'contextDigest', 'inputDigest', 'terminalDigest', 'queued']) &&
     typeof row.id === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(row.id) && hash(row.identityDigest) &&
     ['historyDigest', 'contextDigest', 'inputDigest', 'terminalDigest'].every(key => row[key] === null || hash(row[key])) &&
     typeof row.queued === 'boolean' && (row.queued ? row.terminalDigest === null : hash(row.terminalDigest))) &&
     new Set(value.jobs.map(row => row.id)).size === value.jobs.length;
 }
-function assertConsolePreserved(current: ResourceConsoleDurableState | null, original: ConsoleProof): void {
+function assertConsolePreserved(current: LogicalConsole | null, original: ConsoleProof, version: JournalVersion): void {
   if (original.scopeDigest === null) return; // No console existed to preserve.
-  const proof = consoleProof(current);
+  const proof = consoleProof(current, version);
   if (proof.scopeDigest !== original.scopeDigest) throw new Error('Pool evolution console origin changed');
+  const rows = new Map(proof.jobs.map(row => [row.id, row])); const jobs = new Map(current!.jobs.map(row => [row.id, row]));
   for (const old of original.jobs) {
-    const row = proof.jobs.find(job => job.id === old.id); const live = current!.jobs.find(job => job.id === old.id)!;
+    const row = rows.get(old.id); const live = jobs.get(old.id)!;
     if (!row || row.identityDigest !== old.identityDigest || old.terminalDigest !== null && row.terminalDigest !== old.terminalDigest ||
       old.queued && live.state !== 'queued' && (live.state !== 'cancelled' || live.outcome !== 'cancelled' || live.workerId !== null) ||
       row.historyDigest !== null && row.historyDigest !== old.historyDigest || row.contextDigest !== null && row.contextDigest !== old.contextDigest ||
@@ -112,28 +120,53 @@ function derivePool(scope: Captured, beforePool: unknown): ResourcePoolState {
     pendingEvolution: { planDigest: '0'.repeat(64) } })) + 1 > MAX_BYTES) throw new Error('Pool evolution state capacity reached');
   return afterPool;
 }
-function assemble(scope: Captured, beforePool: unknown, afterPool: ResourcePoolState, stateDigests: Staged['stateDigests'], proof: ConsoleProof): Staged {
-  const planDigest = sha({ schemaVersion: 1, requestDigest: scope.requestDigest, stateDigests, consoleProof: proof });
-  const plan: ResourcePoolEvolutionPlan = { schemaVersion: 1, status: 'planned', planDigest, fromPoolDigest: scope.from.poolDigest,
+function assemble(scope: Captured, beforePool: unknown, afterPool: ResourcePoolState, stateDigests: Staged['stateDigests'], proof: ConsoleProof, version: JournalVersion): Staged {
+  const planDigest = sha({ schemaVersion: version, requestDigest: scope.requestDigest, stateDigests, consoleProof: proof });
+  const plan: ResourcePoolEvolutionPlan = { schemaVersion: version, status: 'planned', planDigest, fromPoolDigest: scope.from.poolDigest,
     toPoolDigest: scope.to.poolDigest, historyCount: afterPool.configurationHistory!.length, preservedReceiptCount: afterPool.attempts.length,
     preservedJobCount: proof.jobs.length, ...scope.changes,
     heldQueuedIds: proof.jobs.filter(job => job.queued).map(job => job.id), executionStarted: false, providerContacted: false };
   return { beforePool, afterPool, stateDigests, consoleProof: proof, plan };
 }
+function consoleRead(scope: Captured, value: unknown, pool: ResourcePoolState): ResourceConsoleStorageView | null {
+  return value === null ? null : readResourceConsoleStorage(value, { root: scope.options.root, workspace: scope.options.workspace,
+    pool: scope.to.pool, bindings: scope.to.bindings, configHistory: pool.configurationHistory });
+}
+function logical(view: ResourceConsoleStorageView | null): LogicalConsole | null { return view ? { ...view.hotState, jobs: view.jobs } : null; }
+function currentGuard(...views: Array<ResourceConsoleStorageView | null>): () => void {
+  return () => { if (views.some(view => view && !view.isCurrent())) throw new ResourcePoolEvolutionError('state-conflict'); };
+}
+/** Preserve the persisted union and order; never flatten archived rows into a legacy root. */
+function transformConsole(scope: Captured, value: unknown, afterPool: ResourcePoolState, version: JournalVersion) {
+  const history = afterPool.configurationHistory!;
+  const previewOptions = { workspace: scope.options.workspace, from: scope.from, to: scope.to, configHistory: history };
+  const before = value === null ? null : readResourceConsoleStorage(value, { root: scope.options.root, workspace: scope.options.workspace,
+    pool: scope.from.pool, bindings: scope.from.bindings, configHistory: history.slice(0, -1) });
+  let source: ResourceConsoleStoredState | null;
+  if (version === 1 || before === null) source = previewResourceConsolePoolEvolution(value, previewOptions);
+  else {
+    if (before.jobs.some(job => job.state === 'dispatching' || job.state === 'unresolved')) throw new ResourcePoolEvolutionError('uncertain-work');
+    const { jobs: _jobs, ...header } = previewResourceConsolePoolEvolution({ ...before.hotState, jobs: [] }, previewOptions)!;
+    source = 'kind' in before.source ? { ...before.source, console: header, currentJobs: before.hotState.jobs }
+      : { ...header, jobs: before.hotState.jobs };
+  }
+  const after = consoleRead(scope, source, afterPool); const assertCurrent = currentGuard(before, after); assertCurrent();
+  return { source, proof: consoleProof(logical(after), version), assertCurrent };
+}
 function derive(scope: Captured, beforePool: unknown, beforeConsole: unknown): Staged {
   const afterPool = derivePool(scope, beforePool);
-  const afterConsole = previewResourceConsolePoolEvolution(beforeConsole, { workspace: scope.options.workspace,
-    from: scope.from, to: scope.to, configHistory: afterPool.configurationHistory! });
+  const transformed = transformConsole(scope, beforeConsole, afterPool, 2); const afterConsole = transformed.source;
   if (Buffer.byteLength(canonical(afterConsole)) + 1 > MAX_BYTES) throw new Error('Console evolution state capacity reached');
   return { ...assemble(scope, beforePool, afterPool, { beforePool: sha(beforePool), afterPool: sha(afterPool),
-    beforeConsole: sha(beforeConsole), afterConsole: sha(afterConsole) }, consoleProof(afterConsole)), afterConsole };
+    beforeConsole: sha(beforeConsole), afterConsole: sha(afterConsole) }, transformed.proof, 2), afterConsole,
+    assertConsoleCurrent: transformed.assertCurrent };
 }
 function loadJournal(scope: Captured): Staged | null {
   if (!present(scope.directory)) return null;
   inspectPrivateDirectory(join(scope.options.root, 'pool-evolution')); inspectPrivateDirectory(scope.directory);
   const journal = readOptional(join(scope.directory, 'journal.json'));
-  if (!exact(journal, ['schemaVersion', 'requestDigest', 'plan', 'stateDigests', 'consoleProof']) || journal.schemaVersion !== 1 ||
-    journal.requestDigest !== scope.requestDigest || !validConsoleProof(journal.consoleProof) ||
+  if (!exact(journal, ['schemaVersion', 'requestDigest', 'plan', 'stateDigests', 'consoleProof']) || (journal.schemaVersion !== 1 && journal.schemaVersion !== 2) ||
+    journal.requestDigest !== scope.requestDigest || !validConsoleProof(journal.consoleProof, journal.schemaVersion) ||
     !exact(journal.stateDigests, ['beforePool', 'afterPool', 'beforeConsole', 'afterConsole']) ||
     Object.values(journal.stateDigests).some(value => typeof value !== 'string' || !/^[a-f0-9]{64}$/.test(value))) {
     throw new ResourcePoolEvolutionError('incomplete-journal');
@@ -141,7 +174,7 @@ function loadJournal(scope: Captured): Staged | null {
   const stages = Object.fromEntries(STAGES.map(key => [key, readResourceJson(join(scope.directory, `${key}.json`), MAX_BYTES)])) as unknown as Staged;
   const afterPool = derivePool(scope, stages.beforePool);
   const stateDigests = journal.stateDigests as Staged['stateDigests'];
-  const expected = assemble(scope, stages.beforePool, afterPool, stateDigests, journal.consoleProof);
+  const expected = assemble(scope, stages.beforePool, afterPool, stateDigests, journal.consoleProof, journal.schemaVersion);
   if (canonical(journal.plan) !== canonical(expected.plan) || STAGES.some(key => stateDigests[key] !== sha(expected[key])) ||
     STAGES.some(key => canonical(stages[key]) !== canonical(expected[key]))) throw new Error('Pool evolution journal differs from its exact snapshots');
   return expected;
@@ -180,29 +213,31 @@ function finalized(scope: Captured, staged: Staged): boolean {
     throw new Error('Pool evolution historical receipt changed');
   }
   const console = readOptional(scope.consoleFile);
-  const currentConsole = console === null ? null : decodeResourceConsoleState(console, { pool: scope.to.pool, bindings: scope.to.bindings,
-    workspace: scope.options.workspace, configHistory: pool.configurationHistory });
-  assertConsolePreserved(currentConsole, staged.consoleProof);
+  const currentConsole = consoleRead(scope, console, pool);
+  assertConsolePreserved(logical(currentConsole), staged.consoleProof, staged.plan.schemaVersion);
+  currentGuard(currentConsole)();
+  if (sha(readOptional(scope.poolFile)) !== sha(current) || sha(readOptional(scope.consoleFile)) !== sha(console)) throw new ResourcePoolEvolutionError('state-conflict');
+  currentGuard(currentConsole)();
   return true;
 }
 function phase(scope: Captured, staged: Staged): 'before' | 'barrier' | 'console' | 'done' {
+  staged.assertConsoleCurrent?.();
   if (finalized(scope, staged)) return 'done';
   const pool = readOptional(scope.poolFile); const console = readOptional(scope.consoleFile);
   const oldPool = canonical(pool) === canonical(staged.beforePool); const oldConsole = sha(console) === staged.stateDigests.beforeConsole;
   const pending = canonical(pool) === canonical(barrier(staged)); const newConsole = sha(console) === staged.stateDigests.afterConsole;
   if (oldConsole) {
-    const transformed = previewResourceConsolePoolEvolution(console, { workspace: scope.options.workspace,
-      from: scope.from, to: scope.to, configHistory: staged.afterPool.configurationHistory! });
-    if (sha(transformed) !== staged.stateDigests.afterConsole || canonical(consoleProof(transformed)) !== canonical(staged.consoleProof)) {
+    const transformed = transformConsole(scope, console, staged.afterPool, staged.plan.schemaVersion);
+    if (sha(transformed.source) !== staged.stateDigests.afterConsole || canonical(transformed.proof) !== canonical(staged.consoleProof)) {
       throw new Error('Pool evolution live console transformation changed');
     }
-    staged.afterConsole = transformed;
+    staged.afterConsole = transformed.source; staged.assertConsoleCurrent = transformed.assertCurrent;
   } else if (newConsole) {
-    const transformed = console === null ? null : decodeResourceConsoleState(console, { pool: scope.to.pool, bindings: scope.to.bindings,
-      workspace: scope.options.workspace, configHistory: staged.afterPool.configurationHistory });
-    if (canonical(consoleProof(transformed)) !== canonical(staged.consoleProof)) throw new Error('Pool evolution console proof changed');
-    staged.afterConsole = transformed;
+    const transformed = consoleRead(scope, console, staged.afterPool);
+    if (canonical(consoleProof(logical(transformed), staged.plan.schemaVersion)) !== canonical(staged.consoleProof)) throw new Error('Pool evolution console proof changed');
+    staged.afterConsole = transformed?.source ?? null; staged.assertConsoleCurrent = currentGuard(transformed);
   }
+  staged.assertConsoleCurrent?.();
   if (oldPool && oldConsole) return 'before';
   if (pending && newConsole) return 'console';
   if (pending && oldConsole) return 'barrier';
@@ -217,10 +252,11 @@ export function checkResourcePoolEvolution(input: ResourcePoolEvolutionOptions):
   requireOffline(scope.options.root);
   if (staged) { phase(scope, staged); return staged.plan; }
   const beforePool = readOptional(scope.poolFile); const beforeConsole = readOptional(scope.consoleFile);
-  const plan = derive(scope, beforePool, beforeConsole).plan;
+  const derived = derive(scope, beforePool, beforeConsole); const plan = derived.plan;
   if (canonical(readOptional(scope.poolFile)) !== canonical(beforePool) || canonical(readOptional(scope.consoleFile)) !== canonical(beforeConsole)) {
     throw new ResourcePoolEvolutionError('state-conflict');
   }
+  derived.assertConsoleCurrent?.();
   return plan;
 }
 function requireOffline(root: string): void {
@@ -232,7 +268,8 @@ function requireOffline(root: string): void {
 function write(root: string, target: string, value: unknown, guard: () => void, temporary?: string): void {
   guard(); const bytes = canonical(value) + '\n';
   if (Buffer.byteLength(bytes) > MAX_BYTES) throw new Error('Pool evolution evidence exceeds bounds');
-  writePrivateFileAtomically(temporary ?? join(root, `.pool-evolution-${randomUUID()}.tmp`), target, bytes, { anchorPath: root, label: 'Pool evolution state' });
+  writePrivateFileAtomically(temporary ?? join(root, `.pool-evolution-${randomUUID()}.tmp`), target, bytes,
+    { anchorPath: root, label: 'Pool evolution state', prepublish: guard });
   guard();
 }
 /** Offline explicit apply/resume, under the same console and pool leases as ordinary ownership. */
@@ -259,10 +296,11 @@ export function applyResourcePoolEvolution(input: ResourcePoolEvolutionOptions &
     quotaLock = acquireLocalStoreLock(join(options.root, '.resource-quota-refresh.lock'), 0, { anchorPath: options.root, exactPrivateStorage: true });
     if (!quotaLock) throw new ResourcePoolEvolutionError('ownership-present');
     if (present(join(options.root, '.resource-quota-refresh-pending.json'))) throw new ResourcePoolEvolutionError('uncertain-work');
-    const guard = (): void => { inspectPrivateDirectory(options.root);
+    let staged: Staged | null = null;
+    const guard = (): void => { inspectPrivateDirectory(options.root); staged?.assertConsoleCurrent?.();
       if (!ownsLocalStoreLock(consoleLock) || !poolLock || !ownsLocalStoreLock(poolLock) || !quotaLock || !ownsLocalStoreLock(quotaLock)) throw new Error('Pool evolution ownership lost'); };
     outcome = { result: (() => {
-    let staged = loadJournal(scope); const resumed = staged !== null;
+    staged = loadJournal(scope); const resumed = staged !== null;
     if (!staged) {
       staged = derive(scope, readOptional(scope.poolFile), readOptional(scope.consoleFile));
       if (staged.plan.planDigest !== expectedPlanDigest) throw new ResourcePoolEvolutionError('state-conflict');
@@ -272,7 +310,7 @@ export function applyResourcePoolEvolution(input: ResourcePoolEvolutionOptions &
       for (const key of STAGES) write(scope.directory, join(scope.directory, `${key}.json`), staged[key], guard);
       // Never archive console prompt/output/context text. Exact hashes and
       // immutable job proofs support recovery without shadow transcript copies.
-      write(scope.directory, join(scope.directory, 'journal.json'), { schemaVersion: 1, requestDigest: scope.requestDigest,
+      write(scope.directory, join(scope.directory, 'journal.json'), { schemaVersion: staged.plan.schemaVersion, requestDigest: scope.requestDigest,
         plan: staged.plan, stateDigests: staged.stateDigests, consoleProof: staged.consoleProof }, guard);
     }
     if (staged.plan.planDigest !== expectedPlanDigest) throw new Error('Pool evolution journal plan mismatch');

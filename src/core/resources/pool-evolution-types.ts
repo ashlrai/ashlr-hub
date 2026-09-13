@@ -20,7 +20,7 @@ export interface ResourcePoolEvolutionOptions {
   root: string; workspace: string; pool: unknown; bindings: unknown; nextPool: unknown; nextBindings: unknown;
 }
 export interface ResourcePoolEvolutionPlan {
-  schemaVersion: 1; status: 'planned'; planDigest: string; fromPoolDigest: string; toPoolDigest: string;
+  schemaVersion: 1 | 2; status: 'planned'; planDigest: string; fromPoolDigest: string; toPoolDigest: string;
   historyCount: number; preservedReceiptCount: number; preservedJobCount: number;
   addedWorkerIds: string[]; annotatedWorkerIds: string[]; heldQueuedIds: string[];
   executionStarted: false; providerContacted: false;

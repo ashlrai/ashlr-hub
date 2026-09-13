@@ -11,8 +11,9 @@ import { startResourceConsoleServer, type ResourceConsoleWorkspaceHandle, type R
 import { validateResourceEngineeringAutonomousSetupPolicy, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
 import { checkResourceEngineeringPredecessor, type ResourceEngineeringPredecessorCheck } from './engineering-predecessor-check.js';
 import { pinResourceConsoleProject, matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
-import { decodeResourceConsoleState, resourceConsoleTaskContinuation, resourceConsoleRecoveryId, ResourceSupervisorError } from './pool-supervisor.js';
+import { resourceConsoleTaskContinuation, resourceConsoleRecoveryId, ResourceSupervisorError } from './pool-supervisor.js';
 import { readResourceWorkspaceCustody } from './workspace-custody.js';
+import { readResourceConsoleStorage } from './console-state-storage.js';
 import { readResourceJson, resourcePoolStatus, readResourcePoolHistory, validateResourceTask, type ResourceTask } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
@@ -176,17 +177,21 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
     const continuation = (original: ResourceTask) => {
       const file = join(runtime.root, 'resource-console-state.json');
       if (!present(file)) return [];
-      const state = decodeResourceConsoleState(readResourceJson(file, 4 * 1024 * 1024), { pool, bindings,
+      const storage = readResourceConsoleStorage(readResourceJson(file, 4 * 1024 * 1024), { root: runtime.root, pool, bindings,
         workspace: config.initial.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
-      return resourceConsoleTaskContinuation(state, original, recipe.projectId === 'default' ? undefined : recipe.projectId, config.deadlineAt);
+      const chain = resourceConsoleTaskContinuation({ jobs: storage.jobs }, original,
+        recipe.projectId === 'default' ? undefined : recipe.projectId, config.deadlineAt);
+      requireFact(storage.isCurrent(), 'Mission console history changed');
+      return chain;
     };
     const consoleStart = async (setup?: ResourceEngineeringAutonomousSetupOptions, allowedTask?: ResourceTask) => {
       guard();
       if (!handle) {
         const file = join(runtime.root, 'resource-console-state.json');
         if (present(file)) {
-          const state = decodeResourceConsoleState(readResourceJson(file, 4 * 1024 * 1024), { pool, bindings,
+          const storage = readResourceConsoleStorage(readResourceJson(file, 4 * 1024 * 1024), { root: runtime.root, pool, bindings,
             workspace: config.initial.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
+          const state = storage.hotState;
           const attempts = resourcePoolStatus(runtime.root, pool, bindings, []).attempts;
           const ownedProposal = (job: typeof state.jobs[number]) => allowedTask && job.id === allowedTask.id &&
             job.taskDigest === missionHash(allowedTask) && job.executionOwnerId !== undefined && job.executionDeadlineAt === config.deadlineAt;
@@ -194,6 +199,7 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
             state.jobs.every(job => job.state !== 'unresolved' && (job.state !== 'dispatching' || ownedProposal(job) &&
               attempts.some(row => row.id === job.id && row.taskDigest === job.taskDigest && row.poolDigest === poolDigest &&
                 job.allowedWorkerIds.includes(row.workerId) && row.status === 'completed'))), 'Mission console contains stopped or unrelated work');
+          requireFact(storage.isCurrent(), 'Mission console history changed');
         }
         guard();
         handle = await startResourceConsoleServer({ root: runtime.root, workspace: config.initial.setup.workspace,
