@@ -194,12 +194,135 @@ export function resourceConsoleTaskContinuation(state: ResourceConsoleDurableSta
   return detached(chain);
 }
 
-/** Strict detached schema1–7 validation; no ownership, recovery, reads or writes. */
-export function decodeResourceConsoleState(value: unknown, options: {
+export interface ResourceConsoleJobValidationOptions {
   pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
-  /** Must be obtained from verified ledger evidence by the caller. Required for schema5. */
+  /** Verified resource-ledger epochs, never console-supplied snapshots. */
   configHistory?: ResourcePoolConfigSnapshot[];
-}): ResourceConsoleDurableState {
+}
+export const MAX_RESOURCE_CONSOLE_HISTORY_JOBS = 4352;
+export const MAX_RESOURCE_CONSOLE_HISTORY_BYTES = 64 * 1024 * 1024;
+
+/** One domain validator for legacy storage and separately bounded historical views. */
+function validateJobRows(rows: unknown[], schemaFor: (index: number) => number,
+  epochForRow: (row: { originPoolDigest?: unknown }) => ResourcePoolConfigSnapshot,
+  scopeForRow: (row: { originPoolDigest?: unknown }) => string,
+  workspace: string, projectBindings: ResourceConsoleProjectBinding[] | undefined): void {
+  const ids = new Set<string>();
+  const recoveryDepths = new Map<string, number>();
+  for (const [index, row] of rows.entries()) {
+    const schemaVersion = schemaFor(index);
+    if (!object(row)) throw new Error('Invalid resource supervisor job');
+    if (Object.hasOwn(row, 'originPoolDigest') && Number(schemaVersion) < 5) throw new Error('Unexpected console origin epoch');
+    if (Object.hasOwn(row, 'originPoolDigest') && (typeof row.originPoolDigest !== 'string' || !HASH.test(row.originPoolDigest))) {
+      throw new Error('Invalid console origin epoch');
+    }
+    const epoch = epochForRow(row);
+    const workerIds = new Set(epoch.pool.workers.map((worker) => worker.id));
+    const { taskInput, taskFor, submissionDigestFor } = consoleTaskCodec(workspace, workerIds, scopeForRow(row), projectBindings);
+    const retained = object(row) && (Object.hasOwn(row, 'retainHistory') || Object.hasOwn(row, 'history'));
+    const continuation = object(row) && ['parent', 'submissionDigest', 'context'].some((key) => Object.hasOwn(row, key));
+    if (!object(row) || !exact(row, ['id', 'state', 'enqueuedAt', 'updatedAt', 'allowedWorkerIds', 'mode', 'workerId',
+      'outcome', 'reason', 'taskDigest', 'input', ...(retained ? ['retainHistory', 'history'] : []),
+      ...(continuation ? ['parent', 'submissionDigest', 'context'] : []), ...(Object.hasOwn(row, 'projectId') ? ['projectId'] : []),
+      ...(Object.hasOwn(row, 'originPoolDigest') ? ['originPoolDigest'] : []),
+      ...(Object.hasOwn(row, 'executionOwnerId') ? ['executionOwnerId'] : []),
+      ...(Object.hasOwn(row, 'executionDeadlineAt') ? ['executionDeadlineAt'] : []),
+      ...(Object.hasOwn(row, 'recoveryOf') ? ['recoveryOf'] : [])]) ||
+      typeof row.id !== 'string' || !ID.test(row.id) || ids.has(row.id) ||
+      typeof row.state !== 'string' || !STATES.includes(row.state) || !iso(row.enqueuedAt) || !iso(row.updatedAt) ||
+      row.updatedAt < row.enqueuedAt || !Array.isArray(row.allowedWorkerIds) || row.allowedWorkerIds.length < 1 ||
+      row.allowedWorkerIds.length > 32 || row.allowedWorkerIds.some((id) => typeof id !== 'string' || !workerIds.has(id)) ||
+      new Set(row.allowedWorkerIds).size !== row.allowedWorkerIds.length ||
+      !['read-only', 'workspace-write'].includes(String(row.mode)) ||
+      !(row.workerId === null || typeof row.workerId === 'string' && row.allowedWorkerIds.includes(row.workerId)) ||
+      !(row.outcome === null || typeof row.outcome === 'string' && OUTCOMES.includes(row.outcome)) ||
+      !(row.reason === null || typeof row.reason === 'string' && /^[a-z0-9-]{1,120}$/.test(row.reason)) ||
+      typeof row.taskDigest !== 'string' || !HASH.test(row.taskDigest)) throw new Error('Invalid resource supervisor job');
+    if (Object.hasOwn(row, 'executionOwnerId') && (Number(schemaVersion) < 6 || typeof row.executionOwnerId !== 'string' ||
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(row.executionOwnerId))) {
+      throw new Error('Invalid task execution owner');
+    }
+    if (Object.hasOwn(row, 'executionDeadlineAt') && (!Object.hasOwn(row, 'executionOwnerId') || !iso(row.executionDeadlineAt))) {
+      throw new Error('Invalid task execution deadline');
+    }
+    if (Object.hasOwn(row, 'recoveryOf')) {
+      const prior = (rows as DurableJob[]).find(job => job.id === row.recoveryOf);
+      if (schemaVersion !== 7 || typeof row.recoveryOf !== 'string' || !ids.has(row.recoveryOf) || !prior ||
+        prior.state !== 'cancelled' || prior.reason !== 'task-owner-unavailable' || prior.executionOwnerId === undefined ||
+        row.executionOwnerId === undefined || row.executionDeadlineAt === undefined || row.executionDeadlineAt !== prior.executionDeadlineAt ||
+        row.projectId !== prior.projectId || row.mode !== 'read-only' || prior.mode !== 'read-only' ||
+        row.parent !== undefined || prior.parent !== undefined || row.retainHistory !== prior.retainHistory ||
+        canonical(row.allowedWorkerIds) !== canonical(prior.allowedWorkerIds) ||
+        row.id !== resourceConsoleRecoveryId(prior) ||
+        (rows as DurableJob[]).filter(job => job.recoveryOf === prior.id).length !== 1) {
+        throw new Error('Invalid task recovery edge');
+      }
+    }
+    if (Object.hasOwn(row, 'projectId') && (Number(schemaVersion) < 4 || typeof row.projectId !== 'string' ||
+      row.projectId === 'default' || !projectBindings?.some((project) => project.id === row.projectId))) throw new Error('Invalid task project');
+    if (retained) {
+      if (schemaVersion === 1 || row.retainHistory !== true) throw new Error('Invalid history consent');
+      const history = row.history;
+      if (history !== null) {
+        if (!object(history) || !exact(history, ['prompt', 'output']) || typeof history.prompt !== 'string' ||
+          !history.prompt.trim() || history.prompt.includes('\0') || Buffer.byteLength(history.prompt) > 32 * 1024) throw new Error('Invalid task history');
+        if (history.output !== null && (!object(history.output) || !exact(history.output, ['text', 'truncated']) ||
+          typeof history.output.text !== 'string' || Buffer.byteLength(history.output.text) > MAX_HISTORY_OUTPUT_BYTES ||
+          typeof history.output.truncated !== 'boolean' || row.state !== 'settled' || row.outcome !== 'completed')) {
+          throw new Error('Invalid captured output');
+        }
+      }
+    }
+    let context: ResourceConsoleContextTurn[] | null = null;
+    if (continuation) {
+      const parent = validateResourceConsoleParent(row.parent);
+      if (Number(schemaVersion) < 3 || !ids.has(parent.taskId) || typeof row.submissionDigest !== 'string' ||
+        !HASH.test(row.submissionDigest)) throw new Error('Invalid conversation identity');
+      const source = (rows as DurableJob[]).find((job: DurableJob) => job.id === parent.taskId) as DurableJob;
+      if (source.projectId !== row.projectId) throw new Error('Conversation parent crosses project bindings');
+      const needsContext = row.input !== null || retained && row.history !== null;
+      if (needsContext) {
+        context = validateResourceConsoleContext(row.context, row.id, parent.taskId);
+        if (context.some((turn) => !ids.has(turn.taskId))) throw new Error('Conversation source identity unavailable');
+        if (context.some((turn) =>
+          (rows as DurableJob[]).find((job) => job.id === turn.taskId)?.projectId !== row.projectId)) {
+          throw new Error('Conversation context crosses project bindings');
+        }
+        const last = context.at(-1)!;
+        if (!['settled', 'cancelled'].includes(source.state) || last.outcome !== source.outcome ||
+          resourceConsoleTranscriptDigest(scopeForRow(source), source, { prompt: last.prompt, output: last.output }, context.slice(0, -1)) !==
+            parent.expectedTranscriptDigest) throw new Error('Conversation snapshot does not match its pinned parent');
+        const ownPrompt = row.input !== null && object(row.input) ? row.input.prompt : object(row.history) ? row.history.prompt : null;
+        if (typeof ownPrompt !== 'string' || Buffer.byteLength(resourceConsoleConversationPrompt(ownPrompt, context)) >
+          MAX_RESOURCE_CONVERSATION_BYTES) throw new Error('Conversation snapshot exceeds its limit');
+      } else if (row.context !== null) throw new Error('Terminal task retained context without consent');
+    }
+    if (row.state === 'queued' || row.state === 'dispatching') {
+      const input = taskInput(row.input);
+      if (input.id !== row.id || input.mode !== row.mode || canonical(input.allowedWorkerIds) !== canonical(row.allowedWorkerIds) ||
+        input.projectId !== row.projectId ||
+        digest(canonical(taskFor(input, context))) !== row.taskDigest || row.outcome !== null ||
+        (input.parent !== undefined) !== continuation || continuation && (canonical(input.parent) !== canonical(row.parent) ||
+          submissionDigestFor(input) !== row.submissionDigest) ||
+        (input.retainHistory === true) !== retained || retained &&
+        (!object(row.history) || row.history.prompt !== input.prompt || row.history.output !== null)) {
+        throw new Error('Invalid queued task identity');
+      }
+    } else if (row.input !== null) throw new Error('Settled resource task retained private prompt');
+    if (row.state === 'settled' && !['completed', 'failed', 'timed-out', 'cancelled'].includes(String(row.outcome))) throw new Error('Invalid settled outcome');
+    if (row.state === 'settled' && row.workerId === null) throw new Error('Settled task has no worker');
+    if (row.state === 'queued' && row.workerId !== null) throw new Error('Queued task already names a worker');
+    if (row.state === 'unresolved' && row.outcome !== null && !['reserved', 'uncertain'].includes(String(row.outcome))) throw new Error('Invalid unresolved outcome');
+    if (row.state === 'cancelled' && (row.outcome !== 'cancelled' || row.workerId !== null)) throw new Error('Invalid queued cancellation');
+    const recoveryDepth = typeof row.recoveryOf === 'string' ? recoveryDepths.get(row.recoveryOf)! + 1 : 1;
+    if (recoveryDepth > MAX_RESOURCE_SUPERVISOR_JOBS) throw new Error('Invalid task recovery chain');
+    recoveryDepths.set(row.id, recoveryDepth);
+    ids.add(row.id);
+  }
+}
+
+/** Strict detached schema1–7 validation; no ownership, recovery, reads or writes. */
+export function decodeResourceConsoleState(value: unknown, options: ResourceConsoleJobValidationOptions): ResourceConsoleDurableState {
   const pool = validateResourcePool(options.pool);
   const bindings = validateResourceBindings(options.bindings, pool);
   const workspace = options.workspace;
@@ -225,113 +348,8 @@ export function decodeResourceConsoleState(value: unknown, options: {
       value.scopeDigest !== scopeFor(value) || typeof value.paused !== 'boolean' || !Array.isArray(value.jobs) ||
       value.jobs.length > MAX_RESOURCE_SUPERVISOR_JOBS) throw new Error('Invalid resource supervisor state');
     if (Object.hasOwn(value, 'projects')) projectBindings = validateResourceConsoleProjectBindings(value.projects, workspace);
-    const ids = new Set<string>();
-    for (const row of value.jobs) {
-      if (!object(row)) throw new Error('Invalid resource supervisor job');
-      if (Object.hasOwn(row, 'originPoolDigest') && Number(value.schemaVersion) < 5) throw new Error('Unexpected console origin epoch');
-      if (Object.hasOwn(row, 'originPoolDigest') && (typeof row.originPoolDigest !== 'string' || !HASH.test(row.originPoolDigest))) {
-        throw new Error('Invalid console origin epoch');
-      }
-      const epoch = epochFor(value, row);
-      const workerIds = new Set(epoch.pool.workers.map((worker) => worker.id));
-      const { taskInput, taskFor, submissionDigestFor } = consoleTaskCodec(workspace, workerIds, scopeFor(value, row), projectBindings);
-      const retained = object(row) && (Object.hasOwn(row, 'retainHistory') || Object.hasOwn(row, 'history'));
-      const continuation = object(row) && ['parent', 'submissionDigest', 'context'].some((key) => Object.hasOwn(row, key));
-      if (!object(row) || !exact(row, ['id', 'state', 'enqueuedAt', 'updatedAt', 'allowedWorkerIds', 'mode', 'workerId',
-        'outcome', 'reason', 'taskDigest', 'input', ...(retained ? ['retainHistory', 'history'] : []),
-        ...(continuation ? ['parent', 'submissionDigest', 'context'] : []), ...(Object.hasOwn(row, 'projectId') ? ['projectId'] : []),
-        ...(Object.hasOwn(row, 'originPoolDigest') ? ['originPoolDigest'] : []),
-        ...(Object.hasOwn(row, 'executionOwnerId') ? ['executionOwnerId'] : []),
-        ...(Object.hasOwn(row, 'executionDeadlineAt') ? ['executionDeadlineAt'] : []),
-        ...(Object.hasOwn(row, 'recoveryOf') ? ['recoveryOf'] : [])]) ||
-        typeof row.id !== 'string' || !ID.test(row.id) || ids.has(row.id) ||
-        typeof row.state !== 'string' || !STATES.includes(row.state) || !iso(row.enqueuedAt) || !iso(row.updatedAt) ||
-        row.updatedAt < row.enqueuedAt || !Array.isArray(row.allowedWorkerIds) || row.allowedWorkerIds.length < 1 ||
-        row.allowedWorkerIds.length > 32 || row.allowedWorkerIds.some((id) => typeof id !== 'string' || !workerIds.has(id)) ||
-        new Set(row.allowedWorkerIds).size !== row.allowedWorkerIds.length ||
-        !['read-only', 'workspace-write'].includes(String(row.mode)) ||
-        !(row.workerId === null || typeof row.workerId === 'string' && row.allowedWorkerIds.includes(row.workerId)) ||
-        !(row.outcome === null || typeof row.outcome === 'string' && OUTCOMES.includes(row.outcome)) ||
-        !(row.reason === null || typeof row.reason === 'string' && /^[a-z0-9-]{1,120}$/.test(row.reason)) ||
-        typeof row.taskDigest !== 'string' || !HASH.test(row.taskDigest)) throw new Error('Invalid resource supervisor job');
-      if (Object.hasOwn(row, 'executionOwnerId') && (Number(value.schemaVersion) < 6 || typeof row.executionOwnerId !== 'string' ||
-        !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(row.executionOwnerId))) {
-        throw new Error('Invalid task execution owner');
-      }
-      if (Object.hasOwn(row, 'executionDeadlineAt') && (!Object.hasOwn(row, 'executionOwnerId') || !iso(row.executionDeadlineAt))) {
-        throw new Error('Invalid task execution deadline');
-      }
-      if (Object.hasOwn(row, 'recoveryOf')) {
-        const prior = (value.jobs as DurableJob[]).find(job => job.id === row.recoveryOf);
-        if (value.schemaVersion !== 7 || typeof row.recoveryOf !== 'string' || !ids.has(row.recoveryOf) || !prior ||
-          prior.state !== 'cancelled' || prior.reason !== 'task-owner-unavailable' || prior.executionOwnerId === undefined ||
-          row.executionOwnerId === undefined || row.executionDeadlineAt === undefined || row.executionDeadlineAt !== prior.executionDeadlineAt ||
-          row.projectId !== prior.projectId || row.mode !== 'read-only' || prior.mode !== 'read-only' ||
-          row.parent !== undefined || prior.parent !== undefined || row.retainHistory !== prior.retainHistory ||
-          canonical(row.allowedWorkerIds) !== canonical(prior.allowedWorkerIds) ||
-          row.id !== resourceConsoleRecoveryId(prior) ||
-          (value.jobs as DurableJob[]).filter(job => job.recoveryOf === prior.id).length !== 1) {
-          throw new Error('Invalid task recovery edge');
-        }
-      }
-      if (Object.hasOwn(row, 'projectId') && (Number(value.schemaVersion) < 4 || typeof row.projectId !== 'string' ||
-        row.projectId === 'default' || !projectBindings?.some((project) => project.id === row.projectId))) throw new Error('Invalid task project');
-      if (retained) {
-        if (value.schemaVersion === 1 || row.retainHistory !== true) throw new Error('Invalid history consent');
-        const history = row.history;
-        if (history !== null) {
-          if (!object(history) || !exact(history, ['prompt', 'output']) || typeof history.prompt !== 'string' ||
-            !history.prompt.trim() || history.prompt.includes('\0') || Buffer.byteLength(history.prompt) > 32 * 1024) throw new Error('Invalid task history');
-          if (history.output !== null && (!object(history.output) || !exact(history.output, ['text', 'truncated']) ||
-            typeof history.output.text !== 'string' || Buffer.byteLength(history.output.text) > MAX_HISTORY_OUTPUT_BYTES ||
-            typeof history.output.truncated !== 'boolean' || row.state !== 'settled' || row.outcome !== 'completed')) {
-            throw new Error('Invalid captured output');
-          }
-        }
-      }
-      let context: ResourceConsoleContextTurn[] | null = null;
-      if (continuation) {
-        const parent = validateResourceConsoleParent(row.parent);
-        if (Number(value.schemaVersion) < 3 || !ids.has(parent.taskId) || typeof row.submissionDigest !== 'string' ||
-          !HASH.test(row.submissionDigest)) throw new Error('Invalid conversation identity');
-        const source = value.jobs.find((job: DurableJob) => job.id === parent.taskId) as DurableJob;
-        if (source.projectId !== row.projectId) throw new Error('Conversation parent crosses project bindings');
-        const needsContext = row.input !== null || retained && row.history !== null;
-        if (needsContext) {
-          context = validateResourceConsoleContext(row.context, row.id, parent.taskId);
-          if (context.some((turn) => !ids.has(turn.taskId))) throw new Error('Conversation source identity unavailable');
-          if (context.some((turn) =>
-            (value.jobs as DurableJob[]).find((job) => job.id === turn.taskId)?.projectId !== row.projectId)) {
-            throw new Error('Conversation context crosses project bindings');
-          }
-          const last = context.at(-1)!;
-          if (!['settled', 'cancelled'].includes(source.state) || last.outcome !== source.outcome ||
-            resourceConsoleTranscriptDigest(scopeFor(value, source), source, { prompt: last.prompt, output: last.output }, context.slice(0, -1)) !==
-              parent.expectedTranscriptDigest) throw new Error('Conversation snapshot does not match its pinned parent');
-          const ownPrompt = row.input !== null && object(row.input) ? row.input.prompt : object(row.history) ? row.history.prompt : null;
-          if (typeof ownPrompt !== 'string' || Buffer.byteLength(resourceConsoleConversationPrompt(ownPrompt, context)) >
-            MAX_RESOURCE_CONVERSATION_BYTES) throw new Error('Conversation snapshot exceeds its limit');
-        } else if (row.context !== null) throw new Error('Terminal task retained context without consent');
-      }
-      if (row.state === 'queued' || row.state === 'dispatching') {
-        const input = taskInput(row.input);
-        if (input.id !== row.id || input.mode !== row.mode || canonical(input.allowedWorkerIds) !== canonical(row.allowedWorkerIds) ||
-          input.projectId !== row.projectId ||
-          digest(canonical(taskFor(input, context))) !== row.taskDigest || row.outcome !== null ||
-          (input.parent !== undefined) !== continuation || continuation && (canonical(input.parent) !== canonical(row.parent) ||
-            submissionDigestFor(input) !== row.submissionDigest) ||
-          (input.retainHistory === true) !== retained || retained &&
-          (!object(row.history) || row.history.prompt !== input.prompt || row.history.output !== null)) {
-          throw new Error('Invalid queued task identity');
-        }
-      } else if (row.input !== null) throw new Error('Settled resource task retained private prompt');
-      if (row.state === 'settled' && !['completed', 'failed', 'timed-out', 'cancelled'].includes(String(row.outcome))) throw new Error('Invalid settled outcome');
-      if (row.state === 'settled' && row.workerId === null) throw new Error('Settled task has no worker');
-      if (row.state === 'queued' && row.workerId !== null) throw new Error('Queued task already names a worker');
-      if (row.state === 'unresolved' && row.outcome !== null && !['reserved', 'uncertain'].includes(String(row.outcome))) throw new Error('Invalid unresolved outcome');
-      if (row.state === 'cancelled' && (row.outcome !== 'cancelled' || row.workerId !== null)) throw new Error('Invalid queued cancellation');
-      ids.add(row.id);
-    }
+    validateJobRows(value.jobs, () => Number(value.schemaVersion), row => epochFor(value, row),
+      row => scopeFor(value, row), workspace, projectBindings);
     const decoded = detached(value as unknown as DurableState);
     // A restored pending record must have the same guaranteed settlement space
     // as a newly admitted one; do not dispatch externally edited overfull state.
@@ -365,3 +383,100 @@ export function previewResourceConsolePoolEvolution(value: unknown, options: {
   return decodeResourceConsoleState(next, { ...options.to, workspace: options.workspace, configHistory });
 }
 
+
+export interface ResourceConsoleJobHistoryInput {
+  scopeDigest: string;
+  originPoolDigest: string;
+  projects?: ResourceConsoleProjectBinding[];
+  rows: Array<{ sourceSchemaVersion: ResourceConsoleDurableState['schemaVersion']; job: unknown }>;
+}
+export interface ResourceConsoleJobHistory {
+  readonly jobs: readonly ResourceConsoleDurableJob[];
+  getJob(id: string): ResourceConsoleDurableJob | undefined;
+}
+
+/** Separate descriptor-safe capture: never call a supplied iterator, getter or serializer. */
+function assertHistoryData(value: unknown, ancestors = new Set<object>(), depth = 0, budget = { nodes: 0, stringBytes: 0 }): void {
+  if (++budget.nodes > MAX_RESOURCE_CONSOLE_HISTORY_BYTES || depth > 32) throw new Error('Invalid console job history');
+  if (typeof value === 'string' && (budget.stringBytes += Buffer.byteLength(value)) > MAX_RESOURCE_CONSOLE_HISTORY_BYTES) {
+    throw new Error('Console job history exceeds its limit');
+  }
+  if (value === null || typeof value === 'string' || typeof value === 'boolean' ||
+    typeof value === 'number' && Number.isFinite(value)) return;
+  if (typeof value !== 'object' || ancestors.has(value)) throw new Error('Invalid console job history');
+  const array = Array.isArray(value);
+  if (array ? Object.getPrototypeOf(value) !== Array.prototype : !object(value)) throw new Error('Invalid console job history');
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const keys = Reflect.ownKeys(descriptors);
+  if (array && (keys.length !== value.length + 1 ||
+    !Array.from({ length: value.length }, (_, index) => Object.hasOwn(descriptors, index)).every(Boolean))) {
+    throw new Error('Invalid console job history');
+  }
+  ancestors.add(value);
+  try {
+    for (const key of keys) {
+      if (array && key === 'length') continue;
+      const descriptor = descriptors[key as string]!;
+      if (typeof key !== 'string' || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) {
+        throw new Error('Invalid console job history');
+      }
+      assertHistoryData(descriptor.value, ancestors, depth + 1, budget);
+    }
+  } finally { ancestors.delete(value); }
+}
+
+/**
+ * Domain validation only. The caller must pin descriptor order, archived bytes and
+ * deletion evidence. This view is not a serializable legacy state or authority.
+ */
+export function validateResourceConsoleJobHistory(value: unknown,
+  options: ResourceConsoleJobValidationOptions): ResourceConsoleJobHistory {
+  assertHistoryData(value);
+  if (!object(value) || !exact(value, ['scopeDigest', 'originPoolDigest', 'rows',
+    ...(Object.hasOwn(value, 'projects') ? ['projects'] : [])]) ||
+    typeof value.scopeDigest !== 'string' || !HASH.test(value.scopeDigest) ||
+    typeof value.originPoolDigest !== 'string' || !HASH.test(value.originPoolDigest) ||
+    !Array.isArray(value.rows) || value.rows.length > MAX_RESOURCE_CONSOLE_HISTORY_JOBS) {
+    throw new Error('Invalid console job history');
+  }
+  const pool = validateResourcePool(options.pool);
+  const bindings = validateResourceBindings(options.bindings, pool);
+  const epochs = consoleEpochs(options.configHistory, pool, bindings);
+  const original = epochs.get(value.originPoolDigest);
+  if (!original || digest(canonical({ pool: original.pool, bindings: original.bindings, workspace: options.workspace })) !== value.scopeDigest) {
+    throw new Error('Unknown console history origin epoch');
+  }
+  const projects = Object.hasOwn(value, 'projects') ? validateResourceConsoleProjectBindings(value.projects, options.workspace) : undefined;
+  const originPoolDigest = value.originPoolDigest;
+  // Bound the history independently, without creating or serializing DurableState.
+  let bytes = Buffer.byteLength(canonical({ scopeDigest: value.scopeDigest, originPoolDigest: value.originPoolDigest,
+    ...(projects ? { projects } : {}), rows: [] }));
+  const schemas: number[] = [];
+  const rows: unknown[] = [];
+  for (const entry of value.rows) {
+    if (!object(entry) || !exact(entry, ['sourceSchemaVersion', 'job']) ||
+      typeof entry.sourceSchemaVersion !== 'number' || ![1, 2, 3, 4, 5, 6, 7].includes(entry.sourceSchemaVersion) ||
+      entry.sourceSchemaVersion === 4 && projects === undefined ||
+      entry.sourceSchemaVersion >= 5 && options.configHistory === undefined) {
+      throw new Error('Invalid console history row');
+    }
+    bytes += Buffer.byteLength(canonical(entry)) + 1;
+    if (bytes > MAX_RESOURCE_CONSOLE_HISTORY_BYTES) throw new Error('Console job history exceeds its limit');
+    schemas.push(entry.sourceSchemaVersion); rows.push(entry.job);
+  }
+  function epochForRow(row: { originPoolDigest?: unknown }): ResourcePoolConfigSnapshot {
+    const id = row.originPoolDigest ?? originPoolDigest;
+    if (typeof id !== 'string' || !epochs.has(id)) throw new Error('Unknown console origin pool epoch');
+    return epochs.get(id)!;
+  }
+  validateJobRows(rows, index => schemas[index]!, epochForRow, row => {
+    const epoch = epochForRow(row);
+    return digest(canonical({ pool: epoch.pool, bindings: epoch.bindings, workspace: options.workspace }));
+  }, options.workspace, projects);
+  const jobs = detached(rows as DurableJob[]);
+  const byId = new Map(jobs.map(job => [job.id, job]));
+  // Lookup returns detached data, so callers cannot alter subsequent identity reads.
+  return { jobs: detached(jobs), getJob: id => {
+    const job = byId.get(id); return job === undefined ? undefined : detached(job);
+  } };
+}

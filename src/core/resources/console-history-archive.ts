@@ -44,7 +44,7 @@ function exact(value: unknown, keys: string[]): value is Record<string, unknown>
     Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 }
 /** Inspect descriptors before any serializer can call array methods or read an element. */
-function assertArchiveData(value: unknown, ancestors = new Set<object>(), depth = 0, budget = { nodes: 0 }): void {
+export function assertResourceConsoleArchiveData(value: unknown, ancestors = new Set<object>(), depth = 0, budget = { nodes: 0 }): void {
   if (++budget.nodes > 100_000 || depth > 32) fail();
   if (value === null || typeof value === 'string' || typeof value === 'boolean' ||
     typeof value === 'number' && Number.isFinite(value)) return;
@@ -63,12 +63,12 @@ function assertArchiveData(value: unknown, ancestors = new Set<object>(), depth 
       if (typeof key !== 'string') fail();
       const descriptor = descriptors[key]!;
       if (!descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) fail();
-      assertArchiveData(descriptor.value, ancestors, depth + 1, budget);
+      assertResourceConsoleArchiveData(descriptor.value, ancestors, depth + 1, budget);
     }
   } finally { ancestors.delete(value); }
 }
 function data<T>(value: unknown, maxBytes: number): T {
-  assertArchiveData(value);
+  assertResourceConsoleArchiveData(value);
   const bytes = canonicalEvidencePackJsonV3(value);
   if (bytes === null || Buffer.byteLength(bytes) > maxBytes) fail();
   return JSON.parse(bytes) as T;

@@ -1591,6 +1591,23 @@ source proofs, recovery/pool-evolution compatibility, and explicit history acces
 Do not treat a `staged` result as completion of that migration or as execution
 authority. Schemas 1–7 retain their current validation and admission behavior.
 
+The standalone [history reader](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/console-history-view.ts)
+can validate an explicitly ordered view of up to 256 current jobs and 4,096
+archived records. Its descriptor must match the caller's expected digest;
+unlisted archive records are not adopted. Current and archived rows share the
+same job, conversation, recovery, project and resource-epoch validation. Each
+conversation and recovery chain keeps its existing limit. The current-state
+settlement-space reservation also remains enforced.
+
+Reads require one unchanged private archive snapshot, with all referenced
+metadata and retained text available or explicitly deleted. Missing text is not
+treated as deletion. A later archive change invalidates the view and its lookup;
+reopen it from fresh evidence. The archive proof does **not** prove that a caller's
+source descriptor is still current: an eventual writer must recheck both at its
+effect boundary. Reading performs no writes or lock recovery. This is a read-only
+development component, not a runtime migration, a 257th admitted task, or a new
+dispatch grant.
+
 For a settled or cancelled task, unlock controls and choose **Delete transcript**,
 then confirm. This removes this transcript, its copied context and console-session output, not task
 records, provider history, backups, crash-left temporary copies or recoverable disk

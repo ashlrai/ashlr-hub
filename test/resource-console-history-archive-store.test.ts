@@ -1,5 +1,5 @@
 /** Real private filesystem staging, not active console compaction or provider execution. */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -10,14 +10,29 @@ import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { prepareResourceConsoleHistoryArchive, restoreResourceConsoleArchiveJob } from '../src/core/resources/console-history-archive.js';
 import { createResourceConsoleHistoryArchiveStore } from '../src/core/resources/console-history-archive-store.js';
 import type { ResourceConsoleDurableState } from '../src/core/resources/console-state-codec.js';
+import type { ImmutablePrivateRecordStoreConfig } from '../src/core/util/immutable-private-record-store.js';
 
 let base: string; let root: string;
-const faults = vi.hoisted(() => ({ unlinkPath: null as string | null }));
+const faults = vi.hoisted(() => ({ unlinkPath: null as string | null, linkPath: null as string | null,
+  readId: null as string | null, afterRead: null as (() => void) | null }));
 vi.mock('node:fs', async original => {
   const actual = await original<typeof import('node:fs')>();
-  return { ...actual, unlinkSync(path: Parameters<typeof actual.unlinkSync>[0]) {
+  return { ...actual, linkSync(existing: Parameters<typeof actual.linkSync>[0], target: Parameters<typeof actual.linkSync>[1]) {
+    if (target === faults.linkPath) { faults.linkPath = null; throw new Error('Fixture interruption before metadata publication'); }
+    return actual.linkSync(existing, target);
+  }, unlinkSync(path: Parameters<typeof actual.unlinkSync>[0]) {
     if (path === faults.unlinkPath) { faults.unlinkPath = null; throw new Error('Fixture interruption after tombstone'); }
     return actual.unlinkSync(path);
+  } };
+});
+vi.mock('../src/core/util/immutable-private-record-store.js', async original => {
+  const actual = await original<typeof import('../src/core/util/immutable-private-record-store.js')>();
+  return { ...actual, readImmutablePrivateRecordPoint<T>(config: ImmutablePrivateRecordStoreConfig<T>, id: string, name: string) {
+    const result = actual.readImmutablePrivateRecordPoint(config, id, name);
+    if (config.rootPath.endsWith('/metadata') && id === faults.readId && faults.afterRead) {
+      const callback = faults.afterRead; faults.afterRead = null; faults.readId = null; callback();
+    }
+    return result;
   } };
 });
 const workspace = '/private/fixture/archive-workspace';
@@ -37,7 +52,8 @@ function entry(paused = true, retained = true) {
 function store() { return createResourceConsoleHistoryArchiveStore({ root, scopeDigest }); }
 const textPath = () => join(root, 'texts', `${digest(canonical({ scopeDigest, jobId: 'finished' }))}.json`);
 beforeEach(() => { base = realpathSync(mkdtempSync(join(tmpdir(), 'console-archive-store-'))); root = join(base, 'archive'); mkdirSync(root, { mode: 0o700 }); });
-afterEach(() => { faults.unlinkPath = null; rmSync(base, { recursive: true, force: true }); });
+afterEach(() => { faults.unlinkPath = null; faults.linkPath = null; faults.readId = null; faults.afterRead = null;
+  rmSync(base, { recursive: true, force: true }); });
 
 describe('standalone resource console archive storage', () => {
   it('does not initialize state, folders or tasks merely by constructing and reading a missing record', () => {
@@ -101,6 +117,125 @@ describe('standalone resource console archive storage', () => {
     expect(archive.stage(first)).toMatchObject({ status: 'replayed', textState: 'unavailable' });
     expect(archive.stage(entry(false))).toMatchObject({ status: 'staged', textState: 'unavailable' });
     expect(existsSync(textPath())).toBe(false);
+  });
+
+  it('holds a different source version after interrupted first publication and permits only exact first-record recovery', () => {
+    const archive = store(); const first = entry(true); const second = entry(false);
+    faults.linkPath = join(root, 'metadata', 'records', `${first.record.id}.json`);
+    expect(() => archive.stage(first)).toThrow();
+    expect(readdirSync(join(root, 'tasks', 'records'))).toHaveLength(1);
+    expect(existsSync(join(root, 'metadata', 'records', `${first.record.id}.json`))).toBe(false);
+    expect(existsSync(textPath())).toBe(true);
+    expect(() => store().stage(second)).toThrow();
+    expect(existsSync(join(root, 'metadata', 'records', `${second.record.id}.json`))).toBe(false);
+    // The orphan text is not committed history; exact A recovery can complete its initial payload.
+    unlinkSync(textPath());
+    expect(store().stage(first)).toMatchObject({ status: 'staged', textState: 'available' });
+    expect(store().stage(second)).toMatchObject({ status: 'staged', textState: 'available' });
+    unlinkSync(textPath());
+    for (const selected of [first, second]) expect(store().stage(selected)).toMatchObject({ textState: 'unavailable' });
+    const { id: _id, ...body } = first.record; body.sourceStateDigest = digest('third-source-version');
+    expect(store().stage({ record: { ...body, id: digest(canonical(body)) }, text: first.text })).toMatchObject({ textState: 'unavailable' });
+    expect(existsSync(textPath())).toBe(false);
+  });
+
+  it('returns an ordered scope-bound snapshot without writing or retaining a lock', () => {
+    const archive = store(); const empty = archive.readSnapshot([]);
+    expect(empty.status).toBe('complete'); expect(empty.isCurrent()).toBe(true); expect(readdirSync(root)).toEqual([]);
+    const otherScope = createResourceConsoleHistoryArchiveStore({ root, scopeDigest: digest('other-scope') }).readSnapshot([]);
+    expect(otherScope.proofDigest).not.toBe(empty.proofDigest);
+    const first = entry(true); const second = entry(false); archive.stage(first); archive.stage(second);
+    expect(empty.isCurrent()).toBe(false);
+    const snapshot = archive.readSnapshot([second.record.id, first.record.id]);
+    expect(snapshot.status).toBe('complete'); expect(snapshot.entries.map(value => value.record.id)).toEqual([second.record.id, first.record.id]);
+    expect(snapshot.isCurrent()).toBe(true); expect(snapshot.proofDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(archive.readSnapshot([first.record.id, second.record.id]).proofDigest).not.toBe(snapshot.proofDigest);
+    expect(archive.readSnapshot([second.record.id, first.record.id]).proofDigest).toBe(snapshot.proofDigest);
+    expect(existsSync(join(root, '.archive.lock'))).toBe(false);
+  });
+
+  it('invalidates a complete snapshot after deletion, while freshly deleted and no-retention snapshots remain complete', () => {
+    const archive = store(); const selected = entry(); archive.stage(selected);
+    const before = archive.readSnapshot([selected.record.id]); expect(before.status).toBe('complete');
+    archive.deleteText(selected.record.id); expect(before.isCurrent()).toBe(false);
+    const deleted = archive.readSnapshot([selected.record.id]); expect(deleted.status).toBe('complete');
+    expect(deleted.entries[0]).toMatchObject({ textState: 'deleted', text: null }); expect(deleted.isCurrent()).toBe(true);
+    expect(deleted.proofDigest).not.toBe(before.proofDigest);
+    const separateRoot = join(base, 'unretained'); mkdirSync(separateRoot, { mode: 0o700 });
+    const unretained = createResourceConsoleHistoryArchiveStore({ root: separateRoot, scopeDigest });
+    const plain = entry(true, false); unretained.stage(plain);
+    expect(unretained.readSnapshot([plain.record.id])).toMatchObject({ status: 'complete', entries: [{ textState: 'not-retained', text: null }] });
+  });
+
+  it('refuses the entire batch when real deletion happens between metadata reads, rather than returning earlier private text', () => {
+    const archive = store(); const first = entry(true); const second = entry(false); archive.stage(first); archive.stage(second);
+    faults.readId = second.record.id; faults.afterRead = () => { archive.deleteText(first.record.id); };
+    const result = archive.readSnapshot([first.record.id, second.record.id]);
+    expect(result).toMatchObject({ status: 'unavailable', entries: [], proofDigest: null }); expect(result.isCurrent()).toBe(false);
+    expect(archive.read(first.record.id)).toMatchObject({ textState: 'deleted', text: null });
+  });
+
+  it('refuses the entire batch when another record is really staged during reading', () => {
+    const archive = store(); const first = entry(true); const second = entry(false); archive.stage(first);
+    faults.readId = first.record.id; faults.afterRead = () => { archive.stage(second); };
+    expect(archive.readSnapshot([first.record.id])).toMatchObject({ status: 'unavailable', entries: [], proofDigest: null });
+    expect(archive.read(second.record.id)).toMatchObject({ status: 'staged', textState: 'available' });
+  });
+
+  it('detects nested payload mutation even when the root timestamp is unchanged', () => {
+    const archive = store(); const selected = entry(); archive.stage(selected);
+    const snapshot = archive.readSnapshot([selected.record.id]); const before = lstatSync(root, { bigint: true });
+    writeFileSync(textPath(), '{}\n', { mode: 0o600 });
+    expect(lstatSync(root, { bigint: true }).mtimeNs).toBe(before.mtimeNs);
+    expect(snapshot.isCurrent()).toBe(false);
+    expect(archive.readSnapshot([selected.record.id])).toMatchObject({ status: 'unavailable', entries: [], proofDigest: null });
+  });
+
+  it('rejects invalid, duplicate, sparse, accessor and oversized requests without invoking getters', () => {
+    const archive = store(); const selected = entry(); archive.stage(selected); let calls = 0;
+    const accessor = [selected.record.id]; Object.defineProperty(accessor, '0', { enumerable: true, get: () => { calls++; return selected.record.id; } });
+    const extra = [selected.record.id]; Object.defineProperty(extra, 'extra', { value: true });
+    const invalid = [null, {}, [selected.record.id, selected.record.id], new Array(1), accessor, extra,
+      Array.from({ length: 4097 }, () => selected.record.id), [digest('absent')], ['../bad']];
+    for (const ids of invalid) {
+      const result = archive.readSnapshot(ids as string[]);
+      expect(result).toMatchObject({ status: 'unavailable', entries: [], proofDigest: null }); expect(result.isCurrent()).toBe(false);
+    }
+    expect(calls).toBe(0); expect(existsSync(join(root, '.archive.lock'))).toBe(false);
+  });
+
+  it('does not return an incomplete snapshot or resurrect missing text', () => {
+    const archive = store(); const selected = entry(); archive.stage(selected); unlinkSync(textPath());
+    expect(archive.readSnapshot([selected.record.id])).toMatchObject({ status: 'unavailable', entries: [], proofDigest: null });
+    expect(existsSync(textPath())).toBe(false);
+  });
+
+  it('bounds returned transcript bytes even when many metadata versions share one small on-disk payload', () => {
+    const archive = store(); const selected = entry();
+    // Escaped output is valid retained text and approaches the serialized per-payload bound,
+    // keeping the real 64 MiB boundary exercise to fewer independent metadata reads.
+    selected.text!.history = { prompt: 'p'.repeat(32 * 1024), output: { text: '\u0001'.repeat(56 * 1024), truncated: false } };
+    const { id: _id, ...body } = selected.record; body.textDigest = digest(canonical(selected.text));
+    selected.record = { ...body, id: digest(canonical(body)) }; archive.stage(selected);
+    const copies = Math.floor(64 * 1024 * 1024 / Buffer.byteLength(canonical(selected.text))) + 1;
+    const ids: string[] = [];
+    // Populate canonical private immutable-record fixtures directly: this tests bounded reads,
+    // not publication throughput or proof that these synthetic source states ever executed.
+    for (let index = 0; index < copies; index++) {
+      const version = { ...body, sourceStateDigest: digest(`fixture-source-${index}`) };
+      const record = { ...version, id: digest(canonical(version)) }; ids.push(record.id);
+      writeFileSync(join(root, 'metadata', 'records', `${record.id}.json`), `${canonical(record)}\n`, { flag: 'wx', mode: 0o600 });
+    }
+    expect(readdirSync(join(root, 'texts'))).toHaveLength(1);
+    expect(archive.readSnapshot(ids.slice(0, -1)).status).toBe('complete');
+    const result = archive.readSnapshot(ids);
+    expect(result).toMatchObject({ status: 'unavailable', entries: [], proofDigest: null }); expect(result.isCurrent()).toBe(false);
+  }, 30_000);
+
+  it('invalidates proof when a caller mutates the returned record or text', () => {
+    const archive = store(); const selected = entry(); archive.stage(selected);
+    const snapshot = archive.readSnapshot([selected.record.id]); expect(snapshot.status).toBe('complete');
+    snapshot.entries[0]!.text!.history.prompt = 'caller-mutated'; expect(snapshot.isCurrent()).toBe(false);
   });
 
   it('preserves no-retention records without creating a text payload or false deletion evidence', () => {
