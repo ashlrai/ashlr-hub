@@ -21,7 +21,7 @@ import { decodeResourceConsoleState, previewResourceConsoleProjects } from './po
 import { readResourceJson, resourcePoolStatus, readResourcePoolHistory } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
-import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
+import { matchesWorkspaceProofState, readResourceWorkspaceProof, type ResourceWorkspaceProofSource } from './workspace-proof-context.js';
 import { hash, readEngineeringSuccessorJournal, parseResourceEngineeringSuccessorProposal,
   validateResourceEngineeringSuccessorCoordinatorConfig, type Intent, type Result, type Prepared, type Admitted } from './engineering-successor-store.js';
 
@@ -42,7 +42,11 @@ export interface ResourceEngineeringPredecessorCheck {
   continuation: 'eligible' | 'stop-requested' | null;
   feedback?: EngineeringMissionFeedback;
 }
-type Stage = 'inputs' | 'setup' | 'configuration' | 'projects' | 'queue' | 'completion' | 'custody' | 'successors' | 'lineage' | 'stability';
+type StabilityField = 'planDigest' | 'runtime' | 'config' | 'supervision' | 'successor' | 'project' | 'consoleState' |
+  'registrations' | 'durable' | 'completed' | 'journal' | 'tip' | 'continuation';
+type AccountingField = 'attempts' | 'observations' | 'allocation' | 'workerAccess' | 'quotaScopeAccess';
+type Stage = 'inputs' | 'setup' | 'configuration' | 'projects' | 'queue' | 'completion' | 'custody' | 'successors' | 'lineage' | 'stability' |
+  `stability-${Lowercase<StabilityField>}` | `stability-accounting-${Lowercase<AccountingField>}`;
 function requireEvidence(value: unknown): asserts value { if (!value) throw new Error('Incomplete predecessor evidence'); }
 function absent(file: string): void {
   try { lstatSync(file); } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
@@ -53,7 +57,7 @@ function absent(file: string): void {
  * must still own its execution scope and revalidate at successor publication.
  * Global stops and quota policy remain enforced by the existing action-time gates. */
 export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPredecessorCheckOptions,
-  ownedResourceLocks: readonly LocalStoreLock[] = [], custody?: ResourceWorkspaceCustody): ResourceEngineeringPredecessorCheck {
+  ownedResourceLocks: readonly LocalStoreLock[] = [], custody?: ResourceWorkspaceProofSource): ResourceEngineeringPredecessorCheck {
   const report: ResourceEngineeringPredecessorCheck = { schemaVersion: 1, scope: 'predecessor-completion-evidence-only',
     status: 'held', reasons: [], sampledAt: new Date().toISOString(), executionAuthorized: false,
     effectsExecuted: false, providerContacted: false, evidenceDigest: null, tip: null, continuation: null };
@@ -65,9 +69,11 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
     // Only in-process acquired capabilities are recognized by the lock module's
     // private registry. JSON-shaped copies and locks on unrelated scopes fail.
     requireEvidence(Array.isArray(ownedResourceLocks) && ownedResourceLocks.length <= 3 && ownedResourceLocks.every(lock => ownsLocalStoreLock(lock)));
-    const borrowed = custody === undefined ? [] : readResourceWorkspaceCustody(custody).locks;
-    const locks = [...new Set([...ownedResourceLocks, ...borrowed])];
-    requireEvidence(locks.length <= 3);
+    const borrowed = custody === undefined ? [] : readResourceWorkspaceProof(custody).lockPaths;
+    const lockPaths = [...new Set([...ownedResourceLocks.map(lock => lock.path), ...borrowed])];
+    const ownsPath = (path: string) => ownedResourceLocks.some(lock => lock.path === path && ownsLocalStoreLock(lock)) ||
+      custody !== undefined && borrowed.includes(path) && readResourceWorkspaceProof(custody).lockPaths.includes(path);
+    requireEvidence(lockPaths.length <= 3);
     requireEvidence(options && Object.keys(options).sort().join(',') === (options.proposalFeedback === undefined
       ? 'expectedDeadlineAt,expectedPlanDigest,setup' : 'expectedDeadlineAt,expectedPlanDigest,proposalFeedback,setup') &&
       (options.proposalFeedback === undefined || options.proposalFeedback === MISSION_MEASURED_FEEDBACK) &&
@@ -81,9 +87,8 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       requireEvidence(plan.planDigest === options.expectedPlanDigest && plan.initialEnrollmentDigest);
       const runtime = validateResourceGenerationRuntime(readResourceJson(options.setup.resourceRuntime));
       const permittedLocks = ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock'].map(name => join(runtime.root, name));
-      requireEvidence(new Set(locks.map(lock => lock.path)).size === locks.length &&
-        locks.every(lock => permittedLocks.includes(lock.path) && ownsLocalStoreLock(lock)));
-      const owned = (name: string) => locks.some(lock => lock.path === join(runtime.root, name) && ownsLocalStoreLock(lock));
+      requireEvidence(lockPaths.every(path => permittedLocks.includes(path) && ownsPath(path)));
+      const owned = (name: string) => lockPaths.some(path => path === join(runtime.root, name) && ownsPath(path));
       // A global kill or exhausted allowance does not erase historical completion.
       // Outstanding work and ownership, however, cannot establish a settled predecessor.
       const ownedHolds = new Set([...(owned('.resource-console.lock') ? ['console-ownership-present'] : []),
@@ -94,7 +99,7 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       const pool = validateResourcePool(readResourceJson(runtime.poolPath));
       const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
       const poolDigest = hash({ pool, bindings });
-      const owner = custody === undefined ? null : readResourceWorkspaceCustody(custody,
+      const owner = custody === undefined ? null : readResourceWorkspaceProof(custody,
         { root: runtime.root, workspace: options.setup.workspace, poolDigest });
       const config = validateResourceConsoleEngineeringPreparationConfig(readResourceJson(plan.paths.profiles));
       const supervision = validateResourceConsoleEngineeringSupervisionConfig(readResourceJson(plan.paths.supervision));
@@ -112,7 +117,7 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       const projects = validateResourceConsoleProjects(projectsDocument.projects);
       const consoleState = decodeResourceConsoleState(readResourceJson(join(runtime.root, 'resource-console-state.json'), 4 * 1024 * 1024),
         { pool, bindings, workspace: options.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
-      requireEvidence(!owner || hash(consoleState) === owner.stateDigest);
+      requireEvidence(!owner || matchesWorkspaceProofState(owner, consoleState));
       const preview = previewResourceConsoleProjects({ workspace: options.setup.workspace, projects, state: consoleState });
       requireEvidence(preview.bindings && preview.projects);
       const project = preview.bindings.find(row => row.id === plan.projectId);
@@ -226,13 +231,29 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
         // Scheduling previews use wall-clock quota freshness. Compare persisted
         // accounting facts, not a time-varying plan, during the second sample.
         accounting: { attempts: owner ? accounting.attempts.filter(row => !owner.ownsReceipt(row)) : accounting.attempts,
-          observations: owner?.metadataPending ? [] : accounting.observations, allocation: accounting.allocation,
+          // Even denied human admissions refresh observations while an async
+          // proof runs, without a quota collector being pending. These are live
+          // scheduling inputs, not historical delivery facts. Every dispatch
+          // still checks fresh quota; ownerless reads retain the exact snapshot.
+          observations: owner ? [] : accounting.observations, allocation: accounting.allocation,
           workerAccess: accounting.workerAccess, quotaScopeAccess: accounting.quotaScopeAccess },
         tip: { enrollmentId: tipId, enrollmentDigest: tip.graph.enrollmentDigest, projectId: tip.source.projectId, commit: tip.source.commit },
         continuation: stopped.has(tipId) ? 'stop-requested' as const : 'eligible' as const };
     };
     const first = sample(); const second = sample();
-    stage = 'stability'; requireEvidence(hash(first) === hash(second) && locks.every(lock => ownsLocalStoreLock(lock)));
+    // Fixed field labels make asynchronous snapshot contention actionable without
+    // disclosing evidence values, paths, task prompts or provider diagnostics.
+    const stableFields: StabilityField[] = ['planDigest', 'runtime', 'config', 'supervision', 'successor', 'project',
+      'consoleState', 'registrations', 'durable', 'completed', 'journal', 'tip', 'continuation'];
+    for (const field of stableFields) {
+      stage = `stability-${field.toLowerCase()}` as Stage;
+      requireEvidence(hash(first[field]) === hash(second[field]));
+    }
+    for (const field of ['attempts', 'observations', 'allocation', 'workerAccess', 'quotaScopeAccess'] as const) {
+      stage = `stability-accounting-${field.toLowerCase()}` as Stage;
+      requireEvidence(hash({ value: first.accounting[field] }) === hash({ value: second.accounting[field] }));
+    }
+    stage = 'stability'; requireEvidence(hash(first) === hash(second) && lockPaths.every(ownsPath));
     let feedback: EngineeringMissionFeedback | undefined;
     if (options.proposalFeedback === MISSION_MEASURED_FEEDBACK) {
       const selected = second.completed.find(row => row.graph.enrollmentId === second.tip.enrollmentId)!;
@@ -241,7 +262,7 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
     }
     // Publish the verified result only after every requested projection has
     // completed, so projection refusal cannot leave a partial verified proof.
-    if (custody !== undefined) readResourceWorkspaceCustody(custody);
+    if (custody !== undefined) readResourceWorkspaceProof(custody);
     report.evidenceDigest = hash(second); report.tip = second.tip; report.continuation = second.continuation; report.status = 'verified';
     if (feedback) report.feedback = feedback;
   } catch { report.reasons = [`${stage}-evidence-unavailable`]; }

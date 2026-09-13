@@ -16,12 +16,19 @@ import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { checkResourceEngineeringAutonomousSetup, prepareResourceEngineeringAutonomousSetup } from '../src/core/resources/engineering-autonomous-setup.js';
 import { runResourceEngineeringMission } from '../src/core/resources/engineering-mission.js';
+import * as missionProof from '../src/core/resources/engineering-mission-proof.js';
+import * as missionConsole from '../src/core/resources/engineering-mission-console.js';
 import { readEngineeringMissionRecords, type ResourceEngineeringMissionConfig } from '../src/core/resources/engineering-mission-store.js';
 import { readEngineeringMissionInvocations } from '../src/core/resources/engineering-mission-invocations.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
 
 const cleanup: Array<() => Promise<void>> = [];
-afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); });
+let retainFailedFixture = false;
+afterEach(async ({ task }) => {
+  retainFailedFixture = task.result?.state === 'fail';
+  for (const close of cleanup.splice(0).reverse()) await close();
+  retainFailedFixture = false;
+});
 const save = (file: string, value: unknown) => writeFileSync(file, canonical(value) + '\n', { mode: 0o600 });
 const json = (file: string) => JSON.parse(readFileSync(file, 'utf8'));
 function git(repo: string, ...args: string[]): string {
@@ -68,7 +75,8 @@ async function fixture() {
   cleanup.push(async () => {
     worker.closeAllConnections(); await new Promise<void>(resolve => worker.close(() => resolve()));
     const writable = (file: string): void => { if (!lstatSync(file).isDirectory()) return; chmodSync(file, 0o700); for (const child of readdirSync(file)) writable(join(file, child)); };
-    writable(base); rmSync(base, { recursive: true, force: true });
+    if (retainFailedFixture) console.log('MISSION_FAILURE_FIXTURE', base);
+    else { writable(base); rmSync(base, { recursive: true, force: true }); }
   });
   const address = worker.address(); if (!address || typeof address === 'string') throw Error('Missing fixture listener');
   const pool = validateResourcePool({ schemaVersion: 1, id: 'mission-fixture', workers: ['repair', 'spare', 'human'].map(id => ({
@@ -114,10 +122,26 @@ async function fixture() {
 describe.runIf(process.platform === 'darwin')('actual standing engineering mission', () => {
   it('reconciles scope one after owner restart, proposes and executes scope two on the same ledger, then honors stop', async () => {
     const f = await fixture(); const stop = new AbortController(); const phases: string[] = [];
+    const proofFailures: string[] = []; const readProof = missionProof.readEngineeringMissionProof;
+    const observeProof = vi.spyOn(missionProof, 'readEngineeringMissionProof').mockImplementation(async (request, host) => {
+      try {
+        const result = await readProof(request, host);
+        if (result.status === 'held') proofFailures.push(`${request.kind}:held:${result.reasons.join(',')}`);
+        return result;
+      }
+      catch (error) { proofFailures.push(`${request.kind}:${error instanceof Error ? error.message : 'unavailable'}`); throw error; }
+    });
+    cleanup.push(async () => { observeProof.mockRestore(); });
+    const consoleFailures: string[] = []; const requestConsole = missionConsole.requestEngineeringMissionConsole;
+    const observeConsole = vi.spyOn(missionConsole, 'requestEngineeringMissionConsole').mockImplementation(async options => {
+      try { return await requestConsole(options); }
+      catch (error) { consoleFailures.push(`${options.path}:${error instanceof Error ? error.name : 'unavailable'}`); throw error; }
+    });
+    cleanup.push(async () => { observeConsole.mockRestore(); });
     const first = await runResourceEngineeringMission(f.config, { signal: stop.signal, onProgress(value) {
       phases.push(`${value.scope}:${value.phase}`); if (value.scope === 1 && value.phase === 'verifying') stop.abort();
     } });
-    expect(first, JSON.stringify({ first, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt: f.config.deadlineAt });
+    expect(first, JSON.stringify({ first, phases, calls: f.calls, errors: f.errors, proofFailures, consoleFailures, fixture: f.base })).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt: f.config.deadlineAt });
     expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
     expect(readEngineeringMissionInvocations(f.config)).toMatchObject({ count: 1, unfinishedCount: 0,
       latest: { outcome: { state: 'stopped', reason: first.reason } } });
@@ -142,7 +166,7 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
       void interruptedWorkspace.close(); throw Error('Fixture owner interrupted after admission');
     };
     const interrupted = await runResourceEngineeringMission(f.config, { workspace: { handle: interruptedWorkspace, expectedAttachment: null } });
-    expect(interrupted, JSON.stringify({ interrupted, calls: f.calls, errors: f.errors }))
+    expect(interrupted, JSON.stringify({ interrupted, calls: f.calls, errors: f.errors, proofFailures, consoleFailures }))
       .toMatchObject({ state: 'held', reason: 'shutdown-unresolved', deadlineAt: f.config.deadlineAt });
     await interruptedWorkspace.close();
     expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
@@ -161,7 +185,7 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     const sharedUrls: Array<string | null> = [];
     const second = await runResourceEngineeringMission(f.config, { workspace: { handle: workspace, expectedAttachment: null },
       onProgress(value) { phases.push(`${value.scope}:${value.phase}`); sharedUrls.push(value.consoleUrl); } });
-    expect(second, JSON.stringify({ second, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'completed', reason: 'stop-requested', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
+    expect(second, JSON.stringify({ second, phases, calls: f.calls, errors: f.errors, proofFailures, consoleFailures, fixture: f.base })).toMatchObject({ state: 'completed', reason: 'stop-requested', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
     expect(second.tip).not.toBeNull(); expect(git(f.project, 'show', `${second.tip!.commit}:value.json`)).toBe('3');
     expect(git(f.project, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.project, 'status', '--porcelain=v1')).toBe('');
     expect(f.calls).toEqual({ generation: 3, successor: 2, mission: 1 }); expect(f.errors).toEqual([]);

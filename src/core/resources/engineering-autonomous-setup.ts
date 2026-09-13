@@ -22,6 +22,7 @@ import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
 import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
+import { matchesWorkspaceProofState, readResourceWorkspaceProof, type ResourceWorkspaceProofSource } from './workspace-proof-context.js';
 import type { ResourceEngineeringAutonomousSetupOptions as Options, ResourceEngineeringAutonomousSetupPolicy as Policy,
   ResourceEngineeringAutonomousSetupPlan as Plan, ResourceEngineeringAutonomousSetupReport as Report } from './engineering-autonomous-setup-types.js';
 export type * from './engineering-autonomous-setup-types.js';
@@ -63,7 +64,7 @@ export function validateResourceEngineeringAutonomousSetupPolicy(input: unknown)
   if (value.successors.maxSuccessors > value.maxEnrollments - 1) fail('Successor capacity excludes the initial enrollment');
   return value;
 }
-function capture(input: Options, internal = false, custody?: ResourceWorkspaceCustody) {
+function capture(input: Options, internal = false, custody?: ResourceWorkspaceProofSource) {
   const options = data<Options>(input);
   if (!exact(options, ['recipe', 'policy', 'output', 'resourceRuntime', 'workspace', 'projectsFile']) ||
     ![options.output, options.resourceRuntime, options.workspace, options.projectsFile].every(path)) fail('Invalid autonomous setup options');
@@ -105,9 +106,9 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspaceCu
   const bundleOptions = { recipe, output: paths.initialBundle, resourceRuntime: options.resourceRuntime, workspace: options.workspace, projectsFile: options.projectsFile };
   const bundlePlan = checkResourceEngineeringPreparation(bundleOptions);
   const poolState = resourcePoolStatus(runtime.root, pool, bindings, []);
-  const owner = custody === undefined ? null : readResourceWorkspaceCustody(custody,
+  const owner = custody === undefined ? null : readResourceWorkspaceProof(custody,
     { root: runtime.root, workspace: options.workspace, poolDigest: hash({ pool, bindings }) });
-  if (owner && (!state || hash(state) !== owner.stateDigest)) fail('Workspace state changed during setup');
+  if (owner && (!state || !matchesWorkspaceProofState(owner, state))) fail('Workspace state changed during setup');
   const holds: string[] = [];
   const kill = readKillSwitch(); if (kill.state !== 'inactive' || kill.sourceState !== 'healthy') holds.push('global-kill-active-or-unavailable');
   if (!loadExistingProvenanceKeyReadOnly()) holds.push('provenance-unavailable');
@@ -117,7 +118,7 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspaceCu
   const lockPath = join(runtime.root, '.resource-console.lock');
   if (!owner && present(lockPath)) holds.push('console-ownership-present');
   if (present(join(runtime.root, '.pool.lock'))) holds.push('pool-ownership-present');
-  if (!owner?.locks.some(lock => lock.path === join(runtime.root, '.resource-quota-refresh.lock')) &&
+  if (!owner?.lockPaths.includes(join(runtime.root, '.resource-quota-refresh.lock')) &&
     present(join(runtime.root, '.resource-quota-refresh.lock'))) holds.push('quota-ownership-present');
   if (!owner?.metadataPending && present(join(runtime.root, '.resource-quota-refresh-pending.json'))) holds.push('quota-work-unresolved');
   if (poolState.attempts.some(row => row.status === 'uncertain' || row.status === 'reserved' && !owner?.ownsReceipt(row))) holds.push('resource-work-unresolved');
@@ -163,7 +164,7 @@ function verified(current: ReturnType<typeof capture>, includeDeliveredSources =
   if (capture(current.options, true, current.custody).plan.planDigest !== current.plan.planDigest) fail('Setup changed during read');
   return { initialEnrollmentDigest: saved.initialEnrollmentDigest, registry: entries, entries: verifiedEntries };
 }
-export function checkResourceEngineeringAutonomousSetup(options: Options, custody?: ResourceWorkspaceCustody): Plan {
+export function checkResourceEngineeringAutonomousSetup(options: Options, custody?: ResourceWorkspaceProofSource): Plan {
   const current = capture(options, false, custody);
   if (current.completed) current.plan.initialEnrollmentDigest = verified(current).initialEnrollmentDigest;
   return current.plan;
@@ -180,7 +181,7 @@ export interface ResourceEngineeringAutonomousSetupEvidence {
  * No proof is cached across invocations; consumers must take their independent
  * second sample and retain publication/custody guards. A null source is not a
  * completed delivery, and these facts alone do not authorize continuation. */
-export function readResourceEngineeringAutonomousSetupEvidence(options: Options, custody?: ResourceWorkspaceCustody): ResourceEngineeringAutonomousSetupEvidence {
+export function readResourceEngineeringAutonomousSetupEvidence(options: Options, custody?: ResourceWorkspaceProofSource): ResourceEngineeringAutonomousSetupEvidence {
   const current = capture(options, false, custody);
   if (!current.completed) fail('Completed setup evidence is required');
   const result = verified(current, true);

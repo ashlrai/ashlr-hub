@@ -1,5 +1,6 @@
 /** Actual pinned registration, without starting a worker or evaluator. */
 import { execFileSync } from 'node:child_process';
+import { createServer } from 'node:http';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,11 +17,14 @@ import * as ownership from '../src/core/fleet/local-store-lock.js';
 import * as bundle from '../src/core/resources/engineering-preparation.js';
 import * as deliveredSource from '../src/core/resources/engineering-delivered-source.js';
 import { setResourcePoolAllocation, readResourceJson } from '../src/core/resources/pool-runtime.js';
+import type { ResourceObservation } from '../src/core/resources/pool-policy.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
 import { createResourceWorkspaceCustody, readResourceWorkspaceCustody } from '../src/core/resources/workspace-custody.js';
 import { acquireResourceQuotaRefreshLease } from '../src/core/resources/quota-refresh-lease.js';
+import { readEngineeringMissionProof } from '../src/core/resources/engineering-mission-proof.js';
+import * as proofRpc from '../src/core/resources/engineering-worker-rpc.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -34,7 +38,7 @@ function git(repo: string, ...args: string[]): string {
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'commit.gpgsign=false', '-C', repo, ...args], {
     encoding: 'utf8', timeout: 10_000, env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0' } }).trim();
 }
-function fixture() {
+function fixture(endpoint = 'http://127.0.0.1:9/v1') {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'preparation-core-'))); roots.push(base);
   const workspace = join(base, 'repo'); const transport = join(base, 'transport'); const ledger = join(base, 'ledger');
   for (const dir of [workspace, transport]) { mkdirSync(dir, { mode: 0o700 }); git(dir, 'init', '-q', '--template=', '--initial-branch=main'); }
@@ -44,7 +48,7 @@ function fixture() {
   const poolPath = join(base, 'pool.json'); const bindingsPath = join(base, 'bindings.json'); const observationsPath = join(base, 'observations.json');
   save(poolPath, { schemaVersion: 1, id: 'pool', workers: [{ id: 'worker', provider: 'local', model: 'inert', maxConcurrent: 1,
     reservePercent: 25, maxTasksPerWindow: 3, taskWindowMs: 60_000, priority: 1 }] });
-  save(bindingsPath, [{ workerId: 'worker', capacityKey: 'shared', kind: 'local-chat', endpoint: 'http://127.0.0.1:9/v1' }]);
+  save(bindingsPath, [{ workerId: 'worker', capacityKey: 'shared', kind: 'local-chat', endpoint }]);
   save(observationsPath, [{ workerId: 'worker', health: 'ready', windows: [], retryAfter: null,
     observedAt: new Date(Date.now() - 1000).toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() }]);
   const resourceRuntime = join(base, 'runtime.json'); save(resourceRuntime, { schemaVersion: 1, root: ledger, workspace: transport,
@@ -75,6 +79,58 @@ function evidence(directory: string): string {
   visit(directory); return JSON.stringify(rows);
 }
 describe('offline autonomous setup', () => {
+  it.each(['append', 'pause'] as const)('handles %s between the worker read and live ownership sample without changing scope', async change => {
+    const f = fixture(); const plan = check(f.options); prepare({ ...f.options, expectedPlanDigest: plan.planDigest });
+    const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+      bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool), readObservations: () => [] });
+    let appended = false; const createRpc = proofRpc.createEngineeringWorkerRpcHost;
+    const captureRpc = vi.spyOn(proofRpc, 'createEngineeringWorkerRpcHost').mockImplementation(options => createRpc({ ...options,
+      handlers: { ...options.handlers, 'custody.sample': input => {
+        if (!appended) {
+          appended = true;
+          if (change === 'pause') supervisor.setPaused(true);
+          else supervisor.submit({ id: 'human-new', prompt: 'Independent human queue append', mode: 'read-only', allowedWorkerIds: ['worker'], timeoutMs: 1000, maxOutputTokens: 128 });
+        }
+        return options.handlers['custody.sample']!(input);
+      } } }));
+    try {
+      const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+      const expected = check(f.options, custody);
+      const reading = readEngineeringMissionProof({ kind: 'setup', input: f.options }, { custody,
+        lifetime: { deadlineAt: new Date(Date.now() + 60_000).toISOString() } });
+      if (change === 'pause') await expect(reading).rejects.toThrow();
+      else { expect(await reading).toEqual(expected); expect(supervisor.snapshot().jobs.find(row => row.id === 'human-new')?.state).toBe('queued'); }
+      expect(appended).toBe(true); expect(supervisor.snapshot().paused).toBe(change === 'pause');
+    } finally { captureRpc.mockRestore(); await supervisor.close(); }
+  });
+  it('joins a real actively owned human receipt across the proof worker boundary', async () => {
+    let requests = 0;
+    const transport = createServer((req, _res) => { req.resume(); req.on('end', () => { requests++; }); });
+    await new Promise<void>(resolve => transport.listen(0, '127.0.0.1', resolve));
+    const address = transport.address(); if (!address || typeof address === 'string') throw Error('Missing fixture transport');
+    let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | undefined;
+    try {
+      const f = fixture(`http://127.0.0.1:${address.port}/v1`);
+      const plan = check(f.options); prepare({ ...f.options, expectedPlanDigest: plan.planDigest });
+      const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+      const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+      supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+        bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool),
+        readObservations: () => readResourceJson(f.observationsPath) as ResourceObservation[] });
+      supervisor.submit({ id: 'human-active', prompt: 'Local fixture waits', mode: 'read-only', allowedWorkerIds: ['worker'],
+        timeoutMs: 60_000, maxOutputTokens: 128 });
+      await vi.waitFor(() => expect(requests).toBe(1));
+      const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+      const expected = check(f.options, custody);
+      expect(await readEngineeringMissionProof({ kind: 'setup', input: f.options }, { custody,
+        lifetime: { deadlineAt: new Date(Date.now() + 60_000).toISOString() } })).toEqual(expected);
+      expect(supervisor.snapshot().jobs[0]!.state).toBe('dispatching');
+    } finally {
+      await supervisor?.close(); transport.closeAllConnections(); await new Promise<void>(resolve => transport.close(() => resolve()));
+    }
+  });
   it('prepares on a genuine live workspace without draining queued human work or releasing borrowed locks', async () => {
     const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
     const pool = validateResourcePool(readResourceJson(runtime.poolPath));
@@ -97,6 +153,34 @@ describe('offline autonomous setup', () => {
       expect(existsSync(join(f.ledger, '.resource-console.lock'))).toBe(true);
       expect(existsSync(join(f.ledger, '.resource-quota-refresh.lock'))).toBe(true);
       expect(check(f.options, custody).initialEnrollmentDigest).toBe(result.initialEnrollmentDigest);
+      // Real proof worker reads the same files while live parent custody answers
+      // only ownership questions. This does not delegate execution credentials.
+      const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+      const health = createServer((_req, res) => { res.writeHead(200); res.end('ready'); });
+      await new Promise<void>(resolve => health.listen(0, '127.0.0.1', resolve));
+      const address = health.address(); if (!address || typeof address === 'string') throw Error('Fixture listener missing');
+      let reading = true; const latencies: number[] = []; const errors: string[] = [];
+      const probing = (async () => {
+        do {
+          const start = performance.now();
+          try {
+            const response = await fetch(`http://127.0.0.1:${address.port}/health`, { signal: AbortSignal.timeout(1000) });
+            if (response.status !== 200 || await response.text() !== 'ready') errors.push('health response');
+          } catch { errors.push('health unavailable'); }
+          latencies.push(performance.now() - start);
+          await new Promise(resolve => setTimeout(resolve, 20));
+        } while (reading);
+      })();
+      try {
+        const asyncPlan = await readEngineeringMissionProof({ kind: 'setup', input: f.options }, { custody, lifetime });
+        reading = false; await probing;
+        expect(asyncPlan).toEqual(check(f.options, custody));
+        expect(errors).toEqual([]); expect(latencies.length).toBeGreaterThan(2); expect(Math.max(...latencies)).toBeLessThan(1000);
+        console.log('MISSION_SETUP_READ_RESPONSIVENESS', JSON.stringify({ samples: latencies.length, maxMs: Math.max(...latencies) }));
+        expect(supervisor.snapshot().jobs.find(row => row.id === 'human')?.state).toBe('queued');
+      } finally {
+        reading = false; await probing; health.closeAllConnections(); await new Promise<void>(resolve => health.close(() => resolve()));
+      }
     } finally { quota.close(); await supervisor.close(); }
   });
   it('refuses forged or revoked workspace custody before publishing a setup', async () => {
@@ -108,6 +192,11 @@ describe('offline autonomous setup', () => {
       let stopped = false;
       const custody = createResourceWorkspaceCustody(supervisor, null, () => { if (stopped) throw Error('attachment replaced'); });
       const plan = check(f.options, custody);
+      const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+      await expect(readEngineeringMissionProof({ kind: 'setup', input: f.options }, { lifetime, custody: { ...custody } })).rejects.toThrow('Unrecognized');
+      const running = readEngineeringMissionProof({ kind: 'setup', input: f.options }, { custody, lifetime });
+      const rejected = expect(running).rejects.toThrow();
+      stopped = true; await rejected;
       expect(() => prepare({ ...f.options, expectedPlanDigest: plan.planDigest }, { workspaceCustody: { ...custody } })).toThrow('Unrecognized');
       stopped = true;
       expect(() => prepare({ ...f.options, expectedPlanDigest: plan.planDigest }, { workspaceCustody: custody })).toThrow('attachment replaced');

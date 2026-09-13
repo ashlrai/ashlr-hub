@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { checkResourceEngineeringPredecessor, type ResourceEngineeringPredecessorCheckOptions } from '../src/core/resources/engineering-predecessor-check.js';
+import * as workspaceProof from '../src/core/resources/workspace-proof-context.js';
 
 const hooks = vi.hoisted(() => ({ stat: vi.fn(), setup: vi.fn(), json: vi.fn(), registry: vi.fn(), prepared: vi.fn(),
   graph: vi.fn(), source: vi.fn(), queue: vi.fn(), preview: vi.fn(), console: vi.fn(), project: vi.fn(),
@@ -271,7 +272,43 @@ describe('predecessor completion joins over mocked host evidence', () => {
   it('rejects changed second-read evidence even when both samples independently verify', () => {
     const f = fixture(); let calls = 0;
     hooks.queue.mockImplementation(() => ({ ...structuredClone(f.queue), stateDigest: h('sample-' + ++calls) }));
-    held(f.options, 'stability'); expect(hooks.setup).toHaveBeenCalledTimes(2);
+    held(f.options, 'stability-durable'); expect(hooks.setup).toHaveBeenCalledTimes(2);
+  });
+  it('identifies observation contention without exposing observation contents', () => {
+    const f = fixture(); let calls = 0;
+    hooks.accounting.mockImplementation(() => ({ sourceState: 'healthy', attempts: structuredClone(f.attempts),
+      observations: [{ privateDetail: 'PRIVATE_OBSERVATION', sample: ++calls }] }));
+    const result = held(f.options, 'stability-accounting-observations');
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_OBSERVATION');
+  });
+  it('keeps historical completion stable across live-owner quota observation refreshes', () => {
+    const f = fixture(); let calls = 0;
+    const owner = vi.spyOn(workspaceProof, 'readResourceWorkspaceProof').mockReturnValue({
+      root: f.runtime.root, workspace: f.options.setup.workspace, poolDigest: h('pool'),
+      stateDigest: hash({ schemaVersion: 1, paused: false, jobs: [] }), lockPaths: [],
+      metadataPending: false, ownsReceipt: () => false,
+    });
+    hooks.accounting.mockImplementation(() => ({ sourceState: 'healthy', attempts: structuredClone(f.attempts),
+      observations: [{ sample: ++calls }] }));
+    try {
+      const result = checkResourceEngineeringPredecessor(f.options, [], { kind: 'workspace-proof-reader' });
+      expect(result, JSON.stringify(result)).toMatchObject({ status: 'verified', executionAuthorized: false, effectsExecuted: false });
+    } finally { owner.mockRestore(); }
+  });
+  it.each(['allocation', 'workerAccess', 'quotaScopeAccess'] as const)('still holds changing %s with a live owner', field => {
+    const f = fixture(); let calls = 0;
+    const owner = vi.spyOn(workspaceProof, 'readResourceWorkspaceProof').mockReturnValue({
+      root: f.runtime.root, workspace: f.options.setup.workspace, poolDigest: h('pool'),
+      stateDigest: hash({ schemaVersion: 1, paused: false, jobs: [] }), lockPaths: [],
+      metadataPending: false, ownsReceipt: () => false,
+    });
+    hooks.accounting.mockImplementation(() => ({ sourceState: 'healthy', attempts: structuredClone(f.attempts),
+      observations: [], [field]: { revision: ++calls } }));
+    try {
+      const result = checkResourceEngineeringPredecessor(f.options, [], { kind: 'workspace-proof-reader' });
+      expect(result).toMatchObject({ status: 'held', evidenceDigest: null, tip: null,
+        reasons: [`stability-accounting-${field.toLowerCase()}-evidence-unavailable`] });
+    } finally { owner.mockRestore(); }
   });
   it('reconstructs delivered sources for the second sample rather than retaining the first projection', () => {
     const f = fixture(); let reads = 0;

@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 const adapters = vi.hoisted(() => ({ check: vi.fn(), prepare: vi.fn(), proof: vi.fn(), start: vi.fn(), request: vi.fn() }));
+vi.mock('../src/core/resources/engineering-mission-proof.js', () => ({ readEngineeringMissionProof: async (request: { kind: string; input: unknown }) =>
+  request.kind === 'setup' ? adapters.check(request.input) : adapters.proof(request.input) }));
 vi.mock('../src/core/resources/engineering-autonomous-setup.js', async original => ({
   ...await original<typeof import('../src/core/resources/engineering-autonomous-setup.js')>(),
   checkResourceEngineeringAutonomousSetup: adapters.check, prepareResourceEngineeringAutonomousSetup: adapters.prepare,

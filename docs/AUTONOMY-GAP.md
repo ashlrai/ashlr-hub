@@ -100,6 +100,11 @@ Older readers must be upgraded before using schema6/7 records. Interrupted
 evaluator/worker recovery is not covered by this never-dispatched-proposal path.
 This closes the foreground coexistence gap, not resident service installation,
 browser mission-start controls or actual-account commissioning.
+Normal mission setup/predecessor reads now use cancellable proof workers with
+live, host-owned custody questions. STOP still permits bounded historical
+inspection without granting execution. New setup materialization and its final
+publication proof remain synchronous; full standing-mission responsiveness is
+not yet established by the read-worker change.
 Terminal/browser panels, conversation compaction and native desktop bootstrap
 remain separate gaps.
 

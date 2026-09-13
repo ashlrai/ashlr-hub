@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const runtime = vi.hoisted(() => ({ setup: vi.fn(), start: vi.fn(), close: vi.fn(), request: vi.fn(), submit: vi.fn(), proof: vi.fn(), releaseFails: false }));
+vi.mock('../src/core/resources/engineering-mission-proof.js', () => ({ readEngineeringMissionProof: async (request: { kind: string; input: unknown }) =>
+  request.kind === 'setup' ? runtime.setup(request.input) : runtime.proof(request.input) }));
 vi.mock('../src/core/resources/engineering-predecessor-check.js', () => ({ checkResourceEngineeringPredecessor: runtime.proof }));
 vi.mock('../src/core/resources/engineering-autonomous-setup.js', () => ({
   checkResourceEngineeringAutonomousSetup: runtime.setup,

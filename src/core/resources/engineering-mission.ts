@@ -8,7 +8,7 @@ import { readKillSwitch } from '../sandbox/policy.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { writeImmutablePrivateRecord } from '../util/immutable-private-record-store.js';
 import { startResourceConsoleServer, type ResourceConsoleWorkspaceHandle, type ResourceConsoleEngineeringAttachment } from '../web/resource-console-server.js';
-import { checkResourceEngineeringAutonomousSetup, prepareResourceEngineeringAutonomousSetup,
+import { prepareResourceEngineeringAutonomousSetup,
   validateResourceEngineeringAutonomousSetupPolicy, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
 import { checkResourceEngineeringPredecessor, type ResourceEngineeringPredecessorCheck } from './engineering-predecessor-check.js';
 import { pinResourceConsoleProject, matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
@@ -27,6 +27,7 @@ import type { ResourceConsoleSnapshot, ResourceConsoleTranscript } from './conso
 import { MissionConsoleRequestError, requestEngineeringMissionConsole } from './engineering-mission-console.js';
 import { beginEngineeringMissionInvocation } from './engineering-mission-invocations.js';
 import { MAX_MISSION_FEEDBACK_PROMPT_BYTES } from './engineering-mission-feedback.js';
+import { readEngineeringMissionProof } from './engineering-mission-proof.js';
 
 export interface ResourceEngineeringMissionReport {
   schemaVersion: 1; missionId: string; state: 'completed' | 'stopped' | 'held'; reason: string;
@@ -67,6 +68,11 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
   if (host.signal?.aborted) abort.abort();
   const deadline = Date.parse(config.deadlineAt);
   const monotonicDeadline = performance.now() + Math.max(0, deadline - Date.now());
+  // Completed history remains inspectable under STOP or an expired mission.
+  // This separate bounded read allowance never grants execution time/tokens.
+  // A new stop during an active read still interrupts that read immediately.
+  const proofLifetime = () => ({ deadlineAt: new Date(Date.now() + 120_000).toISOString(),
+    ...(abort.signal.aborted ? {} : { signal: abort.signal }) });
   let timer: ReturnType<typeof setInterval> | undefined;
   const closeAttachment = async () => {
     try { await attachment?.close(); }
@@ -94,7 +100,8 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
   try {
     inspectPrivateDirectory(config.root);
     const binding = pinResourceConsoleProject({ id: 'mission', label: 'Mission records', workspace: config.root });
-    const initial = checkResourceEngineeringAutonomousSetup(config.initial.setup);
+    const initial = await readEngineeringMissionProof({ kind: 'setup', input: config.initial.setup },
+      { lifetime: proofLifetime() });
     requireFact(initial.planDigest === config.initial.expectedPlanDigest && initial.initialEnrollmentDigest, 'Initial setup changed');
     const runtime = validateResourceGenerationRuntime(readResourceJson(config.initial.setup.resourceRuntime));
     const pool = validateResourcePool(readResourceJson(runtime.poolPath));
@@ -132,6 +139,13 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
     const guard = () => {
       requireFact(!stopped(), 'Mission execution stopped');
       requireFact(!handle || handle.engineeringAttachment() === attachment, 'Mission workspace attachment changed');
+    };
+    const proofHost = () => ({ custody: workspaceCustody(), lifetime: proofLifetime() });
+    const checkSetup = async (setup: ResourceEngineeringAutonomousSetupOptions) => {
+      return readEngineeringMissionProof({ kind: 'setup', input: setup }, proofHost());
+    };
+    const checkPredecessor = async (options: Parameters<typeof checkResourceEngineeringPredecessor>[0]) => {
+      return readEngineeringMissionProof({ kind: 'predecessor', input: options }, proofHost());
     };
     timer = setInterval(() => { if (stopped()) abort.abort(); }, Math.min(config.pollIntervalMs, 1000));
     let rows = readEngineeringMissionRecords(config, true);
@@ -190,7 +204,7 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
       }
       guard();
       if (setup) {
-        const plan = checkResourceEngineeringAutonomousSetup(setup, workspaceCustody());
+        const plan = await checkSetup(setup);
         attachment = await handle.attachEngineering({ expectedAttachment: attachment,
           engineeringPreparationFile: plan.paths.profiles, engineeringSupervisionFile: plan.paths.supervision,
           engineeringSuccessorsFile: plan.paths.successors,
@@ -224,25 +238,30 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         guard(); progress('preparing');
         if (!present(setup.output)) mkdirSync(setup.output, { mode: 0o700 });
         const custody = workspaceCustody();
-        const plan = checkResourceEngineeringAutonomousSetup(setup, custody);
+        const plan = await checkSetup(setup);
         if (index === 1) requireFact(plan.planDigest === config.initial.expectedPlanDigest, 'Initial mission plan changed');
         const previousScope = index > 1 ? get<{ setup: ResourceEngineeringAutonomousSetupOptions }>('reserved', index - 1)! : null;
         const previousPlan = index > 1 ? get<{ planDigest: string }>('prepared', index - 1)! : null;
         const previousRun = index > 1 ? get<{ deadlineAt: string }>('running', index - 1)! : null;
         const previousProof = index > 1 ? get<ResourceEngineeringPredecessorCheck>('settled', index - 1)! : null;
+        const verifyPreviousProof = (proof: ResourceEngineeringPredecessorCheck) => {
+          requireFact(proof.status === 'verified' && proof.continuation === 'eligible' && canonical(proof.tip) === canonical(previousProof!.tip), 'Mission predecessor changed'); guard();
+        };
         const verifyPrevious = (locks: readonly LocalStoreLock[] = []) => {
           if (!previousScope) return;
           const proof = checkResourceEngineeringPredecessor({ setup: previousScope.setup, expectedPlanDigest: previousPlan!.planDigest,
             expectedDeadlineAt: previousRun!.deadlineAt }, locks, custody);
-          requireFact(proof.status === 'verified' && proof.continuation === 'eligible' && canonical(proof.tip) === canonical(previousProof!.tip), 'Mission predecessor changed'); guard();
+          verifyPreviousProof(proof);
         };
-        verifyPrevious(); guard();
+        if (previousScope) verifyPreviousProof(await checkPredecessor({ setup: previousScope.setup,
+          expectedPlanDigest: previousPlan!.planDigest, expectedDeadlineAt: previousRun!.deadlineAt }));
+        guard();
         const prepared = prepareResourceEngineeringAutonomousSetup({ ...setup, expectedPlanDigest: plan.planDigest },
           { isExecutionStopped: stopped, beforePublication: verifyPrevious, ...(custody ? { workspaceCustody: custody } : {}) });
         write('prepared', { planDigest: prepared.planDigest });
       }
       const expectedPlan = get<{ planDigest: string }>('prepared')!;
-      requireFact(checkResourceEngineeringAutonomousSetup(setup, workspaceCustody()).planDigest === expectedPlan.planDigest, 'Mission prepared setup changed');
+      requireFact((await checkSetup(setup)).planDigest === expectedPlan.planDigest, 'Mission prepared setup changed');
       let proof = get<ResourceEngineeringPredecessorCheck>('settled');
       if (!proof) {
         progress('executing'); await consoleStart(setup); progress('executing');
@@ -267,8 +286,8 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
           await wait();
         }
         progress('draining'); await closeAttachment(); progress('verifying');
-        proof = checkResourceEngineeringPredecessor({ setup, expectedPlanDigest: expectedPlan.planDigest, expectedDeadlineAt: get<{ deadlineAt: string }>('running')!.deadlineAt,
-          ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) }, [], workspaceCustody());
+        proof = await checkPredecessor({ setup, expectedPlanDigest: expectedPlan.planDigest, expectedDeadlineAt: get<{ deadlineAt: string }>('running')!.deadlineAt,
+          ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) });
         requireFact(proof.status === 'verified' && proof.tip, 'Mission completion proof unavailable');
         // Feedback belongs to the eventual immutable proposal, never the legacy
         // completion codec. Restart regenerates it from the same verified scope.
@@ -285,9 +304,9 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
           const last = continuation(original).at(-1);
           if (last && ['queued', 'dispatching'].includes(last.state)) await consoleStart(undefined, { ...original, id: last.id });
         }
-        const fresh = checkResourceEngineeringPredecessor({ setup, expectedPlanDigest: expectedPlan.planDigest,
+        const fresh = await checkPredecessor({ setup, expectedPlanDigest: expectedPlan.planDigest,
           expectedDeadlineAt: get<{ deadlineAt: string }>('running')!.deadlineAt,
-          ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) }, [], workspaceCustody());
+          ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) });
         requireFact(fresh.status === 'verified' && fresh.tip && canonical(fresh.tip) === canonical(proof.tip) &&
           fresh.continuation === proof.continuation, 'Recorded mission completion changed');
         proof = fresh;

@@ -201,6 +201,31 @@ recovery endpoint. Schema6/7 require upgraded readers; never downgrade records
 by stripping ownership or recovery fields. This recovers never-dispatched
 proposals, not interrupted evaluators or unverified deliveries.
 Restarting the runner still checks its persisted deadline.
+
+Read-only mission setup and predecessor checks run in dedicated, cancellable
+worker threads. The parent retains genuine workspace ownership and answers
+read-only lock/receipt questions over a fixed protocol. No serialized descriptor
+can authorize task execution or setup publication. Every result waits for worker
+termination and a final live-owner check; failures do not restart the worker or
+dispatch replacement work. Existing double-read delivery checks are unchanged.
+With a verified live workspace owner, historical delivery comparison excludes
+live quota observations and owner-proven ordinary task receipts. It still compares
+allocation, account-access policy and every engineering or unknown receipt.
+Every new dispatch independently checks fresh quota; historical verification
+never authorizes execution. Ownerless reads retain exact observation comparison.
+
+Completed history remains inspectable under STOP or after the mission deadline.
+Each proof read has a separate two-minute elapsed-time read limit, not a new execution
+or token allowance. A stop arriving during an active read cancels that read;
+inspection begun after stop cannot authorize execution. The original mission
+deadline and action-time guards still govern all effects. Setup materialization
+and its final predecessor publication check remain synchronous: isolated reads
+do not yet establish a fully responsive standing-mission workspace.
+
+Predecessor snapshot mismatches name a fixed evidence field (for example,
+`stability-accounting-allocation-evidence-unavailable`). They never include
+account values, prompts, raw provider messages or local paths.
+
 Component close is not a durable fleet-wide STOP; do not
 use it as a substitute for global KILL. These in-process APIs do not install an
 always-on service or provide a browser control for starting a standing mission.
