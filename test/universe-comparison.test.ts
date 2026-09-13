@@ -3,6 +3,8 @@ import { buildUniverseCampaignComparison } from '../src/core/universe/comparison
 import type { UniverseComparisonArmSource } from '../src/core/universe/comparison-types.js';
 import type { UniverseDeliveryReceipt } from '../src/core/universe/delivery.js';
 import type { UniverseRun, UniverseTrial } from '../src/core/universe/types.js';
+import { canonical, digest } from '../src/core/universe/artifacts.js';
+import { seedContextReceipt } from '../src/core/universe/seed-context.js';
 
 const SEED = '0'.repeat(64);
 const COMPARATOR = 'c'.repeat(64);
@@ -79,6 +81,80 @@ function delivery(source: UniverseComparisonArmSource, branch: string): Universe
 }
 const compare = (a = fixture('a', [1, 1, 1]), b = fixture('b', [1, 1, 2], true)) => buildUniverseCampaignComparison(a, b, SAMPLE);
 
+function measuredSeed(source: UniverseComparisonArmSource, pinned = true): UniverseComparisonArmSource {
+  const campaign = source.campaign!;
+  campaign.definition.measureSeed = true;
+  const intent = { schemaVersion: 1 as const, id: 'seed-measurement', sessionSequence: 2,
+    definitionDigest: campaign.definitionDigest, manifestDigest: campaign.manifestDigest, comparatorDigest: COMPARATOR,
+    seedArtifactDigest: SEED, context: 'campaign-seed-v1' as const,
+    startedAt: '2026-09-06T23:59:58.000Z', deadlineAt: '2026-09-06T23:59:59.999Z' };
+  const result = { schemaVersion: 1 as const, intentDigest: digest(canonical(intent)), status: 'measured' as const,
+    finishedAt: '2026-09-06T23:59:59.000Z', durationMs: 1000, processGroupSettlement: 'group-exit-confirmed' as const,
+    measurement: { passed: false, score: 0, metrics: { score: 0 }, diagnostics: [] }, reason: null };
+  campaign.seedEvaluation = { intent, result };
+  if (pinned) for (const run of source.universe!.runs) {
+    run.seedContext = { schemaVersion: 1, source: { universeId: run.universeId, campaignId: campaign.definition.id,
+      definitionDigest: campaign.definitionDigest, manifestDigest: campaign.manifestDigest, comparatorDigest: COMPARATOR,
+      seedArtifactDigest: SEED, intentDigest: result.intentDigest, resultDigest: digest(canonical(result)) }, measurement: result.measurement };
+    for (const trial of run.trials) if (trial.generation) trial.generation.seedContext = seedContextReceipt(run.seedContext);
+  }
+  return source;
+}
+
+describe('seed measurement and retained context comparison regimes', () => {
+  it('preserves legacy absent-context matching with explicit public absence', () => {
+    const report = compare(fixture('a', [1], true), fixture('b', [1], true));
+    expect(report.baseline.seed).toEqual({ measureSeed: false, observedContext: 'absent', runs: { unpinned: 1, pinnedV1: 0 }, receipts: 0 });
+    expect(report.matching.seedRegime).toBe(true); expect(report.matching.comparable).toBe(true);
+    expect(report.feedbackContrast).toBe('same-feedback-condition');
+  });
+  it('withholds matched claims for different configured measurement even when neither run has context', () => {
+    const report = compare(fixture('a', [1], true), measuredSeed(fixture('b', [1], true), false));
+    expect(report.sourceState).toBe('healthy'); expect(report.matching.seedRegime).toBe(false);
+    expect(report.matching.comparable).toBe(false); expect(report.feedbackContrast).toBe('other-or-mixed');
+    expect(report.differences).toContain('configured-seed-measurement-differs');
+    expect(report.scoreDeltas[0].directionAdjustedDelta).toBeNull();
+  });
+  it('matches valid retained seed regimes without requiring cross-campaign identity hashes to equal', () => {
+    const report = compare(measuredSeed(fixture('a', [1], true)), measuredSeed(fixture('b', [2], true)));
+    expect(report.sourceState).toBe('healthy'); expect(report.matching).toMatchObject({ seedRegime: true, comparable: true });
+    expect(report.baseline.seed).toEqual({ measureSeed: true, observedContext: 'context-v1', runs: { unpinned: 0, pinnedV1: 1 }, receipts: 1 });
+    expect(report.feedbackContrast).toBe('same-feedback-condition');
+    expect(JSON.stringify(report)).not.toContain('seed-measurement');
+  });
+  it('separates historical unpinned runs from observed retained-context exposure', () => {
+    const report = compare(measuredSeed(fixture('a', [1], true), false), measuredSeed(fixture('b', [1], true)));
+    expect(report.sourceState).toBe('healthy'); expect(report.matching.seedRegime).toBe(false);
+    expect(report.feedbackContrast).toBe('other-or-mixed'); expect(report.matching.comparable).toBe(false);
+    expect(report.differences).toContain('observed-seed-context-regimes-differ');
+  });
+  it('withholds mixed historical and retained-context campaigns even against another mixed arm', () => {
+    const arms = [measuredSeed(fixture('a', [1, 2], true)), measuredSeed(fixture('b', [1, 2], true))];
+    for (const arm of arms) { delete arm.universe!.runs[0].seedContext; delete arm.universe!.runs[0].trials[0].generation!.seedContext; }
+    const report = compare(arms[0], arms[1]);
+    expect(report.baseline.seed.observedContext).toBe('mixed'); expect(report.sourceState).toBe('healthy');
+    expect(report.matching.seedRegime).toBe(false); expect(report.matching.comparable).toBe(false);
+  });
+  it.each([
+    ['missing measurement', (s: UniverseComparisonArmSource) => { delete s.campaign!.seedEvaluation; }],
+    ['operational result', (s: UniverseComparisonArmSource) => { s.campaign!.seedEvaluation!.result!.status = 'failed'; }],
+    ['foreign source', (s: UniverseComparisonArmSource) => { s.universe!.runs[0].seedContext!.source.campaignId = 'foreign'; }],
+    ['late measurement', (s: UniverseComparisonArmSource) => { s.campaign!.seedEvaluation!.result!.finishedAt = SAMPLE; }],
+    ['altered context measurement', (s: UniverseComparisonArmSource) => { s.universe!.runs[0].seedContext = structuredClone(s.universe!.runs[0].seedContext!); s.universe!.runs[0].seedContext!.measurement.score = 99; }],
+    ['missing receipt', (s: UniverseComparisonArmSource) => { delete s.universe!.runs[0].trials[0].generation!.seedContext; }],
+    ['wrong receipt', (s: UniverseComparisonArmSource) => { s.universe!.runs[0].trials[0].generation!.seedContext!.digest = '9'.repeat(64); }],
+    ['receipt without run pin', (s: UniverseComparisonArmSource) => { delete s.universe!.runs[0].seedContext; }],
+    ['receipt without prompt', (s: UniverseComparisonArmSource) => { s.universe!.runs[0].trials[0].generation!.promptDigest = null; }],
+    ['unconfigured measurement', (s: UniverseComparisonArmSource) => { delete s.campaign!.definition.measureSeed; }],
+  ])('degrades %s without normalizing it to a valid absent regime', (_label, mutate) => {
+    const b = measuredSeed(fixture('b', [1], true)); mutate(b);
+    const report = compare(measuredSeed(fixture('a', [1], true)), b);
+    expect(report.challenger.seed.observedContext).toBe('invalid'); expect(report.sourceState).toBe('degraded');
+    expect(report.matching.comparable).toBe(false); expect(report.feedbackContrast).not.toBe('same-feedback-condition');
+    expect(report.challenger.rates.improvementsPerMillionTokens).toBeNull();
+  });
+});
+
 describe('pure campaign comparison observations', () => {
   it.each(['maximize', 'minimize'] as const)('compares matching %s arms without claiming accepted work or a causal winner', (direction) => {
     const first = direction === 'maximize' ? 1 : 9;
@@ -97,8 +173,8 @@ describe('pure campaign comparison observations', () => {
   });
 
   it.each([
-    ['model', (s: UniverseComparisonArmSource) => { s.universe!.manifest.variants[0].generation!.model = 'other'; }],
-    ['endpoint', (s: UniverseComparisonArmSource) => { s.universe!.manifest.variants[0].generation!.endpoint = 'http://127.0.0.1:9999/v1'; }],
+    ['model', (s: UniverseComparisonArmSource) => { const config = s.universe!.manifest.variants[0].generation!; if (config.kind === 'local-chat') config.model = 'other'; }],
+    ['endpoint', (s: UniverseComparisonArmSource) => { const config = s.universe!.manifest.variants[0].generation!; if (config.kind === 'local-chat') config.endpoint = 'http://127.0.0.1:9999/v1'; }],
     ['output cap', (s: UniverseComparisonArmSource) => { s.universe!.manifest.variants[0].generation!.maxOutputTokens++; }],
     ['hypothesis', (s: UniverseComparisonArmSource) => { s.universe!.manifest.variants[0].hypothesis = 'different'; }],
     ['run budget', (s: UniverseComparisonArmSource) => { s.universe!.manifest.budget.maxDurationMs++; }],
@@ -308,7 +384,8 @@ describe('pure campaign comparison observations', () => {
 
   it('compares configuration objects canonically without depending on property insertion order', () => {
     const b = fixture('b', [1, 1, 2], true);
-    b.universe!.manifest.budget = Object.fromEntries(Object.entries(b.universe!.manifest.budget).reverse()) as typeof b.universe.manifest.budget;
+    const manifest = b.universe!.manifest;
+    manifest.budget = Object.fromEntries(Object.entries(manifest.budget).reverse()) as typeof manifest.budget;
     expect(compare(undefined, b).matching.configuration).toBe(true);
   });
 

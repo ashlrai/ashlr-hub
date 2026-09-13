@@ -12,8 +12,11 @@ export interface UniverseManifest {
   objective: string;
   seed: { repo: string; revision: string };
   metric: { name: string; direction: 'maximize' | 'minimize'; minImprovement: number };
-  budget: { maxTrials: number; maxDurationMs: number; trialTimeoutMs: number; maxParallel: number };
-  evaluation: { command: string[]; timeoutMs: number };
+  budget: { maxTrials: number; maxDurationMs: number; trialTimeoutMs: number; maxParallel: number;
+    /** Explicit worker-only cap for the closed scored evaluator; omission retains the shared trial cap. */
+    workerTimeoutMs?: number };
+  evaluation: { command: string[]; timeoutMs: number; builtin?: never } |
+    { builtin: 'preparation-measurement-v1' | 'preparation-process-score-v1'; timeoutMs: number; command?: never };
   variants: UniverseVariant[];
 }
 
@@ -54,6 +57,23 @@ export interface UniverseDiagnostic {
   line?: number;
 }
 
+/** Fixed measured seed evidence, distinct from a trial or the current edit parent. */
+export interface UniverseSeedContext {
+  schemaVersion: 1;
+  source: {
+    universeId: string;
+    campaignId: string;
+    definitionDigest: string;
+    manifestDigest: string;
+    comparatorDigest: string;
+    seedArtifactDigest: string;
+    intentDigest: string;
+    resultDigest: string;
+  };
+  measurement: { passed: boolean; score: number; metrics: Record<string, number>; diagnostics: UniverseDiagnostic[] };
+}
+export interface UniverseSeedContextReceipt { schemaVersion: 1; digest: string }
+
 export interface UniverseFeedback {
   schemaVersion: 1;
   source: {
@@ -88,7 +108,7 @@ export interface UniverseSearchContext {
   niche: string;
   generation: number;
   metric: UniverseManifest['metric'];
-  /** Null means the pinned seed is the edit base; its score has not been measured. */
+  /** Null means the pinned seed is the edit base; this search protocol carries no seed score. */
   parent: (Omit<UniverseSearchAttempt, 'artifactDigest'> & { artifactDigest: string; score: number }) | null;
   previous: (UniverseSearchAttempt & {
     status: UniverseTrial['status'];
@@ -147,6 +167,7 @@ export interface UniverseGenerationReceipt {
   changedFiles: string[];
   feedback?: UniverseFeedback['source'] & { digest: string };
   search?: UniverseSearchContextReceipt;
+  seedContext?: UniverseSeedContextReceipt;
   fileOperations?: UniverseFileOperationsReceipt;
   resource?: UniverseResourceGenerationEvidence;
   error?: string;
@@ -209,6 +230,8 @@ export interface UniverseRun {
   feedbackEnabled?: true;
   /** Absent denotes legacy v1 feedback; new decision-context runs pin version 2 before execution. */
   feedbackVersion?: 2;
+  /** Optional complete immutable campaign seed context captured before generation. */
+  seedContext?: UniverseSeedContext;
   error?: string;
 }
 
@@ -256,6 +279,10 @@ export interface UniverseRunOptions extends UniverseStoreOptions {
   signal?: AbortSignal;
   /** Explicit private operator configuration path; never part of a portable manifest. */
   resourceRuntime?: string;
+  /** Optional host-enrollment pin, checked before every resource generation dispatch. */
+  expectedResourceRuntimeDigest?: string;
+  /** Synchronous enclosing execution ownership check. True or a throw vetoes effects. */
+  isExecutionStopped?: () => boolean;
 }
 
 export interface UniverseCampaignDefinition {
@@ -271,6 +298,37 @@ export interface UniverseCampaignDefinition {
     maxReportedTokens: number | null;
   };
   feedback: boolean;
+  /** Measure the unchanged pinned seed once before any model-request reservation. */
+  measureSeed?: true;
+}
+
+export interface UniverseCampaignSeedIntent {
+  schemaVersion: 1;
+  id: string;
+  sessionSequence: number;
+  definitionDigest: string;
+  manifestDigest: string;
+  comparatorDigest: string;
+  seedArtifactDigest: string;
+  context: 'campaign-seed-v1';
+  startedAt: string;
+  deadlineAt: string;
+}
+
+export interface UniverseCampaignSeedResult {
+  schemaVersion: 1;
+  intentDigest: string;
+  status: 'measured' | 'failed' | 'timed-out' | 'cancelled';
+  finishedAt: string;
+  durationMs: number;
+  processGroupSettlement: 'not-started' | 'group-exit-confirmed';
+  measurement: { passed: boolean; score: number; metrics: Record<string, number>; diagnostics?: UniverseDiagnostic[] } | null;
+  reason: 'evaluator-failed' | 'evaluator-invalid-result' | 'evaluation-cancelled' | 'evaluation-timed-out' | 'integrity-changed' | null;
+}
+
+export interface UniverseCampaignSeedEvaluation {
+  intent: UniverseCampaignSeedIntent;
+  result: UniverseCampaignSeedResult | null;
 }
 
 export interface UniverseCampaignStep {
@@ -301,6 +359,8 @@ export interface UniverseCampaignSummary {
   deadlineAt: string | null;
   finishedAt: string | null;
   steps: UniverseCampaignStep[];
+  /** Absent until the evaluator-only intent is durably recorded. Never a trial/elite. */
+  seedEvaluation?: UniverseCampaignSeedEvaluation;
   progress: {
     attempts: number;
     completedRuns: number;

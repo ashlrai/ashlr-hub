@@ -1,8 +1,11 @@
 /** Pure task admission: no credential lookup, provider contact, reservation or execution. */
+import { resourceQuotaBuckets, validateResourceQuotaScope, type ResourceQuotaScope } from './quota-scope.js';
 export interface ResourceWorker {
   id: string;
   provider: 'codex' | 'claude' | 'local';
   model: string;
+  /** Explicit versioned association; absent preserves conservative shared-account quota. */
+  quotaScope?: ResourceQuotaScope;
   maxConcurrent: number;
   reservePercent: number;
   maxTasksPerWindow: number;
@@ -40,6 +43,8 @@ export interface ResourceAssignmentInput {
   activeCounts: Record<string, number>;
   taskReservationCounts: Record<string, ResourceTaskReservationCount>;
   nowMs: number;
+  /** Operator-only veto; never interpreted as provider quota evidence. */
+  quotaScopeExcludedWorkerIds?: string[];
 }
 export type ResourceExclusionReason =
   | 'worker-not-allowed'
@@ -53,7 +58,8 @@ export type ResourceExclusionReason =
   | 'quota-window-reset-passed'
   | 'quota-reserve-reached'
   | 'concurrency-exhausted'
-  | 'operator-task-cap-reached';
+  | 'operator-task-cap-reached'
+  | 'operator-quota-scope-excluded';
 export interface ResourceAssignmentCandidate {
   workerId: string;
   provider: ResourceWorker['provider'];
@@ -139,7 +145,7 @@ export function validateResourcePool(value: unknown): ResourcePool {
   const known = new Set<string>(); const workers: ResourceWorker[] = [];
   for (const worker of value.workers) {
     if (!object(worker) || !exact(worker, ['id', 'provider', 'model', 'maxConcurrent', 'reservePercent',
-      'maxTasksPerWindow', 'taskWindowMs', 'priority'], ['allowUnknownQuota']) || !identifier(worker.id) ||
+      'maxTasksPerWindow', 'taskWindowMs', 'priority'], ['allowUnknownQuota', 'quotaScope']) || !identifier(worker.id) ||
       known.has(worker.id) || typeof worker.provider !== 'string' || !['codex', 'claude', 'local'].includes(worker.provider) ||
       !model(worker.model) || !integer(worker.maxConcurrent, 1, 16) || !percent(worker.reservePercent, 99) ||
       !integer(worker.maxTasksPerWindow, 1, 10_000) || !integer(worker.taskWindowMs, 1_000, 604_800_000) ||
@@ -150,6 +156,7 @@ export function validateResourcePool(value: unknown): ResourcePool {
     workers.push({ id: worker.id, provider: worker.provider as ResourceWorker['provider'], model: worker.model,
       maxConcurrent: worker.maxConcurrent, reservePercent: worker.reservePercent, maxTasksPerWindow: worker.maxTasksPerWindow,
       taskWindowMs: worker.taskWindowMs, priority: worker.priority,
+      ...(worker.quotaScope === undefined ? {} : { quotaScope: validateResourceQuotaScope(worker.provider, worker.model, worker.quotaScope) }),
       ...(worker.allowUnknownQuota === undefined ? {} : { allowUnknownQuota: worker.allowUnknownQuota }) });
   }
   return immutable({ schemaVersion: 1, id: value.id, workers });
@@ -173,6 +180,7 @@ export function validateResourceObservations(value: unknown, pool: ResourcePool)
       throw new Error('Invalid resource observations: unique enrolled identities and canonical time bounds required');
     }
     const windowIds = new Set<string>(); const windows: ResourceQuotaWindow[] = [];
+    const buckets = resourceQuotaBuckets(definition.workers.find((worker) => worker.id === observation.workerId)!);
     for (const window of observation.windows) {
       if (!object(window) || !exact(window, ['id', 'usedPercent', 'resetsAt']) || !identifier(window.id) ||
           windowIds.has(window.id) || (window.usedPercent !== null && !percent(window.usedPercent)) ||
@@ -180,6 +188,9 @@ export function validateResourceObservations(value: unknown, pool: ResourcePool)
         throw new Error('Invalid resource observations: unique bounded quota windows required');
       }
       windowIds.add(window.id); windows.push({ id: window.id, usedPercent: window.usedPercent, resetsAt: window.resetsAt });
+      if (buckets && !buckets.some((bucket) => window.id === `codex_${bucket}_primary` || window.id === `codex_${bucket}_secondary`)) {
+        throw new Error('Invalid resource observations: window outside pinned quota scope');
+      }
     }
     seen.add(observation.workerId); observations.push({ workerId: observation.workerId, observedAt: observation.observedAt,
       expiresAt: observation.expiresAt, health: observation.health as ResourceObservation['health'], windows,
@@ -219,7 +230,7 @@ function validateCounts(value: unknown, known: Set<string>, reservations: boolea
  * fresh quota. Known exhaustion/unavailability cannot be erased by stale data.
  */
 export function planResourceAssignment(input: ResourceAssignmentInput): ResourceAssignmentPlan {
-  if (!object(input) || !exact(input, ['pool', 'observations', 'allowedWorkerIds', 'activeCounts', 'taskReservationCounts', 'nowMs']) ||
+  if (!object(input) || !exact(input, ['pool', 'observations', 'allowedWorkerIds', 'activeCounts', 'taskReservationCounts', 'nowMs'], ['quotaScopeExcludedWorkerIds']) ||
       !integer(input.nowMs, 0, Date.parse('9999-12-31T23:59:59.999Z'))) {
     throw new Error('Invalid resource assignment: exact snapshot and bounded current time required');
   }
@@ -231,6 +242,9 @@ export function planResourceAssignment(input: ResourceAssignmentInput): Resource
     throw new Error('Invalid resource assignment: unique enrolled allowed worker identities required');
   }
   const active = validateCounts(input.activeCounts, known, false);
+  const scopeExcluded = input.quotaScopeExcludedWorkerIds === undefined ? [] : input.quotaScopeExcludedWorkerIds;
+  if (!array(scopeExcluded, 0, MAX_RESOURCE_POOL_WORKERS) || scopeExcluded.some(id => typeof id !== 'string' || !known.has(id)) ||
+    new Set(scopeExcluded).size !== scopeExcluded.length) throw new Error('Invalid resource quota scope excluded workers');
   const reservations = validateCounts(input.taskReservationCounts, known, true);
   const allowed = new Set(input.allowedWorkerIds); const byId = new Map(observations.map((row) => [row.workerId, row]));
   const candidates: ResourceAssignmentCandidate[] = []; const exclusions: ResourceAssignmentExclusion[] = [];
@@ -241,6 +255,7 @@ export function planResourceAssignment(input: ResourceAssignmentInput): Resource
       exclusions.push({ workerId: worker.id, reasons: ['worker-not-allowed'], nextEligibleAt: null }); continue;
     }
     const observed = byId.get(worker.id); const count = active[worker.id] ?? 0;
+    if (scopeExcluded.includes(worker.id)) reasons.add('operator-quota-scope-excluded');
     const tasks = reservations[worker.id] ?? { count: 0, nextEligibleAt: null };
     if (count >= worker.maxConcurrent) reasons.add('concurrency-exhausted');
     if (tasks.count >= worker.maxTasksPerWindow) {
@@ -273,7 +288,8 @@ export function planResourceAssignment(input: ResourceAssignmentInput): Resource
       if (!unknown && observed) usedPercent = Math.max(...observed.windows.map((window) => window.usedPercent!));
     }
     if (reasons.size) {
-      exclusions.push({ workerId: worker.id, reasons: [...reasons], nextEligibleAt: retry.sort()[0] ?? null }); continue;
+      exclusions.push({ workerId: worker.id, reasons: [...reasons],
+        nextEligibleAt: scopeExcluded.includes(worker.id) ? null : retry.sort()[0] ?? null }); continue;
     }
     const pressure = Math.max(count / worker.maxConcurrent, tasks.count / worker.maxTasksPerWindow,
       usedPercent === null ? 0 : usedPercent / (100 - worker.reservePercent));

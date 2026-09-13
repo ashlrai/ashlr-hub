@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError, apiGet, apiPost } from './client.js';
 import { clearMutationToken, getMutationToken, setMutationToken } from './auth-store.js';
-import { resourceConsoleScopeQuery, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceWorkerAccessControl } from './resource-pool-queries.js';
+import { resourceConsoleScopeQuery, resourceConsoleSnapshotQuery, setResourceAllocation, setResourceWorkerAccessControl, setResourceQuotaScopeAccess } from './resource-pool-queries.js';
 import { resourceFixture } from '../routes/resources/fixtures.test-support.js';
 import { RESOURCE_COLLECTOR_RECOVERY_REASONS, RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS } from '../../core/resources/console-types.js';
 
@@ -22,6 +22,202 @@ async function query(value?: unknown) {
   return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
 }
 beforeEach(() => { vi.clearAllMocks(); clearMutationToken(); });
+
+describe('quota reservation response and mutation boundary', () => {
+  const general = { capacityKey: 'codex-account', quotaScope: 'codex-general-v1' } as const;
+  const spark = { capacityKey: 'codex-account', quotaScope: 'codex-spark-v1' } as const;
+  async function snapshotWith(value: unknown) {
+    const { snapshot } = resourceFixture();
+    Object.assign(snapshot.pool.workers[0]!, { quotaScope: general.quotaScope, model: 'gpt-6-astra' });
+    Object.assign(snapshot.pool.workers[1]!, { quotaScope: spark.quotaScope, model: 'gpt-5.3-codex-spark' });
+    read.mockResolvedValue({ ...snapshot, quotaScopeAccess: value });
+    return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
+  }
+  it.each([undefined, { exclusions: [], revision: 0, updatedAt: null },
+    { exclusions: [general], revision: 1, updatedAt: NOW }, { exclusions: [spark, general], revision: 2, updatedAt: NOW }])(
+    'accepts legacy absence or exact explicitly enrolled scope %#', async (value) => {
+      await expect(snapshotWith(value)).resolves.toBeDefined(); expect(write).not.toHaveBeenCalled();
+    });
+  it.each([null, {}, { exclusions: [general], revision: 0, updatedAt: null },
+    { exclusions: [], revision: 1, updatedAt: null }, { exclusions: [], revision: -1, updatedAt: NOW },
+    { exclusions: [general, general], revision: 1, updatedAt: NOW },
+    { exclusions: [{ ...general, capacityKey: 'unknown' }], revision: 1, updatedAt: NOW },
+    { exclusions: [{ ...general, quotaScope: 'inferred' }], revision: 1, updatedAt: NOW },
+    { exclusions: [{ ...general, raw: 'PRIVATE' }], revision: 1, updatedAt: NOW },
+    { exclusions: [], revision: 1, updatedAt: NOW, raw: 'PRIVATE' }])('rejects malformed or unregistered snapshots %#', async (value) => {
+    await expect(snapshotWith(value)).rejects.toThrow('selected pool');
+  });
+  it('does not infer a pin from a model name', async () => {
+    const { snapshot } = resourceFixture(); snapshot.pool.workers[0]!.model = 'gpt-6-astra';
+    read.mockResolvedValue({ ...snapshot, quotaScopeAccess: { exclusions: [general], revision: 1, updatedAt: NOW } });
+    await expect(resourceConsoleSnapshotQuery(snapshot.pool.id).fetch()).rejects.toThrow('selected pool');
+  });
+  it('requires control unlock and sends only the exact independent scope revision', async () => {
+    await expect(setResourceQuotaScopeAccess([general], 0)).rejects.toThrow('Unlock controls'); expect(write).not.toHaveBeenCalled();
+    setMutationToken('a'.repeat(64));
+    write.mockResolvedValue({ quotaScopeAccess: { exclusions: [general], revision: 1, updatedAt: NOW } });
+    await expect(setResourceQuotaScopeAccess([general], 0)).resolves.toHaveProperty('quotaScopeAccess.revision', 1);
+    expect(write).toHaveBeenCalledExactlyOnceWith('/api/resources/quota-scope-access', { exclusions: [general], expectedRevision: 0 }, 'a'.repeat(64));
+  });
+  it('accepts reordered selectors without mutating the caller', async () => {
+    setMutationToken('a'.repeat(64)); const requested = [spark, general];
+    write.mockResolvedValue({ quotaScopeAccess: { exclusions: [general, spark], revision: 4, updatedAt: NOW } });
+    await expect(setResourceQuotaScopeAccess(requested, 3)).resolves.toBeDefined(); expect(requested).toEqual([spark, general]);
+  });
+  it.each([{ exclusions: [general, general], revision: 0 }, { exclusions: new Array(1), revision: 0 },
+    { exclusions: [{ ...general, capacityKey: '../secret' }], revision: 0 },
+    { exclusions: [{ ...general, quotaScope: 'inferred' }], revision: 0 },
+    { exclusions: [{ ...general, extra: true }], revision: 0 },
+    { exclusions: Array.from({ length: 65 }, (_, i) => ({ ...general, capacityKey: `account-${i}` })), revision: 0 },
+    { exclusions: [], revision: -1 }, { exclusions: [], revision: 0.5 }, { exclusions: [], revision: Number.MAX_SAFE_INTEGER }])(
+    'rejects invalid requests before contact %#', async ({ exclusions, revision }) => {
+      setMutationToken('a'.repeat(64));
+      await expect(setResourceQuotaScopeAccess(exclusions as Parameters<typeof setResourceQuotaScopeAccess>[0], revision)).rejects.toThrow('Invalid quota reservation');
+      expect(write).not.toHaveBeenCalled();
+    });
+  it.each([{}, { quotaScopeAccess: null }, { quotaScopeAccess: { exclusions: [spark], revision: 1, updatedAt: NOW } },
+    { quotaScopeAccess: { exclusions: [general], revision: 2, updatedAt: NOW } },
+    { quotaScopeAccess: { exclusions: [general], revision: 1, updatedAt: null } },
+    { quotaScopeAccess: { exclusions: [general, general], revision: 1, updatedAt: NOW } },
+    { quotaScopeAccess: { exclusions: [general], revision: 1, updatedAt: NOW }, raw: 'PRIVATE' }])('refuses unverifiable acknowledgments %#', async (value) => {
+    setMutationToken('a'.repeat(64)); write.mockResolvedValue(value);
+    await expect(setResourceQuotaScopeAccess([general], 0)).rejects.toThrow('could not be verified');
+  });
+  it.each([401, 403, 409, 500])('redacts status %i without resubmitting', async (status) => {
+    setMutationToken('a'.repeat(64)); write.mockRejectedValue(new ApiError('PRIVATE_DETAIL', status, '/api/resources/quota-scope-access'));
+    const error = await setResourceQuotaScopeAccess([general], 0).catch((value: Error) => value);
+    expect(error).toBeInstanceOf(Error); expect((error as Error).message).not.toContain('PRIVATE_DETAIL'); expect(write).toHaveBeenCalledOnce();
+    if (status === 409) expect(error).toMatchObject({ status: 409 });
+    if (status === 401) expect(getMutationToken()).toBeNull();
+  });
+});
+
+describe('explicit engineering supervision capability', () => {
+  const projectScope = () => ({ ...resourceFixture().scope, defaultProjectId: 'default',
+    projects: [{ id: 'default', label: 'Hub', workspace: '/private/project', enabled: true }] });
+  it.each([{}, { engineeringSupported: true, engineeringLifecycle: 'stopping', engineeringAttachmentId: 'a'.repeat(32) },
+    { engineeringSupported: true, engineeringLifecycle: 'running', engineeringAttachmentId: 'b'.repeat(32), engineeringPreparationSupported: true }])(
+    'accepts explicit host attachment discovery %# without effects', async patch => {
+      read.mockResolvedValue({ ...projectScope(), engineeringAttachmentSupported: true, ...patch });
+      await expect(resourceConsoleScopeQuery.fetch()).resolves.toMatchObject({ engineeringAttachmentSupported: true });
+      expect(write).not.toHaveBeenCalled();
+    });
+  it.each([{ engineeringAttachmentSupported: false }, { engineeringAttachmentSupported: null },
+    { engineeringAttachmentSupported: true, readOnly: true }, { engineeringAttachmentId: 'a'.repeat(32) },
+    { engineeringAttachmentSupported: true, engineeringAttachmentId: 'a'.repeat(32) },
+    { engineeringAttachmentSupported: true, engineeringSupported: true, engineeringLifecycle: 'running' },
+    ...[null, 1, '', 'x'.repeat(32), 'a'.repeat(64)].map(engineeringAttachmentId => ({ engineeringAttachmentSupported: true,
+      engineeringSupported: true, engineeringLifecycle: 'running', engineeringAttachmentId }))])(
+    'rejects unverifiable attachment capability %#', async patch => {
+      read.mockResolvedValue({ ...projectScope(), ...patch });
+      await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+    });
+  it.each(['running', 'stopping', 'closed', 'held'])('accepts engineering lifecycle %s without mutation', async (engineeringLifecycle) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringLifecycle });
+    await expect(resourceConsoleScopeQuery.fetch()).resolves.toMatchObject({ engineeringLifecycle });
+    expect(write).not.toHaveBeenCalled();
+  });
+  it.each([false, null, 1, 'complete', {}])('rejects malformed engineering lifecycle %#', async (engineeringLifecycle) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringLifecycle });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it('rejects engineering lifecycle without an engineering capability', async () => {
+    read.mockResolvedValue({ ...projectScope(), engineeringLifecycle: 'closed' });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each([{}, { engineeringSupported: true }, { engineeringSupported: true, engineeringSupervisionSupported: true },
+    { engineeringSupported: true, engineeringPreparationSupported: true }, { engineeringSupported: true, engineeringOutcomesSupported: true },
+    { engineeringSupported: true, engineeringPreparationSupported: true, engineeringSupervisionSupported: true, engineeringPreparationAutoAdmission: true }])(
+    'accepts absent or explicitly configured capability %# without effects', async (capability) => {
+      read.mockResolvedValue({ ...projectScope(), ...capability });
+      await expect(resourceConsoleScopeQuery.fetch()).resolves.toBeDefined();
+      expect(write).not.toHaveBeenCalled();
+    });
+  it.each([false, null, 1, 'true', {}])('rejects nonliteral supervision flags %#', async (value) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringSupervisionSupported: value });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it('rejects supervision without engineering support', async () => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupervisionSupported: true });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each([false, null, 1, 'true', {}])('rejects nonliteral preparation flags %#', async (value) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringPreparationSupported: value });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it('rejects preparation without engineering support', async () => {
+    read.mockResolvedValue({ ...projectScope(), engineeringPreparationSupported: true });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each([false, null, 1, 'true', {}])('rejects nonliteral outcome flags %#', async (value) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringOutcomesSupported: value });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it('rejects outcomes without engineering support', async () => {
+    read.mockResolvedValue({ ...projectScope(), engineeringOutcomesSupported: true });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each([false, null, 1, 'true', {}])('rejects nonliteral automatic-preparation flags %#', async (value) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringPreparationSupported: true,
+      engineeringSupervisionSupported: true, engineeringPreparationAutoAdmission: value });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each(['engineeringPreparationSupported', 'engineeringSupervisionSupported'])('requires %s for automatic preparation', async (capability) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringPreparationSupported: true,
+      engineeringSupervisionSupported: true, engineeringPreparationAutoAdmission: true, [capability]: undefined });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  const successorCapabilities = { engineeringSupported: true, engineeringPreparationSupported: true,
+    engineeringSupervisionSupported: true, engineeringSuccessorsSupported: true };
+  it('accepts successor observation without automatic preparation admission or control access', async () => {
+    read.mockResolvedValue({ ...projectScope(), ...successorCapabilities });
+    await expect(resourceConsoleScopeQuery.fetch()).resolves.toMatchObject({ engineeringSuccessorsSupported: true });
+    expect(write).not.toHaveBeenCalled();
+  });
+  it.each([false, null, 1, 'true', {}])('rejects nonliteral successor flags %#', async value => {
+    read.mockResolvedValue({ ...projectScope(), ...successorCapabilities, engineeringSuccessorsSupported: value });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each(['engineeringSupported', 'engineeringPreparationSupported', 'engineeringSupervisionSupported'])('requires %s for successor observation', async capability => {
+    read.mockResolvedValue({ ...projectScope(), ...successorCapabilities, [capability]: undefined });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it.each([{ readOnly: true }, { projects: undefined }, { defaultProjectId: undefined }])('rejects successor observation outside an execution project scope %#', async override => {
+    read.mockResolvedValue({ ...projectScope(), ...successorCapabilities, ...override });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+});
+
+describe('passive collector record inspection boundary', () => {
+  const base = { scope: 'local-record-inspection', sampledAt: NOW, state: 'pending', markerVersion: 1,
+    reasonCode: 'legacy-owner-evidence-missing', recoveryAttempted: false };
+  async function inspect(value: unknown) {
+    const { snapshot } = resourceFixture(); read.mockResolvedValue({ ...snapshot, collectorInspection: value });
+    return resourceConsoleSnapshotQuery(snapshot.pool.id).fetch();
+  }
+  it.each([undefined, base,
+    ...[2, 3, 4].map(markerVersion => ({ ...base, markerVersion, reasonCode: 'recovery-not-evaluated' })),
+    { ...base, state: 'absent', markerVersion: null, reasonCode: 'no-pending-record' },
+    { ...base, state: 'unavailable', markerVersion: null, reasonCode: 'pending-evidence-unavailable' },
+  ])('accepts only passive consistent records and legacy absence %#', async value => {
+    await expect(inspect(value)).resolves.toMatchObject({ collectorInspection: value }); expect(write).not.toHaveBeenCalled();
+  });
+  it.each([null, {}, { ...base, scope: 'collector-running' }, { ...base, recoveryAttempted: true },
+    { ...base, sampledAt: '2026-02-30T12:00:00.000Z' }, { ...base, sampledAt: 'PRIVATE' },
+    { ...base, state: 'running' }, { ...base, markerVersion: '1' }, { ...base, markerVersion: 5 },
+    { ...base, markerVersion: null }, { ...base, markerVersion: 4 }, { ...base, reasonCode: 'recovery-not-evaluated' },
+    { ...base, state: 'absent' }, { ...base, state: 'unavailable' }, { ...base, ownerToken: 'PRIVATE' },
+    { ...base, reasonCode: 'PRIVATE_REASON' },
+  ])('rejects malformed or contradictory records with a fixed redacted error %#', async value => {
+    await expect(inspect(value)).rejects.toThrow('The resource response did not match the selected pool.');
+    expect(write).not.toHaveBeenCalled();
+  });
+  it('does not invoke a supplied inspection getter', async () => {
+    const getter = vi.fn(() => 'PRIVATE'); const value = { ...base };
+    Object.defineProperty(value, 'reasonCode', { enumerable: true, get: getter });
+    await expect(inspect(value)).rejects.toThrow('selected pool'); expect(getter).not.toHaveBeenCalled();
+  });
+});
 
 describe('configured metadata collector lifecycle', () => {
   async function lifecycle(value: unknown) {
@@ -160,6 +356,38 @@ describe('optional native execution response boundary', () => {
 });
 
 describe('connection and allocation response boundaries', () => {
+  it.each(['active', 'inactive', 'unknown'])('accepts closed global stop evidence: %s', async state => {
+    const executionStop = { state, sampledAt: NOW };
+    await expect(extension({ executionStop })).resolves.toMatchObject({ executionStop });
+  });
+  it.each([null, {}, { state: 'ready', sampledAt: NOW }, { state: 'inactive', sampledAt: 'not-a-time' },
+    { state: 'inactive', sampledAt: NOW, path: '/PRIVATE/KILL' }, { state: 'active' }])('rejects malformed or private stop evidence %#', async executionStop => {
+    await expect(extension({ executionStop })).rejects.toThrow();
+  });
+  it('accepts a pre-invocation reservation failure without invented process diagnostics', async () => {
+    const connections = { ...connection(), firstFailure: { accountId: 'codex-a', observedAt: NOW,
+      reasonCode: 'activity-reservation-failed', cancellationAlreadyRequested: false } };
+    await expect(extension({ connections })).resolves.toMatchObject({ connections });
+  });
+  it('accepts a bounded first connection failure without inferring an account is usable', async () => {
+    const connections = { ...connection(), firstFailure: { accountId: 'codex-a', observedAt: NOW,
+      reasonCode: 'native-cleanup-unconfirmed', cancellationAlreadyRequested: false,
+      cleanupDiagnostics: { failure: 'group-exit-unconfirmed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false } } };
+    await expect(extension({ connections })).resolves.toMatchObject({ connections });
+  });
+  it.each(['foreign-account', 'future', 'private-field', 'private-reason', 'bad-boolean', 'private-diagnostic', 'missing-field'])(
+    'rejects %s in first connection failure', async kind => {
+      const firstFailure: Record<string, unknown> = { accountId: 'codex-a', observedAt: NOW,
+        reasonCode: 'native-cleanup-unconfirmed', cancellationAlreadyRequested: false };
+      if (kind === 'foreign-account') firstFailure.accountId = 'unknown';
+      if (kind === 'future') firstFailure.observedAt = NEXT;
+      if (kind === 'private-field') firstFailure.stderr = 'PRIVATE';
+      if (kind === 'private-reason') firstFailure.reasonCode = 'PRIVATE';
+      if (kind === 'bad-boolean') firstFailure.cancellationAlreadyRequested = 'false';
+      if (kind === 'private-diagnostic') firstFailure.cleanupDiagnostics = { failure: 'PRIVATE' };
+      if (kind === 'missing-field') delete firstFailure.reasonCode;
+      await expect(extension({ connections: { ...connection(), firstFailure } })).rejects.toThrow();
+    });
   function connection() {
     return { sampledAt: NOW, refreshing: false, accounts: [{ id: 'codex-a', label: 'Personal', provider: 'codex',
       state: 'observed', authentication: 'signed-in', health: 'reachable', planType: 'pro', observedAt: NOW, expiresAt: NEXT,
@@ -304,6 +532,22 @@ describe('allocation mutations', () => {
 });
 
 describe('optional native quota response boundary', () => {
+  it('accepts safe last-attempt cleanup evidence in a terminal snapshot', async () => {
+    const value = refresh(); value.state = 'closed'; Object.assign(row(value), { status: 'uncertain', reason: 'managed-quota-uncertain',
+      nextAttemptAt: null, cleanupDiagnostics: { failure: 'group-exit-unconfirmed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false } });
+    await expect(query(value)).resolves.toMatchObject({ quotaRefresh: value });
+  });
+  it.each(['private-field', 'private-value', 'missing-field', 'without-attempt', 'successful'])('rejects %s cleanup diagnostics', async kind => {
+    const value = refresh(); Object.assign(row(value), { status: 'failed', reason: 'managed-quota-failed',
+      cleanupDiagnostics: { failure: 'process-failed', processGroupSettlement: 'group-exit-confirmed', timedOut: false, cancelled: false } });
+    const diagnostic = row(value).cleanupDiagnostics as Record<string, unknown>;
+    if (kind === 'private-field') diagnostic.log = 'PRIVATE';
+    if (kind === 'private-value') diagnostic.failure = 'PRIVATE';
+    if (kind === 'missing-field') delete diagnostic.cancelled;
+    if (kind === 'without-attempt') Object.assign(row(value), { lastAttemptAt: null, lastSuccessAt: null });
+    if (kind === 'successful') Object.assign(row(value), { status: 'observed', reason: 'managed-quota-observed' });
+    await expect(query(value)).rejects.toThrow();
+  });
   it.each([undefined, null])('preserves legacy absence %#', async (value) => { await expect(query(value)).resolves.toBeDefined(); });
   it('accepts a bounded enrolled-Codex snapshot and forwards only the existing fixed endpoint', async () => {
     const value = refresh(); const output = await query(value); expect(output.quotaRefresh).toEqual(value);

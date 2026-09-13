@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "scope": "local-installed-measurement-and-regression-not-calibration",
+  "checkout": "/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00",
+  "sourceCommitAtCompletion": "242cf7fd66d01e4c7c22450248c003ad15bac731",
+  "session": 73003,
+  "exitCode": 0,
+  "testFilesPassed": 17,
+  "testsPassed": 489,
+  "skipped": 0,
+  "durationSeconds": 3042.59,
+  "observedTerminalAt": "2026-09-12T10:50:36Z",
+  "command": "npx --no-install vitest run test/preparation-calibration-driver.test.ts test/preparation-score-compiler-deadline.test.ts test/preparation-typecheck.test.ts test/preparation-typecheck-authoring.test.ts test/preparation-score-packaging.test.ts test/universe-builtin-preparation-evaluator.test.ts test/preparation-process-score.test.ts test/resource-engineering-preparation-builtin.test.ts test/resource-engineering-preparation.test.ts test/resource-engineering-preparation-boundaries.test.ts test/resource-engineering-preparation-metadata.test.ts test/preparation-batch-candidate.test.ts test/universe-calibrated-campaign.test.ts test/universe-campaign-passed-seed-acceptance.test.ts test/universe-campaign-passed-seed-improvement.test.ts test/universe-scored-trial-budget.test.ts test/universe-campaign-delivery.test.ts --no-file-parallelism --reporter=dot",
+  "evaluatorDigest": "25d5787412e177238745216d259a9167768ca6460bfed126cc453eb714d0f953",
+  "identityRecord": "primary-build-identity.json",
+  "nativeScope": ["two repeated complete frozen workloads", "poisoned manager refusal", "prelaunch and post-settlement installed drift refusal", "real candidate cancellation"],
+  "separateStaleControls": "../2026-09-12-account-integration/stale-controls.json",
+  "exclusions": ["later test-only cleanup changes", "genuine retained calibration captures", "installed calibrated scorer", "live account quota", "autonomous fleet activation", "production deployment"]
+}

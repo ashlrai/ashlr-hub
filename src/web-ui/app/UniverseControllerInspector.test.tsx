@@ -18,6 +18,27 @@ async function submit(id = 'fleet') {
 
 describe('scoped named controller inspector', () => {
   afterEach(() => vi.unstubAllGlobals());
+  it.each(['in-flight', 'completed'])('shows historical handoff diagnostics alongside %s outcome without retry controls', async state => {
+    const request = vi.fn(async () => json({ ...report, status: state === 'completed' ? 'completed' : 'incomplete',
+      outcomes: [{ campaignId: 'build', state, attempted: true, reasonCode: state === 'completed' ? 'campaign-reconciled' : 'reconciliation-required' }],
+      diagnostics: [{ campaignId: 'build', phase: 'delivery-verification', code: 'delivery-receipt-unverified', at,
+        intentDigest: 'private-intent', error: 'private-error' }] }));
+    vi.stubGlobal('fetch', request); render(<UniverseControllerInspector />); await submit();
+    const section = await screen.findByRole('region', { name: 'Recorded handoff diagnostics' });
+    expect(within(section).getByText('Delivery confirmation')).toBeInTheDocument();
+    expect(within(section).getByText('delivery-receipt-unverified')).toBeInTheDocument();
+    expect(within(section).getByText(/historical failure records, not live errors/)).toBeInTheDocument();
+    expect(within(section).getByText(/Completed outcomes can retain an earlier diagnostic/)).toBeInTheDocument();
+    expect(within(screen.getByRole('table', { name: 'Recorded campaign outcomes' })).getByText(state)).toBeInTheDocument();
+    expect(screen.queryByText(/private-intent|private-error/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /retry|recover|publish/i })).not.toBeInTheDocument();
+    expect(request).toHaveBeenCalledOnce();
+  });
+  it('omits the diagnostic section for legacy observations', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => json(report))); render(<UniverseControllerInspector />);
+    await submit(); await screen.findByRole('table', { name: 'Recorded campaign outcomes' });
+    expect(screen.queryByRole('region', { name: 'Recorded handoff diagnostics' })).not.toBeInTheDocument();
+  });
   it('keeps historical selection while navigating locally without new requests', async () => {
     const request = vi.fn().mockResolvedValueOnce(json(report)).mockRejectedValue(new Error('offline'));
     vi.stubGlobal('fetch', request); render(<UniverseControllerInspector />);

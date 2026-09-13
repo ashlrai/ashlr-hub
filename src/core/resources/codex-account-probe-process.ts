@@ -9,7 +9,11 @@ import type { CodexProbeProcessInput, CodexProbeProcessOutput } from './codex-ac
 // Installed codex-cli 0.136.0 generated schema and official App Server protocol:
 // https://learn.chatgpt.com/docs/app-server (checked 2026-09-07).
 // account/rateLimits/read accepts absent/null params, not an empty object.
-const SUFFIX = ['app-server', '--stdio', '-c', 'analytics.enabled=false'];
+// Metadata handshakes never need plugins. Native startup may otherwise refresh
+// Git-backed catalogs and leave descendants after app-server exits. These are
+// process-only overrides, not persisted profile changes or worker-turn policy.
+const SUFFIX = ['app-server', '--stdio', '-c', 'analytics.enabled=false',
+  '-c', 'features.plugins=false', '-c', 'features.remote_plugin=false'];
 // Binding argv is capped at 16 KiB before JSON escaping, plus fixed metadata.
 const MAX_INPUT_BYTES = 64 * 1024;
 const MAX_OUTPUT_BYTES = 1024 * 1024;

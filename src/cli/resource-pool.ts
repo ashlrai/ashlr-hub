@@ -5,6 +5,13 @@ const USAGE = `usage: ashlr resources pool status --root ABS --pool ABS --bindin
        ashlr resources pool run --root ABS --pool ABS --bindings ABS --observations ABS --task ABS [--output ABS] [--json]
        ashlr resources pool observe --pool ABS --worker ID --provider codex|claude --input ABS --captured-at ISO [--previous ABS] [--bucket ID ...] [--json]
        ashlr resources pool console --help
+       ashlr resources pool engineering --help
+       ashlr resources pool engineering prepare --help
+       ashlr resources pool engineering setup --help
+       ashlr resources pool engineering predecessor --help
+       ashlr resources pool engineering mission --help
+       ashlr resources pool evolve --help
+       ashlr resources pool spark --help
        ashlr resources pool benchmark --help
        ashlr resources pool probe --help
 
@@ -137,6 +144,14 @@ function outputMetadata(reservation: OutputReservation | undefined) {
 
 /** Parse scope before importing execution, and keep transient worker text out of CLI metadata. */
 export async function cmdResourcePool(args: string[]): Promise<number> {
+  if (args[0] === 'spark') {
+    const { cmdResourceSparkEnrollment } = await import('./resource-spark-enrollment.js');
+    return cmdResourceSparkEnrollment(args.slice(1));
+  }
+  if (args[0] === 'evolve') {
+    const { cmdResourcePoolEvolution } = await import('./resource-pool-evolution.js');
+    return cmdResourcePoolEvolution(args.slice(1));
+  }
   if (args[0] === 'probe') {
     const { cmdResourceProbe } = await import('./resource-probe.js');
     return cmdResourceProbe(args.slice(1));
@@ -148,6 +163,26 @@ export async function cmdResourcePool(args: string[]): Promise<number> {
   if (args[0] === 'console') {
     const { cmdResourceConsole } = await import('./resource-console.js');
     return cmdResourceConsole(args.slice(1));
+  }
+  if (args[0] === 'engineering') {
+    if (args[1] === 'predecessor') {
+      const { cmdResourceEngineeringPredecessor } = await import('./resource-engineering-predecessor.js');
+      return cmdResourceEngineeringPredecessor(args.slice(2));
+    }
+    if (args[1] === 'mission') {
+      const { cmdResourceEngineeringMission } = await import('./resource-engineering-mission.js');
+      return cmdResourceEngineeringMission(args.slice(2));
+    }
+    if (args[1] === 'setup') {
+      const { cmdResourceEngineeringSetup } = await import('./resource-engineering-setup.js');
+      return cmdResourceEngineeringSetup(args.slice(2));
+    }
+    if (args[1] === 'prepare') {
+      const { cmdResourceEngineeringPrepare } = await import('./resource-engineering-prepare.js');
+      return cmdResourceEngineeringPrepare(args.slice(2));
+    }
+    const { cmdResourceEngineeringCheck } = await import('./resource-engineering-check.js');
+    return cmdResourceEngineeringCheck(args.slice(1));
   }
   let reserved: OutputReservation | undefined;
   try {

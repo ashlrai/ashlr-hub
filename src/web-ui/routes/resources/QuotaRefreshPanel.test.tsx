@@ -102,6 +102,25 @@ describe('native quota collection presentation', () => {
     expect(screen.getByRole('region', { name: 'Native quota read status' })).toHaveAttribute('tabindex', '0');
   });
 
+  it('explains bounded cleanup evidence without converting it into a recovery action', () => {
+    render(<QuotaRefreshPanel refresh={snapshot([{ status: 'uncertain', reason: 'managed-quota-uncertain', lastAttemptAt: NOW,
+      cleanupDiagnostics: { failure: 'lifecycle-publication-failed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: 'unknown' } }])} onSelect={() => {}} />);
+    expect(screen.getByText(/Process lifecycle evidence could not be recorded/)).toBeVisible();
+    expect(screen.getByText(/Process-group exit unconfirmed/)).toBeVisible();
+    expect(screen.getByText(/Timeout: no; cancellation: unknown/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: /retry|recover|restart/i })).not.toBeInTheDocument();
+  });
+
+  it('does not echo malformed cleanup diagnostics or treat historical detail as live', () => {
+    const value = snapshot([{ status: 'closed', lastAttemptAt: NOW, cleanupDiagnostics: {
+      failure: 'PRIVATE', processGroupSettlement: '/private/profile', timedOut: false, cancelled: false,
+    } as never }]);
+    const { container } = render(<QuotaRefreshPanel historical refresh={value} onSelect={() => {}} />);
+    expect(container.textContent).not.toContain('PRIVATE'); expect(container.textContent).not.toContain('/private/profile');
+    expect(screen.queryByText(/Last attempt detail/)).not.toBeInTheDocument();
+    expect(screen.getByText('Last reported: Closed')).toBeVisible();
+  });
+
   it('shows exact per-worker sample and retry times and opens the existing inspector', () => {
     const select = vi.fn();
     render(<QuotaRefreshPanel refresh={snapshot([{ workerId: 'codex-main', status: 'observed', reason: 'managed-quota-observed',

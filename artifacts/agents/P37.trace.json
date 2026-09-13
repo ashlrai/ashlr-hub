@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P37",
+  "status": "unsigned-stub",
+  "authenticated": false,
+  "attestation": null,
+  "liveProviderExecution": false,
+  "newAuthorityRoots": false,
+  "source": "src/core/resources/worker.ts",
+  "tests": "test/resource-worker-kill.test.ts",
+  "limitation": "Development handoff metadata only; not a signed trace, real-time latency guarantee, or provider-spend settlement."
+}

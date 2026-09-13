@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P35",
+  "status": "unsigned-stub",
+  "authenticated": false,
+  "attestation": null,
+  "paymentRailExecution": false,
+  "effectAuthority": "none",
+  "source": "src/core/universe/payment-broker.ts",
+  "tests": "test/universe-payment-broker.test.ts",
+  "limitation": "Pure reservation simulation; not a payment, approval, signed trace, or payment protocol compatibility claim."
+}

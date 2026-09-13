@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "scope": "diagnostic-only",
+  "observedAt": "2026-09-12T09:39:31Z",
+  "session": 15864,
+  "status": "terminal",
+  "exitCode": 0,
+  "testFile": "test/preparation-qualified-workload-acceptance.test.ts",
+  "passed": 5,
+  "skipped": 0,
+  "durationMs": 1261590,
+  "bundleDigest": "4937844f46bbd3965694fa9deef6b18132899b09b8025d31a16b79764bd531f1",
+  "preservedBundle": "/Users/masonwyatt/.codex/artifacts/ashlr-preparation-runtime-pin.HJhKaA/preparation",
+  "nodeDigest": "72c18e2eeda260f67a5b2b66e96fa9b5ad82864676ebb54925695d87120cae3f",
+  "fullCase": {
+    "testMs": 942004,
+    "evaluatorMs": 936564,
+    "checks": 23,
+    "qualifications": 2,
+    "regions": 15,
+    "benchmarkProcesses": 4828,
+    "reportBytes": 1993,
+    "reportSha256": "2d88050128e908dff438f368d7214815ad870f4c6131bc97407b34eb11022230",
+    "processGroupSettlement": "group-exit-confirmed",
+    "stderrBytes": 0,
+    "timedOut": false,
+    "cancelled": false
+  },
+  "controlCaseMs": {
+    "runtimeCurrent": 33865,
+    "runtimeStale": 28417,
+    "sourceCurrent": 190846,
+    "sourceStale": 65330
+  },
+  "exclusions": ["genuine calibration", "accepted optimization", "recipe integration source", "production activation"]
+}

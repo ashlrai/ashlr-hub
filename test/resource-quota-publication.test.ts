@@ -72,10 +72,11 @@ async function startStubbedCollector() {
   let captures: ResourceObservation[] = []; let unavailable = ['codex']; let closed = false;
   const readObservations = vi.fn((base: ResourceObservation[]) => [...base, ...captures]);
   const unavailableWorkerIds = vi.fn((_defer?: boolean) => [...unavailable]);
+  const quotaUnavailableWorkerIds = vi.fn((_defer?: boolean) => []);
   vi.spyOn(quotas, 'createResourceQuotaRefresher').mockImplementation((options) => {
     notify = options.onChange;
     options.coordinator!.signal.addEventListener('abort', () => { closed = true; notify?.(); }, { once: true });
-    return { readObservations, unavailableWorkerIds,
+    return { readObservations, unavailableWorkerIds, quotaUnavailableWorkerIds,
       snapshot: () => ({ schemaVersion: 1, scope: 'codex-native-metadata', state: closed ? 'closed' : 'running',
         sampledAt: new Date().toISOString(), workers: [] }),
       close: async () => { closed = true; notify?.(); } };
@@ -87,7 +88,7 @@ async function startStubbedCollector() {
     observationsFile: save('observations.json', [f.observation]), quotaConfigFile: save('quota.json', f.config) };
   const server = await startResourceConsoleServer(options); servers.push(server);
   const scope = { ...f, root: options.root };
-  return { f, server, options, readObservations, unavailableWorkerIds, read: () => readSharedQuotaEvidence(scope),
+  return { f, server, options, readObservations, unavailableWorkerIds, quotaUnavailableWorkerIds, read: () => readSharedQuotaEvidence(scope),
     change: (rows: ResourceObservation[], denied: string[]) => { captures = rows; unavailable = denied; notify?.(); } };
 }
 
@@ -99,6 +100,7 @@ describe('console-owned shared quota publication', () => {
     expect(value.read()).toMatchObject({ observations: [], unavailableWorkerIds: ['codex'] });
     expect(value.readObservations).toHaveBeenCalledWith([]);
     expect(value.unavailableWorkerIds).toHaveBeenCalledWith(true);
+    expect(value.quotaUnavailableWorkerIds).toHaveBeenCalledWith(true);
     value.change([value.f.observation], []);
     // 80% remains real evidence, not a cached veto at the collector's 75% default.
     expect(value.read()).toMatchObject({ observations: [value.f.observation], unavailableWorkerIds: [] });

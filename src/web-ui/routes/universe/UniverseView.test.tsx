@@ -283,6 +283,31 @@ describe('UniverseView', () => {
     expect(screen.getByRole('region', { name: 'Evidence for better-motor' })).toBeInTheDocument();
   });
 
+  it.each(['d'.repeat(64), '[redacted]'])('shows the historical seed receipt exactly as supplied (%s)', async (digest) => {
+    const user = userEvent.setup(); const current = summary();
+    current.runs[1]!.trials[0]!.generation = generation({ seedContext: { schemaVersion: 1, digest } });
+    const fetch = mount(overview({ universes: [current] }));
+    const evidence = await screen.findByRole('region', { name: 'Model generation evidence' });
+    await user.click(within(evidence).getByText('Generation source and changes'));
+    expect(within(evidence).getByText('Historical seed context')).toBeInTheDocument();
+    expect(within(evidence).getByText('Version 1')).toBeInTheDocument();
+    expect(within(evidence).getByText('Seed context digest')).toBeInTheDocument();
+    expect(within(evidence).getByText(digest)).toBeInTheDocument();
+    expect(within(evidence).getByText('Historical measured seed evidence is retained across campaign generations. It is not the trial parent, latest-attempt feedback, or acceptance.')).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+
+  it('omits seed receipt details and explanation from legacy generation evidence', async () => {
+    const user = userEvent.setup(); const current = summary();
+    current.runs[1]!.trials[0]!.generation = generation();
+    mount(overview({ universes: [current] }));
+    const evidence = await screen.findByRole('region', { name: 'Model generation evidence' });
+    await user.click(within(evidence).getByText('Generation source and changes'));
+    expect(within(evidence).queryByText('Historical seed context')).not.toBeInTheDocument();
+    expect(within(evidence).queryByText('Seed context digest')).not.toBeInTheDocument();
+    expect(within(evidence).queryByText(/Historical measured seed evidence/)).not.toBeInTheDocument();
+  });
+
   it('shows trial model evidence and generation-scoped usage without calling it billing', async () => {
     const current = summary();
     const latest = current.runs[1]!;

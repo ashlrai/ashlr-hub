@@ -32,6 +32,7 @@ describe('HELP_ENTRIES — the command table', () => {
     'universe campaign <init|status|run|resume|pause|stop>',
     'universe campaign check ',
     'universe resources check ',
+    'universe preparation-measurement ',
     'universe campaign supervise ',
     'universe deliver ',
     'universe deliveries ',
@@ -79,6 +80,22 @@ describe('HELP_ENTRIES — the command table', () => {
     expect(check.description).toContain('policy holds, planner recheck hints and diagnostic nextChecks');
     expect(check.description).toContain('without changing reserves');
     expect(check.description).toContain('providerContacted is false');
+  });
+
+  it('advertises explicit preparation report inspection without scoring or store authority', async () => {
+    const entries = AGENT_COMMANDS.filter(entry => entry.usage.startsWith('ashlr universe preparation-measurement '));
+    expect(entries).toHaveLength(1);
+    const entry = entries[0]!;
+    expect(entry.usage).toContain('--input <absolute-report.json>');
+    expect(entry.usage).not.toContain('--root'); expect(entry.safety).toBe('read');
+    expect(entry.jsonShape).toContain('PreparationMeasurementSummary'); expect(entry.jsonShape).toContain('diagnostic-only');
+    expect(entry.description).toContain('not a score or acceptance evidence');
+    expect(entry.description).toContain('unknown totals stay unknown');
+    expect(entry.description).toContain('blob counts are subsets');
+    expect(entry.description).toContain('fixture groups are separate');
+    expect(await cmdHelp(['autonomy'])).toBe(0);
+    expect(output()).toContain('universe preparation-measurement --input');
+    expect(output()).toContain('No store discovery, execution or provider calls');
   });
 
   it('every entry has a command, description, and known topic', () => {

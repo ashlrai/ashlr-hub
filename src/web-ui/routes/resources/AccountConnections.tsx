@@ -190,6 +190,7 @@ export function AccountConnections({ connections, historical = false, ceilingPer
   if (!connections) return null;
   const ceiling = !historical && typeof ceilingPercent === 'number' && Number.isSafeInteger(ceilingPercent)
     && ceilingPercent >= 0 && ceilingPercent <= 100 ? ceilingPercent : null;
+  const failure = connections.firstFailure;
   return <section className={styles.panel} aria-label="Account connections">
     <header className={styles.heading}><div><h2>Account connections</h2>
       <p>Native sign-in and usage, separate from worker admission.</p></div>
@@ -197,6 +198,17 @@ export function AccountConnections({ connections, historical = false, ceilingPer
     {ceiling !== null ? <div className={styles.referenceLegend}><span className={styles.legendTick} aria-hidden="true" />
       <strong>{ceiling}% saved pool reference</strong><span>{100 - ceiling}% personal headroom target</span>
       <span>Comparison only, not account dispatch eligibility.</span></div> : null}
+    {failure ? <section className={styles.note} aria-label="First observed connection failure">
+      <strong>{historical ? 'Recorded connection failure' : 'First observed connection failure'}</strong>
+      <p>{connections.accounts.find(account => account.id === failure.accountId)?.label ?? failure.accountId}
+        {' — '}{failure.reasonCode} at {resourceTime(failure.observedAt)}.</p>
+      <p>{failure.cancellationAlreadyRequested
+        ? 'Cancellation was already requested. This may be a secondary failure; also inspect Native quota reads for earlier evidence.'
+        : 'Recorded before this monitor requested cancellation. This does not establish the first failure across shared collectors.'}</p>
+      {failure.cleanupDiagnostics ? <p>Cleanup: {failure.cleanupDiagnostics.failure}; process group: {failure.cleanupDiagnostics.processGroupSettlement};
+        {' '}timed out: {failure.cleanupDiagnostics.timedOut ? 'yes' : 'no'}; cancelled: {failure.cleanupDiagnostics.cancelled ? 'yes' : 'no'}.</p> : null}
+      <p>Inspect collector ownership before restarting. This record does not authorize retry or clear a cleanup hold.</p>
+    </section> : null}
     {connections.accounts.length ? <ul className={styles.accounts}>{connections.accounts.map((account) =>
       <AccountRow key={account.id} account={account} sampledAt={connections.sampledAt} historical={historical} ceiling={ceiling} />)}</ul>
       : <p className={styles.empty}>No accounts configured for connection checks.</p>}

@@ -1,0 +1,1530 @@
+# Firm build notes
+
+## September 11: independent successor observation (baseline d56309ce)
+
+- Revalidated clean auto/p00 at d56309ce; Entire resume found no checkpoint.
+  Previous goal turn made verified control progress; the status latency gate
+  remains the next concrete functional gap. Three independent agent streams
+  explored shared journal validation, cold failure semantics and strict UI state.
+- Reuse the existing immutable journal codec and complete attribution fold.
+  The effect worker exports detached startup pins, not leases. A separately
+  prewarmed fixed reader verifies complete fresh records and the selected config
+  before returning only recorded milestones, digest and sampling time.
+- Parent retains lifecycle control and rejects responses after close/fault/exit.
+  The UI separates verified records from worker connection; neither implies
+  current execution, current pool accounting or delivered successor work.
+- Independent review caught two gaps during implementation: an existing empty
+  journal without enrollment must be unavailable to observers (while legacy
+  initialization retains its explicit allowMissing path); overlapping reads
+  must not coalesce into a sample begun before the newer request. Both are
+  corrected, with unique internal read tokens and request-window sample checks.
+- Initial parent mocked HTTP/background/packaging regression passed 58 tests /
+  three files, zero skips, 4.99s. Shared store18 and legacy coordinator29 passed;
+  store strict import/typecheck and scoped lint passed. Independent real reader
+  14 tests passed in 2.79s, including fresh changes while another worker is busy,
+  privacy sentinels and complete file metadata/hash no-write checks.
+- UI focused tests: 123 passed across decoder/panel/workspace acceptance; web
+  typecheck and scoped lint passed. These do not replace actual-CLI performance
+  and unchanged autonomous delivery/restart acceptance.
+- Final parent freshness/protocol/reader/background regression: 33 passed /
+  three files, zero skips, 3.85s. Non-overlapping focused backend total is
+  127 tests / seven files. Full web passed 1,649 tests / 85 files, zero skips,
+  10.68s. Source/web typechecks, full lint (zero errors / 107 existing warnings),
+  lane classification (322 real-IO / 673 unit), local build and docs passed.
+- Source frozen for actual-CLI acceptance. The original seven probes, two-second
+  limits, no-retry behavior, deadlines and resource fixtures are unchanged;
+  stronger assertions now also require correct recorded milestones in each
+  phase response and exact journal digest/fresh sampling on delivery and restart.
+- First integrated actual-CLI gate failed availability, not latency: one failed,
+  zero skips, 83.29s. Admission health/status 1.217/24.237ms, but status returned
+  503; source health/status 0.906/27.024ms and preparation health/status
+  0.947/117.284ms returned 200 with correct proposed facts. Pause accepted in
+  69.231ms. A-only accounting remained exact (three completed fixture receipts,
+  90 reported tokens), no B admission or refs; close13.026s/exit0/stderr0.
+  Exact refusal cause was not instrumented; publication contention is a hypothesis.
+- Inspection found that the immutable reader classifies a coherent record set
+  with a writer marker or concurrent namespace change as source-mutated. The
+  follow-up change permits bounded fresh read-only sampling only for that sole
+  stop reason with no invalid files or limit violation. Corrupt, staged, unsafe,
+  missing and misattributed evidence remain immediately unavailable. No records,
+  locks or ownership are repaired; neither latency limits nor HTTP retries change.
+- Corrected source: store26 and independent reader17 passed without skips;
+  reader tests include genuine writer lease release/publication during the same
+  read, current config drift while waiting and bounded no-write refusal for a
+  persistent lease. Strict import/source checks and scoped lint passed. The
+  retry-admission deadline is rechecked after timer delays before any new proof.
+  Parent background/protocol19 tests also passed. Corrected source is frozen for
+  a new actual-CLI gate; none of this presumes the earlier 503's precise cause.
+- Corrected-source responsiveness passed1/1, zero skips,75.46s total/74.28s test.
+  Seven HTTP200 responses: admission health/status1.094/18.958ms (intent-recorded),
+  source0.912/21.709ms (proposed), preparation1.062/114.282ms (proposed), pause
+  66.519ms. Original queue one entry/paused, A2+proposal1, three completed
+  receipts90tokens, no B admission/execution/refs; close11.524s/exit0/stderr0.
+  No threshold, HTTP-retry, fixture budget or dispatch assertion was weakened.
+  Strengthened two-delivery/restart acceptance started sequentially on the same
+  frozen source with fresh sample windows and exact actual-journal digest checks.
+- Final strengthened setup passed1/1, zero skips,155.90s total/154.77s test.
+  Five fixture requests/six evaluations/two refs/150tokens exact; both delivered
+  at118.44s, restart17.06s. Fresh samples lie inside GET windows; digest equals
+  actual five journal records; restart preserves journal/config/deadline/entries.
+  Seed context, account policy, ledger and read-only replay unchanged. Zero
+  recovery events; all children, listeners and private fixtures cleaned.
+  Passed responsiveness initial supervision read was1228.910ms outside its seven
+  target probes; do not generalize the journal times to every parent-owned route.
+- Final integrated backend run passed138/7files, zero skips,23.06s. Together with
+  web1649/85 and the two actual-CLI gates, corrected-source total is1789/94files,
+  zero skips. Documentation/lane/diff checks pass. No full autonomous Bun/native
+  run in this increment; packaging tests verify its fixed sibling entry only.
+- Cold next-work review: the coordinator's tick catch may set its local faulted
+  flag and stop the loop while the worker stays connected. The new journal
+  intentionally cannot diagnose this; a separate closed, timestamped lifecycle
+  signal remains necessary, without treating connection as execution or stopping
+  independent work. No such signal is claimed implemented here.
+- The existing artifacts/hub-verification-benchmark-plan.md is still a proposal,
+  not a runnable frozen evaluator. Its protected-evaluator capture path still
+  launches one Git blob process per file in engineering-preparation.ts. Measure
+  actual launch counts on current source before allowing a genuine model-generated
+  candidate to optimize that path. Already shipped seed batching/registry reuse
+  must not earn new improvement credit; fixture proposals prove plumbing only.
+- Lookup error: an unmatched components/*Successor* shell glob aborted a read
+  command; corrected to the actual routes/workspace paths. No source effects.
+- A benchmark lookup under test/ and a guessed .performance path found nothing;
+  corrected to the tracked benchmarks/resource-engineering-responsiveness.test.ts.
+
+## September 11: isolated autonomous verification (baseline 82b2c881)
+
+- Previous turn made verified progress, but both baseline and candidate failed
+  the frozen two-second pause/status gate. Clean auto/p00 HEAD revalidated as
+  82b2c881; Entire resume still found no checkpoint. Three agents cover profiling,
+  effectful-worker implementation and independent RPC/control review.
+- Actual-process CPU profiling attributes about 79% of sampled runtime to
+  synchronous child_process.spawnSync, almost all under the macOS private-storage
+  ACL assurance path (`/bin/ls -lde`). This is not evidence that Git/hash CPU is
+  dominant. Native call counters were capped, so their totals are lower bounds;
+  the uncapped CPU profile supplies the attribution. No ACL checks are removed.
+- Selected worker-hosted existing preparation/coordinator over new cached
+  read-set authorization. Original guards, branded leases, staging, source
+  verification and publication stay together in that isolate. Parent HTTP,
+  engineering owner and durable supervision retain their existing custody.
+  Closed synchronous worker-to-parent callbacks use bounded fresh shared buffers;
+  only the worker waits. Parent callbacks cannot reenter the worker. Automatic
+  admission checks parent stop/pause immediately before the unchanged CAS call;
+  explicit manual admission while paused retains its existing contract.
+- Effectful workers cannot use the reader's terminate/restart-on-timeout policy.
+  Close sets a shared stop flag, drains the original coordinator and only then
+  terminates the isolate. Unexpected transport failure must retain uncertainty
+  and still attempt local drain; no abandoned-file deletion or automatic restart.
+- Scoped HTTP routing tests passed 43/43, zero skips, 4.07s, including control
+  availability while preparation awaits and cleanup after configuration failure.
+  Independent actual-worker RPC tests passed 22/22, zero skips, 0.909s. These
+  narrow checks do not establish full responsiveness acceptance.
+- First unchanged worker-hosted benchmark: one failed, zero skips, 118.15s.
+  Health was 1.17/0.91/1.16ms; pause was 200 in 74.13ms. Two generations, one
+  proposal, one enrolled campaign, paused=true: B was not admitted or executed.
+  Three successor-status reads still waited 6.275/58.502/41.008s; initial parent
+  supervision read was 2.572s outside the seven fixed assertions. Clean close
+  501.95ms, child exit zero, no stderr. No retry or threshold change.
+- Review found two lifecycle defects before final integration: an already-faulted
+  worker exiting during cleanup could strand a new pending close request; and
+  swallowed uncertain mutating host calls could let the coordinator keep polling.
+  Builder/cold reviewer own explicit exit rejection and a tested fatal-uncertainty
+  latch. Measurement above predates those targeted error-path corrections.
+- Profiling artifacts: /tmp/ashlr-sync-profile-buxSiS. Uncapped CPU profile totals
+  146.64s, with 115.316s spawnSync self and 114.020s ACL assurance inclusive.
+  Inclusive stage totals overlap: projectUniverse83.941s, seed-context66.825s,
+  source-delivery 49.107s, successorSource 36.804s, prepareSuccessor 61.568s and
+  registry.publish 36.393s. Parent checkRegistration had four roughly 1.7s windows.
+  Instrumentation adds overhead; these are attribution, not uninstrumented SLA.
+- Error fixes landed before final source freeze. Central host-call policy faults
+  protocol/timeouts and uncertain registration/admission before subordinate
+  catches can retry. Expected read closure remains a normal drain condition.
+  Terminal worker exit rejects cleanup waiters even after an earlier fault.
+- Combined parent regression: 116 tests / four files, zero skips, 8.32s (HTTP,
+  unchanged manual queue admission, error policy, actual-worker RPC). Background
+  lifecycle/admission tests: 7/7, 1.06s. SEA shim packaging: 3/3, 0.183s. An
+  actual compiled Bun smoke loaded the fixed engineering worker and acknowledged
+  close in 0.70s, exit zero, without initializing metadata or running providers.
+  Full autonomous Bun/native acceptance remains separate from this load smoke.
+- Frozen corrected-source setup acceptance passed 1/1, zero skips, 198.99s:
+  five requests, six evaluations, two refs and 150 tokens exact; retained seed
+  context, deadline/account policies, restart and read-only setup replay intact.
+  Full phase output retained zero read-recovery events or transport failures.
+  Delivery completed at155.44s, restart took19.57s; children/fixtures cleaned.
+  The final unchanged responsiveness run is separate and fails as recorded below.
+- Final corrected-source responsiveness: one failed, zero skips, 109.08s total
+  (107.88s test). Health 1.095/0.819/0.984ms; authenticated pause HTTP200 in
+  71.056ms. Successor status 6030.261/52342.242/35954.411ms: three failures
+  against unchanged two-second limits. Initial supervision status 2161ms lies
+  outside the seven target assertions. Two generations, one proposal, one
+  enrolled campaign, paused=true; B neither admitted nor executed. Close
+  501.05ms, exit zero, empty stderr, fixtures cleaned. No retry or test edits.
+- Full web verification: 1,604 tests / 85 files, zero skips, 10.74s.
+- Additional unchanged successor adapter/coordinator regressions: 40 tests /
+  two files, zero skips, 14.95s. Combined correctness coverage: 1,771 tests /
+  94 files, zero skips, plus the separately failing responsiveness gate. Full
+  source/web typechecks, local build, compiled setup help and five structural
+  safety checks passed; documentation checker passed without network requests.
+- Final full lint passed: zero errors, 107 existing warnings, none in the new
+  background/RPC or modified packaging files. Real-IO membership passed with
+  320 real-IO / 672 unit files and no unclassified markers. Original checkout
+  remains at a01fc086 with its pre-existing untracked workplans; real KILL
+  remains 19 bytes with mtime1788533266. No account or service was changed.
+- One report-edit tool call used a nonexistent placeholder anchor and was refused
+  before any write; corrected immediately to the real acceptance paragraph.
+- Next implementation map (proposal, not shipped): extract the coordinator's
+  strict journal codec and full attribution fold into one shared read-only store;
+  have a separate bounded/prewarmed reader inspect that journal during execution.
+  Preserve original config/deadline/task/result/prepared/admitted linkage and
+  distinguish durable recorded stage from timestamped last-reported activity.
+  The reader must never construct a coordinator, acquire/reclaim a lease, expose
+  source/model text, or treat activity as dispatch authority. Test journal drift,
+  incomplete staging, same-PID worker exit, timeout, privacy and zero read effects.
+- Lookup corrections: console implementation lives in core/web, not resources;
+  route tests are resource-console-engineering-routes.test.ts, not a nonexistent
+  engineering-server test. Unmatched shell globs were replaced with rg file lists.
+
+## September 11: responsiveness investigation (baseline 104650e8)
+
+- Three independent explorers identified synchronous repeated source checks,
+  captures, graph snapshots and immutable registration guards. Prior 73,098 ms
+  socket wait is evidence of delayed observation, not measured CPU attribution.
+- Source execution leases are privately branded. Moving a proof into a worker
+  does not transfer authority, and parent publication must still freshly check
+  source/configuration/stage identity. Whole-manager worker offload is not a
+  safe small patch. No cross-call positive-proof cache will be introduced.
+- Delivery already has a bounded, content-OID-verified Git batch parser. Seed
+  materialization currently launches one blob process per tracked file. Reuse
+  that parser without a circular artifacts/delivery import; retain existing
+  path policy, aggregate limits, no-clobber output and disk artifact digest.
+- Independent actual-CLI probes will use fresh connections without read retries
+  and record status/pause latency around durable proposal and preparation
+  evidence. The proposed two-second target is an acceptance goal, not a result.
+- Current-turn inspection tried nonexistent universe/execution-lock.ts; corrected
+  to the existing universe/execution.ts. No production state was changed.
+- Targeted parser/delivery gate: 52/52 tests in two files, no skips, 2.01s.
+  Actual 128-file SHA1 and SHA256 fixtures each observed two Git calls; the old
+  algorithm's 129-call count is source-derived, not a timed baseline. Exact
+  artifact bytes/modes/digest and dirty repository inventory were preserved.
+- Publication guards now read fresh verified metadata instead of rebuilding
+  unused commissioning diagnostics. Initial complete reporting is unchanged.
+  Cold review verified that commissioning status was not an admission predicate.
+  Five focused preparation suites passed 56/56, no skips, 205.84s. New assertions
+  observe three metadata checks, four owner checks and two complete reports;
+  changed receipt evidence is refused at each of the three writer checkpoints.
+- Profiling harness attempts were interrupted without retained phase results.
+  Absence of intermediate Vitest output does not prove a module deadlock or
+  that no fixture effects ran: the successful 205.84s regression run also emitted
+  only its final summary. Native sampling alone does not establish the dominant
+  verification stage. Use the uninstrumented actual-CLI HTTP gate as evidence.
+- Static source and new-test checks passed. Full lint passed with zero errors
+  and 107 existing warnings. Compiling the unchanged delivery test in an extra
+  strict ad hoc command exposed two pre-existing Buffer generic typing errors;
+  its runtime tests pass and the unrelated fixture was not edited.
+- Documentation checking caught an invented AUTONOMY-GAP anchor; corrected to
+  the existing next-executable-milestones heading and the check passed. A lookup
+  of absent DEVELOPMENT/TESTING guides was corrected to CONTRIBUTING.md.
+- Clean isolated 104650e8 actual-CLI baseline: one responsiveness test failed,
+  zero skips, 139.50s total. Fresh proposal-admission health/status: 6.448/6.451s;
+  post-result source-proof health/status: 64.019/64.365s; preparation health/
+  status: 48.406/48.496s. Pause returned 409 after 50.469s, not an accepted pause.
+  B was admitted and its first generation started; terminal paused=false and
+  two queue entries. Graceful close took 3.508s, exit zero, no stderr. All GETs
+  returned 200 without transport errors. No read/control retry was used.
+- The same frozen test was moved byte-identically (cmp verified against the
+  retained baseline copy) to benchmarks/resource-engineering-responsiveness.test.ts.
+  Dedicated npm run test:engineering-responsiveness preserves hermetic HOME,
+  one worker, original observation/overall bounds and all two-second assertions.
+  It is separate from default correctness lanes and fails on unsupported hosts,
+  not a skipped pass. Cold review found no false-pass or control-auth issue.
+- Candidate dedicated gate also failed, one test, zero skips, 123.29s total:
+  proposal health/status 5.992/5.995s; post-result health/status 60.967/61.329s;
+  preparation health/status 45.806/45.893s; pause 409 after 47.647s. B was already
+  admitted and its first generation started; paused remained false. Close was
+  clean in 3.005s, no stderr. All GETs were 200 without socket errors. One sample
+  per revision is not a statistical speedup result. Two-second control latency
+  remains failed; no deadline or retry policy was relaxed to obtain a pass.
+- Unchanged happy-path actual CLI setup/continuation/restart acceptance passed:
+  one test, zero skips, 185.58s. Exactly five model-fixture requests, six durable
+  evaluations, two delivery refs and 150 reported tokens. Original deadlines,
+  allocation, seed context, receipts and post-execution setup replay preserved.
+  Exactly one allowed read-only recovery followed a 61.533s stalled read. This
+  is not a responsiveness pass. Fixture children/listeners/trees were cleaned.
+- Final source/web typechecks passed; full web passed 1,604 tests / 85 files,
+  zero skips, 11.00s. Combined non-overlapping correctness result: 1,713 tests /
+  93 files, zero skips. Final independent source review found no actionable
+  correctness/authority regression; the separate performance gate remains red.
+- Local production-format build, compiled setup help and five structural safety
+  checks passed. Documentation links and git diff checks passed. Original
+  checkout remains a01fc086 with pre-existing untracked workplans; real KILL
+  remains 19 bytes with mtime 1788533266. No remote push, npm publication,
+  provider execution or persistent-service activation was performed.
+
+## September 11: coherent offline autonomous startup (in progress)
+
+- Baseline f543e362, isolated auto/p00; Entire resume found no checkpoint.
+  Three parallel streams cover core registry/setup, actual CLI acceptance and
+  independent cold review; parent integrates CLI, documentation and validation.
+- Standalone static preparation did not register its initial objective with the
+  successor manager. New setup connects the existing real preparation registry,
+  bounded profile/supervision/successor configuration and foreground console argv.
+  It never constructs a substitute execution owner or starts provider work.
+- Initial CLI integration run: 20 passed / 7 failed while the imported core
+  module had not yet landed. Repeating after the module was present passed all
+  27 tests; no test weakening or retry policy changes were needed.
+- Cold review found mutable returned configuration aliases; the shared registry
+  now freezes its private captured configuration. Publication context and pool/
+  quota ownership findings were corrected: exact context is checked before any
+  publication callback; existing persisted accounting is required, unresolved
+  jobs/collector state refused, and the existing console/pool/quota lock order
+  guards publication. No new stale-lock repair policy was introduced.
+- Hardened core smoke passed 12/12 (19.93s); independent registry tests passed
+  2/2 (7.60s), preserving independently recomputed legacy digests, canonical bytes,
+  immutable output aliases and write-free replay. Legacy backend gate passed
+  258/258 across eight files (138.71s). Full web passed 1,604/85 (11.03s).
+  TypeScript, full lint (zero errors, 107 existing warnings), docs and local build
+  passed; compiled help and all five structural safety checks passed.
+- Actual setup acceptance first refused an invalid 600-second fixture observation
+  lifetime before setup ran. Corrected to the existing allowed 290-second fixture
+  lifetime without changing execution deadlines. The next run reached two real A
+  generations and an accounted proposal but failed at 127.13s on a status fetch
+  ECONNRESET, before B was observed. Child-exit diagnostics are being added to
+  distinguish console failure from transport failure; this run is not a pass.
+- Diagnostic rerun failed at 149.70s: the original status GET waited 73,098ms,
+  then ECONNRESET; the child remained alive, stderr was empty and no output cap
+  fired. One fresh unpooled read returned 200 immediately. The test still failed
+  deliberately. Acceptance now permits at most one bounded fresh read-only GET
+  recovery for that exact failure class, never a model/action retry. Workflow,
+  delivery, accounting, restart assertions and execution deadlines stay fixed.
+  Long synchronous source proof remains a responsiveness gap, not a solved
+  performance issue or evidence that the HTTP connection stayed uninterrupted.
+- Final actual CLI acceptance passed 1/1, zero skips, 207.63s. Emitted setup argv
+  was used unchanged except JSON/ephemeral-port flags. Four generation requests,
+  one proposal, six durable evaluations, two local refs and five terminal receipts
+  accounting for 150 fixture tokens were verified. Restart preserved deadline,
+  account policy, receipts and source context without repeated worker requests;
+  completed setup replay after execution was write-free. The passing reporter
+  did not retain the actual recovery count; the gate allows at most one exact
+  read-only reset recovery. No action retry or production timeout was changed.
+- Extended setup assertions passed 12/12 in 40.00s, including replay under all
+  existing ownership locks without new acquisition and no-write refusal of
+  altered receipt/configuration. Combined selected gate: 1,877 tests / 96 files,
+  no skips. This proves the local synthetic loop, not useful live Hub improvement.
+- The graded Hub verification benchmark is a design artifact only. Its baseline
+  checked two existing cases (ten deliberately unselected), not a runnable new
+  evaluator, measured subprocess improvement or actual useful self-improvement.
+
+## September 11: successor observability and UTF-8 evidence
+
+- Resumed clean 5fb3b4c0 on auto/p00, no Entire checkpoint. Three independent
+  Explore assignments preceded disjoint implementation ownership.
+- Existing scope contract lacked successor support; project catalog was fetched
+  only on explicit refresh and selected job polling stopped at ready. Reused the
+  existing authenticated read session, supervisor observations, project selector
+  and design tokens rather than adding another execution path.
+- New strict metadata decoder and abortable panel refuse coordinator identity
+  changes, private fields and unverifiable status. Newly registered identities
+  request one catalog read; foreign-project rows prevent duplicate refreshes but
+  never enter the selected project's selector. Selection stays stable.
+- Source decoder used streaming at actual EOF and stripped BOM. New pure helper
+  preserves BOM and allows partial code points only at genuine prefix truncation.
+  Existing context and omission limits remain binding.
+- Integrated full web suite: 1604/85 passed, no skips, 54.15s. Selected backend
+  helper/manager/adapter/CLI: 50/4 passed, no skips, 38.29s. TypeScript, lint
+  (0 errors / 107 existing warnings), docs, real-I/O classification and local
+  build passed. Five compiled structural safety checks passed.
+- Browser acceptance used source server/auth plus compiled UI and controlled
+  nine-phase data, not real account work. 1440/light/dark and 320px layouts have
+  no horizontal overflow; mobile panel overflow 0. Inspect preserved selection.
+  Malformed projection produced sanitized stale state and disabled inspection,
+  hid private-output sentinel, then recovered from the exact restored projection.
+  Browser errors: none. Temporary viewport/theme restored and tab closed.
+- Cold reviewer found no blocking UI/data issue. Full North Star remains active:
+  no provider contact, account policy changes, real KILL removal, daemon install,
+  remote push, npm publication or production activation in this increment.
+- Frozen HTTP scope suite passed 41/41, no skips, 3.85s; combined selected gate
+  is 1,695 tests / 90 files. Temporary browser test passed 1/1 in 216.37s with
+  zero launch/cancel/admit effects. Its private fixture tree and launcher block
+  were removed; loopback listener closed. No temporary browser harness retained.
+
+## September 11: verified-delivery successor loop
+
+- Fresh checkout is clean at be55c10e on auto/p00. Entire resume found no
+  checkpoint; previous goal turn was progress, not a wait or blocked audit.
+- Reusing planning/documentation skills and the established non-eve runtime.
+  Three independent explorations precede source ownership and implementation.
+- Target is a real autonomous chain: delivered campaign -> accounted proposal
+  -> durable exact proposal result -> successor prepared at delivered commit ->
+  current supervisor admission -> independently measured improvement/delivery.
+  A model's success claim must not substitute for source delivery evidence.
+- Current static preparation profile always pins its original seed. Existing
+  integration handoff has source guards but is typed to integration receipts;
+  campaign origins require their own typed binding. Initial-repair policy stays
+  restricted to failed measured seed; passing successors require actual strict
+  improvement rather than an invented seed parent.
+- Implemented three seams: typed campaign-delivery origin and shared successor
+  preparation, immutable accounted proposal coordinator, and private manager /
+  console / CLI adapter. Ordinary browser preparation cannot supply source pins.
+  Host policy names one profile, proposal workers, proposal bound and lifetime
+  successor count, all under the existing supervisor deadline and resource ledger.
+- Proposal context includes fixed acceptance, measured seed and delivered score,
+  and bounded declared file excerpts from the receipt-matching delivered artifact.
+  It never substitutes mutable checkout bytes or inherits source trial scores.
+  Private context is bounded to 8 KiB and excluded from status snapshots.
+- Real successor-preparation tests passed 6/6, 62.04s. Coordinator controlled
+  ledger/adapter with real private journal passed 23/23, 9.55s before subsequent
+  review fixes. Parent source TypeScript and CLI/HTTP passed 53/53, 4s before
+  the additional shared-drain regression. These are intermediate gates, not
+  final frozen-source acceptance.
+- Independent review identified and corrected: mutable adapter callback/options;
+  source drift during quota admission not covered by final dispatch check;
+  present invalid source field falling through legacy registration handling;
+  engineering shutdown checking shared ledger before successor proposal drain.
+  Final dispatch rereads source only after the pool lock releases; inside-lock
+  quota observation retains the cheap guard. Separate completed-result fact
+  persistence preserves paid output during pause/KILL/source drift, while fresh
+  guards still gate preparation and admission. Live states distinguish proposing,
+  capacity waiting, preparation and admission from unresolved response history.
+- Explicit live no-reservation capacity denial retries the same task within
+  original/proposal deadlines; restart of ambiguous intent does not redispatch.
+- Discovery errors: nonexistent console-server/firm-control-types/seed-type
+  guesses were corrected via source search. Initial coordinator Record alias
+  shadowed the built-in type and was renamed. Initial source fixture failed
+  upstream delivery before real-I/O lane registration; registered fixture passed.
+  First actual acceptance stopped during setup because a backdated observation
+  exceeded the existing five-minute TTL; fixture-only expiry corrected to 290s.
+  No production validators or existing test timeouts were widened.
+- Actual three-case manager/adapter/loopback acceptance is running as integration
+  feedback while review fixes land. Its loaded source predates some final fixes;
+  a frozen-source rerun is required. Tests use five model requests (four candidate
+  requests plus one proposer), six evaluations and two strict local deliveries.
+- Informative loaded-source actual acceptance completed 3/3 with no skips in
+  427.72s: automatic chain 232.784s, source-drift 105.654s, lost-output 88.032s.
+  A suspected post-registration stall was only elapsed time: both deliveries
+  ultimately passed. This run predates final review fixes and is not the final
+  frozen acceptance. Optional fixture-only phase timing will measure existing
+  source proof calls and preparation without adding proof reads or raising limits.
+- Final CLI/HTTP/adapter gate passed 65/65 across three files in 5.36s.
+  Supervisor/admission/owner gate has 78 passing tests across three files after
+  correcting a new fault fixture: whitespace is canonically equivalent, so the
+  drift test must alter the persisted revision. No production code was changed
+  for that assertion. The cheap stop guard proves no owner/ledger projection.
+- Expanded coordinator gate passed 26/26 before one additional review fix:
+  source proof may block the event loop, so the per-proposal timeout must also
+  be synchronously checked around final dispatch, not rely only on a timer.
+  That guard and a no-dispatch deadline regression are in progress.
+- Source/web typecheck, full lint (0 errors, 107 existing warnings), documentation
+  links and real-I/O membership passed. Canonical operator documentation now
+  explains autonomous successors, shared budgets, private source context,
+  deadline/restart semantics, and the absence of deployment or a dedicated UI.
+- Frozen legacy/preparation compatibility passed 95/95, no skips, four files,
+  120.34s, including the new null/false source-registration refusals. Parent
+  strict changed-test TypeScript also passes after adding fail-fast stubs for
+  legacy fixture methods outside its scope. Real KILL remains 19 bytes with
+  mtime 1788533266; original checkout remains a01fc086 with prior untracked plans.
+- Independent performance mapping found repeated full projections inside each
+  manager successorSource: committed bundle validation/report followed by source
+  campaign, delivery and context Universe projections. A future within-call
+  verified projection could share those data without a cross-request cache or
+  removing any final dispatch/publication fence. Terminal stop records also
+  re-enter read-only proof on each poll. No speculative optimization landed in
+  the current frozen acceptance wave.
+- The first reviewed-source actual rerun FAILED its happy case at 213.547s.
+  It correctly withheld a proposal whose 10s budget was consumed by redundant
+  synchronous proof: 8 source reads took 51.107s total; no proposal reached the
+  worker. The failed receipt reported worker-dispatch-precondition-failed with
+  unknown tokens, not a charged successful response. This is not accepted
+  operational behavior, and the failed gate remains recorded.
+- Response: retain the pre-clock source proof, immutable intent prepublication
+  proof and final post-reservation proof, but remove the duplicate preliminary
+  proof within the proposal clock. Pass each fresh queue row's exact enrollment
+  digest to the adapter, avoiding a second all-row projection in the same guard.
+  Manager source reads now use a shared verified metadata path that retains both
+  captures, receipt/intent/evidence checks and final source fences but omits the
+  unused commissioning report. Public check/create/replay reports are unchanged.
+  No deadline, quota policy, acceptance threshold or test limit was widened.
+- The optimized coordinator passed 29/29 with exact source-pin and call-count
+  regressions plus both synchronous timeout vetoes; strict TypeScript and lint
+  passed. Lower metadata drift tests and a new final actual run remain required.
+- Metadata tests passed 7/7, 25.52s: two fresh runtime captures, one enrollment
+  validation, zero commissioning report construction; the original full reader
+  still commissions once. Changed evidence and final delivered-source drift
+  refuse without writes. Optimized CLI/HTTP/adapter 65/65 and full source/web
+  TypeScript pass. Local build and five compiled structural safety checks pass.
+- Next operator increment is mapped, not implemented: optional successor scope
+  capability, strict read-only browser decoder, console-wide lineage/phase panel
+  beside EngineeringSupervision, and catalog refresh when an automatically
+  prepared/admitted ID appears. Reserved identity, queued enrollment and verified
+  delivery must remain separate labels; no new mutation routes are needed.
+- Optimized actual happy case PASSED in 197.141s under its unchanged 240s cap
+  and unchanged 10s proposal allowance. Exact five requests, six evaluations,
+  two branches and 150 fixture-reported tokens; original deadline, allocation,
+  spare-account pause and restart receipts preserved. Ten existing source reads
+  totalled 35.064s; source read average was 3.506s, versus 6.388s in the failed
+  prior version. These are phase observations from differing execution paths,
+  not a controlled model-quality or production-performance benchmark.
+  B preparation/registration took 66.322s; both-delivery wait 159.758s;
+  restart 21.019s. Negative cases are still running; no full-suite claim yet.
+- Final optimized actual suite completed 3/3, zero skips, 337.24s total:
+  happy 197.141s, source-drift 74.293s, lost-output 64.523s. Both negative cases
+  retained exactly one completed proposal without preparing B or redispatching.
+  All fixtures closed/cleaned; no live-provider work. Final selected coverage
+  totals 283 passing tests across 14 files, excluding duplicate gate runs.
+- Follow-on text-context edge found by read-only inspection and a Node check:
+  TextDecoder with stream:true silently buffers an incomplete UTF-8 trailer even
+  for a whole file below 1600 bytes, leaving truncated:false on the decoded
+  prefix. Use streaming only when the byte cap actually clips the file and add
+  valid/invalid/trailing-multibyte regressions. This concerns excerpt fidelity,
+  not artifact hashes, evaluated scores or delivery acceptance. Kept as a
+  declared next hardening item rather than changing frozen acceptance source.
+
+## September 11: preparation and replay efficiency
+
+- Prior goal turn made verified progress at clean local commit 7d2c1da6;
+  it did not achieve the full North Star. A final automatic acceptance timing
+  gate remains unresolved, despite two settled jobs and passing browser flow.
+  Current checkout is clean; Entire resume found no checkpoint.
+- Three agents map manager validation, measure baseline phases, and independently
+  review identity/drift defenses. Parent integrates and maintains evidence.
+- Proposed narrow optimization: derive objective plans from the already verified
+  bundle report instead of repeating full preparation checks inside committed
+  registration reads. Keep lower-level before/after captures and registry
+  prepublish revalidation. No filesystem cache or cross-request trust reuse.
+- Baseline timing runs alone; no account, service, KILL or publication changes.
+- Reader-backed manager plan derivation can reduce existing check+prepare replay
+  from 16 full captures to 4, and one-profile/two-registration startup from 10
+  to 6. Counts describe the inspected call graph, not measured time savings.
+  Exact request equality must precede existing-registration reuse so changed
+  objective text/profile/name cannot be ignored by replaying the old request.
+- Independent tests inject drift after private staging but before publication:
+  profile, runtime, comparator, receipt and same-path project inode replacement.
+  No publication, owner exposure or ledger changes may occur after such drift.
+- Discovery initially named a nonexistent console preparation unit test;
+  actual fixtures live in resource-console-engineering-preparation-boundaries.
+- Instrumented baseline on unchanged 7d2 manager passed the automatic case
+  in 114.885s under its existing 120s limit (116.28s Vitest total, two other
+  cases filter-unselected). First/second prepare HTTP latency was 18.291/23.657s;
+  completion waits 19.574/20.860s. Close was 22.5ms, restart 11.954s, and exact
+  replay check/prepare 4.499/14.095s. These are one run's end-to-end phase times,
+  not isolated manager CPU or causal measurements. No fixed shutdown wait was
+  observed. Candidate measurement follows identical source test and limits.
+- Frozen reuse tests pass 4/4 (36.50s total); independent manager boundaries
+  pass 30/30 (81.13s), including six new cases. Strict changed-test TypeScript,
+  scoped ESLint and diff checks pass. Source/web TypeScript, documentation and
+  real-I/O lane checks pass (312 real-I/O files, 666 unit files).
+- Independent cold source review found no acceptance-field bypass: reader
+  planDigest/seedRevision are fresh capture outputs, not trusted receipt JSON.
+  Profile/context/request/bundle digests still cover evaluator, budgets, files,
+  workers and seed; before/after reader captures and prepublish checks remain.
+- Next-work read-only exploration identifies a bounded successor coordinator,
+  not another scheduler: verified campaign delivery -> one shared-ledger-accounted
+  bounded proposal -> durable proposal identity/result -> new objective seeded
+  from that exact delivered commit -> existing supervisor admission. Preserve
+  the original deadline, pause, retained enrollment cap and account reservations.
+  Existing integration-handoff/store initialization provides an origin and final
+  source-recheck pattern, but accepts integration delivery, not campaign delivery;
+  a typed campaign-delivery origin is required rather than relabeling evidence.
+  Static preparation profiles and the separate daemon planner are not this seam.
+  Existing initial-repair policy requires a failed measured seed; the first
+  successor slice should prove two-generation strict improvement on passing
+  delivered code, not fabricate a parent or silently broaden repair acceptance.
+  No successor implementation or provider request was performed this increment.
+- Same isolated candidate automatic test passed in 104.676s (106.05s total),
+  one pass/two filter-unselected under unchanged 120s. Baseline 114.885s ->
+  candidate 104.676s is a single-run 10.209s/8.9% difference, not a stable
+  performance claim. Replay aggregate 18.594 -> 12.782s (check 4.499 -> 3.964s,
+  prepare 14.095 -> 8.818s), restart 11.954 -> 11.418s. Exact two requests,
+  four evaluations/two verified deliveries, unchanged deadline/receipts/
+  allocation/pause and no duplicate replay all passed. Full three-case gate
+  starts serially afterward with source, timing flag and timeouts unchanged.
+- Frozen full acceptance passed 3/3, no skips, 247.62s total/246.13s tests:
+  automatic 105.206s, explicit 84.478s, pause/auth/stale/expired 56.449s.
+  Original case limits 120s/120s/100s unchanged; fixture processes exited and
+  cleanup completed. Second candidate automatic pass corroborates the measured
+  local improvement without proving all host-load behavior. Parent serial
+  lower-level/manual compatibility gate starts only after this process exits.
+- Serial compatibility passed 157/157 in eight files, 74.69s total/71.08s tests:
+  preparation, reader boundaries, real manual console preparation, supervision,
+  admission, HTTP and CLI. Selected total is 194 distinct tests/11 files, no
+  skips; repeated automatic before/after runs are not counted again. Final
+  source/web typechecks, docs and real-I/O lane checks pass. Full lint retains
+  107 existing warnings and no errors. No complete repository or unchanged
+  frontend suite was rerun this increment. Original checkout and real KILL
+  remain unchanged; Entire is enabled in manual-commit mode on auto/p00.
+- Local build and five compiled structural safety checks pass on the reviewed
+  candidate. Parent commits only the owned implementation/tests/docs; final
+  post-commit rebuild will verify a clean source identity. No remote push.
+
+## September 11: automatic intake into the existing fleet
+
+- Previous goal turn was verified progress: clean commit/build 6b7fb229, not
+  a blocked audit. Existing worktree and original checkout ownership rechecked;
+  Entire resume found no checkpoint. Reusing planning and established runtime.
+- Three independent explorations identified separate gaps: dynamic queue
+  admission, delivered-seed/strategy successors, and matched model benchmarks.
+  Existing campaigns already iterate with retained seed/latest feedback. The
+  immediate complete integration is new prepared objectives joining supervision
+  without restarting it; successor seeding and benchmark policy stay separate.
+- User clarified no per-objective human bottleneck. Selected optional
+  maxEnrollments plus autoAdmitPrepared host policy, preserving default fixed
+  queues. Empty opt-in queues can wait; completed queues can accept new work
+  within their original deadline. Completed entries never free retained cap.
+- Core agent owns queue admission/state/recovery; frontend agent owns operator
+  disclosure and response decoding; cold reviewer owns actual HTTP/local-worker
+  evaluation/delivery/restart acceptance. Parent owns API/CLI/scope, docs and
+  browser verification. No live account, KILL, service or external release changes.
+- Prepare remains immutable and independently replayable. Automatic admission
+  happens afterward under the captured host policy. A queue hold returns its
+  own unavailable result while preserving the prepared enrollment. Retrying the
+  same objective can reconcile admission; it cannot renew budgets or rerun a
+  completed graph. This enables agent-driven intake, not autonomous ideation.
+- Read-only discovery guessed console-engineering-supervision-types.ts,
+  console-engineering-inspection.ts and workspace-engineering-supervision.ts;
+  actual files use supervisor-types.ts and data/engineering-supervision.ts.
+- Review added fail-closed persisted-state verification before replay admission,
+  null-input and ambiguous-catalog tests, and HTTP partial-success/replay tests.
+  Final core and legacy boundaries: 76/76. Final CLI/HTTP: 83/83. Full frontend:
+  1,510/1,510 across 82 files, zero skips, 57.84s. A prior frontend invocation
+  crossed the last copy/test edits and failed five assertions against old module
+  transforms; the frozen rerun passed without weakening tests.
+- Existing real preparation/supervision acceptance: 9/9 across two files,
+  zero skips, 172.75s. Source/web typechecks, documentation and lane checks pass;
+  full lint reports zero errors and 107 existing warnings.
+- Browser verification exercised two check/prepare actions, the second after
+  the first completed; both automatically delivered without Run or admission
+  clicks. Independent filesystem/ledger checks confirmed two exact local refs,
+  each changing only value.json to 1; unchanged seed/worktree; two completed
+  receipts; four evaluations; two publications; no protocol errors. Fixture
+  allocation 70/revision 1 and spare-account pause/revision 1 stayed unchanged.
+  Queue revision 2 preserved its original deadline and one remaining slot.
+  The temporary fixture exited cleanly; test-only block/import, tab 13 and
+  viewport overrides were removed. Desktop 1280px and mobile 390px had no
+  document-width overflow. These are local fixture results, not real providers.
+- A final exhausted-capacity UI edge now says Admission limit reached instead
+  of waiting for impossible new admission. Final full web passes 1,512/1,512,
+  82 files, zero skips, 97.09s. Final CLI/HTTP passes 83/83 (5.19s).
+- The final new real acceptance rerun timed out its first automatic case at
+  the unchanged 120s bound (136.68s elapsed). Earlier 3/3 passed and browser
+  executed both objectives. Read-only follow-up found slow setup/reads and
+  real campaign progress, with host load 26.72/14.93/8.82; no proven sleep or
+  specific root cause. Its second explicit-admission case also exceeded the
+  unchanged 120s bound (127.90s elapsed). Do not count that rerun as green or
+  widen timeouts. Parent heavy gates finished before the requested one isolated
+  serial retry of the failed cases; no unrelated process was interrupted.
+- That rerun finished with one passing pause/restart/refusal case (73.40s),
+  two timeouts and 342.42s total duration. Exactly one isolated serial retest
+  of the two failed cases was authorized, without changing tests or timeouts.
+  Its automatic case also timed out (135.25s elapsed). Pre-timeout evidence
+  showed both completed receipts and both settled queue entries, revision 2;
+  the remaining phase was final assertions/close/restart/replay. No more
+  unchanged retries are planned; preserve the unresolved timing gate.
+- Final isolated explicit-admission case passed in 90.09s. That invocation
+  finished one pass, one automatic-case timeout, one intentionally unselected
+  pause case, 226.70s total. All test fixtures were cleaned. Read-only source
+  review found repeated full captures in startup restoration and prepare replay;
+  profile these before considering scoped reuse. No fixed close wait or obvious
+  drain cycle was found, and elapsed attribution remains unproven.
+
+## September 11: engineering outcomes as learning data
+
+- Prior goal turn made verified progress: clean commit/build 3a803c69; no blocked
+  audit. Continuing from the same owned worktree, original checkout preserved.
+- Three read-only agents map outcome/receipt linkage, operator projections and
+  independent attribution failure cases. Parent traces existing benchmark and
+  performance contracts before selecting an implementation, not a new router.
+- Planning/build-agent skills preserve the existing plan and non-eve runtime.
+  No account/provider/service changes or GitHub Actions in discovery.
+- Selected read-only enrollment outcome attribution: retain separate fixed
+  evaluations, selected artifacts, currently verified local deliveries and
+  exact shared-ledger usage. No production credit, causal model ranking or
+  automatic routing changes. Existing Resources performance stays unmatched.
+- Cold review found seed measurement/context missing from comparison controls;
+  implemented additive regime disclosure and matching without changing legacy
+  unpinned runs or scheduling. Main owns CLI rendering and final integration.
+- Design skill keeps the established ice #f5f7fc / white #ffffff / navy #172746 /
+  blue #526fe8 / border #dfe5f1 palette and Space Grotesk/IBM Plex Sans roles.
+  The new left-aligned outcome inspector sits beside existing engineering
+  evidence: campaign stages above worker coverage tables, with bounded table
+  scrolling on mobile. It loads explicitly; no background inventory or polling.
+  The design emphasizes evaluation versus delivery, not a decorative score.
+- Reader and tests owned by Explore next execution; UI/client owned by Explore
+  resources; seed-comparison correction and cold review by Graph semantics.
+  Parent owns enrollment/API wiring, real HTTP acceptance and documentation.
+- Read-only discovery guessed absent score.ts and universe-compare-cli.test.ts;
+  reusable paths are comparison.ts and universe-comparison-cli.test.ts.
+- Exact joins now include historical worker identity, terminal execution time
+  and all declared attempts; unknown usage remains separate from known subtotals.
+  Zero attempts has no measured total. Evidence coverage is not work completion.
+- Independent review found safe-integer overflow across individually valid
+  receipts. The report now fails unavailable with a fixed overflow reason and
+  never exposes a rounded subtotal. Controlled ledger tests cover the boundary.
+- Actual HTTP prepare/evaluate/deliver/restart acceptance initially passed 4/4.
+  New reader + independent review pass 29/29; comparison pure/CLI/read/integration
+  pass 146/146. Both groups have zero skips. Final integrated gates follow.
+- Browser used compiled assets with source API/runtime and test-owned loopback
+  response; no live model provider. The first fixture was restarted before UI
+  verification to correct its asset root to dist/core/web/public. Test logging
+  was buffered, so the fixture also wrote a private read-only connection file.
+- Mobile browser found the outer Resources implicit grid expanding to 630px at
+  a 390px viewport. Explicit minmax(0,1fr) plus min-width:0 children fixed it:
+  document width390, local evidence table viewport324/scroll580. Desktop1280
+  also fits. Project switching removes the prior outcome report. A structural
+  CSS regression complements, but does not replace, actual browser geometry.
+- Actual rendered fixture: one trial/evaluation/pass/selection/local delivery,
+  zero prior-parent strict improvements; seed0 to candidate1;30 reported tokens
+  and112.288ms summed worker execution. This is not a matched model benchmark.
+  Browser reads preserved exact fixture file/account/receipt state (apart from
+  explicit fixture release marker), one worker request, two evaluations and one
+  branch publication. Temporary blocks/tabs/listeners/directories removed.
+- React checklist drove explicit read lifecycle, stale-request cancellation,
+  clearing on session/project changes, labelled scroll regions and keyboard
+  focus. Documentation keeps local fixed-evaluator evidence separate from
+  production acceptance, routing and account authority.
+- Final full web 1,457/1,457 (82 files, zero skips, 58.52s); actual HTTP 4/4
+  (zero skips, 61.29s); comparison 146/146; outcomes/review 29/29; retained
+  seed-model context 14/14. Source/web and changed-test strict typechecks pass.
+  Full lint: zero errors,107 existing warnings. Docs, lane classification,
+  local build and five compiled structural safety checks pass. Original
+  checkout remains a01fc086 with prior untracked plans; KILL remains unchanged.
+
+## September 11: next end-to-end operating workflow
+
+- Previous turn was verified progress: clean commit/build
+  `244c508cf96febc0140017da6427985bffe9feca`. No blocked audit.
+  Entire resume on auto/p00 finds no checkpoint; original checkout preserved.
+- Three bounded Explore assignments compare real scoped-account commissioning,
+  workspace objective preparation and resident graph operation. No credentials,
+  provider calls, account mutation or service activation during exploration.
+- Planning skill reuses this existing plan/notes/report; build-agents guidance
+  keeps the established Hub runtime instead of introducing a second framework.
+- Actual read-only account inventory: three existing workers, no Spark alias;
+  personal account remains paused, ceiling 75%, three historical attempts. No
+  authentication, quota collection or state mutation occurred. Existing code
+  supports scoped migration; guided commissioning remains an operator gap.
+- Selected the complete same-console objective workflow over a disconnected
+  commissioning planner. Host profiles fix evaluator/project/seed/files/workers/
+  budgets; browser supplies bounded identity/name/objective only. Preparation
+  checks, creates a verified bundle and publishes immutable registration; only
+  the existing explicit launch starts work. Automatic queue expansion is not
+  inferred. Expected-old-commit branch advancement remains a separate milestone.
+- Frontend design plan reuses Space Grotesk/IBM Plex Sans and the established
+  ice #f5f7fc, white #ffffff, navy #172746, blue #526fe8, border #dfe5f1 tokens.
+  A left-aligned objective form and fixed acceptance/scope summary share one
+  workspace surface; Check then Prepare encode the actual sequence. On narrow
+  screens they stack. No unrelated decoration, provider logos or animation.
+- Independent review identified whole-config pins blocking unrelated future
+  profile additions; persisted registrations now pin context plus their exact
+  selected profile. Live file changes still require restart; unrelated profile
+  additions on restart must preserve old objectives. Exact completed replay
+  skips record-writer lock/staging, rather than calling a mutating writer again.
+- Startup sequencing review: supervisor schedules with a zero-delay timer;
+  synchronous preparation validation and failure cleanup microtasks run first.
+  No queued-worker launch gap found. Do not add an await there without an
+  admission barrier. Startup may still reconcile existing supervisor state.
+- Early integration checks: wrong immutable-writer return shape corrected;
+  checkRegistration needed to validate before immutable publication; lint's
+  control-character regex rule replaced with explicit code-point checks. New
+  CLI test's empty-array it.each arguments were corrected to object cases.
+  Profile listing uses a control-authenticated POST with a read-only body;
+  same-origin GET does not reliably send Origin and queries remain prohibited.
+- Read-only exploration guessed absent styles/tokens.css and an Engineering*
+  glob; actual paths are design/tokens.css and routes/workspace. A malformed
+  sed range yielded no content and was corrected. No state changed by them.
+- Constructor review caught caller-owned option mutation potentially redirecting
+  later materialization under an earlier context digest. Options now reject
+  accessors/extra fields and capture scalar paths and owner references once;
+  configuration is separately deep-copied. Four real-file regressions prove it.
+- Seed-context choice reverified: 14 model-context tests pass, including original
+  measurement retained alongside newer parent/latest trial feedback. No changes
+  to seed context, scheduling or acceptance were necessary.
+- Final full web suite: 1,399/1,399 across 80 files, zero skips, 60.85s.
+  Focused frontend 117/117; manager boundaries 24/24; preparation regressions
+  34/34; registration/new+existing 61/61; actual HTTP acceptance 4/4. These
+  focused groups overlap and are not a whole-core test claim.
+- Initial browser fixture imported the source server, which served API routes
+  but returned 404 for compiled HTML assets. The embedded browser reported
+  ERR_BLOCKED_BY_CLIENT. Fixture setup is being corrected; no runtime auth or
+  server production behavior was weakened to make browser acceptance pass.
+- Browser acceptance completed using built UI assets plus source API/runtime,
+  with the unchanged static function pointed at the build directory. 1280px
+  desktop and 390px mobile had no horizontal overflow. Prepared objective
+  survived tab loss, then explicit launch produced one recorded delivery branch
+  and one worker receipt (fixture-reported 20 input/10 output tokens). Source
+  checkout and fixture account policy stayed unchanged. A child hit its usage
+  limit after test/code completion; parent finished verification and cleanup.
+  Temporary manual test, listener, viewport override, tab and fixture directory
+  were removed. Real account state and global KILL remained untouched.
+
+## September 10: independent quota-scope reservations
+
+- Final CLI help review found the capability description omitted new scope
+  reservations. Updated only help and existing help assertions; 36/36 CLI tests,
+  scoped lint and diff check pass. Final source and actual web typechecks pass.
+  Compiled structural verify-safety passes all five checks. KILL and original
+  checkout were rechecked unchanged; Entire remains enabled/manual-commit.
+- September 11 rendered acceptance passed against this build with fictional
+  accounts, synthetic quota and execution disabled. Saved General reservation
+  advanced only scope revision to 1 and left both workers account-paused. A
+  separate account release advanced only account revision to 2: General remained
+  reserved and Spark became eligible. Private state has zero attempts and no
+  allocation changes. Desktop 1280px and mobile 390px screenshots were inspected;
+  document width matched viewport width. Temporary viewport reset, fixture tab
+  closed and foreground server stopped. No real account or provider involved.
+- Final frontend focused 349/349 across five files and serial full web
+  1,347/1,347 across 78 files pass, zero skips. A prior parallel full-web run
+  passed 1,346 with one existing unlock-flow timeout; identical isolated and
+  serial tests pass without assertion/timeout edits. Contention is not proven.
+- Renewed seed-retention answer: independent read-only review found no gap.
+  Focused existing context/model/reconstruction tests 72/72 pass; selected real
+  loopback three-generation test passes (one unrelated test unselected). Fixed
+  seed score 0 remains alongside advancing parent/feedback and trial scores
+  1,2,3. Replay produces no requests, attempts or new runs. No seed edits needed.
+- Source/web typechecks and strict imported test checks pass. Full lint has
+  zero errors and 107 existing warnings. Lane registry: 304 real-I/O/666 unit.
+  Documentation verifies 111 local links/31 source references/36 external URLs
+  without external requests. Dirty-source production build passed before UI QA.
+- Browser setup initially lacked the fixture read token; server was restarted
+  to expose its synthetic token locally. Browser IDs changed after CUA reset;
+  fresh inventory resolved the existing fixture tab. A read-only workplan lookup
+  used the original checkout instead of the integration worktree and was corrected.
+  One guessed bin/ashlr.js path was absent; compiled CLI is dist/cli/index.js.
+  A redundant final web typecheck guessed tsconfig.web.json; rerun uses the
+  package's actual typecheck:web script and src/web-ui/tsconfig.json.
+- September 11 final backend checks: core/new+legacy 161/161 across four files;
+  independent boundaries 23/23, including real inert native and HTTP admission;
+  parent IPC/public 118/118; runtime/checker/HTTP/evolution 136/136 across five
+  files. No skips in these groups. They overlap and are not the full core suite.
+- Initial parent gates found a missing closed CLI next-check label (added), a
+  new assertion assuming a different candidate ordering (corrected to preserve
+  the original filtered order), and a scoped test observation with a legacy
+  window ID (corrected to its exact General bucket). Strict tests also found
+  missing policy defaults and an existing tuple-union spy typing issue; fixed
+  fixture types and explicit forbidden-provider spies. No admission weakened.
+- New source reason `operator-quota-scope-excluded` remains separate from
+  observed health and produces no timed release hint. Runtime inspection reports
+  `quota-scope-reserved` / `review-quota-scope-reservation`, not quota refresh.
+- React review keeps direct module imports, derived scope/account state and
+  event-driven draft saves, native labeled controls, revision-conflict handling,
+  focus styling and narrow-layout rows. Real rendered acceptance passed above.
+
+- Prior turn was progress: committed/built clean `10f1909c3a1fbbf43976f96bbbe5473313b56283`.
+  Current status clean; Entire resume found no checkpoint. No blocked audit.
+- Three Explore agents mapped current account-wide worker pauses, scope quota
+  propagation, HTTP CAS controls and raw-checkbox versus effective-access UX.
+- Selected separate optional `quotaScopeAccess` with `exclusions` keyed by
+  capacity and exact quota scope, its own CAS revision/time. Existing account
+  pauses and allocation setters remain unchanged. Save a General reservation
+  before explicitly clearing an account pause; never auto-clear existing pauses.
+- Unmapped aliases on the selected capacity are conservatively withheld. This
+  policy must not be re-expanded as collector health/quota evidence, which would
+  wrongly spill its denial into independently scoped Spark. Add a distinct
+  operator policy reason and retain observed health and historical receipts.
+- Build skill keeps the established runtime; planning skill tracks this complete
+  admission-to-UI increment. Frontend design reuses the technical-control-room
+  typography, palette and account grouping, with subordinate scope controls and
+  explicit saved-versus-effective state, not a decorative new dashboard.
+
+## September 10: next operating bottleneck exploration
+
+- Final targeted seed acceptance passed: one selected real-loopback
+  three-generation case, one unrelated test excluded (17.33 s). Every request
+  retained identical seed evidence while parent/latest feedback advanced; replay
+  added no requests or accounting entries. Production build and compiled evolve
+  help pass; compiled verify-safety returns all five structural checks true.
+  This does not erase the broader gate failures recorded below.
+
+- Final isolated engineering acceptance passed 1/1, no skips (31.34 s), without
+  changing production or fixture budgets: actual evolve CLI check/apply/replay,
+  schema-5 preparation/check, two total worker calls (one old, one new), two
+  fixed evaluations and one new local delivery branch. Existing history,
+  allocation revision and receipt remained unchanged; completed replay wrote
+  nothing. Strict test/import typecheck, scoped lint and diff check pass.
+- Final independent boundary gate passed 25/25, no skips (50.28 s). Previous
+  console compatibility gate passed 129/129 across nine files. Source/web
+  typechecks, full lint (zero errors, 107 existing warnings), docs (zero external
+  requests) and lane check (302 real-I/O, 666 unit files) pass.
+- Parent combined regression passed 189/191 across nine files; failures were
+  immutable evidence read/write unavailable in preparation and seed fixtures.
+  Follow-up passed 74/76 across four files, failing at different fixtures; one
+  concretely reported exact-private-storage `adapter-failed` on its isolated
+  provenance key. Other failures' precise causes remain unproven. Neither run
+  is a clean gate. No assertions, budgets, private-storage checks or real host
+  permissions were weakened. Avoid further blind retries.
+- Final read-only checks: original checkout retains its prior untracked files;
+  host KILL remains the September 4 mode-0600 marker. Entire is enabled in
+  manual-commit mode and resume found no checkpoint. No live provider effects.
+
+- Renewed user answer explicitly retains seed context across the campaign.
+  Exploration confirms this is already implemented by `49206a87`; do not add a
+  duplicate path or alter scheduling/acceptance. Rechecking focused seed suites
+  alongside the current pool-evolution integration.
+- Final core migration rerun: 16/16 passed, no skips (8.47 s). Final parent CLI,
+  performance and public projection: 114/114 passed, no skips (830 ms), including
+  bounded typed hold errors; strict imported-test TypeScript also passed.
+- Additional web attempts remained inconclusive: 1,293 passed and two failed,
+  followed by targeted 53 passed and one timeout with a 921-second test elapsed
+  time. Scoped caffeinate did not prevent observed maintenance sleep. Do not
+  count these as a clean full-web gate or widen timeouts to hide them.
+- Real evolved engineering acceptance reached completed old/new worker receipts
+  and fixed seed/candidate evaluation, but delivery/controller completion is
+  still under investigation. No successful whole-flow claim yet. Independent
+  migration rerun hit one ownership guard failure; unchanged isolated case
+  passed. Final rerun and concrete diagnostics are pending.
+
+- Previous turn was progress: preparation bridge committed as
+  `0a43f52f298511bf812b1161a141ed33ad4040f7`, clean build and source verified.
+  Fresh status remains clean before these tracking edits. Entire resume found
+  no checkpoint. No blocked audit applies.
+- Three bounded Explore assignments compare workspace recipe preparation,
+  history-preserving pool evolution and actual operator acceptance. Parent is
+  mapping existing configuration/account migration and console ownership paths.
+  No provider calls, account edits, history resets or live activation are inferred.
+- Selected pool evolution: more recipe UI cannot enroll its output into the
+  current immutable engineering catalog, whereas pool identity blocks actual
+  resource expansion. Add an explicit stopped-console additive upgrade with
+  preserved receipt/transcript origin identity, ledger policy, account capacity
+  and queued scope. Existing engineering pins are not rewritten or authorized.
+- Work ownership: runtime/epoch/migration bridge, console origin compatibility,
+  and independent acceptance/boundary tests. Parent CLI/docs/integration.
+- Initial source searches guessed nonexistent pool-store/collector filenames;
+  corrected using the actual file inventory. No effects from those failed reads.
+- Independent and parent review found shadow transcript copies in the initial
+  migration journal. The recovery design is being changed to no-text console
+  hashes/identity proofs, so deleteHistory cannot leave plaintext staging copies.
+  Filesystem-level deletion evidence is required before final acceptance.
+- Parent strict checks caught an existing public test fixture missing allocation
+  and workerAccess fields plus ES2022-incompatible toSorted in the new assertion;
+  corrected the fixture and used a copied array sort. Early CLI tests ran before
+  the backend module existed; once present all 110 CLI/performance/public tests
+  passed. Scoped strict tests subsequently passed.
+- Web validation encountered process-start timeouts: first attempt had six failed
+  tests and seven worker errors; bounded two-worker retry passed 1,291 tests but
+  failed to start JournalView. That unchanged four-test suite passed alone.
+  Read-only pmset logs confirm repeated Maintenance Sleep/DarkWake cycles during
+  these runs, including a 357-second sleep from 16:45:07 to 16:51:04. Use a scoped
+  caffeinate assertion for final checks; no power settings or test deadlines are
+  changed. Failed runs are not counted as clean full-suite passes.
+
+## September 10: objective-to-campaign commissioning exploration
+
+- Delivered one reviewed recipe to initialized experiment/campaign, matching
+  engineering enrollment and finite supervision queue. Check is read-only;
+  preparation retains the existing ledger and does not start execution. Exact
+  replay verifies final evidence, including after completed work; incomplete
+  output stays held. Existing runtime and artifact validators are reused.
+- Review corrected selected-project registration truth, artifact file/directory
+  capacity preflight, occupied fresh delivery branches, top-level commissioning
+  reasons, and the report's execution-versus-registration distinction. Parent
+  exported/reused the artifact entry limit rather than duplicating its value.
+- Actual CLI-backed acceptance passed 4/4, no skips (29.62 s): generated files
+  passed unchanged through checker, real console, one worker request, two fixed
+  evaluations and one local branch delivery. This used isolated local fixtures,
+  not user accounts. Independent boundaries passed 28/28 (22.70 s). Final combined
+  preparation/CLI/engineering/campaign regressions passed 165/165 across 7 files
+  (46.69 s). Full web passed 1,295/77 files; these are not a full core test run.
+- Strict CLI test/import and source/web typechecks pass. Full lint has zero
+  errors and 107 existing warnings; scoped lint has no warnings. Build, compiled
+  help and five structural safety checks passed. Documentation/lane checks pass.
+- Renewed user choice is already implemented in HEAD by 49206a87: all eligible
+  generations retain bounded seed evidence beside latest feedback and changing
+  parent context. Independent source review found no missing implementation.
+  Fresh independent verification passed 72/72 tests (32.13 s) plus the targeted
+  three-generation loopback case (16.20 s; one unrelated case excluded). Replay
+  added no requests or ledger attempts. No seed pipeline files were changed.
+- Actual host state remains uncommissioned: KILL is present; known quota evidence
+  is stale; legacy pending collector metadata lacks reclamation ownership proof.
+  Personal/CMP/Claude workers exist but Spark is not enrolled; account policy and
+  history must survive any later migration. No credentials or provider state
+  was changed, tested or inferred from configuration alone.
+- Recovery corrected nonexistent source/test filename guesses, an unmatched
+  shell glob and a rejected documentation patch before edits. Strict checking
+  caught optional state.projects narrowing and an untyped test callback tuple;
+  both were fixed and rerun. No protected history was reset.
+
+- Prior turn was verified progress: `c19d586a5fbf3aab475780e65174dde7a51a8af5`,
+  clean build identity and source. Entire resume found no checkpoint. No blocked
+  audit applies. Memory used only to recheck repository and activation boundaries.
+- Three Explore assignments: existing setup primitives; actual known local
+  commissioning state without secrets; actionable operator flow and acceptance.
+  Parent is mapping manifest/campaign initialization and reviewing the user's
+  supplied north-star context. No new transport/framework is proposed.
+- Initial search for `manifest.ts` found none; the existing strict manifest and
+  experiment initialization APIs are in `src/core/universe/store.ts`.
+
+## September 10: unattended engineering supervision exploration
+
+- Final implementation: explicit console-owned finite queue, no new transport or
+  quota ledger. Cold review caught unknown/mismatched owner state, partial launch
+  acceptance skipping drain, and cancellation before invocation waiting on an
+  unrelated manual call. All three were fixed with exact regression tests.
+- Actual frozen-source acceptance: 5 passed, no skips (109.37 s). Independent
+  persistence/ownership suite: 35 passed, no skips (3.92 s). Existing engineering
+  and seed-context regressions: 185 passed across 8 files (39.99 s). Final full
+  web: 1,294 passed across 77 files (10.73 s); these groups are not a full core run.
+- Initial UI tests exposed an epoch increment discarding the first locked-mode
+  read, fixed and rerun. New scope tests initially lacked required project
+  metadata; corrected fixtures pass. Closed enum checks reject string-coercible
+  arrays, and changed pause responses must advance the revision exactly once.
+- Isolated real-browser fixture verified pause/resume and desktop/narrow layout.
+  At 390 px document width equals viewport width. The first temporary middleware
+  fixture wrongly intercepted its own Vite HTML proxy; using a temporary source
+  fixture resolved it. That exact fixture was removed and our Vite session
+  stopped; the temporary tab and viewport override were cleaned up. No backend
+  or provider was connected to the visual fixture.
+- Source/web typecheck, strict edited core tests, scoped lint (zero warnings),
+  full lint (zero errors, 107 existing warnings), docs/lane checks, production
+  build and five compiled structural safety checks passed. No public release,
+  account changes, host KILL removal or resident-service activation occurred.
+
+- Chosen slice: explicit private startup supervision configuration with a finite
+  digest-pinned queue, original persisted deadline and bounded attempts. Missing
+  flag means no automatic caller. Existing console ownership and launch engine
+  perform effects; pause/revision controls do not create new work or new budgets.
+- UI plan (reviewed against technical-control-room direction): retain white
+  #ffffff, ice #f5f7fc, slate #475467, navy #172746 and indigo #3c59d9 tokens;
+  Space Grotesk headings and IBM Plex body. Add one left-aligned console-wide
+  supervision band above the selected project plan: state/deadline, supervised
+  rows, explicit pause/resume. No decorative assets or motion; statuses include
+  text, and graph invocations are explicitly not labeled model usage.
+- Use `/api/resources/engineering-supervision` to avoid shadowing the already
+  valid enrollment ID `supervision` under the existing engineering status route.
+
+- Previous turn was verified progress: clean local commit/build
+  `074312449218ae5d89a137c63b493bf6859bc58a`; no blocked audit applies.
+  Fresh worktree status is clean; Entire resume has no checkpoint.
+- Existing console owner already provides project-pinned catalog, advisory
+  readiness, durable launch/cancel, shared-account execution and owned drain.
+  Explore durable per-plan supervision on that path rather than another worker
+  or scheduler. Pending continuation is now available under original graph
+  authority; resident planning and dynamic work enrollment remain distinct gaps.
+- Three agents map runtime reuse, actual process acceptance, and cold activation
+  semantics before implementation. An async direction question asks whether the
+  existing console should own the first always-on mode. No host activation,
+  provider calls, KILL removal, account changes or service installation inferred.
+- Discovery corrected guessed console filenames to `src/cli/resource-console.ts`
+  and `src/core/web/resource-console-server.ts`; no state changed on failed reads.
+
+## September 10: graph-owned pending campaign continuation
+
+- Latest user answer retains measured seed context throughout the campaign.
+  Already implemented: independent review verified per-generation seed context
+  alongside changing parent/latest feedback; the two selected seed suites passed
+  16/16 locally. No scheduler or acceptance changes are needed for that answer.
+- UI plan: retain existing semantic surface/ice/navy/indigo theme tokens and
+  Space Grotesk display/IBM Plex reading hierarchy; left-aligned dependency plan
+  beside persistent inspector, with explicit action at the bottom. This is a
+  policy disclosure change, not a palette/layout redesign. No new motion/assets.
+- Actual continuation acceptance caught a reentrant read: the parent stop guard
+  read a campaign while its own immutable writer lock was held, blocking B.
+  Keep live authority/runtime checks writer-safe; full campaign proof remains
+  before continuation, at existing controller admission, and after completion.
+
+- Fresh baseline a2f9931ec5da1132c5d8cf030b5f6f5a5dcc4f7d is clean.
+  Previous turn was verified progress (2,051 selected passing tests and a clean
+  local build), not a blocked turn. Entire resume found no checkpoint.
+- Three independent explorations confirmed the existing controller scheduler
+  already has pending/no-intent, prerequisite delivery, original budget and
+  shared quota admission. Reuse it rather than build another scheduler.
+- Design: host `allowPendingContinuation: true` is included in immutable binding;
+  absent flag remains byte-compatible receipt-only. A separate async registered
+  callback receives a kernel-issued, non-copyable, live capability for this
+  signed unresolved graph intent. Standalone linked-controller resume stays
+  refused. No provider/account/global-KILL/service activation is part of tests.
+- Controller lease must span receipt acknowledgement and scheduling. Reconcile
+  proven prior effects, refuse any remaining held/uncertain attempt, then admit
+  only untouched pending campaign rows. Never change seeds or renew deadlines.
+  Declared dependencies gate execution; they do not silently provide A's artifact
+  as B's source. Explicit dataflow is a separate existing/new-experiment contract.
+- Kernel runs continuation at most once per graph invocation under existing
+  ownership/KILL/original deadline; capability is revoked in finally. CLI/check
+  and console readiness must disclose effectful continuation instead of calling
+  it read-only reconciliation. Existing enrollments gain no new effects.
+- Acceptance: distinct Universes, upfront two-task shared pool, actual A delivery
+  confirmation fault, then exactly one B request; totals two requests, four
+  evaluations, two refs with unchanged A and original graph intent. Include
+  copied capability, default-off, uncertain B, drift, drain/KILL/deadline and
+  ownership refusal, keeping all existing safety/account policy code unchanged.
+
+## September 10: evaluator-only seed measurement
+
+- `measureSeed: true` is an immutable opt-in; absence preserves legacy serialized
+  definitions and projections. The evaluator-only intent/result lives in the
+  existing campaign ledger, before any step or model reservation. Existing lease,
+  comparator, exact seed, confinement, KILL, parent stop and deadline still govern.
+- A measured result is not a trial, archive parent, delta or generation-zero
+  feedback. It is bounded parsed evidence with explicit seed context. A failing
+  measurement can support first-response local delivery only with the existing
+  explicit `allowInitialRepair: true` plan and positive threshold-meeting change.
+- Independent review identified two cross-cutting gaps: a residual evaluator
+  could outlive its campaign and a late stop could arrive during record writing.
+  Shared execution admission now refuses unresolved seed intents on that Universe;
+  result publication reuses the private writer's final prepublish guard. Known
+  unrelated Universes remain independent. No cleanup or replay is inferred.
+- Proof has distinct seed intent/result digest references; legacy failed-trial
+  proof shape is unchanged. Final Git checks and recovery reread current campaign,
+  trial, manifest and baseline bytes. No raw evaluator output is retained.
+- Readiness distinguishes unresolved and operational failures; its web decoder
+  accepts those closed reasons and renders them as past observations, with no
+  execution or automatic retry control. Seed measurement is not automatically
+  included in model feedback; that remains a separate provenance-aware increment.
+- Three parallel agents authored runtime, proof/acceptance and independent tests.
+  They exhausted account usage after saving work. Parent performs remaining local
+  gates and delivery; no substitute account/provider is silently selected.
+
+## September 10: measured initial Hub repair
+
+- Independent evaluator committed first at `9bf75b59`; actual source baseline
+  passes 82/142 fixed cases and fails 60. Candidate `e2e4e33d` changes only the
+  marker-title path extraction and adds 75 focused regressions. The raw scanner
+  already filters non-code paths: scope is shared historical/custom WorkItems,
+  not proven fresh-scanner leakage or measured token savings.
+- Real full-Hub-seed fixture initially reached the passing repair but withheld
+  delivery in three diagnostic runs. A first selected elite correctly has null
+  parent/delta; old campaign delivery required a prior passing parent. Do not
+  invent lineage or weaken the frozen evaluator to get a delivery receipt.
+- `allowInitialRepair: true` explicitly permits a positive finite improvement
+  against an earlier valid failed evaluation of the exact unchanged seed in the
+  same campaign/niche. Reuse immutable campaign/run/step/comparator identities;
+  verify baseline bytes at final Git effect checks and during read-only recovery.
+  Default delivery policy is unchanged. The mode consumes recorded evidence and
+  does not introduce an automatic baseline-evaluation request.
+- The helper has 47 pure tests; independent delivery review adds 14 actual local
+  campaign/Git tests including tamper inside the prepared ref transaction. An
+  early fixture run hit the default unit timeout before real-I/O classification;
+  no production budget was raised. Strict changed-test typecheck found a wrong
+  `universePath` import in full-Hub acceptance; that test-only import was corrected
+  after its in-flight run finished, then typechecked before one clean rerun.
+- Controlled worker proposals are baseline bytes, an evaluator edit that must
+  be refused, and the exact already-reviewed candidate blob. Their loopback
+  usage counts are fixtures, not provider telemetry or autonomous ideation.
+- Keep both evaluator and candidate commits in integration ancestry, not only
+  cherry-picked source, so full-history clones can reproduce immutable pins.
+- Host KILL remains active/healthy. No actual provider requests, account policy
+  changes, history migration, persistent activation, Actions or remote release.
+
+### Historical next-step exploration (implemented in the continuation above)
+
+An immutable opt-in campaign seed-measurement phase could use the existing
+execution lease, fixed evaluator confinement, parser and original wall-clock
+deadline before generation. Record separate intent/result events pinned to
+campaign, comparator and exact seed; never invent a generation-zero variant,
+passing elite or failed parent. It should reserve zero model requests, reuse a
+settled exact result, and hold an unresolved intent rather than automatically
+rerun uncertain evaluator work. Delivery would need a distinct proof reference
+to those event digests. Test first-response repair, passing seed, malformed
+output, timeout/cancellation, crash replay, byte/comparator drift, exhaustion
+and unchanged legacy campaigns. This was the proposal at `2baeef06`; the new
+continuation above implements the opt-in evaluator-only path.
+
+## September 10: standalone engineering commissioning
+
+- Baseline 487d9ad6, isolated auto/p00; three agents mapped strict validation,
+  the CLI boundary and actual no-write acceptance before implementation. Entire
+  resume found no checkpoint. Parent owns checker, integration and final commit.
+- Shared detached schema 1–4 decoder validates complete task/transcript history;
+  project previews preserve immutable historical pins and append-only registration.
+  Shared enrollment preparation produces the live owner's same digests without
+  constructing a supervisor, taking a lease or activating a collector.
+- Standalone stages inspect explicit pool/bindings/observations, project catalog,
+  supervisor and ledger history, enrollment linkage and resource runtime. Re-read
+  captured configuration for drift. Missing state/key/ownership is not repaired.
+- Closed report exposes fixed failures, enrollment identities and local policy
+  holds; invalid runtime reports retain the failing runtime stage without leaking
+  private partial records. Runtime cache includes the expected digest, not just
+  a path. Per-enrollment registration does not inherit unrelated additions.
+- Fifteen real subprocess fixtures snapshot every fixture/HOME directory and file
+  (identity, permissions, timestamps excluding atime, contents), proving no
+  writes or create/remove lock cycles. Worker listener receives zero requests;
+  evaluator is never called. Historical policies, retained jobs, corrupt evidence,
+  missing roots/keys, replaced projects and ownership/KILL holds are covered.
+- Fifteen independent mocked tests cover option accessors, semantic snapshot
+  drift, digest-pinned runtime caching, runtime diagnostics and capacity honesty.
+  CLI tests show per-worker exclusions while keeping configured distinct from
+  admission. No fixture evidence is described as authenticated account acceptance.
+- Source/tests frozen before broad regression. Existing host KILL remains
+  active/healthy; actual accounts, personal General reservation, shared capacity,
+  old ledger, native profiles and services remain untouched.
+- Independent next-campaign exploration found a concrete selection-quality bug
+  in `src/core/portfolio/value-filter.ts`: backlog marker paths with spaces, test
+  suffixes or Windows separators can bypass non-code filtering. Candidate only,
+  not part of this release: first author a fixed evaluator proving baseline
+  failure and preserved security/source-work exceptions, commit it before pinning
+  the seed, and allow only that source file to change. Pin its existing shared
+  resource runtime, measured request budget and explicit local delivery branch.
+  No evaluator, campaign or provider execution was created by this exploration.
+
+## September 10: local engineering admission continuation
+
+- Baseline 2b4064a3, clean isolated auto/p00; Entire resume again found no checkpoint.
+  Three Explore agents independently mapped admission, commissioning and real
+  acceptance before editing. Missing standalone commissioning/service/account
+  migration remains distinct from this existing-console readiness observation.
+- Confirmed pre-existing KILL could publish launch ownership before graph stop
+  admission. Readiness now exposes fixed bounded causes and gates initial launch
+  before the wrapper mutex, under it, and at immutable-record publication.
+- Reused existing campaign readiness, project binding, host-only factory pins,
+  read-only provenance key inspection and signed graph evidence. No eligible
+  worker-count gate or new quota scheduler. Occupied capacity still waits under
+  the existing resource runtime policy. Active read polling avoids expensive
+  factory reconstruction through the already-running return.
+- Cold review caught another known-before-launch condition: an existing graph
+  execution lock. Presence holds fresh launches only, without assuming a live
+  owner or reclaiming a lock. Accepted linked reconciliation retains the ordinary
+  proven-dead lock recovery; it is not blanket-blocked by lock presence.
+- Updated real missing/pending recovery regressions to introduce KILL only after
+  actual immutable launch publication. Pre-existing stop and post-acceptance race
+  must not be conflated. Seven reversible blocker cases restore the exact condition
+  and prove the same enrollment can subsequently dispatch.
+- UI reads job and readiness independently in parallel, validates exact identity,
+  closed schema/reasons and action consistency, and preserves Stop when readiness
+  fails. No automatic launch, retry, account enrollment or local stop repair.
+- Source and tests were frozen before broad verification. Real browser acceptance
+  uses a separate temporary HOME/Git/loopback fixture and installed ephemeral
+  headless Chrome. The host KILL and actual account configuration are untouched.
+
+## September 10: workspace engineering continuation
+
+- Baseline a0f82005, clean isolated auto/p00. Three Explore agents mapped core
+  ownership, HTTP/CLI and real acceptance before implementation. No graph-root
+  writes during catalog construction/status; ordinary supervisor startup can
+  initialize its own existing state. UI reads never dispatch.
+- Corrected an early proposal that equated the generation transport directory
+  with the selected project. It must remain sterile; actual campaign seeds and
+  delivery derive from the registered project and pinned directory identity.
+- Fresh ownership-store reads use missing as an empty unlaunched state, not a
+  malformed incomplete store. A read-only acceptance test caught the initial bug.
+- Signed optional hostEnrollmentDigest and under-lock requireNewGraph protect
+  initial race/restart attribution. Accepted launch with missing/pending intent
+  stays held. Queue pause applies to initial admission, not in-flight cancellation.
+- Shutdown needs more than a resolved graph promise: the final shared ledger
+  fence rejects reserved/uncertain/unreadable receipts. A captured peer-drain hook
+  prevents checking before ordinary owned tasks finish cancelling. No second
+  scheduler, ledger or callback authority exposed to browser inputs.
+- UI/query review corrected stale mutation responses after connection loss,
+  unlock changes, unavailable-enrollment wording, empty-intent reconcile controls
+  and paused-queue launch state. Existing React/style primitives were reused.
+- First broad suite ran across the final source edit; its mixed-revision failures
+  are not counted as a green verification. Full frozen-source rerun is required.
+- Tool discovery mistakes were read-only: ResourcePoolView lives under resources,
+  graph types are colocated, and a guessed manifest.ts does not exist. In-app
+  browser fixture navigation was blocked; isolated installed Chrome provided
+  actual local acceptance. Source static assets and networkidle waits required
+  fixture-only corrections. See report.md for final evidence and limitations.
+
+## September 10: evaluated engineering graph continuation
+
+- Resumed clean `c2b598da` on `auto/p00`; Entire resume found no checkpoint.
+  Three agents mapped existing evaluation/delivery, desktop ownership and
+  autonomy gaps before implementation. Reused the portfolio controller rather
+  than creating another campaign scheduler or quota ledger.
+- Chosen complete local slice: concrete host-enrolled signed delivery graph
+  adapter, digest-checked foreground CLI, actual resource-backed file operations,
+  fixed evaluation and strict-improvement branch delivery. PTY/desktop wrapper,
+  resident planning and live account commissioning remain separate milestones.
+- Cold review found runtime-digest propagation missing above the generation
+  broker, outer deadline reassignment dropping its parent cap, and final worker
+  and prepared Git-ref checks not carrying synchronous parent ownership. All
+  are now connected; confined file-operation preflight/apply and evaluator
+  admission also check parent stop.
+- A prior completed controller under a held execution lock could otherwise be
+  misattributed to a new graph. New-enrollment refusal is checked under the
+  controller transaction; lock refusal cannot return a successful new-enrollment
+  result. Adapter additionally rejects report reasons and verifies exact receipts.
+- Reserved engineering metadata now requires the concrete factory registration
+  and delivery node kind. A copied descriptor on an ordinary explore node cannot
+  manufacture an engineering completion.
+- Test corrections: initial new real-I/O suite used the default five-second lane
+  timeout before registration. A deadline test wrongly compared the persisted
+  inner deadline with the outer effective execution cap. A new controller test
+  expected a report where the API intentionally throws on forbidden adoption.
+  Corrected these expectations; no production allowances were weakened.
+- Broad regression also exposed two older CLI subprocess fixtures which dropped
+  their temporary HOME and reached the real host's active KILL at Git delivery.
+  Diagnosis confirmed the existing production stop gate correctly withheld the
+  operation. Drain/crash fixtures now pass explicit private HOME/USERPROFILE/
+  ASHLR_HOME; no host kill state or production stop semantics were changed.
+- Discovery guesses for portfolio-runtime/portfolio-run and dedicated generation
+  test files did not exist; resolved through actual rg inventories. CLI lint
+  rejected control-byte regex syntax; replaced it with character-code validation.
+  See report.md for final integrated gates, not overlapping agent subtotal counts.
+
+## September 10: file-tool continuation
+
+- Resumed clean `1d1febaf` worktree; Entire found no checkpoint. Three parallel
+  explorers mapped filesystem utilities, HTTP lifecycle and real evaluator gaps.
+- Existing stable-file-read is private-store-oriented, lossy UTF-8 and rejects
+  oversized files. New project reads reuse its identity/nofollow/owner pattern
+  with all relative ancestors checked and a strict bounded UTF-8 prefix.
+- Existing finite command/browser verifiers are not interactive PTY/browser
+  sessions. No suitable routes/dependencies exist; this milestone wires real
+  file browsing and explicit copied context without labeling those tools complete.
+- Reviewer found generic404 dispatch wording and top-level hidden-workspace
+  preview lifecycle gaps; fixed both with tests. Parent also cleared previews on
+  mobile-pane changes and preserved three-tab keyboard navigation.
+- One old UI assertion expected the obsolete file-panel-unavailable wording;
+  updated it to the new capability-specific message. Corrected an attachment
+  validator type annotation; discovery guesses for attachments.ts/api.ts and
+  safety globs failed, then resolved against rg file inventories.
+- Full resource suite 2,475 passed; browser inert fixture browsed/read/attached
+  README and verified control-lock clearing. No real task submitted in browser.
+- Known limits remain explicit: observational not OS confinement, private-name
+  filters not secret detection, bounded previews not silently truncated context.
+
+## September 10: shared-ledger project continuation
+
+- Baseline `b3ad1a26`; three agents divided core, HTTP and independent acceptance.
+  Parent owned UI/query integration, documentation and final verification.
+- Reused the existing supervisor and ledger rather than one quota store per
+  project. Schema 4 adds directory identities without changing legacy digests.
+  New roots require a private startup catalog; historical bindings never rebind.
+- Cold review prompted a final post-reservation directory check and a narrow
+  accounting distinction: a veto has no worker execution or provider cooldown,
+  but does not erase its consumed reservation. Legacy startup compatibility is
+  preserved; the stronger inverse-overlap check requires explicit catalog mode.
+- Broad resource testing found three deterministic old fixture failures: two
+  mocked quota collectors omitted quotaUnavailableWorkerIds, already required
+  at baseline. Corrected the fixtures, not production behavior; final 2,421 passed
+  including the new legacy startup compatibility regression.
+- UI 1,126 passed; safety 449 passed with five existing skips. Browser verified
+  per-project draft recovery, filtered tasks and reload clearing in an inert
+  fixture. Real I/O tests verify selected cwd and shared concurrency/task caps.
+- User checkout and actual active KILL retained. No account migration, provider
+  job, remote publication or activation. Native tools and commissioning remain.
+
+## September 10: follow-up conversation continuation
+
+- Baseline `75d7897e`; clean isolated `auto/p00`, original checkout preserved.
+  Entire resume found no checkpoint. Three agents covered core, HTTP and cold
+  acceptance; parent integrated UI/query contracts and documentation.
+- Chose copied flat context rather than live ancestry lookup: accepted children
+  remain stable after source deletion. Each task retains only its own prompt plus
+  flat prior turns, never a recursively composed provider prompt.
+- Added separate immutable submission digest so duplicate child retry precedes
+  parent lookup and remains idempotent after deletion/restart. Runtime receipt
+  identities and shared account ledger are unchanged.
+- Cold review caught silent draft detachment on parent deletion and a too-small
+  JSON read bound for escaped captured output. Both corrected with UI/query tests.
+- Integrated 200 resource tests; 1,106 UI tests; 449 safety passes, five skips.
+  Independent and builder subsets overlap, not additive productivity counts.
+- Real browser fixture queued/cancelled a retained child, displayed copied
+  ancestry, and recovered it on reload with read authority only. Local HTTP
+  transport fixtures additionally proved actual flat prompt input and no replay.
+- Original KILL sentinel remains active. No Hub account/provider commissioning,
+  publication, GitHub Actions or remote pushes. Project switching/native tools
+  and full autonomous company loop remain unfinished.
+
+Baseline: 5c270bc73890e474463c31764d51e76196ad2e3f.
+User specification read in full from the attachment supplied this turn.
+Original checkout and prior architecture worktree preserved.
+
+Current runtime has finite campaign/controller execution and immutable delivery
+primitives. A persistent company graph and self-improvement wiring are not yet
+commissioned. This work must add executable paths, not reclassify source as live.
+# September 10: exact completed engineering recovery
+
+- Baseline `dc92e08cf4b4a55d7ee351e3d79c2e92a17f6c0a`, clean `auto/p00`.
+  Entire resume found no checkpoint. Original checkout remains separately owned.
+- Reused signed graph intent, immutable controller enrollment, completed campaign
+  projection and verified local branch receipts; no second scheduler or ledger.
+- Optional strict `graphDispatch` binds schema, canonical graph-root digest,
+  graph ID, definition digest, node ID and full signed intent digest. The signed
+  event chain transitively binds the original graph enrollment/deadline. Existing
+  controller creation records are never backfilled with a new association.
+- Factory-private recovery is synchronous receipt collection. Generic callbacks,
+  copied registration metadata and unfinished controller work cannot be retried.
+- Recovery validates controller outcomes against the exact folded ledger snapshot
+  and rereads ledger bytes after checking every actual planned delivery/ref.
+  KILL, ownership and the original deadline are checked before settlement and
+  again at immutable record publication. Expiry never grants a new allowance.
+- Cold review confirmed that direct re-entry of a linked child controller could
+  omit the parent's shorter outer deadline. Such execution re-entry is refused,
+  even with an exact copied parent link. Unlinked legacy restart behavior remains
+  unchanged; graph recovery uses only existing read-only evidence projections.
+- New real crash fixture intercepts only the child controller's exact physical
+  lock release and sends SIGKILL after unlink. Campaign work, evaluation, delivery
+  and signed graph records remain real; no production fault-injection hooks.
+- Fixture-only linkage/ref mutations test refusal, not successful fabricated
+  evidence. The happy recovery uses untouched actual child records and signatures.
+- Initial transient test import failed while new graph imports preceded adapter
+  exports; no provider calls occurred. The final frozen-source run is authoritative.
+- Relocated-graph negative fixture initially copied directories with nonprivate
+  modes and therefore failed before attribution validation. Explicit fixture-only
+  `0700` directory modes make the copied history healthy before root-link refusal.
+  Actual 21-case engineering acceptance then passed, including single-consumption
+  downstream recovery with unchanged resource, campaign, branch and checkout data.
+
+## Next workspace integration: read-only exploration, not implemented
+
+Final recovery verification: 3,166 passes across 123 Universe/firm-MCP suites;
+449 safety passes with five existing skips. Build, typecheck, lint, docs and
+classification passed. Frozen-source broad run took 1,253.17 seconds; the earlier
+interrupted run was not counted. No provider commissioning or public release.
+
+- Reuse `src/core/web/resource-console-server.ts` for authenticated bounded HTTP
+  routes, `pool-supervisor.ts` project bindings, and existing WorkspaceView/query
+  controls. Existing jobs are individual resource tasks, not engineering graphs.
+- Proposed separate **Run enrolled engineering** action selects an explicit
+  startup catalog entry with project ID and expected enrollment digest. Browser
+  input must not become runtime paths, evaluator commands or CLI arguments.
+- Missing contracts: pinned project/repository association, durable graph-job
+  identity, locally owned cancellation and restart behavior. Keep signed graph
+  evidence authoritative instead of inventing duplicate task completion state.
+- The existing `resource-generation.ts` calls `runResourceTask`; pin the same
+  ledger/pool/bindings and shared-collector evidence as the resource console.
+  The sterile generation workspace remains separate from the project checkout.
+- Next acceptance should combine actual HTTP/UI launch with the real engineering
+  Git/loopback fixture, simultaneous shared-capacity ordinary tasks, drift refusal,
+  owned cancellation and exact recovery. No UI/server source changed in this pass.
+- Non-impacting documentation edit error: a patch context did not match; no file
+  changed, and the insertion was retried against this exact section heading.
+
+# September 10: durable workspace continuation
+
+## Verified implementation
+
+- Atomic schema2 history lives in the existing supervisor state. Legacy schema1
+  upgrades only on explicit opt-in; task digests and resource ledger stay unchanged.
+- 64 KiB UTF-8 output prefixes, 4 MiB total state, 256 retained job identities.
+  Worst-case escaped output headroom is reserved before admission.
+- Core/HTTP integration: 153 tests. UI: 1,090 tests. Targeted subsets overlap.
+- Fixed General ceiling display veto incorrectly hiding independent Spark.
+  Existing server mock needed the newly required quota-only callback; fixed mock,
+  not a production permissive fallback.
+- Cold UI review fixed task-switch deletion and cached/in-flight output invalidation
+  in both workspace and Resources inspector. Tests cover each confirmed regression.
+- Browser inert fixture: retain option unchecked by default; unlock did not submit;
+  explicit task remained queued with no eligible capacity, cancelled, survived UI
+  reload, and its exact request was read with no control token. No provider dispatch.
+- Durable multi-turn context/project catalog remain future work. Host account
+  settings and global KILL remain unchanged; no production/publication claim.
+
+- Baseline `f94387ef`, clean `auto/p00`; Entire resume found no checkpoint.
+- `pool-supervisor.ts` owns one private atomic JSON state and existing local lock.
+  Queue input is removed at terminal settlement; output is bounded memory only.
+- The resource ledger binds pool/bindings, while supervisor scope also binds one
+  workspace. Project selection must preserve that shared account ledger.
+- Durable history must not silently change retention for legacy tasks, reveal
+  prompts through polling snapshots, or replay work to reconstruct lost output.
+- Investigating final HTTP ceiling projection: per-worker quota exclusions must
+  not become whole-account exclusions for explicitly independent quota scopes.
+- Non-impacting discovery errors: nonexistent pool-supervisor-types.ts and
+  resource-api.ts guesses; located console-types.ts and existing resource modules.
+# September 10: retained measured seed context
+
+- Baseline `5b8af0aecc1fc32f0f7ad7bcfacd05430697e665`, isolated `auto/p00`.
+  User explicitly chose to retain seed context throughout a campaign.
+- Three parallel streams: shared broker/receipt codec, independent history and
+  restart validation, actual resource acceptance plus existing UI inspector.
+- Context is separate historical evidence, not a trial/parent or acceptance.
+  New measured-seed campaigns with feedback pin it once per generation; legacy
+  absent-context runs and prompt bytes remain unchanged.
+- Full run context is bounded to 16 KiB; each generation receipt stores only its
+  version and digest. Existing trial/final record budgets remain enforced.
+- Raw campaign reconstruction avoids recursive summary projection. Run start,
+  final and prompted receipts are checked against the same exact measurement.
+- Cold review found and corrected a missing parent-stop recheck after synchronous
+  context verification. Another review required version-two search evidence for
+  every seeded run; historical unpinned version-one runs remain supported.
+- Web serialization omits seed diagnostic messages and paths in both run and
+  campaign views, without rewriting private records. Inspector adds receipt
+  details only when present, with no extra requests or layout redesign.
+- Initial full-Hub acceptance exposed an unresolved automatic-delivery handoff
+  despite 142/142 evaluated cases passing; investigate before claiming delivery.
+  Final frozen-source results belong in report.md, not this exploratory log.
+- Non-impacting errors: early metrics narrowing fixed; standalone strict test
+  checking found an existing intentional extra-field fixture needing an unknown
+  cast. Initial empty patch hunk was rejected; corrected patch succeeded.
+# September 10: durable handoff diagnosis and exact recovery
+
+- Final small actual graph acceptance passed (1 test, no skips, 27.50 s).
+  It proves one worker request, two evaluations and one Git ref publication
+  across injected degraded confirmation, exact-link/stop/ownership/drift
+  refusals, expired child/live parent plus drain recovery, and replay.
+- First graph fixture retained an unresolved result instead of completing its
+  acknowledgement. The helper's aggregate ten-second cap was removed in favor
+  of the already supplied parent deadline, with a ten-second fallback only
+  when absent. A later run passed; the first refusal's exact cause was not
+  recorded, so this is not a claim that the historical full-Hub failure is fixed.
+- Cold review added final immutable-publication proof/stop guards, old terminal
+  rejected-node immutability, and preservation of near-capacity legacy cleanup.
+  A preexisting control test assumed a once-only settlement callback and reread
+  its ledger recursively; it now checks the captured records at both the short
+  transaction and immutable writer publication boundaries. Final diagnostics
+  and controls: 66 passed; source/strict test types and scoped lint passed.
+- Final web suite: 1,243 passed / 75 files, no skips (10.73 s). Existing UI
+  inspector now shows historical closed stage/code diagnostics without exposing
+  private intent digests or adding fetches, retries, or raw exception text.
+- Final controller/portfolio gate: 665 passed / 29 files, no skips (236.48 s).
+  Final graph/control/engineering gate after cleanup-edge additions: 141 passed /
+  eight files, no skips (109.68 s). All eight changed core tests pass strict
+  TypeScript. Production build and five compiled structural checks pass. Final
+  full-Hub same-source acceptance: two passes, no skips (180.98 s). Together
+  with the web gate: 2,051 passes / 113 disjoint files, no skips. Local commit
+  and clean build identity are the final handoff steps.
+- First 29-file gate reported 658 passes and one fixture JSONL parse failure
+  while waiting for initial native contact, before cancellation assertions.
+  The unchanged cancellation case passed in isolation. The fixture reader now
+  waits for a complete newline-terminated snapshot and still rejects malformed
+  complete records; six parser cases were added. All original cancellation
+  assertions and budgets remain unchanged. Focused file: 13 passed, no skips.
+- Parent/cold review found a further committed-settlement cleanup edge: the
+  controller can throw after durable metadata publication or return an
+  unavailable wrapper over complete outcomes. The adapter now preserves only
+  freshly proven exact all-completed acknowledgements for later recovery,
+  not permanent delivery-proof rejections. In-flight matching separately permits
+  projected pending dependency reasons; pending work is never executed by the
+  receipt-only helper. Actual cleanup/wrapper and pending-child tests passed.
+  Early fixture setup issues (same-Universe child; fault hook before
+  initial ledger creation) required test-only corrections.
+
+- Baseline `49206a87ec19b34861e5bb63a16af7e8b92b26fa`, clean isolated
+  `auto/p00`; Entire resume found no checkpoint. Previous turn was verified
+  progress, not a wait or blocker. Host/provider/account settings remain outside
+  the fixture work.
+- Explore found a concrete seed recovery bug: completed dispatch attribution
+  admitted only step events, rejecting valid seed measurement intent/result
+  events. The strict campaign fold already proves that pair belongs to the same
+  session; recovery can accept it without relaxing dispatch identity.
+- A post-publication read-only delivery inspection can fail while the actual
+  branch and receipt exist. Its ten-second inspection budget is a plausible
+  trigger for the historical intermittent failure, not a proven diagnosis.
+- New immutable diagnostic events record one bounded controller-owned phase and
+  closed code per exact dispatch intent. They do not settle work, release slots,
+  change outcomes, retry calls or expose raw exception properties.
+- Independent real fixture reproduces post-publication confirmation failure:
+  one worker, two evaluations and one branch publication; direct receipt-only
+  restart acknowledges completed work without repeating any effect.
+- Graph-level gap: initial incomplete controller reports became terminal rejected
+  nodes, while branded recovery only accepted already settled child controllers.
+  Implement receipt-only metadata reconciliation for the exact graph binding and
+  leave healthy in-flight acknowledgement failures unresolved. Do not reopen
+  historical terminal rejected graphs or weaken normal fresh-enrollment rules.
+- Preserve existing clocks: child deadline is not renewed; completed-effect
+  metadata cleanup may occur after it, but graph deadline/KILL/ownership still
+  gate graph-linked reconciliation. Drain blocks new admission, not settlement.
+- Design plan uses existing white #ffffff/ice #f5f7fc/navy #172746 and #0e1730/
+  indigo #526fe8 tokens, Space Grotesk display and IBM Plex text. A left-aligned
+  diagnostic table reuses bounded horizontal scrolling and existing focus styles.
+  Layout: outcomes -> historical failure stage/code/time -> receipt guidance.
+  No new animation, hooks, fetches or decorative dashboard cards.
+- Cold review caught optional diagnostic capacity competing with old settlement
+  and control reserves; preserve already-admitted cleanup. Another review asked
+  for final prepublication settlement checks used by graph metadata recovery.
+- Read-only discovery guessed nonexistent Controller route globs; located the
+  actual inspector under src/web-ui/app and controller-status decoder under data.
+
+## Next-step exploration (proposal only, not implemented)
+
+- Reuse the existing controller scheduler and shared ledger for untouched pending
+  descendants; it already checks original campaign pins, prerequisite delivery,
+  ownership and no prior intent. Do not create another scheduling subsystem.
+- Keep receipt-only recovery distinguishable from effectful continuation. A
+  proposed host-bound opt-in plus separate branded asynchronous callback would
+  preserve old enrollment semantics; this is an architectural option, not an
+  implemented or approved permission change.
+- Require the original graph intent and live kernel context, reconcile proven
+  prior effects, then admit only genuinely pending campaign rows under both
+  original deadlines and existing drain/KILL/runtime/quota guards. Never resume
+  through a copied graph descriptor or renew an enrollment deadline.
+- Acceptance should prove one downstream request after upstream delivery,
+  repeated-interruption idempotency, unchanged reserves, exact pins/receipts,
+  and no new effects from legacy receipt-only or ambiguous histories.

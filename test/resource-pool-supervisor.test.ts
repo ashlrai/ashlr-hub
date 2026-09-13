@@ -5,13 +5,16 @@ import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createResourcePoolSupervisor, ResourceSupervisorError, type ResourcePoolSupervisor,
+import { createResourcePoolSupervisor, readResourceSupervisorCustody, resourceConsoleRecoveryId, ResourceSupervisorError, type ResourcePoolSupervisor,
   type ResourcePoolSupervisorOptions } from '../src/core/resources/pool-supervisor.js';
 import { runResourceTask } from '../src/core/resources/pool-runtime.js';
+import * as runtime from '../src/core/resources/pool-runtime.js';
+import * as killPolicy from '../src/core/sandbox/policy.js';
 import type { ResourceConsoleTaskInput } from '../src/core/resources/console-types.js';
 import type { ResourceObservation, ResourcePool, ResourceWorker } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
+import { createResourceWorkspaceCustody, readResourceWorkspaceCustody } from '../src/core/resources/workspace-custody.js';
 
 let base: string;
 const supervisors: ResourcePoolSupervisor[] = [];
@@ -69,6 +72,111 @@ async function settled(supervisor: ResourcePoolSupervisor, id = 'task-a') {
   return supervisor.snapshot().jobs.find((job) => job.id === id)!;
 }
 
+describe.skipIf(process.platform === 'win32')('global stop preserves queued work', () => {
+  it.each(['active', 'unknown', 'throws'] as const)('holds %s without consuming attempts, then admits the same job after clear', async (state) => {
+    let stopped = true;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => {
+      if (!stopped) return { state: 'inactive', sourceState: 'healthy', reason: 'missing', path: '/PRIVATE/KILL' };
+      if (state === 'throws') throw new Error('PRIVATE_SOURCE_ERROR');
+      return state === 'active'
+        ? { state: 'active', sourceState: 'healthy', reason: 'present', path: '/PRIVATE/KILL' }
+        : { state: 'unknown', sourceState: 'degraded', reason: 'uninspectable', path: '/PRIVATE/KILL' };
+    });
+    const f = await fixture(); const supervisor = await f.start();
+    const dispatched = vi.spyOn(runtime, 'runResourceTask');
+    supervisor.submit(f.task()); const original = f.state().jobs[0];
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]).toMatchObject({ state: 'queued',
+      reason: state === 'active' ? 'supervisor-kill-active' : 'supervisor-kill-unavailable', cancellable: true }));
+    await sleep(60);
+    expect(dispatched).not.toHaveBeenCalled(); expect(f.requests).toEqual([]);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toEqual([]);
+    expect(f.state().jobs[0]).toMatchObject({ input: original.input, taskDigest: original.taskDigest, enqueuedAt: original.enqueuedAt });
+    expect(JSON.stringify(supervisor.snapshot())).not.toContain('PRIVATE');
+    stopped = false;
+    expect(await settled(supervisor)).toMatchObject({ id: original.id, outcome: 'completed' });
+    expect(f.requests).toHaveLength(1);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toHaveLength(1);
+  });
+
+  it('rechecks a stop appearing between queue dispatch and runtime admission', async () => {
+    let stopped = false;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture(); const supervisor = await f.start();
+    const originalRun = runtime.runResourceTask;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation((options) => { stopped = true; return originalRun(options); });
+    supervisor.submit(f.task());
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]).toMatchObject({ state: 'queued', reason: 'supervisor-kill-active' }));
+    expect(f.requests).toEqual([]);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toEqual([]);
+    supervisor.cancel('task-a');
+    expect(supervisor.snapshot().jobs[0]).toMatchObject({ state: 'cancelled', reason: 'queued-task-cancelled' });
+  });
+
+  it('does not renew a child deadline while held by the global stop', async () => {
+    let stopped = true;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture(); const supervisor = await f.start();
+    const deadlineAt = new Date(Date.now() + 250).toISOString();
+    supervisor.submit(f.task(), { deadlineAt });
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('supervisor-kill-active'));
+    await sleep(270); stopped = false;
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    expect(f.state().jobs[0].executionDeadlineAt).toBe(deadlineAt);
+    expect(f.requests).toEqual([]);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toEqual([]);
+  });
+
+  it('retains a reservation if the stop appears after admission and never silently replays it', async () => {
+    let stopped = false;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture(); const supervisor = await f.start();
+    const originalRun = runtime.runResourceTask;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation((options) => originalRun({ ...options,
+      beforeWorkerDispatch: () => { stopped = true; return options.beforeWorkerDispatch!(); } }));
+    supervisor.submit(f.task());
+    expect(await settled(supervisor)).toMatchObject({ outcome: 'failed', reason: 'worker-dispatch-precondition-failed' });
+    const attempts = runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts;
+    expect(attempts).toHaveLength(1); expect(f.requests).toEqual([]);
+    stopped = false; await sleep(60);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toEqual(attempts);
+    expect(f.requests).toEqual([]);
+  });
+
+  it('preserves an operator pause and queued identity across restart', async () => {
+    let stopped = true;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture(); const first = await f.start(); first.submit(f.task());
+    await vi.waitFor(() => expect(first.snapshot().jobs[0]?.reason).toBe('supervisor-kill-active'));
+    const original = f.state().jobs[0]; first.setPaused(true); await first.close();
+    const next = await f.start(); stopped = false; await sleep(80);
+    expect(next.snapshot()).toMatchObject({ paused: true, queuedCount: 1, activeCount: 0 });
+    expect(f.state().jobs[0]).toMatchObject({ taskDigest: original.taskDigest, input: original.input });
+    expect(f.requests).toEqual([]);
+    next.setPaused(false); expect(await settled(next)).toMatchObject({ outcome: 'completed' });
+    expect(f.requests).toHaveLength(1);
+  });
+
+  it('still cancels an active worker while retaining undispatched jobs', async () => {
+    let stopped = false;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture({ hold: true }); const supervisor = await f.start({ maxParallel: 1 });
+    supervisor.submit(f.task('running'));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    stopped = true; supervisor.submit(f.task('waiting'));
+    expect(await settled(supervisor, 'running')).toMatchObject({ outcome: 'cancelled', reason: 'worker-kill-active' });
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs.find(job => job.id === 'waiting')).toMatchObject({
+      state: 'queued', reason: 'supervisor-kill-active', cancellable: true }));
+    expect(f.requests).toHaveLength(1);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts.map(row => row.id)).toEqual(['running']);
+    supervisor.cancel('waiting');
+  });
+});
+
 /** Build only test-owned valid queued records; escaped prompts exercise serialized, not raw, limits. */
 async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reserveTransitions: boolean) {
   const first = await f.start(); first.setPaused(true); first.submit(f.task('template')); await first.close();
@@ -81,7 +189,7 @@ async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reser
     const next = { ...state, jobs: [...state.jobs, row(input)] };
     if (reserveTransitions) {
       next.paused = false;
-      next.jobs = next.jobs.map((job) => ({ ...job, state: 'dispatching', workerId: 'w'.repeat(64),
+      next.jobs = next.jobs.map((job: Record<string, unknown>) => ({ ...job, state: 'dispatching', workerId: 'w'.repeat(64),
         outcome: 'completed', reason: 'r'.repeat(120), updatedAt: '+275760-09-13T00:00:00.000Z' }));
     }
     return Buffer.byteLength(canonical(next) + '\n');
@@ -102,6 +210,264 @@ async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reser
 }
 
 describe.skipIf(process.platform === 'win32')('durable foreground resource supervisor', () => {
+  it('never overwrites a reentrant submission from a host lifetime callback', async () => {
+    const f = await fixture(); const owner = await f.start(); owner.setPaused(true);
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString(); let entered = false;
+    expect(() => owner.submit(f.task(), { deadlineAt, isExecutionStopped: () => {
+      if (!entered) { entered = true; owner.submit(f.task(), { deadlineAt }); }
+      return false;
+    } })).toThrow('queue changed during admission');
+    expect(f.state().jobs).toHaveLength(1);
+    owner.setPaused(false); await settled(owner); expect(f.requests).toHaveLength(1);
+  });
+  it('refuses stale admission after its callback closes the owner', async () => {
+    const f = await fixture(); const owner = await f.start(); let closing: Promise<void> | undefined;
+    expect(() => owner.submit(f.task(), { isExecutionStopped: () => { closing = owner.close(); return false; } })).toThrow('unavailable');
+    await closing; expect(f.state().jobs).toEqual([]); expect(f.requests).toEqual([]);
+  });
+  it('recovers repeated abandoned proposals with an immutable chain and only one actual dispatch', async () => {
+    const f = await fixture(); const original = f.task('mission', { retainHistory: true });
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    let owner = await f.start(); owner.setPaused(true); owner.submit(original, lifetime); await owner.close();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      owner = await f.start(); owner.setPaused(false);
+      const prior = f.state().jobs.at(-1); const before = canonical(f.state().jobs);
+      const recovered = owner.recover(original, lifetime);
+      expect(recovered.id).toBe(resourceConsoleRecoveryId(prior));
+      expect(canonical(f.state().jobs.slice(0, -1))).toBe(before);
+      expect(f.state()).toMatchObject({ schemaVersion: 7 });
+      expect(f.state().jobs.at(-1)).toMatchObject({ recoveryOf: prior.id, executionDeadlineAt: lifetime.deadlineAt });
+      expect(owner.recover(original, lifetime).id).toBe(recovered.id);
+      // Crash window after the atomic new job+edge, before the first dispatch timer.
+      await owner.close();
+    }
+    expect(f.requests).toEqual([]);
+    owner = await f.start(); const recovered = owner.recover(original, lifetime);
+    await settled(owner, recovered.id); expect(f.requests).toHaveLength(1);
+    expect(owner.recover(original, lifetime)).toMatchObject({ id: recovered.id, state: 'settled', outcome: 'completed' });
+    owner.deleteHistory('mission'); expect(f.state().jobs.at(-1).recoveryOf).toBe(f.state().jobs.at(-2).id);
+    await owner.close(); owner = await f.start();
+    expect(owner.recover(original, lifetime)).toMatchObject({ id: recovered.id, state: 'settled' });
+    expect(f.requests).toHaveLength(1);
+  });
+  it('never recovers an explicit cancellation or changes the original proposal limits', async () => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task('manual'), lifetime); owner.cancel('manual');
+    owner.submit(f.task('abandoned'), lifetime); await owner.close(); owner = await f.start(); owner.setPaused(false);
+    expect(() => owner.recover(f.task('manual'), lifetime)).toThrow('recovery evidence unavailable');
+    expect(() => owner.recover(f.task('abandoned', { prompt: 'Different objective' }), lifetime)).toThrow('recovery identity changed');
+    expect(() => owner.recover(f.task('abandoned', { timeoutMs: 10_000 }), lifetime)).toThrow('recovery identity changed');
+    expect(() => owner.recover(f.task('abandoned'), { deadlineAt: new Date(Date.now() + 120_000).toISOString() })).toThrow('recovery identity changed');
+    expect(f.state().jobs).toHaveLength(2); expect(f.requests).toEqual([]);
+  });
+  it.each(['schema', 'orphan', 'deadline', 'manual-parent', 'task-drift'] as const)('rejects a damaged recovery graph: %s', async kind => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task(), lifetime); await owner.close(); owner = await f.start(); owner.setPaused(false);
+    owner.recover(f.task(), lifetime); await owner.close();
+    const state = f.state(); const child = state.jobs[1];
+    if (kind === 'schema') state.schemaVersion = 6;
+    if (kind === 'orphan') child.recoveryOf = 'missing';
+    if (kind === 'deadline') child.executionDeadlineAt = new Date(Date.parse(lifetime.deadlineAt) + 1).toISOString();
+    if (kind === 'manual-parent') state.jobs[0].reason = 'queued-task-cancelled';
+    if (kind === 'task-drift') {
+      child.input.prompt = 'Different task';
+      child.taskDigest = digest(canonical({ ...child.input, schemaVersion: 1, cwd: f.workspace }));
+    }
+    save(join(f.root, 'resource-console-state.json'), state);
+    if (kind === 'task-drift') { owner = await f.start(); expect(() => owner.recover(f.task(), lifetime)).toThrow('recovery identity changed'); }
+    else await expect(f.start()).rejects.toThrow();
+    expect(f.requests).toEqual([]);
+  });
+  it('refuses recovery if an abandoned predecessor has any runtime receipt', async () => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task(), lifetime); await owner.close(); owner = await f.start(); owner.setPaused(false);
+    await runResourceTask({ ...f.options, observations: [observed('local')], task: { ...f.task(), schemaVersion: 1, cwd: f.workspace } });
+    expect(() => owner.recover(f.task(), lifetime)).toThrow('recovery evidence unavailable');
+    expect(f.state().jobs).toHaveLength(1); expect(f.requests).toHaveLength(1);
+  });
+  it.each(['mode', 'deadline', 'paused'] as const)('withholds inadmissible %s recovery without changing history', async kind => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task(), lifetime); await owner.close(); owner = await f.start();
+    const before = canonical(f.state());
+    expect(() => owner.recover(f.task('task-a', kind === 'mode' ? { mode: 'workspace-write' } : {}), kind === 'deadline' ? {} : lifetime)).toThrow();
+    expect(canonical(f.state())).toBe(before); expect(f.requests).toEqual([]);
+  });
+  it('persists child ownership and cancels only abandoned children on plain restart', async () => {
+    const f = await fixture(); const first = await f.start(); first.setPaused(true);
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    first.submit(f.task('mission', { retainHistory: true }), { deadlineAt, isExecutionStopped: () => false });
+    first.submit(f.task('human'));
+    const original = f.state();
+    expect(original.schemaVersion).toBe(6);
+    expect(original.jobs[0]).toMatchObject({ executionOwnerId: first.snapshot().instanceId, executionDeadlineAt: deadlineAt });
+    expect(original.jobs[1]).not.toHaveProperty('executionOwnerId');
+    expect(first.snapshot().jobs[0]).not.toHaveProperty('executionOwnerId');
+    await first.close(); const next = await f.start(); next.setPaused(false); await settled(next, 'human');
+    expect(next.snapshot().jobs[0]).toMatchObject({ state: 'cancelled', outcome: 'cancelled', reason: 'task-owner-unavailable' });
+    expect(f.state().jobs[0]).toMatchObject({ executionOwnerId: original.jobs[0].executionOwnerId, executionDeadlineAt: deadlineAt, input: null });
+    expect(next.history('mission')?.prompt).toContain('PRIVATE_PROMPT mission');
+    next.deleteHistory('mission');
+    expect(f.state().jobs[0].executionOwnerId).toBe(original.jobs[0].executionOwnerId);
+    expect(f.requests).toHaveLength(1); expect(JSON.stringify(f.requests)).toContain('PRIVATE_PROMPT human');
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts.map(row => row.id)).toEqual(['human']);
+  });
+  it('keeps a child deadline and original veto immutable on duplicate submission', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true);
+    let stopped = false; const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    supervisor.submit(f.task(), { deadlineAt, isExecutionStopped: () => stopped });
+    supervisor.submit(f.task(), { deadlineAt, isExecutionStopped: () => false });
+    expect(() => supervisor.submit(f.task())).toThrow('execution owner already set');
+    expect(() => supervisor.submit(f.task(), { deadlineAt: new Date(Date.now() + 120_000).toISOString() })).toThrow('execution owner already set');
+    stopped = true; supervisor.setPaused(false);
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    expect(f.requests).toEqual([]);
+  });
+  it('checks the durable deadline before dispatch and refuses expired admission', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true);
+    const deadlineAt = new Date(Date.now() + 100).toISOString();
+    supervisor.submit(f.task(), { deadlineAt });
+    await sleep(120); supervisor.setPaused(false);
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    expect(() => supervisor.submit(f.task('late'), { deadlineAt })).toThrow('host-execution-stopped');
+    expect(f.requests).toEqual([]);
+  });
+  it('reconciles a proven completed child after restart without dispatching it again', async () => {
+    const f = await fixture(); const first = await f.start();
+    first.submit(f.task(), {}); await settled(first); await first.close();
+    // Model a crash after the runtime receipt, before the console settlement write.
+    const prior = f.state(); prior.jobs[0].state = 'dispatching'; prior.jobs[0].outcome = null;
+    prior.jobs[0].input = f.task(); save(join(f.root, 'resource-console-state.json'), prior);
+    const next = await f.start();
+    expect(next.snapshot().jobs[0]).toMatchObject({ state: 'settled', outcome: 'completed' });
+    expect(next.submit(f.task(), {})).toMatchObject({ state: 'settled', outcome: 'completed' });
+    await sleep(60); expect(f.requests).toHaveLength(1);
+  });
+  it('does not downgrade child ownership when registering projects after restart', async () => {
+    const f = await fixture(); const first = await f.start(); first.setPaused(true); first.submit(f.task(), {}); await first.close();
+    const workspace = join(base, 'other-project'); mkdirSync(workspace, { mode: 0o700 });
+    const next = await f.start({ projects: [{ id: 'other', label: 'Other', workspace }] });
+    expect(f.state()).toMatchObject({ schemaVersion: 6 });
+    expect(next.projects()?.some(row => row.id === 'other')).toBe(true);
+    expect(next.snapshot().jobs[0]?.reason).toBe('task-owner-unavailable');
+  });
+  it.each(['owner', 'deadline', 'orphan-deadline', 'downgrade'] as const)('refuses malformed durable child %s', async kind => {
+    const f = await fixture(); const first = await f.start(); first.setPaused(true);
+    first.submit(f.task(), { deadlineAt: new Date(Date.now() + 60_000).toISOString() }); await first.close();
+    const state = f.state();
+    if (kind === 'owner') state.jobs[0].executionOwnerId = 'forged';
+    if (kind === 'deadline') state.jobs[0].executionDeadlineAt = 'tomorrow';
+    if (kind === 'orphan-deadline') delete state.jobs[0].executionOwnerId;
+    if (kind === 'downgrade') state.schemaVersion = 5;
+    save(join(f.root, 'resource-console-state.json'), state);
+    await expect(f.start()).rejects.toThrow(); expect(f.requests).toEqual([]);
+  });
+  it('withholds a stopped child task without stopping unrelated human dispatch', async () => {
+    const f = await fixture(); let stopped = false;
+    const supervisor = await f.start({ isTaskExecutionStopped: id => id === 'mission' && stopped });
+    supervisor.submit(f.task('mission')); stopped = true;
+    supervisor.submit(f.task('human')); await settled(supervisor, 'human');
+    expect(supervisor.snapshot().jobs.find(row => row.id === 'mission')).toMatchObject({ state: 'queued', reason: 'host-execution-stopped' });
+    expect(f.requests).toHaveLength(1); expect(JSON.stringify(f.requests)).toContain('PRIVATE_PROMPT human');
+  });
+  it('rechecks the child veto at fresh reservation dispatch before contacting a worker', async () => {
+    const f = await fixture(); let stopped = false;
+    const actual = runtime.runResourceTask;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation(options => actual({ ...options,
+      beforeWorkerDispatch: () => { stopped = true; return options.beforeWorkerDispatch!(); } }));
+    const supervisor = await f.start({ isTaskExecutionStopped: () => stopped });
+    supervisor.submit(f.task()); await settled(supervisor);
+    expect(f.requests).toEqual([]);
+    expect(supervisor.snapshot().jobs[0]?.outcome).not.toBe('completed');
+  });
+  it('issues genuine workspace custody and rejects copies, scope drift and closed owners', async () => {
+    const f = await fixture(); const supervisor = await f.start();
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+    expect(readResourceWorkspaceCustody(custody).root).toBe(f.root);
+    expect(() => readResourceSupervisorCustody({ ...supervisor })).toThrow('Unrecognized');
+    expect(() => readResourceWorkspaceCustody({ ...custody })).toThrow('Unrecognized');
+    expect(() => readResourceWorkspaceCustody(custody, { root: f.root, workspace: f.workspace, poolDigest: '0'.repeat(64) })).toThrow('scope changed');
+    await supervisor.close();
+    expect(() => readResourceWorkspaceCustody(custody)).toThrow('unavailable');
+  });
+  it('recognizes only exact ordinary live receipts and refuses cancelling work', async () => {
+    const f = await fixture({ hold: true }); const supervisor = await f.start();
+    supervisor.submit(f.task()); await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+    const receipt = runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts[0]!;
+    const owner = readResourceWorkspaceCustody(custody);
+    expect(owner.ownsReceipt(receipt)).toBe(true);
+    expect(owner.ownsReceipt({ ...receipt, id: 'foreign' })).toBe(false);
+    expect(owner.ownsReceipt({ ...receipt, taskDigest: '0'.repeat(64) })).toBe(false);
+    expect(owner.ownsReceipt({ ...receipt, status: 'uncertain' })).toBe(false);
+    expect(owner.ownsReceipt({ ...receipt, origin: {} as NonNullable<typeof receipt.origin> })).toBe(false);
+    supervisor.cancel('task-a');
+    expect(() => readResourceWorkspaceCustody(custody)).toThrow('custody unavailable');
+    await supervisor.cancelAndDrain('task-a', receipt.taskDigest);
+    expect(readResourceWorkspaceCustody(custody).ownsReceipt(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts[0]!)).toBe(true);
+  });
+  it('rechecks host vetoes and durable state before returning live custody', async () => {
+    const f = await fixture(); const supervisor = await f.start(); let stopped = false;
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => { if (stopped) throw Error('host stopped'); });
+    stopped = true; expect(() => readResourceWorkspaceCustody(custody)).toThrow('host stopped'); stopped = false;
+    const file = join(f.root, 'resource-console-state.json'), original = readFileSync(file, 'utf8');
+    writeFileSync(file, canonical({ ...f.state(), paused: true }) + '\n');
+    expect(() => readResourceWorkspaceCustody(custody)).toThrow('custody unavailable');
+    writeFileSync(file, original);
+    expect(readResourceWorkspaceCustody(custody).root).toBe(f.root);
+  });
+  it.each(['completed', 'failed', 'cancelled', 'timed-out'] as const)('joins only an exact prior reservation to a proven %s settlement', async outcome => {
+    const f = await fixture({ hold: true }); const supervisor = await f.start();
+    supervisor.submit(f.task('task-a', { timeoutMs: outcome === 'timed-out' ? 1000 : 5000 }));
+    await vi.waitFor(() => expect(f.held).toHaveLength(1));
+    const reservation = runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts[0]!;
+    const owner = readResourceSupervisorCustody(supervisor);
+    expect(owner.ownsSettledReservation(reservation)).toBe(false);
+    if (outcome === 'completed') f.held[0]!.end(result());
+    if (outcome === 'failed') { f.held[0]!.writeHead(500); f.held[0]!.end('Fixture refusal'); }
+    if (outcome === 'cancelled') await supervisor.cancelAndDrain('task-a', reservation.taskDigest);
+    expect((await settled(supervisor)).outcome).toBe(outcome);
+    expect(owner.ownsReceipt(reservation)).toBe(false);
+    expect(owner.ownsSettledReservation(reservation)).toBe(true);
+    const changes = [
+      { id: 'foreign' }, { taskDigest: '0'.repeat(64) }, { poolDigest: '0'.repeat(64) },
+      { workerId: 'foreign' }, { capacityKey: 'foreign' }, { startedAt: new Date(Date.parse(reservation.startedAt) - 1).toISOString() },
+      { status: 'uncertain' as const }, { inputTokens: 1 }, { outputDigest: '0'.repeat(64) },
+      { reason: 'different-reservation' }, { origin: {} as NonNullable<typeof reservation.origin> },
+    ];
+    for (const change of changes) expect(owner.ownsSettledReservation({ ...reservation, ...change })).toBe(false);
+    const ledgerPath = join(f.root, 'pool-state.json'), original = readFileSync(ledgerPath);
+    try {
+      const uncertain = f.ledger(); uncertain.attempts[0].status = 'uncertain'; save(ledgerPath, uncertain);
+      expect(owner.ownsSettledReservation(reservation)).toBe(false);
+    } finally { writeFileSync(ledgerPath, original); }
+    supervisor.setPaused(true); expect(owner.ownsSettledReservation(reservation)).toBe(false);
+    supervisor.setPaused(false); await supervisor.close(); expect(owner.ownsSettledReservation(reservation)).toBe(false);
+  });
+  it('withholds queued mission work while retaining observation, cancellation and recovery', async () => {
+    const f = await fixture(); let stop = false;
+    const supervisor = await f.start({ projects: [], isExecutionStopped: () => stop });
+    supervisor.setPaused(true); supervisor.submit(f.task()); stop = true; supervisor.setPaused(false);
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    expect(f.requests).toHaveLength(0);
+    expect(supervisor.projectFileBinding('default').workspace).toBe(f.workspace);
+    expect(() => supervisor.projectExecutionBinding('default')).toThrow('Host execution stopped');
+    expect(() => supervisor.submit(f.task('new'))).toThrow();
+    expect(supervisor.cancel('task-a').state).toBe('cancelled');
+    stop = false; supervisor.submit(f.task('resumed')); await settled(supervisor, 'resumed'); expect(f.requests).toHaveLength(1);
+  });
+  it('rechecks the mission veto after a real reservation and before transport dispatch', async () => {
+    const f = await fixture(); let stop = false; const actual = runtime.runResourceTask;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation(options => actual({ ...options, beforeWorkerDispatch: () => {
+      stop = true; return options.beforeWorkerDispatch?.() ?? true;
+    } }));
+    const supervisor = await f.start({ isExecutionStopped: () => stop }); supervisor.submit(f.task());
+    await settled(supervisor); expect(f.requests).toHaveLength(0);
+    expect(f.ledger().attempts).toHaveLength(1); expect(f.ledger().attempts[0].status).toBe('failed');
+  });
   it('queues gated aliases, uses independent capacity, and recovers without durable quota poisoning', async () => {
     const f = await fixture({ workers: [worker('one'), worker('two'), worker('three')] });
     f.bindings[0]!.capacityKey = 'shared'; f.bindings[1]!.capacityKey = 'shared';
@@ -349,12 +715,75 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     expect(next.snapshot().error).toBeNull();
   });
 
+  it('does not infer transport custody from a scheduler promise before the runtime dispatch boundary', async () => {
+    const f = await fixture({ hold: true }); const supervisor = await f.start();
+    const run = runtime.runResourceTask; let checked = false;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation(options => run({ ...options, beforeWorkerDispatch: () => {
+      const receipt = f.ledger().attempts[0];
+      expect(receipt.status).toBe('reserved'); expect(supervisor.ownsActiveTaskReceipt(receipt)).toBe(false);
+      checked = true; return options.beforeWorkerDispatch!();
+    } }));
+    supervisor.submit(f.task()); await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    expect(checked).toBe(true); expect(supervisor.ownsActiveTaskReceipt(f.ledger().attempts[0])).toBe(true);
+    supervisor.cancel('task-a'); await settled(supervisor);
+  });
+
+  it('proves only live exact ordinary custody, never uncertain, relabelled or cancelled work', async () => {
+    const f = await fixture({ hold: true }); const supervisor = await f.start(); supervisor.submit(f.task());
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    const receipt = f.ledger().attempts[0];
+    expect(supervisor.ownsActiveTaskReceipt(receipt)).toBe(true);
+    for (const patch of [{ status: 'uncertain' }, { status: 'completed' }, { id: 'external' },
+      { taskDigest: '0'.repeat(64) }, { poolDigest: '0'.repeat(64) }, { workerId: 'external' },
+      { origin: { kind: 'universe-generation', universeId: 'other', runId: 'other', variantId: 'other' } }]) {
+      expect(supervisor.ownsActiveTaskReceipt({ ...receipt, ...patch })).toBe(false);
+    }
+    supervisor.cancel('task-a'); expect(supervisor.ownsActiveTaskReceipt(receipt)).toBe(false);
+    await settled(supervisor); await supervisor.close(); expect(supervisor.ownsActiveTaskReceipt(receipt)).toBe(false);
+  });
+
   it('cancels queued work without contacting a worker and retains idempotent metadata', async () => {
     const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
     expect(supervisor.cancel('task-a')).toMatchObject({ state: 'cancelled', outcome: 'cancelled', cancellable: false });
     expect(f.state().jobs[0].input).toBeNull(); supervisor.setPaused(false); await sleep(60);
     expect(f.requests).toHaveLength(0); expect(supervisor.cancel('task-a').state).toBe('cancelled');
     expect(() => supervisor.cancel('absent')).toThrow(ResourceSupervisorError);
+  });
+
+  it('pins queued cancellation to the retained task and keeps terminal cancellation idempotent', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true);
+    supervisor.submit(f.task()); supervisor.submit(f.task('human'));
+    const before = f.state(); const expected = before.jobs[0].taskDigest as string;
+    expect(() => supervisor.cancel('task-a', '0'.repeat(64))).toThrow('Resource task identity changed');
+    expect(f.state()).toEqual(before); expect(f.requests).toHaveLength(0);
+    expect(supervisor.cancel('task-a', expected).state).toBe('cancelled');
+    expect(supervisor.snapshot().jobs.find((job) => job.id === 'human')?.state).toBe('queued');
+    expect(supervisor.cancel('task-a', expected).state).toBe('cancelled');
+    expect(() => supervisor.cancel('task-a', '0'.repeat(64))).toThrow('Resource task identity changed');
+  });
+
+  it.each([null, '', 'a'.repeat(63), 'A'.repeat(64), 42])('rejects malformed cancellation pin %j without writes', async (pin) => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
+    const before = f.state();
+    expect(() => supervisor.cancel('task-a', pin as string)).toThrow('Invalid expected task digest');
+    expect(f.state()).toEqual(before); expect(f.requests).toHaveLength(0);
+  });
+
+  it('cancels only the exactly pinned active task while unrelated human work completes', async () => {
+    const f = await fixture({ workers: [worker('one'), worker('two')], hold: true }); const supervisor = await f.start();
+    supervisor.submit(f.task('mission', { allowedWorkerIds: ['one'] }));
+    supervisor.submit(f.task('human', { allowedWorkerIds: ['two'] }));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    const before = f.state(); const ledger = f.ledger();
+    const expected = before.jobs.find((job: { id: string }) => job.id === 'mission').taskDigest as string;
+    expect(() => supervisor.cancel('mission', '0'.repeat(64))).toThrow('Resource task identity changed');
+    expect(f.state()).toEqual(before); expect(f.ledger()).toEqual(ledger);
+    supervisor.cancel('mission', expected);
+    expect(await settled(supervisor, 'mission')).toMatchObject({ outcome: 'cancelled' });
+    expect(supervisor.snapshot().jobs.find((job) => job.id === 'human')?.state).toBe('dispatching');
+    for (const response of f.held) response.end(result());
+    expect(await settled(supervisor, 'human')).toMatchObject({ outcome: 'completed' });
+    expect(f.requests).toHaveLength(2);
   });
 
   it('cancels an owned actual local request, waits settlement and never runs it again', async () => {
@@ -364,6 +793,56 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     expect(await settled(supervisor)).toMatchObject({ outcome: 'cancelled' });
     expect(f.ledger().attempts[0]).toMatchObject({ status: 'cancelled', inputTokens: null, outputTokens: null });
     supervisor.submit(f.task()); await sleep(60); expect(f.requests).toHaveLength(1);
+  });
+
+  it('drains only the pinned task while human work and future submissions remain live', async () => {
+    const f = await fixture({ workers: [worker('one'), worker('two')], hold: true }); const supervisor = await f.start();
+    supervisor.submit(f.task('mission', { allowedWorkerIds: ['one'] }));
+    supervisor.submit(f.task('human', { allowedWorkerIds: ['two'] }));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    const pin = f.state().jobs.find((job: { id: string }) => job.id === 'mission').taskDigest as string;
+    const before = f.state();
+    await expect(supervisor.cancelAndDrain('mission', '0'.repeat(64))).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(f.state()).toEqual(before);
+    const [first, repeated] = await Promise.all([supervisor.cancelAndDrain('mission', pin), supervisor.cancelAndDrain('mission', pin)]);
+    expect(first).toMatchObject({ state: 'settled', outcome: 'cancelled' }); expect(repeated).toEqual(first);
+    expect(supervisor.snapshot()).toMatchObject({ closing: false, activeCount: 1 });
+    expect(supervisor.snapshot().jobs.find(job => job.id === 'human')?.state).toBe('dispatching');
+    supervisor.submit(f.task('next-human', { allowedWorkerIds: ['one'] }));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(3));
+    for (const response of f.held) response.end(result());
+    expect(await settled(supervisor, 'human')).toMatchObject({ outcome: 'completed' });
+    expect(await settled(supervisor, 'next-human')).toMatchObject({ outcome: 'completed' });
+    await expect(supervisor.cancelAndDrain('mission', pin)).resolves.toMatchObject({ state: 'settled' });
+  });
+
+  it('drains a never-dispatched queued task without creating a reservation', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
+    const pin = f.state().jobs[0].taskDigest as string;
+    await expect(supervisor.cancelAndDrain('task-a', pin)).resolves.toMatchObject({ state: 'cancelled' });
+    expect(f.requests).toHaveLength(0);
+    await expect(supervisor.cancelAndDrain('task-a', pin)).resolves.toMatchObject({ state: 'cancelled' });
+  });
+
+  it.each([undefined, null, '', 'A'.repeat(64)])('refuses unpinned drain %j before cancellation', async pin => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
+    const before = f.state();
+    await expect(supervisor.cancelAndDrain('task-a', pin as string)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(f.state()).toEqual(before); expect(f.requests).toHaveLength(0);
+  });
+
+  it('does not infer drain settlement after a dispatched receipt disappears', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.submit(f.task()); await settled(supervisor);
+    const pin = f.state().jobs[0].taskDigest as string;
+    const ledger = f.ledger(); ledger.attempts = []; save(join(f.root, 'pool-state.json'), ledger);
+    await expect(supervisor.cancelAndDrain('task-a', pin)).rejects.toThrow();
+  });
+  it('rechecks retained queue bytes even when a prior cancellation needs no write', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
+    const pin = f.state().jobs[0].taskDigest as string; supervisor.cancel('task-a', pin);
+    const state = f.state(); state.jobs[0].taskDigest = '0'.repeat(64); save(join(f.root, 'resource-console-state.json'), state);
+    await expect(supervisor.cancelAndDrain('task-a', pin)).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    expect(f.requests).toHaveLength(0);
   });
 
   it('awaits owned work on idempotent shutdown and refuses new submissions', async () => {
@@ -518,7 +997,9 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const bindings: ResourceBinding[] = [{ workerId: 'native', capacityKey: 'native', kind: 'native-cli', command: [process.execPath, script] }];
     const patch = { pool, bindings, readObservations: () => [] }; const supervisor = await f.start(patch);
     supervisor.submit(f.task('native-task', { allowedWorkerIds: ['native'] }));
-    await vi.waitFor(() => expect(existsSync(started)).toBe(true)); supervisor.cancel('native-task');
+    await vi.waitFor(() => expect(existsSync(started)).toBe(true));
+    const pin = f.state().jobs[0].taskDigest as string;
+    await expect(supervisor.cancelAndDrain('native-task', pin)).rejects.toMatchObject({ code: 'UNAVAILABLE' });
     // Native ownership uses a documented 5-second termination grace. Observe
     // its completed settlement before close to cover the no-longer-active case.
     await vi.waitFor(() => expect(supervisor.snapshot().activeCount).toBe(0), { timeout: 10_000 });

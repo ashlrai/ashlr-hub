@@ -1,7 +1,7 @@
 /** Inert injected probes only: no native provider, credential or filesystem contact. */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
-import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig,
+import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, RESOURCE_QUOTA_REFRESH_INTERVAL_MS,
   type ResourceQuotaRefreshConfig, type ResourceQuotaRefresher, type ResourceQuotaRefresherOptions } from '../src/core/resources/quota-refresh.js';
 import { planResourceAssignment, type ResourceObservation, type ResourcePool } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
@@ -100,6 +100,53 @@ describe('pinned managed quota configuration', () => {
 });
 
 describe('foreground quota refresh lifecycle', () => {
+  it('retains detached cleanup diagnostics after terminal collector shutdown without admitting work', async () => {
+    const f = fixture(); const getter = vi.fn(() => 'PRIVATE');
+    const diagnostics = { failure: 'lifecycle-publication-failed' as const, processGroupSettlement: 'unconfirmed' as const,
+      timedOut: false, cancelled: false, privateLog: 'PRIVATE' };
+    Object.defineProperty(diagnostics, 'secret', { get: getter });
+    const probe = vi.fn(async (options: CodexResourceProbeOptions) => success(options, {
+      status: 'uncertain', observation: null, cleanupDiagnostics: diagnostics,
+    }));
+    const handle = start({ ...f.options, _probe: probe }); await firstCycle();
+    const snapshot = handle.snapshot();
+    expect(snapshot).toMatchObject({ state: 'closed', workers: [{ status: 'uncertain', cleanupDiagnostics: {
+      failure: 'lifecycle-publication-failed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false,
+    } }, { status: 'closed' }] });
+    expect(Object.isFrozen(snapshot.workers[0]!.cleanupDiagnostics)).toBe(true);
+    diagnostics.timedOut = true;
+    expect(handle.snapshot().workers[0]!.cleanupDiagnostics!.timedOut).toBe(false);
+    expect(JSON.stringify(snapshot)).not.toContain('PRIVATE'); expect(getter).not.toHaveBeenCalled();
+    expect(handle.unavailableWorkerIds()).toHaveLength(2);
+    await expect(handle.close()).rejects.toThrow('termination unconfirmed');
+    await vi.advanceTimersByTimeAsync(60000); expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['missing', 'invalid', 'accessor'])('uses unknown diagnostics for %s detail without evaluating private getters', async kind => {
+    const getter = vi.fn(() => { throw new Error('PRIVATE'); });
+    const f = fixture();
+    const handle = start({ ...f.options, _probe: async options => {
+      const result = success(options, { status: 'uncertain', observation: null });
+      if (kind === 'invalid') Object.assign(result, { cleanupDiagnostics: { failure: 'PRIVATE' } });
+      if (kind === 'accessor') Object.defineProperty(result, 'cleanupDiagnostics', { get: getter });
+      return result;
+    } });
+    await firstCycle();
+    expect(handle.snapshot().workers[0]!.cleanupDiagnostics).toEqual({ failure: 'diagnostics-unavailable',
+      processGroupSettlement: 'unknown', timedOut: 'unknown', cancelled: 'unknown' });
+    expect(getter).not.toHaveBeenCalled(); expect(JSON.stringify(handle.snapshot())).not.toContain('PRIVATE');
+  });
+
+  it('clears previous failure details before a new attempt and after its successful sample', async () => {
+    const f = fixture(); let fail = true;
+    const handle = start({ ...f.options, _probe: async options => fail ? success(options, { status: 'failed', observation: null,
+      cleanupDiagnostics: { failure: 'process-failed', processGroupSettlement: 'group-exit-confirmed', timedOut: false, cancelled: false } }) : success(options) });
+    await firstCycle(); expect(handle.snapshot().workers.every(row => row.cleanupDiagnostics)).toBe(true);
+    fail = false; await vi.advanceTimersByTimeAsync(RESOURCE_QUOTA_REFRESH_INTERVAL_MS * 2);
+    expect(handle.snapshot().workers.every(row => row.status === 'observed' && row.cleanupDiagnostics === undefined)).toBe(true);
+    await handle.close(); expect(handle.snapshot().workers.every(row => row.cleanupDiagnostics === undefined)).toBe(true);
+  });
+
   it.each(['reject', 'throw', 'missing', 'null', 'unknown', 'accessor'])('treats %s after invocation as terminal cleanup uncertainty', async (kind) => {
     const f = fixture(); const getter = vi.fn(() => 'failed');
     const probe = vi.fn((): Promise<CodexResourceProbeResult> => {
@@ -117,6 +164,8 @@ describe('foreground quota refresh lifecycle', () => {
       { workerId: 'codex-b', status: 'closed' }] });
     expect(handle.unavailableWorkerIds()).toEqual(['codex-a', 'codex-b']);
     expect(JSON.stringify(handle.snapshot())).not.toContain('PRIVATE');
+    expect(handle.snapshot().workers[0]!.cleanupDiagnostics).toEqual({ failure: 'probe-rejected',
+      processGroupSettlement: 'unknown', timedOut: 'unknown', cancelled: 'unknown' });
     await expect(handle.close()).rejects.toThrow('termination unconfirmed');
   });
 

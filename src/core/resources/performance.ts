@@ -124,9 +124,24 @@ function summarize(worker: ResourceWorker, rows: readonly ResourceTaskReceipt[])
     }) };
 }
 
-/** Inputs are one validated ledger scope. Never infer missing measurements from wall-clock timestamps. */
-export function buildResourcePerformance(poolValue: ResourcePool, attempts: readonly ResourceTaskReceipt[]): ResourcePerformanceReport {
+/** Shape only, not proof of migration. The ledger reader supplies verified epochs. */
+export function validateResourceConfigurationDigests(value: unknown): string[] {
+  array(value, 16);
+  if (Object.getPrototypeOf(value) !== Array.prototype || !Array.from({ length: value.length }, (_, index) =>
+    'value' in Object.getOwnPropertyDescriptor(value, index)!).every(Boolean)) invalid();
+  if (!value.length || value.some(row => typeof row !== 'string' || !/^[a-f0-9]{64}$/.test(row)) ||
+    new Set(value).size !== value.length) invalid();
+  return [...value] as string[];
+}
+
+/** Inputs are one validated ledger, optionally with explicitly verified configuration
+ * epochs. Additive evolution preserves worker identity; this does not compare model
+ * quality or authorize combining unrelated ledgers. Never invent missing timing.
+ */
+export function buildResourcePerformance(poolValue: ResourcePool, attempts: readonly ResourceTaskReceipt[],
+  configurationDigests?: readonly string[]): ResourcePerformanceReport {
   const pool = validateResourcePool(poolValue);
+  const allowed = configurationDigests === undefined ? null : new Set(validateResourceConfigurationDigests(configurationDigests));
   array(attempts, MAX_ATTEMPTS);
   const seen = new Set<string>(); const identities = new Set<string>();
   for (const row of attempts) {
@@ -139,7 +154,7 @@ export function buildResourcePerformance(poolValue: ResourcePool, attempts: read
     if (row.status === 'reserved' && row.inputTokens !== null) invalid();
     seen.add(row.id); identities.add(row.poolDigest);
   }
-  if (identities.size > 1) invalid();
+  if (allowed ? [...identities].some(identity => !allowed.has(identity)) : identities.size > 1) invalid();
   return { schemaVersion: 1, scope: 'recorded-worker-execution', comparability: 'unmatched-tasks', quality: 'unmeasured',
     poolId: pool.id, attempts: attempts.length, workers: pool.workers.map((worker) => summarize(worker, attempts.filter((row) => row.workerId === worker.id))) };
 }

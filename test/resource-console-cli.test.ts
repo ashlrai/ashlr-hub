@@ -14,8 +14,8 @@ function server(execute = false) {
       workspace: execute ? '/private/fixture/workspace' : null, maxParallel: execute ? 4 : 0, maxQueued: execute ? 64 : 0 },
     close: vi.fn(async () => {}) };
 }
-function signal(name: 'SIGINT' | 'SIGTERM', before: ReturnType<typeof process.listeners>): void {
-  const added = process.listeners(name).find((listener) => !before.includes(listener)); expect(added).toBeDefined(); added!();
+function signal(name: 'SIGINT' | 'SIGTERM', before: NodeJS.SignalsListener[]): void {
+  const added = process.listeners(name).find((listener) => !before.includes(listener)); expect(added).toBeDefined(); added!(name);
 }
 let out: ReturnType<typeof vi.spyOn>; let err: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
@@ -25,6 +25,25 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('explicit foreground resource console CLI', () => {
+  it.each([false, true])('passes managed mission enrollment with explicit startup=%s', async automatic => {
+    const handle = server(true); backend.start.mockResolvedValue(handle); const before = process.listeners('SIGTERM');
+    const running = cmdResourceConsole([...args, '--execute', '--workspace', '/private/fixture/workspace', '--projects', '/private/fixture/projects.json',
+      '--engineering-mission', '/private/fixture/mission.json', ...(automatic ? ['--mission-auto-start'] : []), '--json']);
+    try {
+      await vi.waitFor(() => expect(out).toHaveBeenCalledOnce());
+      expect(backend.start.mock.calls[0]![0]).toMatchObject({ engineeringMissionFile: '/private/fixture/mission.json', projectsFile: '/private/fixture/projects.json' });
+      expect(backend.start.mock.calls[0]![0].engineeringMissionAutoStart).toBe(automatic ? true : undefined);
+    } finally { signal('SIGTERM', before); await running; }
+    expect(await running).toBe(0);
+  });
+  it.each([
+    ['--mission-auto-start'], ['--engineering-mission', '/private/mission.json'],
+    ['--execute', '--workspace', '/private/work', '--engineering-mission', '/private/mission.json'],
+    ['--execute', '--workspace', '/private/work', '--projects', '/private/projects.json', '--engineering-mission', '/private/mission.json', '--engineering', '/private/engineering.json'],
+    ['--execute', '--workspace', '/private/work', '--projects', '/private/projects.json', '--engineering-mission', '/private/mission.json', '--mission-auto-start', '--mission-auto-start'],
+  ])('refuses ambiguous mission enrollment before startup: %j', async (...extra) => {
+    expect(await cmdResourceConsole([...args, ...extra])).toBe(2); expect(backend.start).not.toHaveBeenCalled();
+  });
   it.each([[], ['--help', '--json'], ['--root', '/'], ['--root', 'relative'], [...args, '--unknown'],
     [...args, '--port', '-1'], [...args, '--port', '65536'], [...args, '--port', '01'], [...args, '--port', '1.5'],
     [...args, '--execute'], [...args, '--workspace', '/private/work'], [...args, '--max-parallel', '2'],
@@ -43,6 +62,15 @@ describe('explicit foreground resource console CLI', () => {
     expect(await cmdResourceConsole([flag])).toBe(0); expect(backend.start).not.toHaveBeenCalled();
     expect(out.mock.calls[0]![0]).toContain('Read-only by default');
     expect(out.mock.calls[0]![0]).toContain('previously dispatching work is never');
+    expect(out.mock.calls[0]![0]).toContain('--allocation-controls for usage ceilings, whole-account pauses and General/Spark reservations');
+    expect(out.mock.calls[0]![0]).toContain('per-account General/Spark reservations for new tasks');
+    expect(out.mock.calls[0]![0]).toContain('Whole-account pauses\nstill block both General and Spark');
+    expect(out.mock.calls[0]![0]).toContain('does not grant access to the other scope');
+    expect(out.mock.calls[0]![0]).toContain('do not enable execution, reset quota, stop in-flight tasks or authorize overage');
+    expect(out.mock.calls[0]![0]).toContain('--engineering-preparation requires --execute and --projects');
+    expect(out.mock.calls[0]![0]).toContain('Run the prepared plan separately');
+    expect(out.mock.calls[0]![0]).toContain('autoAdmitPrepared');
+    expect(out.mock.calls[0]![0]).toContain('original deadline and retained queue capacity');
   });
   it.each([false, true])('passes explicit scope and emits one startup record (execute=%s)', async (execute) => {
     const handle = server(execute); backend.start.mockResolvedValue(handle);
@@ -98,5 +126,21 @@ describe('explicit foreground resource console CLI', () => {
   });
   it.each(['relative', '/', '/private/\u0085'])('refuses invalid quota configuration path %j', async (path) => {
     expect(await cmdResourceConsole([...args, '--quota-config', path])).toBe(2); expect(backend.start).not.toHaveBeenCalled();
+  });
+  it.each([{ extra: [] }, { extra: ['--execute', '--workspace', '/private/fixture/workspace'] }])('requires registered execution projects for preparation %#', async ({ extra }) => {
+    expect(await cmdResourceConsole([...args, ...extra, '--engineering-preparation', '/private/fixture/profiles.json'])).toBe(2);
+    expect(backend.start).not.toHaveBeenCalled();
+  });
+  it.each([false, true])('passes preparation profiles without a static catalog (supervision=%s)', async (automatic) => {
+    backend.start.mockResolvedValue(server(true)); const before = process.listeners('SIGTERM');
+    const running = cmdResourceConsole([...args, '--execute', '--workspace', '/private/fixture/workspace', '--projects', '/private/fixture/projects.json',
+      '--engineering-preparation', '/private/fixture/profiles.json', ...(automatic ? ['--engineering-supervision', '/private/fixture/supervision.json'] : []), '--json']);
+    try {
+      await vi.waitFor(() => expect(out).toHaveBeenCalledOnce());
+      expect(backend.start.mock.calls[0]![0]).toMatchObject({ engineeringPreparationFile: '/private/fixture/profiles.json', execute: true });
+      expect(backend.start.mock.calls[0]![0]).not.toHaveProperty('engineeringFile');
+      expect(backend.start.mock.calls[0]![0].engineeringSupervisionFile).toBe(automatic ? '/private/fixture/supervision.json' : undefined);
+    } finally { signal('SIGTERM', before); await running; }
+    expect(await running).toBe(0);
   });
 });

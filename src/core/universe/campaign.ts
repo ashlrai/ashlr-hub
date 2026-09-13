@@ -1,8 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { verifiedProcessStartRef, ownsLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { assertUniverseExecution, withUniverseExecution } from './execution.js';
 import { runUniverseOwned } from './runner.js';
+import { runCampaignSeedEvaluationOwned } from './campaign-seed-evaluation.js';
 import { scheduledVariants, universePath } from './store.js';
 import { canonical, defaultUniverseRoot, digest } from './artifacts.js';
 import {
@@ -151,6 +153,9 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
       return finish(folded.state === 'stop-requested' ? 'stopped' : 'paused', 'Acknowledged pending owner control', admissionDigest);
     }
     if (controller.signal.aborted) return finish('paused', 'Campaign paused by caller cancellation', admissionDigest);
+    if (summary.definition.measureSeed === true && summary.seedEvaluation && summary.seedEvaluation.result?.status !== 'measured') {
+      return finish('paused', 'Seed evaluation requires attention; its intent is never replayed', admissionDigest);
+    }
 
     // The common Universe lease excludes other runs while abandoned starts
     // are reconciled. Existing run IDs finalize interruption; they never replay.
@@ -176,11 +181,13 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
     assertExpectation(summary, options.expectedIdentity, false);
     if (summary.sourceState !== 'healthy') throw new Error('Campaign evidence is degraded');
     const before = campaignBudgetLimit(summary);
-    if (before) return finish(before.state, before.reason, admissionDigest);
+    if (before) return finish(summary.definition.measureSeed === true && summary.seedEvaluation?.result?.status !== 'measured' &&
+      before.state === 'completed' ? 'paused' : before.state, before.reason, admissionDigest);
     const startRef = verifiedProcessStartRef(process.pid);
     if (!startRef) throw new Error('Cannot establish campaign process ownership');
     const at = new Date().toISOString();
     const deadlineAt = summary.deadlineAt ?? new Date(Date.parse(at) + summary.definition.budget.maxDurationMs).toISOString();
+    const deadlineMonotonicMs = performance.now() + Math.max(0, Date.parse(deadlineAt) - Date.now());
     owned();
     appendCampaignEvent(directory, { kind: 'started', at, deadlineAt, owner: { pid: process.pid, startRef },
       ...(dispatchId === undefined ? {} : { dispatchId }) },
@@ -199,6 +206,11 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
         cancel();
       }
     }, 300);
+
+    if (summary.definition.measureSeed === true) {
+      const measured = await runCampaignSeedEvaluationOwned(id, { ...options, signal: controller.signal, deadlineMonotonicMs }, lock);
+      if (measured.status !== 'measured') return finish('paused', measured.reason ?? 'Seed evaluation requires attention');
+    }
 
     while (true) {
       if (!ownsLocalStoreLock(lock)) throw new Error('Campaign execution ownership was lost');
@@ -242,6 +254,8 @@ async function runCampaignWithLease(id: string, options: CampaignOptions, lock: 
       appendCampaignEvent(directory, { kind: 'step', at: new Date().toISOString(), ordinal, runId, generation,
         variantIds: variants.map((variant) => variant.id), reservedModelRequests });
       const result = await runUniverseOwned(summary.definition.universeId, { root: options.root, resourceRuntime: options.resourceRuntime,
+        expectedResourceRuntimeDigest: options.expectedResourceRuntimeDigest,
+        isExecutionStopped: options.isExecutionStopped,
         signal: controller.signal, runId, campaign: { id, ordinal, definitionDigest: summary.definitionDigest },
         deadlineMs: Date.parse(deadlineAt), trialLimit: variants.length,
         ...(summary.definition.feedback ? { feedback: true as const } : {}),

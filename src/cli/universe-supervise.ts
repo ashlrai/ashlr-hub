@@ -16,6 +16,9 @@ commits. Completed planned campaigns reconcile local delivery without rerunning
 workers; new campaigns keep their original resource and admission checks.
 Plan JSON: {"schemaVersion":1,"deliveries":[{"campaignId":"search",
 "branch":"codex/result","baseCommit":"<full pinned seed commit>"}]}
+Optional target allowInitialRepair:true accepts a first passing repair only with
+an earlier measured failed exact seed in the same campaign/niche and positive
+improvement. Omission preserves prior-passing-elite delivery; no baseline is run.
 The plan must be a private mode-0600 regular file (at most 64 KiB); every target
 is checked before dispatch. No merge, push, checkout or service activation occurs.
 

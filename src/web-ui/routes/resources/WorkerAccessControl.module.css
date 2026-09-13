@@ -14,8 +14,9 @@
 .identity strong { font-size: var(--text-sm-size); font-weight: var(--font-weight-medium); }
 .identity small { display: block; color: var(--text-secondary); font-size: var(--text-xs-size); margin-top: var(--space-1); }
 .state { font-size: var(--text-xs-size); color: var(--text-secondary); text-align: right; overflow-wrap: anywhere; }
+.effective { display: block; max-width: 40ch; font-weight: var(--font-weight-medium); color: var(--status-warning-fg); margin-top: var(--space-1); }
 .actions { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-3); margin-top: var(--space-3); }
-.note { color: var(--text-secondary); margin-top: var(--space-3); max-width: 85ch; }
+.note { color: var(--text-secondary); margin-top: var(--space-3); max-width: 78ch; }
 .actions .note { margin-top: 0; }
 .save, .conflict button { min-height: 38px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: var(--space-2) var(--space-3); font: inherit; font-size: var(--text-sm-size); }
 .save { background: var(--accent-600); color: var(--accent-contrast); border-color: var(--accent-600); }

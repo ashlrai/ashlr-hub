@@ -4,7 +4,7 @@ import { chmodSync, existsSync, linkSync, lstatSync, mkdirSync, mkdtempSync, rea
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from '../src/core/resources/quota-refresh-lease.js';
+import { acquireResourceQuotaRefreshLease, readResourceQuotaRefreshCustody, type ResourceQuotaRefreshLease } from '../src/core/resources/quota-refresh-lease.js';
 import * as durability from '../src/core/util/durability.js';
 // These fixtures specifically preserve and exercise the legacy marker contract.
 vi.mock('../src/core/resources/native-boot-identity.js', () => ({ readNativeBootIdentity: () => null }));
@@ -24,6 +24,17 @@ afterEach(() => {
 });
 
 describe.skipIf(process.platform === 'win32')('shared quota refresh lease', () => {
+  it('issues custody only for its actual live lease and retained marker', async () => {
+    const lease = await acquire();
+    expect(readResourceQuotaRefreshCustody(lease)).toMatchObject({ root, pending: false });
+    expect(() => readResourceQuotaRefreshCustody({ ...lease })).toThrow('Unrecognized');
+    lease.markPending(); expect(readResourceQuotaRefreshCustody(lease).pending).toBe(true);
+    const original = readFileSync(pendingPath(), 'utf8');
+    writeFileSync(pendingPath(), '{}\n');
+    expect(() => readResourceQuotaRefreshCustody(lease)).toThrow('marker changed');
+    writeFileSync(pendingPath(), original); lease.close();
+    expect(() => readResourceQuotaRefreshCustody(lease)).toThrow('ownership lost');
+  });
   it('creates a private lease without marking contact, then closes idempotently', async () => {
     expect(existsSync(root)).toBe(false);
     const lease = await acquire();

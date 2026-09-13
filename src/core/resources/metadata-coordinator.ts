@@ -4,7 +4,9 @@ import type { VerifyProcessGroupLifecycle } from '../run/verify-commands.js';
 type NativeActivity = { settle(): void; processGroupLifecycle?: VerifyProcessGroupLifecycle };
 export interface NativeMetadataCoordinator {
   readonly signal: AbortSignal;
-  run<T>(operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>, settlementConfirmed?: (value: T) => boolean): Promise<T>;
+  /** Observer is synchronous and invocation-local; it never receives native/error data. */
+  run<T>(operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>, settlementConfirmed?: (value: T) => boolean,
+    onReservationFailure?: () => void): Promise<T>;
   abort(): void;
   dispose(): void;
 }
@@ -39,9 +41,13 @@ export function createNativeMetadataCoordinator(options: {
       queue.shift()!.start();
     }
   }
-  function run<T>(operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>, settlementConfirmed?: (value: T) => boolean): Promise<T> {
+  function run<T>(operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>, settlementConfirmed?: (value: T) => boolean,
+    onReservationFailure?: () => void): Promise<T> {
     if (controller.signal.aborted) return Promise.reject(abortError());
     if (typeof operation !== 'function') return Promise.reject(new Error('Invalid native metadata operation'));
+    if (onReservationFailure !== undefined && typeof onReservationFailure !== 'function') {
+      return Promise.reject(new Error('Invalid native metadata reservation observer'));
+    }
     if (options.beginNativeActivity && typeof settlementConfirmed !== 'function') {
       return Promise.reject(new Error('Native metadata settlement predicate required'));
     }
@@ -56,7 +62,13 @@ export function createNativeMetadataCoordinator(options: {
           // Include reservation publication in the terminal failure boundary.
           // It must finish durably before native work can start.
           invoked = true;
-          activity = options.beginNativeActivity?.();
+          try { activity = options.beginNativeActivity?.(); }
+          catch (error) {
+            // Exact invocation and phase witness, before shared cancellation.
+            // Never give diagnostics the thrown value or let them replace it.
+            try { onReservationFailure?.(); } catch { /* Diagnostics cannot change settlement. */ }
+            throw error;
+          }
           if (controller.signal.aborted) { activity?.settle(); throw abortError(); }
           return operation(activity?.processGroupLifecycle);
         }).then((value) => {

@@ -1,6 +1,7 @@
 import { normalizeNumericLoopbackOllamaBaseUrl } from '../run/ollama-identity.js';
 import { resourceUsageScopeForProvider } from '../resources/performance.js';
-import { canonical, digest } from './artifacts.js';
+import { validSeedContextReceipt } from './seed-context.js';
+export { resourceGenerationTaskId } from '../resources/task-origin.js';
 import type { UniverseGenerationConfig, UniverseGenerationReceipt, UniverseGenerationUsage, UniverseResourceGenerationEvidence,
   UniverseRun, UniverseTrial } from './types.js';
 
@@ -36,16 +37,6 @@ function resourceWorkers(value: unknown): value is string[] {
   return denseArray(value, 1, 32) && value.every(resourceId) && new Set(value).size === value.length;
 }
 
-/** Deterministic within the durable run/variant scope, independent of scratch UUIDs. */
-export function resourceGenerationTaskId(identity: { universeId: string; runId: string; variantId: string }): string {
-  if (!dataObject(identity, ['universeId', 'runId', 'variantId']) ||
-    !Object.values(identity).every((value) => typeof value === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/.test(value))) {
-    throw new Error('Invalid Universe resource generation identity');
-  }
-  const identityDigest = digest(canonical(identity));
-  // Keep each segment below the public scrubber's token-shaped string bound.
-  return `u-${identityDigest.slice(0, 30)}-${identityDigest.slice(30, 60)}`;
-}
 export function validGenerationPath(value: unknown): value is string {
   return boundedText(value, 512) && !value.includes('\\') && !value.startsWith('/') &&
     !value.includes(':') && value.split('/').every((part) => part !== '' && part !== '.' && part !== '..' &&
@@ -165,14 +156,16 @@ function validFileOperationsReceipt(value: unknown, promptDigest: unknown, chang
 
 export function validGenerationReceipt(value: unknown): value is UniverseGenerationReceipt {
   if (!object(value)) return false;
+  const seedDescriptor = Object.getOwnPropertyDescriptor(value, 'seedContext');
+  if (seedDescriptor && (!('value' in seedDescriptor) || !validSeedContextReceipt(seedDescriptor.value))) return false;
   const provider = Object.getOwnPropertyDescriptor(value, 'provider')?.value;
   const resource = provider === 'resource-pool';
   if (resource && !dataObject(value, ['schemaVersion', 'provider', 'endpoint', 'model', 'status', 'requestStarted',
-    'promptDigest', 'responseDigest', 'durationMs', 'usage', 'changedFiles', 'resource'], ['error', 'feedback', 'search', 'fileOperations'])) return false;
+    'promptDigest', 'responseDigest', 'durationMs', 'usage', 'changedFiles', 'resource'], ['error', 'feedback', 'search', 'seedContext', 'fileOperations'])) return false;
   if (resource && (typeof value.status !== 'string' || !dataObject(value.usage, ['state', 'inputTokens', 'outputTokens']) ||
     !denseArray(value.changedFiles, 0, 16))) return false;
   if (!object(value) || !exact(value, ['schemaVersion', 'provider', 'endpoint', 'model', 'status', 'requestStarted',
-    'promptDigest', 'responseDigest', 'durationMs', 'usage', 'changedFiles', 'error', 'feedback', 'search', 'fileOperations', 'resource']) ||
+    'promptDigest', 'responseDigest', 'durationMs', 'usage', 'changedFiles', 'error', 'feedback', 'search', 'seedContext', 'fileOperations', 'resource']) ||
       value.schemaVersion !== 1 || (resource ? value.endpoint !== null || value.model !== null || value.requestStarted !== false ||
         !validResourceGenerationEvidence(value.resource)
         : provider !== 'local-openai-compatible' || Object.hasOwn(value, 'resource') || !boundedText(value.endpoint, 512) ||
@@ -184,6 +177,7 @@ export function validGenerationReceipt(value: unknown): value is UniverseGenerat
       !Array.isArray(value.changedFiles) || value.changedFiles.length > 16 || !value.changedFiles.every(validGenerationPath) ||
       new Set(value.changedFiles).size !== value.changedFiles.length ||
       (value.feedback !== undefined && (!validFeedbackReceipt(value.feedback) || value.promptDigest === null)) ||
+      (value.seedContext !== undefined && (!validSeedContextReceipt(value.seedContext) || value.promptDigest === null)) ||
       (value.search !== undefined && (!object(value.search) || !exact(value.search, ['schemaVersion', 'digest']) ||
         value.search.schemaVersion !== 2 || typeof value.search.digest !== 'string' || !/^[a-f0-9]{64}$/.test(value.search.digest) ||
         value.promptDigest === null)) ||

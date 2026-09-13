@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-12",
+  "baseSource": "fc66f69e3829faade603aad5557229b4ca83b02c",
+  "branch": "codex/spark-enrollment-preparation",
+  "proposal": {
+    "status": "prepared",
+    "manifestPath": "/Users/masonwyatt/.codex/artifacts/ashlr-spark-enrollment.ndJdDt/proposal/manifest.json",
+    "inputDigest": "efe7deefbd136ec804a574472c2310bbe7917bdd85b5afd8e8c0eec9c742875f",
+    "fromPoolDigest": "08eed91019dae433893c7daf39e4446e544f1a2048c04ca83955031e8bcb0dc1",
+    "toPoolDigest": "e7f622e0aaada69cc295cd225297d9c3cd18d79dc60095f00bb66faadf9c05dd",
+    "generalWorkerId": "codex-personal",
+    "sparkWorkerId": "codex-personal-spark"
+  },
+  "existingLedgerCheck": {"exitCode": 1, "code": "uncertain-work", "legacyCollectorPendingRetained": true},
+  "ledgerChanged": false,
+  "allocationChanged": false,
+  "accountUnpaused": false,
+  "generalReservationApplied": false,
+  "providerCalled": false,
+  "quotaRefreshed": false,
+  "serviceActivated": false,
+  "deployed": false,
+  "primaryNativeGate": {"handle": 73003, "state": "running", "sourceAndBuildUnchanged": true}
+}

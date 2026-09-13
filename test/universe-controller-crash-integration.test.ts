@@ -34,6 +34,7 @@ function fixture(delivery = false) {
   scratch.push(base);
   const root = join(base, 'store');
   const temp = join(base, 'tmp'); mkdirSync(temp, { mode: 0o700 });
+  const fixtureHome = join(base, 'home'); mkdirSync(fixtureHome, { mode: 0o700 });
   const manifests: UniverseManifest[] = [];
   for (const name of ['a', 'b']) {
     const repo = join(base, `repo-${name}`); mkdirSync(repo, { mode: 0o700 });
@@ -63,7 +64,7 @@ console.log(JSON.stringify({passed:Number.isInteger(value)&&value>0,score:value,
     tasks: [{ campaignId: 'campaign-a', dependsOn: [] }, { campaignId: 'campaign-b', dependsOn: ['campaign-a'] }] };
   const deliveryPlan = { schemaVersion: 1 as const, deliveries: [{ campaignId: 'campaign-a',
     branch: 'codex/crash-native', baseCommit: manifests[0]!.seed.revision }] };
-  return { base, root, temp, definition, manifests, options: { root, ...(delivery ? { deliveryPlan } : {}) } };
+  return { base, root, temp, fixtureHome, definition, manifests, options: { root, ...(delivery ? { deliveryPlan } : {}) } };
 }
 
 type Fixture = ReturnType<typeof fixture>;
@@ -120,7 +121,10 @@ function launch(value: Fixture, boundary?: Boundary) {
     process.stdout.write(JSON.stringify({report})+'\\n');`;
   const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source], {
     cwd: project, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { PATH: process.env.PATH, LC_ALL: 'C', TMPDIR: value.temp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+    // Native child homedir() is not covered by the parent Vitest home mock.
+    env: { PATH: process.env.PATH, LC_ALL: 'C', TMPDIR: value.temp, HOME: value.fixtureHome,
+      USERPROFILE: value.fixtureHome, ASHLR_HOME: join(value.fixtureHome, '.ashlr'),
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
   });
   let stdout = ''; let stderr = '';
   let readyResolve!: (marker: { boundary: Boundary; pid: number; stagePath: string }) => void;

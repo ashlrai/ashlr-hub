@@ -98,7 +98,7 @@ describe('connection monitoring and allocation capabilities', () => {
       workers: [{ workerId: 'codex', accountHint: 'a'.repeat(64), bucketIds: ['codex'] }] });
     const connection = monitor();
     const quota = vi.spyOn(quotas, 'createResourceQuotaRefresher').mockReturnValue({
-      readObservations: (base) => base, unavailableWorkerIds: () => ['codex'],
+      readObservations: (base) => base, unavailableWorkerIds: () => ['codex'], quotaUnavailableWorkerIds: () => [],
       snapshot: () => ({ schemaVersion: 1, scope: 'codex-native-metadata', state: 'running', sampledAt: new Date().toISOString(), workers: [] }),
       close: async () => {},
     });

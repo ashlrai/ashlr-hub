@@ -1,0 +1,155 @@
+{
+  "schemaVersion": 1,
+  "scope": "local-successor-admission-not-activated",
+  "sourceCommit": "29f3e0551a04e9beca55984a6afea988749d065b",
+  "build": {
+    "session": 96245,
+    "exitCode": 0,
+    "dirty": false,
+    "webModules": 257
+  },
+  "gates": [
+    {
+      "name": "coordinator-and-preflight",
+      "session": 63781,
+      "files": 2,
+      "passed": 72,
+      "skipped": 0,
+      "durationSeconds": 27.38
+    },
+    {
+      "name": "final-precise-zero-preflight-rerun",
+      "session": 92038,
+      "files": 1,
+      "passed": 24,
+      "skipped": 0,
+      "durationSeconds": 2.71,
+      "overlaps": "coordinator-and-preflight"
+    },
+    {
+      "name": "adjacent-admission-and-capacity",
+      "session": 8395,
+      "files": 6,
+      "passed": 190,
+      "skipped": 0,
+      "durationSeconds": 14.86
+    },
+    {
+      "name": "quota-evidence-and-scope-policy",
+      "session": 28734,
+      "files": 2,
+      "passed": 63,
+      "skipped": 0,
+      "durationSeconds": 11.35
+    },
+    {
+      "name": "builtin-structure-registry-lifecycle",
+      "session": 46036,
+      "files": 3,
+      "passed": 67,
+      "skipped": 0,
+      "durationSeconds": 9.47
+    },
+    {
+      "name": "real-loopback-successor-delivery",
+      "session": 80608,
+      "files": 1,
+      "passed": 3,
+      "skipped": 0,
+      "durationSeconds": 315.7
+    }
+  ],
+  "uniqueTests": 395,
+  "uniqueFiles": 14,
+  "static": {
+    "sourceTypecheck": true,
+    "strictChangedTestImports": true,
+    "scopedLint": true,
+    "documentation": true,
+    "realIoLane": {
+      "files": 348,
+      "unitFiles": 708,
+      "unclassified": 0
+    }
+  },
+  "independentReview": "no-blocking-findings",
+  "evaluator": {
+    "sampledAt": "2026-09-12T11:08:34.367Z",
+    "evaluatorDigest": "9a051509b3eccea7e562a3b5d525bdc5e1beae1bdfe5bc2f83edad8c8306fe46",
+    "manifest": {
+      "schemaVersion": 1,
+      "id": "preparation-measurement-v1",
+      "files": [
+        {
+          "name": "preparation-bridge.mjs",
+          "digest": "355c122975745da283719651c9d5ad7d845c0a5f54f308d3b10530cef327cb02"
+        },
+        {
+          "name": "preparation-verification-activity.mjs",
+          "digest": "02d0f8a3d9addb899266859c6eaf110286e9dedc2bef9da9e4efe6e304188dce"
+        },
+        {
+          "name": "preparation-verification-child.mjs",
+          "digest": "f89798b6b43006c72e00f53a2fabea8b27c121d4f4a55e081783974851b0ef37"
+        },
+        {
+          "name": "preparation-verification-controller.mjs",
+          "digest": "4c7e80cb73a7f3b6df7a40301544273e9d08cdb28ee4d904223ae4e029c873bf"
+        },
+        {
+          "name": "preparation-verification-fixtures.mjs",
+          "digest": "48b8e1eda0bcdc4f573625df7e45b6ae9572628669fb71813149c87ead133672"
+        },
+        {
+          "name": "preparation-verification-native.mjs",
+          "digest": "f61520b2dc6d3fb6d7e99afc167865ecefd0bb548df307166c32e2cac4787a5c"
+        },
+        {
+          "name": "preparation-verification-protocol.mjs",
+          "digest": "9b9664097862c2391d0d9c12060905517a285e1fb8862e079e880bcb2ebb56c6"
+        },
+        {
+          "name": "preparation-verification-tool.mjs",
+          "digest": "5e42f135f463c13f777e2ceef6751fabd252a02c2c11266dac550f13713e33e3"
+        },
+        {
+          "name": "preparation-verification.mjs",
+          "digest": "f20673014df460b54f915ad7a1ade2b3b1e5f6ecf67521c58fd5308124444062"
+        }
+      ]
+    },
+    "allAssetHashesVerified": true,
+    "globalStop": {
+      "state": "active",
+      "sourceState": "healthy"
+    },
+    "collector": {
+      "scope": "local-record-inspection",
+      "sampledAt": "2026-09-12T11:08:34.391Z",
+      "state": "pending",
+      "markerVersion": 1,
+      "reasonCode": "legacy-owner-evidence-missing",
+      "recoveryAttempted": false
+    },
+    "priorDigest": "25d5787412e177238745216d259a9167768ca6460bfed126cc453eb714d0f953",
+    "changedAssets": [
+      "preparation-bridge.mjs",
+      "preparation-verification-fixtures.mjs"
+    ],
+    "exactCurrentNativeQualification": false
+  },
+  "effects": {
+    "providerCalls": false,
+    "accountPolicyChanged": false,
+    "collectorRecoveryAttempted": false,
+    "globalStopChanged": false,
+    "serviceActivated": false,
+    "remotePublished": false
+  },
+  "exclusions": [
+    "Current rebuilt evaluator full native qualification",
+    "Genuine retained scoring calibration",
+    "Live account commissioning",
+    "Production activation"
+  ]
+}

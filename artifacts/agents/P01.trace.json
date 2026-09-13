@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P01",
+  "baseCommit": "5c270bc73890e474463c31764d51e76196ad2e3f",
+  "status": "unsigned-source-inventory",
+  "evidenceScope": "read-only-source-review",
+  "independentlyVerified": false,
+  "signature": null,
+  "ownedFiles": [
+    "artifacts/agents/P01.md",
+    "artifacts/agents/P01.trace.json",
+    "artifacts/firm-gap-inventory.json"
+  ],
+  "verification": {
+    "sourceReferences": "all-16-entry-paths-and-line-bounds-checked",
+    "runtimeTests": "not-run",
+    "liveActivation": "not-attempted"
+  },
+  "all48PackagesComplete": false
+}

@@ -121,7 +121,8 @@ describe('explicit Codex metadata protocol and identity hints', () => {
     expect(Date.parse(result.observation!.expiresAt) - Date.parse(result.startedAt)).toBe(60_000);
     expect(Date.parse(result.finishedAt)).toBeGreaterThanOrEqual(Date.parse(result.startedAt));
     const recorded = invocation();
-    expect(recorded.argv).toEqual(['app-server', '--stdio', '-c', 'analytics.enabled=false']);
+    expect(recorded.argv).toEqual(['app-server', '--stdio', '-c', 'analytics.enabled=false',
+      '-c', 'features.plugins=false', '-c', 'features.remote_plugin=false']);
     expect(recorded.requests).toEqual([
       { id: 1, method: 'initialize', params: { clientInfo: { name: 'ashlr_hub_resource_probe', version: '1' },
         capabilities: { experimentalApi: false, requestAttestation: false } } },

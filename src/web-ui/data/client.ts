@@ -51,6 +51,7 @@ export async function apiPost<T>(
   path: string,
   body: unknown,
   mutationToken: string,
+  signal?: AbortSignal,
 ): Promise<T> {
   const res = await fetch(path, {
     method: 'POST',
@@ -60,6 +61,7 @@ export async function apiPost<T>(
       'x-ashlr-token': mutationToken,
     },
     body: JSON.stringify(body ?? {}),
+    signal,
   });
   if (res.status === 404) {
     throw new DispatchDisabledError(path);

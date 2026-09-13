@@ -11,7 +11,7 @@ import { fsyncDirectory } from '../util/durability.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readResourceJson } from './pool-runtime.js';
 import { readNativeBootIdentity, type NativeBootIdentity } from './native-boot-identity.js';
-import type { ResourceCollectorRecoveryDiagnosis } from './console-types.js';
+import type { ResourceCollectorInspection, ResourceCollectorRecoveryDiagnosis } from './console-types.js';
 
 export type ResourceQuotaRefreshLeaseErrorCode = 'collector-owned' | 'reconciliation-required' |
   'collector-unavailable' | 'cleanup-unconfirmed' | 'cancelled';
@@ -28,6 +28,13 @@ export class ResourceQuotaRefreshLeaseError extends Error {
 }
 
 const ACQUISITION_UNAVAILABLE = 'Resource quota collector already owned or unavailable; prior pending work requires operator reconciliation';
+const quotaCustodies = new WeakMap<ResourceQuotaRefreshLease, () => { root: string; lock: LocalStoreLock; pending: boolean }>();
+/** Only a real live lease can vouch for its metadata fence. */
+export function readResourceQuotaRefreshCustody(lease: ResourceQuotaRefreshLease) {
+  const read = quotaCustodies.get(lease);
+  if (!read) throw new Error('Unrecognized resource quota owner');
+  return read();
+}
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const MAX_MARKER_BYTES = 512;
 const RECOVERY_RECEIPT = '.resource-quota-refresh-recovery.json';
@@ -86,6 +93,38 @@ function readPendingMarker(path: string): { marker: PendingMarker; stat: BigIntS
   const after = lstatSync(path, { bigint: true });
   if (!validMarker(marker) || !sameMarker(before, after)) throw new Error();
   return { marker, stat: after, recordDigest: digest(canonical(marker)) };
+}
+
+/** Read only the selected private marker; never acquire ownership or evaluate recovery. */
+export function inspectResourceQuotaRefreshPending(root: string): ResourceCollectorInspection {
+  const report = (state: ResourceCollectorInspection['state'], markerVersion: ResourceCollectorInspection['markerVersion'],
+    reasonCode: ResourceCollectorInspection['reasonCode']): ResourceCollectorInspection => ({
+    scope: 'local-record-inspection', sampledAt: new Date().toISOString(), state, markerVersion, reasonCode, recoveryAttempted: false,
+  });
+  try {
+    if (typeof root !== 'string' || !isAbsolute(root) || resolve(root) !== root || root === parse(root).root ||
+      root.length > 4096 || [...root].some(character => character.charCodeAt(0) < 32 ||
+        character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159)) throw new Error();
+    inspectPrivateDirectory(root);
+    const before = lstatSync(root, { bigint: true });
+    const finish = () => {
+      inspectPrivateDirectory(root);
+      const after = lstatSync(root, { bigint: true });
+      if (before.dev !== after.dev || before.ino !== after.ino || before.mode !== after.mode || before.uid !== after.uid ||
+        before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new Error();
+    };
+    const path = join(root, '.resource-quota-refresh-pending.json');
+    try { lstatSync(path); }
+    catch (error) {
+      // ENOENT is absence only when the already verified parent remains intact.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      finish(); return report('absent', null, 'no-pending-record');
+    }
+    const { marker } = readPendingMarker(path);
+    finish();
+    return report('pending', marker.schemaVersion, marker.schemaVersion === 1
+      ? 'legacy-owner-evidence-missing' : 'recovery-not-evaluated');
+  } catch { return report('unavailable', null, 'pending-evidence-unavailable'); }
 }
 
 function privateActivityStat(stat: BigIntStats): boolean {
@@ -469,5 +508,7 @@ export async function acquireResourceQuotaRefreshLease(root: string,
     }
     if (closeError) throw closeError;
   }
-  return Object.freeze({ assertOwnership, identity, markPending, beginNativeActivity, close });
+  const lease = Object.freeze({ assertOwnership, identity, markPending, beginNativeActivity, close });
+  quotaCustodies.set(lease, () => { assertOwnership(); return Object.freeze({ root, lock, pending: pending !== null }); });
+  return lease;
 }

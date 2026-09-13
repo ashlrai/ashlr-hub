@@ -11,6 +11,87 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Keep calibrated scoring local
+
+- Excludes the machine-specific preparation scorer and its frozen source snapshot
+  from public npm archives while retaining the installed local evaluator.
+- Rejects scorer files in release pack reports without relaxing file-mode or
+  dependency validation.
+
+### Engineering preparation transport isolation
+
+- Rejects transport workspaces overlapping any console project, including the
+  implicit default, during plan checks and before creating preparation output.
+- Aligns preflight with enrollment's existing boundary, avoiding partial bundles
+  for configurations that were never eligible for enrollment.
+
+### Global-stop queue recovery
+
+- Holds undispatched resource jobs while the global stop is active or unreadable,
+  preserving task identity and input without recording a cancelled attempt.
+- Rechecks stop authority during admission and before worker dispatch; retains
+  existing cancellation for running work and original mission deadlines.
+- Shows distinct queue waiting reasons and automatically retries eligible work
+  after the stop clears, without clearing it or overriding queue pause.
+
+### Global execution stop visibility
+
+- Displays live global-stop evidence separately from account capacity in the
+  Resources workspace, without exposing private authority paths.
+- Withholds task submission, queue resume and mission start on active, unknown
+  or historical stop evidence while preserving authorized stop controls.
+- Keeps real worker admission and the global stop unchanged; no activation or
+  stop-clearing capability is added.
+
+### Native collector failure visibility
+
+- Distinguishes pre-invocation activity reservation failure from shared queued
+  cancellation, preserving its cause without exposing raw errors or weakening
+  partial-publication cleanup holds.
+- Retains the first observed connection failure separately from cancelled peers,
+  including bounded cleanup details in the Account connections panel.
+- Disables plugin startup for metadata-only Codex clients using process-local
+  overrides; leaves worker plugins, account policy and cleanup checks unchanged.
+- Preserves sanitized last-attempt cleanup diagnostics in continuous quota
+  snapshots and the Native quota reads panel, including evidence-publication
+  failure versus unconfirmed process-group exit.
+- Keeps unknown evidence explicit, clears old details on a new attempt, and
+  preserves existing cleanup holds and account reserves. No automatic retry or
+  recovery authority is added.
+
+### Managed standing mission workspace
+
+- Adds explicit `--engineering-mission` enrollment and optional
+  `--mission-auto-start` to the Resources workspace, sharing its existing pool.
+- Exposes identity/revision-checked start/stop/status and a mission phase strip.
+  Stop intent survives restart; shutdown drains mission work before the human
+  workspace. The original deadline and account reservations are unchanged.
+- Keeps the current scope's close control separate from standing-mission stop.
+  No resident service installation or actual-account activation is implied.
+
+### Cooperative standing-mission setup
+
+- Moves mission setup materialization and publication-time predecessor checks
+  into a fixed worker while preserving genuine parent workspace ownership.
+- Binds execution to one pinned request and the original deadline; stop waits
+  for cleanup and natural exit without force-terminating writes or retrying
+  uncertain output. Retained initialization leases withhold success.
+- Preserves the standalone synchronous setup API and adds local responsiveness,
+  human-task settlement, replay and cancellation coverage. This does not install
+  a resident service or commission external accounts.
+- Reopens a resource JSON snapshot once on a detected atomic replacement,
+  repeating every validation; unsafe, in-place or repeatedly changing input
+  remains refused. No effectful operation is retried.
+
+### Autonomous coordinator lifecycle visibility
+
+- Separates last-reported coordinator transitions, fixed failure reasons and
+  report time from fresh journal samples and worker connection status.
+- Keeps caught successor-loop faults visible without closing independent work;
+  reports do not grant execution, refresh budgets or trigger automatic recovery.
+- Adds a test-only preparation measurement prototype with incorrect-candidate
+  controls. Its diagnostic output cannot serve as accepted evaluation evidence.
+
 ### Controller observation comparison
 
 - Adds session-only before/after comparison for consecutive accepted controller

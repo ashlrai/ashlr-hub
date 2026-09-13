@@ -34,6 +34,103 @@ function setup() {
 }
 
 describe('resource dispatch desk', () => {
+  it('keeps human drafts mounted across first attachment, close, replacement and a failed scope read', async () => {
+    const f = setup(); f.scope.engineeringAttachmentSupported = true;
+    f.scope.defaultProjectId = 'default'; f.scope.projects = [{ id: 'default', label: 'Hub', workspace: f.scope.workspace!, enabled: true }];
+    let observed = { ...f.scope }, unavailable = false;
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (path, init) => {
+      if (path === '/api/resources/console') return unavailable ? json({}, 503) : json(observed);
+      if (path === '/api/resources/engineering-runtime/close') {
+        expect(JSON.parse(String(init?.body))).toEqual({ expectedAttachmentId: observed.engineeringAttachmentId });
+        observed = { ...observed, engineeringLifecycle: 'closed' };
+        return json({ engineeringLifecycle: 'closed', engineeringAttachmentId: observed.engineeringAttachmentId });
+      }
+      return original(path, init);
+    });
+    window.history.replaceState(null, '', '/resources/#resource-workspace'); setMutationToken('a'.repeat(64));
+    const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await screen.findByText('Not attached');
+    const prompt = await screen.findByLabelText('Task prompt');
+    await user.type(prompt, 'Keep this human draft across autonomous scopes.');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Task worker' }), 'local-a');
+    expect(screen.queryByRole('button', { name: /Engineering runs/ })).not.toBeInTheDocument();
+    observed = { ...observed, engineeringSupported: true, engineeringLifecycle: 'running', engineeringAttachmentId: 'a'.repeat(32) };
+    await user.click(screen.getByRole('button', { name: 'Check engineering status' })); await screen.findByText('Running');
+    expect(screen.getByRole('button', { name: /Engineering runs/ })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Close engineering' })); await screen.findByText('Closed');
+    observed = { ...observed, engineeringLifecycle: 'running', engineeringAttachmentId: 'b'.repeat(32) };
+    await user.click(screen.getByRole('button', { name: 'Check engineering status' })); await screen.findByText('Running');
+    unavailable = true; await user.click(screen.getByRole('button', { name: 'Check engineering status' })); await screen.findByText('Unknown');
+    expect(screen.getByLabelText('Task prompt')).toBe(prompt);
+    expect(prompt).toHaveValue('Keep this human draft across autonomous scopes.');
+    expect(screen.getByRole('button', { name: 'Send task' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Send task' }));
+    await waitFor(() => expect(f.request.mock.calls.some(([path, init]) => path === '/api/resources/tasks' && init?.method === 'POST')).toBe(true));
+  });
+  it('reloads only the engineering pane when attachment changes and retains the human draft', async () => {
+    const f = setup(); f.scope.engineeringAttachmentSupported = true; f.scope.engineeringAttachmentId = 'a'.repeat(32);
+    f.scope.engineeringSupported = true; f.scope.engineeringLifecycle = 'running';
+    f.scope.defaultProjectId = 'default'; f.scope.projects = [{ id: 'default', label: 'Hub', workspace: f.scope.workspace!, enabled: true }];
+    let observed = { ...f.scope };
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (path, init) => {
+      if (path === '/api/resources/console') return json(observed);
+      if (path === '/api/resources/engineering') return json([]);
+      return original(path, init);
+    });
+    window.history.replaceState(null, '', '/resources/#resource-workspace');
+    const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await screen.findByText('Running'); await user.type(await screen.findByLabelText('Task prompt'), 'My draft survives.');
+    await user.click(screen.getByRole('button', { name: /Engineering runs/ }));
+    await screen.findByRole('heading', { name: 'No engineering plan enrolled for this project.' });
+    const before = f.request.mock.calls.filter(([path]) => path === '/api/resources/engineering').length;
+    observed = { ...observed, engineeringAttachmentId: 'b'.repeat(32) };
+    await user.click(screen.getByRole('button', { name: 'Check engineering status' }));
+    await waitFor(() => expect(f.request.mock.calls.filter(([path]) => path === '/api/resources/engineering').length).toBeGreaterThan(before));
+    await user.click(screen.getByRole('button', { name: '+ New task' }));
+    expect(screen.getByLabelText('Task prompt')).toHaveValue('My draft survives.');
+  });
+  it('preserves a human workspace draft and submission when engineering closes', async () => {
+    const f = setup(); f.scope.engineeringSupported = true; f.scope.engineeringLifecycle = 'running';
+    f.scope.defaultProjectId = 'default'; f.scope.projects = [{ id: 'default', label: 'Hub', workspace: f.scope.workspace!, enabled: true }];
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (path, init) => {
+      if (path === '/api/resources/console') return json(f.scope);
+      if (path === '/api/resources/engineering-runtime/close') { f.scope.engineeringLifecycle = 'closed'; return json({ engineeringLifecycle: 'closed' }); }
+      return original(path, init);
+    });
+    window.history.replaceState(null, '', '/resources/#resource-workspace'); setMutationToken('a'.repeat(64));
+    const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await within(screen.getByRole('region', { name: 'Engineering lifecycle' })).findByText('Running');
+    await user.type(await screen.findByLabelText('Task prompt'), 'Keep my human task while engineering closes.');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Task worker' }), 'local-a');
+    await user.click(screen.getByRole('button', { name: 'Close engineering' }));
+    await within(screen.getByRole('region', { name: 'Engineering lifecycle' })).findByText('Closed');
+    expect(screen.getByLabelText('Task prompt')).toHaveValue('Keep my human task while engineering closes.');
+    expect(screen.getByRole('button', { name: 'Send task' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Send task' }));
+    await waitFor(() => expect(f.request.mock.calls.some(([path, init]) => path === '/api/resources/tasks' && init?.method === 'POST')).toBe(true));
+  });
+
+  it('shows passive inspection on the existing read-only poll and keeps failed samples historical', async () => {
+    const f = setup(); f.scope.readOnly = true; f.scope.workspace = null; f.scope.maxParallel = 0; f.scope.maxQueued = 0;
+    f.snapshot.supervisor = null;
+    f.snapshot.collectorInspection = { scope: 'local-record-inspection', sampledAt: f.snapshot.sampledAt,
+      state: 'pending', markerVersion: 1, reasonCode: 'legacy-owner-evidence-missing', recoveryAttempted: false };
+    delete f.snapshot.metadataCollector; delete f.snapshot.quotaRefresh; delete f.snapshot.connections;
+    const user = userEvent.setup(); const { container } = render(<ResourcePoolView scope={f.scope} />);
+    expect(await screen.findByText('Legacy ownership evidence missing')).toBeVisible();
+    expect(screen.getByText(/No collector startup or recovery was attempted/)).toBeVisible();
+    expect(container.querySelector('#collector-inspection-title')?.closest('section')?.querySelector('time')).toHaveAttribute('dateTime', f.snapshot.sampledAt);
+    f.request.mockResolvedValueOnce(json({ error: 'unavailable' }, 503));
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('Last reported: Legacy ownership evidence missing')).toBeVisible();
+    expect(screen.getByText(/Current collector records, activity and quota freshness are unverified/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: /restart collector|retry collector|recover|Pause queue/ })).not.toBeInTheDocument();
+    expect(f.request.mock.calls.every(([path, init]) => path === '/api/resources' && init?.method === 'GET')).toBe(true);
+  });
+
   it('keeps the desk useful when configured metadata collection was blocked at startup', async () => {
     const f = setup(); f.scope.quotaRefreshEnabled = true; f.scope.connectionsEnabled = true;
     f.snapshot.metadataCollector = { state: 'blocked', reasonCode: 'reconciliation-required', sampledAt: f.snapshot.sampledAt };
@@ -208,6 +305,20 @@ describe('resource dispatch desk', () => {
     expect(within(screen.getByRole('region', { name: 'Task external-task' })).getByText(/not a process heartbeat/)).toBeInTheDocument();
   });
 
+  it.each(['active', 'unknown', 'missing'] as const)('keeps stop controls available while global stop is %s', async state => {
+    const f = setup(); if (state === 'missing') delete f.snapshot.executionStop; else f.snapshot.executionStop!.state = state;
+    setMutationToken('d'.repeat(64)); const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await screen.findByRole('heading', { name: 'Routing board' });
+    expect(screen.getByRole('region', { name: 'Global execution stop' })).toHaveTextContent(state === 'active' ? 'Global stop active' : 'Global stop status unavailable');
+    expect(screen.getByRole('button', { name: 'Queue task' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Pause queue' }));
+    expect(await screen.findByRole('button', { name: 'Resume queue' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: /^owned-task/ }));
+    await user.click(screen.getByRole('button', { name: 'Cancel owned task' }));
+    await waitFor(() => expect(f.request.mock.calls.some(([path]) => path.endsWith('/owned-task/cancel'))).toBe(true));
+    expect(screen.queryByRole('button', { name: /clear.*stop/i })).not.toBeInTheDocument();
+  });
+
   it('loads output only on demand and renders provider text without HTML execution', async () => {
     const f = setup(); const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
     await screen.findByRole('heading', { name: 'Routing board' });
@@ -263,6 +374,7 @@ describe('resource dispatch desk', () => {
     f.request.mockResolvedValueOnce(json({ error: 'unavailable' }, 503));
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('last successful read');
+    expect(screen.getByRole('region', { name: 'Global execution stop' })).toHaveTextContent('Global stop status is historical');
     expect(screen.getByRole('heading', { name: 'Routing board' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Pause queue' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Queue task' })).toBeDisabled();
@@ -374,14 +486,21 @@ describe('resource dispatch desk', () => {
     expect(f.request.mock.calls.filter(([path]) => path.endsWith('/output'))).toHaveLength(reads);
   });
 
-  it.each(['read-only', 'degraded', 'closing'] as const)('withholds execution when %s', async (kind) => {
-    const f = setup(); if (kind === 'read-only') { f.scope.readOnly = true; f.scope.workspace = null; }
+  it.each(['read-only', 'degraded', 'closing', 'stop-active', 'stop-unknown', 'stop-missing'] as const)('withholds execution when %s', async (kind) => {
+    const f = setup(); if (kind === 'read-only') { f.scope.readOnly = true; f.scope.workspace = null; f.snapshot.executionStop!.state = 'active'; }
     if (kind === 'degraded') { f.snapshot.sourceState = 'degraded'; f.snapshot.plan = null; }
     if (kind === 'closing') f.snapshot.supervisor!.closing = true;
+    if (kind === 'stop-active') f.snapshot.executionStop!.state = 'active';
+    if (kind === 'stop-unknown') f.snapshot.executionStop!.state = 'unknown';
+    if (kind === 'stop-missing') delete f.snapshot.executionStop;
     setMutationToken('d'.repeat(64)); render(<ResourcePoolView scope={f.scope} />);
     await screen.findByRole('heading', { name: 'Routing board' });
     expect(screen.getByRole('button', { name: 'Queue task' })).toBeDisabled();
     expect(f.request.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+    if (kind === 'read-only') {
+      expect(screen.getByRole('region', { name: 'Global execution stop' })).toHaveTextContent('read-only session cannot start, pause or cancel');
+      expect(screen.getByRole('region', { name: 'Global execution stop' })).not.toHaveTextContent('cancellation remain available');
+    }
   });
 
   it('validates task limits and allowlist before sending a control request', async () => {

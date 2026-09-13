@@ -6,6 +6,17 @@ vi.mock('../src/core/universe/resource-runtime-check.js', () => ({ checkResource
 beforeEach(() => hooks.check.mockReset());
 
 describe('invocation-local resource admission preflight', () => {
+  it('rechecks pinned enrollment on every admission and carries the exact digest', () => {
+    hooks.check.mockReturnValueOnce({ status: 'valid' }).mockReturnValueOnce({ status: 'invalid',
+      checks: [{ code: 'runtime', status: 'failed' }] }).mockReturnValue({ status: 'valid' });
+    const expectedRuntimeDigest = 'a'.repeat(64);
+    const check = resourceAdmissionPreflight('/private/runtime.json', expectedRuntimeDigest);
+    expect(check()).toBeNull();
+    expect(check()).toBe('resource-runtime-invalid:runtime');
+    expect(check()).toBeNull();
+    expect(hooks.check).toHaveBeenCalledTimes(3);
+    expect(hooks.check).toHaveBeenLastCalledWith({ resourceRuntime: '/private/runtime.json', expectedRuntimeDigest });
+  });
   it('is lazy and caches a valid result without gating on capacity or warnings', () => {
     hooks.check.mockReturnValue({ status: 'valid', counts: { eligibleWorkers: 0 },
       warnings: ['quota-refresh-not-configured'], workers: [{ eligibility: 'excluded' }] });

@@ -2,6 +2,7 @@ import { resourceCheckOptions, resourceCheckPath, ResourceCheckUsageError } from
 import type { ResourceGenerationCheckStage, ResourceGenerationNextCheck } from '../core/universe/resource-runtime-check.js';
 
 const NEXT_CHECKS: Record<ResourceGenerationNextCheck, string> = {
+  'review-quota-scope-reservation': 'Review the saved account quota-scope reservation; this is operator policy, not stale quota.',
   'review-owner-pause': 'This capacity is intentionally paused. Preserve the owner policy; use other eligible capacity.',
   'review-subscription-allocation': 'Subscription allocation is disabled. Preserve the allocation policy; use other eligible capacity.',
   'refresh-quota-evidence': 'Review quota evidence and explicitly refresh it when authorized; this check does not contact the provider.',

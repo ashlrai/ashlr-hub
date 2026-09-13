@@ -5,9 +5,12 @@ import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>() }));
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { mergeResourceObservations, readResourceJson, resourcePoolStatus, runResourceTask, validateUnavailableResourceWorkerIds,
-  type ResourceTask } from '../src/core/resources/pool-runtime.js';
+  validateResourceTask, type ResourceTask } from '../src/core/resources/pool-runtime.js';
+import { resourceGenerationTaskId, type ResourceTaskOrigin } from '../src/core/resources/task-origin.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 import { validateResourceObservations, type ResourceObservation, type ResourcePool, type ResourceWorker } from '../src/core/resources/pool-policy.js';
 import { mergeClaudeResourceObservation } from '../src/core/resources/provider-observations.js';
@@ -91,6 +94,92 @@ async function quotaFixture(provider: 'codex' | 'claude' = 'codex', allowUnknown
 }
 
 describe.skipIf(process.platform === 'win32')('durable resource task runtime acceptance', () => {
+  const origin: ResourceTaskOrigin = { kind: 'universe-generation', universeId: 'fixture', runId: 'run-one', variantId: 'edit' };
+  const originId = resourceGenerationTaskId({ universeId: origin.universeId, runId: origin.runId, variantId: origin.variantId });
+
+  it('records generation origin atomically before the dispatch guard, including a refused launch', async () => {
+    const f = await fixture(); let observed: unknown;
+    const result = await runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings, observations: f.observations,
+      task: f.task(originId, { origin }), beforeWorkerDispatch: () => {
+        observed = JSON.parse(f.ledger()).attempts[0]; return false;
+      } });
+    expect(observed).toMatchObject({ id: originId, origin, status: 'reserved', taskDigest: digest(canonical(f.task(originId, { origin }))) });
+    expect(result.receipt).toMatchObject({ id: originId, origin });
+    expect(result.receipt?.status).not.toBe('reserved');
+    expect(f.status().attempts[0]?.origin).toEqual(origin); expect(f.requests).toHaveLength(0);
+  });
+
+  it('records successor proposal origin before a real worker request and preserves exact replay', async () => {
+    const f = await fixture(); const proposalKey = 'a'.repeat(48);
+    const successorOrigin: ResourceTaskOrigin = { kind: 'engineering-successor-proposal', scopeDigest: 'b'.repeat(64), proposalKey };
+    const task = f.task(`proposal-${proposalKey}`, { origin: successorOrigin }); let reserved = false;
+    const result = await runResourceTask({ root: f.root, pool: f.pool, bindings: f.bindings, observations: f.observations, task,
+      beforeWorkerDispatch: () => {
+        expect(JSON.parse(f.ledger()).attempts[0]).toMatchObject({ origin: successorOrigin, status: 'reserved' });
+        expect(f.requests).toHaveLength(0); reserved = true; return true;
+      } });
+    expect(reserved).toBe(true); expect(result.receipt).toMatchObject({ status: 'completed', origin: successorOrigin });
+    expect((await f.run(task.id, { origin: successorOrigin })).replayed).toBe(true); expect(f.requests).toHaveLength(1);
+    await expect(f.run(task.id, { origin: { ...successorOrigin, scopeDigest: 'c'.repeat(64) } })).rejects.toThrow('identity conflict');
+  });
+
+  it.each([{ scopeDigest: 'short' }, { proposalKey: 'a'.repeat(47) }, { proposalKey: 'c'.repeat(48) },
+    { unexpected: true }, { kind: 'unknown' }])('refuses malformed or mismatched successor origin before contact: %#', async patch => {
+    const f = await fixture(); const proposalKey = 'a'.repeat(48);
+    const candidate = { kind: 'engineering-successor-proposal', scopeDigest: 'b'.repeat(64), proposalKey, ...patch };
+    await expect(f.run(`proposal-${proposalKey}`, { origin: candidate as ResourceTaskOrigin })).rejects.toThrow('Invalid resource task');
+    expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+  });
+
+  it('retains origin after real worker settlement and exact replay without trial publication', async () => {
+    const f = await fixture(); const result = await f.run(originId, { origin });
+    expect(result.receipt).toMatchObject({ status: 'completed', origin });
+    const before = f.ledger();
+    expect((await f.run(originId, { origin })).replayed).toBe(true);
+    expect(f.status().attempts[0]?.origin).toEqual(origin); expect(f.ledger()).toBe(before);
+    expect(f.requests).toHaveLength(1); expect(before).not.toContain('TASK_REQUEST_KEEP_PRIVATE');
+  });
+
+  it('keeps legacy tasks unlabelled and refuses adding provenance to a prior task', async () => {
+    const f = await fixture(); await f.run(originId);
+    expect(f.status().attempts[0]).not.toHaveProperty('origin'); const before = f.ledger();
+    await expect(f.run(originId, { origin })).rejects.toThrow('identity conflict');
+    expect(f.ledger()).toBe(before); expect(f.requests).toHaveLength(1);
+  });
+
+  it('refuses stripped origin on replay even when the original task digest remains', async () => {
+    const f = await fixture(); await f.run(originId, { origin });
+    const state = JSON.parse(f.ledger()); delete state.attempts[0].origin;
+    writeJson(join(f.root, 'pool-state.json'), state); const before = f.ledger();
+    await expect(f.run(originId, { origin })).rejects.toThrow('identity conflict');
+    expect(f.ledger()).toBe(before); expect(f.requests).toHaveLength(1);
+  });
+
+  it.each([undefined, null, {}, { ...origin, extra: true }, { ...origin, runId: '../run' },
+    { ...origin, kind: 'console' }, { ...origin, variantId: 'another' }])('rejects malformed or mismatched origin before reservation: %#', async value => {
+    const f = await fixture();
+    await expect(f.run(originId, { origin: value as ResourceTaskOrigin })).rejects.toThrow('Invalid resource task');
+    expect(existsSync(f.root)).toBe(false); expect(f.requests).toHaveLength(0);
+  });
+
+  it('detaches validated origin and refuses accessor metadata without invoking getters', async () => {
+    const f = await fixture(); const input = f.task(originId, { origin: { ...origin } });
+    const validated = validateResourceTask(input);
+    if (input.origin?.kind === 'universe-generation') input.origin.runId = 'changed';
+    expect(validated.origin).toEqual(origin);
+    const getter = vi.fn(() => origin.runId); const accessor = { ...origin };
+    Object.defineProperty(accessor, 'runId', { get: getter });
+    expect(() => validateResourceTask(f.task(originId, { origin: accessor }))).toThrow('Invalid resource task');
+    expect(getter).not.toHaveBeenCalled();
+  });
+
+  it('rejects a persisted origin that disagrees with the task ID', async () => {
+    const f = await fixture(); await f.run(originId, { origin });
+    const state = JSON.parse(f.ledger()); state.attempts[0].origin.variantId = 'foreign';
+    writeJson(join(f.root, 'pool-state.json'), state);
+    expect(() => f.status()).toThrow(); expect(f.requests).toHaveLength(1);
+  });
+
   it.each([null, 'local-a', ['missing'], ['local-a', 'local-a'], Array(1), Array(33).fill('local-a')])(
     'rejects malformed admission constraints before store initialization or worker contact: %#', async (value) => {
       const f = await fixture();
@@ -598,6 +687,42 @@ describe.skipIf(process.platform === 'win32')('durable resource task runtime acc
     expect(f.requests).toHaveLength(1);
   });
 
+  it.each(['before-open', 'after-read'] as const)('reopens an atomically replaced snapshot read once: %s', stage => {
+    const path = join(fixtureRoot, 'snapshot.json'), next = join(fixtureRoot, 'next.json');
+    writeJson(path, { revision: 1 }); writeJson(next, { revision: 2 });
+    let replaced = false;
+    if (stage === 'before-open') {
+      const open = fs.openSync;
+      vi.spyOn(fs, 'openSync').mockImplementation(((...args: Parameters<typeof open>) => {
+        if (args[0] === path && !replaced) { replaced = true; fs.renameSync(next, path); }
+        return open(...args);
+      }) as typeof open);
+    } else {
+      const read = fs.readSync;
+      vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof read>) => {
+        const count = read(...args);
+        if (!replaced) { replaced = true; fs.renameSync(next, path); }
+        return count;
+      }) as typeof read);
+    }
+    expect(readResourceJson(path)).toEqual({ revision: 2 }); expect(replaced).toBe(true);
+  });
+  it.each(['repeated-replacement', 'unsafe-replacement', 'in-place-write'] as const)('refuses unstable or unsafe snapshot read: %s', mode => {
+    const path = join(fixtureRoot, 'snapshot.json'); writeJson(path, { revision: 1 });
+    const replacements = [join(fixtureRoot, 'next-1.json'), join(fixtureRoot, 'next-2.json')];
+    replacements.forEach((file, index) => writeJson(file, { revision: index + 2 }));
+    if (mode === 'unsafe-replacement') chmodSync(replacements[0]!, 0o644);
+    let reads = 0; const read = fs.readSync;
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof read>) => {
+      const count = read(...args); reads++;
+      if (mode === 'in-place-write') writeFileSync(path, '{"revision":1000}');
+      else fs.renameSync(replacements[reads - 1]!, path);
+      return count;
+    }) as typeof read);
+    expect(() => readResourceJson(path)).toThrow('Resource file');
+    expect(reads).toBe(mode === 'repeated-replacement' ? 2 : 1);
+    if (mode === 'unsafe-replacement') expect(statSync(path).mode & 0o777).toBe(0o644);
+  });
   it('refuses unsafe or malformed JSON inputs without repairing permissions or following aliases', async () => {
     const path = join(fixtureRoot, 'input.json'); writeJson(path, { schemaVersion: 1 });
     expect(readResourceJson(path)).toEqual({ schemaVersion: 1 });

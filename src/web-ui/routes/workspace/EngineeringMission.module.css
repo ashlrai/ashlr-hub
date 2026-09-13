@@ -1,0 +1,15 @@
+.panel { padding: var(--space-4); border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-surface); }
+.title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3); }
+.title h2 { font-family: var(--font-display); font-size: var(--text-md-size); }
+.identity { color: var(--text-secondary); font-size: var(--text-sm-size); overflow-wrap: anywhere; }
+.phases { display: flex; flex-wrap: wrap; list-style: none; gap: var(--space-1); padding: 0; margin: var(--space-3) 0; }
+.phases li { flex: 1 1 90px; padding: var(--space-2); border-bottom: 2px solid var(--border-default); color: var(--text-secondary); font-size: var(--text-sm-size); }
+.phases li[aria-current="step"] { color: var(--text-primary); border-color: var(--accent-500); background: var(--bg-selected); font-weight: 600; }
+.details p { max-width: 76ch; margin-top: var(--space-1); color: var(--text-secondary); font-size: var(--text-sm-size); overflow-wrap: anywhere; }
+.details [role="alert"] { color: var(--status-warning-fg); }
+.actions { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-3); }
+.actions button { min-height: 40px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-canvas); font-size: var(--text-sm-size); }
+.actions button:hover:enabled { background: var(--bg-hover); }
+.actions button:focus-visible { outline: 2px solid var(--border-focus); outline-offset: 3px; }
+.actions button:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 540px) { .actions button { flex: 1 1 160px; } }

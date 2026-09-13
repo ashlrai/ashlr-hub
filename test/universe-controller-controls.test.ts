@@ -55,13 +55,22 @@ describe('Controller durable control ordering and transactions', () => {
     const f = fixture();
     const intent = f.append({ kind: 'intent', campaignId: 'a', at: new Date().toISOString() });
     f.request('drain'); const drained = f.read();
+    let initialReads = 0; let publicationChecks = 0; let stagedChecks = 0;
     const beforeSettlement = vi.fn((records: readonly PortfolioControllerEvent[]) => {
       expect(records).toEqual(drained);
       expect(existsSync(join(f.directory, '.control.lock'))).toBe(true);
-      expect(f.read()).toEqual(drained);
+      if (existsSync(join(f.directory, 'ledger', '.records.lock'))) {
+        publicationChecks++;
+        if (readdirSync(join(f.directory, 'ledger', 'staging')).length > 0) stagedChecks++;
+        // Final proof checks use captured records; the writer mutex correctly
+        // refuses a recursive immutable-ledger read during publication.
+        expect(() => f.read()).toThrow('Controller evidence is unavailable');
+      } else { initialReads++; expect(f.read()).toEqual(drained); }
     });
     const next = appendPortfolioControllerEvent(f.directory, f.settle(), { expectedRecords: intent, beforeSettlement });
-    expect(beforeSettlement).toHaveBeenCalledOnce();
+    expect(initialReads).toBe(1); expect(publicationChecks).toBeGreaterThanOrEqual(2);
+    expect(stagedChecks).toBe(1);
+    expect(beforeSettlement).toHaveBeenCalledTimes(initialReads + publicationChecks);
     expect(next.at(-1)?.kind).toBe('settled');
     expect(existsSync(join(f.directory, '.control.lock'))).toBe(false);
   });

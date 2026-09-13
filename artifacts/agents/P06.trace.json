@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P06",
+  "baseCommit": "50fd5d5154ee9253e2437fc6ca8d1415de628393",
+  "status": "unsigned-local-implementation",
+  "ownedFiles": [
+    "src/core/universe/value-allocation.ts",
+    "test/universe-value-allocation.test.ts",
+    "artifacts/agents/P06.md",
+    "artifacts/agents/P06.trace.json"
+  ],
+  "verification": {
+    "focusedTestsPassed": 22,
+    "combinedTestsPassed": 80,
+    "typecheck": "passed",
+    "scopedEslint": "passed",
+    "diffCheck": "passed"
+  },
+  "evidenceScope": "local-checks-only",
+  "independentlyVerified": false,
+  "signature": null,
+  "limitations": [
+    "This package stub is not the signed DecisionTraceV1 produced by the caller.",
+    "Source bytes, source completeness and inventory are supplied and pinned, not independently observed.",
+    "Semantic vision/mission validation and cryptographic outcome receipt verification belong to separate caller boundaries.",
+    "Canonical hypotheses digest retains input array order; pure portfolio output remains order-invariant.",
+    "No persistence, lease, dispatch, budget renewal, activation or provider contact."
+  ]
+}

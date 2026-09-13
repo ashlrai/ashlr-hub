@@ -1,7 +1,7 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createResourceConsoleReader, normalizeResourceConsoleRead, validateResourceConsolePath,
-  validateResourceConsoleReadScope, unavailableManagedResourceWorkers, withholdResourceConsoleWorkers,
+  validateResourceConsoleReadScope, unavailableManagedResourceWorkers, withholdResourceConsoleWorkers, withholdResourceConsoleQuotaScopeWorkers,
   type ResourceConsoleReader, type ResourceConsoleReadScope, type ResourceConsoleManagedRead } from '../src/core/web/resource-console-reads.js';
 import { degradedResourceConsoleEvidence, MAX_RESOURCE_CONSOLE_RESPONSE_BYTES, projectResourceConsoleEvidence,
   validateResourceConsoleResponse } from '../src/core/web/resource-console-public.js';
@@ -63,6 +63,9 @@ function eligibleEvidence(selectedScope = managedScope()) {
   const observations = [...managed().observations, { ...reading('local'), windows: [] }];
   return projectResourceConsoleEvidence(selectedScope.pool, selectedScope.bindings,
     { schemaVersion: 1, sourceState: 'missing', poolId: selectedScope.pool.id, observations, attempts: [],
+      allocation: { ceilingPercent: null, revision: 0, updatedAt: null },
+      workerAccess: { pausedWorkerIds: [], revision: 0, updatedAt: null },
+      quotaScopeAccess: { exclusions: [], revision: 0, updatedAt: null },
       plan: planResourceAssignment({ pool: selectedScope.pool, observations, allowedWorkerIds: selectedScope.pool.workers.map((row) => row.id),
         activeCounts: {}, taskReservationCounts: {}, nowMs: NOW }) });
 }
@@ -134,6 +137,24 @@ describe('managed resource read payload boundary', () => {
 });
 
 describe('managed freshness across asynchronous IPC', () => {
+  it('applies a direct scope reservation to cached candidates without withholding other aliases or changing observations', () => {
+    const original = eligibleEvidence(); const before = JSON.stringify(original);
+    const result = withholdResourceConsoleQuotaScopeWorkers(original, ['codex-a']);
+    expect(result.plan?.candidates).toEqual(original.plan?.candidates.filter(row => row.workerId !== 'codex-a'));
+    expect(result.plan?.exclusions.find(row => row.workerId === 'codex-a')).toEqual({
+      workerId: 'codex-a', reasons: ['operator-quota-scope-excluded'], nextEligibleAt: null });
+    expect(result.observations).toBe(original.observations);
+    expect(result.recentAttempts).toBe(original.recentAttempts);
+    expect(JSON.stringify(original)).toBe(before);
+    expect(validateResourceConsoleResponse(JSON.stringify(result), managedScope().pool, managedScope().bindings)).toEqual(result);
+    expect(withholdResourceConsoleQuotaScopeWorkers(result, ['codex-a'])).toEqual(result);
+    expect(withholdResourceConsoleWorkers(result, ['codex-b']).plan?.candidates.map(row => row.workerId)).toEqual(['local']);
+  });
+
+  it.each([new Array(1), ['unknown'], ['codex-a', 'codex-a']].map(ids => ({ ids })))('refuses malformed scope projection IDs %#', ({ ids }) => {
+    expect(() => withholdResourceConsoleQuotaScopeWorkers(eligibleEvidence(), ids)).toThrow();
+  });
+
   it.each([
     { observations: [] },
     { observations: [reading(), reading('codex-b', { health: 'unavailable' })] },

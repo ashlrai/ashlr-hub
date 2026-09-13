@@ -1,4 +1,7 @@
-.view { display: grid; gap: var(--space-5); min-width: 0; }
+/* Constrain the track, not its table contents: nested evidence tables scroll
+   inside the workspace rather than giving this implicit column a minimum width. */
+.view { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); min-width: 0; }
+.view > * { min-width: 0; }
 .statusBar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-5); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border-default); min-width: 0; }
 .sectionNav { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); }
 .sectionNav a { display: inline-flex; align-items: center; min-height: 40px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); color: var(--text-secondary); font-size: var(--text-sm-size); font-weight: var(--font-weight-medium); text-decoration: none; }
@@ -37,6 +40,10 @@
 .notice, .actionNotice { padding: var(--space-4); border-radius: var(--radius-sm); line-height: var(--text-base-line); }
 .notice { border: 1px solid var(--status-warning-solid); background: var(--status-warning-bg); }
 .notice p { margin-top: var(--space-1); max-width: 90ch; }
+.executionStop { padding: var(--space-3) var(--space-4); border-inline-start: 3px solid var(--border-strong); background: var(--bg-surface); min-width: 0; }
+.executionStop strong { font-family: var(--font-display, var(--font-ui)); font-size: var(--text-md-size); }
+.executionStop p { margin-top: var(--space-1); max-width: 78ch; color: var(--text-secondary); font-size: var(--text-sm-size); line-height: var(--text-sm-line); overflow-wrap: anywhere; }
+.executionStop[data-stopped="true"] { border-inline-start-color: var(--status-warning-solid); background: var(--status-warning-bg); }
 .actionNotice { background: var(--status-info-bg); color: var(--status-info-fg); }
 .loading { display: grid; gap: var(--space-4); padding: var(--space-6); }
 .supervisor { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; justify-content: space-between; padding: var(--space-3) var(--space-4); background: var(--bg-surface); border: 1px solid var(--border-default); border-left: 3px solid var(--accent-500); border-radius: var(--radius-sm); min-width: 0; }

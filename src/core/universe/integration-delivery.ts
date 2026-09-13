@@ -13,6 +13,7 @@ import type { UniverseIntegrationDeliveryEvidence, UniverseIntegrationDeliveryRe
 import { validUniverseDeliveryBranch } from './delivery.js';
 import { assertComparatorUnchanged, manifestRecord, projectUniverse, universePath } from './store.js';
 import type { UniverseStoreOptions } from './types.js';
+import { killSwitchOn } from '../sandbox/policy.js';
 
 const HASH = /^[a-f0-9]{64}$/;
 const OID = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
@@ -257,6 +258,12 @@ export async function deliverUniverseIntegration(input: unknown,
       assertReceiptEvidence(existing.receipt, evidence, snapshot);
       inspectGit(existing.receipt, git, evidence.result.finishedAt);
     }
+    // A stop withholds new staging/publication, but must not hide an already
+    // published exact intent whose final receipt was interrupted. Inspection
+    // above proves its source, commit and tree before allowing reconciliation.
+    const alreadyPublished = existing?.kind === 'intent' && existing.receipt.changedFiles.length > 0 &&
+      git.ref(request.branch) === existing.receipt.commit;
+    if (!alreadyPublished && killSwitchOn()) throw new Error('Integration delivery withheld by global KILL');
     const tree = existing?.receipt.tree ?? git.writeTree(snapshot.entries);
     if (git.treeDigest(tree) !== snapshot.digest) throw new Error('Integration delivery tree differs from the verified artifact');
     const changedFiles = changedPaths(git, baseTree, tree);
@@ -277,13 +284,19 @@ export async function deliverUniverseIntegration(input: unknown,
     }
     if (!existing && !capacityAvailable(directory, prior, request, intent)) throw new Error('Integration delivery receipt exceeds bounded evidence capacity');
     const before = source(); assertReceiptEvidence(intent, before.evidence, before.snapshot); inspectGit(intent, git, before.evidence.result.finishedAt);
-    if (!existing) persist(directory, request, intent);
+    if (!existing) {
+      if (killSwitchOn()) throw new Error('Integration delivery withheld by global KILL');
+      persist(directory, request, intent);
+    }
     if (changedFiles.length) {
       const target = git.ref(request.branch);
       if (target !== null && target !== intent.commit) throw new Error('Integration delivery branch conflicts with an existing ref');
       if (target === null) {
         git.assertNotCheckedOut(request.branch);
-        await git.createRef(request.branch, intent.commit, () => { source(); assertOwned(); check(); });
+        await git.createRef(request.branch, intent.commit, () => {
+          source(); assertOwned(); check();
+          if (killSwitchOn()) throw new Error('Integration delivery withheld by global KILL');
+        });
       }
     }
     // Publication may have succeeded even if cancellation arrived afterwards.
@@ -293,7 +306,9 @@ export async function deliverUniverseIntegration(input: unknown,
     const settledGit = changedFiles.length ? deliveryGit(record.manifest.seed.repo, performance.now() + 5_000) : git;
     assertReceiptEvidence(intent, after.evidence, after.snapshot);
     const completed: UniverseIntegrationDeliveryReceipt = { ...intent, status: changedFiles.length ? 'delivered' : 'unchanged', completedAt: new Date().toISOString() };
-    inspectGit(completed, settledGit, after.evidence.result.finishedAt); assertOwned(); persist(directory, request, completed);
+    inspectGit(completed, settledGit, after.evidence.result.finishedAt); assertOwned();
+    if (!changedFiles.length && killSwitchOn()) throw new Error('Integration delivery withheld by global KILL');
+    persist(directory, request, completed);
     return completed;
   });
 }

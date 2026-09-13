@@ -17,6 +17,7 @@ const REASONS: Record<UniverseCampaignReadinessView['reasonCode'], true> = {
   'stagnation-budget-exhausted': true, 'request-budget-exhausted': true, 'reported-token-budget-exhausted': true,
   'usage-unavailable': true, 'campaign-completed': true, 'campaign-stopped': true, 'campaign-failed': true,
   'paused-unclassified': true, 'interrupted-unclassified': true, 'campaign-missing': true, 'evidence-degraded': true, 'snapshot-changed': true,
+  'seed-evaluation-unresolved': true, 'seed-evaluation-attention-required': true,
 };
 
 /** Reject mismatched identities and uncontracted/private fields before they reach the view. */

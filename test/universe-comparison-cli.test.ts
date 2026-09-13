@@ -12,6 +12,7 @@ function arm(campaignId: string): UniverseComparisonArm {
     fresh: true, fullyAttributed: true, nonempty: true, metric: { name: 'score', direction: 'maximize', minImprovement: 0 },
     feedback: { configured: false, observed: 'disabled', runs: { disabled: 2, legacyV1: 0, searchV2: 0 },
       receipts: { modelTrials: 2, legacyFeedback: 0, searchContext: 0 } },
+    seed: { measureSeed: false, observedContext: 'absent', runs: { unpinned: 2, pinnedV1: 0 }, receipts: 0 },
     counts: { attempts: 2, completedRuns: 2, interruptedRuns: 0, failedRuns: 0, passedTrials: 2, admissions: 1,
       improvements: 1, distinctSelectedArtifacts: 2, modelRequestsStarted: 2, reportedModelRequests: 2,
       reservedModelRequests: 2, verifiedDeliveryBranches: 2, distinctDeliveredArtifacts: 1 },
@@ -24,7 +25,7 @@ function arm(campaignId: string): UniverseComparisonArm {
 function report(): UniverseCampaignComparison {
   return { schemaVersion: 1, sampledAt: '2026-09-07T00:00:00.000Z', measurementScope: 'local-experiment', authority: 'observation-only',
     sourceState: 'healthy', reasons: [], baseline: arm('baseline'), challenger: arm('challenger'),
-    matching: { comparator: true, configuration: true, workload: true, comparable: true, reasons: [] },
+    matching: { comparator: true, configuration: true, workload: true, seedRegime: true, comparable: true, reasons: [] },
     differences: [], feedbackContrast: 'same-feedback-condition',
     scoreDeltas: [{ niche: 'quality', baselineScore: 2, challengerScore: 2, directionAdjustedDelta: 0 }], acceptedChanges: null };
 }
@@ -78,7 +79,7 @@ describe('Universe comparison CLI', () => {
 
   it('keeps healthy unmatched evidence distinct from read errors', async () => {
     const value = report();
-    value.matching = { comparator: false, configuration: false, workload: false, comparable: false, reasons: ['comparator-mismatch'] };
+    value.matching = { comparator: false, configuration: false, workload: false, seedRegime: true, comparable: false, reasons: ['comparator-mismatch'] };
     value.differences = ['variant-configuration'];
     value.scoreDeltas[0]!.directionAdjustedDelta = null;
     core.readUniverseCampaignComparison.mockReturnValue(value);
@@ -96,6 +97,8 @@ describe('Universe comparison CLI', () => {
     expect(await cmdUniverseCompare(['baseline', 'challenger'])).toBe(0);
     const text = output.mock.calls[0]![0] as string;
     expect(text).toContain('Model request coverage: 2/2');
+    expect(text).toContain('Seed measurement configured: false · observed seed context: absent · context receipts: 0');
+    expect(text).toContain('Seed measurement/context regime match: true');
     expect(text).toContain('Observed token subtotal: 200 · complete model-generation tokens: 200');
     expect(text).toContain('Recorded run duration: 500 ms · wall-clock span: 700 ms');
     expect(text).toContain('Archive admissions: 1 · strict improvements: 1');

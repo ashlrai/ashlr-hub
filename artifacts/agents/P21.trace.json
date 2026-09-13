@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P21",
+  "baseCommit": "5c270bc73890e474463c31764d51e76196ad2e3f",
+  "status": "unsigned-local-implementation",
+  "ownedFiles": [
+    "src/core/universe/harness-archive.ts",
+    "test/universe-harness-archive.test.ts",
+    "artifacts/agents/P21.md",
+    "artifacts/agents/P21.trace.json"
+  ],
+  "verification": {
+    "focusedTestsPassed": 35,
+    "typecheck": "passed",
+    "scopedEslint": "passed",
+    "diffCheck": "passed"
+  },
+  "evidenceScope": "local-checks-only",
+  "independentlyVerified": false,
+  "signature": null,
+  "limitations": [
+    "Supplied verifier linkage is not authenticated by the archive.",
+    "Content digests detect inconsistency, not a same-user adversary rewriting all records and hashes.",
+    "No candidate execution, application, promotion, provider calls or publication occurred.",
+    "Real-IO test lane membership remains parent-owned."
+  ]
+}

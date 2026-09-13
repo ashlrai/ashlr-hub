@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "scope": "real-compiler-with-synthetic-scoring-fixture",
+  "session": 33880,
+  "exitCode": 0,
+  "passed": 2,
+  "skipped": 0,
+  "durationMs": 27200,
+  "sourceCommit": "3d32d70806dc6cd90b946fbad294daf301ec0f23",
+  "sourceTree": "1c599c62fe400210ba0a6a42cdeb8a779bb80cb0",
+  "inventoryOrigin": "pinned-head",
+  "expectedFilesBound": true,
+  "inventoryFiles": 2731,
+  "inventoryBytes": 50903379,
+  "inventoryDigest": "94750e764743cdd245d7981ce92e275e6a3e54a62a43ba5118a83684bb8d3d2d",
+  "authorMs": 11476,
+  "packageMs": 1073,
+  "compilerVersion": "5.9.3",
+  "roots": 725,
+  "files": 1082,
+  "projectBytes": 22456376,
+  "projectDigest": "861b30fca76cd12647c64b41db54aac0816caf2ae06923b752474bfc44f501eb",
+  "childDigest": "a76c7b5608fdb8015af84e3b4dcd3f0b9f289541f80c5ad2307c34f8867cb1f5",
+  "targetDigest": "417ecede89540ae95541764d08da11f9fd60dfbf99afef94fb730253d32db446",
+  "syntheticPackageDigest": "4e3e15f8eb67b5dfe6ed6dcb19034361fe9f33bbfb735bb69db84e71c6646fa6",
+  "cases": [
+    { "name": "baseline", "evaluatorMs": 6304, "testMs": 6491, "exitCode": 0, "diagnosticCodes": [], "stdoutBytes": 258, "stderrBytes": 0, "processGroupSettlement": "group-exit-confirmed" },
+    { "name": "ill-typed", "evaluatorMs": 6253, "testMs": 6438, "exitCode": 0, "diagnosticCodes": [2322], "stdoutBytes": 263, "stderrBytes": 0, "processGroupSettlement": "group-exit-confirmed" }
+  ],
+  "syntheticCalibration": true,
+  "concurrentWorkloadTiming": "uncontrolled",
+  "exclusions": ["genuine calibration", "model execution", "native workload scoring", "accepted optimization", "production activation"]
+}

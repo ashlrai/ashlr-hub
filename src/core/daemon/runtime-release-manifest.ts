@@ -57,12 +57,20 @@ const LAUNCHER_PATH = 'bin/ashlr';
 const RUNTIME_ENTRY_PATH = 'dist/cli/index.js';
 const VERIFIER_RUNNER_PATH = 'scripts/run-verify-command.mjs';
 const SCORECARD_HISTORY_WORKER_PATH = 'scripts/scorecard-history-worker.mjs';
+const PREPARATION_HELPER_PATHS = [
+  'scripts/evaluators/preparation-verification-activity.mjs',
+  'scripts/evaluators/preparation-verification-activity.d.mts',
+  'scripts/evaluators/preparation-verification-protocol.mjs',
+  'scripts/evaluators/preparation-verification-native.mjs',
+  'scripts/evaluators/preparation-verification-native.d.mts',
+] as const;
 const FIXED_ARTIFACT_PATHS = new Set([
   PACKAGE_MANIFEST_PATH,
   RUNTIME_RELEASE_DEPENDENCY_INVENTORY_PATH,
   LAUNCHER_PATH,
   VERIFIER_RUNNER_PATH,
   SCORECARD_HISTORY_WORKER_PATH,
+  ...PREPARATION_HELPER_PATHS,
 ]);
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
@@ -493,6 +501,17 @@ function pathEntryExists(path: string): boolean {
   }
 }
 
+function hasPreparationHelpers(paths: readonly string[]): boolean {
+  const base = PREPARATION_HELPER_PATHS.slice(0, 3).filter((path) => paths.includes(path)).length;
+  const native = PREPARATION_HELPER_PATHS.slice(3).filter((path) => paths.includes(path)).length;
+  // Preserve legacy three-helper packages; native selection adds an exact pair,
+  // never an independently usable partial helper installation.
+  if ((base !== 0 && base !== 3) || (native !== 0 && (native !== 2 || base !== 3))) {
+    throw new Error('release preparation helper set is incomplete');
+  }
+  return base !== 0;
+}
+
 function discoverReleaseLayout(
   packageRoot: string,
   schemaVersion: UnsignedRuntimeReleaseManifest['schemaVersion'],
@@ -519,6 +538,13 @@ function discoverReleaseLayout(
   admitArtifact(packageRoot, VERIFIER_RUNNER_PATH, budget, paths, undefined, observation);
   if (schemaVersion >= 3 || pathEntryExists(join(packageRoot, ...SCORECARD_HISTORY_WORKER_PATH.split('/')))) {
     admitArtifact(packageRoot, SCORECARD_HISTORY_WORKER_PATH, budget, paths, undefined, observation);
+  }
+  // Older packages have none. Observe only the explicit shipped helper set, never arbitrary scripts.
+  const helpers = PREPARATION_HELPER_PATHS.filter((path) =>
+    pathEntryExists(join(packageRoot, ...path.split('/'))));
+  if (hasPreparationHelpers(helpers)) {
+    observeDirectory('scripts/evaluators');
+    for (const path of helpers) admitArtifact(packageRoot, path, budget, paths, undefined, observation);
   }
 
   const visitRuntime = (relativeDirectory: string, depth: number): void => {
@@ -810,6 +836,9 @@ function completeReleaseScan(
   if (declaredFiles.includes(SCORECARD_HISTORY_WORKER_PATH)) {
     artifactByPath(artifacts, SCORECARD_HISTORY_WORKER_PATH);
   }
+  if (hasPreparationHelpers(declaredFiles)) {
+    for (const path of PREPARATION_HELPER_PATHS.filter(path => declaredFiles.includes(path))) artifactByPath(artifacts, path);
+  }
   requireBeforeRuntimeReleaseObservationDeadline(observation, 'runtime release manifest scan');
   const parsedInventory = parseRuntimeReleaseDependencyInventory(dependencyInventoryBytes);
   if (!parsedInventory.ok) throw new Error(parsedInventory.reason);
@@ -1034,6 +1063,7 @@ function validateManifestShape(value: unknown): UnsignedRuntimeReleaseManifest {
     };
   });
   const paths = artifacts.map((artifact) => artifact.path);
+  hasPreparationHelpers(paths);
   if (new Set(paths).size !== paths.length || paths.some((entry, index) => index > 0 && entry <= paths[index - 1]!)) {
     throw new Error('runtime release manifest artifact paths must be unique and sorted');
   }

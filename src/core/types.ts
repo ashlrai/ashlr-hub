@@ -446,6 +446,10 @@ export interface DelegationScopeSummary {
 
 /** Persisted configuration for the hub. Lives at ~/.ashlr/config.json. */
 export interface AshlrConfig {
+  /** Optional agent graph inspection root. Explicit existing canonical private directory;
+   * absent disables firm MCP resources. Reading never enrolls, executes, or creates keys.
+   */
+  firm?: { graphRoot: string };
   /** Schema/config version for forward migration. */
   version: number;
   /** Absolute roots to scan (typically the Desktop and github/). */

@@ -111,7 +111,9 @@ export function GenerationEvidence({ trial }: { trial: UniverseTrial }) {
           <div><dt>Response digest</dt><dd><code>{receipt.responseDigest ?? 'Unavailable'}</code></dd></div>
           {receipt.feedback ? <><div><dt>Evaluator feedback source</dt><dd>Generation {receipt.feedback.generation} · trial {receipt.feedback.trialId}</dd></div><div><dt>Feedback digest</dt><dd><code>{receipt.feedback.digest}</code></dd></div></> : null}
           {receipt.search ? <><div><dt>Recorded search context</dt><dd>Version {receipt.search.schemaVersion}</dd></div><div><dt>Search context digest</dt><dd><code>{receipt.search.digest}</code></dd></div></> : null}
+          {receipt.seedContext ? <><div><dt>Historical seed context</dt><dd>Version {receipt.seedContext.schemaVersion}</dd></div><div><dt>Seed context digest</dt><dd><code>{receipt.seedContext.digest}</code></dd></div></> : null}
         </dl>
+        {receipt.seedContext ? <p>Historical measured seed evidence is retained across campaign generations. It is not the trial parent, latest-attempt feedback, or acceptance.</p> : null}
         {pooled ? <p>Some digests are redacted in the web view. Use scoped CLI JSON for exact evidence; this view does not revalidate the resource ledger.</p> : null}
       </details>
       <p>Generation success means a valid replacement response, not evaluator acceptance. {pooled

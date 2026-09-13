@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P07",
+  "baseCommit": "6c6080c30fd4fa93becd2443cc4d2ed6e678a4dd",
+  "status": "unsigned-local-implementation",
+  "ownedFiles": [
+    "src/core/universe/value-allocation-store.ts",
+    "test/universe-value-allocation-store.test.ts",
+    "artifacts/agents/P07.md",
+    "artifacts/agents/P07.trace.json"
+  ],
+  "verification": {
+    "storeTestsPassed": 18,
+    "combinedTestsPassed": 88,
+    "typecheck": "passed",
+    "scopedEslint": "passed",
+    "diffCheck": "passed",
+    "separateProcessFinalSlotContention": "passed",
+    "aggregateByteOverflow": "synthetic-immutable-reader-unit-seam"
+  },
+  "evidenceScope": "local-checks-only",
+  "independentlyVerified": false,
+  "signature": null,
+  "limitations": [
+    "This unsigned package stub is not a stored signed allocation wrapper.",
+    "Existing-key HMAC authenticates local evidence, not external source truth, capacity reservation, freshness or replay prevention across allocation IDs/roots.",
+    "Corrupt/incomplete storage and ownership are not healed by this API.",
+    "Read completeness is bounded snapshot evidence, not a live process claim.",
+    "Real-IO lane membership remains parent-owned."
+  ]
+}

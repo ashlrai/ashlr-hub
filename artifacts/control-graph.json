@@ -1,0 +1,940 @@
+{
+  "schemaVersion": 1,
+  "sourceRevision": "5c270bc73890e474463c31764d51e76196ad2e3f",
+  "authority": "build-plan-only",
+  "hostConcurrency": 4,
+  "definition": {
+    "schemaVersion": 1,
+    "id": "ashlr-firm-build",
+    "maxConcurrent": 3,
+    "maxDurationMs": 86400000,
+    "nodes": [
+      {
+        "id": "P00",
+        "kind": "plan",
+        "requires": [
+          "P02"
+        ],
+        "input": {
+          "title": "Control graph dispatcher"
+        }
+      },
+      {
+        "id": "P01",
+        "kind": "explore",
+        "requires": [],
+        "input": {
+          "title": "Autonomy gap inventory"
+        }
+      },
+      {
+        "id": "P02",
+        "kind": "implement",
+        "requires": [],
+        "input": {
+          "title": "Signed decision trace contract"
+        }
+      },
+      {
+        "id": "P03",
+        "kind": "talk",
+        "requires": [
+          "P02"
+        ],
+        "input": {
+          "title": "Conflict-preserving trace query"
+        }
+      },
+      {
+        "id": "P04",
+        "kind": "talk",
+        "requires": [
+          "P03"
+        ],
+        "input": {
+          "title": "Agent-first graph resources"
+        }
+      },
+      {
+        "id": "P05",
+        "kind": "implement",
+        "requires": [
+          "P02"
+        ],
+        "input": {
+          "title": "Sandboxed engine trace adapter"
+        }
+      },
+      {
+        "id": "P06",
+        "kind": "plan",
+        "requires": [
+          "P01"
+        ],
+        "input": {
+          "title": "Value-hypothesis allocation caller"
+        }
+      },
+      {
+        "id": "P07",
+        "kind": "plan",
+        "requires": [
+          "P06",
+          "P02"
+        ],
+        "input": {
+          "title": "Digest-bound allocation receipts"
+        }
+      },
+      {
+        "id": "P08",
+        "kind": "implement",
+        "requires": [
+          "P07",
+          "P16"
+        ],
+        "input": {
+          "title": "Receipt-to-capacity dispatcher"
+        }
+      },
+      {
+        "id": "P09",
+        "kind": "implement",
+        "requires": [
+          "P00",
+          "P13"
+        ],
+        "input": {
+          "title": "Typed integration graph transitions"
+        }
+      },
+      {
+        "id": "P10",
+        "kind": "deliver",
+        "requires": [
+          "P09"
+        ],
+        "input": {
+          "title": "CAS branch advancement"
+        }
+      },
+      {
+        "id": "P11",
+        "kind": "implement",
+        "requires": [
+          "P09",
+          "P10"
+        ],
+        "input": {
+          "title": "Receipt-linked downstream handoff"
+        }
+      },
+      {
+        "id": "P12",
+        "kind": "plan",
+        "requires": [
+          "P06"
+        ],
+        "input": {
+          "title": "Competing courses of action"
+        }
+      },
+      {
+        "id": "P13",
+        "kind": "verify",
+        "requires": [],
+        "input": {
+          "title": "Cold verifier contract"
+        }
+      },
+      {
+        "id": "P14",
+        "kind": "critic",
+        "requires": [
+          "P13",
+          "P09"
+        ],
+        "input": {
+          "title": "Rival critic integration gate"
+        }
+      },
+      {
+        "id": "P15",
+        "kind": "verify",
+        "requires": [
+          "P13",
+          "P02"
+        ],
+        "input": {
+          "title": "Predeclared effectiveness outcomes"
+        }
+      },
+      {
+        "id": "P16",
+        "kind": "implement",
+        "requires": [
+          "P01"
+        ],
+        "input": {
+          "title": "Execution-identity capacity leases"
+        }
+      },
+      {
+        "id": "P17",
+        "kind": "implement",
+        "requires": [
+          "P16"
+        ],
+        "input": {
+          "title": "Interrupted lease reconciliation"
+        }
+      },
+      {
+        "id": "P18",
+        "kind": "implement",
+        "requires": [
+          "P15",
+          "P16"
+        ],
+        "input": {
+          "title": "Measured router role policy"
+        }
+      },
+      {
+        "id": "P19",
+        "kind": "implement",
+        "requires": [
+          "P16",
+          "P18"
+        ],
+        "input": {
+          "title": "Reserve-aware local fallback"
+        }
+      },
+      {
+        "id": "P20",
+        "kind": "implement",
+        "requires": [
+          "P00",
+          "P16"
+        ],
+        "input": {
+          "title": "Bounded saturation and backpressure"
+        }
+      },
+      {
+        "id": "P21",
+        "kind": "mutate-harness",
+        "requires": [],
+        "input": {
+          "title": "Frozen-evaluator harness archive"
+        }
+      },
+      {
+        "id": "P22",
+        "kind": "mutate-harness",
+        "requires": [
+          "P21",
+          "P05"
+        ],
+        "input": {
+          "title": "Sandboxed harness proposer"
+        }
+      },
+      {
+        "id": "P23",
+        "kind": "verify",
+        "requires": [
+          "P21",
+          "P13"
+        ],
+        "input": {
+          "title": "Matched harness evaluation"
+        }
+      },
+      {
+        "id": "P24",
+        "kind": "mutate-harness",
+        "requires": [
+          "P21"
+        ],
+        "input": {
+          "title": "Protected candidate admission"
+        }
+      },
+      {
+        "id": "P25",
+        "kind": "implement",
+        "requires": [
+          "P00",
+          "P08",
+          "P14"
+        ],
+        "input": {
+          "title": "Existing-activation daemon graph wiring"
+        }
+      },
+      {
+        "id": "P26",
+        "kind": "implement",
+        "requires": [
+          "P25"
+        ],
+        "input": {
+          "title": "Company mission intake and idle wake"
+        }
+      },
+      {
+        "id": "P27",
+        "kind": "implement",
+        "requires": [
+          "P02"
+        ],
+        "input": {
+          "title": "Memory filesystem ownership"
+        }
+      },
+      {
+        "id": "P28",
+        "kind": "implement",
+        "requires": [
+          "P27"
+        ],
+        "input": {
+          "title": "Consolidator and genome index"
+        }
+      },
+      {
+        "id": "P29",
+        "kind": "mutate-harness",
+        "requires": [
+          "P28",
+          "P23"
+        ],
+        "input": {
+          "title": "Task-family memory programs"
+        }
+      },
+      {
+        "id": "P30",
+        "kind": "critic",
+        "requires": [
+          "P21",
+          "P23"
+        ],
+        "input": {
+          "title": "Evaluator-copy Red Queen archive"
+        }
+      },
+      {
+        "id": "P31",
+        "kind": "invent",
+        "requires": [
+          "P11",
+          "P15"
+        ],
+        "input": {
+          "title": "Bounded product universe lifecycle"
+        }
+      },
+      {
+        "id": "P32",
+        "kind": "invent",
+        "requires": [
+          "P31"
+        ],
+        "input": {
+          "title": "Invent-to-spike adapter"
+        }
+      },
+      {
+        "id": "P33",
+        "kind": "weigh",
+        "requires": [
+          "P31",
+          "P13"
+        ],
+        "input": {
+          "title": "Ecosystem product acceptance sensor"
+        }
+      },
+      {
+        "id": "P34",
+        "kind": "talk",
+        "requires": [
+          "P04"
+        ],
+        "input": {
+          "title": "Agent Card discovery"
+        }
+      },
+      {
+        "id": "P35",
+        "kind": "implement",
+        "requires": [],
+        "input": {
+          "title": "Deterministic capped payment broker stub"
+        }
+      },
+      {
+        "id": "P36",
+        "kind": "implement",
+        "requires": [
+          "P02",
+          "P15"
+        ],
+        "input": {
+          "title": "Exception-only inbox projection"
+        }
+      },
+      {
+        "id": "P37",
+        "kind": "implement",
+        "requires": [
+          "P00"
+        ],
+        "input": {
+          "title": "Kill and revoke graph enforcement"
+        }
+      },
+      {
+        "id": "P38",
+        "kind": "verify",
+        "requires": [
+          "P00",
+          "P17"
+        ],
+        "input": {
+          "title": "Crash boundary acceptance"
+        }
+      },
+      {
+        "id": "P39",
+        "kind": "implement",
+        "requires": [
+          "P25",
+          "P02"
+        ],
+        "input": {
+          "title": "Durable tick observation producer"
+        }
+      },
+      {
+        "id": "P40",
+        "kind": "weigh",
+        "requires": [
+          "P15",
+          "P33"
+        ],
+        "input": {
+          "title": "Accepted-yield measurement"
+        }
+      },
+      {
+        "id": "P41",
+        "kind": "implement",
+        "requires": [
+          "P00",
+          "P03"
+        ],
+        "input": {
+          "title": "Existing console company projection"
+        }
+      },
+      {
+        "id": "P42",
+        "kind": "sweep",
+        "requires": [
+          "P01"
+        ],
+        "input": {
+          "title": "Dead command and duplicate-state audit"
+        }
+      },
+      {
+        "id": "P43",
+        "kind": "implement",
+        "requires": [
+          "P00",
+          "P02",
+          "P13"
+        ],
+        "input": {
+          "title": "Executable firm demo path"
+        }
+      },
+      {
+        "id": "P44",
+        "kind": "verify",
+        "requires": [
+          "P25",
+          "P38"
+        ],
+        "input": {
+          "title": "Activation runbook acceptance"
+        }
+      },
+      {
+        "id": "P45",
+        "kind": "weigh",
+        "requires": [
+          "P00"
+        ],
+        "input": {
+          "title": "Saturation evidence report"
+        }
+      },
+      {
+        "id": "P46",
+        "kind": "verify",
+        "requires": [
+          "P43",
+          "P24"
+        ],
+        "input": {
+          "title": "Safety and self-diff regression gate"
+        }
+      },
+      {
+        "id": "P47",
+        "kind": "integrate",
+        "requires": [
+          "P44",
+          "P46",
+          "P40"
+        ],
+        "input": {
+          "title": "Frozen firm commissioning gate"
+        }
+      }
+    ]
+  },
+  "packages": [
+    {
+      "id": "P00",
+      "title": "Control graph dispatcher",
+      "state": "landed-local",
+      "branch": "auto/p00",
+      "artifactDigest": "a6fc5a0946c86801a8e3f35991ff5f8eee3bc19324249cab7549c62691ae53d0",
+      "receipt": "artifacts/merge-traces.json#merge:e58c95bd53fd58b70689d3a791b615aa8b438079",
+      "commit": "e58c95bd53fd58b70689d3a791b615aa8b438079",
+      "completionScope": "tested component; live integration and activation are separate",
+      "followUpCommit": "307a55def0ec438ac6d24b9c3c187fb782551436"
+    },
+    {
+      "id": "P01",
+      "title": "Autonomy gap inventory",
+      "state": "landed-local",
+      "branch": "auto/p01",
+      "artifactDigest": "108e6d530ab8213bedf904db910f37806f52a33bef561d77adefd87478d12507",
+      "receipt": "artifacts/merge-traces.json#merge:6f4493051568d6164ea4bea8e207ba5f1ac1fdaf",
+      "commit": "6f4493051568d6164ea4bea8e207ba5f1ac1fdaf",
+      "completionScope": "source inventory only"
+    },
+    {
+      "id": "P02",
+      "title": "Signed decision trace contract",
+      "state": "landed-local",
+      "branch": "auto/p02",
+      "artifactDigest": "f39d61fb3d535f1e06e99ed3b74f44529a7e9841f40cee27c8c8690db065db75",
+      "receipt": "artifacts/merge-traces.json#merge:278b6b64092701c3e68bbe872fd58f72cbdbf159",
+      "commit": "278b6b64092701c3e68bbe872fd58f72cbdbf159",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P03",
+      "title": "Conflict-preserving trace query",
+      "state": "landed-local",
+      "branch": "auto/p03",
+      "artifactDigest": "d2c1d11c4f8810143fa7807b51786ccb632d1ce799abe015b232245e81cf9539",
+      "receipt": "artifacts/merge-traces.json#merge:d6c6bf3a7c6452e5000b16a2be14d516a6af4622",
+      "commit": "d6c6bf3a7c6452e5000b16a2be14d516a6af4622",
+      "completionScope": "tested general graph CLI and SDK; MCP and live status remain separate"
+    },
+    {
+      "id": "P04",
+      "title": "Agent-first graph resources",
+      "state": "landed-local",
+      "branch": "auto/p04",
+      "artifactDigest": "b5e7f58f637823ece3d11f62a4db27919b1b018f962a98ef6de950e795ae6dd2",
+      "receipt": "artifacts/merge-traces.json#merge:8f86b2f990c5e57fee7b58a9734b4c6be220e621",
+      "commit": "8f86b2f990c5e57fee7b58a9734b4c6be220e621",
+      "completionScope": "tested optional signed MCP resources; explicit host configuration required"
+    },
+    {
+      "id": "P05",
+      "title": "Sandboxed engine trace adapter",
+      "state": "landed-local",
+      "branch": "auto/p05",
+      "artifactDigest": "1ce31c6514d5742aae1b31ff6eb0f58e309ff72aa737f565a6fb62808f8ec5a0",
+      "receipt": "artifacts/merge-traces.json#merge:f98ddaf0fe7f4b262ab454fee5e679dd937813e5",
+      "commit": "f98ddaf0fe7f4b262ab454fee5e679dd937813e5",
+      "completionScope": "tested resource-generation graph adapter only; full sandbox engines and independent acceptance remain separate"
+    },
+    {
+      "id": "P06",
+      "title": "Value-hypothesis allocation caller",
+      "state": "landed-local",
+      "branch": "auto/p06",
+      "artifactDigest": "8849a614584b05bdb80875d674c6eb6042a06663790ceed82db95084a9d9ab0a",
+      "receipt": "artifacts/merge-traces.json#merge:6c6080c30fd4fa93becd2443cc4d2ed6e678a4dd",
+      "commit": "6c6080c30fd4fa93becd2443cc4d2ed6e678a4dd",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P07",
+      "title": "Digest-bound allocation receipts",
+      "state": "landed-local",
+      "branch": "auto/p07",
+      "artifactDigest": "df8ea149f62cefa8fa3fbebd89cea0ccc259dcd41b80e5109817d10bc6f361e3",
+      "receipt": "artifacts/merge-traces.json#merge:74f43f539ea0d7260140ee01e434e8880d638f69",
+      "commit": "74f43f539ea0d7260140ee01e434e8880d638f69",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P08",
+      "title": "Receipt-to-capacity dispatcher",
+      "state": "landed-local",
+      "branch": "auto/p08",
+      "artifactDigest": "a6fb1bf9710d6ac27a33c9949d30c25a0dc4d4b21f35eff101ae28c8653b9022",
+      "receipt": "artifacts/merge-traces.json#merge:9d9e434b4cf71b1d040db9134155a0e5970c970d",
+      "commit": "9d9e434b4cf71b1d040db9134155a0e5970c970d",
+      "completionScope": "tested explicit host API with inert real transports; graph caller, cumulative budgets and live commissioning remain separate"
+    },
+    {
+      "id": "P09",
+      "title": "Typed integration graph transitions",
+      "state": "planned",
+      "branch": "auto/p09",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P10",
+      "title": "CAS branch advancement",
+      "state": "planned",
+      "branch": "auto/p10",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P11",
+      "title": "Receipt-linked downstream handoff",
+      "state": "planned",
+      "branch": "auto/p11",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P12",
+      "title": "Competing courses of action",
+      "state": "planned",
+      "branch": "auto/p12",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P13",
+      "title": "Cold verifier contract",
+      "state": "landed-local",
+      "branch": "auto/p13",
+      "artifactDigest": "a034a45a31518ece5feb6e57d5213fbaa4e102a499eaf6c981829a476d0643bb",
+      "receipt": "artifacts/merge-traces.json#merge:3cdc55f4fe251bbc9cb06c4cbf2a9b90db682d8b",
+      "commit": "3cdc55f4fe251bbc9cb06c4cbf2a9b90db682d8b",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P14",
+      "title": "Rival critic integration gate",
+      "state": "planned",
+      "branch": "auto/p14",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P15",
+      "title": "Predeclared effectiveness outcomes",
+      "state": "planned",
+      "branch": "auto/p15",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P16",
+      "title": "Execution-identity capacity leases",
+      "state": "planned",
+      "branch": "auto/p16",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P17",
+      "title": "Interrupted lease reconciliation",
+      "state": "planned",
+      "branch": "auto/p17",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P18",
+      "title": "Measured router role policy",
+      "state": "planned",
+      "branch": "auto/p18",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P19",
+      "title": "Reserve-aware local fallback",
+      "state": "planned",
+      "branch": "auto/p19",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P20",
+      "title": "Bounded saturation and backpressure",
+      "state": "planned",
+      "branch": "auto/p20",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P21",
+      "title": "Frozen-evaluator harness archive",
+      "state": "landed-local",
+      "branch": "auto/p21",
+      "artifactDigest": "bb23b020a32b96beeefd91ead751dd396eb89731709a0c8ce7fc0a4ffaf6458d",
+      "receipt": "artifacts/merge-traces.json#merge:4b9723b863fb02f6f1f481324cc82897b7863890",
+      "commit": "4b9723b863fb02f6f1f481324cc82897b7863890",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P22",
+      "title": "Sandboxed harness proposer",
+      "state": "planned",
+      "branch": "auto/p22",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P23",
+      "title": "Matched harness evaluation",
+      "state": "planned",
+      "branch": "auto/p23",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P24",
+      "title": "Protected candidate admission",
+      "state": "planned",
+      "branch": "auto/p24",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P25",
+      "title": "Existing-activation daemon graph wiring",
+      "state": "planned",
+      "branch": "auto/p25",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P26",
+      "title": "Company mission intake and idle wake",
+      "state": "planned",
+      "branch": "auto/p26",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P27",
+      "title": "Memory filesystem ownership",
+      "state": "landed-local",
+      "branch": "auto/p27",
+      "artifactDigest": "02a887c973b1d0c2c97d5b243e7f76b66a9787b930c3e2775e615d6f42406e9e",
+      "receipt": "artifacts/merge-traces.json#merge:7887f5a0a8920b646243281892f57e75b6c4685b",
+      "commit": "7887f5a0a8920b646243281892f57e75b6c4685b",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P28",
+      "title": "Consolidator and genome index",
+      "state": "planned",
+      "branch": "auto/p28",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P29",
+      "title": "Task-family memory programs",
+      "state": "planned",
+      "branch": "auto/p29",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P30",
+      "title": "Evaluator-copy Red Queen archive",
+      "state": "planned",
+      "branch": "auto/p30",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P31",
+      "title": "Bounded product universe lifecycle",
+      "state": "planned",
+      "branch": "auto/p31",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P32",
+      "title": "Invent-to-spike adapter",
+      "state": "planned",
+      "branch": "auto/p32",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P33",
+      "title": "Ecosystem product acceptance sensor",
+      "state": "planned",
+      "branch": "auto/p33",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P34",
+      "title": "Agent Card discovery",
+      "state": "planned",
+      "branch": "auto/p34",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P35",
+      "title": "Deterministic capped payment broker stub",
+      "state": "landed-local",
+      "branch": "auto/p35",
+      "artifactDigest": "14ca1ab620adc387287638be50affdc479685d426a64b070a47ee191bc8d0bbe",
+      "receipt": "artifacts/merge-traces.json#merge:50fd5d5154ee9253e2437fc6ca8d1415de628393",
+      "commit": "50fd5d5154ee9253e2437fc6ca8d1415de628393",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P36",
+      "title": "Exception-only inbox projection",
+      "state": "planned",
+      "branch": "auto/p36",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P37",
+      "title": "Kill and revoke graph enforcement",
+      "state": "landed-local",
+      "branch": "auto/p37",
+      "artifactDigest": "64b8d89ceed49c058613b1e5ca2a33e8fd44219b5b39b65eaffc7be29080a00e",
+      "receipt": "artifacts/merge-traces.json#merge:520396aec9edc1f912f889103b245334603cfd0b",
+      "commit": "520396aec9edc1f912f889103b245334603cfd0b",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P38",
+      "title": "Crash boundary acceptance",
+      "state": "planned",
+      "branch": "auto/p38",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P39",
+      "title": "Durable tick observation producer",
+      "state": "planned",
+      "branch": "auto/p39",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P40",
+      "title": "Accepted-yield measurement",
+      "state": "planned",
+      "branch": "auto/p40",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P41",
+      "title": "Existing console company projection",
+      "state": "planned",
+      "branch": "auto/p41",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P42",
+      "title": "Dead command and duplicate-state audit",
+      "state": "planned",
+      "branch": "auto/p42",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P43",
+      "title": "Executable firm demo path",
+      "state": "landed-local",
+      "branch": "auto/p43",
+      "artifactDigest": "e0660b02c25906aaae4779d6bdf2400c7c4fa1037aac256661379cc82f6f7461",
+      "receipt": "artifacts/merge-traces.json#merge:effb00f3aad9ae39bffa9dd2c82522e6c6c300fe",
+      "commit": "effb00f3aad9ae39bffa9dd2c82522e6c6c300fe",
+      "completionScope": "tested component; live integration and activation are separate"
+    },
+    {
+      "id": "P44",
+      "title": "Activation runbook acceptance",
+      "state": "planned",
+      "branch": "auto/p44",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P45",
+      "title": "Saturation evidence report",
+      "state": "planned",
+      "branch": "auto/p45",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P46",
+      "title": "Safety and self-diff regression gate",
+      "state": "planned",
+      "branch": "auto/p46",
+      "artifactDigest": null,
+      "receipt": null
+    },
+    {
+      "id": "P47",
+      "title": "Frozen firm commissioning gate",
+      "state": "planned",
+      "branch": "auto/p47",
+      "artifactDigest": null,
+      "receipt": null
+    }
+  ],
+  "edges": [],
+  "note": "This is the parent-maintained build plan, not a forged runtime execution ledger. Requires are declared dependencies. Local artifact digests and signed post-integration attestations are recorded separately. The executable fixture has its own signed artifact-edge ledger in a test-owned root. No planned package is marked complete merely to meet a count.",
+  "progress": {
+    "locallyLandedPackages": 13,
+    "codeAndTestPackages": 12,
+    "inventoryPackages": 1,
+    "plannedPackages": 35,
+    "fullyAutonomous": false,
+    "hostExecution": "withheld-global-kill",
+    "externalDelivery": "not-pushed"
+  }
+}

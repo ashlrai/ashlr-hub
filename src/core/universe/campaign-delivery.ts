@@ -1,16 +1,24 @@
 import { resolve } from 'node:path';
-import { canonical, defaultUniverseRoot, digest } from './artifacts.js';
+import { artifactDigest, canonical, defaultUniverseRoot, digest } from './artifacts.js';
 import { runUniverseCampaign, type UniverseCampaignExpectation } from './campaign.js';
 import { campaignDirectory, campaignUniverse, readCampaignEvents, readUniverseCampaign } from './campaign-store.js';
+import { verifiedCampaignPassedSeedImprovement, verifiedInitialCampaignRepair, verifiedInitialCampaignSeedImprovement } from './campaign-improvement.js';
 import { deliverUniverseEliteOwned, readUniverseDeliveries, validUniverseDeliveryBranch,
   type UniverseDeliveryReceipt } from './delivery.js';
 import { withUniverseExecution } from './execution.js';
 import { manifestRecord, universePath } from './store.js';
-import type { UniverseCampaignSummary, UniverseRunOptions } from './types.js';
+import type { UniverseCampaignSummary, UniverseRunOptions, UniverseSummary, UniverseTrial } from './types.js';
+
+export interface UniverseCampaignDeliveryTarget {
+  branch: string;
+  baseCommit: string;
+  /** Opt in to a first passing repair measured against an earlier failed exact-seed evaluation. */
+  allowInitialRepair?: true;
+}
 
 export interface UniverseCampaignDeliveryOptions extends UniverseRunOptions {
   /** Explicit invocation intent, separate from the frozen experiment/campaign definitions. */
-  delivery: { branch: string; baseCommit: string };
+  delivery: UniverseCampaignDeliveryTarget;
 }
 export interface UniverseCampaignDeliveryResult {
   campaign: UniverseCampaignSummary;
@@ -19,7 +27,7 @@ export interface UniverseCampaignDeliveryResult {
 }
 export interface UniverseCampaignDeliveryPlan {
   schemaVersion: 1;
-  deliveries: Array<{ campaignId: string; branch: string; baseCommit: string }>;
+  deliveries: Array<UniverseCampaignDeliveryTarget & { campaignId: string }>;
 }
 
 function dataRecord(value: unknown, keys: string[]): value is Record<string, unknown> {
@@ -38,21 +46,73 @@ export function validateUniverseCampaignDeliveryPlan(value: unknown, ids: string
         .some((property) => !property || !Object.hasOwn(property, 'value'))) throw new Error('Invalid campaign delivery plan');
   const seen = new Set<string>();
   const deliveries = value.deliveries.map((row: unknown) => {
-    if (!dataRecord(row, ['campaignId', 'branch', 'baseCommit']) || typeof row.campaignId !== 'string' ||
+    const keys = row !== null && typeof row === 'object' && Object.hasOwn(row, 'allowInitialRepair')
+      ? ['campaignId', 'branch', 'baseCommit', 'allowInitialRepair'] : ['campaignId', 'branch', 'baseCommit'];
+    if (!dataRecord(row, keys) || keys.includes('allowInitialRepair') && row.allowInitialRepair !== true || typeof row.campaignId !== 'string' ||
         !ids.includes(row.campaignId) || seen.has(row.campaignId) || !validUniverseDeliveryBranch(row.branch) ||
         typeof row.baseCommit !== 'string' || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(row.baseCommit)) {
       throw new Error('Invalid campaign delivery plan');
     }
     seen.add(row.campaignId);
-    return { campaignId: row.campaignId, branch: row.branch, baseCommit: row.baseCommit };
+    return { campaignId: row.campaignId, branch: row.branch, baseCommit: row.baseCommit,
+      ...(keys.includes('allowInitialRepair') ? { allowInitialRepair: true as const } : {}) };
   });
   return { schemaVersion: 1, deliveries };
+}
+
+/** Capture only a literal, own opt-in; never invoke a caller's policy accessor. */
+function initialRepairOption(target: UniverseCampaignDeliveryTarget): true | undefined {
+  const property = Object.getOwnPropertyDescriptor(target, 'allowInitialRepair');
+  if ('allowInitialRepair' in target && (!property || !Object.hasOwn(property, 'value') || property.value !== true)) {
+    throw new Error('Campaign initial repair requires an explicit true opt-in');
+  }
+  return property?.value as true | undefined;
+}
+
+/** The pure proof is not enough: delivery and restart inspection also verify its archived baseline bytes. */
+export function hasVerifiedInitialCampaignRepair(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string, options: { root: string }): boolean {
+  return hasVerifiedCampaignComparison(universe, campaign, trial, seedDigest, options, verifiedInitialCampaignRepair);
+}
+
+export function hasVerifiedInitialCampaignSeedImprovement(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string, options: { root: string }): boolean {
+  return hasVerifiedCampaignComparison(universe, campaign, trial, seedDigest, options, verifiedInitialCampaignSeedImprovement);
+}
+
+export function hasVerifiedCampaignPassedSeedImprovement(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string, options: { root: string }): boolean {
+  return hasVerifiedCampaignComparison(universe, campaign, trial, seedDigest, options, verifiedCampaignPassedSeedImprovement);
+}
+
+function hasVerifiedCampaignComparison(universe: UniverseSummary, campaign: UniverseCampaignSummary,
+  trial: UniverseTrial, seedDigest: string, options: { root: string },
+  verify: typeof verifiedInitialCampaignRepair | typeof verifiedInitialCampaignSeedImprovement | typeof verifiedCampaignPassedSeedImprovement): boolean {
+  const proof = verify(universe, campaign, trial, seedDigest);
+  if (!proof) return false;
+  // Captured summaries cannot authorize a final effect after durable evidence
+  // changes. The strict campaign decoder also validates the seed session link.
+  const latest = readUniverseCampaign(campaign.definition.id, options);
+  if (canonical(latest) !== canonical(campaign)) return false;
+  const current = campaignUniverse(latest, options);
+  const currentTrial = current.runs.flatMap(run => run.trials).find(value => value.id === trial.id);
+  if (!currentTrial || canonical(currentTrial) !== canonical(trial) ||
+      canonical(verify(current, latest, currentTrial, seedDigest)) !== canonical(proof)) return false;
+  const record = manifestRecord(universePath(options.root, universe.manifest.id));
+  if (record.manifestDigest !== universe.manifestDigest || record.comparatorDigest !== universe.comparatorDigest ||
+      record.seedArtifact.digest !== seedDigest || artifactDigest(record.seedArtifact.path) !== seedDigest) return false;
+  if (!('baselineRunId' in proof)) return proof.seedIntentDigest === digest(canonical(latest.seedEvaluation!.intent)) &&
+    proof.seedResultDigest === digest(canonical(latest.seedEvaluation!.result));
+  const baseline = universe.runs.find((run) => run.id === proof.baselineRunId)?.trials
+    .find((item) => item.id === proof.baselineTrialId);
+  return !!baseline?.artifact && artifactDigest(baseline.artifact.path) === proof.baselineArtifactDigest;
 }
 
 /** Read-only preflight shared by single-campaign execution and whole-queue admission. */
 export function preflightUniverseCampaignDelivery(id: string, options: UniverseCampaignDeliveryOptions): {
   campaign: UniverseCampaignSummary; repo: string;
 } {
+  initialRepairOption(options.delivery);
   const { branch, baseCommit } = options.delivery;
   if (!validUniverseDeliveryBranch(branch) || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(baseCommit)) {
     throw new Error('Campaign delivery requires a codex/ branch and exact pinned base commit');
@@ -77,13 +137,18 @@ function identity(summary: UniverseCampaignSummary): UniverseCampaignExpectation
 export async function runUniverseCampaignAndDeliver(id: string,
   options: UniverseCampaignDeliveryOptions): Promise<UniverseCampaignDeliveryResult> {
   const store = { root: resolve(options.root ?? defaultUniverseRoot()) };
-  const delivery = { ...options.delivery };
+  const allowInitialRepair = initialRepairOption(options.delivery);
+  const delivery = { branch: options.delivery.branch, baseCommit: options.delivery.baseCommit,
+    ...(allowInitialRepair ? { allowInitialRepair } : {}) };
   const initial = preflightUniverseCampaignDelivery(id, { ...store, delivery }).campaign;
   const campaign = await runUniverseCampaign(id, { ...store, signal: options.signal,
-    resourceRuntime: options.resourceRuntime, expectedIdentity: identity(initial) });
+    resourceRuntime: options.resourceRuntime, expectedResourceRuntimeDigest: options.expectedResourceRuntimeDigest,
+    isExecutionStopped: options.isExecutionStopped,
+    expectedIdentity: identity(initial) });
   if (options.signal?.aborted) return { campaign, delivery: { status: 'withheld', reason: 'cancelled' } };
   if (campaign.state !== 'completed') return { campaign, delivery: { status: 'withheld', reason: 'campaign-not-completed' } };
   return deliverCompletedUniverseCampaign(id, { ...store, delivery, signal: options.signal,
+    isExecutionStopped: options.isExecutionStopped,
     expectedIdentity: { ...identity(initial), summaryDigest: digest(canonical(campaign)) } });
 }
 
@@ -92,9 +157,11 @@ export async function deliverCompletedUniverseCampaign(id: string,
   options: UniverseCampaignDeliveryOptions & { expectedIdentity?: UniverseCampaignExpectation;
     /** Absolute performance.now() deadline for in-process orchestration. */
     deadlineMonotonicMs?: number }): Promise<UniverseCampaignDeliveryResult> {
+  const allowInitialRepair = initialRepairOption(options.delivery);
   const { branch, baseCommit } = options.delivery;
   const store = { root: resolve(options.root ?? defaultUniverseRoot()) };
-  const initial = preflightUniverseCampaignDelivery(id, { ...store, delivery: { branch, baseCommit } }).campaign;
+  const initial = preflightUniverseCampaignDelivery(id, { ...store, delivery: { branch, baseCommit,
+    ...(allowInitialRepair ? { allowInitialRepair } : {}) } }).campaign;
   const expectedIdentity = { ...(options.expectedIdentity ?? identity(initial)) };
   const universeId = initial.definition.universeId;
   const directory = universePath(store.root, universeId);
@@ -110,14 +177,18 @@ export async function deliverCompletedUniverseCampaign(id: string,
     if (options.signal?.aborted) return { campaign: current, delivery: { status: 'withheld', reason: 'cancelled' } };
     if (current.state !== 'completed') return { campaign: current, delivery: { status: 'withheld', reason: 'campaign-not-completed' } };
     const seedDigest = manifestRecord(directory).seedArtifact.digest;
+    const passedSeed = current.seedEvaluation?.result?.measurement?.passed === true;
     const allTrials = new Map(universe.runs.flatMap((run) => run.trials).map((trial) => [trial.id, trial]));
     const trials = universe.runs.flatMap((run) => run.status === 'completed' &&
       run.campaign?.id === id && run.campaign.definitionDigest === current.definitionDigest &&
       current.steps.some((step) => step.runId === run.id && step.ordinal === run.campaign!.ordinal)
       ? run.trials.filter((trial) => {
         const parent = trial.parentTrialId ? allTrials.get(trial.parentTrialId) : undefined;
-        return trial.selected && trial.status === 'passed' && trial.score !== null && trial.delta !== null && trial.delta > 0 &&
-          trial.artifact && trial.artifact.digest !== seedDigest && parent?.artifact && trial.artifact.digest !== parent.artifact.digest;
+        return trial.selected && trial.status === 'passed' && trial.score !== null && trial.artifact && trial.artifact.digest !== seedDigest &&
+          (!passedSeed || verifiedCampaignPassedSeedImprovement(universe, current, trial, seedDigest) !== null) &&
+          (trial.delta !== null && trial.delta > 0 && parent?.artifact && trial.artifact.digest !== parent.artifact.digest ||
+            verifiedInitialCampaignSeedImprovement(universe, current, trial, seedDigest) !== null ||
+            allowInitialRepair && verifiedInitialCampaignRepair(universe, current, trial, seedDigest) !== null);
       }) : []);
     const prior = readUniverseDeliveries(universeId, store);
     if (prior.sourceState === 'degraded') throw new Error('Campaign delivery ledger is degraded');
@@ -131,8 +202,23 @@ export async function deliverCompletedUniverseCampaign(id: string,
       .filter((trial) => universe.elites.some((elite) => elite.trialId === trial.id))
       .sort((a, b) => direction * (a.score! - b.score!) || a.id.localeCompare(b.id))[0];
     if (!selected) return { campaign: current, delivery: { status: 'withheld', reason: 'no-strict-improvement' } };
+    // Passed-seed custody applies to descendants too: improvement over an
+    // intermediate regression must not publish a net regression from the seed.
+    const isExecutionStopped = passedSeed || selected.parentTrialId === null ? () => {
+      if (options.isExecutionStopped?.()) return true;
+      if (passedSeed) {
+        if (!hasVerifiedCampaignPassedSeedImprovement(universe, current, selected, seedDigest, store)) {
+          throw new Error(selected.parentTrialId === null ? 'Initial campaign improvement baseline artifact is missing or changed'
+            : 'Campaign improvement baseline artifact is missing or changed');
+        }
+      } else if (!hasVerifiedInitialCampaignSeedImprovement(universe, current, selected, seedDigest, store) &&
+          !(allowInitialRepair && hasVerifiedInitialCampaignRepair(universe, current, selected, seedDigest, store))) {
+        throw new Error('Initial campaign improvement baseline artifact is missing or changed');
+      }
+      return false;
+    } : options.isExecutionStopped;
     const receipt = await deliverUniverseEliteOwned(universeId, { ...store, trialId: selected.id, branch, signal: options.signal,
-      deadlineMonotonicMs: options.deadlineMonotonicMs }, lock);
+      isExecutionStopped, deadlineMonotonicMs: options.deadlineMonotonicMs }, lock);
     if (receipt.status !== 'delivered') throw new Error('Campaign delivery did not produce a changed local branch');
     return { campaign: current, delivery: { status: 'delivered', receipt } };
   });

@@ -17,6 +17,7 @@ export function resourceFixture(): { scope: ResourceConsoleScope; snapshot: Reso
     scope: { schemaVersion: 1, mode: 'resource-pool', root: "/private/resource O'Brien/$ledger", poolId: 'builder-pool',
       readOnly: false, workspace: '/private/project', maxParallel: 4, maxQueued: 64 },
     snapshot: { schemaVersion: 1, mode: 'resource-pool', authority: 'local-evidence', sampledAt: at,
+      executionStop: { state: 'inactive', sampledAt: at },
       sourceState: 'healthy', reasons: [], pool: { id: 'builder-pool', workers: [
         worker('codex-a', 'codex', 'codex-account'), worker('codex-alias', 'codex', 'codex-account'), worker('local-a', 'local', 'local-machine'),
       ] }, groups: [

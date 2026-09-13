@@ -3,7 +3,7 @@ import type { ResourceConsoleEvidence, ResourceConsoleGroup } from '../resources
 import type { ResourceBinding } from '../resources/worker.js';
 import type { ResourceTaskReceipt, resourcePoolStatus } from '../resources/pool-runtime.js';
 import { buildResourcePerformance, resourceUsageScopeForProvider, validateResourcePerformanceReport,
-  validResourceExecutionMeasurement } from '../resources/performance.js';
+  validResourceExecutionMeasurement, validateResourceConfigurationDigests } from '../resources/performance.js';
 import { validResourceNativeProcessForReceipt } from '../resources/native-diagnostics.js';
 
 export const MAX_RESOURCE_CONSOLE_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -15,7 +15,8 @@ const ACTIVE = new Set(['reserved', 'uncertain']);
 const STATUSES = ['reserved', 'completed', 'failed', 'timed-out', 'cancelled', 'uncertain'];
 const EXCLUSIONS = ['worker-not-allowed', 'worker-unavailable', 'provider-retry-after', 'observation-missing',
   'observation-future', 'observation-stale', 'quota-windows-missing', 'quota-window-unknown',
-  'quota-window-reset-passed', 'quota-reserve-reached', 'concurrency-exhausted', 'operator-task-cap-reached'];
+  'quota-window-reset-passed', 'quota-reserve-reached', 'concurrency-exhausted', 'operator-task-cap-reached',
+  'operator-quota-scope-excluded'];
 type Status = ReturnType<typeof resourcePoolStatus>;
 type JsonObject = Record<string, unknown>;
 
@@ -98,6 +99,7 @@ export function projectResourceConsoleEvidence(pool: ResourcePool, bindings: Res
   if (!['missing', 'healthy'].includes(status.sourceState) || status.poolId !== pool.id || status.attempts.length > MAX_ATTEMPTS) invalid();
   const now = Date.parse(result.sampledAt);
   result.sourceState = status.sourceState; result.reasons = [];
+  if (status.configurationDigests !== undefined) result.configurationDigests = validateResourceConfigurationDigests(status.configurationDigests);
   // Copy only the plan's public fields; definition and binding locators never enter the DTO.
   result.plan = { schemaVersion: 1, poolId: status.plan.poolId, sampledAt: status.plan.sampledAt,
     selectedWorkerId: status.plan.selectedWorkerId, nextEligibleAt: status.plan.nextEligibleAt,
@@ -129,7 +131,7 @@ export function projectResourceConsoleEvidence(pool: ResourcePool, bindings: Res
   result.usage = { reportedAttempts: reported.length, unknownAttempts: status.attempts.length - reported.length,
     reportedInputTokens: reported.length ? input : null, reportedOutputTokens: reported.length ? output : null,
     totalInputTokens: complete ? input : null, totalOutputTokens: complete ? output : null, complete };
-  result.performance = buildResourcePerformance(pool, status.attempts);
+  result.performance = buildResourcePerformance(pool, status.attempts, result.configurationDigests);
   return result;
 }
 
@@ -191,11 +193,15 @@ export function validateResourceConsoleResponse(value: unknown, pool: ResourcePo
   let parsed: unknown;
   try { parsed = JSON.parse(value); } catch { invalid(); }
   const hasPerformance = parsed !== null && typeof parsed === 'object' && Object.hasOwn(parsed, 'performance');
+  const hasConfigurations = parsed !== null && typeof parsed === 'object' && Object.hasOwn(parsed, 'configurationDigests');
   object(parsed, ['schemaVersion', 'mode', 'authority', 'sampledAt', 'sourceState', 'reasons', 'pool', 'groups', 'plan',
-    'observations', 'activeAttempts', 'recentAttempts', 'counts', 'usage', ...(hasPerformance ? ['performance'] : [])]);
+    'observations', 'activeAttempts', 'recentAttempts', 'counts', 'usage', ...(hasPerformance ? ['performance'] : []),
+    ...(hasConfigurations ? ['configurationDigests'] : [])]);
   if (parsed.schemaVersion !== 1 || parsed.mode !== 'resource-pool' || parsed.authority !== 'local-evidence' ||
     !iso(parsed.sampledAt) || !['missing', 'healthy', 'degraded'].includes(parsed.sourceState as string)) invalid();
   const expected = configuration(pool, bindings);
+  const configurationDigests = hasConfigurations ? validateResourceConfigurationDigests(parsed.configurationDigests) : undefined;
+  if (hasConfigurations && parsed.sourceState !== 'healthy') invalid();
   if (!equal(parsed.pool, expected.pool)) invalid();
   array(parsed.reasons, 1);
   if (!equal(parsed.reasons, parsed.sourceState === 'degraded' ? ['resource-evidence-unavailable'] : [])) invalid();
@@ -214,6 +220,7 @@ export function validateResourceConsoleResponse(value: unknown, pool: ResourcePo
   array(parsed.activeAttempts, MAX_ATTEMPTS); array(parsed.recentAttempts, MAX_RESOURCE_CONSOLE_RECENT_ATTEMPTS);
   const allRows = [...parsed.activeAttempts, ...parsed.recentAttempts];
   for (const row of allRows) validateReceipt(row, expected.pool);
+  if (configurationDigests && allRows.some(row => !configurationDigests.includes((row as ResourceTaskReceipt).poolDigest))) invalid();
   const rows = allRows as ResourceTaskReceipt[];
   if (new Set(rows.map((row) => row.id)).size !== rows.length ||
     (parsed.activeAttempts as ResourceTaskReceipt[]).some((row) => !ACTIVE.has(row.status)) ||
@@ -267,7 +274,7 @@ export function validateResourceConsoleResponse(value: unknown, pool: ResourcePo
         usage.totalInputTokens !== (complete ? input : null) || usage.totalOutputTokens !== (complete ? output : null)) invalid();
       // When the public history is complete, recompute rather than trusting a
       // second, potentially inconsistent summary of the same included records.
-      if (counts.omittedHistory === 0 && !equal(performance, buildResourcePerformance(pool, rows))) invalid();
+      if (counts.omittedHistory === 0 && !equal(performance, buildResourcePerformance(pool, rows, configurationDigests))) invalid();
     }
   }
   return parsed as unknown as ResourceConsoleEvidence;

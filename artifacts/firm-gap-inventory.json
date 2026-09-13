@@ -1,0 +1,489 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P01",
+  "source": {
+    "repository": "/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p21",
+    "branch": "auto/p21",
+    "baseCommit": "5c270bc73890e474463c31764d51e76196ad2e3f",
+    "dirtyState": "P21 owned files uncommitted; this inventory adds only P01 artifacts",
+    "directionSource": "user attachment f726d14c-98a5-4b55-bcff-50fcfc71aad9/pasted-text.txt"
+  },
+  "scope": "Read-only source/call-site inventory; no private state, provider probes, resident service inspection or activation.",
+  "classificationLegend": {
+    "EXISTS-WIRED-CLI": "Source and command caller exist; not runtime commissioning.",
+    "EXISTS-PURE-UNWIRED": "Pure library exists without the required effectful caller.",
+    "EXISTS-LIBRARY-UNWIRED": "Library exists but no product caller is connected.",
+    "MISSING-WIRING": "Identified required connection is absent in reviewed call paths; adjacent primitives may exist."
+  },
+  "liveVerification": {
+    "state": "NOT-PERFORMED",
+    "existsLiveClaims": 0
+  },
+  "all48PackagesComplete": false,
+  "items": [
+    {
+      "id": "activation",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P0",
+      "implemented": "Daemon and explicit one-goal permit consumers exist, but broader conductor activation returns false and both compiled root sets are empty.",
+      "gap": "No source-authorized resident firm activation. Enabling a config flag or supplying an unsigned package trace cannot admit it.",
+      "next": "Finish resident graph machinery behind the existing activation consumer; require separately reviewed root provisioning and exact existing permit contract for commissioning.",
+      "evidence": [
+        {
+          "path": "src/core/daemon/activation-permit.ts",
+          "line": 184
+        },
+        {
+          "path": "src/core/daemon/activation-permit.ts",
+          "line": 224
+        },
+        {
+          "path": "src/core/daemon/activation-permit.ts",
+          "line": 1418
+        },
+        {
+          "path": "src/core/daemon/loop.ts",
+          "line": 8122
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "conductor-watch",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P0",
+      "implemented": "loop routes to runConductor; goals advance via sandboxed proposal-only work.",
+      "gap": "Active-goal runConductor performs one bounded pass and returns. once:false only reaches the daemon fallback when there are no active goals; a watch flag alone does not implement repeated goal cycles.",
+      "next": "Add a bounded checkpointed caller loop with overlap suppression, cancellation, goal-state refresh and per-tick receipts; preserve the existing activation refusal.",
+      "evidence": [
+        {
+          "path": "src/cli/loop.ts",
+          "line": 175
+        },
+        {
+          "path": "src/core/goals/conductor.ts",
+          "line": 135
+        },
+        {
+          "path": "src/core/goals/conductor.ts",
+          "line": 142
+        },
+        {
+          "path": "src/core/goals/conductor.ts",
+          "line": 235
+        },
+        {
+          "path": "src/core/goals/advance.ts",
+          "line": 591
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "resident-universe-bridge",
+      "classification": "MISSING-WIRING",
+      "priority": "P0",
+      "implemented": "Explicit Universe foreground controller runs/reconciles a fixed campaign DAG; supervisor runs a fixed queue.",
+      "gap": "No daemon/conductor caller was found for runUniversePortfolioController or superviseUniverseCampaigns. Neither discovers new campaign work or renews authority.",
+      "next": "Implement a durable adapter for explicitly enrolled graph manifests and existing resource runtime pins, with no automatic budget renewal or duplicate unresolved dispatch.",
+      "evidence": [
+        {
+          "path": "src/cli/universe-controller.ts",
+          "line": 224
+        },
+        {
+          "path": "src/core/universe/portfolio-controller.ts",
+          "line": 116
+        },
+        {
+          "path": "src/cli/universe-supervise.ts",
+          "line": 9
+        },
+        {
+          "path": "src/cli/universe-supervise.ts",
+          "line": 91
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "kill-universe-boundary",
+      "classification": "MISSING-WIRING",
+      "priority": "P0",
+      "implemented": "Sandbox policy provides KILL checks/fenced control; daemon polls KILL at 50ms. Resource workers accept caller AbortSignal.",
+      "gap": "No shared sandbox KILL admission was found in Universe modules or resource worker. A caller signal is not evidence that ~/.ashlr/KILL stops those paths.",
+      "next": "Connect existing kill policy at pre-intent/pre-start and active-work cancellation boundaries; add race/settlement tests without inventing another kill root.",
+      "evidence": [
+        {
+          "path": "src/core/sandbox/policy.ts",
+          "line": 1548
+        },
+        {
+          "path": "src/core/sandbox/policy.ts",
+          "line": 1780
+        },
+        {
+          "path": "src/core/daemon/loop.ts",
+          "line": 8261
+        },
+        {
+          "path": "src/core/resources/worker.ts",
+          "line": 296
+        },
+        {
+          "path": "src/core/universe/portfolio-controller.ts",
+          "line": 328
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "swarm-execution",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Swarm CLI dispatches runSwarm with explicit project/budget/parallel options, resume, background workers and approval gates.",
+      "gap": "A runnable swarm is not the requested generic P00-P47 artifact-edge package dispatcher or a completed independently verified firm loop.",
+      "next": "Reuse swarm task execution behind a package graph adapter with owned worktrees, immutable output references and separate verification nodes.",
+      "evidence": [
+        {
+          "path": "src/cli/index.ts",
+          "line": 1794
+        },
+        {
+          "path": "src/cli/swarm.ts",
+          "line": 1371
+        },
+        {
+          "path": "src/cli/swarm.ts",
+          "line": 1400
+        },
+        {
+          "path": "src/cli/swarm.ts",
+          "line": 813
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "living-value-allocation",
+      "classification": "EXISTS-PURE-UNWIRED",
+      "priority": "P1",
+      "implemented": "Value portfolio implements pure digest-bound hypotheses, capacity and deterministic guarded allocations.",
+      "gap": "buildPortfolioShadowV1 has no production CLI/daemon/goals caller in the reviewed source. Pure outputs do not reserve capacity.",
+      "next": "Add an evidence-validating allocation-receipt caller; keep separate the lease-consuming dispatcher and leave the pure module free of effects.",
+      "evidence": [
+        {
+          "path": "src/core/vision/value-portfolio.ts",
+          "line": 1
+        },
+        {
+          "path": "src/core/vision/value-portfolio.ts",
+          "line": 14
+        },
+        {
+          "path": "src/core/vision/value-portfolio.ts",
+          "line": 817
+        },
+        {
+          "path": "src/core/vision/strategic-investment-compiler.ts",
+          "line": 13
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "resource-capacity",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Resource pool has explicit bindings, capacityKey alias grouping, durable reserved/terminal attempts, allocation ceiling, paused workers, quota freshness and local/native workers. Universe generation consumes it.",
+      "gap": "This audit has no commissioned identity/profile/quota proof. Shared bindings do not prove that two Codex subscriptions are isolated or usable; resource output is not accepted work.",
+      "next": "Produce a values-free commissioning report bound to explicit pool/binding digests, preserving personal-worker pause and reserves; then separately verify one accepted local task.",
+      "evidence": [
+        {
+          "path": "src/core/resources/pool-runtime.ts",
+          "line": 1
+        },
+        {
+          "path": "src/core/resources/pool-runtime.ts",
+          "line": 342
+        },
+        {
+          "path": "src/core/resources/pool-runtime.ts",
+          "line": 535
+        },
+        {
+          "path": "src/core/resources/pool-policy.ts",
+          "line": 257
+        },
+        {
+          "path": "src/core/universe/resource-generation.ts",
+          "line": 95
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "provider-profile-isolation",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Native profile environment explicitly separates CODEX_HOME and Claude configuration roots; worker bindings distinguish native-cli/local-chat.",
+      "gap": "No account files were read or probes executed. Current core pool provider enum is codex/claude/local, not Grok; broader account UI labels cannot establish a Grok execution adapter here.",
+      "next": "Commission existing profiles independently without importing personal credentials; require a dedicated provider contract and quota semantics before claiming Grok execution.",
+      "evidence": [
+        {
+          "path": "src/core/resources/native-profile.ts",
+          "line": 72
+        },
+        {
+          "path": "src/core/resources/native-profile.ts",
+          "line": 78
+        },
+        {
+          "path": "src/core/resources/worker.ts",
+          "line": 13
+        },
+        {
+          "path": "src/core/resources/pool-policy.ts",
+          "line": 143
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "learned-routing",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Daemon calls learned recommendation/budget cascade, and router consumes evidence-gated operational engine/producer scores.",
+      "gap": "Learned routing is not missing, but observed scores are not automatically authorized steering. No current eligible yield evidence was inspected.",
+      "next": "Connect new accepted-work receipts to existing operational-learning evidence and report observational versus admitted steering separately.",
+      "evidence": [
+        {
+          "path": "src/core/daemon/loop.ts",
+          "line": 5994
+        },
+        {
+          "path": "src/core/run/router.ts",
+          "line": 411
+        },
+        {
+          "path": "src/core/run/learned-router.ts",
+          "line": 1078
+        },
+        {
+          "path": "src/core/run/learned-router.ts",
+          "line": 1299
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "inbox-integration",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Daemon already invokes an opt-in judge/auto-merge maintenance pass using existing inbox merge authority, verification, provenance, enrollment and kill checks.",
+      "gap": "It would be incorrect to build a new ungated inbox drainer or claim every proposal requires a new manual click. Whether standing authority is actually commissioned is unverified.",
+      "next": "Reuse runAutoMergePass and existing per-proposal gates; expose exact exceptions without weakening merge.ts or equating a judge opinion with realized acceptance.",
+      "evidence": [
+        {
+          "path": "src/core/daemon/loop.ts",
+          "line": 3710
+        },
+        {
+          "path": "src/core/daemon/loop.ts",
+          "line": 7685
+        },
+        {
+          "path": "src/core/fleet/automerge-pass.ts",
+          "line": 6
+        },
+        {
+          "path": "src/core/fleet/automerge-pass.ts",
+          "line": 789
+        },
+        {
+          "path": "src/core/fleet/automerge-pass.ts",
+          "line": 1068
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "delivery-advancement",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Verified integration artifact delivery creates a new explicit local branch with immutable receipt replay and drift checks.",
+      "gap": "Existing branches are deliberately refused for new requests; automatic CAS advancement of a long-lived branch is not implemented by this delivery path.",
+      "next": "Add a separately specified expected-old-commit CAS advancement transaction and preserve unexpected human commits and prior delivery evidence.",
+      "evidence": [
+        {
+          "path": "src/core/universe/integration-delivery.ts",
+          "line": 209
+        },
+        {
+          "path": "src/core/universe/integration-delivery.ts",
+          "line": 246
+        },
+        {
+          "path": "src/core/universe/integration-delivery.ts",
+          "line": 253
+        },
+        {
+          "path": "src/core/universe/integration-delivery.ts",
+          "line": 286
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "controller-recovery",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Controller persists original deadline, intent and outcomes, and reconciles dispatch-attributed completed work. Drain/resume controls preserve scope.",
+      "gap": "Unresolved dispatches cannot be reissued; missing worker evidence does not prove no-start. Session continuation and integration/handoff node orchestration need explicit recovery contracts.",
+      "next": "Implement restartable node-specific adapters using proven completion and original budgets, never timeout-as-proof of death.",
+      "evidence": [
+        {
+          "path": "src/core/universe/portfolio-controller.ts",
+          "line": 116
+        },
+        {
+          "path": "src/core/universe/portfolio-controller.ts",
+          "line": 277
+        },
+        {
+          "path": "src/core/universe/portfolio-controller.ts",
+          "line": 289
+        },
+        {
+          "path": "src/cli/universe-controller.ts",
+          "line": 30
+        },
+        {
+          "path": "src/cli/universe-controller.ts",
+          "line": 56
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "signed-trace-join",
+      "classification": "MISSING-WIRING",
+      "priority": "P1",
+      "implemented": "Existing swarm output HMAC signing, foundry provenance and decision/action ledgers provide reusable primitives.",
+      "gap": "No single DecisionTraceV1 all-admitted-action join was established by this scoped audit. Package unsigned stubs are not signed action evidence.",
+      "next": "Bind graph intent, artifact, independent verification, policy, spend and existing provenance into queryable traces; preserve explicit conflict edges.",
+      "evidence": [
+        {
+          "path": "src/core/swarm/sign.ts",
+          "line": 118
+        },
+        {
+          "path": "src/core/swarm/sign.ts",
+          "line": 176
+        },
+        {
+          "path": "src/core/fleet/automerge-pass.ts",
+          "line": 57
+        },
+        {
+          "path": "src/core/fleet/automerge-pass.ts",
+          "line": 69
+        },
+        {
+          "path": "src/core/universe/graph-query.ts",
+          "line": 1
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "operator-observability",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Universe inspector labels explicitly refreshed recorded/historical observations. Daemon public observation combines durable state with lock/activity evidence.",
+      "gap": "Recorded in-flight state does not prove a live worker, and successful commands do not prove control acknowledgement. No live UI or process acceptance was performed.",
+      "next": "Reuse the existing console to show graph intents, admitted workers, acknowledged control and unavailable evidence as separate facts.",
+      "evidence": [
+        {
+          "path": "src/web-ui/app/UniverseControllerInspector.tsx",
+          "line": 73
+        },
+        {
+          "path": "src/web-ui/app/UniverseControllerInspector.tsx",
+          "line": 83
+        },
+        {
+          "path": "src/core/daemon/public-observation.ts",
+          "line": 46
+        },
+        {
+          "path": "src/cli/universe-controller.ts",
+          "line": 56
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "demo-acceptance",
+      "classification": "EXISTS-WIRED-CLI",
+      "priority": "P1",
+      "implemented": "Existing demo runs a disposable local-only chain; no-model fallback uses a dry-run and explicitly synthetic pending proposal.",
+      "gap": "Existing demo is not proof of new graph plan-to-implement-to-independent-verify-to-signed-trace execution or resident commissioning.",
+      "next": "Add a deterministic disposable graph demonstration with rival verification and signed trace query; clearly identify fixtures and avoid provider activation.",
+      "evidence": [
+        {
+          "path": "src/cli/demo.ts",
+          "line": 25
+        },
+        {
+          "path": "src/cli/demo.ts",
+          "line": 260
+        },
+        {
+          "path": "src/cli/demo.ts",
+          "line": 301
+        },
+        {
+          "path": "src/cli/demo.ts",
+          "line": 364
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    },
+    {
+      "id": "harness-archive",
+      "classification": "EXISTS-LIBRARY-UNWIRED",
+      "priority": "P2",
+      "implemented": "P21 uncommitted library stores scoped immutable candidate snapshots including refuted outcomes and frozen evaluator bytes.",
+      "gap": "No proposer, frozen multi-suite evaluator caller, elite selection or promotion path is connected. Supplied receipt linkage is not independently authenticated by P21.",
+      "next": "Integrate through separate proposer/verifier graph nodes and existing merge gate; archive failures without authorizing candidates to change acceptance.",
+      "evidence": [
+        {
+          "path": "src/core/universe/harness-archive.ts",
+          "line": 1
+        },
+        {
+          "path": "test/universe-harness-archive.test.ts",
+          "line": 1
+        }
+      ],
+      "verificationLayer": "source-inspected",
+      "liveVerified": false
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P03",
+  "kind": "unsigned-review-stub",
+  "action": "implement-read-only-signed-graph-inspection",
+  "provenanceSig": null,
+  "authority": "none",
+  "note": "Not runtime evidence. Parent merge attestations are stored separately."
+}

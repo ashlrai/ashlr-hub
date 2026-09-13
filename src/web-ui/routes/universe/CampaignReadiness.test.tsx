@@ -15,6 +15,20 @@ beforeEach(() => { evictAll(); });
 afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('recorded campaign readiness disclosure', () => {
+  it.each([
+    ['seed-evaluation-unresolved', 'recovery-required', 'Recovery inspection was required'],
+    ['seed-evaluation-attention-required', 'attention-required', 'Attention was required'],
+  ] as const)('accepts and displays %s without offering a retry execution', async (reasonCode, disposition, label) => {
+    const fetch = vi.fn(async () => response(report({ reasonCode, disposition, observedState: 'paused' })));
+    vi.stubGlobal('fetch', fetch);
+    render(<CampaignReadiness campaignId="search" universeId="compiler" />);
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Check recorded readiness' }));
+    expect(await screen.findByText(label)).toBeInTheDocument();
+    expect(screen.getByText(reasonCode)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^run|^start|^retry/i })).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ method: 'GET' }));
+  });
   it('reads only on demand, has no polling, and never dispatches', async () => {
     const user = userEvent.setup(); const fetch = vi.fn(async () => response()); vi.stubGlobal('fetch', fetch);
     const timer = vi.spyOn(window, 'setInterval');

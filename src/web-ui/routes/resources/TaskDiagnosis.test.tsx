@@ -17,6 +17,18 @@ beforeEach(() => { vi.stubGlobal('fetch', vi.fn()); });
 afterEach(() => { vi.unstubAllGlobals(); });
 
 describe('receipt-bound task diagnosis', () => {
+  it.each([
+    ['task-owner-unavailable', 'Cancelled after restart: mission owner unavailable'],
+    ['task-recovery-evidence-unavailable', 'Recovery held: prior attempt evidence is unresolved'],
+    ['host-execution-stopped', 'Waiting: host lifetime stopped or deadline reached'],
+    ['supervisor-kill-active', 'Waiting: global stop active'],
+    ['supervisor-kill-unavailable', 'Waiting: global stop status unavailable'],
+  ])('explains the bounded host reason %s without inventing a worker receipt', (reason, label) => {
+    const job = { ...resourceFixture().snapshot.supervisor!.jobs[2]!, reason, outputAvailable: false };
+    render(<TaskInspector row={{ id: job.id, job }} enabled busy={false} onCancel={vi.fn()} />);
+    expect(screen.getByText(label!)).toBeVisible();
+    expect(screen.queryByRole('region', { name: 'Receipt diagnosis' })).not.toBeInTheDocument();
+  });
   it('shows measured process facts without guessing a provider fault or fetching output', () => {
     render(<TaskDiagnosis receipt={receipt()} />);
     const region = within(screen.getByRole('region', { name: 'Receipt diagnosis' }));

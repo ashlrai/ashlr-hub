@@ -7,6 +7,7 @@ import { startResourceConsoleServer, type ResourceConsoleServerHandle, type Reso
 import * as readers from '../src/core/web/resource-console-reads.js';
 import * as refreshers from '../src/core/resources/quota-refresh.js';
 import * as supervisors from '../src/core/resources/pool-supervisor.js';
+import * as killPolicy from '../src/core/sandbox/policy.js';
 import { projectResourceConsoleEvidence } from '../src/core/web/resource-console-public.js';
 import { mergeResourceObservations, resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
@@ -42,6 +43,68 @@ async function http(handle: ResourceConsoleServerHandle, path: string, method = 
 }
 
 describe('resource console HTTP fences', () => {
+  it('publishes current global stop state without authority paths or clearing the stop', async () => {
+    const handle = await start();
+    const read = vi.spyOn(killPolicy, 'readKillSwitch');
+    for (const state of ['active', 'inactive', 'unknown'] as const) {
+      read.mockReturnValue(state === 'unknown'
+        ? { state, sourceState: 'degraded', reason: 'uninspectable', path: '/PRIVATE/KILL', errorCode: 'PRIVATE' }
+        : { state, sourceState: 'healthy', reason: state === 'active' ? 'present' : 'missing', path: '/PRIVATE/KILL' });
+      const response = await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken });
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.text).executionStop).toEqual({ state, sampledAt: expect.any(String) });
+      expect(response.text).not.toContain('PRIVATE');
+    }
+    read.mockImplementation(() => { throw new Error('PRIVATE'); });
+    const response = await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken });
+    expect(response.status).toBe(200); expect(JSON.parse(response.text).executionStop.state).toBe('unknown');
+    expect(response.text).not.toContain('PRIVATE');
+  });
+  it('requires an exact pin for awaited cancellation and leaves the console usable', async () => {
+    const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
+    const handle = await start({ execute: true, workspace });
+    const headers = { 'x-ashlr-token': handle.controlToken!, 'content-type': 'application/json' };
+    await http(handle, '/api/resources/queue', 'POST', headers, JSON.stringify({ paused: true }));
+    for (const id of ['mission', 'human']) await http(handle, '/api/resources/tasks', 'POST', headers, JSON.stringify({ id, prompt: 'fixture',
+      allowedWorkerIds: ['local'], mode: 'read-only', timeoutMs: 1000, maxOutputTokens: 100 }));
+    const file = join(options.root, 'resource-console-state.json'); const before = readFileSync(file, 'utf8');
+    const expectedTaskDigest = JSON.parse(before).jobs.find((job: { id: string }) => job.id === 'mission').taskDigest as string;
+    const path = '/api/resources/tasks/mission/cancel'; const body = JSON.stringify({ expectedTaskDigest, awaitSettlement: true });
+    expect((await http(handle, path, 'POST', { 'content-type': 'application/json' }, body)).status).toBe(401);
+    for (const input of [{ awaitSettlement: true }, { expectedTaskDigest, awaitSettlement: false }, { expectedTaskDigest, awaitSettlement: 'true' }]) {
+      expect((await http(handle, path, 'POST', headers, JSON.stringify(input))).status).toBe(400);
+    }
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    const drained = await http(handle, path, 'POST', headers, body);
+    expect(drained.status).toBe(200); expect(JSON.parse(drained.text).job.state).toBe('cancelled');
+    expect(JSON.parse(readFileSync(file, 'utf8')).jobs.find((job: { id: string }) => job.id === 'human').state).toBe('queued');
+    expect((await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken })).status).toBe(200);
+    expect((await http(handle, path, 'POST', headers, body)).status).toBe(200);
+  });
+  it('accepts exact cancellation pins, rejects mismatches and preserves legacy human cancellation', async () => {
+    const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
+    const handle = await start({ execute: true, workspace });
+    const headers = { 'x-ashlr-token': handle.controlToken!, 'content-type': 'application/json' };
+    expect((await http(handle, '/api/resources/queue', 'POST', headers, JSON.stringify({ paused: true }))).status).toBe(200);
+    for (const id of ['mission', 'human']) {
+      expect((await http(handle, '/api/resources/tasks', 'POST', headers, JSON.stringify({ id, prompt: 'fixture',
+        allowedWorkerIds: ['local'], mode: 'read-only', timeoutMs: 1000, maxOutputTokens: 100 }))).status).toBe(202);
+    }
+    const stateFile = join(options.root, 'resource-console-state.json'); const before = readFileSync(stateFile, 'utf8');
+    const expectedTaskDigest = JSON.parse(before).jobs.find((job: { id: string }) => job.id === 'mission').taskDigest as string;
+    const path = '/api/resources/tasks/mission/cancel';
+    expect((await http(handle, path, 'POST', headers, JSON.stringify({ expectedTaskDigest: '0'.repeat(64) }))).status).toBe(409);
+    for (const body of [{ expectedTaskDigest: null }, { expectedTaskDigest: '' }, { expectedTaskDigest: 'A'.repeat(64) },
+      { expectedTaskDigest, extra: true }]) {
+      expect((await http(handle, path, 'POST', headers, JSON.stringify(body))).status).toBe(400);
+    }
+    expect(readFileSync(stateFile, 'utf8')).toBe(before);
+    const cancelled = await http(handle, path, 'POST', headers, JSON.stringify({ expectedTaskDigest }));
+    expect(cancelled.status).toBe(200); expect(JSON.parse(cancelled.text).job.state).toBe('cancelled');
+    expect(JSON.parse(readFileSync(stateFile, 'utf8')).jobs.find((job: { id: string }) => job.id === 'human').state).toBe('queued');
+    expect((await http(handle, '/api/resources/tasks/human/cancel', 'POST', headers, '{}')).status).toBe(200);
+  });
+
   it('reads explicit missing-store evidence without initialization or exposing bindings', async () => {
     const original = readFileSync(options.observationsFile); const handle = await start();
     expect(handle.controlToken).toBeNull(); expect(handle.scope.readOnly).toBe(true);
@@ -73,9 +136,9 @@ describe('resource console HTTP fences', () => {
   it.each(['/api/events', '/api/config', '/api/fleet', '/api/universe', '/api/resources/tasks/../output', '/next/index.html', '/universe/'])('does not expose unrelated route %s', async (path) => {
     const handle = await start(); expect((await http(handle, path, 'GET', { 'x-ashlr-token': handle.readToken })).status).toBe(404);
   });
-  it.each([{ host: 'evil.invalid' }, { origin: 'https://evil.invalid' }, { origin: 'null' }])('rejects host/origin %j', async (headers) => {
+  it.each<Record<string, string>>([{ host: 'evil.invalid' }, { origin: 'https://evil.invalid' }, { origin: 'null' }])('rejects host/origin %j', async (headers) => {
     const handle = await start(); expect((await http(handle, '/api/resources/console', 'GET', {
-      'x-ashlr-token': handle.readToken, ...headers } as Record<string, string>)).status).toBe(403);
+      'x-ashlr-token': handle.readToken, ...headers })).status).toBe(403);
   });
   it.each(['/api/resources?root=/private/elsewhere', '/api/resources?client=secret', '/api/session?token=secret', '/resources/?token=secret'])('rejects query scope or token delivery %s', async (path) => {
     const handle = await start(); expect((await http(handle, path, 'GET', { 'x-ashlr-token': handle.readToken })).status).toBe(400);
@@ -101,6 +164,10 @@ describe('resource console HTTP fences', () => {
     const controller = new AbortController(); controller.abort(); await expect(start({ signal: controller.signal })).rejects.toThrow(/cancelled/);
     expect(existsSync(options.root)).toBe(false); const handle = await start(); await handle.close(); await handle.close();
   });
+  it('a host stop refuses startup before creating state', async () => {
+    await expect(start({ isExecutionStopped: () => true })).rejects.toThrow(/execution stopped/);
+    expect(existsSync(options.root)).toBe(false);
+  });
 });
 
 /** Transport doubles exercise the server await boundary without native/provider contact. */
@@ -124,6 +191,7 @@ function managedFixture() {
   const refresher: refreshers.ResourceQuotaRefresher = {
     readObservations: (base) => mergeResourceObservations(base, state.observations),
     unavailableWorkerIds: () => [...state.unavailable],
+    quotaUnavailableWorkerIds: () => [],
     snapshot: () => ({ schemaVersion: 1, scope: 'codex-native-metadata', state: 'running', sampledAt: new Date().toISOString(),
       workers: [{ workerId: 'codex-a', status: state.status, lastAttemptAt: observations[0]!.observedAt,
         lastSuccessAt: state.status === 'observed' ? observations[0]!.observedAt : null,
@@ -140,6 +208,31 @@ function managedFixture() {
 }
 
 describe('managed quota server lifecycle and coherent reads', () => {
+  it('serves actual collector cleanup diagnostics while preserving the unresolved-work fence', async () => {
+    const original = refreshers.createResourceQuotaRefresher;
+    const f = managedFixture();
+    f.created.mockImplementation(input => original({ ...input, _probe: async request => ({
+      schemaVersion: 1, scope: 'codex-native-metadata', workerId: request.workerId,
+      poolDigest: digest(canonical({ pool: request.pool, bindings: request.bindings })),
+      status: 'uncertain', reason: 'probe-termination-uncertain', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      accountHint: null, planType: null, observation: null,
+      cleanupDiagnostics: { failure: 'lifecycle-publication-failed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false },
+    }) }));
+    const handle = await start();
+    expect((await http(handle, '/api/resources')).status).toBe(401);
+    await vi.waitFor(async () => {
+      const response = await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken });
+      expect(response.status).toBe(200);
+      const value = JSON.parse(response.text);
+      expect(value.quotaRefresh).toMatchObject({ state: 'closed', workers: [{ status: 'uncertain', cleanupDiagnostics: {
+        failure: 'lifecycle-publication-failed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false,
+      } }] });
+      expect(value.plan.selectedWorkerId).toBeNull();
+    });
+    await expect(handle.close()).rejects.toThrow(/shutdown uncertain/);
+    expect(existsSync(f.marker)).toBe(true);
+  });
+
   it('retries a pending-to-observed transition before publishing current eligibility', async () => {
     const f = managedFixture(); f.state.observations = []; f.state.unavailable = ['codex-a']; f.state.status = 'pending';
     f.snapshot.mockImplementationOnce(async (managed) => {
@@ -209,6 +302,18 @@ describe('managed quota server lifecycle and coherent reads', () => {
     });
     await expect(start({ execute: true, workspace, signal: controller.signal })).rejects.toThrow(/cancelled/);
     expect(f.created).not.toHaveBeenCalled(); expect(existsSync(f.marker)).toBe(false);
+  });
+  it('a synchronous host veto during execution preflight prevents collector startup and releases ownership', async () => {
+    const f = managedFixture(); const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
+    let stopped = false; const original = supervisors.createResourcePoolSupervisor;
+    vi.spyOn(supervisors, 'createResourcePoolSupervisor').mockImplementation(async (input) => {
+      expect(input.isExecutionStopped?.()).toBe(false);
+      const supervisor = await original(input); stopped = true; return supervisor;
+    });
+    await expect(start({ execute: true, workspace, isExecutionStopped: () => stopped })).rejects.toThrow(/cancelled/);
+    expect(f.created).not.toHaveBeenCalled(); expect(existsSync(f.marker)).toBe(false);
+    expect(existsSync(join(options.root, '.resource-quota-refresh.lock'))).toBe(false);
+    expect(existsSync(join(options.root, '.resource-console.lock'))).toBe(false);
   });
 
   it.each(['invalid-json', 'wrong-pool'])('rejects existing %s ledger before metadata contact', async (mode) => {

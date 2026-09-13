@@ -1,0 +1,110 @@
+{
+  "kind": "scoring-capable-measurement-build-identity",
+  "scope": "diagnostic-only",
+  "nativeGate": {
+    "session": "87267",
+    "status": "passed",
+    "observedAt": "2026-09-12T09:02:56.000Z",
+    "exitCode": 0,
+    "testsPassed": 5,
+    "testsSkipped": 0,
+    "durationSeconds": 1258.55,
+    "completedControls": [
+      { "name": "runtime-drift current", "passed": true, "durationMs": 34108 },
+      { "name": "runtime-drift stale", "passed": true, "durationMs": 29370 },
+      { "name": "source-drift current", "passed": true, "durationMs": 189611 },
+      { "name": "source-drift stale", "passed": true, "durationMs": 64556 }
+    ],
+    "fullWorkload": {
+      "passed": true,
+      "checks": 23,
+      "regions": 15,
+      "benchmarkProcesses": 4828,
+      "elapsedMs": 933644,
+      "testDurationMs": 939752,
+      "reportBytes": 1993,
+      "reportSha256": "2d88050128e908dff438f368d7214815ad870f4c6131bc97407b34eb11022230",
+      "settlement": "group-exit-confirmed"
+    }
+  },
+  "digest": "460b5fd4191872533b4fe9c84a464f2d67b6f14a574979481e4dc7eb0e857547",
+  "executableDigest": "72c18e2eeda260f67a5b2b66e96fa9b5ad82864676ebb54925695d87120cae3f",
+  "command": [
+    "/opt/homebrew/Cellar/node@24/24.18.0/bin/node",
+    "--experimental-vm-modules",
+    "--no-warnings",
+    "preparation-verification.mjs",
+    "preparation-bridge.mjs"
+  ],
+  "files": [
+    {
+      "name": "preparation-bridge.mjs",
+      "digest": "6b29d6fa6eaa4619f317f7f1dfa261d51cb209d4066c47d0df3f60badf2a5254"
+    },
+    {
+      "name": "preparation-verification-activity.mjs",
+      "digest": "02d0f8a3d9addb899266859c6eaf110286e9dedc2bef9da9e4efe6e304188dce"
+    },
+    {
+      "name": "preparation-verification-child.mjs",
+      "digest": "f89798b6b43006c72e00f53a2fabea8b27c121d4f4a55e081783974851b0ef37"
+    },
+    {
+      "name": "preparation-verification-controller.mjs",
+      "digest": "4c7e80cb73a7f3b6df7a40301544273e9d08cdb28ee4d904223ae4e029c873bf"
+    },
+    {
+      "name": "preparation-verification-fixtures.mjs",
+      "digest": "0ca1cbb6fb3993bb981aafd1285daad50d363deb14d21d03145630fb49fbacef"
+    },
+    {
+      "name": "preparation-verification-native.mjs",
+      "digest": "f61520b2dc6d3fb6d7e99afc167865ecefd0bb548df307166c32e2cac4787a5c"
+    },
+    {
+      "name": "preparation-verification-protocol.mjs",
+      "digest": "9b9664097862c2391d0d9c12060905517a285e1fb8862e079e880bcb2ebb56c6"
+    },
+    {
+      "name": "preparation-verification-tool.mjs",
+      "digest": "5e42f135f463c13f777e2ceef6751fabd252a02c2c11266dac550f13713e33e3"
+    },
+    {
+      "name": "preparation-verification.mjs",
+      "digest": "f20673014df460b54f915ad7a1ade2b3b1e5f6ecf67521c58fd5308124444062"
+    }
+  ],
+  "tools": [
+    {
+      "path": "/Library/Developer/CommandLineTools/usr/bin/git",
+      "digest": "74b90b9f97ec79bfe7886a4fc6132533b3e1014ef4195d28abd1ca9bf321f34a"
+    },
+    {
+      "path": "/bin/ls",
+      "digest": "24752389e1d97c9555dd153b644902fadd460dfbe1a166251876c67bbacb0810"
+    },
+    {
+      "path": "/bin/ps",
+      "digest": "3bbba882e30d91fc4ff6e6844ca7c59fef4351b9a3fea35dca55708d6d487d1c"
+    },
+    {
+      "path": "/usr/bin/sandbox-exec",
+      "digest": "abc5bb136d6b5cce8fa85d789f78e3326c51ca60cae637b2064adfb67a1dcd9a"
+    }
+  ],
+  "git": {
+    "path": "/Library/Developer/CommandLineTools/usr/bin/git",
+    "digest": "74b90b9f97ec79bfe7886a4fc6132533b3e1014ef4195d28abd1ca9bf321f34a"
+  },
+  "manifestDigest": "77f94bf6fdf2223ff029ac9da265426c394f65d68b19c6e7d00b4135c11df0e9",
+  "targetDigest": "33c52a614d017e7651b74111a3e3b175588f2a1a082dead5b6b1b0b1674ffabd",
+  "scoringPackageInstalled": false,
+  "sourceIdentity": {
+    "src/core/universe/fixed-evaluator.ts": "cf07bb8ce9c08e8d691a7b51aeff4fc06ea3843b71bb84e2a010a2c24780a3f6",
+    "src/core/run/verify-commands.ts": "18a3a6cdb443724a73250405f992eda51ee66e71ded8a090ed3d18076708f1e2",
+    "scripts/evaluators/preparation-score.mjs": "e1601664e93d32008e8201b61a36c38fb5203f2b994dcc9dd7214bd068b67002",
+    "src/core/universe/preparation-process-score.ts": "9aee18ca65beb8bb82c55f611513cbb83414350eb28131f55eecd8d3f72b4352",
+    "src/core/universe/builtin-evaluator-registry.ts": "782aeedae26709f8f434f5e29e0808c73d6b53d4de8480d08626da54eebc8043",
+    "src/core/universe/runner.ts": "b9b6cc502aa427e92e1576fdb8f364887016f721870bfcb1628ddb2b1bd1eab8"
+  }
+}

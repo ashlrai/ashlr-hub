@@ -15,6 +15,42 @@ function deferred<T>() {
 async function flush(): Promise<void> { for (let i = 0; i < 8; i++) await Promise.resolve(); }
 
 describe('shared native metadata coordinator', () => {
+  it('reports reservation failure before abort, only to that invocation, preserving the original error', async () => {
+    const original = Object.create(null); const getter = vi.fn();
+    Object.defineProperty(original, 'message', { get: getter });
+    const coordinator = create({ maxConcurrent: 1, beginNativeActivity() { throw original; } });
+    const own = vi.fn(() => { expect(coordinator.signal.aborted).toBe(false); });
+    const peer = vi.fn(); const operation = vi.fn(async () => 1);
+    const first = coordinator.run(operation, () => true, own);
+    const queued = coordinator.run(operation, () => true, peer);
+    const queuedCheck = expect(queued).rejects.toThrow('cancelled');
+    await expect(first).rejects.toBe(original); await queuedCheck;
+    expect(own).toHaveBeenCalledExactlyOnceWith(); expect(peer).not.toHaveBeenCalled();
+    expect(operation).not.toHaveBeenCalled(); expect(getter).not.toHaveBeenCalled();
+    expect(coordinator.signal.aborted).toBe(true);
+  });
+  it('does not let a throwing diagnostic observer replace the reservation failure or release queued work', async () => {
+    const original = new Error('reservation failed');
+    const coordinator = create({ maxConcurrent: 1, beginNativeActivity() { throw original; } });
+    const operation = vi.fn(async () => 1);
+    const first = coordinator.run(operation, () => true, () => { throw new Error('observer failed'); });
+    const queued = coordinator.run(operation, () => true);
+    const queuedCheck = expect(queued).rejects.toThrow('cancelled');
+    await expect(first).rejects.toBe(original); await queuedCheck; expect(operation).not.toHaveBeenCalled();
+  });
+  it('does not classify post-invocation settlement errors as failed reservations', async () => {
+    const error = new Error('settlement failed'); const observer = vi.fn();
+    const coordinator = create({ beginNativeActivity: () => ({ settle() { throw error; } }) });
+    await expect(coordinator.run(async () => 1, () => true, observer)).rejects.toBe(error);
+    expect(observer).not.toHaveBeenCalled();
+  });
+  it('rejects an invalid observer before reserving or invoking work', async () => {
+    const begin = vi.fn(() => ({ settle() {} })); const operation = vi.fn(async () => 1);
+    const coordinator = create({ beginNativeActivity: begin });
+    await expect(coordinator.run(operation, () => true, 42 as never)).rejects.toThrow('Invalid native metadata reservation observer');
+    expect(begin).not.toHaveBeenCalled(); expect(operation).not.toHaveBeenCalled();
+    expect(coordinator.signal.aborted).toBe(false);
+  });
   it('passes each concurrent operation its own durable lifecycle without invoking it', async () => {
     const hooks = [0, 1].map(() => ({ prepare: vi.fn() }));
     const settled: number[] = []; let id = 0;

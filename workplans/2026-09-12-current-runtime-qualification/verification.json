@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "scope": "source-net-seed-improvement-not-activation",
+  "sourceCommit": "f8cd6f1e3bbed0bb0eb50ea6a5936903ed21ddea",
+  "regression": {
+    "session": 35514,
+    "expectedFailure": true,
+    "observed": "Old source delivered minimize 140 -> 145 -> 144"
+  },
+  "gates": [
+    {
+      "name": "proof-and-private-git",
+      "session": 31486,
+      "passed": 67,
+      "files": 2,
+      "skipped": 0,
+      "durationSeconds": 113.22
+    },
+    {
+      "name": "real-workers-and-controller",
+      "session": 28026,
+      "passed": 19,
+      "files": 2,
+      "skipped": 0,
+      "durationSeconds": 40.96
+    },
+    {
+      "name": "delivery-repair-portfolio",
+      "session": 27652,
+      "passed": 105,
+      "files": 5,
+      "skipped": 0,
+      "durationSeconds": 111.87
+    },
+    {
+      "name": "automatic-resource-successor-chain",
+      "session": 31303,
+      "passed": 1,
+      "files": 1,
+      "filtered": 2,
+      "durationSeconds": 233.34
+    }
+  ],
+  "uniquePassed": 192,
+  "uniqueFiles": 10,
+  "static": {
+    "sourceTypes": true,
+    "strictChangedTestTypes": true,
+    "scopedLint": true,
+    "diffCheck": true,
+    "docs": true,
+    "realIoLaneFiles": 348,
+    "unitLaneFiles": 708
+  },
+  "review": "independent-source-and-acceptance-no-blocking-findings",
+  "nativeQualification": {
+    "session": 76456,
+    "state": "running",
+    "lastObservedAt": "2026-09-12T11:24:04Z",
+    "result": null,
+    "command": "npx --no-install vitest run test/preparation-qualified-workload-acceptance.test.ts -t 'runs the actual default builtin' --no-file-parallelism",
+    "buildSource": "29f3e0551a04e9beca55984a6afea988749d065b",
+    "evaluatorDigest": "9a051509b3eccea7e562a3b5d525bdc5e1beae1bdfe5bc2f83edad8c8306fe46",
+    "nodeVersion": "v24.18.0",
+    "nodePath": "/opt/homebrew/Cellar/node@24/24.18.0/bin/node",
+    "targetPath": "src/core/resources/engineering-preparation.ts",
+    "targetDigest": "417ecede89540ae95541764d08da11f9fd60dfbf99afef94fb730253d32db446",
+    "targetUnchangedFromBuildSource": true,
+    "includesNewSeedFloorCorrection": false,
+    "assetsHeldFixed": true
+  },
+  "runtime": {
+    "sampledAt": "2026-09-12T11:23:59.731Z",
+    "evaluatorDigest": "9a051509b3eccea7e562a3b5d525bdc5e1beae1bdfe5bc2f83edad8c8306fe46",
+    "globalStop": {
+      "state": "active",
+      "sourceState": "healthy"
+    },
+    "collector": {
+      "scope": "local-record-inspection",
+      "sampledAt": "2026-09-12T11:23:59.755Z",
+      "state": "pending",
+      "markerVersion": 1,
+      "reasonCode": "legacy-owner-evidence-missing",
+      "recoveryAttempted": false
+    }
+  },
+  "effects": {
+    "providersContacted": false,
+    "collectorRecovered": false,
+    "globalStopChanged": false,
+    "accountPolicyChanged": false,
+    "sourceRebuiltDuringNativeRun": false,
+    "serviceActivated": false,
+    "remotePublished": false
+  },
+  "remaining": [
+    "Observe terminal native handle 76456 without restarting",
+    "Build corrected source after native handle is terminal",
+    "Retained scoring calibration",
+    "Legacy collector recovery direction",
+    "Actual account commissioning and activation"
+  ]
+}
