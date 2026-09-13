@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ResourcePoolConsoleApp } from '../../app/ResourcePoolConsoleApp.js';
 import { clearMutationToken, markCheckComplete } from '../../data/auth-store.js';
@@ -29,6 +30,15 @@ afterEach(() => {
 });
 
 describe('independent workspace acceptance boundaries', () => {
+  it('keeps disabled native file-picker chrome hidden while dimming its visible label', () => {
+    // jsdom does not model the full CSS cascade. Real-browser computed opacity
+    // is checked separately; retain the disabled selector that wins over the
+    // generic .workspace input:disabled rule without hiding the accessible input.
+    const css = readFileSync('src/web-ui/routes/workspace/WorkspaceView.module.css', 'utf8');
+    expect(css).toMatch(/\.fileButton input:disabled\s*\{[^}]*opacity:\s*0;[^}]*cursor:\s*not-allowed;/);
+    expect(css).toMatch(/\.fileButton:has\(input:disabled\)\s*\{[^}]*opacity:\s*\.65;[^}]*cursor:\s*not-allowed;/);
+  });
+
   it('renders a null-workspace read-only session without enabling send or upload', () => {
     const input = props(); input.scope = { ...input.scope, readOnly: true, workspace: null, maxParallel: 0, maxQueued: 0 };
     input.snapshot.supervisor = null;

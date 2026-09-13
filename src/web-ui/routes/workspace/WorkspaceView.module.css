@@ -82,6 +82,9 @@
 .fileButton { position: relative; min-height: 40px; display: flex; align-items: center; padding: var(--space-2); font-size: var(--text-xs-size); color: var(--text-secondary); border: 1px solid var(--border-default); border-radius: var(--radius-sm); cursor: pointer; overflow: hidden; }
 .fileButton:hover { background: var(--bg-hover); }
 .fileButton input { position: absolute; inset: 0; opacity: 0; width: 100%; cursor: pointer; }
+/* Generic disabled-input opacity must not reveal the native file-picker chrome. */
+.fileButton input:disabled { opacity: 0; cursor: not-allowed; }
+.fileButton:has(input:disabled) { opacity: .65; cursor: not-allowed; }
 .fileButton:focus-within { outline: 2px solid var(--border-focus); outline-offset: 2px; }
 .options { font-size: var(--text-xs-size); color: var(--text-secondary); margin-top: var(--space-3); }
 .options summary { cursor: pointer; padding: var(--space-2) 0; }
