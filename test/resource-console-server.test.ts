@@ -42,6 +42,30 @@ async function http(handle: ResourceConsoleServerHandle, path: string, method = 
 }
 
 describe('resource console HTTP fences', () => {
+  it('accepts exact cancellation pins, rejects mismatches and preserves legacy human cancellation', async () => {
+    const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
+    const handle = await start({ execute: true, workspace });
+    const headers = { 'x-ashlr-token': handle.controlToken!, 'content-type': 'application/json' };
+    expect((await http(handle, '/api/resources/queue', 'POST', headers, JSON.stringify({ paused: true }))).status).toBe(200);
+    for (const id of ['mission', 'human']) {
+      expect((await http(handle, '/api/resources/tasks', 'POST', headers, JSON.stringify({ id, prompt: 'fixture',
+        allowedWorkerIds: ['local'], mode: 'read-only', timeoutMs: 1000, maxOutputTokens: 100 }))).status).toBe(202);
+    }
+    const stateFile = join(options.root, 'resource-console-state.json'); const before = readFileSync(stateFile, 'utf8');
+    const expectedTaskDigest = JSON.parse(before).jobs.find((job: { id: string }) => job.id === 'mission').taskDigest as string;
+    const path = '/api/resources/tasks/mission/cancel';
+    expect((await http(handle, path, 'POST', headers, JSON.stringify({ expectedTaskDigest: '0'.repeat(64) }))).status).toBe(409);
+    for (const body of [{ expectedTaskDigest: null }, { expectedTaskDigest: '' }, { expectedTaskDigest: 'A'.repeat(64) },
+      { expectedTaskDigest, extra: true }]) {
+      expect((await http(handle, path, 'POST', headers, JSON.stringify(body))).status).toBe(400);
+    }
+    expect(readFileSync(stateFile, 'utf8')).toBe(before);
+    const cancelled = await http(handle, path, 'POST', headers, JSON.stringify({ expectedTaskDigest }));
+    expect(cancelled.status).toBe(200); expect(JSON.parse(cancelled.text).job.state).toBe('cancelled');
+    expect(JSON.parse(readFileSync(stateFile, 'utf8')).jobs.find((job: { id: string }) => job.id === 'human').state).toBe('queued');
+    expect((await http(handle, '/api/resources/tasks/human/cancel', 'POST', headers, '{}')).status).toBe(200);
+  });
+
   it('reads explicit missing-store evidence without initialization or exposing bindings', async () => {
     const original = readFileSync(options.observationsFile); const handle = await start();
     expect(handle.controlToken).toBeNull(); expect(handle.scope.readOnly).toBe(true);
@@ -73,9 +97,9 @@ describe('resource console HTTP fences', () => {
   it.each(['/api/events', '/api/config', '/api/fleet', '/api/universe', '/api/resources/tasks/../output', '/next/index.html', '/universe/'])('does not expose unrelated route %s', async (path) => {
     const handle = await start(); expect((await http(handle, path, 'GET', { 'x-ashlr-token': handle.readToken })).status).toBe(404);
   });
-  it.each([{ host: 'evil.invalid' }, { origin: 'https://evil.invalid' }, { origin: 'null' }])('rejects host/origin %j', async (headers) => {
+  it.each<Record<string, string>>([{ host: 'evil.invalid' }, { origin: 'https://evil.invalid' }, { origin: 'null' }])('rejects host/origin %j', async (headers) => {
     const handle = await start(); expect((await http(handle, '/api/resources/console', 'GET', {
-      'x-ashlr-token': handle.readToken, ...headers } as Record<string, string>)).status).toBe(403);
+      'x-ashlr-token': handle.readToken, ...headers })).status).toBe(403);
   });
   it.each(['/api/resources?root=/private/elsewhere', '/api/resources?client=secret', '/api/session?token=secret', '/resources/?token=secret'])('rejects query scope or token delivery %s', async (path) => {
     const handle = await start(); expect((await http(handle, path, 'GET', { 'x-ashlr-token': handle.readToken })).status).toBe(400);

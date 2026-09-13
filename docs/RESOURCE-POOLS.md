@@ -2424,6 +2424,17 @@ The foreground supervisor provides:
   queued work or aborts a dispatch owned by this server instance. It cannot stop
   an external reservation. These stop controls remain available when evidence is
   stale or unavailable.
+- **Exact-task cancellation:** authenticated controllers can send
+  `{"expectedTaskDigest":"<64 lowercase hex characters>"}` to
+  `POST /api/resources/tasks/:id/cancel`. The supervisor compares that pin with
+  the retained task digest before changing queued state or signalling a worker.
+  A mismatch returns 409 without cancellation; malformed pins return 400.
+  Derive the pin from the controller's retained full task envelope, not a task
+  name alone. The existing empty-object human cancellation remains supported.
+  A pin is an identity check, not additional authority: control authentication
+  and the server's worker-ownership checks still apply. Active cancellation is
+  a request; confirm terminal settlement before treating the task as stopped.
+  This does not yet detach mission lifetime from the workspace service.
 - **Evidence recovery:** missing/corrupt observations stop new admissions but do
   not cancel admitted work. Polling recovers automatically after the selected
   private file is repaired with fresh evidence. Quota reset time alone does not

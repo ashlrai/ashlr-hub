@@ -82,7 +82,7 @@ async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reser
     const next = { ...state, jobs: [...state.jobs, row(input)] };
     if (reserveTransitions) {
       next.paused = false;
-      next.jobs = next.jobs.map((job) => ({ ...job, state: 'dispatching', workerId: 'w'.repeat(64),
+      next.jobs = next.jobs.map((job: Record<string, unknown>) => ({ ...job, state: 'dispatching', workerId: 'w'.repeat(64),
         outcome: 'completed', reason: 'r'.repeat(120), updatedAt: '+275760-09-13T00:00:00.000Z' }));
     }
     return Buffer.byteLength(canonical(next) + '\n');
@@ -377,6 +377,42 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     expect(f.state().jobs[0].input).toBeNull(); supervisor.setPaused(false); await sleep(60);
     expect(f.requests).toHaveLength(0); expect(supervisor.cancel('task-a').state).toBe('cancelled');
     expect(() => supervisor.cancel('absent')).toThrow(ResourceSupervisorError);
+  });
+
+  it('pins queued cancellation to the retained task and keeps terminal cancellation idempotent', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true);
+    supervisor.submit(f.task()); supervisor.submit(f.task('human'));
+    const before = f.state(); const expected = before.jobs[0].taskDigest as string;
+    expect(() => supervisor.cancel('task-a', '0'.repeat(64))).toThrow('Resource task identity changed');
+    expect(f.state()).toEqual(before); expect(f.requests).toHaveLength(0);
+    expect(supervisor.cancel('task-a', expected).state).toBe('cancelled');
+    expect(supervisor.snapshot().jobs.find((job) => job.id === 'human')?.state).toBe('queued');
+    expect(supervisor.cancel('task-a', expected).state).toBe('cancelled');
+    expect(() => supervisor.cancel('task-a', '0'.repeat(64))).toThrow('Resource task identity changed');
+  });
+
+  it.each([null, '', 'a'.repeat(63), 'A'.repeat(64), 42])('rejects malformed cancellation pin %j without writes', async (pin) => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
+    const before = f.state();
+    expect(() => supervisor.cancel('task-a', pin as string)).toThrow('Invalid expected task digest');
+    expect(f.state()).toEqual(before); expect(f.requests).toHaveLength(0);
+  });
+
+  it('cancels only the exactly pinned active task while unrelated human work completes', async () => {
+    const f = await fixture({ workers: [worker('one'), worker('two')], hold: true }); const supervisor = await f.start();
+    supervisor.submit(f.task('mission', { allowedWorkerIds: ['one'] }));
+    supervisor.submit(f.task('human', { allowedWorkerIds: ['two'] }));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    const before = f.state(); const ledger = f.ledger();
+    const expected = before.jobs.find((job: { id: string }) => job.id === 'mission').taskDigest as string;
+    expect(() => supervisor.cancel('mission', '0'.repeat(64))).toThrow('Resource task identity changed');
+    expect(f.state()).toEqual(before); expect(f.ledger()).toEqual(ledger);
+    supervisor.cancel('mission', expected);
+    expect(await settled(supervisor, 'mission')).toMatchObject({ outcome: 'cancelled' });
+    expect(supervisor.snapshot().jobs.find((job) => job.id === 'human')?.state).toBe('dispatching');
+    for (const response of f.held) response.end(result());
+    expect(await settled(supervisor, 'human')).toMatchObject({ outcome: 'completed' });
+    expect(f.requests).toHaveLength(2);
   });
 
   it('cancels an owned actual local request, waits settlement and never runs it again', async () => {

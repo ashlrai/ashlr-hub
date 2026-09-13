@@ -76,7 +76,8 @@ export interface ResourcePoolSupervisor {
   /** Synchronous owning/paused/enabled/directory check at engineering effect boundaries. */
   projectExecutionBinding(projectId: string): ResourceConsoleProjectBinding;
   submit(input: ResourceConsoleTaskInput): ResourceSupervisorJob;
-  cancel(id: string): ResourceSupervisorJob;
+  /** Optional exact retained task pin for host-driven, scoped cancellation. */
+  cancel(id: string, expectedTaskDigest?: string): ResourceSupervisorJob;
   setPaused(paused: boolean): ResourceSupervisorSnapshot;
   output(id: string): ResourceConsoleOutput | null;
   history(id: string): ResourceConsoleTranscript | null;
@@ -817,10 +818,18 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         jobs: [...detached(state.jobs), job] };
       assertStateHeadroom(next); persist(next); schedule(0); return publicJob(job);
     },
-    cancel(id) {
+    cancel(id, expectedTaskDigest) {
       ensureAvailable(); if (typeof id !== 'string' || !ID.test(id)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource task id');
+      if (expectedTaskDigest !== undefined && (typeof expectedTaskDigest !== 'string' || !HASH.test(expectedTaskDigest))) {
+        throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid expected task digest');
+      }
       const job = state.jobs.find((row) => row.id === id);
       if (!job) throw new ResourceSupervisorError('NOT_FOUND', 'Resource task unavailable');
+      // Compare before changing queued state or signalling an active worker.
+      // A matching ID alone must not let an old mission cancel a different envelope.
+      if (expectedTaskDigest !== undefined && job.taskDigest !== expectedTaskDigest) {
+        throw new ResourceSupervisorError('CONFLICT', 'Resource task identity changed');
+      }
       if (job.state === 'queued') update(id, { state: 'cancelled', outcome: 'cancelled', input: null, reason: 'queued-task-cancelled',
         ...(job.parent && !job.history ? { context: null } : {}) });
       else if (active.has(id)) { update(id, { reason: 'cancellation-requested' }); active.get(id)!.controller.abort(); }
