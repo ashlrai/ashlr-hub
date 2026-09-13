@@ -229,9 +229,27 @@ Completed history remains inspectable under STOP or after the mission deadline.
 Each proof read has a separate two-minute elapsed-time read limit, not a new execution
 or token allowance. A stop arriving during an active read cancels that read;
 inspection begun after stop cannot authorize execution. The original mission
-deadline and action-time guards still govern all effects. Setup materialization
-and its final predecessor publication check remain synchronous: isolated reads
-do not yet establish a fully responsive standing-mission workspace.
+deadline and action-time guards still govern all effects.
+
+Standing-mission setup materialization and its final predecessor publication
+checks use a separate cooperative worker. Its one-use execution context is
+pinned to the exact setup request and is distinct from read-only custody proof.
+The parent keeps genuine console/collector ownership, while the worker acquires
+only the additional leases needed for preparation. STOP, lost ownership and the
+original mission deadline revoke further guarded publication. The parent waits
+for cleanup and natural worker exit; it never forcibly terminates an effectful
+setup thread or retries uncertain output. Success requires the exact prepared
+result, confirmed lease cleanup and a final active-owner check. Partial output
+and unconfirmed inner initialization locks remain held for inspection.
+Cancellation is cooperative, not a hard wall-clock termination guarantee for an
+in-progress filesystem/Git operation; cleanup may finish after the deadline.
+The standalone synchronous setup API remains available for offline callers.
+
+Resource JSON reads discard and reopen once when an atomic replacement is
+detected between naming, opening and validating a file. The fresh attempt repeats
+all private-file, size, identity and JSON checks. In-place edits, unsafe files
+and repeated replacement still fail; this does not retry a task, publication or
+whole proof, and does not renew any deadline.
 
 New setup under genuine live workspace custody uses a separate root-local
 `.resource-engineering-setup.lock`, leaving `.pool.lock` available to ordinary
@@ -242,8 +260,10 @@ Competing new preparation is refused; completed setup history remains readable
 and replayable while another setup holds that lease. Unknown or replaced leases
 are not reclaimed, and partial output is retained for inspection. Offline setup
 without live custody still acquires all three resource locks. This separates
-publication ownership from accounting ownership; it does not itself move
-materialization off the event loop or prove human-task latency during setup.
+publication ownership from accounting ownership. The cooperative mission worker
+also moves materialization off the parent event loop; real local tests exercise
+HTTP requests and human-task settlement during that work. These tests do not
+establish production latency or qualify every desktop interaction.
 
 Predecessor snapshot mismatches name a fixed evidence field (for example,
 `stability-accounting-allocation-evidence-unavailable`). They never include
@@ -252,10 +272,9 @@ account values, prompts, raw provider messages or local paths.
 Component close is not a durable fleet-wide STOP; do not
 use it as a substitute for global KILL. These in-process APIs do not install an
 always-on service or provide a browser control for starting a standing mission.
-New setup and its final predecessor publication proof are still synchronous
-host calls. Preserving worker lifetime does not prove responsive HTTP/UI latency
-during those filesystem/Git joins; isolating that effectful work remains separate
-from the already-isolated read-only checks.
+Worker isolation is not a resident-service installation or an actual-account
+commissioning result. Provider qualification and unattended operating evidence
+remain separate from the local materialization tests.
 
 ## Engineering workspace
 
@@ -466,7 +485,9 @@ every object identity and the aggregate byte limit before creating seed files,
 then verifies the resulting disk artifact digest. Immutable registration still
 rechecks the prepared bundle and live owner at every publication boundary; it
 does not rebuild unused commissioning diagnostics at those internal boundaries.
-These reductions do not make the remaining synchronous proof work nonblocking.
+The standalone preparation command remains synchronous. Standing missions use
+the cooperative setup worker described above; other synchronous callers must
+not run preparation directly on an interactive server's event loop.
 See the [responsiveness limitation](AUTONOMY-GAP.md#next-executable-milestones) before
 treating the console as an unattended always-on service.
 
@@ -651,8 +672,8 @@ deadline; mutation failures, authentication refusals and quota denials do not us
 that retry path. Preserve incomplete setup or unresolved records for inspection.
 
 This is a foreground implementation, not an installed resident service or a
-commissioned account fleet. It retains existing finite history limits, performs
-synchronous offline proof checks between owners, and does not advance existing
+commissioned account fleet. It retains existing finite history limits, isolates
+mission proof reads and setup publication in fixed workers, and does not advance existing
 branches, push Git, publish packages, or deploy applications. Long-running native
 acceptance and provider-specific qualification remain separate release gates.
 

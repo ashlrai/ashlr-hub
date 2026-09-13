@@ -2,15 +2,12 @@
 import { Worker } from 'node:worker_threads';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { join } from 'node:path';
-import { canonical, digest } from '../universe/artifacts.js';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { createEngineeringWorkerRpcHost } from './engineering-worker-rpc.js';
 import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } from './engineering-lifetime.js';
 import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
-import { readResourceJson, type ResourceTaskReceipt } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
-import { isWorkspacePoolAvailable } from './workspace-proof-context.js';
+import { createWorkspaceProofHandlers } from './workspace-proof-host.js';
 import type { ResourceEngineeringAutonomousSetupOptions, ResourceEngineeringAutonomousSetupPlan } from './engineering-autonomous-setup-types.js';
 import type { ResourceEngineeringPredecessorCheck, ResourceEngineeringPredecessorCheckOptions } from './engineering-predecessor-check.js';
 
@@ -54,49 +51,15 @@ export async function readEngineeringMissionProof(request: EngineeringMissionPro
   };
   assertActive();
   const closeFlag = new Int32Array(new SharedArrayBuffer(4));
-  const samples = new Map<number, ReturnType<typeof readResourceWorkspaceCustody>>();
-  let sampleId = 0;
-  const rpc = createEngineeringWorkerRpcHost({ closeFlag, handlers: {
-    'custody.sample': input => {
-      assertActive(); if (input !== null || !custody || samples.size >= 128) throw unavailable();
-      const owner = readResourceWorkspaceCustody(custody);
-      // The actual owner validates its FULL durable state. Only then may a
-      // read-only worker ignore concurrent ordinary job rows, as the existing
-      // predecessor evidence projection already does. Never ignore scope drift.
-      const state = readResourceJson(join(owner.root, 'resource-console-state.json'), 4 * 1024 * 1024) as object;
-      if (digest(canonical(state)) !== owner.stateDigest) throw unavailable();
-      samples.set(++sampleId, owner);
-      return { sampleId, root: owner.root, workspace: owner.workspace, poolDigest: owner.poolDigest,
-        stateDigest: owner.stateDigest, consoleScopeDigest: digest(canonical({ ...state, jobs: [] })),
-        lockPaths: owner.locks.map(lock => lock.path), metadataPending: owner.metadataPending };
-    },
-    'custody.receipt': input => {
-      assertActive();
-      const value = copy<{ sampleId: number; receipt: ResourceTaskReceipt }>(input);
-      if (!value || Object.keys(value).sort().join(',') !== 'receipt,sampleId' || !Number.isSafeInteger(value.sampleId)) throw unavailable();
-      const owner = samples.get(value.sampleId); if (!owner) throw unavailable();
-      // Receipt reads and replies are asynchronous. Keep the original scope,
-      // but use fresh genuine ownership when an ordinary task has progressed.
-      const fresh = readResourceWorkspaceCustody(custody!, owner);
-      return fresh.ownsReceipt(value.receipt) || fresh.ownsSettledReservation(value.receipt);
-    },
-    'custody.poolAvailable': input => {
-      assertActive();
-      if (!Number.isSafeInteger(input)) throw unavailable();
-      const owner = samples.get(input as number); if (!owner || !custody) throw unavailable();
-      // Parent ledger transactions are synchronous. This message is processed
-      // after they release the lock, avoiding a stale worker-side busy sample.
-      // External/unknown ownership still returns false; no lease is borrowed.
-      return isWorkspacePoolAvailable(readResourceWorkspaceCustody(custody, owner).root);
-    },
-  } });
+  const proof = createWorkspaceProofHandlers(custody, assertActive);
+  const rpc = createEngineeringWorkerRpcHost({ closeFlag, handlers: proof.handlers });
   const worker = new Worker(entrypoint(), { workerData: { schemaVersion: 1, request: captured,
     hasCustody: custody !== undefined, closeBuffer: closeFlag.buffer }, execArgv: [],
     resourceLimits: { maxOldGenerationSizeMb: 512, maxYoungGenerationSizeMb: 64 } });
   return new Promise((resolve, reject) => {
     let finished = false;
     const finish = (error?: Error, value?: unknown) => {
-      if (finished) return; finished = true; clearInterval(timer); rpc.close(); samples.clear();
+      if (finished) return; finished = true; clearInterval(timer); rpc.close(); proof.close();
       // Every path waits for terminal worker exit; a later read never shares
       // an abandoned thread or accepts a late result from a stopped request.
       void worker.terminate().then(() => {

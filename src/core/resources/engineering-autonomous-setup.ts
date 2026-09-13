@@ -23,6 +23,7 @@ import { validateResourceBindings } from './worker.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
 import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
 import { matchesWorkspaceProofState, readResourceWorkspaceProof, type ResourceWorkspaceProofSource } from './workspace-proof-context.js';
+import { takeWorkerSetupExecutionContext, type EngineeringSetupExecutionContext } from './engineering-setup-context.js';
 import type { ResourceEngineeringAutonomousSetupOptions as Options, ResourceEngineeringAutonomousSetupPolicy as Policy,
   ResourceEngineeringAutonomousSetupPlan as Plan, ResourceEngineeringAutonomousSetupReport as Report } from './engineering-autonomous-setup-types.js';
 export type * from './engineering-autonomous-setup-types.js';
@@ -207,15 +208,31 @@ function writePrivate(file: string, value: unknown, guard: () => void): void {
 export function prepareResourceEngineeringAutonomousSetup(input: Options & { expectedPlanDigest: string },
   host: { isExecutionStopped?: () => boolean; beforePublication?: (locks: readonly LocalStoreLock[]) => void;
     workspaceCustody?: ResourceWorkspaceCustody } = {}): Report {
+  const property = Object.getOwnPropertyDescriptor(host, 'workspaceCustody');
+  if (property && !Object.hasOwn(property, 'value') || !property && 'workspaceCustody' in host) fail('Invalid workspace custody');
+  const custody = property?.value as ResourceWorkspaceCustody | undefined;
+  if (property) readResourceWorkspaceCustody(custody!);
+  return prepareSetup(input, host, custody, custody ? [...readResourceWorkspaceCustody(custody).locks] : []);
+}
+
+/** Private fixed-worker entrypoint. A serialized value or proof reader is never execution authority. */
+export function prepareResourceEngineeringAutonomousSetupInWorker(input: Options & { expectedPlanDigest: string },
+  context: EngineeringSetupExecutionContext,
+  beforePublication: (locks: readonly LocalStoreLock[], proof?: ResourceWorkspaceProofSource) => void): Report {
+  const execution = takeWorkerSetupExecutionContext(context, input);
+  const verify = (locks: readonly LocalStoreLock[]) => { execution.assertActive(); beforePublication(locks, execution.proof); execution.assertActive(); };
+  verify([]);
+  return prepareSetup(input, { isExecutionStopped: () => { execution.assertActive(); return false; }, beforePublication: verify }, execution.proof, [], true);
+}
+
+function prepareSetup(input: Options & { expectedPlanDigest: string },
+  host: { isExecutionStopped?: () => boolean; beforePublication?: (locks: readonly LocalStoreLock[]) => void },
+  custody?: ResourceWorkspaceProofSource, borrowedLocks: LocalStoreLock[] = [], auditInitialization = false): Report {
   const hostStopped = captureResourceExecutionVeto(host);
   const publication = Object.getOwnPropertyDescriptor(host, 'beforePublication');
   if (publication && (!Object.hasOwn(publication, 'value') || typeof publication.value !== 'function') ||
       !publication && 'beforePublication' in host) fail('Invalid host publication guard');
   const beforeHostPublication = publication?.value as ((locks: readonly LocalStoreLock[]) => unknown) | undefined;
-  const property = Object.getOwnPropertyDescriptor(host, 'workspaceCustody');
-  if (property && !Object.hasOwn(property, 'value') || !property && 'workspaceCustody' in host) fail('Invalid workspace custody');
-  const custody = property?.value as ResourceWorkspaceCustody | undefined;
-  if (property) readResourceWorkspaceCustody(custody!);
   const supplied = data<Options & { expectedPlanDigest: string }>(input);
   if (!exact(supplied, ['recipe', 'policy', 'output', 'resourceRuntime', 'workspace', 'projectsFile', 'expectedPlanDigest']) ||
     typeof supplied.expectedPlanDigest !== 'string' || !HASH.test(supplied.expectedPlanDigest)) fail('Setup requires a checked plan digest');
@@ -224,7 +241,9 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
   if (current.plan.planDigest !== expectedPlanDigest) fail('Setup plan changed');
   if (current.completed) return report(current, verified(current).initialEnrollmentDigest, 'replayed');
   if (hostStopped()) fail('Host setup publication stopped');
-  const locks = custody ? [...readResourceWorkspaceCustody(custody).locks] : [];
+  const locks = [...borrowedLocks];
+  const borrowedPaths = custody ? readResourceWorkspaceProof(custody).lockPaths : [];
+  if (borrowedPaths.some(file => !['.resource-console.lock', '.resource-quota-refresh.lock'].some(name => file === join(current.runtime.root, name)))) fail('Setup ownership scope changed');
   const acquiredLocks: LocalStoreLock[] = [];
   let setupLock: LocalStoreLock | undefined;
   let result: Report;
@@ -243,7 +262,7 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
       ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock'];
     for (const name of resourceLocks) {
       const file = join(current.runtime.root, name);
-      if (locks.some(lock => lock.path === file)) continue;
+      if (locks.some(lock => lock.path === file) || borrowedPaths.includes(file)) continue;
       if (present(file)) fail('Setup requires stopped resource ownership');
       const next = acquireLocalStoreLockWithOutcome(file, 0, { anchorPath: current.runtime.root, exactPrivateStorage: true });
       if (next.state !== 'acquired') fail('Setup resource ownership unavailable');
@@ -253,6 +272,7 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
       if (hostStopped()) fail('Host setup publication stopped');
       if (locks.some(lock => !ownsLocalStoreLock(lock)) || setupLock && !ownsLocalStoreLock(setupLock) ||
         !matchesResourceConsoleProject(current.outputBinding)) fail('Setup ownership changed');
+      if (custody && borrowedPaths.some(file => !readResourceWorkspaceProof(custody).lockPaths.includes(file))) fail('Setup borrowed ownership changed');
       const fresh = capture(options, true, custody);
       if (fresh.plan.planDigest !== expectedPlanDigest || fresh.plan.holds.some(reason => reason.endsWith('-work-unresolved') ||
         custody && reason === 'pool-ownership-present')) fail('Setup inputs or resource ownership changed');
@@ -293,6 +313,17 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
     // Borrowed workspace/collector locks outlive this setup. Release only the
     // leases acquired here, including on partial preparation failure.
     for (const lock of acquiredLocks.reverse()) if (!releaseLocalStoreLock(lock)) released = false;
+    if (auditInitialization) {
+      // Initializers release their own leases in finally. A normal return is
+      // insufficient if that release failed; inspect only the exact known
+      // initialization stores, never reclaim someone else's lock or staging.
+      const universe = join(current.paths.initialBundle, 'universe', 'universes', current.recipe.id);
+      const campaign = join(current.paths.initialBundle, 'universe', 'campaigns', current.recipe.id);
+      for (const file of [join(universe, '.run.lock'), join(universe, 'ledger', '.records.lock'),
+        join(campaign, 'ledger', '.records.lock'), join(dirname(dirname(current.paths.registration)), '.records.lock')]) {
+        try { if (present(file)) released = false; } catch { released = false; }
+      }
+    }
     if (!released) fail('Setup ownership cleanup could not be confirmed');
   }
   return result;

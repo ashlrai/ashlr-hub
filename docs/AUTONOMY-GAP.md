@@ -102,18 +102,20 @@ This closes the foreground coexistence gap, not resident service installation,
 browser mission-start controls or actual-account commissioning.
 Normal mission setup/predecessor reads now use cancellable proof workers with
 live, host-owned custody questions. STOP still permits bounded historical
-inspection without granting execution. New setup materialization and its final
-publication proof remain synchronous; full standing-mission responsiveness is
-not yet established by the read-worker change.
+inspection without granting execution. New mission setup materialization and
+its final publication proof now run in a separate cooperative worker. Stop
+revokes further guarded publication, then waits for cleanup and natural exit;
+it cannot force-kill a write or automatically retry uncertain output.
 Live proof replies also reconcile an exact prior human reservation against its
 proven terminal receipt, so ordinary completion during a read does not become
 false unresolved work. This does not recover uncertain workers. Live setup now
 uses a separate publication lease rather than holding the ledger transaction
 lock; real ledger writes can proceed at publication while genuine console and
 collector ownership remain enforced. Stopped/offline setup retains its original
-resource-lock contract. Effectful setup still needs cooperative worker isolation
-and measured human-task/HTTP responsiveness during materialization; lock
-separation alone does not establish that result.
+resource-lock contract. Actual local setup tests now exercise HTTP responsiveness
+and human-task settlement during materialization, plus cancellation, exact replay
+and retained initialization-lock refusal. This is local fixture evidence, not
+resident-service operation, provider commissioning or a production latency SLO.
 Read workers also obtain ledger availability from the live owner after its
 synchronous transactions finish; external locks and revoked custody still hold
 the proof. A vacancy sample never grants transaction ownership.

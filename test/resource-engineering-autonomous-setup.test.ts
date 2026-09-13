@@ -25,6 +25,7 @@ import { createResourceWorkspaceCustody, readResourceWorkspaceCustody } from '..
 import { acquireResourceQuotaRefreshLease } from '../src/core/resources/quota-refresh-lease.js';
 import { readEngineeringMissionProof } from '../src/core/resources/engineering-mission-proof.js';
 import * as proofRpc from '../src/core/resources/engineering-worker-rpc.js';
+import { prepareEngineeringMissionSetup } from '../src/core/resources/engineering-setup.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -79,6 +80,130 @@ function evidence(directory: string): string {
   visit(directory); return JSON.stringify(rows);
 }
 describe('offline autonomous setup', () => {
+  it('creates and exactly replays an offline setup through the fixed worker', async () => {
+    const f = fixture(); const plan = check(f.options);
+    const request = { input: { ...f.options, expectedPlanDigest: plan.planDigest } };
+    const host = { lifetime: { deadlineAt: new Date(Date.now() + 60_000).toISOString() } };
+    const created = await prepareEngineeringMissionSetup(request, host);
+    expect(created.disposition).toBe('created'); expect(created.providerContacted).toBe(false);
+    const before = evidence(f.options.output);
+    const replay = await prepareEngineeringMissionSetup(request, host);
+    expect(replay.disposition).toBe('replayed'); expect(replay.initialEnrollmentDigest).toBe(created.initialEnrollmentDigest);
+    expect(evidence(f.options.output)).toBe(before);
+    for (const file of ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock', '.resource-engineering-setup.lock']) {
+      expect(existsSync(join(f.ledger, file))).toBe(false);
+    }
+  }, 60_000);
+  it('refuses an uncompleted predecessor before creating the next setup', async () => {
+    const f = fixture(); const plan = check(f.options); const before = evidence(f.options.output);
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    await expect(prepareEngineeringMissionSetup({ input: { ...f.options, expectedPlanDigest: plan.planDigest }, predecessor: {
+      options: { setup: f.options, expectedPlanDigest: plan.planDigest, expectedDeadlineAt: deadlineAt },
+      expectedTip: { enrollmentId: 'repair', enrollmentDigest: 'a'.repeat(64), projectId: 'default', commit: f.options.recipe.seedRevision },
+    } }, { lifetime: { deadlineAt } })).rejects.toThrow('Engineering');
+    expect(evidence(f.options.output)).toBe(before);
+    expect(readResourceEngineeringPreparationRegistrations(f.ledger)).toEqual([]);
+  }, 60_000);
+  it('withholds a prepared result when an inner initialization lease remains owned', async () => {
+    const f = fixture(); const plan = check(f.options);
+    const file = join(plan.paths.initialBundle, 'universe', 'universes', f.options.recipe.id, '.run.lock');
+    let retained: ownership.LocalStoreLock | null = null;
+    const createHost = proofRpc.createEngineeringWorkerRpcHost;
+    vi.spyOn(proofRpc, 'createEngineeringWorkerRpcHost').mockImplementation(options => createHost({ ...options,
+      handlers: { ...options.handlers, 'setup.active': input => {
+        if (!retained && existsSync(join(plan.paths.initialBundle, 'receipt.json'))) {
+          retained = acquireLocalStoreLock(file, 0, { anchorPath: plan.paths.initialBundle, exactPrivateStorage: true });
+          expect(retained).not.toBeNull();
+        }
+        return options.handlers['setup.active']!(input);
+      } } }));
+    try {
+      await expect(prepareEngineeringMissionSetup({ input: { ...f.options, expectedPlanDigest: plan.planDigest } },
+        { lifetime: { deadlineAt: new Date(Date.now() + 60_000).toISOString() } })).rejects.toThrow('setup-cleanup-unconfirmed');
+      expect(retained).not.toBeNull(); expect(ownership.ownsLocalStoreLock(retained)).toBe(true);
+      expect(existsSync(plan.paths.intent)).toBe(true);
+      for (const name of ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock']) expect(existsSync(join(f.ledger, name))).toBe(false);
+    } finally { if (retained) expect(releaseLocalStoreLock(retained)).toBe(true); }
+  }, 60_000);
+  it('materializes in a worker while parent HTTP and real human task settlement remain responsive', async () => {
+    const responses: ServerResponse[] = [];
+    const server = createServer((req, res) => {
+      if (req.url === '/health') { res.end('ready'); return; }
+      req.resume(); req.on('end', () => responses.push(res));
+    });
+    await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address(); if (!address || typeof address === 'string') throw Error('Missing listener');
+    const f = fixture(`http://127.0.0.1:${address.port}/v1`);
+    const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
+    const supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool, bindings,
+      readObservations: () => readResourceJson(f.observationsPath) as ResourceObservation[] });
+    const quota = await acquireResourceQuotaRefreshLease(f.ledger);
+    const custody = createResourceWorkspaceCustody(supervisor, quota, () => {});
+    let done = false, released = false, settledDuringSetup = false;
+    const latencies: number[] = []; const errors: string[] = [];
+    let probing: Promise<void> | undefined;
+    try {
+      supervisor.submit({ id: 'human-during-setup', prompt: 'Hold until materialization', mode: 'read-only', allowedWorkerIds: ['worker'], timeoutMs: 60_000, maxOutputTokens: 128 });
+      await vi.waitFor(() => expect(responses).toHaveLength(1));
+      const plan = check(f.options, custody);
+      const preparation = prepareEngineeringMissionSetup({ input: { ...f.options, expectedPlanDigest: plan.planDigest } },
+        { custody, lifetime: { deadlineAt: new Date(Date.now() + 60_000).toISOString() } }).finally(() => { done = true; });
+      probing = (async () => {
+        do {
+          if (!released && existsSync(join(plan.paths.initialBundle, 'universe'))) {
+            released = true;
+            responses[0]!.end(JSON.stringify({ choices: [{ message: { content: 'Human work completed during setup' }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } }));
+          }
+          const start = performance.now();
+          try {
+            const response = await fetch(`http://127.0.0.1:${address.port}/health`, { signal: AbortSignal.timeout(1000) });
+            if (response.status !== 200 || await response.text() !== 'ready') errors.push('health response');
+          } catch { errors.push('health unavailable'); }
+          latencies.push(performance.now() - start);
+          if (!done && supervisor.snapshot().jobs.find(row => row.id === 'human-during-setup')?.outcome === 'completed') settledDuringSetup = true;
+          await new Promise(resolve => setTimeout(resolve, 20));
+        } while (!done);
+      })();
+      const result = await preparation; await probing;
+      expect(result.disposition).toBe('created'); expect(released).toBe(true); expect(settledDuringSetup).toBe(true);
+      expect(errors).toEqual([]); expect(latencies.length).toBeGreaterThan(3); expect(Math.max(...latencies)).toBeLessThan(1000);
+      expect(supervisor.snapshot().jobs.find(row => row.id === 'human-during-setup')?.outcome).toBe('completed');
+      expect(resourcePoolStatus(f.ledger, pool, bindings, []).allocation.ceilingPercent).toBe(75);
+      expect(readResourceWorkspaceCustody(custody).locks).toHaveLength(2);
+      expect(existsSync(join(f.ledger, '.resource-engineering-setup.lock'))).toBe(false);
+      expect(check(f.options, custody).initialEnrollmentDigest).toBe(result.initialEnrollmentDigest);
+      console.log('MISSION_SETUP_WRITE_RESPONSIVENESS', JSON.stringify({ samples: latencies.length, maxMs: Math.max(...latencies), settledDuringSetup }));
+    } finally {
+      done = true; await probing;
+      for (const response of responses) response.destroy(); quota.close(); await supervisor.close();
+      server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }, 120_000);
+  it('cooperatively stops new setup after intent publication and preserves the workspace owner', async () => {
+    const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+      bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool), readObservations: () => [] });
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => {}); const stop = new AbortController();
+    const createHost = proofRpc.createEngineeringWorkerRpcHost; let stoppedAfterIntent = false;
+    vi.spyOn(proofRpc, 'createEngineeringWorkerRpcHost').mockImplementation(options => createHost({ ...options,
+      handlers: { ...options.handlers, 'setup.active': input => {
+        if (existsSync(join(f.options.output, 'setup-intent.json'))) { stoppedAfterIntent = true; stop.abort(); }
+        return options.handlers['setup.active']!(input);
+      } } }));
+    try {
+      const plan = check(f.options, custody);
+      await expect(prepareEngineeringMissionSetup({ input: { ...f.options, expectedPlanDigest: plan.planDigest } },
+        { custody, lifetime: { deadlineAt: new Date(Date.now() + 60_000).toISOString(), signal: stop.signal } })).rejects.toThrow('Engineering');
+      expect(stoppedAfterIntent).toBe(true); expect(existsSync(plan.paths.intent)).toBe(true); expect(existsSync(plan.paths.receipt)).toBe(false);
+      expect(existsSync(join(f.ledger, '.resource-engineering-setup.lock'))).toBe(false);
+      expect(existsSync(join(f.ledger, '.resource-quota-refresh.lock'))).toBe(false);
+      expect(readResourceWorkspaceCustody(custody).locks).toHaveLength(1);
+    } finally { await supervisor.close(); }
+  }, 60_000);
   it.each(['released', 'retained', 'revoked'] as const)('samples live-owner ledger availability with %s transaction custody', async mode => {
     const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
     const pool = validateResourcePool(readResourceJson(runtime.poolPath));

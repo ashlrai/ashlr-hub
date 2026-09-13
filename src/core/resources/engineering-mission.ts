@@ -8,8 +8,7 @@ import { readKillSwitch } from '../sandbox/policy.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { writeImmutablePrivateRecord } from '../util/immutable-private-record-store.js';
 import { startResourceConsoleServer, type ResourceConsoleWorkspaceHandle, type ResourceConsoleEngineeringAttachment } from '../web/resource-console-server.js';
-import { prepareResourceEngineeringAutonomousSetup,
-  validateResourceEngineeringAutonomousSetupPolicy, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
+import { validateResourceEngineeringAutonomousSetupPolicy, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
 import { checkResourceEngineeringPredecessor, type ResourceEngineeringPredecessorCheck } from './engineering-predecessor-check.js';
 import { pinResourceConsoleProject, matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
 import { decodeResourceConsoleState, resourceConsoleTaskContinuation, resourceConsoleRecoveryId, ResourceSupervisorError } from './pool-supervisor.js';
@@ -28,6 +27,7 @@ import { MissionConsoleRequestError, requestEngineeringMissionConsole } from './
 import { beginEngineeringMissionInvocation } from './engineering-mission-invocations.js';
 import { MAX_MISSION_FEEDBACK_PROMPT_BYTES } from './engineering-mission-feedback.js';
 import { readEngineeringMissionProof } from './engineering-mission-proof.js';
+import { prepareEngineeringMissionSetup } from './engineering-setup.js';
 
 export interface ResourceEngineeringMissionReport {
   schemaVersion: 1; missionId: string; state: 'completed' | 'stopped' | 'held'; reason: string;
@@ -247,17 +247,14 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         const verifyPreviousProof = (proof: ResourceEngineeringPredecessorCheck) => {
           requireFact(proof.status === 'verified' && proof.continuation === 'eligible' && canonical(proof.tip) === canonical(previousProof!.tip), 'Mission predecessor changed'); guard();
         };
-        const verifyPrevious = (locks: readonly LocalStoreLock[] = []) => {
-          if (!previousScope) return;
-          const proof = checkResourceEngineeringPredecessor({ setup: previousScope.setup, expectedPlanDigest: previousPlan!.planDigest,
-            expectedDeadlineAt: previousRun!.deadlineAt }, locks, custody);
-          verifyPreviousProof(proof);
-        };
         if (previousScope) verifyPreviousProof(await checkPredecessor({ setup: previousScope.setup,
           expectedPlanDigest: previousPlan!.planDigest, expectedDeadlineAt: previousRun!.deadlineAt }));
         guard();
-        const prepared = prepareResourceEngineeringAutonomousSetup({ ...setup, expectedPlanDigest: plan.planDigest },
-          { isExecutionStopped: stopped, beforePublication: verifyPrevious, ...(custody ? { workspaceCustody: custody } : {}) });
+        const prepared = await prepareEngineeringMissionSetup({ input: { ...setup, expectedPlanDigest: plan.planDigest },
+          ...(previousScope ? { predecessor: { options: { setup: previousScope.setup, expectedPlanDigest: previousPlan!.planDigest,
+            expectedDeadlineAt: previousRun!.deadlineAt }, expectedTip: previousProof!.tip! } } : {}) },
+        { lifetime: { signal: abort.signal, deadlineAt: config.deadlineAt, isExecutionStopped: stopped }, ...(custody ? { custody } : {}) });
+        guard();
         write('prepared', { planDigest: prepared.planDigest });
       }
       const expectedPlan = get<{ planDigest: string }>('prepared')!;

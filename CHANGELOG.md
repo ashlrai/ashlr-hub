@@ -11,6 +11,20 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Cooperative standing-mission setup
+
+- Moves mission setup materialization and publication-time predecessor checks
+  into a fixed worker while preserving genuine parent workspace ownership.
+- Binds execution to one pinned request and the original deadline; stop waits
+  for cleanup and natural exit without force-terminating writes or retrying
+  uncertain output. Retained initialization leases withhold success.
+- Preserves the standalone synchronous setup API and adds local responsiveness,
+  human-task settlement, replay and cancellation coverage. This does not install
+  a resident service or commission external accounts.
+- Reopens a resource JSON snapshot once on a detected atomic replacement,
+  repeating every validation; unsafe, in-place or repeatedly changing input
+  remains refused. No effectful operation is retried.
+
 ### Autonomous coordinator lifecycle visibility
 
 - Separates last-reported coordinator transitions, fixed failure reasons and

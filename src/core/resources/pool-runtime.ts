@@ -171,24 +171,33 @@ export function readResourceJson(file: string, maxBytes = 2 * 1024 * 1024): unkn
   if (!path(file) || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > MAX_STATE_BYTES) {
     throw new Error('Invalid resource file');
   }
-  let fd: number | undefined;
-  try {
-    const named = lstatSync(file);
-    if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1 || realpathSync(file) !== file ||
-      named.size < 2 || named.size > maxBytes || (named.mode & 0o777) !== 0o600 ||
-      (typeof process.getuid === 'function' && named.uid !== process.getuid()) ||
-      !assurePrivateStoragePath(file, 'file', 'inspect-existing', { anchorPath: dirname(file) }).ok) throw new Error();
-    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-    const opened = fstatSync(fd);
-    if (opened.dev !== named.dev || opened.ino !== named.ino || opened.size !== named.size) throw new Error();
-    const bytes = Buffer.alloc(named.size);
-    if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) throw new Error();
-    const after = fstatSync(fd); const installed = lstatSync(file);
-    if (after.size !== named.size || after.mtimeMs !== named.mtimeMs || after.ctimeMs !== named.ctimeMs ||
-      installed.dev !== named.dev || installed.ino !== named.ino) throw new Error();
-    return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
-  } catch { throw new Error('Resource file unavailable, unsafe, oversized, or malformed'); }
-  finally { if (fd !== undefined) closeSync(fd); }
+  // An atomic ledger publication may replace the name while an off-thread
+  // reader holds the prior inode. Discard that snapshot and reopen once; never
+  // return stale bytes, retry an in-place mutation, or replay a caller's effects.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd: number | undefined;
+    let replaced = false;
+    try {
+      const named = lstatSync(file);
+      if (!named.isFile() || named.isSymbolicLink() || named.nlink !== 1 || realpathSync(file) !== file ||
+        named.size < 2 || named.size > maxBytes || (named.mode & 0o777) !== 0o600 ||
+        (typeof process.getuid === 'function' && named.uid !== process.getuid()) ||
+        !assurePrivateStoragePath(file, 'file', 'inspect-existing', { anchorPath: dirname(file) }).ok) throw new Error();
+      fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const opened = fstatSync(fd);
+      if (opened.dev !== named.dev || opened.ino !== named.ino) { replaced = true; throw new Error(); }
+      if (opened.size !== named.size) throw new Error();
+      const bytes = Buffer.alloc(named.size);
+      if (readSync(fd, bytes, 0, bytes.length, 0) !== bytes.length) throw new Error();
+      const after = fstatSync(fd); const installed = lstatSync(file);
+      if (installed.dev !== named.dev || installed.ino !== named.ino) { replaced = true; throw new Error(); }
+      if (after.size !== named.size || after.mtimeMs !== named.mtimeMs || after.ctimeMs !== named.ctimeMs) throw new Error();
+      return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+    } catch {
+      if (!replaced || attempt === 1) throw new Error('Resource file unavailable, unsafe, oversized, or malformed');
+    } finally { if (fd !== undefined) closeSync(fd); }
+  }
+  throw new Error('Resource file unavailable, unsafe, oversized, or malformed');
 }
 
 function inspectRoot(root: string, create: boolean): boolean {

@@ -5,6 +5,8 @@ import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+vi.mock('node:fs', async original => ({ ...await original<typeof import('node:fs')>() }));
 import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { mergeResourceObservations, readResourceJson, resourcePoolStatus, runResourceTask, validateUnavailableResourceWorkerIds,
   validateResourceTask, type ResourceTask } from '../src/core/resources/pool-runtime.js';
@@ -685,6 +687,42 @@ describe.skipIf(process.platform === 'win32')('durable resource task runtime acc
     expect(f.requests).toHaveLength(1);
   });
 
+  it.each(['before-open', 'after-read'] as const)('reopens an atomically replaced snapshot read once: %s', stage => {
+    const path = join(fixtureRoot, 'snapshot.json'), next = join(fixtureRoot, 'next.json');
+    writeJson(path, { revision: 1 }); writeJson(next, { revision: 2 });
+    let replaced = false;
+    if (stage === 'before-open') {
+      const open = fs.openSync;
+      vi.spyOn(fs, 'openSync').mockImplementation(((...args: Parameters<typeof open>) => {
+        if (args[0] === path && !replaced) { replaced = true; fs.renameSync(next, path); }
+        return open(...args);
+      }) as typeof open);
+    } else {
+      const read = fs.readSync;
+      vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof read>) => {
+        const count = read(...args);
+        if (!replaced) { replaced = true; fs.renameSync(next, path); }
+        return count;
+      }) as typeof read);
+    }
+    expect(readResourceJson(path)).toEqual({ revision: 2 }); expect(replaced).toBe(true);
+  });
+  it.each(['repeated-replacement', 'unsafe-replacement', 'in-place-write'] as const)('refuses unstable or unsafe snapshot read: %s', mode => {
+    const path = join(fixtureRoot, 'snapshot.json'); writeJson(path, { revision: 1 });
+    const replacements = [join(fixtureRoot, 'next-1.json'), join(fixtureRoot, 'next-2.json')];
+    replacements.forEach((file, index) => writeJson(file, { revision: index + 2 }));
+    if (mode === 'unsafe-replacement') chmodSync(replacements[0]!, 0o644);
+    let reads = 0; const read = fs.readSync;
+    vi.spyOn(fs, 'readSync').mockImplementation(((...args: Parameters<typeof read>) => {
+      const count = read(...args); reads++;
+      if (mode === 'in-place-write') writeFileSync(path, '{"revision":1000}');
+      else fs.renameSync(replacements[reads - 1]!, path);
+      return count;
+    }) as typeof read);
+    expect(() => readResourceJson(path)).toThrow('Resource file');
+    expect(reads).toBe(mode === 'repeated-replacement' ? 2 : 1);
+    if (mode === 'unsafe-replacement') expect(statSync(path).mode & 0o777).toBe(0o644);
+  });
   it('refuses unsafe or malformed JSON inputs without repairing permissions or following aliases', async () => {
     const path = join(fixtureRoot, 'input.json'); writeJson(path, { schemaVersion: 1 });
     expect(readResourceJson(path)).toEqual({ schemaVersion: 1 });

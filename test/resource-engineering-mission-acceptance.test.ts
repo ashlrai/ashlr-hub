@@ -53,7 +53,17 @@ async function fixture() {
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8')); const raw = JSON.parse(body.messages[0].content);
         const context = Array.isArray(raw) ? JSON.parse(raw.find(row => row.role === 'user').content) : raw;
-        if (context.kind === 'human-hold') { humanResponses.push(res); return; }
+        if (context.kind === 'human-hold') {
+          // A healthy pending JSON response, not a silent/dead HTTP server.
+          // Once setup leaves the parent event loop, Undici's independent
+          // five-minute headers/body inactivity timers can fire on schedule.
+          // Leading JSON whitespace keeps this fixture transport alive without
+          // completing the task, renewing its deadline or changing production timeouts.
+          res.writeHead(200, { 'content-type': 'application/json' }); res.write(' ');
+          const heartbeat = setInterval(() => { if (!res.destroyed) res.write(' '); }, 10_000);
+          heartbeat.unref(); res.once('close', () => clearInterval(heartbeat));
+          humanResponses.push(res); return;
+        }
         let content: unknown;
         if (context.seedContext) {
           calls.generation++; const value = JSON.parse(context.files.find((row: { path: string }) => row.path === 'value.json').content);

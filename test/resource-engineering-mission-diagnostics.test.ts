@@ -9,8 +9,10 @@ vi.mock('../src/core/resources/engineering-mission-proof.js', () => ({ readEngin
 vi.mock('../src/core/resources/engineering-predecessor-check.js', () => ({ checkResourceEngineeringPredecessor: runtime.proof }));
 vi.mock('../src/core/resources/engineering-autonomous-setup.js', () => ({
   checkResourceEngineeringAutonomousSetup: runtime.setup,
-  prepareResourceEngineeringAutonomousSetup: vi.fn(() => ({ planDigest: 'a'.repeat(64) })),
   validateResourceEngineeringAutonomousSetupPolicy: (value: unknown) => value,
+}));
+vi.mock('../src/core/resources/engineering-setup.js', () => ({
+  prepareEngineeringMissionSetup: vi.fn(async () => ({ planDigest: 'a'.repeat(64) })),
 }));
 vi.mock('../src/core/universe/resource-generation.js', () => ({ validateResourceGenerationRuntime: (value: unknown) => value }));
 vi.mock('../src/core/resources/pool-policy.js', async importOriginal => ({

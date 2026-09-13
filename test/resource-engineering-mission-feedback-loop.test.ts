@@ -11,8 +11,9 @@ vi.mock('../src/core/resources/engineering-mission-proof.js', () => ({ readEngin
   request.kind === 'setup' ? adapters.check(request.input) : adapters.proof(request.input) }));
 vi.mock('../src/core/resources/engineering-autonomous-setup.js', async original => ({
   ...await original<typeof import('../src/core/resources/engineering-autonomous-setup.js')>(),
-  checkResourceEngineeringAutonomousSetup: adapters.check, prepareResourceEngineeringAutonomousSetup: adapters.prepare,
+  checkResourceEngineeringAutonomousSetup: adapters.check,
 }));
+vi.mock('../src/core/resources/engineering-setup.js', () => ({ prepareEngineeringMissionSetup: adapters.prepare }));
 vi.mock('../src/core/resources/engineering-predecessor-check.js', () => ({ checkResourceEngineeringPredecessor: adapters.proof }));
 vi.mock('../src/core/web/resource-console-server.js', () => ({ startResourceConsoleServer: adapters.start }));
 vi.mock('../src/core/resources/engineering-mission-console.js', () => ({
@@ -31,6 +32,8 @@ import type { ResourceEngineeringAutonomousSetupOptions } from '../src/core/reso
 import { createResourcePoolSupervisor, type ResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
 import type { ResourceConsoleTaskInput } from '../src/core/resources/console-types.js';
 import type { ResourceEngineeringLifetime } from '../src/core/resources/engineering-lifetime.js';
+import { captureResourceEngineeringLifetime } from '../src/core/resources/engineering-lifetime.js';
+import type { EngineeringSetupRequest, EngineeringSetupHost } from '../src/core/resources/engineering-setup.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.clearAllMocks(); });
@@ -94,9 +97,16 @@ async function fixture(mode: Mode) {
   let durableOwner: ResourcePoolSupervisor | undefined; let crashOnce = mode === 'restart-recovery';
   let queueReads = 0; const drainReads: number[] = [];
   adapters.check.mockImplementation((value: ResourceEngineeringAutonomousSetupOptions) => { const checked = plan(value); scopes.set(checked.paths.profiles, value); return checked; });
-  adapters.prepare.mockImplementation((value: ResourceEngineeringAutonomousSetupOptions & { expectedPlanDigest: string }, host: { beforePublication(): void }) => {
+  adapters.prepare.mockImplementation(async ({ input: value, predecessor }: EngineeringSetupRequest, host: EngineeringSetupHost) => {
     if (prepared.length && mode === 'stop-before-publication') controller.abort();
-    host.beforePublication(); const { expectedPlanDigest: _expected, ...published } = value;
+    // Synthetic publication seam only; the real cooperative worker is covered separately.
+    if (captureResourceEngineeringLifetime({ engineeringLifetime: host.lifetime }).isStopped()) throw Error('Fixture stopped');
+    if (predecessor) {
+      const proof = adapters.proof(predecessor.options);
+      if (proof.status !== 'verified' || proof.continuation !== 'eligible' ||
+        canonical(proof.tip) !== canonical(predecessor.expectedTip)) throw Error('Fixture predecessor changed');
+    }
+    const { expectedPlanDigest: _expected, ...published } = value;
     prepared.push(published); return plan(published);
   });
   const tipFor = (value: ResourceEngineeringAutonomousSetupOptions) => ({ enrollmentId: value.output === setup.output ? 'initial' : 'second',
