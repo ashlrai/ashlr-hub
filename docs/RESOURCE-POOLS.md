@@ -82,12 +82,46 @@ component. Cleanup failures retain a held result while still attempting the
 remaining owners' drains; the workspace supervisor and collectors remain outside
 component-only shutdown.
 
-There is no same-console engineering restart operation yet. A new explicitly
-started console lifetime still reconciles its existing durable queues and graph
-records; component close does not erase work, renew deadlines, or bypass held
-records. This is not a durable fleet-wide STOP, and it does not yet separate the
-standing mission controller's lifetime from its console. Those remain distinct
-integration work; do not use this endpoint as a substitute for global KILL.
+### Replace engineering without restarting the workspace
+
+An in-process host receives a `ResourceConsoleWorkspaceHandle` from
+`startResourceConsoleServer`. Its `engineeringAttachment()` returns the current
+attachment capability, or `null` if engineering was not initially configured.
+After that attachment's `close()` resolves and its `state()` is `closed`, the
+host can call `attachEngineering` with the exact capability as
+`expectedAttachment` and explicit engineering configuration paths. The first
+attachment requires `expectedAttachment: null`. These methods are host-only;
+there is no HTTP attachment endpoint or browser-supplied configuration.
+
+Attachment preserves the workspace supervisor, human tasks and queue pause,
+collectors, URL, read session and control token. It validates the new catalog,
+preparation, supervision and successor configuration through the same validators
+as startup. Pool, bindings, project catalog and collector configuration must still
+match the workspace's captured configuration. New control files must remain
+outside writable projects. Attachment does not change account reserves or
+allocation, erase records, renew deadlines, advance branches, or bypass held work.
+
+The capability is an in-process object, not its printable `id`: copying or
+serializing it cannot authorize replacement. Concurrent replacement, a stale
+capability, a running or held predecessor, changed configuration, or a stopped
+workspace is refused. Engineering writes are unavailable during attachment;
+ordinary tasks remain available through their existing quota controls. Requests
+already reading a body or awaiting an engineering result cannot act on the new
+component. An old capability's `close()` and old child controls continue to refer
+only to their original component.
+
+If initialization fails or shutdown races with attachment, the host drains any
+late-arriving worker before the operation finishes. Inspect
+`engineeringAttachment()` again after failure: a newly installed but closed
+attachment remains the current capability for a subsequent explicit attempt;
+cleanup uncertainty remains held. Use that capability's `state()` or authenticated
+`GET /api/resources/console` for current lifecycle, not the handle's initial
+`scope` snapshot.
+
+The standing mission controller does not yet use this attachment API to share a
+persistent human workspace. Its setup/predecessor ownership joins and mission
+integration remain separate work. Component close is also not a durable
+fleet-wide STOP; do not use it as a substitute for global KILL.
 
 ## Engineering workspace
 

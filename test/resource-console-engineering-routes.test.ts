@@ -2,6 +2,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { IncomingMessage, request } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const owner = vi.hoisted(() => ({ create: vi.fn(), validate: vi.fn(), catalog: vi.fn(), snapshot: vi.fn(),
   readiness: vi.fn(), launch: vi.fn(), cancel: vi.fn(), close: vi.fn() }));
@@ -337,6 +338,154 @@ function post(handle: ResourceConsoleServerHandle, path = '/api/resources/engine
   headers: Record<string, string> = { 'x-ashlr-token': handle.controlToken!, origin: handle.url }) {
   return fetch(`${handle.url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value) });
 }
+
+async function pendingBody(handle: ResourceConsoleServerHandle, route: string, value: unknown) {
+  const bytes = JSON.stringify(value); let entered!: () => void;
+  const seen = new Promise<void>(resolve => { entered = resolve; });
+  const original = IncomingMessage.prototype.on;
+  const spy = vi.spyOn(IncomingMessage.prototype, 'on').mockImplementation(function(this: IncomingMessage, event, listener) {
+    if (event === 'data' && this.url === route && this.headers['x-fixture-pending'] === 'true') entered();
+    return original.call(this, event, listener);
+  });
+  let resolve!: (status: number) => void, reject!: (error: Error) => void;
+  const response = new Promise<number>((done, fail) => { resolve = done; reject = fail; });
+  const req = request(`${handle.url}${route}`, { method: 'POST', headers: { origin: handle.url, 'x-ashlr-token': handle.controlToken!,
+    'content-type': 'application/json', 'content-length': Buffer.byteLength(bytes), 'x-fixture-pending': 'true' } }, res => {
+    res.resume(); res.once('end', () => resolve(res.statusCode!));
+  });
+  req.once('error', reject); req.write(bytes.slice(0, 1));
+  try { await Promise.race([seen, response.then(() => { throw new Error('Request refused before body'); })]); }
+  finally { spy.mockRestore(); }
+  return { finish: () => req.end(bytes.slice(1)), response, destroy: () => req.destroy() };
+}
+
+describe('host-owned same-workspace engineering attachment', () => {
+  function workerConfiguration() {
+    const profiles = join(directory, 'attached-profiles.json'), supervision = join(directory, 'attached-supervision.json');
+    const policy = join(directory, 'attached-successors.json');
+    save(profiles, { schemaVersion: 1, profiles: [{ id: 'evolve', recipe: { projectId: 'default' } }] });
+    save(supervision, { schemaVersion: 1, id: 'attached-queue', maxEnrollments: 4 });
+    save(policy, { schemaVersion: 1, supervisionId: 'attached-queue', profileId: 'evolve', allowedWorkerIds: ['local'],
+      maxOutputTokens: 256, proposalTimeoutMs: 10000, maxSuccessors: 2, pollIntervalMs: 1000 });
+    return { engineeringPreparationFile: profiles, engineeringSupervisionFile: supervision, engineeringSuccessorsFile: policy };
+  }
+  it('attaches to an empty workspace without replacing its human queue or tokens', async () => {
+    const handle = await start({ engineeringFile: undefined }); const tokens = [handle.url, handle.readToken, handle.controlToken];
+    expect(handle.engineeringAttachment()).toBeNull();
+    expect((await post(handle, '/api/resources/queue', { paused: true })).status).toBe(200);
+    expect((await post(handle, '/api/resources/tasks', { id: 'human-retained', prompt: 'inert', allowedWorkerIds: ['local'],
+      mode: 'read-only', timeoutMs: 5000, maxOutputTokens: 10 })).status).toBe(202);
+    const before = await (await fetch(`${handle.url}/api/resources`, { headers: { 'x-ashlr-token': handle.readToken } })).json();
+    const attached = await handle.attachEngineering({ expectedAttachment: null, engineeringFile: options.engineeringFile });
+    expect(attached.state()).toBe('running'); expect(handle.engineeringAttachment()).toBe(attached);
+    const after = await (await fetch(`${handle.url}/api/resources`, { headers: { 'x-ashlr-token': handle.readToken } })).json();
+    expect(after.supervisor.instanceId).toBe(before.supervisor.instanceId); expect(after.supervisor.jobs).toEqual(before.supervisor.jobs);
+    expect(after.supervisor.paused).toBe(true); expect([handle.url, handle.readToken, handle.controlToken]).toEqual(tokens);
+  });
+  it('requires the exact drained predecessor and leaves a stale close bound to the old owner', async () => {
+    const handle = await start(), previous = handle.engineeringAttachment()!;
+    await expect(handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile })).rejects.toThrow('not drained');
+    await previous.close();
+    await expect(handle.attachEngineering({ expectedAttachment: { ...previous }, engineeringFile: options.engineeringFile })).rejects.toThrow('changed');
+    const nextOwner = { ...owner, close: vi.fn().mockResolvedValue(undefined) }; owner.create.mockReturnValueOnce(nextOwner);
+    const next = await handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile });
+    expect(next.id).not.toBe(previous.id); await previous.close(); expect(nextOwner.close).not.toHaveBeenCalled();
+    await expect(handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile })).rejects.toThrow('changed');
+    expect(next.state()).toBe('running');
+  });
+  it.each(['/api/resources/engineering/start', '/api/resources/engineering-runtime/close'])('refuses a stale body at %s after replacement', async route => {
+    const handle = await start(), previous = handle.engineeringAttachment()!;
+    const pending = await pendingBody(handle, route, route.endsWith('/close') ? {} : input);
+    try {
+      await previous.close();
+      const nextOwner = { ...owner, launch: vi.fn(), close: vi.fn().mockResolvedValue(undefined) }; owner.create.mockReturnValueOnce(nextOwner);
+      const next = await handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile });
+      pending.finish(); expect([409, 503]).toContain(await pending.response);
+      expect(nextOwner.launch).not.toHaveBeenCalled(); expect(nextOwner.close).not.toHaveBeenCalled(); expect(next.state()).toBe('running');
+    } finally { pending.destroy(); }
+  });
+  it('does not inherit an aborted predecessor child signal', async () => {
+    const child = new AbortController(), handle = await start({ engineeringLifetime: { signal: child.signal } });
+    const previous = handle.engineeringAttachment()!; child.abort(); await previous.close();
+    const next = await handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile });
+    expect(next.state()).toBe('running'); expect((await post(handle)).status).toBe(202);
+  });
+  it('refuses held predecessors and retains whole-console cleanup uncertainty', async () => {
+    const handle = await start(), previous = handle.engineeringAttachment()!;
+    owner.close.mockRejectedValue(new Error('inert unresolved cleanup')); await expect(previous.close()).rejects.toThrow('uncertain');
+    await expect(handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile })).rejects.toThrow('not drained');
+    await expect(handle.close()).rejects.toThrow('uncertain'); handles.splice(handles.indexOf(handle), 1);
+  });
+  it.each(['pool', 'projects', 'workspace-control'] as const)('refuses %s drift or overlap before creating a replacement', async kind => {
+    const handle = await start(), previous = handle.engineeringAttachment()!; await previous.close();
+    let file = options.engineeringFile;
+    if (kind === 'pool') save(options.poolFile, { invalid: true });
+    if (kind === 'projects') save(options.projectsFile!, { schemaVersion: 1, projects: [{ id: 'changed' }] });
+    if (kind === 'workspace-control') { file = join(options.workspace!, 'engineering.json'); save(file, { schemaVersion: 1, enrollments: [] }); }
+    await expect(handle.attachEngineering({ expectedAttachment: previous, engineeringFile: file })).rejects.toThrow();
+    expect(owner.create).toHaveBeenCalledOnce(); expect(handle.engineeringAttachment()).toBe(previous);
+  });
+  it('never invokes attachment property getters', async () => {
+    const handle = await start(), previous = handle.engineeringAttachment()!; await previous.close();
+    const getter = vi.fn(); const value = { expectedAttachment: previous, get engineeringFile() { getter(); return options.engineeringFile; } };
+    await expect(handle.attachEngineering(value)).rejects.toThrow('Invalid'); expect(getter).not.toHaveBeenCalled();
+  });
+  it('withholds competing attachment while late initialization leaves human queue controls usable', async () => {
+    const handle = await start(), previous = handle.engineeringAttachment()!; await previous.close();
+    const create = background.create.getMockImplementation()!; let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    background.create.mockImplementationOnce(async value => { await gate; return create(value); });
+    const configuration = workerConfiguration();
+    const pending = handle.attachEngineering({ expectedAttachment: previous, ...configuration });
+    await vi.waitFor(() => expect(background.create).toHaveBeenCalledOnce());
+    try {
+      await expect(handle.attachEngineering({ expectedAttachment: handle.engineeringAttachment(), ...configuration })).rejects.toThrow('not drained');
+      expect((await post(handle, '/api/resources/queue', { paused: true })).status).toBe(200);
+      expect((await post(handle)).status).toBe(503);
+    } finally { finish(); }
+    const attached = await pending; expect(attached.state()).toBe('running'); expect(successors.start).toHaveBeenCalledOnce();
+  });
+  it('awaits and drains a late attachment when the entire workspace closes', async () => {
+    const handle = await start(), previous = handle.engineeringAttachment()!; await previous.close();
+    const create = background.create.getMockImplementation()!; let finish!: () => void;
+    const gate = new Promise<void>(resolve => { finish = resolve; });
+    background.create.mockImplementationOnce(async value => { await gate; return create(value); });
+    const pending = handle.attachEngineering({ expectedAttachment: previous, ...workerConfiguration() });
+    const refused = expect(pending).rejects.toThrow();
+    await vi.waitFor(() => expect(background.create).toHaveBeenCalledOnce());
+    const closing = handle.close(); let finished = false; void closing.then(() => { finished = true; });
+    await Promise.resolve(); expect(finished).toBe(false); finish();
+    await refused; await closing; expect(successors.close).toHaveBeenCalled(); expect(successors.start).not.toHaveBeenCalled();
+  });
+  it('refuses changed configuration during initialization before starting successors', async () => {
+    const handle = await start(), previous = handle.engineeringAttachment()!; await previous.close();
+    const configuration = workerConfiguration(), create = background.create.getMockImplementation()!;
+    background.create.mockImplementationOnce(async value => {
+      save(configuration.engineeringSuccessorsFile, { schemaVersion: 1, supervisionId: 'attached-queue', profileId: 'evolve', allowedWorkerIds: ['local'],
+        maxOutputTokens: 257, proposalTimeoutMs: 10000, maxSuccessors: 2, pollIntervalMs: 1000 });
+      return create(value);
+    });
+    await expect(handle.attachEngineering({ expectedAttachment: previous, ...configuration })).rejects.toThrow('configuration changed');
+    expect(successors.start).not.toHaveBeenCalled(); expect(successors.close).toHaveBeenCalled();
+    expect(handle.engineeringAttachment()!.state()).toBe('closed');
+    expect((await post(handle, '/api/resources/queue', { paused: true })).status).toBe(200);
+  });
+  it('keeps a retired worker fault out of the replacement scope while retaining cleanup uncertainty', async () => {
+    const handle = await start(workerConfiguration()), previous = handle.engineeringAttachment()!;
+    const oldFault = background.create.mock.calls[0]![0].onFault;
+    await previous.close();
+    const nextOwner = { ...owner, close: vi.fn().mockResolvedValue(undefined) }; owner.create.mockReturnValueOnce(nextOwner);
+    const next = await handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile });
+    oldFault(); expect(next.state()).toBe('running'); expect(nextOwner.close).not.toHaveBeenCalled();
+    const response = await fetch(`${handle.url}/api/resources/console`, { headers: { 'x-ashlr-token': handle.readToken } });
+    expect(await response.json()).toMatchObject({ engineeringLifecycle: 'running' });
+    await expect(handle.close()).rejects.toThrow('uncertain'); handles.splice(handles.indexOf(handle), 1);
+  });
+  it('has no browser route for attachment', async () => {
+    const handle = await start(); expect((await post(handle, '/api/resources/engineering-runtime/attach', {})).status).toBe(404);
+    expect(owner.create).toHaveBeenCalledOnce();
+  });
+});
 
 describe('engineering HTTP capability boundary', () => {
   it('rejects an already-stopped child before acquiring execution ownership', async () => {

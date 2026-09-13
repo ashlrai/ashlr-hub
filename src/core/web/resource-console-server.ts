@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto';
+import { types } from 'node:util';
+import { canonical } from '../universe/artifacts.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,22 +16,17 @@ import { acquireResourceQuotaRefreshLease, inspectResourceQuotaRefreshPending, R
 import { publishSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
 import { expandResourceQuotaDenials } from '../resources/quota-scope.js';
 import { validateResourceConsoleProjects } from '../resources/console-projects.js';
-import { validateResourceConsoleEngineeringCatalog,
-  type ResourceConsoleEngineeringOwner } from '../resources/console-engineering.js';
-import { validateResourceConsoleEngineeringSupervisionConfig,
-  type ResourceConsoleEngineeringSupervisor } from '../resources/console-engineering-supervisor.js';
+import { validateResourceConsoleEngineeringCatalog } from '../resources/console-engineering.js';
+import { validateResourceConsoleEngineeringSupervisionConfig } from '../resources/console-engineering-supervisor.js';
 import { listResourceConsoleFiles, readResourceConsoleFile, ResourceConsoleFileError } from '../resources/console-files.js';
 import { createResourceConnectionMonitor, validateResourceConnectionConfig, type ResourceConnectionMonitor } from '../resources/connection-monitor.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from '../resources/metadata-coordinator.js';
 import type { ResourceConsoleScope, ResourceConsoleTaskInput, ResourceConsoleSnapshot } from '../resources/console-types.js';
-import { validateResourceConsoleEngineeringPreparationConfig,
-  type ResourceConsoleEngineeringPreparationOwner } from '../resources/console-engineering-preparation.js';
+import { validateResourceConsoleEngineeringPreparationConfig } from '../resources/console-engineering-preparation.js';
 import { createResourceConsoleReader, withholdResourceConsoleWorkers, withholdResourceConsoleQuotaScopeWorkers } from './resource-console-reads.js';
 import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
 import { validateUniverseConsoleRoot } from './universe-console-reads.js';
 import { serveStatic } from './static.js';
-import type { EngineeringBackground } from '../resources/engineering-background-types.js';
-import type { createResourceEngineeringAutomaticAdmission } from '../resources/engineering-automatic-admission.js';
 import { createResourceEngineeringComponent, type ResourceEngineeringComponent } from '../resources/engineering-component.js';
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from '../resources/engineering-successor-coordinator.js';
 import { captureResourceExecutionVeto } from '../resources/execution-veto.js';
@@ -71,6 +68,44 @@ export interface ResourceConsoleServerHandle {
   controlToken: string | null;
   scope: ResourceConsoleScope;
   close(): Promise<void>;
+}
+export interface ResourceConsoleEngineeringAttachment {
+  readonly id: string;
+  state(): NonNullable<ResourceConsoleScope['engineeringLifecycle']>;
+  close(): Promise<void>;
+}
+export type ResourceConsoleEngineeringAttachmentInput = Pick<ResourceConsoleServerOptions,
+  'engineeringFile' | 'engineeringPreparationFile' | 'engineeringSupervisionFile' | 'engineeringSuccessorsFile' | 'engineeringLifetime'> & {
+    /** Exact in-process capability returned by this workspace, or null before first attachment. */
+    expectedAttachment: ResourceConsoleEngineeringAttachment | null;
+  };
+export interface ResourceConsoleWorkspaceHandle extends ResourceConsoleServerHandle {
+  engineeringAttachment(): ResourceConsoleEngineeringAttachment | null;
+  attachEngineering(input: ResourceConsoleEngineeringAttachmentInput): Promise<ResourceConsoleEngineeringAttachment>;
+}
+
+function engineeringPaths(input: Pick<ResourceConsoleServerOptions, 'engineeringFile' | 'engineeringPreparationFile' | 'engineeringSupervisionFile' | 'engineeringSuccessorsFile'>) {
+  return {
+    engineeringFile: input.engineeringFile === undefined ? null : validateUniverseConsoleRoot(input.engineeringFile),
+    engineeringPreparationFile: input.engineeringPreparationFile === undefined ? null : validateUniverseConsoleRoot(input.engineeringPreparationFile),
+    engineeringSupervisionFile: input.engineeringSupervisionFile === undefined ? null : validateUniverseConsoleRoot(input.engineeringSupervisionFile),
+    engineeringSuccessorsFile: input.engineeringSuccessorsFile === undefined ? null : validateUniverseConsoleRoot(input.engineeringSuccessorsFile),
+  };
+}
+function readEngineeringConfiguration(paths: ReturnType<typeof engineeringPaths>) {
+  const { engineeringFile, engineeringPreparationFile, engineeringSupervisionFile, engineeringSuccessorsFile } = paths;
+  const engineeringCatalog = engineeringFile ? validateResourceConsoleEngineeringCatalog(readResourceJson(engineeringFile, 1024 * 1024)) : null;
+  const engineeringPreparationConfig = engineeringPreparationFile ? validateResourceConsoleEngineeringPreparationConfig(readResourceJson(engineeringPreparationFile, 1024 * 1024)) : null;
+  const engineeringSupervisionConfig = engineeringSupervisionFile ? validateResourceConsoleEngineeringSupervisionConfig(readResourceJson(engineeringSupervisionFile, 128 * 1024)) : null;
+  if (engineeringSupervisionConfig?.autoAdmitPrepared && !engineeringPreparationConfig) throw new Error('Automatic prepared-work admission requires preparation profiles');
+  const engineeringSuccessorsConfig = engineeringSuccessorsFile ? validateResourceEngineeringSuccessorCoordinatorConfig(readResourceJson(engineeringSuccessorsFile, 16 * 1024)) : null;
+  const successorProfile = engineeringPreparationConfig?.profiles.find(row => row.id === engineeringSuccessorsConfig?.profileId);
+  if (engineeringSuccessorsConfig && (!successorProfile || engineeringSupervisionConfig?.maxEnrollments === undefined ||
+      engineeringSuccessorsConfig.supervisionId !== engineeringSupervisionConfig.id ||
+      engineeringSuccessorsConfig.maxSuccessors > engineeringSupervisionConfig.maxEnrollments)) {
+    throw new Error('Successor policy requires a matching appendable supervision queue and preparation profile');
+  }
+  return { ...paths, engineeringCatalog, engineeringPreparationConfig, engineeringSupervisionConfig, engineeringSuccessorsConfig, successorProfile };
 }
 
 class RequestError extends Error {
@@ -133,7 +168,7 @@ function sendSnapshot(res: ServerResponse, value: unknown, status = 200): void {
 }
 
 /** One fixed pool; independent read and control capabilities. No default dashboard imports. */
-export async function startResourceConsoleServer(options: ResourceConsoleServerOptions): Promise<ResourceConsoleServerHandle> {
+export async function startResourceConsoleServer(options: ResourceConsoleServerOptions): Promise<ResourceConsoleWorkspaceHandle> {
   const hostStopped = captureResourceExecutionVeto(options);
   const engineeringLifetime = captureResourceEngineeringLifetime(options);
   if (hostStopped()) throw new Error('Host console execution stopped');
@@ -146,10 +181,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const quotaConfigFile = options.quotaConfigFile === undefined ? null : validateUniverseConsoleRoot(options.quotaConfigFile);
   const connectionsConfigFile = options.connectionsConfigFile === undefined ? null : validateUniverseConsoleRoot(options.connectionsConfigFile);
   const projectsFile = options.projectsFile === undefined ? null : validateUniverseConsoleRoot(options.projectsFile);
-  const engineeringFile = options.engineeringFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringFile);
-  const engineeringPreparationFile = options.engineeringPreparationFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringPreparationFile);
-  const engineeringSupervisionFile = options.engineeringSupervisionFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringSupervisionFile);
-  const engineeringSuccessorsFile = options.engineeringSuccessorsFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringSuccessorsFile);
+  const initialEngineeringPaths = engineeringPaths(options);
+  const { engineeringFile, engineeringPreparationFile, engineeringSupervisionFile, engineeringSuccessorsFile } = initialEngineeringPaths;
   if (engineeringLifetime.configured && engineeringFile === null && engineeringPreparationFile === null) {
     throw new Error('Engineering lifetime requires configured engineering');
   }
@@ -175,22 +208,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   }
   const projects = projectsFile ? validateResourceConsoleProjects((catalog as { projects: unknown }).projects) : undefined;
   if (projects) { projects.forEach((project) => Object.freeze(project)); Object.freeze(projects); }
-  const engineeringCatalog = engineeringFile ? validateResourceConsoleEngineeringCatalog(readResourceJson(engineeringFile, 1024 * 1024)) : null;
-  const engineeringPreparationConfig = engineeringPreparationFile ?
-    validateResourceConsoleEngineeringPreparationConfig(readResourceJson(engineeringPreparationFile, 1024 * 1024)) : null;
-  const engineeringSupervisionConfig = engineeringSupervisionFile ?
-    validateResourceConsoleEngineeringSupervisionConfig(readResourceJson(engineeringSupervisionFile, 128 * 1024)) : null;
-  if (engineeringSupervisionConfig?.autoAdmitPrepared && !engineeringPreparationConfig) {
-    throw new Error('Automatic prepared-work admission requires preparation profiles');
-  }
-  const engineeringSuccessorsConfig = engineeringSuccessorsFile
-    ? validateResourceEngineeringSuccessorCoordinatorConfig(readResourceJson(engineeringSuccessorsFile, 16 * 1024)) : null;
-  const successorProfile = engineeringPreparationConfig?.profiles.find(row => row.id === engineeringSuccessorsConfig?.profileId);
-  if (engineeringSuccessorsConfig && (!successorProfile || engineeringSupervisionConfig?.maxEnrollments === undefined ||
-      engineeringSuccessorsConfig.supervisionId !== engineeringSupervisionConfig.id ||
-      engineeringSuccessorsConfig.maxSuccessors > engineeringSupervisionConfig.maxEnrollments)) {
-    throw new Error('Successor policy requires a matching appendable supervision queue and preparation profile');
-  }
+  const initialEngineering = readEngineeringConfiguration(initialEngineeringPaths);
+  const { engineeringSuccessorsConfig } = initialEngineering;
   const configuredWorkspaces = workspace ? [workspace, ...(projects?.map((project) => project.workspace) ?? [])] : [];
   const contains = (parent: string, target: string) => {
     const nested = relative(parent, target);
@@ -228,13 +247,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     ...(options.execute ? { historySupported: true, followUpSupported: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
-  let engineering: ResourceConsoleEngineeringOwner | null = null;
-  let engineeringPreparation: Pick<ResourceConsoleEngineeringPreparationOwner, 'profiles' | 'check' | 'prepare' | 'prepareAutomatically' | 'pendingAutomaticAdmissions'> |
-    Pick<EngineeringBackground, 'profiles' | 'check' | 'prepare' | 'prepareAutomatically' | 'pendingAutomaticAdmissions'> | null = null;
-  let automaticAdmission: ReturnType<typeof createResourceEngineeringAutomaticAdmission> | null = null;
-  let engineeringSupervision: ResourceConsoleEngineeringSupervisor | null = null;
   let engineeringComponent: ResourceEngineeringComponent | null = null;
-  let engineeringSuccessors: Pick<EngineeringBackground, 'snapshot' | 'start' | 'close'> | null = null;
+  let attachment: ResourceConsoleEngineeringAttachment | null = null;
+  let attachmentPending = false;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
   let quotaLease: ResourceQuotaRefreshLease | null = null;
   let connectionMonitor: ResourceConnectionMonitor | null = null;
@@ -243,9 +258,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   let quotaPublicationFailed = false;
   let metadataCollector: ResourceConsoleSnapshot['metadataCollector'];
   let origin = ''; let port = 0; let closing: Promise<void> | null = null; let ready = false;
-  let engineeringClosing: Promise<void> | null = null;
   let engineeringFaulted = false;
-  const engineeringStopped = () => hostStopped() || engineeringLifetime.isStopped() || engineeringComponent?.isStopped() === true || engineeringClosing !== null || scope.engineeringLifecycle === 'stopping';
 
   // Configured-but-blocked collection remains managed. Never fall back to
   // owner-supplied observations as if they were a current native quota read.
@@ -289,6 +302,13 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   }
 
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Bind both sides of every await to this exact scope, never mutable host slots.
+    const selectedComponent = engineeringComponent;
+    const engineering = selectedComponent?.owner ?? null, engineeringPreparation = selectedComponent?.preparation ?? null;
+    const engineeringSupervision = selectedComponent?.supervision ?? null, automaticAdmission = selectedComponent?.admission ?? null;
+    const engineeringSuccessors = selectedComponent?.successors ?? null;
+    const currentEngineering = () => { if (selectedComponent !== engineeringComponent || attachmentPending) throw new RequestError(409, 'Engineering attachment changed'); };
+    const engineeringStopped = () => selectedComponent !== engineeringComponent || attachmentPending || selectedComponent?.isStopped() === true || hostStopped();
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'");
     res.setHeader('X-Frame-Options', 'DENY'); res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
@@ -368,7 +388,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (!engineering) throw new RequestError(403, 'Engineering is not configured');
           if (!exact(await body(req), [])) throw new RequestError(400, 'Engineering close expects an empty object');
           if (closing) throw new RequestError(503, 'Console is closing');
-          await closeEngineering();
+          currentEngineering(); await selectedComponent!.close(); currentEngineering();
           if (scope.engineeringLifecycle !== 'closed') throw new RequestError(503, 'Engineering shutdown uncertain');
           sendJson(res, 200, { engineeringLifecycle: scope.engineeringLifecycle }); return;
         }
@@ -381,15 +401,17 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
           const input = await body(req);
           if (!exact(input, ['projectId']) || typeof input.projectId !== 'string') throw new RequestError(400, 'Expected one project ID');
-          sendSnapshot(res, { profiles: await engineeringPreparation.profiles(input.projectId) }); return;
+          currentEngineering(); const profiles = await engineeringPreparation.profiles(input.projectId); currentEngineering();
+          sendSnapshot(res, { profiles }); return;
         }
         if (url.pathname === '/api/resources/engineering/prepare/check' || url.pathname === '/api/resources/engineering/prepare') {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
           const input = await body(req);
           if (closing || scope.engineeringLifecycle !== 'running' || engineeringStopped()) throw new RequestError(503, 'Engineering runtime is not running');
-          if (url.pathname.endsWith('/check')) { sendSnapshot(res, await engineeringPreparation.check(input)); return; }
-          sendSnapshot(res, automaticAdmission ? await automaticAdmission.prepare(input) : await engineeringPreparation.prepare(input)); return;
+          const value = url.pathname.endsWith('/check') ? await engineeringPreparation.check(input) :
+            automaticAdmission ? await automaticAdmission.prepare(input) : await engineeringPreparation.prepare(input);
+          currentEngineering(); sendSnapshot(res, value); return;
         }
         if (url.pathname === '/api/resources/engineering-supervision/admit') {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
@@ -494,7 +516,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
       if (url.pathname === '/api/resources/engineering-successors') {
         if (!engineeringSuccessors) throw new RequestError(403, 'Engineering successors are not configured');
-        sendSnapshot(res, await engineeringSuccessors.snapshot()); return;
+        const value = await engineeringSuccessors.snapshot(); currentEngineering(); sendSnapshot(res, value); return;
       }
       const engineeringReadiness = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/readiness$/.exec(url.pathname);
       if (engineeringReadiness) {
@@ -610,11 +632,6 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   });
   server.requestTimeout = 30_000; server.headersTimeout = 10_000;
 
-  const closeEngineering = (): Promise<void> => {
-    if (engineeringClosing) return engineeringClosing;
-    engineeringClosing = engineeringComponent?.close() ?? Promise.resolve();
-    return engineeringClosing;
-  };
   const close = (): Promise<void> => {
     if (closing) return closing;
     ready = false; sessions.clear(); signal?.removeEventListener('abort', aborted);
@@ -647,13 +664,108 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     })();
     return closing;
   };
-  const engineeringFault = () => {
-    engineeringFaulted = true;
-    if (scope.engineeringLifecycle === 'closed') scope.engineeringLifecycle = 'held';
-    // A failed engineering component must stop its own producers, not healthy
-    // human work. Startup still fails closed before exposing a partial service.
-    void (ready ? closeEngineering() : close()).catch(() => {});
-  };
+  async function installEngineering(configuration: ReturnType<typeof readEngineeringConfiguration>,
+    lifetime: ReturnType<typeof captureResourceEngineeringLifetime>) {
+    if (!supervisor) throw new Error('Engineering requires an executing workspace');
+    const { engineeringCatalog, engineeringPreparationConfig, engineeringPreparationFile,
+      engineeringSupervisionConfig, engineeringSuccessorsConfig, engineeringSuccessorsFile, successorProfile } = configuration;
+    const ownerOptions = { ...(engineeringCatalog ? { catalog: engineeringCatalog } : {}),
+      ...(engineeringPreparationConfig ? { registrationEnabled: true as const } : {}), supervisor, root,
+      poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? { quotaConfigFile } : {}), signal };
+    const preparationOptions = engineeringPreparationConfig && engineeringPreparationFile && workspace && projectsFile
+      ? { config: engineeringPreparationConfig, configFile: engineeringPreparationFile, root, workspace, projectsFile,
+        poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? { quotaConfigFile } : {}) } : undefined;
+    const successorOptions = engineeringSuccessorsConfig && engineeringSuccessorsFile && successorProfile
+      ? { root, configFile: engineeringSuccessorsFile, config: engineeringSuccessorsConfig,
+        projectId: successorProfile.recipe.projectId, acceptance: successorProfile.acceptance, pool, bindings } : undefined;
+    let state: NonNullable<ResourceConsoleScope['engineeringLifecycle']> = 'stopping';
+    const component = createResourceEngineeringComponent({ owner: ownerOptions, preparation: preparationOptions,
+      supervision: engineeringSupervisionConfig ?? undefined, successors: successorOptions,
+      ...(lifetime.configured ? { lifetime: { signal: lifetime.signal, isExecutionStopped: lifetime.isStopped } } : {}),
+      isWorkspaceStopped: () => closing !== null || signal?.aborted === true || hostStopped(),
+      onState: next => {
+        state = next;
+        if (engineeringComponent === component) scope.engineeringLifecycle = attachmentPending && next === 'running' ? 'stopping' : next;
+      },
+      onFault: () => {
+        engineeringFaulted = true;
+        // A retired component can retain a fault without stopping its successor.
+        if (engineeringComponent !== component) return;
+        void (ready ? component.close() : close()).catch(() => {});
+      },
+      readAdmissionEvidence: () => {
+        const base = validateResourceObservations(readResourceJson(observationsFile), pool);
+        return { observations: quotaRefresher ? quotaRefresher.readObservations(base) : base,
+          unavailableWorkerIds: quotaRefresher ? quotaRefresher.unavailableWorkerIds() : quotaConfig?.workers.map(row => row.workerId) ?? [],
+          quotaUnavailableWorkerIds: quotaRefresher?.quotaUnavailableWorkerIds() ?? [] };
+      } });
+    engineeringComponent = component;
+    attachment = Object.freeze({ id: randomBytes(16).toString('hex'), state: () => state, close: () => component.close() });
+    scope.engineeringLifecycle = 'stopping';
+    for (const key of ['engineeringSupported', 'engineeringOutcomesSupported', 'engineeringPreparationSupported',
+      'engineeringSupervisionSupported', 'engineeringPreparationAutoAdmission', 'engineeringSuccessorsSupported'] as const) delete scope[key];
+    await component.initialize();
+    scope.engineeringSupported = true; scope.engineeringOutcomesSupported = true;
+    if (component.preparation) scope.engineeringPreparationSupported = true;
+    if (component.supervision) scope.engineeringSupervisionSupported = true;
+    if (engineeringSupervisionConfig?.autoAdmitPrepared) scope.engineeringPreparationAutoAdmission = true;
+    if (component.successors) scope.engineeringSuccessorsSupported = true;
+    return component;
+  }
+  async function attachEngineering(input: ResourceConsoleEngineeringAttachmentInput): Promise<ResourceConsoleEngineeringAttachment> {
+    if (!input || types.isProxy(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) throw new Error('Invalid engineering attachment');
+    const descriptors = Object.getOwnPropertyDescriptors(input);
+    const allowed = ['expectedAttachment', 'engineeringFile', 'engineeringPreparationFile', 'engineeringSupervisionFile', 'engineeringSuccessorsFile', 'engineeringLifetime'];
+    if (!Object.hasOwn(descriptors, 'expectedAttachment') || Reflect.ownKeys(input).some(key => typeof key !== 'string' || !allowed.includes(key) ||
+      !Object.hasOwn(descriptors[key]!, 'value'))) throw new Error('Invalid engineering attachment');
+    const selected = Object.fromEntries(Object.entries(descriptors).map(([key, property]) => [key, property.value])) as ResourceConsoleEngineeringAttachmentInput;
+    const previous = attachment;
+    const assertHost = (checkAttachment = true) => {
+      if (!ready || closing || signal?.aborted || hostStopped() || !supervisor || !workspace || !projectsFile || engineeringFaulted) throw new Error('Engineering workspace unavailable');
+      if (checkAttachment && selected.expectedAttachment !== attachment) throw new Error('Engineering attachment changed');
+      if (canonical(validateResourcePool(readResourceJson(poolFile))) !== canonical(pool) ||
+        canonical(validateResourceBindings(readResourceJson(bindingsFile), pool)) !== canonical(bindings) ||
+        canonical(readResourceJson(projectsFile, 256 * 1024)) !== canonical(catalog) ||
+        quotaConfigFile && canonical(validateResourceQuotaRefreshConfig(readResourceJson(quotaConfigFile), pool, bindings)) !== canonical(quotaConfig) ||
+        connectionsConfigFile && canonical(validateResourceConnectionConfig(readResourceJson(connectionsConfigFile))) !== canonical(connectionsConfig)) {
+        throw new Error('Engineering workspace configuration changed');
+      }
+    };
+    assertHost();
+    if (attachmentPending || previous && previous.state() !== 'closed') throw new Error('Previous engineering attachment is not drained');
+    const paths = engineeringPaths(selected), lifetime = captureResourceEngineeringLifetime(selected);
+    if (lifetime.isStopped() || !paths.engineeringFile && !paths.engineeringPreparationFile ||
+      paths.engineeringSupervisionFile && !paths.engineeringFile && !paths.engineeringPreparationFile ||
+      paths.engineeringSuccessorsFile && (!paths.engineeringSupervisionFile || !paths.engineeringPreparationFile)) throw new Error('Invalid engineering attachment configuration');
+    if (Object.values(paths).some(file => file && configuredWorkspaces.some(selectedWorkspace => contains(selectedWorkspace, file)))) {
+      throw new Error('Resource control files must remain outside the writable workspace');
+    }
+    const configuration = readEngineeringConfiguration(paths), configurationDigest = canonical(configuration);
+    if (configuration.engineeringSuccessorsConfig?.allowedWorkerIds.some(id => !pool.workers.some(worker => worker.id === id))) throw new Error('Successor proposal worker is not in the resource pool');
+    attachmentPending = true;
+    let candidate: ResourceEngineeringComponent | null = null;
+    try {
+      await previous?.close(); assertHost();
+      if (lifetime.isStopped() || canonical(readEngineeringConfiguration(paths)) !== configurationDigest) throw new Error('Engineering attachment configuration changed');
+      const installed = installEngineering(configuration, lifetime);
+      candidate = engineeringComponent;
+      await installed;
+      assertHost(false);
+      if (canonical(readEngineeringConfiguration(paths)) !== configurationDigest) throw new Error('Engineering attachment configuration changed');
+      if (closing || signal?.aborted || hostStopped() || lifetime.isStopped()) throw new Error('Engineering attachment stopped');
+      await candidate!.start();
+      assertHost(false);
+      if (canonical(readEngineeringConfiguration(paths)) !== configurationDigest) throw new Error('Engineering attachment configuration changed');
+      if (closing || candidate!.isStopped()) throw new Error('Engineering attachment stopped');
+      return attachment!;
+    } catch (error) {
+      if (candidate) { try { await candidate.close(); } catch { engineeringFaulted = true; } }
+      throw error;
+    } finally {
+      attachmentPending = false;
+      if (candidate && engineeringComponent === candidate && attachment) scope.engineeringLifecycle = attachment.state();
+    }
+  }
   const aborted = () => { void close().catch(() => {}); };
   try {
     await new Promise<void>((resolve, reject) => {
@@ -692,39 +804,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     const publishedProjects = supervisor?.projects?.();
     if (publishedProjects !== undefined) { scope.projects = publishedProjects; scope.defaultProjectId = 'default'; }
     if (publishedProjects !== undefined && typeof supervisor?.projectFileBinding === 'function') scope.workspaceFilesSupported = true;
-    if ((engineeringCatalog || engineeringPreparationConfig) && supervisor) {
-      const ownerOptions = { ...(engineeringCatalog ? { catalog: engineeringCatalog } : {}),
-        ...(engineeringPreparationConfig ? { registrationEnabled: true as const } : {}), supervisor, root,
-        poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? { quotaConfigFile } : {}), signal } as const;
-      const preparationOptions = engineeringPreparationConfig && engineeringPreparationFile && workspace && projectsFile
-        ? { config: engineeringPreparationConfig,
-          configFile: engineeringPreparationFile, root, workspace, projectsFile, poolFile, bindingsFile, observationsFile,
-          ...(quotaConfigFile ? { quotaConfigFile } : {}) } : undefined;
-      const successorOptions = engineeringSuccessorsConfig && engineeringSuccessorsFile && successorProfile
-        ? { root, configFile: engineeringSuccessorsFile,
-          config: engineeringSuccessorsConfig, projectId: successorProfile.recipe.projectId, acceptance: successorProfile.acceptance,
-          pool, bindings } : undefined;
-      engineeringComponent = createResourceEngineeringComponent({ owner: ownerOptions,
-        preparation: preparationOptions, supervision: engineeringSupervisionConfig ?? undefined, successors: successorOptions,
-        ...(engineeringLifetime.configured ? { lifetime: { signal: engineeringLifetime.signal, isExecutionStopped: engineeringLifetime.isStopped } } : {}),
-        isWorkspaceStopped: () => closing !== null || signal?.aborted === true || hostStopped(),
-        onState: state => { scope.engineeringLifecycle = state; }, onFault: engineeringFault,
-        readAdmissionEvidence: () => {
-            const base = validateResourceObservations(readResourceJson(observationsFile), pool);
-            return { observations: quotaRefresher ? quotaRefresher.readObservations(base) : base,
-              unavailableWorkerIds: quotaRefresher ? quotaRefresher.unavailableWorkerIds() : quotaConfig?.workers.map(row => row.workerId) ?? [],
-              quotaUnavailableWorkerIds: quotaRefresher?.quotaUnavailableWorkerIds() ?? [] };
-          } });
-      await engineeringComponent.initialize();
-      engineering = engineeringComponent.owner; engineeringPreparation = engineeringComponent.preparation;
-      engineeringSupervision = engineeringComponent.supervision; automaticAdmission = engineeringComponent.admission;
-      engineeringSuccessors = engineeringComponent.successors;
-      scope.engineeringSupported = true; scope.engineeringOutcomesSupported = true;
-      if (engineeringPreparation) scope.engineeringPreparationSupported = true;
-      if (engineeringSupervision) scope.engineeringSupervisionSupported = true;
-      if (engineeringSupervisionConfig?.autoAdmitPrepared) scope.engineeringPreparationAutoAdmission = true;
-      if (engineeringSuccessors) scope.engineeringSuccessorsSupported = true;
-    }
+    const initialComponent = (initialEngineering.engineeringCatalog || initialEngineering.engineeringPreparationConfig) && supervisor
+      ? await installEngineering(initialEngineering, engineeringLifetime) : null;
     if (signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     if (quotaConfig || connectionsConfig) {
       // Execution ownership and all startup preflight must succeed before the
@@ -748,9 +829,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       signal, assertOwnership: quotaLease!.assertOwnership, coordinator: metadataCoordinator! });
     if (signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     signal?.addEventListener('abort', aborted, { once: true }); ready = true;
-    await engineeringComponent?.start();
+    await initialComponent?.start();
     if (closing || signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
-      scope: { ...scope }, close };
+      scope: { ...scope }, close, engineeringAttachment: () => attachment, attachEngineering };
   } catch (error) { await close(); throw error; }
 }

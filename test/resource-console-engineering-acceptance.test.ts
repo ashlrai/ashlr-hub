@@ -70,7 +70,7 @@ async function readiness(handle: ResourceConsoleServerHandle, row: ResourceConso
   return value;
 }
 const launchInput = (row: ResourceConsoleEngineeringEnrollment) => ({ enrollmentId: row.id, expectedEnrollmentDigest: row.enrollmentDigest });
-async function fixture(options: { holdEngineering?: boolean; maxConcurrent?: number } = {}) {
+async function fixture(options: { holdEngineering?: boolean; maxConcurrent?: number; values?: number[] } = {}) {
   expect(homedir()).not.toBe(process.env.ASHLR_VITEST_REAL_HOME);
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'engineering-http-acceptance-')));
   const repo = join(base, 'project'); const second = join(base, 'second'); const transport = join(base, 'sterile-transport');
@@ -102,7 +102,7 @@ diagnostics:value<0?[{code:'NONNEGATIVE',message:'Value must be nonnegative',pat
         const generation = JSON.parse(messages.find((message) => message.role === 'user')!.content);
         requests.push({ kind: 'engineering', generation: generation.generation, feedback: generation.feedback });
         if (options.holdEngineering) return;
-        const value = [-1, 2, 3][generation.generation - 1]; if (value === undefined) throw new Error('Unexpected generation');
+        const value = (options.values ?? [-1, 2, 3])[generation.generation - 1]; if (value === undefined) throw new Error('Unexpected generation');
         reply(res, JSON.stringify({ operations: [{ op: 'replace', path: 'value.json', content: `${value}\n` }] }));
       } catch (error) { errors.push(String(error)); res.writeHead(500); res.end('Fixture rejected unexpected protocol'); }
     });
@@ -150,12 +150,55 @@ diagnostics:value<0?[{code:'NONNEGATIVE',message:'Value must be nonnegative',pat
   });
   const start = async (patch: Partial<ResourceConsoleServerOptions> = {}) => { const handle = await startResourceConsoleServer({ ...serverOptions, ...patch }); handles.push(handle); return handle; };
   const ledger = () => resourcePoolStatus(serverOptions.root, pool, bindings, observations).attempts;
-  return { base, repo, second, revision, transport, universeRoot, graphRoot, branch, campaignId, host, serverOptions, catalog, requests, errors,
+  return { base, repo, second, revision, transport, universeRoot, graphRoot, branch, campaignId, host, manifest, serverOptions, catalog, requests, errors,
     start, ledger, peak: () => peak, active: () => active,
     releaseOrdinary: () => { expect(ordinary).toBeDefined(); reply(ordinary!, 'ordinary-completed'); } };
 }
 
 describe.runIf(process.platform === 'darwin')('independent Workspace engineering HTTP acceptance', () => {
+  it('delivers two attached scopes in one workspace while a human task stays live', async () => {
+    const mode = { maxConcurrent: 2, values: [-1, 2, 3] };
+    const f = await fixture(mode), handle = await f.start({ engineeringFile: undefined });
+    const identity = [handle.url, handle.readToken, handle.controlToken];
+    expect(handle.engineeringAttachment()).toBeNull();
+    expect((await http(handle, '/api/resources/tasks', { id: 'human-during-rollover', projectId: 'second', prompt: 'ordinary-held',
+      allowedWorkerIds: ['local-worker'], mode: 'read-only', timeoutMs: 120_000, maxOutputTokens: 100 })).status).toBe(202);
+    await vi.waitFor(() => expect(f.requests).toEqual([{ kind: 'ordinary' }]), { timeout: 10_000 });
+    const first = await handle.attachEngineering({ expectedAttachment: null, engineeringFile: f.serverOptions.engineeringFile });
+    expect((await http(handle, `${engineeringPath}/start`, launchInput((await enrollments(handle))[0]!))).status).toBe(202);
+    await vi.waitFor(async () => expect((await status(handle)).state).toBe('completed'), { timeout: 45_000, interval: 250 });
+    const delivered = git(f.repo, 'rev-parse', f.branch); expect(git(f.repo, 'show', `${delivered}:value.json`)).toBe('3');
+    await first.close(); expect(f.ledger().find(row => row.id === 'human-during-rollover')?.status).toBe('reserved');
+
+    // New explicit graph/campaign, seeded from the first delivery; no reset of
+    // the prior archive, queue, resource ledger or human workspace is involved.
+    mode.values = [-1, 4, 5];
+    const nextManifest = { ...f.manifest, id: 'attached-next', seed: { repo: f.repo, revision: delivered } };
+    initUniverse(nextManifest, { root: f.universeRoot });
+    initUniverseCampaign({ schemaVersion: 1, id: 'attached-campaign', universeId: nextManifest.id, feedback: true,
+      budget: { maxGenerations: 3, maxDurationMs: 45_000, maxModelRequests: 3, maxStagnantGenerations: 3, maxReportedTokens: null } }, { root: f.universeRoot });
+    const graphRoot = join(f.base, 'attached-graph'); mkdirSync(graphRoot, { mode: 0o700 });
+    const branch = 'codex/attached-next';
+    const host = { ...f.host, definition: { ...f.host.definition, id: 'attached-controller', tasks: [{ campaignId: 'attached-campaign', dependsOn: [] }] },
+      deliveryPlan: { schemaVersion: 1, deliveries: [{ campaignId: 'attached-campaign', branch, baseCommit: delivered }] } };
+    const catalog = join(f.base, 'attached-catalog.json');
+    save(catalog, { schemaVersion: 1, enrollments: [{ id: 'attached-next', projectId: 'default', graphId: 'attached-graph', graphRoot, host }] });
+    const second = await handle.attachEngineering({ expectedAttachment: first, engineeringFile: catalog });
+    await first.close(); expect(second.state()).toBe('running');
+    const enrollment = (await enrollments(handle))[0]!; expect(enrollment.id).toBe('attached-next');
+    expect((await http(handle, `${engineeringPath}/start`, launchInput(enrollment))).status).toBe(202);
+    await vi.waitFor(async () => expect((await status(handle, enrollment.id)).state).toBe('completed'), { timeout: 45_000, interval: 250 });
+    expect(git(f.repo, 'show', `${branch}:value.json`)).toBe('5');
+    expect(git(f.repo, 'merge-base', f.branch, branch)).toBe(delivered);
+    expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.repo, 'status', '--porcelain=v1')).toBe('');
+    expect([handle.url, handle.readToken, handle.controlToken]).toEqual(identity);
+    expect(f.ledger().find(row => row.id === 'human-during-rollover')?.status).toBe('reserved');
+    await second.close(); f.releaseOrdinary();
+    await vi.waitFor(() => expect(f.ledger().every(row => row.status === 'completed')).toBe(true), { timeout: 10_000 });
+    expect(f.requests.filter(row => row.kind === 'engineering')).toHaveLength(6);
+    expect(f.ledger()).toHaveLength(7); expect(f.errors).toEqual([]); expect(f.peak()).toBe(2);
+  }, 180_000);
+
   it('inspects a checked enrollment without graph writes and rejects unconfirmed launch authority', async () => {
     const f = await fixture(); const handle = await f.start(); expect(handle.scope.engineeringSupported).toBe(true);
     const rows = await enrollments(handle); expect(rows).toHaveLength(1);
