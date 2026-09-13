@@ -2,12 +2,13 @@
  * ENTIRE derived root, including failure pointers. Point/range checks validate
  * visited evidence, not completeness of arbitrarily supplied cross-index roots. */
 import { createHash } from 'node:crypto';
-import { lstatSync, mkdirSync } from 'node:fs';
+import { lstatSync, mkdirSync, realpathSync, type BigIntStats } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { types } from 'node:util';
 import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { inspectPrivateDirectory } from '../universe/artifacts.js';
 import { fsyncDirectory } from '../util/durability.js';
+import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { readImmutablePrivateRecordPoint, writeImmutablePrivateRecord, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import { captureOrderedImmutableIndexRoot, emptyOrderedImmutableIndexRoot, type OrderedImmutableIndexRoot } from '../util/ordered-immutable-index.js';
 import { createOrderedImmutableIndexStore } from '../util/ordered-immutable-index-store.js';
@@ -70,6 +71,27 @@ function qualifiesFailure(row: ResourceTaskReceipt): boolean {
 function present(path: string): boolean {
   try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; return fail(); }
 }
+function privateDirectory(path: string): BigIntStats {
+  try {
+    const stat = lstatSync(path, { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink() || realpathSync(path) !== path ||
+      typeof process.getuid === 'function' && stat.uid !== BigInt(process.getuid()) ||
+      process.platform !== 'win32' && (stat.mode & 0o777n) !== 0o700n ||
+      !assurePrivateStoragePath(path, 'directory', 'inspect-existing', { anchorPath: dirname(path) }).ok) return fail();
+    return stat;
+  } catch { return fail(); }
+}
+/** Fresh directory checks, not cached permission evidence. The old empty-index
+ * count adapter checked the identical pair twice without reading any nodes. */
+function directoryFence(paths: readonly string[]): () => void {
+  const identities = paths.map(privateDirectory);
+  return () => {
+    for (let index = 0; index < paths.length; index++) {
+      const current = privateDirectory(paths[index]!); const original = identities[index]!;
+      if (current.dev !== original.dev || current.ino !== original.ino) fail();
+    }
+  };
+}
 export function emptyResourcePoolReceiptArchiveRoot(): ResourcePoolReceiptArchiveRoot {
   return { schemaVersion: 1, byId: emptyOrderedImmutableIndexRoot(), byStart: emptyOrderedImmutableIndexRoot(), latestFailures: [] };
 }
@@ -81,11 +103,15 @@ export function createResourcePoolReceiptArchive(input: { root: string; anchorPa
   const history = validateResourcePoolConfigHistory(config.configurationHistory);
   const epochs = new Map(history.map(epoch => [epoch.poolDigest, epoch]));
   const capacities = new Set(history.flatMap(epoch => epoch.bindings.map(binding => binding.capacityKey)));
-  // Reuse the audited private directory/ACL/identity fence without creating nodes.
-  const fence = createOrderedImmutableIndexStore({ root: config.root, anchorPath: config.anchorPath });
-  const bound = () => { fence.count(emptyOrderedImmutableIndexRoot(), {}); };
+  // Retain the audited exact path/config validation; use an explicit fresh fence
+  // rather than dispatching an empty index query at every archive boundary.
+  createOrderedImmutableIndexStore({ root: config.root, anchorPath: config.anchorPath });
+  const bound = directoryFence([config.anchorPath, config.root]);
   const indexRoot = join(config.root, 'index');
-  const index = () => createOrderedImmutableIndexStore({ root: indexRoot, anchorPath: config.root });
+  let pinnedIndex: ReturnType<typeof createOrderedImmutableIndexStore> | undefined;
+  // Only the handle is retained. Every index operation still checks private
+  // storage afresh, and replacement of a previously observed index root refuses.
+  const index = () => pinnedIndex ??= createOrderedImmutableIndexStore({ root: indexRoot, anchorPath: config.root });
   function terminal(value: unknown): ResourceTaskReceipt {
     const receipt = capture<ResourceTaskReceipt>(value);
     const epoch = epochs.get(receipt?.poolDigest);
@@ -112,9 +138,9 @@ export function createResourcePoolReceiptArchive(input: { root: string; anchorPa
   function payload(expected: string): ResourceTaskReceipt {
     bound();
     const store = payloadStore(expected);
-    const ancestors = createOrderedImmutableIndexStore({ root: store.anchorPath, anchorPath: dirname(store.anchorPath) });
+    const ancestors = directoryFence([dirname(store.anchorPath), store.anchorPath]);
     const result = readImmutablePrivateRecordPoint(store, expected, `${expected}.json`);
-    ancestors.count(emptyOrderedImmutableIndexRoot(), {}); bound();
+    ancestors(); bound();
     if (result.sourceState !== 'healthy' || !result.exactReadComplete || !result.record) return fail();
     return result.record;
   }
@@ -231,12 +257,12 @@ export function createResourcePoolReceiptArchive(input: { root: string; anchorPa
             guard(); inspectPrivateDirectory(dirname(directory));
             if (!present(directory)) mkdirSync(directory, { mode: 0o700 });
             inspectPrivateDirectory(directory);
-            createOrderedImmutableIndexStore({ root: directory, anchorPath: dirname(directory) }).count(emptyOrderedImmutableIndexRoot(), {});
+            privateDirectory(dirname(directory)); privateDirectory(directory);
             fsyncDirectory(dirname(directory)); guard();
           }
           const disposition = writeImmutablePrivateRecord(store, receipt, { prepublish: () => {
             guard();
-            createOrderedImmutableIndexStore({ root: store.anchorPath, anchorPath: dirname(store.anchorPath) }).count(emptyOrderedImmutableIndexRoot(), {});
+            privateDirectory(dirname(store.anchorPath)); privateDirectory(store.anchorPath);
             return true;
           } });
           if (!['recorded', 'replayed'].includes(disposition) || present(join(store.rootPath, store.lockFileName))) fail();

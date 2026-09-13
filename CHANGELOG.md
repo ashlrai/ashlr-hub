@@ -11,6 +11,19 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Receipt archive performance evidence
+
+- Removes redundant archive directory-check adapters while keeping fresh
+  permission checks at every existing boundary and pinning the index directory
+  identity across calls.
+- Rechecks every newly staged index node after the final host callback, refusing
+  missing or corrupted split siblings even when the inserted-key path still reads.
+- Rechecks staged bytes, file permissions and shard custody after the last
+  publication callback, before linking an immutable node into place.
+- Adds a bounded compiled-storage benchmark covering terminal staging, exact
+  lookup, account windows, history pages and replay. Reports build identity and
+  synthetic-receipt timings without using provider tokens or activating a ledger.
+
 ### Query-backed fleet receipt readers
 
 - Moves capacity waiting, generation handoff and supervisor recovery to coherent

@@ -1,5 +1,5 @@
 /** Real private storage, synthetic validated receipts. No tasks/providers execute. */
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, readdirSync, writeFileSync, unlinkSync, chmodSync, renameSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, readdirSync, writeFileSync, unlinkSync, chmodSync, renameSync, symlinkSync, cpSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +10,15 @@ import { createArchivedResourcePoolReceiptQuery } from '../src/core/resources/po
 import type { ResourceTaskReceipt } from '../src/core/resources/pool-receipt-codec.js';
 import type { ResourcePool } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
+
+const assurance = vi.hoisted(() => ({ paths: [] as string[], deniedPath: null as string | null }));
+vi.mock('../src/core/util/private-storage.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
+  return { ...actual, assurePrivateStoragePath: (...args: Parameters<typeof actual.assurePrivateStoragePath>) => {
+    assurance.paths.push(args[0]);
+    return args[0] === assurance.deniedPath ? { ok: false, reason: 'fixture-acl-denied' } : actual.assurePrivateStoragePath(...args);
+  } };
+});
 
 const pool: ResourcePool = { schemaVersion: 1, id: 'fixture', workers: [{ id: 'worker', provider: 'codex', model: 'fixture',
   maxConcurrent: 1, reservePercent: 10, maxTasksPerWindow: 5, taskWindowMs: 60_000, priority: 1 }] };
@@ -34,9 +43,40 @@ function files(path: string): string[] {
   return readdirSync(path, { withFileTypes: true }).flatMap(row => row.isDirectory() ? files(join(path, row.name)) : [join(path, row.name)]);
 }
 const noGuard = { guard() {} };
-afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => {
+  assurance.paths = []; assurance.deniedPath = null;
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
 
 describe('terminal receipt archive backend (not activated)', () => {
+  it('performs one fresh directory-pair assurance at every empty read boundary, with no permission cache', () => {
+    const { archive, anchorPath, root } = fixture(); assurance.paths = [];
+    expect(archive.get(emptyResourcePoolReceiptArchiveRoot(), 'missing').status).toBe('proven-absent');
+    // Three existing boundaries, two directories each; old empty-index count
+    // adaptation performed twelve checks for these same six observations.
+    expect(assurance.paths).toEqual([anchorPath, root, anchorPath, root, anchorPath, root]);
+    assurance.deniedPath = root;
+    expect(() => archive.get(emptyResourcePoolReceiptArchiveRoot(), 'missing')).toThrow('evidence unavailable');
+  });
+  it('pins the lazily observed index directory across calls while retaining fresh ACL checks', () => {
+    const { archive, root: path, reopen } = fixture();
+    const saved = archive.stage(emptyResourcePoolReceiptArchiveRoot(), receipt(), noGuard).root;
+    const indexPath = join(path, 'index'); assurance.deniedPath = indexPath;
+    expect(() => archive.get(saved, 'task')).toThrow('evidence unavailable'); assurance.deniedPath = null;
+    renameSync(indexPath, indexPath + '-old'); cpSync(indexPath + '-old', indexPath, { recursive: true });
+    // cpSync creates directory ancestors using the process umask. Make this a
+    // genuinely private byte-identical replacement, not an unsafe-mode fixture.
+    const secureCopy = (directory: string) => {
+      chmodSync(directory, 0o700);
+      for (const row of readdirSync(directory, { withFileTypes: true })) {
+        if (row.isDirectory()) secureCopy(join(directory, row.name));
+        else chmodSync(join(directory, row.name), 0o600);
+      }
+    };
+    secureCopy(indexPath);
+    expect(() => archive.get(saved, 'task')).toThrow('evidence unavailable');
+    expect(reopen().get(saved, 'task').status).toBe('found');
+  });
   it('reads empty commitments without creating storage and distinguishes bounded batches from history', () => {
     const { root, archive } = fixture(); const empty = emptyResourcePoolReceiptArchiveRoot();
     expect(archive.get(empty, 'missing')).toEqual({ status: 'proven-absent', id: 'missing' });

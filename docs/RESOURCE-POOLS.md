@@ -3186,6 +3186,8 @@ summaries; it does not prove that every unread historical file is available.
 Its private store stages durable nodes but never publishes an authoritative
 ledger root. A future migration must preserve receipt identity, account
 accounting, configuration history and provenance before activating that store.
+Before returning a staged root, it rechecks every newly staged node after the
+final host callback, including split siblings outside the inserted-key path.
 
 The internal terminal-receipt archive stores immutable receipt payloads plus
 task-ID and capacity/start-time indexes. It preserves originating configurations,
@@ -3199,6 +3201,25 @@ The active/archive query adapter combines these two disjoint sets, refuses
 duplicate identities between them and retains all unresolved occupancy. Large
 exact-ID requests use bounded batches against the same captured archive root;
 batching does not change the meaning of absence or reset accounting.
+
+To measure this storage layer locally, build the checkout and run:
+
+```sh
+npm run build
+node scripts/benchmark-resource-receipt-archive.mjs 3
+```
+
+The optional receipt count is 1–32 (default 3). This creates and removes an
+isolated private temporary archive with synthetic success/failure receipts; it
+does not execute workers, contact providers or select a live ledger root. JSON
+output includes the compiled build identity and separate timings for staging,
+fresh-handle lookup, batch lookup, account windows, pages and replay. Fresh-handle
+lookup does not flush the operating-system cache. Small-sample percentiles are
+descriptive, not a production throughput guarantee. Use the same count, machine
+and background workload when comparing builds; timings include actual private
+storage checks and durability barriers. Staging samples span a growing archive
+from one to the selected count, not repeated identical-size trials; this bounded
+benchmark does not exercise index splits. Success JSON is emitted after cleanup.
 
 Each observation holds at most eight windows. If successive valid snapshots
 exceed that inventory, the ledger retains seven strongest readings and a

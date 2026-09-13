@@ -1,13 +1,14 @@
 /** Synthetic immutable index records; no resource tasks, accounts, or ledger activation. */
 import { createHash } from 'node:crypto';
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOrderedImmutableIndexStore } from '../src/core/util/ordered-immutable-index-store.js';
 import { emptyOrderedImmutableIndexRoot, planOrderedImmutableIndexInsert, type OrderedImmutableIndexRoot } from '../src/core/util/ordered-immutable-index.js';
 
-const hooks = vi.hoisted(() => ({ afterWrite: null as ((target: string) => void) | null, denyAssurance: false }));
+const hooks = vi.hoisted(() => ({ afterWrite: null as ((target: string) => void) | null, denyAssurance: false,
+  denyAssurancePath: null as string | null }));
 vi.mock('../src/core/util/private-file-write.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/core/util/private-file-write.js')>();
   return { ...actual, writePrivateFileAtomically: (...args: Parameters<typeof actual.writePrivateFileAtomically>) => {
@@ -17,14 +18,15 @@ vi.mock('../src/core/util/private-file-write.js', async importOriginal => {
 vi.mock('../src/core/util/private-storage.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
   return { ...actual, assurePrivateStoragePath: (...args: Parameters<typeof actual.assurePrivateStoragePath>) =>
-    hooks.denyAssurance ? { ok: false, reason: 'fixture-acl-denied' } : actual.assurePrivateStoragePath(...args) };
+    hooks.denyAssurance || args[0] === hooks.denyAssurancePath
+      ? { ok: false, reason: 'fixture-acl-denied' } : actual.assurePrivateStoragePath(...args) };
 });
 
 const key = (index: number) => `id-${String(index).padStart(6, '0')}`;
 const valueDigest = (index: number) => createHash('sha256').update(String(index)).digest('hex');
 let base: string | undefined;
 afterEach(() => {
-  hooks.afterWrite = null; hooks.denyAssurance = false; vi.restoreAllMocks();
+  hooks.afterWrite = null; hooks.denyAssurance = false; hooks.denyAssurancePath = null; vi.restoreAllMocks();
   if (base) { rmSync(base, { recursive: true, force: true }); base = undefined; }
 });
 function fixture() {
@@ -81,6 +83,66 @@ describe.skipIf(process.platform === 'win32')('private ordered index staging and
     expect(f.store.stage(next.root, entry, { guard() {} })).toEqual({ root: next.root, nodesStaged: 0, replayed: true });
     expect(() => f.store.stage(next.root, { ...entry, valueDigest: valueDigest(99) }, { guard() {} })).toThrow('identity conflict');
     expect(f.store.count(old, {})).toBe(32);
+  });
+  it.each(['missing', 'corrupt'] as const)('refuses a %s off-path split sibling changed by the final callback', kind => {
+    const f = fixture(); const old = seed(f.root, 32);
+    const entry = { key: key(32), valueDigest: valueDigest(32) };
+    const plan = planOrderedImmutableIndexInsert(old, entry, hash => readFileSync(nodePath(f.root, hash), 'utf8'));
+    const sibling = plan.nodes.find(node => {
+      const value = JSON.parse(node.bytes) as { entries?: Array<{ key: string }> };
+      return value.entries && !value.entries.some(row => row.key === entry.key);
+    });
+    expect(sibling).toBeDefined(); expect(plan.nodes).toHaveLength(3);
+    // Measure this implementation's last callback on the same real split in a
+    // separate private store; do not hard-code a guard count or mock the writer.
+    const baselineRoot = join(f.anchor, 'baseline'); mkdirSync(baselineRoot, { mode: 0o700 });
+    const baseline = createOrderedImmutableIndexStore({ root: baselineRoot, anchorPath: f.anchor });
+    let finalGuard = 0;
+    baseline.stage(seed(baselineRoot, 32), entry, { guard() { finalGuard++; } });
+    let calls = 0;
+    expect(() => f.store.stage(old, entry, { guard() {
+      if (++calls !== finalGuard) return;
+      const target = nodePath(f.root, sibling!.nodeDigest);
+      if (kind === 'missing') unlinkSync(target); else writeFileSync(target, '{}\n');
+    } })).toThrow('evidence unavailable');
+    expect(calls).toBe(finalGuard);
+    // The inserted-key path alone still verifies, demonstrating why a complete
+    // NEW-node readback is required. The original commitment remains unchanged.
+    expect(f.store.lookup(plan.root, entry.key)).toEqual({ found: true, valueDigest: entry.valueDigest });
+    expect(f.store.lookup(old, entry.key)).toEqual({ found: false });
+    expect(f.store.lookup(old, key(0))).toEqual({ found: true, valueDigest: valueDigest(0) });
+    expect(existsSync(join(f.root, '.index-writer.lock'))).toBe(false);
+  }, 30_000);
+  it('rechecks the replay path after the final callback even when there are no new nodes', () => {
+    const f = fixture(); const old = seed(f.root, 1);
+    const entry = { key: key(0), valueDigest: valueDigest(0) }; let finalGuard = 0;
+    expect(f.store.stage(old, entry, { guard() { finalGuard++; } }).replayed).toBe(true);
+    let calls = 0;
+    expect(() => f.store.stage(old, entry, { guard() {
+      if (++calls === finalGuard) unlinkSync(nodePath(f.root, old.nodeDigest!));
+    } })).toThrow('evidence unavailable');
+    expect(calls).toBe(finalGuard);
+    expect(existsSync(join(f.root, '.index-writer.lock'))).toBe(false);
+  });
+  it.each(['mode', 'acl'] as const)('refuses callback %s drift before linking a staged node', kind => {
+    const f = fixture(); const empty = emptyOrderedImmutableIndexRoot();
+    const entry = { key: key(0), valueDigest: valueDigest(0) };
+    const node = planOrderedImmutableIndexInsert(empty, entry, () => '').nodes[0]!;
+    const target = nodePath(f.root, node.nodeDigest);
+    const staged = join(dirname(target), `.stage-${node.nodeDigest}.json`);
+    let stagedWritten = false; let changed = false;
+    hooks.afterWrite = path => { if (path === staged) stagedWritten = true; };
+    expect(() => f.store.stage(empty, entry, { guard() {
+      if (!stagedWritten || changed) return;
+      changed = true;
+      // Real staged file publication, with a real mode change or a narrowly
+      // injected ACL refusal at the shard; outer root/lock custody still holds.
+      if (kind === 'mode') chmodSync(staged, 0o644); else hooks.denyAssurancePath = dirname(target);
+    } })).toThrow('evidence unavailable');
+    expect(changed).toBe(true); expect(existsSync(staged)).toBe(true);
+    expect(existsSync(target)).toBe(false);
+    expect(existsSync(join(f.root, '.index-writer.lock'))).toBe(false);
+    expect(f.store.lookup(empty, entry.key)).toEqual({ found: false });
   });
   it('captures an entry before host callbacks can replace its fields with getters', () => {
     const f = fixture(); const trap = vi.fn(() => { throw new Error('must not read'); });

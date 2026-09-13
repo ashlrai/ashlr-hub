@@ -149,8 +149,13 @@ export function createOrderedImmutableIndexStore(value: { root: string; anchorPa
               });
             if (read(node.nodeDigest, true) !== node.bytes) return unavailable();
             const stageIdentity = lstatSync(staged, { bigint: true });
+            const publicationDirectories = target.paths.map(directory);
             guard();
-            if (!sameIdentity(lstatSync(staged, { bigint: true }), stageIdentity)) return unavailable();
+            // Recheck bytes, exact-private file custody and every shard after
+            // the callback; inode equality alone does not preserve permissions.
+            if (read(node.nodeDigest, true) !== node.bytes ||
+              !sameIdentity(lstatSync(staged, { bigint: true }), stageIdentity) ||
+              target.paths.some((path, index) => !sameIdentity(directory(path), publicationDirectories[index]))) return unavailable();
             linkSync(staged, target.file); // Atomic no-clobber, including a racing target.
             const installed = lstatSync(target.file, { bigint: true }); const source = lstatSync(staged, { bigint: true });
             if (!sameIdentity(installed, stageIdentity) || !sameIdentity(source, stageIdentity) || installed.nlink !== 2n || source.nlink !== 2n) return unavailable();
@@ -158,9 +163,12 @@ export function createOrderedImmutableIndexStore(value: { root: string; anchorPa
           }
           guard(); if (read(node.nodeDigest) !== node.bytes) return unavailable();
         }
-        // Read back every NEW reachable node, not just the root's summary.
-        for (const node of plan.nodes) { guard(); if (read(node.nodeDigest) !== node.bytes) return unavailable(); }
-        lookupOrderedImmutableIndex(plan.root, capturedEntry.key, read); guard();
+        // No host callback follows the final dependency readback. A callback
+        // can invalidate an off-path split sibling while root custody survives.
+        guard();
+        // Read back every NEW reachable node, not just the inserted-key path.
+        for (const node of plan.nodes) { if (read(node.nodeDigest) !== node.bytes) return unavailable(); }
+        lookupOrderedImmutableIndex(plan.root, capturedEntry.key, read);
         answer = { root: plan.root, replayed: plan.replayed, nodesStaged: plan.nodes.length };
       } catch (error) { failed = error; }
       finally { if (!releaseLocalStoreLock(lock)) failed = new OrderedImmutableIndexError('UNAVAILABLE'); }
