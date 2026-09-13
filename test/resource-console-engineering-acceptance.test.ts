@@ -148,7 +148,7 @@ diagnostics:value<0?[{code:'NONNEGATIVE',message:'Value must be nonnegative',pat
       chmodSync(path, 0o700); for (const name of readdirSync(path)) writable(join(path, name)); };
     writable(base); rmSync(base, { recursive: true, force: true });
   });
-  const start = async () => { const handle = await startResourceConsoleServer(serverOptions); handles.push(handle); return handle; };
+  const start = async (patch: Partial<ResourceConsoleServerOptions> = {}) => { const handle = await startResourceConsoleServer({ ...serverOptions, ...patch }); handles.push(handle); return handle; };
   const ledger = () => resourcePoolStatus(serverOptions.root, pool, bindings, observations).attempts;
   return { base, repo, second, revision, transport, universeRoot, graphRoot, branch, campaignId, host, serverOptions, catalog, requests, errors,
     start, ledger, peak: () => peak, active: () => active,
@@ -284,8 +284,12 @@ describe.runIf(process.platform === 'darwin')('independent Workspace engineering
     expect(f.requests).toHaveLength(1); expect(f.ledger()).toEqual(before); expect(git(f.repo, 'branch', '--list', f.branch)).toBe('');
   });
 
-  it('closes engineering independently while human work and the same console remain usable', async () => {
-    const f = await fixture({ holdEngineering: true, maxConcurrent: 2 }); const handle = await f.start();
+  it.each(['http', 'signal', 'veto', 'veto-throw'] as const)('closes engineering via %s while human work and the same console remain usable', async mode => {
+    const f = await fixture({ holdEngineering: true, maxConcurrent: 2 });
+    const child = new AbortController(); let stopped = false;
+    const handle = await f.start(mode === 'http' ? {} : { engineeringLifetime: mode === 'signal' ? { signal: child.signal } : {
+      isExecutionStopped: () => { if (stopped && mode === 'veto-throw') throw new Error('fixture stopped'); return stopped; },
+    } });
     const enrollment = (await enrollments(handle))[0]!;
     expect((await http(handle, '/api/resources/tasks', { id: 'human-survives', projectId: 'second', prompt: 'ordinary-held',
       allowedWorkerIds: ['local-worker'], mode: 'read-only', timeoutMs: 30_000, maxOutputTokens: 100 })).status).toBe(202);
@@ -293,8 +297,13 @@ describe.runIf(process.platform === 'darwin')('independent Workspace engineering
     expect((await http(handle, `${engineeringPath}/start`, launchInput(enrollment))).status).toBe(202);
     await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 15_000 });
     const stopPath = '/api/resources/engineering-runtime/close';
-    const closed = await http(handle, stopPath, {});
-    expect(closed.status, closed.text).toBe(200); expect(JSON.parse(closed.text)).toEqual({ engineeringLifecycle: 'closed' });
+    if (mode === 'http') {
+      const closed = await http(handle, stopPath, {});
+      expect(closed.status, closed.text).toBe(200); expect(JSON.parse(closed.text)).toEqual({ engineeringLifecycle: 'closed' });
+    } else {
+      if (mode === 'signal') child.abort(); else stopped = true;
+      await vi.waitFor(async () => expect((await http(handle, '/api/resources/console')).text).toContain('"engineeringLifecycle":"closed"'), { timeout: 10_000 });
+    }
     expect(f.ledger().find((row) => row.id === 'human-survives')?.status).toBe('reserved');
     expect(f.ledger().filter((row) => row.id !== 'human-survives').map((row) => row.status)).toEqual(['cancelled']);
     expect((await http(handle, stopPath, {})).status).toBe(200);

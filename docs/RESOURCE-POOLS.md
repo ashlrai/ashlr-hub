@@ -61,6 +61,19 @@ An engineering worker or automatic-admission fault after startup also closes
 only this component and retains `held` evidence. Unresolved component faults
 remain visible as an uncertain result when the entire console is later closed.
 
+In-process hosts can pass `engineeringLifetime` to `startResourceConsoleServer`,
+containing a child `signal`, a synchronous `isExecutionStopped` callback, or both.
+These controls stop only engineering; the top-level signal and execution veto
+still govern the whole console. Callback failure or any result other than `false`
+withholds engineering and starts component close. The callback is captured once,
+checked at engineering effect boundaries and polled every 250 ms while attached;
+the interval is not a hard real-time guarantee. A stopped child cannot reopen
+by returning `false` later. Already-stopped or malformed controls are rejected
+before startup, and these options require configured engineering. They are not
+browser-supplied policy and do not renew deadlines or alter account reserves.
+An embedding host must retain its mission's original deadline/ownership checks
+inside that child control, not forward them as the whole-console stop signal.
+
 There is no same-console engineering restart operation yet. A new explicitly
 started console lifetime still reconciles its existing durable queues and graph
 records; component close does not erase work, renew deadlines, or bypass held

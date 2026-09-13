@@ -33,10 +33,13 @@ import type { EngineeringBackground } from '../resources/engineering-background-
 import { createResourceEngineeringAutomaticAdmission } from '../resources/engineering-automatic-admission.js';
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from '../resources/engineering-successor-coordinator.js';
 import { captureResourceExecutionVeto } from '../resources/execution-veto.js';
+import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } from '../resources/engineering-lifetime.js';
 
 export interface ResourceConsoleServerOptions {
-  /** Host-only mission veto, never exposed as browser-configurable policy. */
+  /** Whole-console host veto, never exposed as browser-configurable policy. */
   isExecutionStopped?: () => boolean;
+  /** Child mission control; stopping it preserves human tasks and collectors. */
+  engineeringLifetime?: ResourceEngineeringLifetime;
   root: string;
   poolFile: string;
   bindingsFile: string;
@@ -132,7 +135,9 @@ function sendSnapshot(res: ServerResponse, value: unknown, status = 200): void {
 /** One fixed pool; independent read and control capabilities. No default dashboard imports. */
 export async function startResourceConsoleServer(options: ResourceConsoleServerOptions): Promise<ResourceConsoleServerHandle> {
   const hostStopped = captureResourceExecutionVeto(options);
+  const engineeringLifetime = captureResourceEngineeringLifetime(options);
   if (hostStopped()) throw new Error('Host console execution stopped');
+  if (engineeringLifetime.isStopped()) throw new Error('Engineering lifetime already stopped');
   const signal = options.signal;
   const root = validateUniverseConsoleRoot(options.root);
   const poolFile = validateUniverseConsoleRoot(options.poolFile);
@@ -145,6 +150,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const engineeringPreparationFile = options.engineeringPreparationFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringPreparationFile);
   const engineeringSupervisionFile = options.engineeringSupervisionFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringSupervisionFile);
   const engineeringSuccessorsFile = options.engineeringSuccessorsFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringSuccessorsFile);
+  if (engineeringLifetime.configured && engineeringFile === null && engineeringPreparationFile === null) {
+    throw new Error('Engineering lifetime requires configured engineering');
+  }
   const requestedPort = options.port ?? 0;
   const maxParallel = options.maxParallel ?? 4;
   if (!Number.isSafeInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535 ||
@@ -237,7 +245,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   let origin = ''; let port = 0; let closing: Promise<void> | null = null; let ready = false;
   let engineeringClosing: Promise<void> | null = null;
   let engineeringFaulted = false;
-  const engineeringStopped = () => hostStopped() || engineeringClosing !== null || scope.engineeringLifecycle === 'stopping';
+  let engineeringStopTimer: ReturnType<typeof setInterval> | null = null;
+  const engineeringStopped = () => hostStopped() || engineeringLifetime.isStopped() || engineeringClosing !== null || scope.engineeringLifecycle === 'stopping';
 
   // Configured-but-blocked collection remains managed. Never fall back to
   // owner-supplied observations as if they were a current native quota read.
@@ -364,7 +373,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (scope.engineeringLifecycle !== 'closed') throw new RequestError(503, 'Engineering shutdown uncertain');
           sendJson(res, 200, { engineeringLifecycle: scope.engineeringLifecycle }); return;
         }
-        if (url.pathname.startsWith('/api/resources/engineering') && scope.engineeringLifecycle !== undefined && scope.engineeringLifecycle !== 'running') {
+        if (url.pathname.startsWith('/api/resources/engineering') && scope.engineeringLifecycle !== undefined &&
+          (scope.engineeringLifecycle !== 'running' || engineeringStopped())) {
           throw new RequestError(503, 'Engineering runtime is not running');
         }
         if (url.pathname === '/api/resources/engineering/profiles') {
@@ -378,7 +388,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
           const input = await body(req);
-          if (closing || scope.engineeringLifecycle !== 'running') throw new RequestError(503, 'Engineering runtime is not running');
+          if (closing || scope.engineeringLifecycle !== 'running' || engineeringStopped()) throw new RequestError(503, 'Engineering runtime is not running');
           if (url.pathname.endsWith('/check')) { sendSnapshot(res, await engineeringPreparation.check(input)); return; }
           sendSnapshot(res, automaticAdmission ? await automaticAdmission.prepare(input) : await engineeringPreparation.prepare(input)); return;
         }
@@ -386,7 +396,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineeringSupervision) throw new RequestError(403, 'Engineering supervision is not configured');
           const input = await body(req);
-          if (closing || scope.engineeringLifecycle !== 'running') throw new RequestError(503, 'Engineering runtime is not running');
+          if (closing || scope.engineeringLifecycle !== 'running' || engineeringStopped()) throw new RequestError(503, 'Engineering runtime is not running');
           sendSnapshot(res, engineeringSupervision.admit(input)); return;
         }
         if (url.pathname === '/api/resources/engineering-supervision') {
@@ -398,7 +408,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             throw new RequestError(400, 'Expected a pause mode and current supervision revision');
           }
           if (closing) throw new RequestError(503, 'Console is closing');
-          if (scope.engineeringLifecycle !== 'running') throw new RequestError(503, 'Engineering runtime is not running');
+          if (scope.engineeringLifecycle !== 'running' || engineeringStopped()) throw new RequestError(503, 'Engineering runtime is not running');
           sendSnapshot(res, engineeringSupervision.setPaused(input.paused, Number(input.expectedRevision))); return;
         }
         const engineeringCancel = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/cancel$/.exec(url.pathname);
@@ -406,7 +416,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');
           const input = await body(req);
-          if (closing || scope.engineeringLifecycle !== 'running') throw new RequestError(503, 'Engineering runtime is not running');
+          if (closing || scope.engineeringLifecycle !== 'running' || engineeringStopped()) throw new RequestError(503, 'Engineering runtime is not running');
           if (engineeringCancel) {
             if (!exact(input, [])) throw new RequestError(400, 'Engineering cancellation expects an empty JSON object');
             sendSnapshot(res, engineering.cancel(engineeringCancel[1]!));
@@ -603,6 +613,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
 
   const closeEngineering = (): Promise<void> => {
     if (engineeringClosing) return engineeringClosing;
+    if (engineeringStopTimer !== null) { clearInterval(engineeringStopTimer); engineeringStopTimer = null; }
+    engineeringLifetime.signal?.removeEventListener('abort', engineeringAborted);
     scope.engineeringLifecycle = 'stopping';
     // Fence every engineering producer before awaiting any drain. Human queue,
     // sessions, metadata collectors and HTTP retain their independent lifetime.
@@ -622,6 +634,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   };
   const close = (): Promise<void> => {
     if (closing) return closing;
+    if (engineeringStopTimer !== null) { clearInterval(engineeringStopTimer); engineeringStopTimer = null; }
+    engineeringLifetime.signal?.removeEventListener('abort', engineeringAborted);
     ready = false; sessions.clear(); signal?.removeEventListener('abort', aborted);
     closing = (async () => {
       // Fence worker RPC before a pending recovery read reaches registration.
@@ -668,6 +682,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     void (ready ? closeEngineering() : close()).catch(() => {});
   };
   const aborted = () => { void close().catch(() => {}); };
+  // Do not forward a child signal to owners whose generic abort closes peers.
+  // Enter the component-specific drain first so live human custody is preserved.
+  const engineeringAborted = () => { void closeEngineering().catch(() => {}); };
   try {
     await new Promise<void>((resolve, reject) => {
       const failed = (error: Error) => { server.removeListener('listening', listening); reject(error); };
@@ -785,6 +802,12 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     automaticAdmission?.start();
     await engineeringSuccessors?.start();
     if (closing || signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
+    if (engineeringLifetime.configured && engineeringClosing === null) {
+      engineeringLifetime.signal?.addEventListener('abort', engineeringAborted, { once: true });
+      engineeringStopTimer = setInterval(() => { if (engineeringLifetime.isStopped()) engineeringAborted(); }, 250);
+      engineeringStopTimer.unref?.();
+      if (engineeringLifetime.isStopped()) engineeringAborted();
+    }
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
       scope: { ...scope }, close };
   } catch (error) { await close(); throw error; }

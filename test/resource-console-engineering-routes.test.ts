@@ -110,6 +110,17 @@ describe('host-configured engineering successor HTTP boundary', () => {
     await expect(start(config())).rejects.toThrow('Configuration refused');
     expect(successors.start).not.toHaveBeenCalled(); expect(successors.close).toHaveBeenCalledOnce();
   });
+  it('does not install a child observer after a startup-stage component fault already closed engineering', async () => {
+    const veto = vi.fn(() => false);
+    successors.start.mockImplementation(async () => { background.create.mock.calls[0]![0].onFault(); });
+    const handle = await start({ ...config(), engineeringLifetime: { isExecutionStopped: veto } });
+    await vi.waitFor(() => expect(owner.close).toHaveBeenCalledExactlyOnceWith({ preserveSupervisorTasks: true }));
+    const calls = veto.mock.calls.length;
+    await new Promise(resolve => setTimeout(resolve, 350)); expect(veto).toHaveBeenCalledTimes(calls);
+    expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+    await expect(handle.close()).rejects.toThrow('Resource console shutdown uncertain');
+    handles.splice(handles.indexOf(handle), 1);
+  });
   it('isolates a running engineering worker fault from the human console and retains held evidence', async () => {
     const handle = await start(config());
     const onFault = background.create.mock.calls[0]![0].onFault as () => void;
@@ -328,6 +339,31 @@ function post(handle: ResourceConsoleServerHandle, path = '/api/resources/engine
 }
 
 describe('engineering HTTP capability boundary', () => {
+  it('rejects an already-stopped child before acquiring execution ownership', async () => {
+    const child = new AbortController(); child.abort();
+    await expect(start({ engineeringLifetime: { signal: child.signal } })).rejects.toThrow('Engineering lifetime already stopped');
+    expect(owner.create).not.toHaveBeenCalled(); expect(background.create).not.toHaveBeenCalled();
+  });
+  it('requires configured engineering for a child lifetime', async () => {
+    await expect(start({ engineeringFile: undefined, engineeringLifetime: {} })).rejects.toThrow('requires configured engineering');
+    expect(owner.create).not.toHaveBeenCalled();
+  });
+  it('fences a changed child veto before its polling close and never reopens after it clears', async () => {
+    let stop = false; const handle = await start({ engineeringLifetime: { isExecutionStopped: () => stop } });
+    stop = true;
+    expect((await post(handle)).status).toBe(503); expect(owner.launch).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(owner.close).toHaveBeenCalledExactlyOnceWith({ preserveSupervisorTasks: true }));
+    stop = false;
+    expect((await post(handle)).status).toBe(503); expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+    expect((await post(handle, '/api/resources/queue', { paused: true })).status).toBe(200);
+  });
+  it('removes child observation and abort listeners when the console closes', async () => {
+    const child = new AbortController(); const veto = vi.fn(() => false);
+    const handle = await start({ engineeringLifetime: { signal: child.signal, isExecutionStopped: veto } });
+    await handle.close(); const calls = veto.mock.calls.length; const closes = owner.close.mock.calls.length;
+    child.abort(); await new Promise(resolve => setTimeout(resolve, 350));
+    expect(veto).toHaveBeenCalledTimes(calls); expect(owner.close).toHaveBeenCalledTimes(closes);
+  });
   it('fences engineering while draining but keeps the ordinary queue and read session available', async () => {
     const handle = await start(); const path = '/api/resources/engineering-runtime/close';
     expect((await post(handle, '/api/resources/queue', { paused: true })).status).toBe(200);
