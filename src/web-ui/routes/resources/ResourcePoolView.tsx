@@ -24,14 +24,19 @@ import { WorkspaceView } from '../workspace/WorkspaceView.js';
 import { EngineeringLifecycle } from '../workspace/EngineeringLifecycle.js';
 import styles from './ResourcePoolView.module.css';
 
-export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
+export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConsoleScope }) {
+  const [observedScope, setObservedScope] = useState<ResourceConsoleScope | null>(null);
+  const scope = observedScope ?? initialScope;
   const definition = useMemo(() => resourceConsoleSnapshotQuery(scope.poolId), [scope.poolId]);
   const query = useQuery(definition);
   const refresh = useCallback(() => runQuery(definition.key, definition.fetch), [definition]);
   const hold = useMutationHold();
   const [unlockOpen, setUnlockOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [engineeringReady, setEngineeringReady] = useState(scope.engineeringLifecycle === undefined);
+  const [engineeringReadiness, setEngineeringReadiness] = useState<{ ready: boolean; attachmentId?: string }>({
+    ready: scope.engineeringLifecycle === undefined && scope.engineeringAttachmentSupported !== true });
+  const setEngineeringReady = useCallback((ready: boolean, attachmentId?: string) => setEngineeringReadiness({ ready, attachmentId }), []);
+  const engineeringReady = engineeringReadiness.ready && engineeringReadiness.attachmentId === scope.engineeringAttachmentId;
   const [allocationBusy, setAllocationBusy] = useState(false);
   const [workerAccessBusy, setWorkerAccessBusy] = useState(false);
   const [workerAccessError, setWorkerAccessError] = useState<string | null>(null);
@@ -213,8 +218,8 @@ export function ResourcePoolView({ scope }: { scope: ResourceConsoleScope }) {
           onClick={() => hold.hasHold ? hold.clear() : setUnlockOpen(true)}>{hold.hasHold ? 'Lock controls' : 'Unlock controls'}</button> : null}
       </div>
     </header>
-    {scope.engineeringLifecycle !== undefined ? <EngineeringLifecycle scope={scope} unlocked={hold.hasHold}
-      onUnlock={() => setUnlockOpen(true)} onReadyChange={setEngineeringReady} /> : null}
+    {initialScope.engineeringLifecycle !== undefined || initialScope.engineeringAttachmentSupported ? <EngineeringLifecycle scope={initialScope} unlocked={hold.hasHold}
+      onUnlock={() => setUnlockOpen(true)} onReadyChange={setEngineeringReady} onScopeChange={setObservedScope} /> : null}
     <div className={styles.statusBar}><div className={styles.freshness}>
       <strong>{scope.poolId}</strong>{snapshot ? <span>{historical ? 'Last successful read' : 'Observed'} {resourceTime(snapshot.sampledAt)}</span> : null}
       <span>Refreshes every 3 seconds while visible</span>{query.status === 'refreshing' ? <RefreshIndicator /> : null}

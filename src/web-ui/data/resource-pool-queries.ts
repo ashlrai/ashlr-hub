@@ -201,6 +201,11 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       scope.workspaceFilesSupported !== undefined && (typeof scope.workspaceFilesSupported !== 'boolean' ||
         scope.workspaceFilesSupported && (scope.readOnly || !scope.projects)) ||
       scope.engineeringSupported !== undefined && (scope.engineeringSupported !== true || scope.readOnly || !scope.projects) ||
+      scope.engineeringAttachmentSupported !== undefined && (scope.engineeringAttachmentSupported !== true || scope.readOnly || !scope.projects) ||
+      scope.engineeringAttachmentId !== undefined && (scope.engineeringAttachmentSupported !== true ||
+        typeof scope.engineeringAttachmentId !== 'string' || !/^[a-f0-9]{32}$/.test(scope.engineeringAttachmentId) ||
+        scope.engineeringSupported !== true || scope.engineeringLifecycle === undefined) ||
+      scope.engineeringAttachmentSupported === true && scope.engineeringSupported === true && scope.engineeringAttachmentId === undefined ||
       scope.engineeringLifecycle !== undefined && (scope.engineeringSupported !== true ||
         !['running', 'stopping', 'closed', 'held'].includes(scope.engineeringLifecycle)) ||
       scope.engineeringPreparationSupported !== undefined && (scope.engineeringPreparationSupported !== true || scope.engineeringSupported !== true) ||
@@ -241,11 +246,12 @@ export function resourceConsoleSnapshotQuery(poolId: string): QueryDef<ResourceC
   };
 }
 
-async function control<T>(path: string, body: unknown, disabledMessage = 'Task execution is disabled for this console.'): Promise<T> {
+async function control<T>(path: string, body: unknown, disabledMessage = 'Task execution is disabled for this console.', signal?: AbortSignal): Promise<T> {
   const token = getMutationToken();
   if (!token) throw new Error('Unlock controls with this console’s control token first.');
   try {
-    const result = await apiPost<T>(path, body, token);
+    const result = await (signal === undefined ? apiPost<T>(path, body, token) : apiPost<T>(path, body, token, signal));
+    signal?.throwIfAborted();
     touchMutationHold();
     return result;
   } catch (error) {
@@ -259,15 +265,24 @@ async function control<T>(path: string, body: unknown, disabledMessage = 'Task e
 }
 
 export const submitResourceTask = (task: ResourceConsoleTaskInput) => control<{ job: ResourceSupervisorJob }>('/api/resources/tasks', task);
-export async function readResourceEngineeringLifecycle(scope: Pick<ResourceConsoleScope, 'root' | 'poolId' | 'workspace'>, signal?: AbortSignal) {
+export async function readResourceEngineeringScope(scope: Pick<ResourceConsoleScope, 'root' | 'poolId' | 'workspace'>, signal?: AbortSignal) {
   const current = await resourceConsoleScopeQuery.fetch(signal);
-  if (signal?.aborted || current.root !== scope.root || current.poolId !== scope.poolId || current.workspace !== scope.workspace ||
-    current.engineeringLifecycle === undefined) throw new Error('Engineering lifecycle scope could not be verified.');
+  if (signal?.aborted || current.root !== scope.root || current.poolId !== scope.poolId || current.workspace !== scope.workspace) {
+    throw new Error('Engineering lifecycle scope could not be verified.');
+  }
+  return current;
+}
+export async function readResourceEngineeringLifecycle(scope: Pick<ResourceConsoleScope, 'root' | 'poolId' | 'workspace'>, signal?: AbortSignal) {
+  const current = await readResourceEngineeringScope(scope, signal);
+  if (current.engineeringLifecycle === undefined) throw new Error('Engineering lifecycle scope could not be verified.');
   return current.engineeringLifecycle;
 }
-export async function closeResourceEngineering(): Promise<'closed'> {
-  const result = await control<unknown>('/api/resources/engineering-runtime/close', {}, 'Engineering close is unavailable for this console.');
-  if (!record(result) || Object.keys(result).length !== 1 || result.engineeringLifecycle !== 'closed') {
+export async function closeResourceEngineering(expectedAttachmentId?: string, signal?: AbortSignal): Promise<'closed'> {
+  if (expectedAttachmentId !== undefined && (typeof expectedAttachmentId !== 'string' || !/^[a-f0-9]{32}$/.test(expectedAttachmentId))) throw new Error('Engineering attachment identity is invalid.');
+  const result = await control<unknown>('/api/resources/engineering-runtime/close',
+    expectedAttachmentId === undefined ? {} : { expectedAttachmentId }, 'Engineering close is unavailable for this console.', signal);
+  if (signal?.aborted || !record(result) || Object.keys(result).length !== (expectedAttachmentId === undefined ? 1 : 2) ||
+    result.engineeringLifecycle !== 'closed' || expectedAttachmentId !== undefined && result.engineeringAttachmentId !== expectedAttachmentId) {
     throw new Error('Engineering close was not confirmed. Check its status before acting.');
   }
   return 'closed';

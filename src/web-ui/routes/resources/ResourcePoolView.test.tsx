@@ -34,6 +34,63 @@ function setup() {
 }
 
 describe('resource dispatch desk', () => {
+  it('keeps human drafts mounted across first attachment, close, replacement and a failed scope read', async () => {
+    const f = setup(); f.scope.engineeringAttachmentSupported = true;
+    f.scope.defaultProjectId = 'default'; f.scope.projects = [{ id: 'default', label: 'Hub', workspace: f.scope.workspace!, enabled: true }];
+    let observed = { ...f.scope }, unavailable = false;
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (path, init) => {
+      if (path === '/api/resources/console') return unavailable ? json({}, 503) : json(observed);
+      if (path === '/api/resources/engineering-runtime/close') {
+        expect(JSON.parse(String(init?.body))).toEqual({ expectedAttachmentId: observed.engineeringAttachmentId });
+        observed = { ...observed, engineeringLifecycle: 'closed' };
+        return json({ engineeringLifecycle: 'closed', engineeringAttachmentId: observed.engineeringAttachmentId });
+      }
+      return original(path, init);
+    });
+    window.history.replaceState(null, '', '/resources/#resource-workspace'); setMutationToken('a'.repeat(64));
+    const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await screen.findByText('Not attached');
+    const prompt = await screen.findByLabelText('Task prompt');
+    await user.type(prompt, 'Keep this human draft across autonomous scopes.');
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Task worker' }), 'local-a');
+    expect(screen.queryByRole('button', { name: /Engineering runs/ })).not.toBeInTheDocument();
+    observed = { ...observed, engineeringSupported: true, engineeringLifecycle: 'running', engineeringAttachmentId: 'a'.repeat(32) };
+    await user.click(screen.getByRole('button', { name: 'Check engineering status' })); await screen.findByText('Running');
+    expect(screen.getByRole('button', { name: /Engineering runs/ })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Close engineering' })); await screen.findByText('Closed');
+    observed = { ...observed, engineeringLifecycle: 'running', engineeringAttachmentId: 'b'.repeat(32) };
+    await user.click(screen.getByRole('button', { name: 'Check engineering status' })); await screen.findByText('Running');
+    unavailable = true; await user.click(screen.getByRole('button', { name: 'Check engineering status' })); await screen.findByText('Unknown');
+    expect(screen.getByLabelText('Task prompt')).toBe(prompt);
+    expect(prompt).toHaveValue('Keep this human draft across autonomous scopes.');
+    expect(screen.getByRole('button', { name: 'Send task' })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Send task' }));
+    await waitFor(() => expect(f.request.mock.calls.some(([path, init]) => path === '/api/resources/tasks' && init?.method === 'POST')).toBe(true));
+  });
+  it('reloads only the engineering pane when attachment changes and retains the human draft', async () => {
+    const f = setup(); f.scope.engineeringAttachmentSupported = true; f.scope.engineeringAttachmentId = 'a'.repeat(32);
+    f.scope.engineeringSupported = true; f.scope.engineeringLifecycle = 'running';
+    f.scope.defaultProjectId = 'default'; f.scope.projects = [{ id: 'default', label: 'Hub', workspace: f.scope.workspace!, enabled: true }];
+    let observed = { ...f.scope };
+    const original = f.request.getMockImplementation()!;
+    f.request.mockImplementation(async (path, init) => {
+      if (path === '/api/resources/console') return json(observed);
+      if (path === '/api/resources/engineering') return json([]);
+      return original(path, init);
+    });
+    window.history.replaceState(null, '', '/resources/#resource-workspace');
+    const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await screen.findByText('Running'); await user.type(await screen.findByLabelText('Task prompt'), 'My draft survives.');
+    await user.click(screen.getByRole('button', { name: /Engineering runs/ }));
+    await screen.findByRole('heading', { name: 'No engineering plan enrolled for this project.' });
+    const before = f.request.mock.calls.filter(([path]) => path === '/api/resources/engineering').length;
+    observed = { ...observed, engineeringAttachmentId: 'b'.repeat(32) };
+    await user.click(screen.getByRole('button', { name: 'Check engineering status' }));
+    await waitFor(() => expect(f.request.mock.calls.filter(([path]) => path === '/api/resources/engineering').length).toBeGreaterThan(before));
+    await user.click(screen.getByRole('button', { name: '+ New task' }));
+    expect(screen.getByLabelText('Task prompt')).toHaveValue('My draft survives.');
+  });
   it('preserves a human workspace draft and submission when engineering closes', async () => {
     const f = setup(); f.scope.engineeringSupported = true; f.scope.engineeringLifecycle = 'running';
     f.scope.defaultProjectId = 'default'; f.scope.projects = [{ id: 'default', label: 'Hub', workspace: f.scope.workspace!, enabled: true }];

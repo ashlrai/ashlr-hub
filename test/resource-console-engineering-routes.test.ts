@@ -360,6 +360,30 @@ async function pendingBody(handle: ResourceConsoleServerHandle, route: string, v
 }
 
 describe('host-owned same-workspace engineering attachment', () => {
+  it('publishes a read-only attachment identity and pins close to the displayed component', async () => {
+    const handle = await start(); const previous = handle.engineeringAttachment()!;
+    const headers = { 'x-ashlr-token': handle.readToken };
+    expect(await (await fetch(`${handle.url}/api/resources/console`, { headers })).json()).toMatchObject({
+      engineeringAttachmentSupported: true, engineeringAttachmentId: previous.id });
+    const closed = await post(handle, '/api/resources/engineering-runtime/close', { expectedAttachmentId: previous.id });
+    expect(closed.status).toBe(200); expect(await closed.json()).toEqual({ engineeringLifecycle: 'closed', engineeringAttachmentId: previous.id });
+    const nextOwner = { ...owner, close: vi.fn().mockResolvedValue(undefined) }; owner.create.mockReturnValueOnce(nextOwner);
+    const next = await handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile });
+    expect((await post(handle, '/api/resources/engineering-runtime/close', { expectedAttachmentId: previous.id })).status).toBe(409);
+    expect(nextOwner.close).not.toHaveBeenCalled(); expect(next.state()).toBe('running');
+    expect(await (await fetch(`${handle.url}/api/resources/console`, { headers })).json()).toMatchObject({ engineeringAttachmentId: next.id });
+  });
+  it.each([null, 12, '', 'x'.repeat(32), 'a'.repeat(64)])('refuses malformed close attachment %j', async expectedAttachmentId => {
+    const handle = await start();
+    expect((await post(handle, '/api/resources/engineering-runtime/close', { expectedAttachmentId })).status).toBe(400);
+    expect(owner.close).not.toHaveBeenCalled();
+  });
+  it('advertises attachment discovery without claiming an engineering component exists', async () => {
+    const handle = await start({ engineeringFile: undefined });
+    const response = await fetch(`${handle.url}/api/resources/console`, { headers: { 'x-ashlr-token': handle.readToken } });
+    const scope = await response.json(); expect(scope.engineeringAttachmentSupported).toBe(true);
+    expect(scope.engineeringAttachmentId).toBeUndefined(); expect(scope.engineeringLifecycle).toBeUndefined();
+  });
   function workerConfiguration() {
     const profiles = join(directory, 'attached-profiles.json'), supervision = join(directory, 'attached-supervision.json');
     const policy = join(directory, 'attached-successors.json');

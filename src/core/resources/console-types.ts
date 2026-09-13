@@ -30,6 +30,10 @@ export interface ResourceConsoleScope {
   engineeringSupported?: true;
   /** Current console lifetime only; closing engineering does not close human tasks. */
   engineeringLifecycle?: 'running' | 'stopping' | 'closed' | 'held';
+  /** Host-managed attachment discovery; never browser attachment authority. */
+  engineeringAttachmentSupported?: true;
+  /** Read-only identity of the current component; not the host capability object. */
+  engineeringAttachmentId?: string;
   /** Read-only evaluation and shared-ledger attribution; never routing authority. */
   engineeringOutcomesSupported?: true;
   /** Host-pinned objective preparation and durable same-console enrollment. */

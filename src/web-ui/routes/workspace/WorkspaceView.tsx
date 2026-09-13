@@ -259,7 +259,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
     </aside>
 
     {engineering && scope.engineeringSupported ? <div className={styles.engineeringPane} data-mobile-visible={mobilePane === 'task'}>
-      {active && mobilePane !== 'tasks' ? <WorkspaceEngineering key={`${session}:${project?.id ?? 'default'}`} projectId={project?.id ?? 'default'}
+      {active && mobilePane !== 'tasks' ? <WorkspaceEngineering key={`${session}:${project?.id ?? 'default'}:${scope.engineeringAttachmentId ?? 'legacy'}`} projectId={project?.id ?? 'default'}
         controlsAvailable={engineeringControlsAvailable}
         projectName={projectName} available={!historical && snapshot.sourceState === 'healthy'}
         supervisionSupported={scope.engineeringSupervisionSupported === true}

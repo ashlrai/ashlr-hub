@@ -244,6 +244,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     readOnly: !options.execute, workspace, maxParallel: options.execute ? maxParallel : 0, maxQueued: options.execute ? 64 : 0,
     ...(quotaConfig ? { quotaRefreshEnabled: true } : {}), ...(connectionsConfig ? { connectionsEnabled: true } : {}),
     ...(options.allocationControls ? { allocationWritable: true } : {}),
+    ...(options.execute && projectsFile ? { engineeringAttachmentSupported: true } : {}),
     ...(options.execute ? { historySupported: true, followUpSupported: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
@@ -304,6 +305,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   async function route(req: IncomingMessage, res: ServerResponse): Promise<void> {
     // Bind both sides of every await to this exact scope, never mutable host slots.
     const selectedComponent = engineeringComponent;
+    const selectedAttachmentId = attachment?.id;
     const engineering = selectedComponent?.owner ?? null, engineeringPreparation = selectedComponent?.preparation ?? null;
     const engineeringSupervision = selectedComponent?.supervision ?? null, automaticAdmission = selectedComponent?.admission ?? null;
     const engineeringSuccessors = selectedComponent?.successors ?? null;
@@ -386,11 +388,15 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         if (url.pathname === '/api/resources/engineering-runtime/close') {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineering) throw new RequestError(403, 'Engineering is not configured');
-          if (!exact(await body(req), [])) throw new RequestError(400, 'Engineering close expects an empty object');
+          const input = await body(req);
+          const pinned = exact(input, ['expectedAttachmentId']) && typeof input.expectedAttachmentId === 'string' && /^[a-f0-9]{32}$/.test(input.expectedAttachmentId);
+          if (!exact(input, []) && !pinned) throw new RequestError(400, 'Engineering close expects an empty object or expectedAttachmentId');
+          if (pinned && input.expectedAttachmentId !== selectedAttachmentId) throw new RequestError(409, 'Engineering attachment changed');
           if (closing) throw new RequestError(503, 'Console is closing');
           currentEngineering(); await selectedComponent!.close(); currentEngineering();
           if (scope.engineeringLifecycle !== 'closed') throw new RequestError(503, 'Engineering shutdown uncertain');
-          sendJson(res, 200, { engineeringLifecycle: scope.engineeringLifecycle }); return;
+          sendJson(res, 200, { engineeringLifecycle: scope.engineeringLifecycle,
+            ...(pinned ? { engineeringAttachmentId: selectedAttachmentId } : {}) }); return;
         }
         if (url.pathname.startsWith('/api/resources/engineering') && scope.engineeringLifecycle !== undefined &&
           (scope.engineeringLifecycle !== 'running' || engineeringStopped())) {
@@ -701,8 +707,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       } });
     engineeringComponent = component;
     attachment = Object.freeze({ id: randomBytes(16).toString('hex'), state: () => state, close: () => component.close() });
+    scope.engineeringAttachmentId = attachment.id;
     scope.engineeringLifecycle = 'stopping';
-    for (const key of ['engineeringSupported', 'engineeringOutcomesSupported', 'engineeringPreparationSupported',
+    scope.engineeringSupported = true;
+    for (const key of ['engineeringOutcomesSupported', 'engineeringPreparationSupported',
       'engineeringSupervisionSupported', 'engineeringPreparationAutoAdmission', 'engineeringSuccessorsSupported'] as const) delete scope[key];
     await component.initialize();
     scope.engineeringSupported = true; scope.engineeringOutcomesSupported = true;

@@ -95,6 +95,23 @@ describe('quota reservation response and mutation boundary', () => {
 describe('explicit engineering supervision capability', () => {
   const projectScope = () => ({ ...resourceFixture().scope, defaultProjectId: 'default',
     projects: [{ id: 'default', label: 'Hub', workspace: '/private/project', enabled: true }] });
+  it.each([{}, { engineeringSupported: true, engineeringLifecycle: 'stopping', engineeringAttachmentId: 'a'.repeat(32) },
+    { engineeringSupported: true, engineeringLifecycle: 'running', engineeringAttachmentId: 'b'.repeat(32), engineeringPreparationSupported: true }])(
+    'accepts explicit host attachment discovery %# without effects', async patch => {
+      read.mockResolvedValue({ ...projectScope(), engineeringAttachmentSupported: true, ...patch });
+      await expect(resourceConsoleScopeQuery.fetch()).resolves.toMatchObject({ engineeringAttachmentSupported: true });
+      expect(write).not.toHaveBeenCalled();
+    });
+  it.each([{ engineeringAttachmentSupported: false }, { engineeringAttachmentSupported: null },
+    { engineeringAttachmentSupported: true, readOnly: true }, { engineeringAttachmentId: 'a'.repeat(32) },
+    { engineeringAttachmentSupported: true, engineeringAttachmentId: 'a'.repeat(32) },
+    { engineeringAttachmentSupported: true, engineeringSupported: true, engineeringLifecycle: 'running' },
+    ...[null, 1, '', 'x'.repeat(32), 'a'.repeat(64)].map(engineeringAttachmentId => ({ engineeringAttachmentSupported: true,
+      engineeringSupported: true, engineeringLifecycle: 'running', engineeringAttachmentId }))])(
+    'rejects unverifiable attachment capability %#', async patch => {
+      read.mockResolvedValue({ ...projectScope(), ...patch });
+      await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+    });
   it.each(['running', 'stopping', 'closed', 'held'])('accepts engineering lifecycle %s without mutation', async (engineeringLifecycle) => {
     read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringLifecycle });
     await expect(resourceConsoleScopeQuery.fetch()).resolves.toMatchObject({ engineeringLifecycle });

@@ -32,15 +32,20 @@ project drafts. The panel distinguishes closing, confirmed closed, held and
 unavailable states; a lost response never automatically repeats a mutation.
 A status read that stalls for ten seconds becomes unavailable, rather than
 keeping a previously running sample actionable indefinitely.
-New engineering controls stay withheld after a close attempt, even if a later
-sample still says running. Ordinary task submission remains independent, and
+New engineering controls stay withheld after a close attempt for that same
+attachment, even if a later sample still says running. A verified replacement
+has its own close state. Ordinary task submission remains independent, and
 recorded engineering evidence remains readable. The control applies to every
 engineering plan in this console, not just the selected project.
 
 For an engineering-enabled console, a control-authenticated request to
 `POST /api/resources/engineering-runtime/close` with an explicit matching
-`Origin` and an empty JSON object closes the engineering component for this
-console lifetime. This is a mutating stop operation, not a read or a pause.
+`Origin` closes the engineering component. Send
+`{"expectedAttachmentId":"<observed attachment ID>"}` to target the component
+shown in the latest scope read; the acknowledgment includes the matching
+`engineeringAttachmentId`. A stale identity returns 409 without stopping its
+replacement. An empty JSON object retains the legacy current-component close
+behavior for older clients. This is a mutating stop operation, not a read or a pause.
 It stops automatic admission, successor planning and graph supervision, requests
 owned generation cancellation, and awaits their existing cleanup paths.
 
@@ -118,11 +123,23 @@ cleanup uncertainty remains held. Use that capability's `state()` or authenticat
 `GET /api/resources/console` for current lifecycle, not the handle's initial
 `scope` snapshot.
 
-The current browser lifecycle panel is not yet attachment-aware: it retains a
-close attempt within the mounted view and does not distinguish a replacement
-component from a stale running response. Host attachment is supported, but
-seamless browser capability refresh without losing drafts remains UI integration
-work. Do not treat this host API as a completed in-browser restart workflow.
+The scope advertises `engineeringAttachmentSupported: true` on executing hosts
+with a project catalog, even before the first attachment. Each installed
+component adds a read-only `engineeringAttachmentId`. This printable identity
+can pin a close request, but cannot replace the host capability object or attach
+new work.
+
+The browser's bounded, visibility-aware lifecycle observer also refreshes the
+engineering capabilities. It discovers the first attachment, preserves human
+drafts and task selection, and reloads only the engineering pane on replacement.
+An uncertain close still withholds the same attachment; only a verified new
+identity can restore that attachment's controls. Late close acknowledgments
+cannot close or overwrite the replacement in the UI. Status and close requests
+have ten-second observation deadlines; a timeout never retries the mutation or
+proves worker termination. Unavailable status keeps human tasks usable and
+engineering mutations withheld. Hosts without attachment support retain the
+legacy lifecycle behavior. Attachment itself remains host-managed: the browser
+has no attach/restart control.
 
 The standing mission controller does not yet use this attachment API to share a
 persistent human workspace. Its setup/predecessor ownership joins and mission
