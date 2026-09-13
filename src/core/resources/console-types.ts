@@ -135,6 +135,22 @@ export interface ResourceSupervisorSnapshot {
   activeCount: number;
   queuedCount: number;
   jobs: ResourceSupervisorJob[];
+  jobWindow?: ResourceSupervisorJobWindow;
+}
+
+export interface ResourceSupervisorJobWindow { totalJobs: number; visibleJobs: number; omittedJobs: number }
+export interface ResourceSupervisorView extends ResourceSupervisorSnapshot { jobWindow: ResourceSupervisorJobWindow }
+export interface ResourceSupervisorJobsCursor { enqueuedAt: string; id: string }
+export interface ResourceSupervisorJobsPageOptions { before?: ResourceSupervisorJobsCursor; limit?: number }
+/** Newest-first enqueue identity navigation, not a frozen history snapshot. */
+export interface ResourceSupervisorJobsPage {
+  items: ResourceSupervisorJob[];
+  totalJobs: number;
+  nextBefore: ResourceSupervisorJobsCursor | null;
+}
+export interface ResourceConsoleTaskStatus {
+  supervisor: Omit<ResourceSupervisorSnapshot, 'jobs'>;
+  job: ResourceSupervisorJob;
 }
 
 /** Fixed acquisition-time diagnosis only; never process identities or recovery authority. */

@@ -8,6 +8,7 @@ import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-
 import { ApiError, apiGet, apiPost } from './client.js';
 import type { QueryDef } from './queries.js';
 import type { EngineeringMissionCommand, EngineeringMissionSnapshot } from '../../core/resources/engineering-mission-manager-types.js';
+import { validResourceJobWindow } from './resource-task-history.js';
 
 function absolutePath(value: unknown): value is string {
   return typeof value === 'string' && /^(?:\/|[a-zA-Z]:[\\/]|\\\\)/.test(value) &&
@@ -246,6 +247,7 @@ export function resourceConsoleSnapshotQuery(poolId: string): QueryDef<ResourceC
       if (snapshot?.schemaVersion !== 1 || snapshot.mode !== 'resource-pool' || snapshot.pool?.id !== poolId ||
         snapshot.authority !== 'local-evidence' || !['healthy', 'missing', 'degraded'].includes(snapshot.sourceState) ||
         !Array.isArray(snapshot.groups) || !Array.isArray(snapshot.activeAttempts) || !Array.isArray(snapshot.recentAttempts) ||
+        snapshot.supervisor?.jobWindow !== undefined && !validResourceJobWindow(snapshot.supervisor.jobWindow, snapshot.supervisor.jobs?.length) ||
         !validNativeDiagnostics(snapshot.activeAttempts, snapshot.pool.workers) ||
         !validNativeDiagnostics(snapshot.recentAttempts, snapshot.pool.workers) ||
         !validQuotaRefresh(snapshot.quotaRefresh, snapshot.pool.workers) || !validConnections(snapshot.connections) || !validMetadataCollector(snapshot.metadataCollector) ||

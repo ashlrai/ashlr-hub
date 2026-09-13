@@ -16,7 +16,9 @@ import { resourceConsoleTranscriptDigest, validateResourceConsoleContext } from 
 import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResourceConsoleProjectBindings,
   validateResourceConsoleProjects, type ResourceConsoleProjectBinding } from './console-projects.js';
 import type { ResourceConsoleContextTurn, ResourceConsoleOutput, ResourceConsoleTaskInput, ResourceConsoleTranscript,
-  ResourceConsoleProject, ResourceConsoleProjectInput, ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
+  ResourceConsoleProject, ResourceConsoleProjectInput, ResourceSupervisorJob, ResourceSupervisorSnapshot,
+  ResourceSupervisorView, ResourceSupervisorJobsPage, ResourceSupervisorJobsPageOptions } from './console-types.js';
+import { selectResourceConsoleJobView, selectResourceConsoleJobsPage, validateResourceConsoleJobId } from './console-job-view.js';
 import { readResourceConsoleStorage, prepareResourceConsoleStorage, compactResourceConsoleStorage, deleteResourceConsoleStoredHistory, resourceConsoleStorageProof,
   type ResourceConsoleStorageView } from './console-state-storage.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
@@ -53,6 +55,9 @@ export interface ResourcePoolSupervisorOptions {
 }
 export interface ResourcePoolSupervisor {
   snapshot(): ResourceSupervisorSnapshot;
+  view(): ResourceSupervisorView;
+  job(id: string): ResourceSupervisorJob | null;
+  jobsPage(options?: ResourceSupervisorJobsPageOptions): ResourceSupervisorJobsPage;
   projects(): ResourceConsoleProject[] | undefined;
   projectFileBinding(projectId: string): ResourceConsoleProjectBinding;
   /** Persisted identity for host enrollment; does not authorize execution. */
@@ -705,6 +710,24 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       return { instanceId, paused: state.paused, closing, error: error ?? sourceError, maxParallel, maxQueued,
         activeCount: active.size, queuedCount: state.jobs.filter((job) => job.state === 'queued').length,
         jobs: (loaded?.jobs ?? state.jobs).map(publicJob) };
+    },
+    view() {
+      ensureAvailable();
+      const selected = selectResourceConsoleJobView(historyJobs());
+      return { instanceId, paused: state.paused, closing, error: error ?? sourceError, maxParallel, maxQueued,
+        activeCount: active.size, queuedCount: state.jobs.filter(job => job.state === 'queued').length,
+        jobs: selected.jobs.map(publicJob), jobWindow: selected.jobWindow };
+    },
+    job(id) {
+      ensureAvailable();
+      const identity = validateResourceConsoleJobId(id);
+      const row = historyJobs().find(job => job.id === identity);
+      return row ? publicJob(row) : null;
+    },
+    jobsPage(options) {
+      ensureAvailable();
+      const selected = selectResourceConsoleJobsPage(historyJobs(), options);
+      return { ...selected, items: selected.items.map(publicJob) };
     },
     submit: (value, lifetime) => submitTask(value, lifetime),
     recover(value, lifetime) {

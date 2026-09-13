@@ -43,6 +43,63 @@ async function http(handle: ResourceConsoleServerHandle, path: string, method = 
 }
 
 describe('resource console HTTP fences', () => {
+  it('rejects non-data or inherited history options before any resource acquisition', async () => {
+    const constructor = vi.spyOn(supervisors, 'createResourcePoolSupervisor');
+    let reads = 0;
+    const accessor = Object.defineProperty({ ...options }, 'archiveHistory', { get: () => { reads++; return true; } });
+    const inherited = Object.assign(Object.create({ archiveHistory: true }), options);
+    const proxy = new Proxy({ ...options }, { getOwnPropertyDescriptor() { reads++; throw new Error('unexpected trap'); } });
+    const proxyPrototype = Object.assign(Object.create(new Proxy({}, { has() { reads++; throw new Error('unexpected trap'); } })), options);
+    for (const input of [accessor, inherited, proxy, proxyPrototype, { ...options, archiveHistory: undefined }, { ...options, archiveHistory: 'true' },
+      { ...options, archiveHistory: true }]) {
+      await expect(startResourceConsoleServer(input as ResourceConsoleServerOptions)).rejects.toThrow(/options|option/);
+    }
+    expect(reads).toBe(0); expect(constructor).not.toHaveBeenCalled(); expect(existsSync(options.root)).toBe(false);
+  });
+  it.each([undefined, false, true])('captures history compaction as an explicit execution capability: %s', async archiveHistory => {
+    const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
+    const constructor = vi.spyOn(supervisors, 'createResourcePoolSupervisor');
+    await start({ execute: true, workspace, ...(archiveHistory === undefined ? {} : { archiveHistory }) });
+    expect(constructor).toHaveBeenCalledOnce();
+    const passed = constructor.mock.calls[0]![0];
+    expect(Object.hasOwn(passed, 'archiveHistory')).toBe(archiveHistory === true);
+    if (archiveHistory === true) expect(passed.archiveHistory).toBe(true);
+  });
+  it('pages metadata and reads an exact task with independent read authority, without mutating queue state', async () => {
+    const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
+    const handle = await start({ execute: true, workspace });
+    const control = { 'x-ashlr-token': handle.controlToken!, 'content-type': 'application/json' };
+    const read = { 'x-ashlr-token': handle.readToken };
+    expect((await http(handle, '/api/resources/queue', 'POST', control, JSON.stringify({ paused: true }))).status).toBe(200);
+    for (const id of ['first', 'second', 'third']) {
+      expect((await http(handle, '/api/resources/tasks', 'POST', control, JSON.stringify({ id, prompt: 'PRIVATE_PAGE_PROMPT',
+        allowedWorkerIds: ['local'], mode: 'read-only', timeoutMs: 1000, maxOutputTokens: 100 }))).status).toBe(202);
+    }
+    const before = readFileSync(join(options.root, 'resource-console-state.json'));
+    for (const route of ['/api/resources/tasks', '/api/resources/tasks/first']) {
+      expect((await http(handle, route)).status).toBe(401);
+      expect((await http(handle, route, 'GET', control)).status).toBe(401);
+    }
+    const first = await http(handle, '/api/resources/tasks?limit=2', 'GET', read);
+    expect(first.status).toBe(200); expect(first.text).not.toContain('PRIVATE_PAGE_PROMPT');
+    const page = JSON.parse(first.text);
+    expect(page.totalJobs).toBe(3); expect(page.items).toHaveLength(2);
+    expect(page.items.map((job: { id: string }) => job.id)).toEqual(['third', 'second']);
+    const cursor = new URLSearchParams({ limit: '2', before: page.nextBefore.enqueuedAt, beforeId: page.nextBefore.id });
+    const second = await http(handle, `/api/resources/tasks?${cursor}`, 'GET', read);
+    expect(second.status).toBe(200); expect(JSON.parse(second.text)).toMatchObject({ items: [{ id: 'first' }], nextBefore: null });
+    const exact = await http(handle, '/api/resources/tasks/first', 'GET', read);
+    expect(exact.status).toBe(200); expect(JSON.parse(exact.text)).toMatchObject({ supervisor: { paused: true, error: null }, job: { id: 'first', state: 'queued' } });
+    expect(JSON.parse(exact.text).supervisor.jobs).toBeUndefined(); expect(exact.text).not.toContain('PRIVATE_PAGE_PROMPT');
+    expect((await http(handle, '/api/resources/tasks/missing', 'GET', read)).status).toBe(404);
+    for (const query of ['limit=0', 'limit=257', 'limit=1&limit=2', 'limit=1.5', 'limit=01', 'limit=1%0A', 'root=/tmp',
+      'before=invalid&beforeId=first', 'beforeId=first', 'before=2026-09-13T00%3A00%3A00.000Z', 'limit=',
+      'before=2026-09-13T00%3A00%3A00.000Z&beforeId=../first']) {
+      expect((await http(handle, `/api/resources/tasks?${query}`, 'GET', read)).status, query).toBe(400);
+    }
+    expect((await http(handle, '/api/resources/tasks/first?limit=1', 'GET', read)).status).toBe(400);
+    expect(readFileSync(join(options.root, 'resource-console-state.json'))).toEqual(before);
+  });
   it('publishes current global stop state without authority paths or clearing the stop', async () => {
     const handle = await start();
     const read = vi.spyOn(killPolicy, 'readKillSwitch');

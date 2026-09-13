@@ -1623,8 +1623,9 @@ source descriptor is still current: an eventual writer must recheck both at its
 effect boundary. Reading performs no writes or lock recovery. This is a read-only
 development component, not by itself a runtime migration or a new dispatch grant.
 
-The source also has an **experimental supervisor-constructor opt-in**,
-`archiveHistory: true`, implemented through the
+The foreground console supports an explicit `--archive-history` option alongside
+`--execute --workspace ABS`. The host API equivalent is `archiveHistory: true`,
+implemented through the
 [versioned storage adapter](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/console-state-storage.ts).
 It stages up to eight safe terminal jobs when the 256-current-job limit would block
 admission, verifies their readback, then atomically replaces
@@ -1636,8 +1637,10 @@ accounting stay separate. This does not renew a task window, deadline or quota.
 Admission rechecks mission lifetime, host stops and project bindings after a
 compaction burst; changed or expired authority cannot enqueue a new task.
 
-This option defaults to `false` and is **not exposed as a production CLI/UI
-switch**. A supervisor can reopen an already migrated root without the flag;
+This option defaults to `false`; the browser cannot enable it. It changes private
+storage format as admissions require compaction, so preserve the root and its
+archive together when backing up or moving it. Never delete the descriptor or
+archive to recover capacity. A supervisor can reopen a migrated root without the flag;
 further compaction requires the opt-in. Mission preparation, setup, predecessor
 checks, continuation and enrollment inspection now read the persisted union
 through the same storage adapter. Continuation uses joined history; project and
@@ -1652,11 +1655,36 @@ change. This proof is issued from actual supervisor custody; it does not grant
 execution authority. Legacy job-only proof matching is not accepted for a
 descriptor or an archive-bearing workspace.
 
-Public CLI/UI rollout and end-to-end operational commissioning remain separate
-from this constructor experiment. Archive capacity remains bounded
+Source support and local tests are distinct from an installed production build
+or end-to-end provider commissioning. Archive capacity remains bounded
 at 4,096 records, hot jobs at 256, the active file at 4 MiB including settlement
 reserve, and joined history at 64 MiB. The resource ledger has its own independent
 limits; this is not unlimited lifetime storage.
+
+### Observe a growing queue
+
+The authenticated `GET /api/resources` supervisor view contains every queued,
+dispatching and unresolved job, plus recent terminal jobs up to 256 total.
+`jobWindow` reports `totalJobs`, `visibleJobs` and `omittedJobs`; omitted jobs are
+not deleted. Internal host `snapshot()` calls retain their full-history contract.
+Metadata responses never include task prompts, copied context or output text.
+
+Use `GET /api/resources/tasks?limit=64` to browse metadata newest-first. The limit
+is 1–256; the response contains `items`, `totalJobs` and `nextBefore`. When
+`nextBefore` is present, pass its `enqueuedAt` as `before` and its `id` as
+`beforeId`, URL-encoded, to read the next page. Both cursor fields are required
+together. Unknown or repeated parameters are rejected. Ordering is by enqueue
+timestamp, then task ID; it survives compaction without positional offsets.
+Pages are fresh observations, not a frozen historical snapshot. Refresh the
+first page to discover newly admitted work, including after a clock adjustment.
+
+`GET /api/resources/tasks/:id` returns the exact job and supervisor status
+without a jobs array. A missing task returns 404; unavailable ownership or
+storage evidence is a refusal, not proof that an old task is safe to resubmit.
+Missions use this point lookup rather than assuming their task appears in the
+dashboard window. Retained transcripts remain separate on-demand history reads.
+These routes require read authority, not control authority, and do not dispatch
+work or change account policy.
 
 Deletion covers stable task-key archive copies, including unpublished staging.
 A committed deletion marker suppresses hot text on reads even if a crash prevented
@@ -2990,8 +3018,10 @@ The foreground supervisor provides:
   loses raw output. The durable queue retains prompts only while queued or
   dispatching; metadata views omit them. A read session can view retained output.
 - **Bounded execution:** default four parallel jobs, configurable from one to 16;
-  at most 64 queued jobs, a 32 KiB prompt per task, and 256 retained queue identities
-  within a 4 MiB state file. History is not silently evicted into replayable work.
+  at most 64 queued jobs, a 32 KiB prompt per task, and 256 current queue identities
+  within a 4 MiB state file. `--archive-history` can preserve up to 4,096 additional
+  terminal identities in private archives; the browser pages that history.
+  History is not silently evicted into replayable work.
   Admission reserves future metadata space; large escaped prompts can reach the
   byte limit before the count limits.
   Capacity exhaustion requires an explicit migration, not deleting state to reuse

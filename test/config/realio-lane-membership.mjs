@@ -110,6 +110,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-history-archive-store.test.ts', // actual private staging, deletion and restart evidence
   'test/resource-console-history-view.test.ts', // verified current/archive joins against private on-disk snapshots
   'test/resource-console-compaction-acceptance.test.ts', // actual public task admission, archive/restart and quota continuity
+  'test/resource-console-job-view.test.ts', // bounded metadata selection plus actual supervisor ownership and redaction
+  'test/resource-console-compaction-cli-acceptance.test.ts', // real CLI and authenticated HTTP admissions through archive/restart
   'test/resource-console-compaction-deadline.test.ts', // real archive publication followed by deadline/host/reentrancy vetoes
   'test/resource-console-state-storage.test.ts', // versioned private source projection and guarded archive staging
   'test/resource-engineering-compacted-proof-acceptance.test.ts', // genuine workspace custody and worker proofs over archived history

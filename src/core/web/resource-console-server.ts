@@ -66,6 +66,8 @@ export interface ResourceConsoleServerOptions {
   allocationControls?: boolean;
   port?: number;
   execute?: boolean;
+  /** Explicit terminal history compaction; reopening existing archives does not require it. */
+  archiveHistory?: boolean;
   workspace?: string;
   maxParallel?: number;
   signal?: AbortSignal;
@@ -185,6 +187,12 @@ function sendSnapshot(res: ServerResponse, value: unknown, status = 200): void {
 
 /** One fixed pool; independent read and control capabilities. No default dashboard imports. */
 export async function startResourceConsoleServer(options: ResourceConsoleServerOptions): Promise<ResourceConsoleWorkspaceHandle> {
+  if (!options || typeof options !== 'object' || types.isProxy(options) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(options))) throw new Error('Invalid resource console options');
+  const archiveOption = Object.getOwnPropertyDescriptor(options, 'archiveHistory');
+  if (archiveOption && (!Object.hasOwn(archiveOption, 'value') || typeof archiveOption.value !== 'boolean') ||
+    !archiveOption && 'archiveHistory' in options) throw new Error('Invalid console history option');
+  const archiveHistory = archiveOption?.value === true;
   const hostStopped = captureResourceExecutionVeto(options);
   const engineeringLifetime = captureResourceEngineeringLifetime(options);
   if (hostStopped()) throw new Error('Host console execution stopped');
@@ -208,6 +216,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   if (!Number.isSafeInteger(requestedPort) || requestedPort < 0 || requestedPort > 65_535 ||
     !Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 16 ||
     (options.execute !== undefined && typeof options.execute !== 'boolean') ||
+    archiveHistory && options.execute !== true ||
     (options.allocationControls !== undefined && typeof options.allocationControls !== 'boolean') ||
     (options.engineeringMissionAutoStart !== undefined && typeof options.engineeringMissionAutoStart !== 'boolean') ||
     options.engineeringMissionAutoStart === true && missionFile === null ||
@@ -362,8 +371,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       throw new RequestError(403, 'Forbidden: invalid Origin header');
     }
     const url = requestUrl(req);
-    if (!url || url.search) throw new RequestError(400, 'This console does not accept query parameters');
     const method = (req.method ?? 'GET').toUpperCase();
+    if (!url || url.search && !(method === 'GET' && url.pathname === '/api/resources/tasks')) {
+      throw new RequestError(400, 'This console only accepts task history pagination parameters');
+    }
     if (url.pathname === '/health') {
       if (method !== 'GET' && method !== 'HEAD') throw new RequestError(405, 'Method not allowed');
       sendJson(res, 200, { ok: true }); return;
@@ -559,7 +570,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             : pinned ? supervisor.cancel(cancel[1]!, input.expectedTaskDigest as string) : supervisor.cancel(cancel[1]!) });
         } else {
           if (!exact(input, ['paused']) || typeof input.paused !== 'boolean') throw new RequestError(400, 'Expected paused boolean');
-          sendJson(res, 200, { supervisor: supervisor.setPaused(input.paused) });
+          supervisor.setPaused(input.paused);
+          sendSnapshot(res, { supervisor: supervisor.view() });
         }
         return;
       }
@@ -666,7 +678,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             }).map((worker) => worker.id);
             evidence = withholdResourceConsoleWorkers(evidence, [], expandResourceQuotaDenials(pool, bindings, quotaUnavailable));
           }
-          sendSnapshot(res, { ...evidence, supervisor: supervisor?.snapshot() ?? null,
+          sendSnapshot(res, { ...evidence, supervisor: supervisor?.view() ?? null,
             executionStop: readResourceExecutionStop(),
             // Passive local evidence is not an acquisition attempt or provider
             // health. Keep configured/executing collector lifecycle unchanged.
@@ -679,6 +691,30 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             allocation, workerAccess, quotaScopeAccess }); return;
         }
         throw new RequestError(503, 'Resource quota or allocation evidence changed during this read');
+      }
+      if (url.pathname === '/api/resources/tasks') {
+        if (!supervisor) throw new RequestError(404, 'Task history requires an execution console');
+        const keys = [...url.searchParams.keys()];
+        if (keys.some(key => !['limit', 'before', 'beforeId'].includes(key)) || new Set(keys).size !== keys.length ||
+          url.searchParams.has('before') !== url.searchParams.has('beforeId')) {
+          throw new RequestError(400, 'Expected only limit and a complete task history cursor');
+        }
+        const limit = url.searchParams.get('limit');
+        if (limit !== null && (!/^[1-9]\d{0,2}$/.test(limit) || String(Number(limit)) !== limit)) {
+          throw new RequestError(400, 'Invalid task history page limit');
+        }
+        sendSnapshot(res, supervisor.jobsPage({
+          ...(limit === null ? {} : { limit: Number(limit) }),
+          ...(url.searchParams.has('before') ? { before: { enqueuedAt: url.searchParams.get('before')!, id: url.searchParams.get('beforeId')! } } : {}),
+        })); return;
+      }
+      const taskStatus = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})$/.exec(url.pathname);
+      if (taskStatus) {
+        const job = supervisor?.job(taskStatus[1]!);
+        if (!job || !supervisor) throw new RequestError(404, 'Resource task unavailable');
+        const { jobs: _jobs, ...status } = supervisor.view();
+        if (status.error) throw new RequestError(503, 'Resource task evidence unavailable');
+        sendSnapshot(res, { supervisor: status, job }); return;
       }
       const history = /^\/api\/resources\/tasks\/([a-z0-9][a-z0-9_-]{0,63})\/history$/.exec(url.pathname);
       if (history) {
@@ -904,6 +940,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
     }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
+      ...(archiveHistory ? { archiveHistory: true } : {}),
       ...(missionConfig ? { isExecutionStopped: () => !!closing || signal?.aborted === true || hostStopped() }
         : Object.hasOwn(options, 'isExecutionStopped') ? { isExecutionStopped: hostStopped } : {}),
       ...(projects === undefined ? {} : { projects }),

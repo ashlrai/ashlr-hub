@@ -24,6 +24,8 @@ import { WorkspaceView } from '../workspace/WorkspaceView.js';
 import { EngineeringLifecycle } from '../workspace/EngineeringLifecycle.js';
 import { EngineeringMission } from '../workspace/EngineeringMission.js';
 import styles from './ResourcePoolView.module.css';
+import { useResourceTaskHistory } from '../../data/use-resource-task-history.js';
+import { TaskHistoryNavigation } from './TaskHistoryNavigation.js';
 
 export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConsoleScope }) {
   const [observedScope, setObservedScope] = useState<ResourceConsoleScope | null>(null);
@@ -63,7 +65,9 @@ export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConso
   // Share the map's conservative assignment interpretation with every inspector
   // and row. Independently sampled records may not yet agree on a worker.
   const historical = !!query.error;
-  const fleet = useMemo(() => snapshot ? buildResourceFleet(snapshot, historical) : null, [snapshot, historical]);
+  const taskHistory = useResourceTaskHistory(snapshot, selection?.kind === 'task' ? selection.id : null, surface === 'resources' && !historical);
+  const historySnapshot = taskHistory.snapshot;
+  const fleet = useMemo(() => historySnapshot ? buildResourceFleet(historySnapshot, historical) : null, [historySnapshot, historical]);
   const rows = fleet?.tasks ?? [];
   const ownedRows = rows.filter((row) => row.job?.state === 'dispatching');
   const selectedWorker = snapshot?.pool.workers.find((worker) => worker.id === selection?.id && selection.kind === 'worker');
@@ -294,6 +298,7 @@ export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConso
               </button></li>)}</ul> : <div className={styles.empty}><h3>{filter === 'all' ? 'No recorded tasks yet' : 'No matching tasks'}</h3>
                 <p>{filter === 'all' ? 'Inspect a worker’s quota, then queue a concrete task when execution is enabled.' : 'Choose another filter to inspect the recorded task history.'}</p></div>}
             <p className={styles.boardNote}>{resourceNumber(snapshot.counts.total)} durable attempts. {resourceNumber(snapshot.counts.omittedHistory)} older terminal receipts omitted. All occupied reservations are shown.</p>
+            <TaskHistoryNavigation history={taskHistory} disabled={historical} buttonClassName={styles.secondaryButton} className={styles.boardNote} />
           </section>
         </div>
         <aside className={styles.sideColumn} aria-label="Resource workspace">
@@ -306,8 +311,10 @@ export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConso
           {/* Keep unsent text while inspecting evidence; hidden forms are not interactive. */}
           <div hidden={tab !== 'compose'}><TaskComposer scope={scope} workers={snapshot.pool.workers} enabled={enabled}
             unlocked={hold.hasHold} busy={busy} onUnlock={() => setUnlockOpen(true)} onSubmit={submit} /></div>
-          {tab === 'inspect' ? <div ref={inspector} className={styles.inspectionTarget}>{selectedWorker ? <WorkerInspector worker={selectedWorker} snapshot={snapshot} historical={historical} /> : selectedTask
-            ? <TaskInspector key={`${supervisor?.instanceId ?? 'external'}:${selectedTask.id}:${selectedTask.job?.historyAvailable === true}:${selectedTask.job?.outputAvailable === true}`} row={selectedTask} fleetTask={selectedTask} enabled={stopEnabled} busy={busy}
+          {tab === 'inspect' ? <div ref={inspector} className={styles.inspectionTarget}>
+            {taskHistory.detailError ? <p role="alert" className={styles.warning}>{taskHistory.detailError}</p> : null}
+            {selectedWorker ? <WorkerInspector worker={selectedWorker} snapshot={snapshot} historical={historical} /> : selectedTask
+            ? <TaskInspector key={`${supervisor?.instanceId ?? 'external'}:${selectedTask.id}:${selectedTask.job?.historyAvailable === true}:${selectedTask.job?.outputAvailable === true}`} row={selectedTask} fleetTask={selectedTask} enabled={stopEnabled && taskHistory.selectedCurrent} busy={busy}
               onCancel={(id) => { void cancel(id); }} />
             : <section className={styles.empty}><h2 tabIndex={-1} data-inspector-heading>{selection
               ? `${selection.kind === 'worker' ? 'Worker' : 'Task'} ${selection.id} is not in this snapshot`

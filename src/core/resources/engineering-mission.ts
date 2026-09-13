@@ -23,7 +23,7 @@ import { engineeringMissionRecordStore, missionData, missionExact, missionHash, 
 import type { ResourceEngineeringRecipe } from './engineering-preparation-types.js';
 import type { ResourceConsoleEngineeringSupervisionSnapshot } from './console-engineering-supervisor-types.js';
 import type { ResourceEngineeringSuccessorCoordinatorSnapshot } from './engineering-successor-coordinator-types.js';
-import type { ResourceConsoleSnapshot, ResourceConsoleTranscript } from './console-types.js';
+import type { ResourceConsoleTaskStatus, ResourceConsoleTranscript } from './console-types.js';
 import { MissionConsoleRequestError, requestEngineeringMissionConsole } from './engineering-mission-console.js';
 import { beginEngineeringMissionInvocation } from './engineering-mission-invocations.js';
 import { MAX_MISSION_FEEDBACK_PROMPT_BYTES } from './engineering-mission-feedback.js';
@@ -359,10 +359,11 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
           { signal: abort.signal, isExecutionStopped: stopped, deadlineAt: config.deadlineAt });
         requireFact(admitted.id === task.id, 'Mission proposal identity changed');
         while (true) {
-          const view = await request<ResourceConsoleSnapshot>('/api/resources');
-          requireFact(view.supervisor && !view.supervisor.paused && !view.supervisor.closing, 'Mission proposal console unavailable');
-          const job = view.supervisor!.jobs.find(row => row.id === task.id);
-          requireFact(job && !['unresolved', 'cancelled'].includes(job.state), 'Mission proposal unresolved');
+          const view = await request<ResourceConsoleTaskStatus>(`/api/resources/tasks/${task.id}`);
+          requireFact(view.supervisor && view.supervisor.paused === false && view.supervisor.closing === false &&
+            view.supervisor.error === null, 'Mission proposal console unavailable');
+          const job = view.job;
+          requireFact(job && job.id === task.id && ['queued', 'dispatching', 'settled'].includes(job.state), 'Mission proposal unresolved');
           if (job!.state === 'settled') {
             const settled = receipt(); requireFact(settled?.status === 'completed', 'Mission proposal did not complete');
             const history = await request<ResourceConsoleTranscript>(`/api/resources/tasks/${task.id}/history`);

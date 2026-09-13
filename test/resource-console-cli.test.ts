@@ -25,6 +25,30 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('explicit foreground resource console CLI', () => {
+  it('forwards explicit history compaction within the complete 32-argument contract', async () => {
+    const before = process.listeners('SIGTERM'); backend.start.mockResolvedValue(server(true));
+    const input = [...args, '--execute', '--workspace', '/private/work', '--projects', '/private/projects',
+      '--engineering', '/private/engineering', '--engineering-preparation', '/private/preparation',
+      '--engineering-supervision', '/private/supervision', '--engineering-successors', '/private/successors',
+      '--quota-config', '/private/quota', '--connections-config', '/private/connections', '--port', '0',
+      '--max-parallel', '4', '--allocation-controls', '--archive-history', '--json'];
+    expect(input).toHaveLength(32);
+    const running = cmdResourceConsole(input);
+    try {
+      await vi.waitFor(() => expect(out).toHaveBeenCalledOnce());
+      expect(backend.start.mock.calls[0]![0].archiveHistory).toBe(true);
+    } finally { signal('SIGTERM', before); await running; }
+    expect(await running).toBe(0);
+  });
+  it.each([
+    ['--archive-history'], ['--archive-history', 'true'],
+    ['--execute', '--workspace', '/private/work', '--archive-history', '--archive-history'],
+    ['--execute', '--workspace', '/private/work', '--archive-history', 'false'],
+  ])('rejects ambiguous history compaction before startup: %j', async (...extra) => {
+    const imported = backend.imported.mock.calls.length;
+    expect(await cmdResourceConsole([...args, ...extra])).toBe(2);
+    expect(backend.start).not.toHaveBeenCalled(); expect(backend.imported).toHaveBeenCalledTimes(imported);
+  });
   it.each([false, true])('passes managed mission enrollment with explicit startup=%s', async automatic => {
     const handle = server(true); backend.start.mockResolvedValue(handle); const before = process.listeners('SIGTERM');
     const running = cmdResourceConsole([...args, '--execute', '--workspace', '/private/fixture/workspace', '--projects', '/private/fixture/projects.json',
@@ -61,6 +85,7 @@ describe('explicit foreground resource console CLI', () => {
   it.each(['--help', '-h'])('help is inert: %s', async (flag) => {
     expect(await cmdResourceConsole([flag])).toBe(0); expect(backend.start).not.toHaveBeenCalled();
     expect(out.mock.calls[0]![0]).toContain('Read-only by default');
+    expect(out.mock.calls[0]![0]).toContain('--archive-history requires execution and is off by default');
     expect(out.mock.calls[0]![0]).toContain('previously dispatching work is never');
     expect(out.mock.calls[0]![0]).toContain('--allocation-controls for usage ceilings, whole-account pauses and General/Spark reservations');
     expect(out.mock.calls[0]![0]).toContain('per-account General/Spark reservations for new tasks');
@@ -82,6 +107,7 @@ describe('explicit foreground resource console CLI', () => {
       expect(opts).toMatchObject({ root: '/private/fixture/ledger', poolFile: '/private/fixture/pool.json',
         bindingsFile: '/private/fixture/bindings.json', observationsFile: '/private/fixture/observations.json', port: 0, execute });
       expect(opts.signal).toBeInstanceOf(AbortSignal);
+      expect(Object.hasOwn(opts, 'archiveHistory')).toBe(false);
       expect(opts.workspace).toBe(execute ? '/private/fixture/workspace' : undefined);
       const record = JSON.parse(out.mock.calls[0]![0] as string);
       expect(record.readOnly).toBe(!execute); expect(record.controlToken).toBe(handle.controlToken);

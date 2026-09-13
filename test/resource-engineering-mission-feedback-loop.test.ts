@@ -38,7 +38,8 @@ import type { EngineeringSetupRequest, EngineeringSetupHost } from '../src/core/
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.clearAllMocks(); });
 type Mode = 'measured' | 'unknown' | 'stale-queue' | 'tampered-history' | 'changed-receipt' | 'stop' | 'stop-before-publication' | 'restart-recovery' | 'exhausted-recovery';
-async function fixture(mode: Mode) {
+type ProposalStatus = 'progress' | 'paused' | 'closing' | 'error' | 'missing' | 'foreign' | 'unresolved' | 'cancelled' | 'unknown';
+async function fixture(mode: Mode, proposalStatus?: ProposalStatus) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mission-feedback-loop-')));
   const root = join(base, 'ledger'), missionRoot = join(base, 'mission'), workspace = join(base, 'project');
   for (const path of [missionRoot, workspace, join(base, 'transport')]) mkdirSync(path, { mode: 0o700 });
@@ -107,7 +108,7 @@ async function fixture(mode: Mode) {
   let isOpen = false; let task: ResourceTask | undefined; let resultRead = false;
   let proposalWork: Promise<unknown> | undefined;
   let durableOwner: ResourcePoolSupervisor | undefined; let crashOnce = mode === 'restart-recovery' || mode === 'exhausted-recovery';
-  let queueReads = 0; const drainReads: number[] = [];
+  let queueReads = 0; const drainReads: number[] = []; const statusPaths: string[] = [];
   adapters.check.mockImplementation((value: ResourceEngineeringAutonomousSetupOptions) => { const checked = plan(value); scopes.set(checked.paths.profiles, value); return checked; });
   adapters.prepare.mockImplementation(async ({ input: value, predecessor }: EngineeringSetupRequest, host: EngineeringSetupHost) => {
     if (prepared.length && mode === 'stop-before-publication') controller.abort();
@@ -188,9 +189,20 @@ async function fixture(mode: Mode) {
       const result = await runResourceTask({ root, pool, bindings, observations, task, signal: controller.signal });
       expect(result.receipt?.status).toBe('completed'); return {};
     }
-    if (path === '/api/resources') {
-      if (durableOwner) return { supervisor: durableOwner.snapshot() };
-      await proposalWork; return { supervisor: { paused: false, closing: false, jobs: [{ id: task!.id, state: 'settled' }] } };
+    if (path === `/api/resources/tasks/${task?.id}`) {
+      statusPaths.push(path);
+      if (durableOwner) {
+        const { jobs, ...supervisor } = durableOwner.snapshot();
+        return { supervisor, job: jobs.find(row => row.id === task!.id) ?? null };
+      }
+      await proposalWork;
+      // This endpoint intentionally has no job collection. Scope/setup evidence
+      // above remains synthetic; proposal transport and accounting are real.
+      const supervisor = { paused: proposalStatus === 'paused', closing: proposalStatus === 'closing',
+        error: proposalStatus === 'error' ? 'supervisor-persistence-unavailable' : null };
+      const state = proposalStatus === 'progress' ? ['queued', 'dispatching', 'settled'][Math.min(statusPaths.length - 1, 2)]
+        : ['unresolved', 'cancelled', 'unknown'].includes(proposalStatus ?? '') ? proposalStatus : 'settled';
+      return { supervisor, job: proposalStatus === 'missing' ? null : { id: proposalStatus === 'foreign' ? 'unrelated-human-task' : task!.id, state } };
     }
     if (path.endsWith('/history')) {
       resultRead = true;
@@ -215,7 +227,7 @@ async function fixture(mode: Mode) {
       } };
     });
   }
-  return { config, prepared, contexts, errors, controller, recipe, policy, allocation, drainReads,
+  return { config, prepared, contexts, errors, controller, recipe, policy, allocation, drainReads, statusPaths,
     ownerSnapshot: () => durableOwner?.snapshot(),
     capacityStatus: () => resourcePoolStatus(root, pool, bindings, observations),
     ownerLockPresent: () => existsSync(join(root, '.resource-console.lock')),
@@ -224,6 +236,29 @@ async function fixture(mode: Mode) {
 }
 
 describe('measured feedback through an accounted proposal into the next mission scope', () => {
+  it('polls only the exact proposal identity through queued, dispatching and settled status without requiring all history', async () => {
+    const f = await fixture('measured', 'progress');
+    expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'completed', scopesReserved: 2 });
+    const proposal = f.records().find(row => row.kind === 'proposal')!.payload as { task: ResourceTask };
+    expect(f.statusPaths).toEqual(Array(3).fill(`/api/resources/tasks/${proposal.task.id}`));
+    expect(adapters.request.mock.calls.map(([input]) => input.path)).not.toContain('/api/resources');
+    expect(f.contexts).toHaveLength(1); expect(f.status().attempts).toHaveLength(1);
+    expect(f.prepared).toHaveLength(2); expect(f.errors).toEqual([]);
+  }, 30_000);
+  it.each(['paused', 'closing', 'error', 'missing', 'foreign', 'unresolved', 'cancelled', 'unknown'] as const)(
+    'holds a proposal on exact-task %s without consuming history or publishing the next scope', async status => {
+      const f = await fixture('measured', status);
+      const result = await runResourceEngineeringMission(f.config);
+      expect(result).toMatchObject({ state: 'held', scopesReserved: 1, reason: ['paused', 'closing', 'error'].includes(status)
+        ? 'mission-proposal-console-unavailable' : 'mission-proposal-unresolved' });
+      const proposal = f.records().find(row => row.kind === 'proposal')!.payload as { task: ResourceTask };
+      expect(f.statusPaths).toEqual([`/api/resources/tasks/${proposal.task.id}`]);
+      const paths = adapters.request.mock.calls.map(([input]) => input.path as string);
+      expect(paths).not.toContain('/api/resources'); expect(paths.some(path => path.endsWith('/history'))).toBe(false);
+      expect(f.records().some(row => row.kind === 'result')).toBe(false);
+      expect(f.prepared).toHaveLength(1); expect(f.contexts).toHaveLength(1);
+      expect(f.status().attempts).toHaveLength(1); expect(f.errors).toEqual([]);
+    }, 30_000);
   it('keeps an exhausted shared task window exhausted when a never-dispatched mission proposal is recovered', async () => {
     const f = await fixture('exhausted-recovery');
     const before = f.capacityStatus(), contexts = structuredClone(f.contexts), deadlineAt = f.config.deadlineAt;

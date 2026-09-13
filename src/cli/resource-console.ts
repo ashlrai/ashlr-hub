@@ -2,6 +2,7 @@ import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 
 const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindings ABS --observations ABS [--port N] [--json]
        add --execute --workspace ABS [--max-parallel N] to enable foreground queued tasks
+       add --archive-history to compact settled local queue history as new tasks arrive
        add --projects ABS to pin additional projects while keeping --workspace as default
        add --engineering ABS to expose explicitly enrolled evaluated engineering actions
        add --engineering-preparation ABS to prepare objectives from trusted work profiles
@@ -82,6 +83,12 @@ Queued intents and pause state are durable; previously dispatching work is never
 silently replayed after restart. Ordinary output is bounded and session-only;
 opt-in transcripts persist locally until deleted. Accepted follow-ups freeze copied
 context independently of later deletion of their source transcripts.
+--archive-history requires execution and is off by default. It preserves terminal
+jobs in private archives when the 256-current-job store fills (at most 4096 archived
+jobs). Existing archives reopen without the flag; further compaction requires it.
+The desk shows active/recent jobs with paged history and exact task status reads.
+Compaction does not reset usage, renew deadlines or remove the resource ledger's
+separate capacity limits. It is not an unlimited or always-on service.
 --port accepts 0..65535, default 0. --max-parallel accepts 1..16, default 4.
 Connections are informational native metadata only, separate from worker admission.
 Policy controls persist revision-checked usage ceilings, whole-account pauses and
@@ -96,7 +103,7 @@ Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid argumen
 class UsageError extends Error {}
 type Options = { help: true } | { help: false; root: string; poolFile: string; bindingsFile: string;
   observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; engineeringFile?: string; engineeringPreparationFile?: string; engineeringSupervisionFile?: string; engineeringSuccessorsFile?: string; engineeringMissionFile?: string; engineeringMissionAutoStart?: boolean; allocationControls?: boolean;
-  port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
+  port: number; execute: boolean; archiveHistory?: boolean; workspace?: string; maxParallel?: number; json: boolean };
 
 function path(value: string): string {
   if (!isAbsolute(value) || resolve(value) === parsePath(value).root || Buffer.byteLength(value) > 4_096) {
@@ -109,10 +116,11 @@ function parse(args: string[]): Options {
       [...arg].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159)) ||
     Buffer.byteLength(args.join('\0')) > 32 * 1024) throw new UsageError('Arguments exceed the bounded text contract');
   if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) return { help: true };
-  const values = new Map<string, string>(); let execute = false; let json = false; let allocationControls = false; let missionAutoStart = false;
+  const values = new Map<string, string>(); let execute = false; let json = false; let allocationControls = false; let missionAutoStart = false; let archiveHistory = false;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
     if (flag === '--execute') { if (execute) throw new UsageError('Duplicate console option'); execute = true; continue; }
+    if (flag === '--archive-history') { if (archiveHistory) throw new UsageError('Duplicate console option'); archiveHistory = true; continue; }
     if (flag === '--json') { if (json) throw new UsageError('Duplicate console option'); json = true; continue; }
     if (flag === '--allocation-controls') { if (allocationControls) throw new UsageError('Duplicate console option'); allocationControls = true; continue; }
     if (flag === '--mission-auto-start') { if (missionAutoStart) throw new UsageError('Duplicate console option'); missionAutoStart = true; continue; }
@@ -128,6 +136,7 @@ function parse(args: string[]): Options {
   if (execute ? !values.has('--workspace') : values.has('--workspace') || values.has('--max-parallel') || values.has('--projects')) {
     throw new UsageError('Execution requires --execute with --workspace; projects and parallelism are execution-only');
   }
+  if (archiveHistory && !execute) throw new UsageError('History compaction requires --execute with --workspace');
   if ((values.has('--engineering') || values.has('--engineering-preparation')) && (!execute || !values.has('--projects'))) {
     throw new UsageError('Engineering requires --execute and an explicit --projects catalog');
   }
@@ -156,6 +165,7 @@ function parse(args: string[]): Options {
     ...(values.has('--engineering-mission') ? { engineeringMissionFile: path(values.get('--engineering-mission')!) } : {}),
     ...(missionAutoStart ? { engineeringMissionAutoStart: true } : {}),
     ...(allocationControls ? { allocationControls: true } : {}),
+    ...(archiveHistory ? { archiveHistory: true } : {}),
     port: Number(portText), execute, ...(execute ? { workspace: path(values.get('--workspace')!), maxParallel: Number(parallelText) } : {}), json };
 }
 

@@ -11,6 +11,8 @@ import styles from './WorkspaceView.module.css';
 import { TaskTranscript } from './TaskTranscript.js';
 import { WorkspaceFiles } from './WorkspaceFiles.js';
 import { WorkspaceEngineering } from './WorkspaceEngineering.js';
+import { useResourceTaskHistory } from '../../data/use-resource-task-history.js';
+import { TaskHistoryNavigation } from '../resources/TaskHistoryNavigation.js';
 
 export interface WorkspaceViewProps {
   surfaceActive?: boolean;
@@ -59,8 +61,10 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   project, projects, onSelectProject, active = true }: WorkspaceViewProps & {
     project?: ResourceConsoleProject; projects?: ResourceConsoleProject[]; onSelectProject?(id: string): void; active?: boolean;
   }) {
-  const fleet = useMemo(() => buildResourceFleet(snapshot, historical), [snapshot, historical]);
   const [selection, setSelection] = useState<string | null>(null);
+  const taskHistory = useResourceTaskHistory(snapshot, selection, active && !historical, project?.id);
+  const historySnapshot = taskHistory.snapshot ?? snapshot;
+  const fleet = useMemo(() => buildResourceFleet(historySnapshot, historical), [historySnapshot, historical]);
   const [engineering, setEngineering] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [taskId, setTaskId] = useState(newTaskId);
@@ -121,7 +125,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
   useEffect(() => {
     if (retentionSeen.current.session !== session) retentionSeen.current = { session, ids: new Set() };
     const removed = new Set<string>();
-    for (const job of snapshot.supervisor?.jobs ?? []) {
+    for (const job of historySnapshot.supervisor?.jobs ?? []) {
       if (job.historyAvailable === true) retentionSeen.current.ids.add(job.id);
       else if (retentionSeen.current.ids.delete(job.id)) removed.add(job.id);
     }
@@ -131,7 +135,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         outputRequest.current?.abort(); setOutput(null); setOutputError(null); setLoadingOutput(false);
       }
     }
-  }, [session, snapshot.supervisor?.jobs, selection]);
+  }, [session, historySnapshot.supervisor?.jobs, selection]);
 
   function select(id: string | null) {
     outputRequest.current?.abort(); fileGeneration.current++; setReadingFiles(false);
@@ -255,6 +259,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         <button type="button" aria-current={!engineering && selection === row.id ? 'true' : undefined} onClick={() => select(row.id)}>
           <span>{row.id}</span><StatusBadge status={row.state} tone={taskTone(row)} />
         </button></li>)}</ul> : <p className={styles.caption}>Your queued tasks will appear here.</p>}
+      <TaskHistoryNavigation history={taskHistory} disabled={!active || historical} buttonClassName={styles.subtleButton} className={styles.caption} />
       <p className={styles.railFoot}>{projects ? 'One shared account ledger. Project drafts stay separate in this browser session. Unattributed tasks remain in Resources.' : 'One confirmed workspace. Add a startup project catalog to enable project switching.'}</p>
     </aside>
 
@@ -276,6 +281,7 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
         {selected ? <StatusBadge status={selected.state} tone={taskTone(selected)} /> : null}</header>
       <div className={styles.conversation}>
         {historical ? <p className={styles.notice}>Showing the last successful snapshot. Sending is paused until current evidence returns.</p> : null}
+        {taskHistory.detailError ? <p role="alert" className={styles.notice}>{taskHistory.detailError}</p> : null}
         {scope.readOnly ? <p className={styles.notice}>Task execution is disabled for this console. You can inspect recorded work.</p> : null}
         {project?.enabled === false ? <p className={styles.notice}>This project is disabled. Its history remains available; new tasks cannot be sent.</p> : null}
         {notice ? <p role="status" className={styles.notice}>{notice}</p> : null}
@@ -283,14 +289,14 @@ function WorkspaceBody({ scope, snapshot, historical, enabled, stopEnabled, busy
           {submitted[selection] ? <section className={styles.request}><h3>Your task</h3><p>{submitted[selection]}</p></section>
             : <p className={styles.caption}>Original prompt text is not included in the task snapshot.</p>}
           {active && selected?.job?.historyAvailable === true ? <TaskTranscript key={outputKey} id={selection} projectId={project?.id ?? 'default'}
-            canDelete={stopEnabled && !busy && !!onDeleteHistory && ['settled', 'cancelled'].includes(selected.job.state)}
+            canDelete={stopEnabled && !busy && taskHistory.selectedCurrent && !!onDeleteHistory && ['settled', 'cancelled'].includes(selected.job.state)}
             unlocked={unlocked} onUnlock={onUnlock} onDelete={deleteHistory}
-            onFollowUp={scope.followUpSupported && canSend && !lockedForm && ['settled', 'cancelled'].includes(selected.job.state)
+            onFollowUp={scope.followUpSupported && canSend && !lockedForm && taskHistory.selectedCurrent && ['settled', 'cancelled'].includes(selected.job.state)
               ? (parent, turns) => { setFollowUp({ parent, turns }); setTaskId(newTaskId()); setError(null); textarea.current?.focus(); }
               : undefined} /> : null}
           <section className={styles.answer} aria-label="Task response"><h3>Response</h3>{outputContent}</section>
           {selected?.stateDisagreement ? <p className={styles.notice}>Supervisor and receipt states differ. Refreshing will reconcile the snapshots.</p> : null}
-          {selected?.job?.cancellable ? <button type="button" className={styles.subtleButton} disabled={!stopEnabled || busy}
+          {selected?.job?.cancellable ? <button type="button" className={styles.subtleButton} disabled={!active || !stopEnabled || busy || !taskHistory.selectedCurrent}
             onClick={() => onCancel(selected.id)}>{selected.job.state === 'queued' ? 'Cancel queued task' : 'Cancel owned task'}</button> : null}
         </> : <div className={styles.invitation}><span aria-hidden="true" className={styles.workMark}>⌑</span><h3>Start with the work.</h3>
           <p>Ask for an investigation, a proposed change, or a bounded implementation. Choose exactly which enrolled worker receives it.</p></div>}
