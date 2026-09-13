@@ -1,9 +1,12 @@
 # Hub verification-work benchmark proposal
 
-Status: design and local baseline observations, **not a frozen evaluator or an
-accepted optimization**. Audience: the engineer operating a real Hub campaign
-and the independent evaluator author. An [unapplied batching candidate](hub-verification-batch-candidate.md)
-is supplied for independent evaluation; the live preparation source is unchanged.
+Status: historical design, local measurements and subsequent verification notes,
+**not release or fleet-activation authority**. Audience: the engineer operating a
+real Hub campaign and the independent evaluator author. The retained
+[batching patch](hub-verification-batch-candidate.md) was adopted in source at
+`e9ddb5832ee894085f64c67d8177530c8f99c41b`; that document records its strict
+current-source native comparison. Earlier observations below remain tied to
+their historical source, not renewed by adoption.
 
 ## Runnable prototype: limited measurement, not acceptance authority
 
@@ -11,7 +14,8 @@ The prototype introduced after `3a228e1b` comprises a
 [standalone prototype](../scripts/evaluators/preparation-verification.mjs), a
 [shared trusted dependency packager](../scripts/build-preparation-builtin.mjs)
 and [real-fixture tests](../test/universe-preparation-verification.test.ts).
-The target remains unchanged. The first slice compares ordinary preparation
+Introducing the prototype did not change the target; batching was adopted later
+as noted above. The first slice compares ordinary preparation
 check and metadata reads for one/four protected evaluator files, including
 committed bytes that differ from the working checkout. The newer installed
 workflow revision below extends those measurements to manager and successor
@@ -54,6 +58,40 @@ rewards, promotion or autonomous delivery. The `preparation-verification-measure
 envelope deliberately omits evaluation `passed` and `score` fields; the tests
 require the Universe evaluation parser to reject it, including the confined run.
 This prevents mistaking a prototype measurement for accepted evaluation evidence.
+
+### Current-source prototype verification
+
+On 2026-09-13, the corrected prototype suite passed all 14 cases with zero skips
+in 141.97 seconds on macOS/Node 24.18.0, through
+`vitest.config.release-native.ts`. The runtime source was unchanged from
+`34b599223484670ecc96a1bf3debec88720d739e`, target Git blob
+`fff44339010fb6fb665bbdbfc6d7005ef2caafa4`. Three fresh processes each passed eight
+correctness checks and produced identical full metrics: one/four-file checks
+each used 34 broker launches, metadata reads each used 109, and all four reads
+used two blob launches apiece (286 broker launches total). These are prototype
+diagnostics, not the separate strict batching comparison or a wall-time benchmark.
+
+Constant-output, cached-verification and incorrect-blob controls must fail at
+the semantic comparison stage (`CANDIDATE_BEHAVIOR_FAILED`), not because startup
+or confinement failed. The cached control first passes two healthy checks before
+stale reuse is rejected. Syntax validation, assertion tampering, stdout forgery,
+forbidden process creation, network denial, filesystem protection and settled
+cleanup checks remain in the suite. Its optional diagnostic reports precede
+assertions so a failed expectation retains the actual measured result.
+
+Reproduce this source-only check with the installed dependencies and Node 24 on
+macOS; the wrapper and candidate deadlines are unchanged:
+
+```sh
+ASHLR_VERIFICATION_PROTOTYPE_REPORT=1 node scripts/test-ci.mjs \
+  --config vitest.config.release-native.ts \
+  test/universe-preparation-verification.test.ts --no-file-parallelism
+```
+
+This is one native test file, not complete native-release coverage, installed
+candidate qualification, a production release or permission to activate a fleet.
+
+### Historical prototype baseline
 
 Historical baseline at `96e9a6e8` (before process separation): eight tests passed
 in 23.35s on macOS/Node 24.18.0. Three fresh processes produced these diagnostics;
@@ -347,10 +385,11 @@ call-local reuse optimization is already present; do not grade rediscovering it.
 If a safe improvement requires another file, review a new benchmark contract
 before expanding the candidate allowlist.
 
-## Observed cost and baseline evidence
+## Historical observed cost and baseline evidence
 
-`capture()` currently performs these Git subprocesses for an existing prepared
-bundle with one protected evaluator file:
+At reviewed source `f543e3627adbbe979c5b4a826d5e1036ab745edb`, `capture()`
+performed these Git subprocesses for an existing prepared bundle with one
+protected evaluator file:
 
 | Operation | Source | Calls per capture |
 | --- | --- | ---: |
@@ -499,13 +538,13 @@ the final bundle's own digest inside its baseline file.
    parent-linked local delivery. Resolve the batching draft's documented
    [compatibility issue](hub-verification-batch-candidate.md) before accepting it.
 
-Direct Universe manifests already support the installed builtin path. The
+At the time of this proposal, direct Universe manifests supported the installed
+builtin path, while console recipes and preparation validation were command-only.
+That limitation is historical: the current
 [console recipe type](../src/core/resources/engineering-preparation-types.ts)
 and [preparation validator](../src/core/resources/engineering-preparation.ts)
-remain command-only: automatic prepared objectives would additionally need
-narrow support for this closed scoring builtin, not arbitrary executable
-authority. This distinction does not require a new orchestration layer or an
-additional human checkpoint for work already within the authorized scope.
+also support the closed builtin route. This does not grant arbitrary executable
+authority or substitute for candidate qualification and commissioning evidence.
 
 ## Review and commissioning gates
 

@@ -112,15 +112,17 @@ describe.runIf(confinementSupported)('runnable protected preparation verificatio
   it('measures the actual baseline public paths repeatably in three fresh processes', async () => {
     const results = [];
     for (let index = 0; index < 3; index++) results.push(await direct(record.seedArtifact.path));
+    if (process.env.ASHLR_VERIFICATION_PROTOTYPE_REPORT === '1') console.info('verification-prototype-baseline', JSON.stringify(results[0]));
     for (const result of results) {
       expect(result.checksPassed, JSON.stringify(result)).toBe(true);
       expect(result.metrics.correctness_checks).toBe(8);
       expect(result.metrics.files_1_check_blob_processes).toBe(2);
-      expect(result.metrics.files_4_check_blob_processes).toBe(8);
+      expect(result.metrics.files_1_metadata_blob_processes).toBe(2);
+      expect(result.metrics.files_4_check_blob_processes).toBe(2);
+      expect(result.metrics.files_4_metadata_blob_processes).toBe(2);
       expect(result.metrics.verification_processes).toBeGreaterThan(0);
     }
     expect(results[1]!.metrics).toEqual(results[0]!.metrics); expect(results[2]!.metrics).toEqual(results[0]!.metrics);
-    if (process.env.ASHLR_VERIFICATION_PROTOTYPE_REPORT === '1') console.info('verification-prototype-baseline', JSON.stringify(results[0]));
   }, 360000);
 
   it.each(['constant', 'cache', 'blob-bypass', 'global-assert-tamper', 'stdout-forgery', 'unexpected-process-route'] as const)('rejects an incorrect candidate control: %s', async kind => {
@@ -130,7 +132,7 @@ describe.runIf(confinementSupported)('runnable protected preparation verificatio
       const original = 'return preparedMetadata(input);'; expect(source).toContain(original);
       text = 'let benchmarkIncorrectCache;\n' + source.replace(original, 'return benchmarkIncorrectCache ??= preparedMetadata(input);');
     } else if (kind === 'blob-bypass') {
-      const original = "digest(git(seed.repo, ['cat-file', 'blob', entries.get(file)!]))"; expect(source).toContain(original);
+      const original = 'digest(blobs[index]!)'; expect(source.split(original)).toHaveLength(2);
       text = source.replace(original, "digest(Buffer.from('incorrect comparator'))");
     } else if (kind === 'global-assert-tamper') text = `import { readFileSync } from 'node:fs';
 const escaped = readFileSync.constructor('return process')();
@@ -147,7 +149,16 @@ escaped.exit(0);\n` + source;
       text = "import { execSync as benchmarkForbiddenShell } from 'node:child_process';\n" + source.replace(original,
         "benchmarkForbiddenShell('true'); " + original);
     }
-    const result = await direct(altered(text)); expect(result.checksPassed, JSON.stringify(result)).toBe(false);
+    const result = await direct(altered(text));
+    if (process.env.ASHLR_VERIFICATION_PROTOTYPE_REPORT === '1') console.info('verification-prototype-control', JSON.stringify({ kind, result }));
+    expect(result.checksPassed, JSON.stringify(result)).toBe(false);
+    if (kind === 'constant' || kind === 'cache' || kind === 'blob-bypass') {
+      // These candidates must reach semantic comparison, not pass this control
+      // because fixture startup, confinement, or cleanup failed. The cache first
+      // passes check+metadata, then incorrectly reuses metadata after mutation.
+      expect(result.diagnostics.map(row => row.code)).toEqual(['CANDIDATE_BEHAVIOR_FAILED']);
+      expect(result.metrics.correctness_checks).toBe(kind === 'cache' ? 2 : 0);
+    }
   }, 120000);
 
   it('refuses unavailable nested confinement without treating it as accepted evaluation', async () => {
