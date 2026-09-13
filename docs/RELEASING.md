@@ -61,6 +61,60 @@ succeed, or use a token/OTP fallback that bypasses its release checks. Source
 delivery and local verification can proceed without claiming npm production
 or fleet activation.
 
+### Native-test timing remains a release blocker
+
+The current local gate gives each root test shard 20 minutes. In the September
+13 local verification, the qualification file's main case and four controls
+measured 25 minutes 35 seconds in total. Its existing file-level shard cannot
+accommodate that observed workload within the outer deadline. Separately,
+`test:ci` terminates a child after five minutes without child output; the
+wrapper's own heartbeat does not make a silent native test progress.
+
+Do not interpret focused native passes or successful package installation as a
+complete release-gate pass. Do not remove long-running cases, shorten their
+workloads, or increase timeouts ad hoc to obtain one. A successor gate needs an
+explicit, coverage-preserving partition and reviewed budgets, followed by real
+execution. Changed gate semantics must be versioned in the contract and receipt
+verifier without reinterpreting historical receipts.
+
+From the repository root, with the locked development dependencies installed,
+inspect the proposed whole-file partition:
+
+```bash
+node scripts/check-release-test-coverage.mjs
+```
+
+The JSON report discovers the default project/file pairs from the local Vitest
+configuration, then verifies an exact-once split using the reviewed manifest in
+[`release-native-candidates.mjs`](../test/config/release-native-candidates.mjs).
+It rejects missing manifest files, project mismatches, duplicate assignments,
+and uncovered files. New default files remain in the ordinary group. Review
+their timing separately: this inventory does not infer test duration or classify
+new long-running cases automatically.
+
+This command loads trusted repository configuration but does not import test or
+setup modules. It rejects command-line filters and has a 30-second CLI ceiling,
+including cleanup; exceeding it is a failure with cleanup unconfirmed. The
+report explicitly says `testsExecuted: false` and `gateAttestation: false`.
+It describes a **proposed** partition, not the current three shards, expanded
+test-case counts, passing tests, or proof that either group's budget is adequate.
+No release command or receipt semantics change merely by running this check.
+
+### Keep public source separate from private commissioning evidence
+
+Before source delivery, review the complete outgoing commit range, not only the
+latest diff. Local account inspections, machine paths, process captures, and
+commissioning receipts are not reusable setup documentation. Keep original
+evidence in private custody and write portable instructions with fictional
+examples for public readers. Never redact a signed or digest-bound receipt in
+place and continue presenting it as the original proof.
+
+Removing a file from the tip does not remove it from reachable Git history.
+Choose the publication-history strategy explicitly before pushing; preserve
+the original private evidence and do not silently rewrite shared history.
+Passing the npm file allowlist checks does not clear the broader Git repository
+for public source delivery.
+
 ## Local verification for the 3.4.0 successor
 
 The M571 gate verifies the tracked M570 policy entirely on the local macOS
