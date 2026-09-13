@@ -76,6 +76,20 @@ function timeGuard() {
   }
 }
 
+function assertSettledCapture(captured, retained) {
+  assert.equal(captured.state, 'recorded'); assert.equal(captured.disposition, 'created');
+  assert.equal(captured.receipt?.outcome, 'captured'); assert.equal(captured.receipt?.identityVerified, true);
+  assert.equal(captured.receipt?.processGroupSettlement, 'group-exit-confirmed');
+  if (captured.receipt.custodyDiagnostics !== undefined) assert.equal(captured.receipt.custodyDiagnostics.boundary, 'completed');
+  // The fixed evaluator authenticated nested settlement while it held the
+  // invocation key. That key is deliberately not retained. Re-reading old
+  // process IDs (or asking for that discarded key) cannot re-prove completion.
+  // Consume the validated durable receipt, never an unauthenticated journal.
+  assert.equal(retained.state, 'recorded');
+  assert.deepEqual(retained.intent, captured.intent);
+  assert.deepEqual(retained.receipt, captured.receipt);
+}
+
 async function main() {
   assert.equal(process.platform, 'darwin'); assert.ok(Number(process.versions.node.split('.')[0]) >= 24);
   assert.ok(process.argv.length === 6 || process.argv.length === 8);
@@ -113,7 +127,6 @@ async function main() {
   const { parsePreparationMeasurementReport } = await load('core/universe/preparation-measurement-report.js');
   const { extractPreparationScenarioVector } = await load('core/universe/preparation-measurement-comparison.js');
   const { calibratePreparationMeasurements, parsePreparationMeasurementCalibration } = await load('core/universe/preparation-measurement-calibration.js');
-  const { inspectBuiltinActivity } = await import(pathToFileURL(join(repository, 'scripts/evaluators/preparation-verification-activity.mjs')).href);
   guard(); announce('source-and-runtime-preflight');
   const installed = resolveBuiltinEvaluator('preparation-measurement-v1');
   // Ambient Git overrides can redirect init/add/commit despite -C. Discard all
@@ -266,9 +279,7 @@ async function main() {
     saveJson(`${captureId}-capture.json`, captured);
     const raw = captured.receipt?.report?.stdout;
     if (raw !== undefined) save(`${captureId}-report.json`, raw);
-    assert.equal(captured.state, 'recorded'); assert.equal(captured.disposition, 'created');
-    assert.equal(captured.receipt?.outcome, 'captured'); assert.equal(captured.receipt?.identityVerified, true);
-    assert.equal(captured.receipt?.processGroupSettlement, 'group-exit-confirmed');
+    assertSettledCapture(captured, readUniversePreparationMeasurementCapture(request));
     assert.equal(typeof raw, 'string');
     const report = parsePreparationMeasurementReport(raw), vector = extractPreparationScenarioVector(raw);
     assert.equal(report.workload, 'preparation-workflows-v2'); assert.equal(report.checksPassed, true);
@@ -283,12 +294,8 @@ async function main() {
     assert.equal(artifactDigest(record.seedArtifact.path), record.seedArtifact.digest);
     assert.deepEqual(readRecords(directory), beforeRecords); assert.equal(snapshot(record.seedArtifact.path), seedBefore);
     if (seedScope === 'private-one-file') assert.equal(snapshot(seedRepo), repoBefore); else assertSourceRepository();
-    const work = join(directory, 'preparation-measurement-work', captureId);
-    const roots = readdirSync(work).filter(name => name.startsWith('builtin-activity-')); assert.equal(roots.length, 1);
-    const activityRoot = join(work, roots[0]), owner = JSON.parse(readFileSync(join(activityRoot, 'owner.json'), 'utf8'));
-    assert.equal(owner.implementationDigest, installed.digest); assert.ok(inspectBuiltinActivity(activityRoot, owner));
     const settled = snapshot(root);
-    assert.deepEqual(readUniversePreparationMeasurementCapture(request).receipt, captured.receipt);
+    assertSettledCapture(captured, readUniversePreparationMeasurementCapture(request));
     guard();
     const replay = await captureUniversePreparationMeasurement({ ...request, signal: controller.signal });
     assert.equal(replay.disposition, 'replayed'); assert.deepEqual(replay.receipt, captured.receipt); assert.equal(snapshot(root), settled);

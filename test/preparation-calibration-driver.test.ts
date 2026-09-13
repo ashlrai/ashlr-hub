@@ -13,6 +13,47 @@ import { describe, expect, it, vi } from 'vitest';
 // no real Git, capture, filesystem mutation, HOME or KILL access is available.
 const source = ts.createSourceFile('run-calibration.mjs', readFileSync(new URL(
   '../workplans/2026-09-12-installed-scoring/run-calibration.mjs', import.meta.url), 'utf8'), ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
+const settlementFunction = source.statements.find((node): node is ts.FunctionDeclaration =>
+  ts.isFunctionDeclaration(node) && node.name?.text === 'assertSettledCapture');
+if (!settlementFunction) throw new Error('Calibration settlement guard unavailable');
+// Execute the actual driver guard with only assert injected. No process probing,
+// private-key recovery, capture execution or filesystem access is available.
+const checkSettlement = compileFunction(`${settlementFunction.getText(source)}\nreturn assertSettledCapture(captured, retained);`,
+  ['assert', 'captured', 'retained']);
+function settledFixture() {
+  const captured = { state: 'recorded', disposition: 'created', intent: { captureId: 'baseline-v2-1', evaluator: { digest: 'a'.repeat(64) } },
+    receipt: { outcome: 'captured', identityVerified: true, processGroupSettlement: 'group-exit-confirmed',
+      custodyDiagnostics: { boundary: 'completed' }, report: { sha256: 'b'.repeat(64) } } };
+  return { captured, retained: { ...structuredClone(captured), disposition: null } };
+}
+describe('calibration consumes exact retained settlement evidence', () => {
+  it('accepts authenticated completion through its receipt without retaining the private key', () => {
+    const { captured, retained } = settledFixture();
+    expect(() => checkSettlement(assert, captured, retained)).not.toThrow();
+  });
+  it('preserves legacy captured receipts without inventing diagnostics', () => {
+    const { captured, retained } = settledFixture();
+    Reflect.deleteProperty(captured.receipt, 'custodyDiagnostics'); Reflect.deleteProperty(retained.receipt, 'custodyDiagnostics');
+    expect(() => checkSettlement(assert, captured, retained)).not.toThrow();
+  });
+  it.each([
+    { state: 'held' }, { disposition: 'replayed' }, { receipt: null },
+    { receipt: { outcome: 'held', identityVerified: true, processGroupSettlement: 'unconfirmed' } },
+    { receipt: { outcome: 'captured', identityVerified: false, processGroupSettlement: 'group-exit-confirmed' } },
+    { receipt: { outcome: 'captured', identityVerified: true, processGroupSettlement: 'unconfirmed' } },
+    { receipt: { outcome: 'captured', identityVerified: true, processGroupSettlement: 'group-exit-confirmed', custodyDiagnostics: { boundary: 'nested-activity' } } },
+  ])('refuses unsuccessful fresh evidence even if readback agrees: %#', patch => {
+    const { captured } = settledFixture(); const changed = { ...captured, ...patch };
+    expect(() => checkSettlement(assert, changed, structuredClone(changed))).toThrow();
+  });
+  it.each(['state', 'intent', 'receipt', 'missing'] as const)('refuses mismatched retained %s', field => {
+    const { captured, retained } = settledFixture();
+    if (field === 'state') retained.state = 'held';
+    if (field === 'intent') retained.intent.captureId = 'another-capture';
+    if (field === 'receipt') retained.receipt.report.sha256 = 'c'.repeat(64);
+    expect(() => checkSettlement(assert, captured, field === 'missing' ? null : retained)).toThrow();
+  });
+});
 const transformed = ts.transform(source, [context => root => {
   const f = context.factory;
   const visit: ts.Visitor = node => {
