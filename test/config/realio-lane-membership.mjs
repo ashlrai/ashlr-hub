@@ -114,7 +114,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-state-storage.test.ts', // versioned private source projection and guarded archive staging
   'test/resource-engineering-compacted-proof-acceptance.test.ts', // genuine workspace custody and worker proofs over archived history
   'test/resource-engineering-custody-acl-diagnostic.test.ts', // Darwin ACL subprocess timings with actual proof/setup workers and private Git fixtures
+  'test/resource-engineering-preparation-report-review.test.ts', // real private preparation registry, public reports, replay and callback-mutation vetoes
   'test/resource-pool-evolution-archive.test.ts', // versioned migration journal and archived history replay
+  'test/resource-pool-config-history.test.ts', // full-size epoch histories with real private offline migration, replay and interrupted resume
   'test/private-file-publication-guard.test.ts', // exact private-file publication veto and temporary identity checks
   'test/resource-console-history-deletion-failure.test.ts', // real completed output withheld after exact root publication failure
   'test/resource-console-history-acceptance.test.ts', // independent restart, deletion and receipt reconciliation

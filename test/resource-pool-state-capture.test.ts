@@ -92,12 +92,12 @@ describe('pool-specific bounded JSON capture', () => {
     expect(() => decodeResourcePoolState({ ...state, poolDigest: next.poolDigest, configurationHistory: tooMany }, next.pool, next.bindings))
       .toThrow('Invalid resource configuration history');
   });
-  it('does not silently relax the separate large-epoch evidence-pack boundary', () => {
+  it('accepts sixteen valid large epochs without inheriting evidence-pack limits', () => {
     const history = Array.from({ length: 16 }, (_, index) => configuration(index + 17, 32));
     const current = history.at(-1)!;
     const state = { schemaVersion: 2, poolDigest: current.poolDigest, configurationHistory: history, observations: [], attempts: [] };
     expect(captureResourcePoolStateJson(state)).toBeDefined();
     expect(canonicalEvidencePackJsonV3(history)).toBeNull();
-    expect(() => decodeResourcePoolState(state, current.pool, current.bindings)).toThrow('Invalid resource configuration history');
+    expect(decodeResourcePoolState(state, current.pool, current.bindings).configurationHistory).toEqual(history);
   });
 });

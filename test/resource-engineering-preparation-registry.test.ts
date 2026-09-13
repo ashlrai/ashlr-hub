@@ -168,18 +168,28 @@ describe('owner-independent preparation registry boundaries', () => {
 
   it('keeps fresh full bundle evidence at all writer boundaries without repeating unused commissioning reports', () => {
     const f = fixture(); const plan = f.registry.materialize(request).plan;
-    const metadata = vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata');
+    const events: string[] = []; const readMetadata = preparation.readPreparedResourceEngineeringMetadata;
+    const metadata = vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata').mockImplementation(input => {
+      events.push('verify'); const result = readMetadata(input); events.push('verified'); return result;
+    });
     const full = vi.spyOn(preparation, 'readPreparedResourceEngineeringBundle');
     const reports = vi.spyOn(commissioning, 'checkResourceConsoleEngineering');
-    const guard = vi.fn();
-    const prepared = f.registry.prepare({ ...request, expectedPlanDigest: plan.planDigest }, { beforeNew() {}, beforePublication: guard });
+    const creator = vi.spyOn(preparation, 'prepareResourceEngineeringBundle');
+    const guard = vi.fn(() => { events.push('publication'); });
+    const prepared = f.registry.prepare({ ...request, expectedPlanDigest: plan.planDigest }, {
+      beforeNew() { events.push('before-new'); }, beforePublication: guard });
     expect(prepared.disposition).toBe('created');
-    expect(full).toHaveBeenCalledTimes(1);
-    expect(metadata).toHaveBeenCalledTimes(3);
+    expect(full).toHaveBeenCalledTimes(0);
+    expect(metadata).toHaveBeenCalledTimes(4);
     expect(guard).toHaveBeenCalledTimes(4);
-    // Creator and initial committed report remain complete; the three writer
-    // gates use the same fresh evidence reader without its diagnostics wrapper.
-    expect(reports).toHaveBeenCalledTimes(2);
+    expect(events).toEqual(['before-new', ...Array.from({ length: 4 }, () => ['verify', 'verified', 'publication']).flat()]);
+    // Creator remains complete; the discarded initial publication report and
+    // three writer gates use the same fresh evidence reader without diagnostics.
+    expect(reports).toHaveBeenCalledTimes(1);
+    const created = creator.mock.results[0];
+    if (!created || created.type !== 'return') throw new Error('Actual creator did not return');
+    expect(prepared).toEqual({ plan, catalog: JSON.parse(readFileSync(created.value.paths.engineering, 'utf8')),
+      enrollmentDigest: created.value.enrollmentDigest, disposition: created.value.disposition });
     const row = f.registry.registrations()[0]!;
     const before = tree(f.base); const verified = f.registry.committed(row);
     expect(verified.report).toHaveProperty('commissioning');
@@ -188,12 +198,32 @@ describe('owner-independent preparation registry boundaries', () => {
     expect(tree(f.base)).toEqual(before);
   });
 
+  it.each(['receipt', 'seed'] as const)('refuses changed %s at the initial metadata proof before any publication callback', part => {
+    const f = fixture(); const plan = f.registry.materialize(request).plan;
+    const original = preparation.readPreparedResourceEngineeringMetadata; const guard = vi.fn();
+    const metadata = vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata').mockImplementation(input => {
+      if (part === 'receipt') {
+        const file = join(input.output, 'receipt.json');
+        save(file, { ...JSON.parse(readFileSync(file, 'utf8')), enrollmentDigest: 'f'.repeat(64) });
+      } else {
+        const file = join(input.output, 'universe', 'universes', request.id, 'seed', 'evaluate.mjs');
+        chmodSync(file, 0o600); writeFileSync(file, 'throw Error("Changed fixed evaluator artifact");\n');
+      }
+      return original(input);
+    });
+    expect(() => f.registry.prepare({ ...request, expectedPlanDigest: plan.planDigest }, { beforeNew() {}, beforePublication: guard })).toThrow();
+    expect(metadata).toHaveBeenCalledTimes(1); expect(guard).not.toHaveBeenCalled();
+    expect(existsSync(join(f.root, 'console-engineering-preparations', 'records', `${request.id}.json`))).toBe(false);
+    expect(existsSync(join(f.config.outputRoot, request.id, 'receipt.json'))).toBe(true);
+    expect(existsSync(join(f.root, 'pool-state.json'))).toBe(false);
+  });
+
   it.each([1, 2, 3])('refuses receipt drift at fresh writer boundary %i without publishing registration', boundary => {
     const f = fixture(); const plan = f.registry.materialize(request).plan;
     const original = preparation.readPreparedResourceEngineeringMetadata;
     let calls = 0;
     vi.spyOn(preparation, 'readPreparedResourceEngineeringMetadata').mockImplementation(input => {
-      if (++calls === boundary) {
+      if (++calls === boundary + 1) {
         const file = join(input.output, 'receipt.json');
         save(file, { ...JSON.parse(readFileSync(file, 'utf8')), enrollmentDigest: 'f'.repeat(64) });
       }
@@ -201,7 +231,7 @@ describe('owner-independent preparation registry boundaries', () => {
     });
     expect(() => f.registry.prepare({ ...request, expectedPlanDigest: plan.planDigest }, { beforeNew() {}, beforePublication() {} }))
       .toThrow('Objective registration incomplete');
-    expect(calls).toBe(boundary);
+    expect(calls).toBe(boundary + 1);
     expect(existsSync(join(f.root, 'console-engineering-preparations', 'records', `${request.id}.json`))).toBe(false);
     // Retain incomplete evidence rather than repairing it or executing work.
     expect(existsSync(join(f.config.outputRoot, request.id, 'receipt.json'))).toBe(true);

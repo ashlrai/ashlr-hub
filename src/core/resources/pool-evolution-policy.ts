@@ -1,6 +1,7 @@
 /** Pure additive compatibility; importing it never opens a store. */
 import { canonical, digest } from '../universe/artifacts.js';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
+import { captureResourcePoolConfigHistoryJson } from './pool-state-capture.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
@@ -48,8 +49,7 @@ export function validateResourcePoolAdditiveEvolution(from: ResourcePoolConfigSn
   return { addedWorkerIds, annotatedWorkerIds };
 }
 export function validateResourcePoolConfigHistory(value: unknown): ResourcePoolConfigSnapshot[] {
-  const json = canonicalEvidencePackJsonV3(value);
-  if (json === null || Buffer.byteLength(json) > 2 * 1024 * 1024) throw new Error('Invalid resource configuration history');
+  const json = captureResourcePoolConfigHistoryJson(value);
   const rows = JSON.parse(json) as ResourcePoolConfigSnapshot[];
   if (!Array.isArray(rows) || rows.length < 1 || rows.length > MAX_RESOURCE_POOL_CONFIGURATIONS) throw new Error('Invalid resource configuration history');
   const result = rows.map(row => {

@@ -200,10 +200,11 @@ export function createResourceEngineeringPreparationRegistry(input: {
     const catalog = validateResourceConsoleEngineeringCatalog(readResourceJson(report.paths.engineering));
     return { candidate, report, catalog };
   }
-  function publish(registration: ResourceEngineeringPreparationRegistration, beforePublication: (catalog: ResourceConsoleEngineeringCatalog) => void) {
+  function publishInternal(registration: ResourceEngineeringPreparationRegistration,
+    beforePublication: (catalog: ResourceConsoleEngineeringCatalog) => void, metadataOnly: boolean) {
     const captured = copy<ResourceEngineeringPreparationRegistration>(registration);
     if (!decodeRegistration(captured) || captured.configDigest !== contextDigest) fail('CONFLICT', 'Objective registration context changed');
-    const verified = committed(captured); currentConfig(); beforePublication(verified.catalog);
+    const verified = committed(captured, captured.request, metadataOnly); currentConfig(); beforePublication(verified.catalog);
     const written = writeImmutablePrivateRecord(store, captured, { prepublish: () => {
       // Each writer boundary still reconstructs the entire bundle proof and
       // invokes the live owner's check. Only unused commissioning diagnostics
@@ -213,6 +214,12 @@ export function createResourceEngineeringPreparationRegistry(input: {
     } });
     if (!['recorded', 'replayed'].includes(written)) fail('UNAVAILABLE', 'Objective registration incomplete; inspect retained output before retrying');
     return verified;
+  }
+  // Public publication retains its full report. Internal preparation paths
+  // discard commissioning diagnostics; they consume the same freshly
+  // verified catalog and never reuse a proof across publication boundaries.
+  function publish(registration: ResourceEngineeringPreparationRegistration, beforePublication: (catalog: ResourceConsoleEngineeringCatalog) => void) {
+    return publishInternal(registration, beforePublication, false);
   }
   return { config, contextDigest, currentConfig, registrations, objective, planned, materialize, successorOptions, committed, publish,
     prepare(input: unknown, guards: { beforeNew(id: string, priorCount: number): void; beforePublication(catalog: ResourceConsoleEngineeringCatalog): void }, automaticAdmission?: ResourceEngineeringAutomaticAdmission) {
@@ -225,8 +232,9 @@ export function createResourceEngineeringPreparationRegistry(input: {
       if (existing) {
         if (admission && existing.automaticAdmission && canonical(admission) !== canonical(existing.automaticAdmission)) fail('CONFLICT', 'Automatic admission belongs to another supervision budget');
         // The bundle reader still performs both fresh pin captures and receipt
-        // verification. Do not cache this result across calls or publication gates.
-        const verified = committed(existing, incoming);
+        // verification. This return does not include commissioning diagnostics.
+        // Do not cache this result across calls or publication gates.
+        const verified = committed(existing, incoming, true);
         if (expectedPlanDigest !== verified.candidate.plan.planDigest) fail('CONFLICT', 'Objective plan changed; check it again');
         currentConfig(); guards.beforePublication(verified.catalog);
         return { plan: verified.candidate.plan, catalog: verified.catalog, enrollmentDigest: verified.report.enrollmentDigest, disposition: 'replayed' as const };
@@ -239,7 +247,7 @@ export function createResourceEngineeringPreparationRegistry(input: {
       const registration: ResourceEngineeringPreparationRegistration = { schemaVersion: 1, configDigest: contextDigest, request: candidate.request, planDigest: expectedPlanDigest,
         bundlePlanDigest: candidate.bundlePlan.planDigest, enrollmentDigest: report.enrollmentDigest,
         ...(admission ? { automaticAdmission: admission } : {}) };
-      const verified = publish(registration, guards.beforePublication);
+      const verified = publishInternal(registration, guards.beforePublication, true);
       return { plan: candidate.plan, catalog: verified.catalog, enrollmentDigest: report.enrollmentDigest, disposition: report.disposition };
     },
   };

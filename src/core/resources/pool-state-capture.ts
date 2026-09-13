@@ -1,7 +1,8 @@
 /** Pool-local JSON capture. Evidence-pack cryptographic budgets are intentionally unrelated. */
 import { types } from 'node:util';
 
-const MAX_BYTES = 4 * 1024 * 1024;
+const MAX_STATE_BYTES = 4 * 1024 * 1024;
+const MAX_HISTORY_BYTES = 2 * 1024 * 1024;
 const MAX_DEPTH = 32;
 const MAX_CONTAINER_ENTRIES = 4096;
 const MAX_STRING_BYTES = 128 * 1024;
@@ -11,20 +12,31 @@ const invalid = (): never => { throw new Error('Invalid bounded resource ledger'
 
 /** Detached, key-sorted canonical JSON with space reserved for the persisted newline.
  * Keep the prior depth/container/string/key ceilings. The node ceiling is the
- * 4MiB byte ceiling: every JSON value consumes at least one byte, so this cannot
+ * domain byte ceiling: every JSON value consumes at least one byte, so this cannot
  * exclude a document fitting the ledger while still bounding traversal work.
  * Receipt count, schema, policies and the 16-epoch limit remain domain checks. */
 export function captureResourcePoolStateJson(input: unknown): string {
+  return capture(input, MAX_STATE_BYTES, 1);
+}
+
+/** History is embedded JSON, so its existing 2MiB bound excludes a newline.
+ * Individual snapshots and the sixteen-epoch/additive rules remain policy checks. */
+export function captureResourcePoolConfigHistoryJson(input: unknown): string {
+  try { return capture(input, MAX_HISTORY_BYTES, 0); }
+  catch { throw new Error('Invalid resource configuration history'); }
+}
+
+function capture(input: unknown, maxBytes: number, newlineBytes: 0 | 1): string {
   const ancestors = new Set<object>();
-  let nodes = 0; let bytes = 1;
-  const charge = (amount: number) => { bytes += amount; if (bytes > MAX_BYTES) invalid(); };
+  let nodes = 0; let bytes = newlineBytes;
+  const charge = (amount: number) => { bytes += amount; if (bytes > maxBytes) invalid(); };
   const string = (value: string, limit: number) => {
     if (Buffer.byteLength(value, 'utf8') > limit) invalid();
     charge(Buffer.byteLength(JSON.stringify(value), 'utf8'));
     return value;
   };
   const visit = (value: unknown, depth: number): Json => {
-    if (++nodes > MAX_BYTES || depth > MAX_DEPTH) return invalid();
+    if (++nodes > maxBytes || depth > MAX_DEPTH) return invalid();
     if (value === null || typeof value === 'boolean') { charge(value === null ? 4 : value ? 4 : 5); return value; }
     if (typeof value === 'string') return string(value, MAX_STRING_BYTES);
     if (typeof value === 'number') {
@@ -66,7 +78,7 @@ export function captureResourcePoolStateJson(input: unknown): string {
   };
   try {
     const encoded = JSON.stringify(visit(input, 0));
-    if (Buffer.byteLength(encoded, 'utf8') + 1 !== bytes) return invalid();
+    if (Buffer.byteLength(encoded, 'utf8') + newlineBytes !== bytes) return invalid();
     return encoded;
   } catch { return invalid(); }
 }

@@ -502,6 +502,12 @@ every object identity and the aggregate byte limit before creating seed files,
 then verifies the resulting disk artifact digest. Immutable registration still
 rechecks the prepared bundle and live owner at every publication boundary; it
 does not rebuild unused commissioning diagnostics at those internal boundaries.
+Internal preparation and exact replay use the fresh verified-bundle metadata
+reader when they only need the plan, catalog and enrollment identity. New bundle
+creation and public committed/publication reports still include commissioning
+diagnostics and command arguments. This omits discarded reporting work, not
+receipt, evaluator, source, owner or publication verification; no positive proof
+is cached between calls or callbacks.
 The standalone preparation command remains synchronous. Standing missions use
 the cooperative setup worker described above; other synchronous callers must
 not run preparation directly on an interactive server's event loop.
@@ -2030,7 +2036,12 @@ leaves the old ledger intact but still requires inspection. Do not delete journa
 receipts, downgrade the binary or use an empty ledger as recovery. Exact completed
 replay is read-only and must not overwrite later work, deletion or cancellation.
 The ledger supports at most 16 configuration epochs within its existing byte
-and task-identity bounds; this is not automatic archival or compaction.
+and task-identity bounds. The complete configuration history has its own 2 MiB
+JSON envelope; each snapshot remains bounded to 256 KiB. Ordinary reads,
+migration planning, apply, interrupted resume and completed replay validate that
+same history, including exact digests and additive compatibility. The history
+reader does not use the smaller evidence-pack cryptographic envelope. This is
+not automatic archival or compaction.
 
 The journal does not archive conversation text. Console recovery uses hashes and
 immutable job identities. Explicit resume can remove only its exact, complete,
@@ -3132,10 +3143,8 @@ persisted newline. Its ledger-specific JSON capture checks plain data descriptor
 before reading values and accounts for encoded bytes during traversal. It does
 not borrow the smaller evidence-pack cryptographic envelope. Receipt validation,
 quota accounting and replay checks still apply independently. Configuration
-history retains its own validation bounds, including the smaller nested
-evidence-pack envelope. Large configuration histories can still be refused
-before their nominal 2 MiB bound. This change does not expand epoch history or
-archive resource receipts. Before starting
+history retains its separate 2 MiB, 16-epoch and per-snapshot validation bounds.
+These readers do not archive resource receipts. Before starting
 a worker, admission budgets worst-case settlement metadata for every reserved
 task and the bounded quota inventory. Insufficient receipt headroom refuses the
 new admission; it does not evict history. Existing receipt identity and replay
