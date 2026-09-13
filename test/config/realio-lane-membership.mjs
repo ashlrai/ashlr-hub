@@ -109,6 +109,10 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-history.test.ts', // durable supervisor transcripts with real inert transports
   'test/resource-console-history-archive-store.test.ts', // actual private staging, deletion and restart evidence
   'test/resource-console-history-view.test.ts', // verified current/archive joins against private on-disk snapshots
+  'test/resource-console-compaction-acceptance.test.ts', // actual public task admission, archive/restart and quota continuity
+  'test/resource-console-compaction-deadline.test.ts', // real archive publication followed by deadline/host/reentrancy vetoes
+  'test/resource-console-state-storage.test.ts', // versioned private source projection and guarded archive staging
+  'test/resource-console-history-deletion-failure.test.ts', // real completed output withheld after exact root publication failure
   'test/resource-console-history-acceptance.test.ts', // independent restart, deletion and receipt reconciliation
   'test/resource-console-followup.test.ts', // context headroom and corrupted durable-state refusal
   'test/resource-console-followup-server.test.ts', // authenticated follow-up HTTP and shared quota accounting

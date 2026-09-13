@@ -38,6 +38,10 @@ export interface ResourceConsoleHistoryArchiveStore {
   readSnapshot(ids: string[]): ResourceConsoleArchiveSnapshot;
   /** Tombstone commits before unlink. A thrown cleanup may still have durably suppressed reads. */
   deleteText(recordId: string): { status: 'deleted' | 'not-retained'; recordId: string };
+  /** Also covers orphan staging before the first metadata record was published. */
+  deleteTaskText(jobId: string, expectedTaskDigest: string): { status: 'missing' | 'deleted' | 'not-retained' };
+  /** Point deletion evidence, not payload availability; bracket queries with readSnapshot([]). */
+  readTaskDeletionState(jobId: string, expectedTaskDigest: string): 'missing' | 'retained' | 'not-retained' | 'deleted' | 'unavailable';
 }
 
 const same = (a: BigIntStats, b: BigIntStats): boolean => a.dev === b.dev && a.ino === b.ino;
@@ -204,6 +208,18 @@ export function createResourceConsoleHistoryArchiveStore(options: { root: string
     guard(); const result = writeImmutablePrivateRecord(store, value, { lockWaitMs: 0, prepublish: () => { guard(); return true; } });
     if (result !== 'recorded' && result !== 'replayed') fail(); guard();
   }
+  function deleteTaskPayload(task: Identity, guard: () => void): 'deleted' | 'not-retained' {
+    const tombstone = point(tombstones, task.id);
+    if (tombstone && tombstone.taskDigest !== task.taskDigest) fail();
+    if (!tombstone && task.textDigest === null) return 'not-retained';
+    publish(tombstones, { schemaVersion: 1, kind: 'resource-console-archive-text-deletion', id: task.id,
+      scopeDigest, taskDigest: task.taskDigest }, guard);
+    if (!absent(texts)) for (const name of [`${task.id}.json`, `.${task.id}.tmp`]) {
+      inspectPrivateDirectory(texts); const path = join(texts, name);
+      if (!absent(path)) { const before = privateFile(path); guard(); if (!same(before, privateFile(path))) fail(); unlinkSync(path); fsyncDirectory(texts); }
+    }
+    guard(); return 'deleted';
+  }
   inventory();
   return {
     read(recordId) {
@@ -267,7 +283,9 @@ export function createResourceConsoleHistoryArchiveStore(options: { root: string
         // A different source version must not bypass an interrupted initial publication.
         // Otherwise firstRecordId can remain absent after B commits, allowing a later A/C
         // retry to mistake a lost published transcript for an uncommitted initial payload.
-        if (prior && prior.firstRecordId !== record.id && !point(records, prior.firstRecordId)) fail();
+        // A verified permanent tombstone is the sole exception: a different version
+        // can finish metadata publication, but can never recreate the initial text.
+        if (prior && !tombstone && prior.firstRecordId !== record.id && !point(records, prior.firstRecordId)) fail();
         if (!existing && limits.metadata >= MAX_RECORDS || !prior && limits.tasks >= MAX_RECORDS ||
           limits.bytes + Buffer.byteLength(canonical(record)) + (text ? Buffer.byteLength(canonical(text)) : 0) + 4096 > MAX_BYTES) fail();
         if (!prior) publish(tasks, expected, guard);
@@ -291,16 +309,40 @@ export function createResourceConsoleHistoryArchiveStore(options: { root: string
       if (typeof recordId !== 'string' || !HASH.test(recordId)) fail();
       return locked(guard => {
         const record = point(records, recordId); if (!record) return fail();
-        const { task, deleted } = relation(record);
-        if (!deleted && record.textDigest === null) return { status: 'not-retained', recordId };
-        publish(tombstones, { schemaVersion: 1, kind: 'resource-console-archive-text-deletion', id: task.id,
-          scopeDigest, taskDigest: task.taskDigest }, guard);
-        if (!absent(texts)) for (const name of [`${task.id}.json`, `.${task.id}.tmp`]) {
-          inspectPrivateDirectory(texts); const path = join(texts, name);
-          if (!absent(path)) { const before = privateFile(path); guard(); if (!same(before, privateFile(path))) fail(); unlinkSync(path); fsyncDirectory(texts); }
-        }
-        guard(); return { status: 'deleted', recordId };
+        const { task } = relation(record);
+        return { status: deleteTaskPayload(task, guard), recordId };
       });
+    },
+    deleteTaskText(jobId, expectedTaskDigest) {
+      if (typeof jobId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(jobId) ||
+        typeof expectedTaskDigest !== 'string' || !HASH.test(expectedTaskDigest)) fail();
+      return locked(guard => {
+        const id = digest(canonical({ scopeDigest, jobId })); const task = point(tasks, id);
+        if (!task) { if (point(tombstones, id)) fail(); return { status: 'missing' }; }
+        if (task.taskDigest !== expectedTaskDigest) fail();
+        return { status: deleteTaskPayload(task, guard) };
+      });
+    },
+    readTaskDeletionState(jobId, expectedTaskDigest) {
+      try {
+        if (typeof jobId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(jobId) ||
+          typeof expectedTaskDigest !== 'string' || !HASH.test(expectedTaskDigest)) fail();
+        fence(); if (!absent(lockPath)) fail(); const before = lstatSync(root, { bigint: true });
+        const id = digest(canonical({ scopeDigest, jobId })); const task = point(tasks, id); const tombstone = point(tombstones, id);
+        let state: 'missing' | 'retained' | 'not-retained' | 'deleted';
+        if (!task) { if (tombstone) fail(); state = 'missing'; }
+        else {
+          if (task.taskDigest !== expectedTaskDigest || tombstone && tombstone.taskDigest !== expectedTaskDigest) fail();
+          if (tombstone) state = 'deleted';
+          else if (task.textDigest === null) state = 'not-retained';
+          // Retention intent is not proof that a staged payload is present or readable.
+          // A still-authoritative hot row may survive an interrupted first staging.
+          else state = 'retained';
+        }
+        fence(); const after = lstatSync(root, { bigint: true });
+        if (!absent(lockPath) || before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) fail();
+        return state;
+      } catch { return 'unavailable'; }
     },
   };
 }

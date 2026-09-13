@@ -154,6 +154,78 @@ describe('standalone resource console archive storage', () => {
     expect(existsSync(join(root, '.archive.lock'))).toBe(false);
   });
 
+  it('deletes orphan text by exact task identity before any metadata publication, then suppresses A and a new B', () => {
+    const selected = entry(true); const next = entry(false); const archive = store();
+    faults.linkPath = join(root, 'metadata', 'records', `${selected.record.id}.json`);
+    expect(() => archive.stage(selected)).toThrow();
+    expect(existsSync(join(root, 'metadata', 'records', `${selected.record.id}.json`))).toBe(false);
+    expect(existsSync(textPath())).toBe(true);
+    expect(archive.readTaskDeletionState(selected.record.job.id, selected.record.job.taskDigest)).toBe('retained');
+    // An interrupted atomic payload can leave this second deletable name; neither
+    // private copy may survive a successfully completed task-identity deletion.
+    const temporary = join(root, 'texts', `.${digest(canonical({ scopeDigest, jobId: selected.record.job.id }))}.tmp`);
+    writeFileSync(temporary, `${canonical(selected.text)}\n`, { mode: 0o600, flag: 'wx' });
+    expect(store().deleteTaskText(selected.record.job.id, selected.record.job.taskDigest)).toEqual({ status: 'deleted' });
+    expect(store().readTaskDeletionState(selected.record.job.id, selected.record.job.taskDigest)).toBe('deleted');
+    expect(existsSync(textPath())).toBe(false); expect(existsSync(temporary)).toBe(false);
+    expect(store().stage(next)).toMatchObject({ status: 'staged', textState: 'deleted' });
+    expect(existsSync(join(root, 'metadata', 'records', `${selected.record.id}.json`))).toBe(false);
+    expect(store().stage(selected)).toMatchObject({ status: 'staged', textState: 'deleted' });
+    expect(store().deleteTaskText(selected.record.job.id, selected.record.job.taskDigest)).toEqual({ status: 'deleted' });
+    expect(store().readSnapshot([selected.record.id, next.record.id])).toMatchObject({ status: 'complete',
+      entries: [{ textState: 'deleted', text: null }, { textState: 'deleted', text: null }] });
+    expect(existsSync(textPath())).toBe(false);
+  });
+
+  it('refuses foreign task digests without tombstoning or deleting a retained orphan', () => {
+    const selected = entry(); const archive = store();
+    faults.linkPath = join(root, 'metadata', 'records', `${selected.record.id}.json`);
+    expect(() => archive.stage(selected)).toThrow(); const before = readFileSync(textPath(), 'utf8');
+    expect(() => archive.deleteTaskText(selected.record.job.id, digest('different-task'))).toThrow();
+    expect(readFileSync(textPath(), 'utf8')).toBe(before); expect(existsSync(join(root, 'tombstones'))).toBe(false);
+    expect(store().stage(selected)).toMatchObject({ textState: 'available' });
+  });
+
+  it('keeps missing and unretained task deletion distinct without manufacturing a tombstone', () => {
+    const archive = store(); const selected = entry(true, false);
+    expect(archive.deleteTaskText('missing', digest('missing'))).toEqual({ status: 'missing' });
+    expect(readdirSync(root)).toEqual([]); archive.stage(selected);
+    expect(archive.deleteTaskText(selected.record.job.id, selected.record.job.taskDigest)).toEqual({ status: 'not-retained' });
+    expect(existsSync(join(root, 'tombstones'))).toBe(false); expect(existsSync(join(root, 'texts'))).toBe(false);
+    for (const [id, hash] of [['../unsafe', digest('x')], ['finished', 'invalid']]) {
+      expect(() => archive.deleteTaskText(id!, hash!)).toThrow();
+    }
+  });
+
+  it('keeps orphan deletion durable across an interrupted unlink and finishes cleanup on retry', () => {
+    const selected = entry(); const archive = store();
+    faults.linkPath = join(root, 'metadata', 'records', `${selected.record.id}.json`);
+    expect(() => archive.stage(selected)).toThrow(); faults.unlinkPath = textPath();
+    expect(() => archive.deleteTaskText(selected.record.job.id, selected.record.job.taskDigest)).toThrow('Fixture interruption after tombstone');
+    expect(existsSync(textPath())).toBe(true);
+    expect(store().readTaskDeletionState(selected.record.job.id, selected.record.job.taskDigest)).toBe('deleted');
+    expect(store().stage(entry(false))).toMatchObject({ textState: 'deleted' });
+    expect(store().deleteTaskText(selected.record.job.id, selected.record.job.taskDigest)).toEqual({ status: 'deleted' });
+    expect(existsSync(textPath())).toBe(false);
+  });
+
+  it('reads exact task deletion evidence without writes or conflating retention intent with payload availability', () => {
+    const selected = entry(); const archive = store();
+    expect(archive.readTaskDeletionState('missing', digest('missing'))).toBe('missing'); expect(readdirSync(root)).toEqual([]);
+    archive.stage(selected); const before = readFileSync(textPath(), 'utf8');
+    const snapshot = archive.readSnapshot([]);
+    expect(archive.readTaskDeletionState(selected.record.job.id, selected.record.job.taskDigest)).toBe('retained');
+    expect(archive.readTaskDeletionState(selected.record.job.id, digest('wrong'))).toBe('unavailable');
+    expect(snapshot.isCurrent()).toBe(true); expect(readFileSync(textPath(), 'utf8')).toBe(before);
+    writeFileSync(textPath(), '{}\n', { mode: 0o600 });
+    expect(archive.readTaskDeletionState(selected.record.job.id, selected.record.job.taskDigest)).toBe('retained');
+    expect(archive.read(selected.record.id)).toMatchObject({ textState: 'unavailable' });
+    unlinkSync(textPath());
+    expect(archive.readTaskDeletionState(selected.record.job.id, selected.record.job.taskDigest)).toBe('retained');
+    expect(archive.read(selected.record.id)).toMatchObject({ textState: 'unavailable' });
+    expect(existsSync(textPath())).toBe(false);
+  });
+
   it('invalidates a complete snapshot after deletion, while freshly deleted and no-retention snapshots remain complete', () => {
     const archive = store(); const selected = entry(); archive.stage(selected);
     const before = archive.readSnapshot([selected.record.id]); expect(before.status).toBe('complete');

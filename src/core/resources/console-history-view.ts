@@ -22,6 +22,8 @@ export interface ResourceConsoleHistoryView {
   currentJobIds: readonly string[];
   jobCount: number;
   archiveCount: number;
+  /** One bounded capture for graph scans, with one archive freshness check. */
+  getJobs(): readonly ResourceConsoleDurableJob[];
   getJob(id: string): ResourceConsoleDurableJob | undefined;
   /** Archive freshness only. The caller must separately recheck its source descriptor. */
   isCurrent(): boolean;
@@ -90,6 +92,10 @@ export function readResourceConsoleHistoryView(input: unknown, options: DecodeOp
   const currentJobIds = Object.freeze([...current.keys()]);
   return Object.freeze({ descriptorDigest: expectedDescriptorDigest, archiveProofDigest: snapshot.proofDigest,
     identityDigest, currentJobIds, jobCount: history.jobs.length, archiveCount: archiveIds.length,
+    getJobs() {
+      if (!snapshot.isCurrent()) fail();
+      return structuredClone(history.jobs);
+    },
     getJob(id: string) {
       if (typeof id !== 'string' || !ID.test(id) || !snapshot.isCurrent()) fail();
       return history.getJob(id);

@@ -17,12 +17,14 @@ import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResou
   validateResourceConsoleProjects, type ResourceConsoleProjectBinding } from './console-projects.js';
 import type { ResourceConsoleContextTurn, ResourceConsoleOutput, ResourceConsoleTaskInput, ResourceConsoleTranscript,
   ResourceConsoleProject, ResourceConsoleProjectInput, ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
+import { readResourceConsoleStorage, prepareResourceConsoleStorage, compactResourceConsoleStorage, deleteResourceConsoleStoredHistory,
+  type ResourceConsoleStorageView } from './console-state-storage.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
 import { readResourceExecutionStop } from './execution-stop.js';
 import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } from './engineering-lifetime.js';
 
 import { ResourceSupervisorError, MAX_RESOURCE_SUPERVISOR_JOBS, MAX_STATE_BYTES, MAX_HISTORY_OUTPUT_BYTES,
-  consoleTaskCodec, consoleEpochs, assertStateHeadroom, decodeResourceConsoleState,
+  consoleTaskCodec, consoleEpochs, assertStateHeadroom,
   resourceConsoleRecoveryId, resourceConsoleTaskContinuation,
   type ResourceConsoleDurableJob as DurableJob, type ResourceConsoleDurableState } from './console-state-codec.js';
 export { ResourceSupervisorError, MAX_RESOURCE_SUPERVISOR_JOBS, decodeResourceConsoleState,
@@ -39,6 +41,8 @@ export interface ResourcePoolSupervisorOptions {
   isExecutionStopped?: () => boolean;
   /** Host-only child veto, checked again at fresh reservation dispatch. */
   isTaskExecutionStopped?: (id: string) => boolean;
+  /** Opt-in terminal compaction only; existing archived state always reopens. */
+  archiveHistory?: boolean;
   root: string; pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
   projects?: ResourceConsoleProjectInput[];
   readObservations(): ResourceObservation[];
@@ -158,6 +162,10 @@ export function previewResourceConsoleProjects(options: {
 /** Scope is explicit and immutable; no input callback can alter the chosen worker bindings. */
 export async function createResourcePoolSupervisor(options: ResourcePoolSupervisorOptions): Promise<ResourcePoolSupervisor> {
   const hostStopped = captureResourceExecutionVeto(options);
+  const archiveOption = Object.getOwnPropertyDescriptor(options, 'archiveHistory');
+  if (archiveOption && (!Object.hasOwn(archiveOption, 'value') || typeof archiveOption.value !== 'boolean') ||
+    !archiveOption && 'archiveHistory' in options) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid console history option');
+  const archiveHistory = archiveOption?.value === true;
   const taskVeto = Object.getOwnPropertyDescriptor(options, 'isTaskExecutionStopped');
   if (taskVeto && (!Object.hasOwn(taskVeto, 'value') || typeof taskVeto.value !== 'function') ||
     !taskVeto && 'isTaskExecutionStopped' in options) throw new Error('Invalid task execution veto');
@@ -165,7 +173,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   const taskLifetimes = new Map<string, ReturnType<typeof captureResourceEngineeringLifetime>>();
   const taskStopped = (id: string) => {
     if (hostStopped()) return true;
-    const job = state.jobs.find(row => row.id === id);
+    const job = knownJob(id);
     if (job?.executionOwnerId !== undefined && (job.executionOwnerId !== instanceId ||
       !taskLifetimes.has(id) || taskLifetimes.get(id)!.isStopped())) return true;
     if (!readTaskVeto) return false;
@@ -192,8 +200,11 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   // validates every byte before using any durable binding or queue record.
   let persistedCatalog = false;
   if (path(root)) {
-    try { const source = readResourceJson(join(root, 'resource-console-state.json'), MAX_STATE_BYTES) as ResourceConsoleDurableState;
-      persistedCatalog = source.schemaVersion === 4 || source.schemaVersion >= 5 && source.projects !== undefined; }
+    try {
+      const source = readResourceJson(join(root, 'resource-console-state.json'), MAX_STATE_BYTES);
+      const header = object(source) && source.kind === 'resource-console-history-descriptor' ? source.console : source;
+      persistedCatalog = object(header) && (header.schemaVersion === 4 || Number(header.schemaVersion) >= 5 && header.projects !== undefined);
+    }
     catch { /* Missing/invalid state remains the owned decoder's responsibility. */ }
   }
   stoppedBeforeStart();
@@ -255,10 +266,9 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   function originCodec(job: DurableJob) {
     return consoleTaskCodec(workspace, new Set(originFor(job).pool.workers.map((worker) => worker.id)), originScope(job), projectBindings);
   }
-  function decode(value: unknown): DurableState {
-    const decoded = decodeResourceConsoleState(value, { pool, bindings, workspace, configHistory });
-    projectBindings = decoded.projects;
-    return decoded;
+  const storageOptions = { root, pool, bindings, workspace, configHistory };
+  function decode(value: unknown): ResourceConsoleStorageView {
+    return readResourceConsoleStorage(value, storageOptions);
   }
 
   stoppedBeforeStart();
@@ -277,6 +287,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   if (!lock) throw new ResourceSupervisorError('CONFLICT', 'Resource supervisor already owned or unavailable');
   let state: DurableState = { schemaVersion: 1, scopeDigest, paused: false, jobs: [] };
   let persistedDigest: string | null = null;
+  let loaded: ResourceConsoleStorageView | null = null;
   let error: string | null = null;
   let sourceError: string | null = null;
   let closing = false;
@@ -297,25 +308,40 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   function own(): void {
     if (!ownsLocalStoreLock(lock)) { fault('supervisor-ownership-lost'); throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor ownership lost'); }
   }
-  function persist(next: DurableState): void {
+  function historyJobs(): readonly DurableJob[] {
+    if (loaded && !loaded.isCurrent()) {
+      fault('supervisor-history-unavailable');
+      throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor history unavailable');
+    }
+    return loaded?.jobs ?? state.jobs;
+  }
+  function knownJob(id: string): DurableJob | undefined { return historyJobs().find(job => job.id === id); }
+  function sourceCurrent(): void {
+    own();
+    const current = entryExists(statePath) ? digest(canonical(readResourceJson(statePath, MAX_STATE_BYTES))) : null;
+    if (current !== persistedDigest) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor state changed');
+  }
+  function persist(next: DurableState, prepared?: ResourceConsoleStorageView): void {
     own();
     const temporary = join(root, `.resource-console-${randomUUID()}.tmp`);
     let fd: number | undefined;
     try {
-      const before = entryExists(statePath) ? digest(canonical(readResourceJson(statePath, MAX_STATE_BYTES))) : null;
-      if (before !== persistedDigest) throw new Error('State identity changed');
-      const bytes = Buffer.from(canonical(next) + '\n');
+      sourceCurrent();
+      // A compaction's own staged publication changes the old archive census.
+      // Its freshly verified replacement is authoritative only after root CAS.
+      if (prepared ? !prepared.isCurrent() : loaded && !loaded.isCurrent()) throw new Error('History identity changed');
+      const candidate = prepared ?? prepareResourceConsoleStorage(next, loaded, storageOptions);
+      const bytes = Buffer.from(canonical(candidate.source) + '\n');
       if (bytes.length > MAX_STATE_BYTES) throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor state capacity reached');
       fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       let offset = 0;
       while (offset < bytes.length) { const written = writeSync(fd, bytes, offset, bytes.length - offset);
         if (written < 1) throw new Error('Incomplete state write'); offset += written; }
       fsyncSync(fd); closeSync(fd); fd = undefined;
-      own();
-      const current = entryExists(statePath) ? digest(canonical(readResourceJson(statePath, MAX_STATE_BYTES))) : null;
-      if (current !== persistedDigest) throw new Error('State identity changed');
+      sourceCurrent();
+      if (!candidate.isCurrent() || !prepared && loaded && !loaded.isCurrent()) throw new Error('History identity changed');
       renameSync(temporary, statePath); fsyncDirectory(root); own();
-      state = next; persistedDigest = digest(canonical(next));
+      state = candidate.hotState; projectBindings = state.projects; loaded = candidate; persistedDigest = candidate.sourceDigest;
     } catch (cause) {
       if (cause instanceof ResourceSupervisorError && cause.code === 'CAPACITY') throw cause;
       fault('supervisor-persistence-unavailable');
@@ -323,6 +349,30 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     } finally {
       if (fd !== undefined) closeSync(fd);
       try { unlinkSync(temporary); } catch { /* Only this exact private temporary file. */ }
+    }
+  }
+  function compactForAdmission(): void {
+    if (!archiveHistory || state.jobs.length < MAX_RESOURCE_SUPERVISOR_JOBS || !loaded) return;
+    const remaining = 4096 - loaded.archivedRecords.size;
+    if (remaining <= 0) return;
+    // Limit the synchronous durable-publication burst. Each record retains all
+    // archive fsyncs and freshness checks; later admissions rotate more rows.
+    const selected = state.jobs.filter(job => ['settled', 'cancelled'].includes(job.state) &&
+      job.input === null && !active.has(job.id)).slice(0, Math.min(8, remaining)).map(job => job.id);
+    if (!selected.length) return;
+    sourceCurrent(); historyJobs();
+    const expectedDigest = persistedDigest;
+    const guard = () => {
+      if (closing || error) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor unavailable');
+      sourceCurrent();
+      if (persistedDigest !== expectedDigest) throw new ResourceSupervisorError('CONFLICT', 'Resource queue changed during compaction');
+    };
+    try {
+      const compacted = compactResourceConsoleStorage(loaded, selected, storageOptions, guard);
+      guard(); persist(compacted.hotState, compacted);
+    } catch {
+      fault('supervisor-compaction-unavailable');
+      throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor compaction unavailable');
     }
   }
   function update(id: string, patch: Partial<DurableJob>): void {
@@ -340,7 +390,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
   function ensureAvailable(): void {
     if (closing || error) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor unavailable');
-    own();
+    own(); historyJobs();
   }
   function receiptFor(job: DurableJob, receipts: ResourceTaskReceipt[]): ResourceTaskReceipt | undefined {
     const receipt = receipts.find((row) => row.id === job.id);
@@ -431,6 +481,8 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     }
   }
   function dispatchHold(job: DurableJob): string | null {
+    try { sourceCurrent(); historyJobs(); }
+    catch { return 'supervisor-history-unavailable'; }
     const ownerHold = recoveryHold(job.recoveryOf) ?? (taskStopped(job.id) ? 'host-execution-stopped' : null);
     if (ownerHold) return ownerHold;
     // A global stop is reversible, not a failed task attempt. Check before
@@ -499,9 +551,10 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     if (!recoveryOf) return null;
     try {
       const attempts = resourcePoolStatus(root, pool, bindings, []).attempts;
+      const jobs = historyJobs();
       const seen = new Set<string>(); let id: string | undefined = recoveryOf;
       while (id) {
-        const prior = state.jobs.find(row => row.id === id);
+        const prior = jobs.find(row => row.id === id);
         if (seen.has(id) || !prior || prior.state !== 'cancelled' || prior.reason !== 'task-owner-unavailable' ||
           prior.executionOwnerId === undefined || prior.mode !== 'read-only' || prior.parent ||
           originFor(prior).poolDigest !== poolDigest || attempts.some(row => row.id === id)) return 'task-recovery-evidence-unavailable';
@@ -512,12 +565,12 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
   function submitTask(value: ResourceConsoleTaskInput, lifetime?: ResourceEngineeringLifetime, recoveryOf?: string): ResourceSupervisorJob {
       ensureAvailable();
-      const admissionDigest = persistedDigest;
+      let admissionDigest = persistedDigest;
       const child = captureResourceEngineeringLifetime(lifetime === undefined ? {} : { engineeringLifetime: lifetime });
       // Choose the historical codec without invoking an unvalidated accessor.
       const descriptor = object(value) ? Object.getOwnPropertyDescriptor(value, 'id') : undefined;
       const previous = descriptor && 'value' in descriptor && typeof descriptor.value === 'string'
-        ? state.jobs.find((job) => job.id === descriptor.value) : undefined;
+        ? knownJob(descriptor.value) : undefined;
       const retryCodec = previous ? originCodec(previous) : null;
       const input = retryCodec ? retryCodec.taskInput(value) : taskInput(value);
       if (previous) {
@@ -550,12 +603,13 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       }
       const projectReason = child.isStopped() || taskStopped(input.id) ? 'host-execution-stopped' : projectHold(input.projectId);
       if (projectReason) throw new ResourceSupervisorError('UNAVAILABLE', projectReason);
-      if (state.jobs.length >= MAX_RESOURCE_SUPERVISOR_JOBS || state.jobs.filter((job) => job.state === 'queued').length >= maxQueued) {
+      if (!archiveHistory && state.jobs.length >= MAX_RESOURCE_SUPERVISOR_JOBS ||
+        state.jobs.filter((job) => job.state === 'queued').length >= maxQueued) {
         throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor history or queue capacity reached');
       }
       let context: ResourceConsoleContextTurn[] | undefined;
       if (input.parent) {
-        const parent = state.jobs.find((job) => job.id === input.parent!.taskId);
+        const parent = knownJob(input.parent!.taskId);
         if (!parent?.history) throw new ResourceSupervisorError('NOT_FOUND', 'Parent transcript is unavailable or deleted');
         if (parent.projectId !== input.projectId) throw new ResourceSupervisorError('CONFLICT', 'Follow-up must remain in its parent project');
         if (parent.state !== 'settled' && parent.state !== 'cancelled') {
@@ -579,6 +633,23 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       }
       // Host callbacks can synchronously submit, cancel, pause or close. Never
       // publish an intent built before such a change, even when they return false.
+      ensureAvailable();
+      if (persistedDigest !== admissionDigest) throw new ResourceSupervisorError('CONFLICT', 'Resource queue changed during admission');
+      // All request, parent, receipt and callback checks precede compaction.
+      // Only our guarded publication may replace the captured admission anchor.
+      compactForAdmission();
+      const compacted = persistedDigest !== admissionDigest;
+      admissionDigest = persistedDigest;
+      if (compacted) {
+        // Durable staging can outlast the original lifetime. Repeat action-time
+        // vetoes only after our own compaction; the CAS below still rejects any
+        // synchronous queue mutation performed by those callbacks.
+        const refreshedReason = child.isStopped() || taskStopped(input.id) ? 'host-execution-stopped' : projectHold(input.projectId);
+        if (refreshedReason) throw new ResourceSupervisorError('UNAVAILABLE', refreshedReason);
+      }
+      if (state.jobs.length >= MAX_RESOURCE_SUPERVISOR_JOBS) {
+        throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor history or queue capacity reached');
+      }
       ensureAvailable();
       if (persistedDigest !== admissionDigest) throw new ResourceSupervisorError('CONFLICT', 'Resource queue changed during admission');
       const now = new Date().toISOString();
@@ -629,10 +700,10 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         ({ ...project, enabled: enabledProjects.has(project.id) }))) : undefined;
     },
     snapshot() {
-      if (!closing && !error) { try { own(); } catch { /* Snapshot reports loss without private diagnostics. */ } }
+      if (!closing && !error) { try { own(); historyJobs(); } catch { /* Snapshot reports loss without private diagnostics. */ } }
       return { instanceId, paused: state.paused, closing, error: error ?? sourceError, maxParallel, maxQueued,
         activeCount: active.size, queuedCount: state.jobs.filter((job) => job.state === 'queued').length,
-        jobs: state.jobs.map(publicJob) };
+        jobs: (loaded?.jobs ?? state.jobs).map(publicJob) };
     },
     submit: (value, lifetime) => submitTask(value, lifetime),
     recover(value, lifetime) {
@@ -642,7 +713,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       if (!child.deadlineAt || input.mode !== 'read-only' || input.parent) {
         throw new ResourceSupervisorError('INVALID_INPUT', 'Recovery requires a deadline-bound read-only task');
       }
-      const chain = resourceConsoleTaskContinuation(state, taskFor(input), input.projectId, child.deadlineAt);
+      const chain = resourceConsoleTaskContinuation({ jobs: historyJobs() }, taskFor(input), input.projectId, child.deadlineAt);
       if (chain.some(row => originFor(row).poolDigest !== poolDigest || (row.retainHistory === true) !== (input.retainHistory === true))) {
         throw new ResourceSupervisorError('CONFLICT', 'Resource task recovery scope changed');
       }
@@ -669,7 +740,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       if (expectedTaskDigest !== undefined && (typeof expectedTaskDigest !== 'string' || !HASH.test(expectedTaskDigest))) {
         throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid expected task digest');
       }
-      const job = state.jobs.find((row) => row.id === id);
+      const job = knownJob(id);
       if (!job) throw new ResourceSupervisorError('NOT_FOUND', 'Resource task unavailable');
       // Compare before changing queued state or signalling an active worker.
       // A matching ID alone must not let an old mission cancel a different envelope.
@@ -680,7 +751,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         ...(job.parent && !job.history ? { context: null } : {}) });
       else if (active.has(id)) { update(id, { reason: 'cancellation-requested' }); active.get(id)!.controller.abort(); }
       else if (job.state === 'dispatching' || job.state === 'unresolved') throw new ResourceSupervisorError('CONFLICT', 'Resource task is not owned by this console');
-      return publicJob(state.jobs.find((row) => row.id === id)!);
+      return publicJob(knownJob(id)!);
     },
     async cancelAndDrain(id, expectedTaskDigest) {
       if (typeof expectedTaskDigest !== 'string' || !HASH.test(expectedTaskDigest)) {
@@ -699,7 +770,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       supervisor.cancel(id, expectedTaskDigest);
       if (owned) await owned.promise;
       verifyState();
-      const job = state.jobs.find((row) => row.id === id);
+      const job = knownJob(id);
       if (!job || job.taskDigest !== expectedTaskDigest || active.has(id) || !['settled', 'cancelled'].includes(job.state)) {
         throw new ResourceSupervisorError('UNAVAILABLE', 'Resource task settlement unconfirmed');
       }
@@ -719,7 +790,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     history(id) {
       ensureAvailable();
       if (typeof id !== 'string' || !ID.test(id)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource task id');
-      const job = state.jobs.find((row) => row.id === id);
+      const job = knownJob(id);
       return job?.history ? detached({ id, ...job.history, retention: 'local-until-deleted' as const,
         transcriptDigest: resourceConsoleTranscriptDigest(originScope(job), job, job.history, job.context),
         ...(job.projectId ? { projectId: job.projectId } : {}),
@@ -728,17 +799,32 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     deleteHistory(id) {
       ensureAvailable();
       if (typeof id !== 'string' || !ID.test(id)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource task id');
-      const job = state.jobs.find((row) => row.id === id);
+      const job = knownJob(id);
       if (!job) throw new ResourceSupervisorError('NOT_FOUND', 'Resource task unavailable');
       if (job.state !== 'settled' && job.state !== 'cancelled') {
         throw new ResourceSupervisorError('CONFLICT', 'Task history can be deleted only after terminal settlement');
       }
       // Consent and task identity remain, so identical retries cannot restore
       // deliberately removed text or acquire a second runtime allowance.
-      if (job.history) update(id, { history: null, ...(job.parent ? { context: null } : {}) });
+      // Deletion may commit its tombstone before a later root CAS fails. Drop
+      // this session's copy before either step so output() cannot expose it.
       const ephemeral = outputs.get(id);
       if (ephemeral) { outputBytes -= Buffer.byteLength(ephemeral.text); outputs.delete(id); }
-      return publicJob(state.jobs.find((row) => row.id === id)!);
+      try {
+        if (!loaded) throw new Error('Console source unavailable');
+        const expectedDigest = persistedDigest;
+        const guard = () => {
+          if (closing || error) throw new Error('Console owner unavailable');
+          sourceCurrent();
+          if (persistedDigest !== expectedDigest) throw new Error('Console source changed');
+        };
+        const candidate = deleteResourceConsoleStoredHistory(loaded, id, storageOptions, guard);
+        guard(); persist(candidate.hotState, candidate);
+      } catch {
+        fault('supervisor-history-deletion-unavailable');
+        throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor history deletion unavailable');
+      }
+      return publicJob(knownJob(id)!);
     },
     close() {
       if (closePromise) return closePromise;
@@ -750,8 +836,9 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         try {
           if (dispatched.size) {
             const receipts = resourcePoolStatus(root, pool, bindings, []).attempts;
+            const jobs = historyJobs();
             for (const id of dispatched) {
-              const job = state.jobs.find((row) => row.id === id)!; const receipt = receiptFor(job, receipts);
+              const job = jobs.find(row => row.id === id)!; const receipt = receiptFor(job, receipts);
               if (!receipt || ['reserved', 'uncertain'].includes(receipt.status)) error ??= 'supervisor-termination-unconfirmed';
             }
           }
@@ -766,10 +853,16 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   try {
     stoppedBeforeStart();
     if (entryExists(statePath)) {
-      const source = readResourceJson(statePath, MAX_STATE_BYTES); state = decode(source); persistedDigest = digest(canonical(source));
+      const source = readResourceJson(statePath, MAX_STATE_BYTES); loaded = decode(source);
+      state = loaded.hotState; projectBindings = state.projects; persistedDigest = loaded.sourceDigest;
     }
     const receipts = resourcePoolStatus(root, pool, bindings, []).attempts;
-    const recovered = detached(state); let changed = persistedDigest === null;
+    const recovered = detached(state);
+    // A committed deletion can precede a failed root publication. The adapter
+    // suppresses that old plaintext immediately; the next owner also removes
+    // it from the hot file without treating deletion as task execution.
+    const sourceJobs = loaded ? ('kind' in loaded.source ? loaded.source.currentJobs : loaded.source.jobs) : [];
+    let changed = persistedDigest === null || canonical(sourceJobs) !== canonical(state.jobs);
     if (configuredCatalogValue !== undefined || state.projects !== undefined) {
       const preview = previewResourceConsoleProjects({ workspace, projects: configuredCatalogValue === undefined ? undefined : configuredProjects, state });
       projectBindings = preview.bindings;
@@ -812,13 +905,13 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       ensureAvailable();
       if (hostStopped() || signal?.aborted || state.paused || persistedDigest === null ||
         digest(canonical(readResourceJson(statePath, MAX_STATE_BYTES))) !== persistedDigest ||
-        digest(canonical(state)) !== persistedDigest || state.jobs.some(job => job.state === 'unresolved' ||
+        loaded?.sourceDigest !== persistedDigest || !loaded.isCurrent() || state.jobs.some(job => job.state === 'unresolved' ||
           job.state === 'dispatching' && (!active.has(job.id) || active.get(job.id)!.controller.signal.aborted || taskStopped(job.id)))) {
         throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor custody unavailable');
       }
       // Copy the exact known identities for this sample. Never infer ownership
       // from a task prefix or from the absence of an engineering origin alone.
-      const jobs = detached(state.jobs);
+      const jobs = detached(historyJobs());
       return Object.freeze({ root, workspace, poolDigest, lock, stateDigest: persistedDigest,
         ownsReceipt(receipt: ResourceTaskReceipt) {
           if (receipt.origin !== undefined || receipt.status === 'uncertain') return false;

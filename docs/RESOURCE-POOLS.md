@@ -1605,8 +1605,37 @@ treated as deletion. A later archive change invalidates the view and its lookup;
 reopen it from fresh evidence. The archive proof does **not** prove that a caller's
 source descriptor is still current: an eventual writer must recheck both at its
 effect boundary. Reading performs no writes or lock recovery. This is a read-only
-development component, not a runtime migration, a 257th admitted task, or a new
-dispatch grant.
+development component, not by itself a runtime migration or a new dispatch grant.
+
+The source also has an **experimental supervisor-constructor opt-in**,
+`archiveHistory: true`, implemented through the
+[versioned storage adapter](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/console-state-storage.ts).
+It stages up to eight safe terminal jobs when the 256-current-job limit would block
+admission, verifies their readback, then atomically replaces
+`resource-console-state.json` with a descriptor under the existing owner lock.
+The fixed private `resource-console-history` directory holds the archive. The
+active root is not replaced if staging fails; staged copies remain inert.
+Current jobs, ordered historical identities, receipt attribution and quota
+accounting stay separate. This does not renew a task window, deadline or quota.
+Admission rechecks mission lifetime, host stops and project bindings after a
+compaction burst; changed or expired authority cannot enqueue a new task.
+
+This option defaults to `false` and is **not exposed as a production CLI/UI
+switch**. A supervisor can reopen an already migrated root without the flag;
+further compaction requires the opt-in. Mission raw-state readers, workspace
+source-proof projections and versioned pool-evolution journals still require
+integration before public rollout. Do not enable the constructor experiment on
+an operational workspace that uses those paths. Archive capacity remains bounded
+at 4,096 records, hot jobs at 256, the active file at 4 MiB including settlement
+reserve, and joined history at 64 MiB. The resource ledger has its own independent
+limits; this is not unlimited lifetime storage.
+
+Deletion covers stable task-key archive copies, including unpublished staging.
+A committed deletion marker suppresses hot text on reads even if a crash prevented
+the active-file rewrite; an owning startup then persists that cleanup. Deletion
+failure also withholds the requested task's console-session output. Missing text
+without a marker is not a deletion request and is never reconstructed behind
+published archive metadata.
 
 For a settled or cancelled task, unlock controls and choose **Delete transcript**,
 then confirm. This removes this transcript, its copied context and console-session output, not task

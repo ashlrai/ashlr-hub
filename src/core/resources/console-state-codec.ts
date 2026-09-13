@@ -83,7 +83,10 @@ function assertStateData(value: unknown, ancestors = new Set<object>(), depth = 
   } finally { ancestors.delete(value); }
 }
 
-export function assertStateHeadroom(next: DurableState): void {
+export function assertStateHeadroom(next: DurableState, storageEnvelopeBytes = 0): void {
+  if (!Number.isSafeInteger(storageEnvelopeBytes) || storageEnvelopeBytes < 0 || storageEnvelopeBytes > MAX_STATE_BYTES) {
+    throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor state capacity reached');
+  }
   // Reserve the complete future metadata envelope, not a guessed byte margin.
   // Mutable IDs/reasons are unescaped ASCII bounded at 64/120 characters;
   // canonical ISO dates are at most 27 characters. Every other job field is
@@ -101,7 +104,7 @@ export function assertStateHeadroom(next: DurableState): void {
       ...(job.history ? { history: { prompt: job.history.prompt, output: { text: '', truncated: false } } } : {}),
     };
   }) };
-  if (Buffer.byteLength(canonical(envelope) + '\n') + futureOutputBytes > MAX_STATE_BYTES) {
+  if (Buffer.byteLength(canonical(envelope) + '\n') + futureOutputBytes + storageEnvelopeBytes > MAX_STATE_BYTES) {
     throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor state capacity reached');
   }
 }
@@ -171,7 +174,7 @@ export function resourceConsoleRecoveryId(prior: { id: string; taskDigest: strin
 }
 
 /** Read-only identity join over already decoded state, never execution authority. */
-export function resourceConsoleTaskContinuation(state: ResourceConsoleDurableState, original: ResourceTask,
+export function resourceConsoleTaskContinuation(state: { jobs: readonly ResourceConsoleDurableJob[] }, original: ResourceTask,
   projectId?: string, deadlineAt?: string): DurableJob[] {
   const task = validateResourceTask(original);
   const root = state.jobs.find(row => row.id === task.id);
