@@ -21,6 +21,7 @@ import { decodeResourceConsoleState, previewResourceConsoleProjects } from './po
 import { readResourceJson, resourcePoolStatus, readResourcePoolHistory } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
+import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
 import { hash, readEngineeringSuccessorJournal, parseResourceEngineeringSuccessorProposal,
   validateResourceEngineeringSuccessorCoordinatorConfig, type Intent, type Result, type Prepared, type Admitted } from './engineering-successor-store.js';
 
@@ -52,7 +53,7 @@ function absent(file: string): void {
  * must still own its execution scope and revalidate at successor publication.
  * Global stops and quota policy remain enforced by the existing action-time gates. */
 export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPredecessorCheckOptions,
-  ownedResourceLocks: readonly LocalStoreLock[] = []): ResourceEngineeringPredecessorCheck {
+  ownedResourceLocks: readonly LocalStoreLock[] = [], custody?: ResourceWorkspaceCustody): ResourceEngineeringPredecessorCheck {
   const report: ResourceEngineeringPredecessorCheck = { schemaVersion: 1, scope: 'predecessor-completion-evidence-only',
     status: 'held', reasons: [], sampledAt: new Date().toISOString(), executionAuthorized: false,
     effectsExecuted: false, providerContacted: false, evidenceDigest: null, tip: null, continuation: null };
@@ -64,7 +65,9 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
     // Only in-process acquired capabilities are recognized by the lock module's
     // private registry. JSON-shaped copies and locks on unrelated scopes fail.
     requireEvidence(Array.isArray(ownedResourceLocks) && ownedResourceLocks.length <= 3 && ownedResourceLocks.every(lock => ownsLocalStoreLock(lock)));
-    const locks = [...ownedResourceLocks];
+    const borrowed = custody === undefined ? [] : readResourceWorkspaceCustody(custody).locks;
+    const locks = [...new Set([...ownedResourceLocks, ...borrowed])];
+    requireEvidence(locks.length <= 3);
     requireEvidence(options && Object.keys(options).sort().join(',') === (options.proposalFeedback === undefined
       ? 'expectedDeadlineAt,expectedPlanDigest,setup' : 'expectedDeadlineAt,expectedPlanDigest,proposalFeedback,setup') &&
       (options.proposalFeedback === undefined || options.proposalFeedback === MISSION_MEASURED_FEEDBACK) &&
@@ -73,7 +76,7 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       new Date(options.expectedDeadlineAt).toISOString() === options.expectedDeadlineAt);
     const sample = () => {
       stage = 'setup';
-      const setupEvidence = readResourceEngineeringAutonomousSetupEvidence(options.setup);
+      const setupEvidence = readResourceEngineeringAutonomousSetupEvidence(options.setup, custody);
       const plan = setupEvidence.plan;
       requireEvidence(plan.planDigest === options.expectedPlanDigest && plan.initialEnrollmentDigest);
       const runtime = validateResourceGenerationRuntime(readResourceJson(options.setup.resourceRuntime));
@@ -91,6 +94,8 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       const pool = validateResourcePool(readResourceJson(runtime.poolPath));
       const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
       const poolDigest = hash({ pool, bindings });
+      const owner = custody === undefined ? null : readResourceWorkspaceCustody(custody,
+        { root: runtime.root, workspace: options.setup.workspace, poolDigest });
       const config = validateResourceConsoleEngineeringPreparationConfig(readResourceJson(plan.paths.profiles));
       const supervision = validateResourceConsoleEngineeringSupervisionConfig(readResourceJson(plan.paths.supervision));
       const successor = validateResourceEngineeringSuccessorCoordinatorConfig(readResourceJson(plan.paths.successors));
@@ -107,6 +112,7 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       const projects = validateResourceConsoleProjects(projectsDocument.projects);
       const consoleState = decodeResourceConsoleState(readResourceJson(join(runtime.root, 'resource-console-state.json'), 4 * 1024 * 1024),
         { pool, bindings, workspace: options.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
+      requireEvidence(!owner || hash(consoleState) === owner.stateDigest);
       const preview = previewResourceConsoleProjects({ workspace: options.setup.workspace, projects, state: consoleState });
       requireEvidence(preview.bindings && preview.projects);
       const project = preview.bindings.find(row => row.id === plan.projectId);
@@ -159,12 +165,13 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       });
       stage = 'custody';
       for (const name of ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock', '.resource-quota-refresh-pending.json']) {
+        if (name === '.resource-quota-refresh-pending.json' && owner?.metadataPending) continue;
         if (!owned(name)) absent(join(runtime.root, name));
       }
       absent(join(runtime.root, 'engineering-supervision', supervision.id, '.execution.lock'));
       absent(join(runtime.root, 'engineering-successors', successor.supervisionId, '.execution.lock'));
       const accounting = resourcePoolStatus(runtime.root, pool, bindings, []);
-      requireEvidence(!accounting.attempts.some(row => row.status === 'reserved' || row.status === 'uncertain'));
+      requireEvidence(!accounting.attempts.some(row => row.status === 'uncertain' || row.status === 'reserved' && !owner?.ownsReceipt(row)));
       stage = 'successors';
       const journal = readEngineeringSuccessorJournal({ directory: join(runtime.root, 'engineering-successors', successor.supervisionId),
         config: successor, expectedEnrollment: { id: 'enrollment', kind: 'enrollment', configDigest: hash(successor),
@@ -210,11 +217,16 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
       requireEvidence(visited.size === registrations.length);
       const tip = completed.find(row => row.graph.enrollmentId === tipId);
       requireEvidence(tip);
-      return { planDigest: plan.planDigest, runtime, config, supervision, successor, project, consoleState,
+      // A verified live owner may progress ordinary human tasks between samples.
+      // Keep project/epoch state and every engineering/unknown receipt in the
+      // join; unrelated prompt history and collector timestamps are not delivery.
+      return { planDigest: plan.planDigest, runtime, config, supervision, successor, project,
+        consoleState: owner ? { ...consoleState, jobs: [] } : consoleState,
         registrations, durable, completed, journal,
         // Scheduling previews use wall-clock quota freshness. Compare persisted
         // accounting facts, not a time-varying plan, during the second sample.
-        accounting: { attempts: accounting.attempts, observations: accounting.observations, allocation: accounting.allocation,
+        accounting: { attempts: owner ? accounting.attempts.filter(row => !owner.ownsReceipt(row)) : accounting.attempts,
+          observations: owner?.metadataPending ? [] : accounting.observations, allocation: accounting.allocation,
           workerAccess: accounting.workerAccess, quotaScopeAccess: accounting.quotaScopeAccess },
         tip: { enrollmentId: tipId, enrollmentDigest: tip.graph.enrollmentDigest, projectId: tip.source.projectId, commit: tip.source.commit },
         continuation: stopped.has(tipId) ? 'stop-requested' as const : 'eligible' as const };
@@ -229,6 +241,7 @@ export function checkResourceEngineeringPredecessor(input: ResourceEngineeringPr
     }
     // Publish the verified result only after every requested projection has
     // completed, so projection refusal cannot leave a partial verified proof.
+    if (custody !== undefined) readResourceWorkspaceCustody(custody);
     report.evidenceDigest = hash(second); report.tip = second.tip; report.continuation = second.continuation; report.status = 'verified';
     if (feedback) report.feedback = feedback;
   } catch { report.reasons = [`${stage}-evidence-unavailable`]; }

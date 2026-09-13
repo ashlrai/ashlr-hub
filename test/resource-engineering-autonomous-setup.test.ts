@@ -18,6 +18,9 @@ import * as deliveredSource from '../src/core/resources/engineering-delivered-so
 import { setResourcePoolAllocation, readResourceJson } from '../src/core/resources/pool-runtime.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
+import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
+import { createResourceWorkspaceCustody, readResourceWorkspaceCustody } from '../src/core/resources/workspace-custody.js';
+import { acquireResourceQuotaRefreshLease } from '../src/core/resources/quota-refresh-lease.js';
 
 const roots: string[] = [];
 afterEach(() => {
@@ -72,6 +75,46 @@ function evidence(directory: string): string {
   visit(directory); return JSON.stringify(rows);
 }
 describe('offline autonomous setup', () => {
+  it('prepares on a genuine live workspace without draining queued human work or releasing borrowed locks', async () => {
+    const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+      bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool), readObservations: () => [] });
+    const quota = await acquireResourceQuotaRefreshLease(f.ledger);
+    try {
+      quota.markPending();
+      supervisor.submit({ id: 'human', prompt: 'Retain this unrelated human task', mode: 'read-only', allowedWorkerIds: ['worker'], timeoutMs: 1000, maxOutputTokens: 128 });
+      expect(() => check(f.options)).toThrow('stopped');
+      const custody = createResourceWorkspaceCustody(supervisor, quota, () => {});
+      const plan = check(f.options, custody);
+      expect(plan.holds).not.toContain('ordinary-queued-work-retained');
+      const result = prepare({ ...f.options, expectedPlanDigest: plan.planDigest }, { workspaceCustody: custody,
+        beforePublication: locks => { expect(locks).toHaveLength(3); expect(locks.every(ownership.ownsLocalStoreLock)).toBe(true); } });
+      expect(result.disposition).toBe('created');
+      expect(readResourceWorkspaceCustody(custody).metadataPending).toBe(true);
+      expect(supervisor.snapshot().jobs.find(row => row.id === 'human')?.state).toBe('queued');
+      expect(existsSync(join(f.ledger, '.pool.lock'))).toBe(false);
+      expect(existsSync(join(f.ledger, '.resource-console.lock'))).toBe(true);
+      expect(existsSync(join(f.ledger, '.resource-quota-refresh.lock'))).toBe(true);
+      expect(check(f.options, custody).initialEnrollmentDigest).toBe(result.initialEnrollmentDigest);
+    } finally { quota.close(); await supervisor.close(); }
+  });
+  it('refuses forged or revoked workspace custody before publishing a setup', async () => {
+    const f = fixture(); const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+    const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+    const supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+      bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool), readObservations: () => [] });
+    try {
+      let stopped = false;
+      const custody = createResourceWorkspaceCustody(supervisor, null, () => { if (stopped) throw Error('attachment replaced'); });
+      const plan = check(f.options, custody);
+      expect(() => prepare({ ...f.options, expectedPlanDigest: plan.planDigest }, { workspaceCustody: { ...custody } })).toThrow('Unrecognized');
+      stopped = true;
+      expect(() => prepare({ ...f.options, expectedPlanDigest: plan.planDigest }, { workspaceCustody: custody })).toThrow('attachment replaced');
+      expect(readdirSync(f.options.output)).toEqual([]);
+      expect(existsSync(join(f.ledger, '.pool.lock'))).toBe(false);
+    } finally { await supervisor.close(); }
+  });
   it('withholds new publication on a host veto without touching the setup or accounting', () => {
     const f = fixture(); const expectedPlanDigest = check(f.options).planDigest; const before = evidence(f.base);
     expect(() => prepare({ ...f.options, expectedPlanDigest }, { isExecutionStopped: () => true })).toThrow('Host setup publication stopped');

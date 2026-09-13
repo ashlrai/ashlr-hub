@@ -141,10 +141,45 @@ engineering mutations withheld. Hosts without attachment support retain the
 legacy lifecycle behavior. Attachment itself remains host-managed: the browser
 has no attach/restart control.
 
-The standing mission controller does not yet use this attachment API to share a
-persistent human workspace. Its setup/predecessor ownership joins and mission
-integration remain separate work. Component close is also not a durable
-fleet-wide STOP; do not use it as a substitute for global KILL.
+The standing mission controller uses these attachments across scopes. An
+in-process host may pass `workspace: { handle, expectedAttachment }` to
+`runResourceEngineeringMission(config, host)` to borrow an existing workspace.
+The expected attachment must be the exact current closed capability, or `null`
+before first attachment. Mission completion, cancellation and failure drain only
+that mission's attachment and exact proposal task; the borrowed workspace stays
+open. Without this option the runner owns one console for the invocation and
+closes it on exit. The CLI does not discover or take over other running consoles.
+
+`engineeringCustody(expectedAttachment)` provides a host-only live ownership
+join for setup and predecessor verification. The actual supervisor and quota
+lease constructors issue the underlying capabilities. Copies, closed owners,
+changed state/configuration, attachment replacement and uncertain work are
+refused. Setup borrows existing console/collector locks and releases only its
+own short publication locks. A proven live ordinary task or collector does not
+require workspace shutdown; unknown or origin-bearing reserved receipts still
+hold preparation and completion. All engineering evaluator, receipt, graph and
+delivery checks remain required. Double-read completion excludes only exact
+owned ordinary receipts and verified live collector timestamp churn, not
+engineering evidence or accounting policy.
+
+Mission proposals use host-only synchronous `submitTask` admission and
+`cancelTaskAndDrain(id, expectedTaskDigest)`. This prevents an unobserved late
+HTTP submission from arriving after mission cleanup. Neither method creates a
+second worker runtime. `submitTask(input, lifetime)` binds the optional child
+signal/veto before the queue can dispatch; the supervisor rechecks it at fresh
+worker dispatch. Retrying an ID cannot replace its retained child stop. Mission
+cancellation also drains its exact task immediately, without pausing human work.
+Child signals/vetoes are process-local. This change does not add durable mission
+attribution to ordinary proposal jobs; unattended console recovery needs that
+additional join before resuming a queued proposal under its original mission
+deadline. Restarting the mission runner still checks its persisted deadline.
+Component close is not a durable fleet-wide STOP; do not
+use it as a substitute for global KILL. These in-process APIs do not install an
+always-on service or provide a browser control for starting a standing mission.
+Setup and predecessor proof are still synchronous host calls. Preserving worker
+lifetime does not prove responsive HTTP/UI latency during those filesystem/Git
+joins; moving expensive verification off the workspace event loop remains
+separate work.
 
 ## Engineering workspace
 
@@ -417,11 +452,14 @@ evidence, not proof of completed engineering work.
 
 ### Run a bounded standing mission
 
-The foreground mission runner composes the existing console: execute a scope,
+The foreground mission runner reuses one console across scopes: execute a scope,
 drain its workers, verify the delivered chain, request an accounted next objective,
 and prepare a new scope from the verified commit. It needs no per-objective **Run**
 action. The evaluator, permitted files, workers, account reserves and per-scope
 budgets remain fixed; model output supplies only a name/objective or a stop request.
+Before draining, the runner joins each admitted successor ID to its completed
+queue entry. A pre-admission queue snapshot cannot make a newly admitted child
+look finished; stale observations wait within the existing mission deadline.
 
 Create a private JSON configuration matching
 [`ResourceEngineeringMissionConfig`](../src/core/resources/engineering-mission-store.ts).
@@ -508,8 +546,9 @@ The `invocations` field separately reports retained runner attempts: the latest
 start, final outcome/reason, monotonic elapsed time and per-scope phase durations.
 It also counts attempts without a terminal observation. A missing outcome means
 **unknown**, not an active worker or permission to retry. Final outcomes are
-recorded after console shutdown and mission-lock release; either failure is
+recorded after owned-work cleanup and mission-lock release; either failure is
 retained as a held result when final observation publication succeeds.
+An invocation-owned console is closed; an explicitly borrowed workspace is not.
 Setup failures before ownership have no invocation
 record and remain visible only in the command's returned report.
 

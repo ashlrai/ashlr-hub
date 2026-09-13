@@ -1,14 +1,15 @@
 /** Actual mission -> console -> local transport -> evaluated Git delivery, with a stopped/restarted owner. */
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { canonical } from '../src/core/universe/artifacts.js';
 import { writePrivateFileAtomically } from '../src/core/util/private-file-write.js';
 import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
+import { startResourceConsoleServer } from '../src/core/web/resource-console-server.js';
 import { resourcePoolStatus, setResourcePoolAllocation, setResourceWorkerAccess } from '../src/core/resources/pool-runtime.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
@@ -38,11 +39,13 @@ async function fixture() {
   git(project, 'add', '.'); git(project, '-c', 'user.name=Mission Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixed evaluator');
   const revision = git(project, 'rev-parse', 'HEAD');
   const calls = { generation: 0, successor: 0, mission: 0 }; const errors: string[] = [];
+  const humanResponses: ServerResponse[] = [];
   const worker = createServer((req, res) => {
     const chunks: Buffer[] = []; req.on('data', (chunk: Buffer) => chunks.push(chunk)); req.on('end', () => {
       try {
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8')); const raw = JSON.parse(body.messages[0].content);
         const context = Array.isArray(raw) ? JSON.parse(raw.find(row => row.role === 'user').content) : raw;
+        if (context.kind === 'human-hold') { humanResponses.push(res); return; }
         let content: unknown;
         if (context.seedContext) {
           calls.generation++; const value = JSON.parse(context.files.find((row: { path: string }) => row.path === 'value.json').content);
@@ -67,7 +70,7 @@ async function fixture() {
     writable(base); rmSync(base, { recursive: true, force: true });
   });
   const address = worker.address(); if (!address || typeof address === 'string') throw Error('Missing fixture listener');
-  const pool = validateResourcePool({ schemaVersion: 1, id: 'mission-fixture', workers: ['repair', 'spare'].map(id => ({
+  const pool = validateResourcePool({ schemaVersion: 1, id: 'mission-fixture', workers: ['repair', 'spare', 'human'].map(id => ({
     id, provider: 'local', model: 'fixture', maxConcurrent: 1, maxTasksPerWindow: 12, taskWindowMs: 3600_000, reservePercent: 25, priority: 1 })) });
   const bindings = validateResourceBindings(pool.workers.map(row => ({ workerId: row.id, capacityKey: row.id, kind: 'local-chat', endpoint: `http://127.0.0.1:${address.port}/v1` })), pool);
   const observations = pool.workers.map(row => ({ workerId: row.id, health: 'ready' as const, windows: [], retryAfter: null,
@@ -104,7 +107,7 @@ async function fixture() {
   const plan = checkResourceEngineeringAutonomousSetup(setup); prepareResourceEngineeringAutonomousSetup({ ...setup, expectedPlanDigest: plan.planDigest });
   const config: ResourceEngineeringMissionConfig = { schemaVersion: 1, id: 'measured-mission', root: missionRoot,
     initial: { setup, expectedPlanDigest: plan.planDigest }, deadlineAt: new Date(Date.now() + 1800_000).toISOString(), maxScopes: 2, pollIntervalMs: 100 };
-  return { base, project, root, config, allocation, access, pool, bindings, observations, calls, errors, revision };
+  return { base, project, root, config, allocation, access, pool, bindings, observations, paths, calls, errors, revision, humanResponses };
 }
 
 describe.runIf(process.platform === 'darwin')('actual standing engineering mission', () => {
@@ -118,13 +121,27 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(readEngineeringMissionInvocations(f.config)).toMatchObject({ count: 1, unfinishedCount: 0,
       latest: { outcome: { state: 'stopped', reason: first.reason } } });
     const firstRows = readEngineeringMissionRecords(f.config); expect(firstRows.some(row => row.kind === 'settled')).toBe(true);
-    const second = await runResourceEngineeringMission(f.config, { onProgress(value) { phases.push(`${value.scope}:${value.phase}`); } });
+    const workspace = await startResourceConsoleServer({ root: f.root, workspace: f.project, poolFile: f.paths.pool,
+      bindingsFile: f.paths.bindings, observationsFile: f.paths.observations, projectsFile: f.paths.projects, execute: true, port: 0 });
+    cleanup.push(() => workspace.close());
+    // A deliberately unavailable human task must stay queued, not be cancelled
+    // or consume a disabled worker, while the mission advances on the same owner.
+    workspace.submitTask({ id: 'human-queued', prompt: 'Keep my private human work', allowedWorkerIds: ['spare'],
+      mode: 'read-only', timeoutMs: 1000, maxOutputTokens: 128, retainHistory: true });
+    workspace.submitTask({ id: 'human-running', prompt: canonical({ kind: 'human-hold' }), allowedWorkerIds: ['human'],
+      mode: 'read-only', timeoutMs: 900_000, maxOutputTokens: 128, retainHistory: true });
+    await vi.waitFor(() => expect(f.humanResponses).toHaveLength(1));
+    const sharedUrls: Array<string | null> = [];
+    const second = await runResourceEngineeringMission(f.config, { workspace: { handle: workspace, expectedAttachment: null },
+      onProgress(value) { phases.push(`${value.scope}:${value.phase}`); sharedUrls.push(value.consoleUrl); } });
     expect(second, JSON.stringify({ second, phases, calls: f.calls, errors: f.errors })).toMatchObject({ state: 'completed', reason: 'stop-requested', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
     expect(second.tip).not.toBeNull(); expect(git(f.project, 'show', `${second.tip!.commit}:value.json`)).toBe('3');
     expect(git(f.project, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.project, 'status', '--porcelain=v1')).toBe('');
     expect(f.calls).toEqual({ generation: 3, successor: 2, mission: 1 }); expect(f.errors).toEqual([]);
     const ledger = resourcePoolStatus(f.root, f.pool, f.bindings, f.observations);
-    expect(ledger.attempts).toHaveLength(6); expect(ledger.attempts.every(row => row.status === 'completed' && row.workerId === 'repair')).toBe(true);
+    expect(ledger.attempts).toHaveLength(7);
+    expect(ledger.attempts.filter(row => row.id !== 'human-running').every(row => row.status === 'completed' && row.workerId === 'repair')).toBe(true);
+    expect(ledger.attempts.find(row => row.id === 'human-running')).toMatchObject({ status: 'reserved', workerId: 'human' });
     expect(ledger.allocation).toEqual(f.allocation); expect(ledger.workerAccess).toEqual(f.access);
     const final = readEngineeringMissionRecords(f.config);
     for (const row of firstRows) expect(final.find(item => item.id === row.id)).toEqual(row);
@@ -134,6 +151,20 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(next.setup.recipe.seedRevision).toBe(prior.tip.commit);
     expect(phases).toContain('1:reconciling'); expect(phases).toContain('2:executing');
     expect(existsSync(join(f.config.root, '.mission.lock'))).toBe(false);
+    expect(existsSync(join(f.root, '.resource-console.lock'))).toBe(true);
+    expect(sharedUrls.length).toBeGreaterThan(0); expect(sharedUrls.every(url => url === workspace.consoleUrl)).toBe(true);
+    expect(workspace.engineeringAttachment()?.state()).toBe('closed');
+    expect(json(join(f.root, 'resource-console-state.json')).jobs.find((job: { id: string }) => job.id === 'human-queued')).toMatchObject({ state: 'queued' });
+    expect(json(join(f.root, 'resource-console-state.json')).jobs.find((job: { id: string }) => job.id === 'human-running')).toMatchObject({ state: 'dispatching' });
+    expect((await fetch(`${workspace.url}/api/resources/console`, { headers: { 'x-ashlr-token': workspace.readToken } })).status).toBe(200);
+    f.humanResponses[0]!.end(JSON.stringify({ choices: [{ message: { content: 'Human work survived the mission' }, finish_reason: 'stop' }] }));
+    await vi.waitFor(() => expect(resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts.find(row => row.id === 'human-running')?.status).toBe('completed'));
+    // Closing a human workspace deliberately retains its queued work. The
+    // human fixture must withdraw that job explicitly before asking the stopped
+    // (ownerless) predecessor reader to establish fully resolved accounting.
+    const queued = json(join(f.root, 'resource-console-state.json')).jobs.find((job: { id: string }) => job.id === 'human-queued');
+    await workspace.cancelTaskAndDrain(queued.id, queued.taskDigest);
+    await workspace.close();
     expect(existsSync(join(f.root, '.resource-console.lock'))).toBe(false);
     expect(json(join(f.root, 'resource-console-state.json')).paused).toBe(false);
     // Completed history remains inspectable under an explicit stop; replay must
@@ -141,7 +172,7 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     const stopped = new AbortController(); stopped.abort(); const replayPhases: string[] = []; const replayUrls: Array<string | null> = [];
     const replay = await runResourceEngineeringMission(f.config, { signal: stopped.signal,
       onProgress(value) { replayPhases.push(`${value.scope}:${value.phase}`); replayUrls.push(value.consoleUrl); } });
-    expect(replay).toEqual(second); expect(replayPhases).toContain('2:reconciling');
+    expect(replay, JSON.stringify({ replay, second, replayPhases })).toEqual(second); expect(replayPhases).toContain('2:reconciling');
     // Observer exceptions are intentionally isolated by the runner, so assertions
     // belong outside that callback where a regression can actually fail the test.
     expect(replayUrls.every(url => url === null)).toBe(true);

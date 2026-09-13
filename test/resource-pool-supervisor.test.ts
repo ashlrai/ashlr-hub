@@ -5,7 +5,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createResourcePoolSupervisor, ResourceSupervisorError, type ResourcePoolSupervisor,
+import { createResourcePoolSupervisor, readResourceSupervisorCustody, ResourceSupervisorError, type ResourcePoolSupervisor,
   type ResourcePoolSupervisorOptions } from '../src/core/resources/pool-supervisor.js';
 import { runResourceTask } from '../src/core/resources/pool-runtime.js';
 import * as runtime from '../src/core/resources/pool-runtime.js';
@@ -13,6 +13,7 @@ import type { ResourceConsoleTaskInput } from '../src/core/resources/console-typ
 import type { ResourceObservation, ResourcePool, ResourceWorker } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
+import { createResourceWorkspaceCustody, readResourceWorkspaceCustody } from '../src/core/resources/workspace-custody.js';
 
 let base: string;
 const supervisors: ResourcePoolSupervisor[] = [];
@@ -103,6 +104,60 @@ async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reser
 }
 
 describe.skipIf(process.platform === 'win32')('durable foreground resource supervisor', () => {
+  it('withholds a stopped child task without stopping unrelated human dispatch', async () => {
+    const f = await fixture(); let stopped = false;
+    const supervisor = await f.start({ isTaskExecutionStopped: id => id === 'mission' && stopped });
+    supervisor.submit(f.task('mission')); stopped = true;
+    supervisor.submit(f.task('human')); await settled(supervisor, 'human');
+    expect(supervisor.snapshot().jobs.find(row => row.id === 'mission')).toMatchObject({ state: 'queued', reason: 'host-execution-stopped' });
+    expect(f.requests).toHaveLength(1); expect(JSON.stringify(f.requests)).toContain('PRIVATE_PROMPT human');
+  });
+  it('rechecks the child veto at fresh reservation dispatch before contacting a worker', async () => {
+    const f = await fixture(); let stopped = false;
+    const actual = runtime.runResourceTask;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation(options => actual({ ...options,
+      beforeWorkerDispatch: () => { stopped = true; return options.beforeWorkerDispatch!(); } }));
+    const supervisor = await f.start({ isTaskExecutionStopped: () => stopped });
+    supervisor.submit(f.task()); await settled(supervisor);
+    expect(f.requests).toEqual([]);
+    expect(supervisor.snapshot().jobs[0]?.outcome).not.toBe('completed');
+  });
+  it('issues genuine workspace custody and rejects copies, scope drift and closed owners', async () => {
+    const f = await fixture(); const supervisor = await f.start();
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+    expect(readResourceWorkspaceCustody(custody).root).toBe(f.root);
+    expect(() => readResourceSupervisorCustody({ ...supervisor })).toThrow('Unrecognized');
+    expect(() => readResourceWorkspaceCustody({ ...custody })).toThrow('Unrecognized');
+    expect(() => readResourceWorkspaceCustody(custody, { root: f.root, workspace: f.workspace, poolDigest: '0'.repeat(64) })).toThrow('scope changed');
+    await supervisor.close();
+    expect(() => readResourceWorkspaceCustody(custody)).toThrow('unavailable');
+  });
+  it('recognizes only exact ordinary live receipts and refuses cancelling work', async () => {
+    const f = await fixture({ hold: true }); const supervisor = await f.start();
+    supervisor.submit(f.task()); await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+    const receipt = runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts[0]!;
+    const owner = readResourceWorkspaceCustody(custody);
+    expect(owner.ownsReceipt(receipt)).toBe(true);
+    expect(owner.ownsReceipt({ ...receipt, id: 'foreign' })).toBe(false);
+    expect(owner.ownsReceipt({ ...receipt, taskDigest: '0'.repeat(64) })).toBe(false);
+    expect(owner.ownsReceipt({ ...receipt, status: 'uncertain' })).toBe(false);
+    expect(owner.ownsReceipt({ ...receipt, origin: {} as NonNullable<typeof receipt.origin> })).toBe(false);
+    supervisor.cancel('task-a');
+    expect(() => readResourceWorkspaceCustody(custody)).toThrow('custody unavailable');
+    await supervisor.cancelAndDrain('task-a', receipt.taskDigest);
+    expect(readResourceWorkspaceCustody(custody).ownsReceipt(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts[0]!)).toBe(true);
+  });
+  it('rechecks host vetoes and durable state before returning live custody', async () => {
+    const f = await fixture(); const supervisor = await f.start(); let stopped = false;
+    const custody = createResourceWorkspaceCustody(supervisor, null, () => { if (stopped) throw Error('host stopped'); });
+    stopped = true; expect(() => readResourceWorkspaceCustody(custody)).toThrow('host stopped'); stopped = false;
+    const file = join(f.root, 'resource-console-state.json'), original = readFileSync(file, 'utf8');
+    writeFileSync(file, canonical({ ...f.state(), paused: true }) + '\n');
+    expect(() => readResourceWorkspaceCustody(custody)).toThrow('custody unavailable');
+    writeFileSync(file, original);
+    expect(readResourceWorkspaceCustody(custody).root).toBe(f.root);
+  });
   it('withholds queued mission work while retaining observation, cancellation and recovery', async () => {
     const f = await fixture(); let stop = false;
     const supervisor = await f.start({ projects: [], isExecutionStopped: () => stop });

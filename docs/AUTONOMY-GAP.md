@@ -82,6 +82,14 @@ read-only successor lineage, intent capacity, original deadline and held reasons
 New prepared/queued plans refresh the project catalog without changing selection;
 queued status is explicitly distinct from executed or delivered work. This
 observability does not commission accounts or install a resident service.
+The [foreground standing mission](RESOURCE-POOLS.md#run-a-bounded-standing-mission)
+now reuses one console across scopes and can borrow an explicitly selected live
+workspace. Setup and completion use genuine supervisor/collector custody so
+owned human tasks can continue; mission cleanup drains only its attachment and
+exact proposal task. Child deadlines are checked at worker dispatch. Unknown
+receipts, unfinished engineering and changed ownership still hold progress.
+This closes the foreground coexistence gap, not resident service installation,
+browser mission-start controls or actual-account commissioning.
 Terminal/browser panels, conversation compaction and native desktop bootstrap
 remain separate gaps.
 

@@ -7,12 +7,13 @@ import { canonical, digest, inspectPrivateDirectory } from '../universe/artifact
 import { readKillSwitch } from '../sandbox/policy.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { writeImmutablePrivateRecord } from '../util/immutable-private-record-store.js';
-import { startResourceConsoleServer, type ResourceConsoleServerHandle } from '../web/resource-console-server.js';
+import { startResourceConsoleServer, type ResourceConsoleWorkspaceHandle, type ResourceConsoleEngineeringAttachment } from '../web/resource-console-server.js';
 import { checkResourceEngineeringAutonomousSetup, prepareResourceEngineeringAutonomousSetup,
   validateResourceEngineeringAutonomousSetupPolicy, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
 import { checkResourceEngineeringPredecessor, type ResourceEngineeringPredecessorCheck } from './engineering-predecessor-check.js';
 import { pinResourceConsoleProject, matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
-import { decodeResourceConsoleState } from './pool-supervisor.js';
+import { decodeResourceConsoleState, ResourceSupervisorError } from './pool-supervisor.js';
+import { readResourceWorkspaceCustody } from './workspace-custody.js';
 import { readResourceJson, resourcePoolStatus, readResourcePoolHistory, validateResourceTask, type ResourceTask } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
@@ -33,6 +34,8 @@ export interface ResourceEngineeringMissionReport {
 }
 export interface ResourceEngineeringMissionHost {
   signal?: AbortSignal;
+  /** Borrow an explicit live workspace. Mission cleanup never closes this owner. */
+  workspace?: { handle: ResourceConsoleWorkspaceHandle; expectedAttachment: ResourceConsoleEngineeringAttachment | null };
   /** Observation only. No tokens or model output are sent to this callback. */
   onProgress?(value: { missionId: string; scope: number; phase: string; consoleUrl: string | null }): void;
 }
@@ -49,7 +52,10 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
   const configDigest = missionHash(config);
   const report: ResourceEngineeringMissionReport = { schemaVersion: 1, missionId: config.id, state: 'held', reason: 'mission-unavailable',
     scopesReserved: 0, deadlineAt: config.deadlineAt, tip: null };
-  let phase = 'startup', index = 1, handle: ResourceConsoleServerHandle | null = null;
+  let phase = 'startup', index = 1, handle: ResourceConsoleWorkspaceHandle | null = null;
+  let attachment: ResourceConsoleEngineeringAttachment | null = null;
+  let ownsWorkspace = false;
+  let proposalTask: { id: string; digest: string } | null = null;
   let lease: LocalStoreLock | null = null;
   let shutdownUnresolved = false;
   let invocation: ReturnType<typeof beginEngineeringMissionInvocation> | undefined;
@@ -62,6 +68,29 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
   const deadline = Date.parse(config.deadlineAt);
   const monotonicDeadline = performance.now() + Math.max(0, deadline - Date.now());
   let timer: ReturnType<typeof setInterval> | undefined;
+  const closeAttachment = async () => {
+    try { await attachment?.close(); }
+    catch (error) { shutdownUnresolved = true; throw error; }
+  };
+  const drainProposal = async () => {
+    if (!handle || !proposalTask) return;
+    try { await handle.cancelTaskAndDrain(proposalTask.id, proposalTask.digest); proposalTask = null; }
+    catch (error) {
+      // Admission is synchronous: no unobserved HTTP POST can arrive after this
+      // exact, state-verified NOT_FOUND. Other failures retain uncertain custody.
+      if (error instanceof ResourceSupervisorError && error.code === 'NOT_FOUND') { proposalTask = null; return; }
+      shutdownUnresolved = true; throw error;
+    }
+  };
+  let abortDrain: Promise<void> | null = null;
+  const interruptOwnedWork = () => {
+    // Cancellation reaches the exact task synchronously, before waiting for any
+    // HTTP observation. It must not pause the borrowed human supervisor.
+    abortDrain ??= Promise.allSettled([closeAttachment(), drainProposal()]).then(results => {
+      if (results.some(result => result.status === 'rejected')) shutdownUnresolved = true;
+    });
+  };
+  abort.signal.addEventListener('abort', interruptOwnedWork, { once: true });
   try {
     inspectPrivateDirectory(config.root);
     const binding = pinResourceConsoleProject({ id: 'mission', label: 'Mission records', workspace: config.root });
@@ -71,6 +100,13 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
     const pool = validateResourcePool(readResourceJson(runtime.poolPath));
     const bindings = validateResourceBindings(readResourceJson(runtime.bindingsPath), pool);
     const poolDigest = missionHash({ pool, bindings });
+    if (host.workspace) {
+      const borrowed = host.workspace;
+      const custody = borrowed.handle.engineeringCustody(borrowed.expectedAttachment);
+      readResourceWorkspaceCustody(custody, { root: runtime.root, workspace: config.initial.setup.workspace, poolDigest });
+      handle = borrowed.handle; attachment = borrowed.expectedAttachment;
+    }
+    const workspaceCustody = () => handle?.engineeringCustody(attachment);
     const recipe = missionData<ResourceEngineeringRecipe>(config.initial.setup.recipe);
     const policy = validateResourceEngineeringAutonomousSetupPolicy(config.initial.setup.policy);
     const projectsDocument = readResourceJson(config.initial.setup.projectsFile) as { projects: unknown };
@@ -93,7 +129,10 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         !ownsLocalStoreLock(lease) || !matchesResourceConsoleProject(binding) || present(join(config.root, 'STOP')) ||
         kill.state !== 'inactive' || kill.sourceState !== 'healthy'; } catch { return true; }
     };
-    const guard = () => requireFact(!stopped(), 'Mission execution stopped');
+    const guard = () => {
+      requireFact(!stopped(), 'Mission execution stopped');
+      requireFact(!handle || handle.engineeringAttachment() === attachment, 'Mission workspace attachment changed');
+    };
     timer = setInterval(() => { if (stopped()) abort.abort(); }, Math.min(config.pollIntervalMs, 1000));
     let rows = readEngineeringMissionRecords(config, true);
     const read = () => { rows = readEngineeringMissionRecords(config); return rows; };
@@ -115,11 +154,6 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         abort.signal.addEventListener('abort', done, { once: true }); if (abort.signal.aborted) done();
       }); guard();
     };
-    const close = async () => {
-      const active = handle; handle = null;
-      try { if (active) await active.close(); }
-      catch (error) { shutdownUnresolved = true; throw error; }
-    };
     const request = async <T>(path: string, body?: unknown): Promise<T> => {
       guard(); requireFact(handle && new URL(handle.url).hostname === '127.0.0.1', 'Mission console unavailable');
       return requestEngineeringMissionConsole<T>({ handle: handle!, path, ...(body === undefined ? {} : { body }),
@@ -127,22 +161,30 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
     };
     const consoleStart = async (setup?: ResourceEngineeringAutonomousSetupOptions, allowedQueuedId?: string) => {
       guard();
-      const file = join(runtime.root, 'resource-console-state.json');
-      if (present(file)) {
-        const state = decodeResourceConsoleState(readResourceJson(file, 4 * 1024 * 1024), { pool, bindings,
-          workspace: config.initial.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
-        requireFact(!state.paused && state.jobs.every(job => job.state !== 'queued' || job.id === allowedQueuedId) &&
-          state.jobs.every(job => !['dispatching', 'unresolved'].includes(job.state)), 'Mission console contains stopped or unrelated work');
+      if (!handle) {
+        const file = join(runtime.root, 'resource-console-state.json');
+        if (present(file)) {
+          const state = decodeResourceConsoleState(readResourceJson(file, 4 * 1024 * 1024), { pool, bindings,
+            workspace: config.initial.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
+          requireFact(!state.paused && state.jobs.every(job => job.state !== 'queued' || job.id === allowedQueuedId) &&
+            state.jobs.every(job => !['dispatching', 'unresolved'].includes(job.state)), 'Mission console contains stopped or unrelated work');
+        }
+        guard();
+        handle = await startResourceConsoleServer({ root: runtime.root, workspace: config.initial.setup.workspace,
+          poolFile: runtime.poolPath, bindingsFile: runtime.bindingsPath, observationsFile: runtime.observationsPath,
+          projectsFile: config.initial.setup.projectsFile, ...(runtime.quotaConfigPath ? { quotaConfigFile: runtime.quotaConfigPath } : {}),
+          execute: true, port: 0 });
+        ownsWorkspace = true;
       }
-      const plan = setup ? checkResourceEngineeringAutonomousSetup(setup) : null;
       guard();
-      handle = await startResourceConsoleServer({ root: runtime.root, workspace: config.initial.setup.workspace,
-        poolFile: runtime.poolPath, bindingsFile: runtime.bindingsPath, observationsFile: runtime.observationsPath,
-        projectsFile: config.initial.setup.projectsFile, ...(runtime.quotaConfigPath ? { quotaConfigFile: runtime.quotaConfigPath } : {}),
-        ...(plan ? { engineeringPreparationFile: plan.paths.profiles, engineeringSupervisionFile: plan.paths.supervision,
-          engineeringSuccessorsFile: plan.paths.successors } : {}), execute: true, port: 0, signal: abort.signal,
-        isExecutionStopped: stopped });
-      guard();
+      if (setup) {
+        const plan = checkResourceEngineeringAutonomousSetup(setup, workspaceCustody());
+        attachment = await handle.attachEngineering({ expectedAttachment: attachment,
+          engineeringPreparationFile: plan.paths.profiles, engineeringSupervisionFile: plan.paths.supervision,
+          engineeringSuccessorsFile: plan.paths.successors,
+          engineeringLifetime: { signal: abort.signal, isExecutionStopped: stopped } });
+        guard();
+      }
     };
     if (!rows.length) { guard(); write('definition', { configDigest }, 0); }
     if (!get('reserved', 1)) { guard(); write('reserved', { setup: config.initial.setup }, 1); }
@@ -169,7 +211,8 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
       if (!pinned) {
         guard(); progress('preparing');
         if (!present(setup.output)) mkdirSync(setup.output, { mode: 0o700 });
-        const plan = checkResourceEngineeringAutonomousSetup(setup);
+        const custody = workspaceCustody();
+        const plan = checkResourceEngineeringAutonomousSetup(setup, custody);
         if (index === 1) requireFact(plan.planDigest === config.initial.expectedPlanDigest, 'Initial mission plan changed');
         const previousScope = index > 1 ? get<{ setup: ResourceEngineeringAutonomousSetupOptions }>('reserved', index - 1)! : null;
         const previousPlan = index > 1 ? get<{ planDigest: string }>('prepared', index - 1)! : null;
@@ -178,16 +221,16 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         const verifyPrevious = (locks: readonly LocalStoreLock[] = []) => {
           if (!previousScope) return;
           const proof = checkResourceEngineeringPredecessor({ setup: previousScope.setup, expectedPlanDigest: previousPlan!.planDigest,
-            expectedDeadlineAt: previousRun!.deadlineAt }, locks);
+            expectedDeadlineAt: previousRun!.deadlineAt }, locks, custody);
           requireFact(proof.status === 'verified' && proof.continuation === 'eligible' && canonical(proof.tip) === canonical(previousProof!.tip), 'Mission predecessor changed'); guard();
         };
         verifyPrevious(); guard();
         const prepared = prepareResourceEngineeringAutonomousSetup({ ...setup, expectedPlanDigest: plan.planDigest },
-          { isExecutionStopped: stopped, beforePublication: verifyPrevious });
+          { isExecutionStopped: stopped, beforePublication: verifyPrevious, ...(custody ? { workspaceCustody: custody } : {}) });
         write('prepared', { planDigest: prepared.planDigest });
       }
       const expectedPlan = get<{ planDigest: string }>('prepared')!;
-      requireFact(checkResourceEngineeringAutonomousSetup(setup).planDigest === expectedPlan.planDigest, 'Mission prepared setup changed');
+      requireFact(checkResourceEngineeringAutonomousSetup(setup, workspaceCustody()).planDigest === expectedPlan.planDigest, 'Mission prepared setup changed');
       let proof = get<ResourceEngineeringPredecessorCheck>('settled');
       if (!proof) {
         progress('executing'); await consoleStart(setup); progress('executing');
@@ -200,16 +243,20 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
           const successors = await request<ResourceEngineeringSuccessorCoordinatorSnapshot>('/api/resources/engineering-successors');
           requireFact(successors.supervisionId === queue.configId && successors.deadlineAt === queue.deadlineAt, 'Mission successor scope changed');
           const complete = queue.entries.length > 0 && queue.entries.every(row => row.state === 'completed');
-          const settled = successors.entries.every(row => row.state === 'admitted' || row.state === 'stopped');
+          // The successor journal may advance after the queue read. Admission
+          // is not execution: never drain a scope from a pre-admission queue
+          // snapshot that omits the newly admitted child's completion.
+          const settled = successors.entries.every(row => row.state === 'stopped' || row.state === 'admitted' &&
+            typeof row.successorId === 'string' && queue.entries.some(entry => entry.enrollmentId === row.successorId && entry.state === 'completed'));
           const final = successors.entries.some(row => row.state === 'stopped') || successors.entries.length >= policy.successors.maxSuccessors;
           if (complete && settled && final) break;
           requireFact(!['timed-out', 'unavailable', 'closed'].includes(queue.state) &&
             !queue.entries.some(row => ['held', 'stopped', 'unavailable'].includes(row.state)), 'Mission scope did not settle');
           await wait();
         }
-        progress('draining'); await close(); progress('verifying');
+        progress('draining'); await closeAttachment(); progress('verifying');
         proof = checkResourceEngineeringPredecessor({ setup, expectedPlanDigest: expectedPlan.planDigest, expectedDeadlineAt: get<{ deadlineAt: string }>('running')!.deadlineAt,
-          ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) });
+          ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) }, [], workspaceCustody());
         requireFact(proof.status === 'verified' && proof.tip, 'Mission completion proof unavailable');
         // Feedback belongs to the eventual immutable proposal, never the legacy
         // completion codec. Restart regenerates it from the same verified scope.
@@ -218,7 +265,7 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         progress('reconciling');
         const fresh = checkResourceEngineeringPredecessor({ setup, expectedPlanDigest: expectedPlan.planDigest,
           expectedDeadlineAt: get<{ deadlineAt: string }>('running')!.deadlineAt,
-          ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) });
+          ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) }, [], workspaceCustody());
         requireFact(fresh.status === 'verified' && fresh.tip && canonical(fresh.tip) === canonical(proof.tip) &&
           fresh.continuation === proof.continuation, 'Recorded mission completion changed');
         proof = fresh;
@@ -255,7 +302,10 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
       if (!result) {
         if (!handle) await consoleStart(undefined, task.id);
         const { schemaVersion: _schema, cwd: _cwd, ...submission } = task;
-        await request('/api/resources/tasks', { ...submission, retainHistory: true, projectId: recipe.projectId });
+        guard();
+        proposalTask = { id: task.id, digest: missionHash(task) };
+        handle!.submitTask({ ...submission, retainHistory: true, projectId: recipe.projectId },
+          { signal: abort.signal, isExecutionStopped: stopped });
         while (true) {
           const view = await request<ResourceConsoleSnapshot>('/api/resources');
           requireFact(view.supervisor && !view.supervisor.paused && !view.supervisor.closing, 'Mission proposal console unavailable');
@@ -272,7 +322,7 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
           await wait();
         }
       }
-      await close();
+      await drainProposal();
       const settledReceipt = receipt(); requireFact(settledReceipt?.status === 'completed' && missionHash(settledReceipt) === result.receiptDigest &&
         digest(result.output) === settledReceipt.outputDigest, 'Mission proposal result changed');
       const proposal = parseResourceEngineeringSuccessorProposal(result.output);
@@ -292,7 +342,10 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
     return report;
   } finally {
     if (timer) clearInterval(timer); host.signal?.removeEventListener('abort', stoppedExternally); abort.abort();
-    try { if (handle) await handle.close(); }
+    await abortDrain; abort.signal.removeEventListener('abort', interruptOwnedWork);
+    try { await closeAttachment(); } catch { shutdownUnresolved = true; }
+    try { await drainProposal(); } catch { shutdownUnresolved = true; }
+    try { if (handle && ownsWorkspace) await handle.close(); }
     catch { shutdownUnresolved = true; }
     if (shutdownUnresolved) { report.state = 'held'; report.reason = 'shutdown-unresolved'; }
     if (lease && !releaseLocalStoreLock(lease)) { report.state = 'held'; report.reason = 'ownership-release-unresolved'; }

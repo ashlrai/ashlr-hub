@@ -4,7 +4,7 @@ import { closeSync, constants, existsSync, fsyncSync, lstatSync, mkdirSync, open
   renameSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
+import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock, type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { canonical, digest, inspectPrivateDirectory } from '../universe/artifacts.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
@@ -59,6 +59,8 @@ type DurableState = ResourceConsoleDurableState;
 export interface ResourcePoolSupervisorOptions {
   /** Host mission ownership/deadline veto; false is the only permitting result. */
   isExecutionStopped?: () => boolean;
+  /** Host-only child veto, checked again at fresh reservation dispatch. */
+  isTaskExecutionStopped?: (id: string) => boolean;
   root: string; pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
   projects?: ResourceConsoleProjectInput[];
   readObservations(): ResourceObservation[];
@@ -87,6 +89,18 @@ export interface ResourcePoolSupervisor {
   history(id: string): ResourceConsoleTranscript | null;
   deleteHistory(id: string): ResourceSupervisorJob;
   close(): Promise<void>;
+}
+
+/** Host-only live ownership, issued by the actual constructor, never by a wire descriptor. */
+export interface ResourceSupervisorCustody {
+  root: string; workspace: string; poolDigest: string; lock: LocalStoreLock; stateDigest: string;
+  ownsReceipt(receipt: ResourceTaskReceipt): boolean;
+}
+const supervisorCustodies = new WeakMap<ResourcePoolSupervisor, () => ResourceSupervisorCustody>();
+export function readResourceSupervisorCustody(supervisor: ResourcePoolSupervisor): ResourceSupervisorCustody {
+  const read = supervisorCustodies.get(supervisor);
+  if (!read) throw new ResourceSupervisorError('UNAVAILABLE', 'Unrecognized resource supervisor owner');
+  return read();
 }
 
 function object(value: unknown): value is Record<string, unknown> {
@@ -420,6 +434,19 @@ export function previewResourceConsoleProjects(options: {
 export async function createResourcePoolSupervisor(options: ResourcePoolSupervisorOptions): Promise<ResourcePoolSupervisor> {
   const hostStopped = captureResourceExecutionVeto(options);
   const hasHostVeto = Object.hasOwn(options, 'isExecutionStopped');
+  const taskVeto = Object.getOwnPropertyDescriptor(options, 'isTaskExecutionStopped');
+  if (taskVeto && (!Object.hasOwn(taskVeto, 'value') || typeof taskVeto.value !== 'function') ||
+    !taskVeto && 'isTaskExecutionStopped' in options) throw new Error('Invalid task execution veto');
+  const readTaskVeto = taskVeto?.value as ((id: string) => unknown) | undefined;
+  const taskStopped = (id: string) => {
+    if (hostStopped()) return true;
+    if (!readTaskVeto) return false;
+    try {
+      const result = readTaskVeto(id);
+      if (result instanceof Promise) void result.catch(() => {});
+      return result !== false;
+    } catch { return true; }
+  };
   let pool: ResourcePool; let bindings: ResourceBinding[];
   const root = options.root; const workspace = options.workspace;
   const configuredCatalogValue = options.projects;
@@ -620,7 +647,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
   function start(job: DurableJob, observations: ResourceObservation[], unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]): void {
     if (!job.input) throw new Error('Queued task input unavailable');
-    const initialProjectHold = hostStopped() ? 'host-execution-stopped' : projectHold(job.projectId);
+    const initialProjectHold = taskStopped(job.id) ? 'host-execution-stopped' : projectHold(job.projectId);
     if (initialProjectHold) { if (job.reason !== initialProjectHold) update(job.id, { reason: initialProjectHold }); return; }
     update(job.id, { state: 'dispatching', reason: 'dispatch-requested', workerId: null });
     // Publish the supervisor's irreversible intent before entering the runtime.
@@ -636,11 +663,11 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       beforeWorkerDispatch: () => {
         // Runtime invokes this only for this call's fresh reservation, never
         // replay. An active scheduler promise alone is not transport custody.
-        owned.workerStarted = !hostStopped() && projectHold(job.projectId) === null;
+        owned.workerStarted = !taskStopped(job.id) && projectHold(job.projectId) === null;
         return owned.workerStarted;
       },
-      ...(projectBindings || hasHostVeto ? { readAdmissionEvidence: () => {
-        admissionProjectHold = hostStopped() ? 'host-execution-stopped' : projectHold(job.projectId);
+      ...(projectBindings || hasHostVeto || readTaskVeto ? { readAdmissionEvidence: () => {
+        admissionProjectHold = taskStopped(job.id) ? 'host-execution-stopped' : projectHold(job.projectId);
         return { observations, unavailableWorkerIds: admissionProjectHold ? [...workerIds] : unavailableWorkerIds, quotaUnavailableWorkerIds };
       } } : {}) }).then((result) => {
       if (result.replayed || !result.receipt) dispatched.delete(job.id);
@@ -790,7 +817,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         }
         return publicJob(previous);
       }
-      const projectReason = hostStopped() ? 'host-execution-stopped' : projectHold(input.projectId);
+      const projectReason = taskStopped(input.id) ? 'host-execution-stopped' : projectHold(input.projectId);
       if (projectReason) throw new ResourceSupervisorError('UNAVAILABLE', projectReason);
       if (state.jobs.length >= MAX_RESOURCE_SUPERVISOR_JOBS || state.jobs.filter((job) => job.state === 'queued').length >= maxQueued) {
         throw new ResourceSupervisorError('CAPACITY', 'Resource supervisor history or queue capacity reached');
@@ -973,6 +1000,27 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     stoppedBeforeStart(); if (changed) persist(recovered);
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) { await supervisor.close(); throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor startup cancelled'); }
+    const ownsActiveReceipt = supervisor.ownsActiveTaskReceipt.bind(supervisor);
+    supervisorCustodies.set(supervisor, () => {
+      ensureAvailable();
+      if (hostStopped() || signal?.aborted || state.paused || persistedDigest === null ||
+        digest(canonical(readResourceJson(statePath, MAX_STATE_BYTES))) !== persistedDigest ||
+        digest(canonical(state)) !== persistedDigest || state.jobs.some(job => job.state === 'unresolved' ||
+          job.state === 'dispatching' && (!active.has(job.id) || active.get(job.id)!.controller.signal.aborted || taskStopped(job.id)))) {
+        throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor custody unavailable');
+      }
+      // Copy the exact known identities for this sample. Never infer ownership
+      // from a task prefix or from the absence of an engineering origin alone.
+      const jobs = detached(state.jobs);
+      return Object.freeze({ root, workspace, poolDigest, lock, stateDigest: persistedDigest,
+        ownsReceipt(receipt: ResourceTaskReceipt) {
+          if (receipt.origin !== undefined || receipt.status === 'uncertain') return false;
+          if (receipt.status === 'reserved') return ownsActiveReceipt(receipt);
+          return jobs.some(job => job.id === receipt.id && job.taskDigest === receipt.taskDigest &&
+            originFor(job).poolDigest === receipt.poolDigest && job.allowedWorkerIds.includes(receipt.workerId) &&
+            job.state === 'settled' && job.workerId === receipt.workerId && job.outcome === receipt.status);
+        } });
+    });
     schedule(0); return supervisor;
   } catch (cause) {
     signal?.removeEventListener('abort', onAbort); if (timer) clearTimeout(timer);

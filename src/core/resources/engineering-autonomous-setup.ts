@@ -21,6 +21,7 @@ import { readResourceJson, readResourcePoolHistory, resourcePoolStatus } from '.
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
+import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
 import type { ResourceEngineeringAutonomousSetupOptions as Options, ResourceEngineeringAutonomousSetupPolicy as Policy,
   ResourceEngineeringAutonomousSetupPlan as Plan, ResourceEngineeringAutonomousSetupReport as Report } from './engineering-autonomous-setup-types.js';
 export type * from './engineering-autonomous-setup-types.js';
@@ -62,7 +63,7 @@ export function validateResourceEngineeringAutonomousSetupPolicy(input: unknown)
   if (value.successors.maxSuccessors > value.maxEnrollments - 1) fail('Successor capacity excludes the initial enrollment');
   return value;
 }
-function capture(input: Options, internal = false) {
+function capture(input: Options, internal = false, custody?: ResourceWorkspaceCustody) {
   const options = data<Options>(input);
   if (!exact(options, ['recipe', 'policy', 'output', 'resourceRuntime', 'workspace', 'projectsFile']) ||
     ![options.output, options.resourceRuntime, options.workspace, options.projectsFile].every(path)) fail('Invalid autonomous setup options');
@@ -104,18 +105,22 @@ function capture(input: Options, internal = false) {
   const bundleOptions = { recipe, output: paths.initialBundle, resourceRuntime: options.resourceRuntime, workspace: options.workspace, projectsFile: options.projectsFile };
   const bundlePlan = checkResourceEngineeringPreparation(bundleOptions);
   const poolState = resourcePoolStatus(runtime.root, pool, bindings, []);
+  const owner = custody === undefined ? null : readResourceWorkspaceCustody(custody,
+    { root: runtime.root, workspace: options.workspace, poolDigest: hash({ pool, bindings }) });
+  if (owner && (!state || hash(state) !== owner.stateDigest)) fail('Workspace state changed during setup');
   const holds: string[] = [];
   const kill = readKillSwitch(); if (kill.state !== 'inactive' || kill.sourceState !== 'healthy') holds.push('global-kill-active-or-unavailable');
   if (!loadExistingProvenanceKeyReadOnly()) holds.push('provenance-unavailable');
   if (state?.paused) holds.push('queue-paused');
-  if (state?.jobs.some(row => row.state === 'queued')) holds.push('ordinary-queued-work-retained');
-  if (state?.jobs.some(row => row.state === 'dispatching' || row.state === 'unresolved')) holds.push('console-work-unresolved');
+  if (!owner && state?.jobs.some(row => row.state === 'queued')) holds.push('ordinary-queued-work-retained');
+  if (!owner && state?.jobs.some(row => row.state === 'dispatching' || row.state === 'unresolved')) holds.push('console-work-unresolved');
   const lockPath = join(runtime.root, '.resource-console.lock');
-  if (present(lockPath)) holds.push('console-ownership-present');
+  if (!owner && present(lockPath)) holds.push('console-ownership-present');
   if (present(join(runtime.root, '.pool.lock'))) holds.push('pool-ownership-present');
-  if (present(join(runtime.root, '.resource-quota-refresh.lock'))) holds.push('quota-ownership-present');
-  if (present(join(runtime.root, '.resource-quota-refresh-pending.json'))) holds.push('quota-work-unresolved');
-  if (poolState.attempts.some(row => row.status === 'reserved' || row.status === 'uncertain')) holds.push('resource-work-unresolved');
+  if (!owner?.locks.some(lock => lock.path === join(runtime.root, '.resource-quota-refresh.lock')) &&
+    present(join(runtime.root, '.resource-quota-refresh.lock'))) holds.push('quota-ownership-present');
+  if (!owner?.metadataPending && present(join(runtime.root, '.resource-quota-refresh-pending.json'))) holds.push('quota-work-unresolved');
+  if (poolState.attempts.some(row => row.status === 'uncertain' || row.status === 'reserved' && !owner?.ownsReceipt(row))) holds.push('resource-work-unresolved');
   const completed = present(paths.receipt);
   if (!internal && !completed) {
     if (readdirSync(options.output).length) fail('Incomplete setup requires inspection; no automatic repair');
@@ -127,7 +132,7 @@ function capture(input: Options, internal = false) {
     projectBindings: preview.bindings, projects: preview.projects, bundlePlanDigest: bundlePlan.planDigest, profileConfig, successorConfig });
   const plan: Plan = { schemaVersion: 1, status: 'planned', scope: 'local-autonomous-setup-only', planDigest, output: options.output,
     projectId: recipe.projectId, seedRevision: recipe.seedRevision, initialEnrollmentDigest: null, executionStarted: false, providerContacted: false, paths, holds };
-  return { options, policy, recipe, runtime, pool, bindings, preview, paths, plan, completed, outputBinding, lockPath, profileConfig, successorConfig, supervision };
+  return { options, policy, recipe, runtime, pool, bindings, preview, paths, plan, completed, outputBinding, lockPath, profileConfig, successorConfig, supervision, custody };
 }
 function registry(current: ReturnType<typeof capture>) {
   return createResourceEngineeringPreparationRegistry({ configFile: current.paths.profiles, config: current.profileConfig, root: current.runtime.root,
@@ -155,11 +160,11 @@ function verified(current: ReturnType<typeof capture>, includeDeliveredSources =
     if (canonical(result.registration) !== canonical(row)) fail('Preparation registration changed during read');
     return result;
   });
-  if (capture(current.options, true).plan.planDigest !== current.plan.planDigest) fail('Setup changed during read');
+  if (capture(current.options, true, current.custody).plan.planDigest !== current.plan.planDigest) fail('Setup changed during read');
   return { initialEnrollmentDigest: saved.initialEnrollmentDigest, registry: entries, entries: verifiedEntries };
 }
-export function checkResourceEngineeringAutonomousSetup(options: Options): Plan {
-  const current = capture(options);
+export function checkResourceEngineeringAutonomousSetup(options: Options, custody?: ResourceWorkspaceCustody): Plan {
+  const current = capture(options, false, custody);
   if (current.completed) current.plan.initialEnrollmentDigest = verified(current).initialEnrollmentDigest;
   return current.plan;
 }
@@ -175,8 +180,8 @@ export interface ResourceEngineeringAutonomousSetupEvidence {
  * No proof is cached across invocations; consumers must take their independent
  * second sample and retain publication/custody guards. A null source is not a
  * completed delivery, and these facts alone do not authorize continuation. */
-export function readResourceEngineeringAutonomousSetupEvidence(options: Options): ResourceEngineeringAutonomousSetupEvidence {
-  const current = capture(options);
+export function readResourceEngineeringAutonomousSetupEvidence(options: Options, custody?: ResourceWorkspaceCustody): ResourceEngineeringAutonomousSetupEvidence {
+  const current = capture(options, false, custody);
   if (!current.completed) fail('Completed setup evidence is required');
   const result = verified(current, true);
   current.plan.initialEnrollmentDigest = result.initialEnrollmentDigest;
@@ -197,36 +202,41 @@ function writePrivate(file: string, value: unknown, guard: () => void): void {
   fsyncDirectory(dirname(file)); guard();
 }
 export function prepareResourceEngineeringAutonomousSetup(input: Options & { expectedPlanDigest: string },
-  host: { isExecutionStopped?: () => boolean; beforePublication?: (locks: readonly LocalStoreLock[]) => void } = {}): Report {
+  host: { isExecutionStopped?: () => boolean; beforePublication?: (locks: readonly LocalStoreLock[]) => void;
+    workspaceCustody?: ResourceWorkspaceCustody } = {}): Report {
   const hostStopped = captureResourceExecutionVeto(host);
   const publication = Object.getOwnPropertyDescriptor(host, 'beforePublication');
   if (publication && (!Object.hasOwn(publication, 'value') || typeof publication.value !== 'function') ||
       !publication && 'beforePublication' in host) fail('Invalid host publication guard');
   const beforeHostPublication = publication?.value as ((locks: readonly LocalStoreLock[]) => unknown) | undefined;
+  const property = Object.getOwnPropertyDescriptor(host, 'workspaceCustody');
+  if (property && !Object.hasOwn(property, 'value') || !property && 'workspaceCustody' in host) fail('Invalid workspace custody');
+  const custody = property?.value as ResourceWorkspaceCustody | undefined;
+  if (property) readResourceWorkspaceCustody(custody!);
   const supplied = data<Options & { expectedPlanDigest: string }>(input);
   if (!exact(supplied, ['recipe', 'policy', 'output', 'resourceRuntime', 'workspace', 'projectsFile', 'expectedPlanDigest']) ||
     typeof supplied.expectedPlanDigest !== 'string' || !HASH.test(supplied.expectedPlanDigest)) fail('Setup requires a checked plan digest');
   const { expectedPlanDigest, ...options } = supplied;
-  const current = capture(options);
+  const current = capture(options, false, custody);
   if (current.plan.planDigest !== expectedPlanDigest) fail('Setup plan changed');
   if (current.completed) return report(current, verified(current).initialEnrollmentDigest, 'replayed');
   if (hostStopped()) fail('Host setup publication stopped');
-  const acquired = acquireLocalStoreLockWithOutcome(current.lockPath, 0, { anchorPath: current.runtime.root, exactPrivateStorage: true });
-  if (acquired.state !== 'acquired') fail('Console is owned or unavailable');
-  const locks = [acquired.lock];
+  const locks = custody ? [...readResourceWorkspaceCustody(custody).locks] : [];
+  const acquiredLocks: LocalStoreLock[] = [];
   let result: Report;
   try {
-    for (const name of ['.pool.lock', '.resource-quota-refresh.lock']) {
+    for (const name of ['.resource-console.lock', '.pool.lock', '.resource-quota-refresh.lock']) {
       const file = join(current.runtime.root, name);
+      if (locks.some(lock => lock.path === file)) continue;
       if (present(file)) fail('Setup requires stopped resource ownership');
       const next = acquireLocalStoreLockWithOutcome(file, 0, { anchorPath: current.runtime.root, exactPrivateStorage: true });
       if (next.state !== 'acquired') fail('Setup resource ownership unavailable');
-      locks.push(next.lock);
+      locks.push(next.lock); acquiredLocks.push(next.lock);
     }
     const guard = () => {
       if (hostStopped()) fail('Host setup publication stopped');
       if (locks.some(lock => !ownsLocalStoreLock(lock)) || !matchesResourceConsoleProject(current.outputBinding)) fail('Setup ownership changed');
-      const fresh = capture(options, true);
+      const fresh = capture(options, true, custody);
       if (fresh.plan.planDigest !== expectedPlanDigest || fresh.plan.holds.some(reason => reason.endsWith('-work-unresolved'))) fail('Setup inputs or resource ownership changed');
       if (hostStopped()) fail('Host setup publication stopped');
     };
@@ -240,7 +250,7 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
     const checked = entries.materialize(request);
     const beforePublication = (catalog: ResourceConsoleEngineeringCatalog) => {
       guard();
-      const fresh = capture(options, true);
+      const fresh = capture(options, true, custody);
       prepareResourceConsoleEngineeringEnrollments({ root: current.runtime.root, poolFile: current.runtime.poolPath,
         bindingsFile: current.runtime.bindingsPath, observationsFile: current.runtime.observationsPath,
         ...(current.runtime.quotaConfigPath ? { quotaConfigFile: current.runtime.quotaConfigPath } : {}), catalog,
@@ -262,7 +272,9 @@ export function prepareResourceEngineeringAutonomousSetup(input: Options & { exp
     result = report(current, verified(current).initialEnrollmentDigest, 'created');
   } finally {
     let released = true;
-    for (const lock of locks.reverse()) if (!releaseLocalStoreLock(lock)) released = false;
+    // Borrowed workspace/collector locks outlive this setup. Release only our
+    // short publication locks, including on partial preparation failure.
+    for (const lock of acquiredLocks.reverse()) if (!releaseLocalStoreLock(lock)) released = false;
     if (!released) fail('Setup ownership cleanup could not be confirmed');
   }
   return result;

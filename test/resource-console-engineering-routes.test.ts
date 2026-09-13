@@ -23,6 +23,7 @@ vi.mock('../src/core/resources/console-engineering.js', () => ({
 }));
 import { startResourceConsoleServer, type ResourceConsoleServerHandle, type ResourceConsoleServerOptions } from '../src/core/web/resource-console-server.js';
 import { ResourceSupervisorError } from '../src/core/resources/pool-supervisor.js';
+import { readResourceWorkspaceCustody } from '../src/core/resources/workspace-custody.js';
 import type { ResourceConsoleEngineeringReadiness } from '../src/core/resources/console-engineering-types.js';
 
 let directory: string; let options: ResourceConsoleServerOptions;
@@ -360,6 +361,21 @@ async function pendingBody(handle: ResourceConsoleServerHandle, route: string, v
 }
 
 describe('host-owned same-workspace engineering attachment', () => {
+  it('binds live workspace custody to the exact closed attachment and invalidates it on replacement', async () => {
+    const handle = await start(), previous = handle.engineeringAttachment()!;
+    expect(() => handle.engineeringCustody(previous)).toThrow('not drained');
+    await previous.close();
+    expect(() => handle.engineeringCustody({ ...previous })).toThrow('changed');
+    const custody = handle.engineeringCustody(previous);
+    expect(readResourceWorkspaceCustody(custody).root).toBe(options.root);
+    const nextOwner = { ...owner, close: vi.fn().mockResolvedValue(undefined) }; owner.create.mockReturnValueOnce(nextOwner);
+    const next = await handle.attachEngineering({ expectedAttachment: previous, engineeringFile: options.engineeringFile });
+    expect(() => readResourceWorkspaceCustody(custody)).toThrow('changed');
+    await next.close();
+    const current = handle.engineeringCustody(next);
+    await handle.close();
+    expect(() => readResourceWorkspaceCustody(current)).toThrow('unavailable');
+  });
   it('publishes a read-only attachment identity and pins close to the displayed component', async () => {
     const handle = await start(); const previous = handle.engineeringAttachment()!;
     const headers = { 'x-ashlr-token': handle.readToken };

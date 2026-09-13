@@ -28,6 +28,13 @@ export class ResourceQuotaRefreshLeaseError extends Error {
 }
 
 const ACQUISITION_UNAVAILABLE = 'Resource quota collector already owned or unavailable; prior pending work requires operator reconciliation';
+const quotaCustodies = new WeakMap<ResourceQuotaRefreshLease, () => { root: string; lock: LocalStoreLock; pending: boolean }>();
+/** Only a real live lease can vouch for its metadata fence. */
+export function readResourceQuotaRefreshCustody(lease: ResourceQuotaRefreshLease) {
+  const read = quotaCustodies.get(lease);
+  if (!read) throw new Error('Unrecognized resource quota owner');
+  return read();
+}
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const MAX_MARKER_BYTES = 512;
 const RECOVERY_RECEIPT = '.resource-quota-refresh-recovery.json';
@@ -501,5 +508,7 @@ export async function acquireResourceQuotaRefreshLease(root: string,
     }
     if (closeError) throw closeError;
   }
-  return Object.freeze({ assertOwnership, identity, markPending, beginNativeActivity, close });
+  const lease = Object.freeze({ assertOwnership, identity, markPending, beginNativeActivity, close });
+  quotaCustodies.set(lease, () => { assertOwnership(); return Object.freeze({ root, lock, pending: pending !== null }); });
+  return lease;
 }

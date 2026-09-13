@@ -9,7 +9,8 @@ import { readResourceJson, resourcePoolStatus, readResourcePoolAllocation, setRe
   readResourceWorkerAccess, setResourceWorkerAccess, readResourceQuotaScopeAccess, setResourceQuotaScopeAccess } from '../resources/pool-runtime.js';
 import { validateResourceQuotaScopeExclusions, excludedResourceQuotaScopeWorkerIds } from '../resources/quota-scope-access.js';
 import { validateResourceBindings } from '../resources/worker.js';
-import { createResourcePoolSupervisor, ResourceSupervisorError } from '../resources/pool-supervisor.js';
+import { createResourcePoolSupervisor, ResourceSupervisorError, type ResourcePoolSupervisor } from '../resources/pool-supervisor.js';
+import { createResourceWorkspaceCustody, type ResourceWorkspaceCustody } from '../resources/workspace-custody.js';
 import { createResourceQuotaRefresher, validateResourceQuotaRefreshConfig, type ResourceQuotaRefresher } from '../resources/quota-refresh.js';
 import { acquireResourceQuotaRefreshLease, inspectResourceQuotaRefreshPending, ResourceQuotaRefreshLeaseError,
   type ResourceQuotaRefreshLease } from '../resources/quota-refresh-lease.js';
@@ -82,6 +83,11 @@ export type ResourceConsoleEngineeringAttachmentInput = Pick<ResourceConsoleServ
 export interface ResourceConsoleWorkspaceHandle extends ResourceConsoleServerHandle {
   engineeringAttachment(): ResourceConsoleEngineeringAttachment | null;
   attachEngineering(input: ResourceConsoleEngineeringAttachmentInput): Promise<ResourceConsoleEngineeringAttachment>;
+  /** Host-only capability for setup and completion joins while human work stays live. */
+  engineeringCustody(expectedAttachment: ResourceConsoleEngineeringAttachment | null): ResourceWorkspaceCustody;
+  /** Synchronous admission prevents a late HTTP request from outliving mission cleanup. */
+  submitTask(input: ResourceConsoleTaskInput, lifetime?: ResourceEngineeringLifetime): ReturnType<ResourcePoolSupervisor['submit']>;
+  cancelTaskAndDrain: ResourcePoolSupervisor['cancelAndDrain'];
 }
 
 function engineeringPaths(input: Pick<ResourceConsoleServerOptions, 'engineeringFile' | 'engineeringPreparationFile' | 'engineeringSupervisionFile' | 'engineeringSuccessorsFile'>) {
@@ -248,6 +254,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     ...(options.execute ? { historySupported: true, followUpSupported: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
+  const taskLifetimes = new Map<string, ReturnType<typeof captureResourceEngineeringLifetime>>();
   let engineeringComponent: ResourceEngineeringComponent | null = null;
   let attachment: ResourceConsoleEngineeringAttachment | null = null;
   let attachmentPending = false;
@@ -720,6 +727,26 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (component.successors) scope.engineeringSuccessorsSupported = true;
     return component;
   }
+  function assertWorkspace() {
+    if (!ready || closing || signal?.aborted || hostStopped() || !supervisor || !workspace || !projectsFile || engineeringFaulted) throw new Error('Engineering workspace unavailable');
+    if (canonical(validateResourcePool(readResourceJson(poolFile))) !== canonical(pool) ||
+      canonical(validateResourceBindings(readResourceJson(bindingsFile), pool)) !== canonical(bindings) ||
+      canonical(readResourceJson(projectsFile, 256 * 1024)) !== canonical(catalog) ||
+      quotaConfigFile && canonical(validateResourceQuotaRefreshConfig(readResourceJson(quotaConfigFile), pool, bindings)) !== canonical(quotaConfig) ||
+      connectionsConfigFile && canonical(validateResourceConnectionConfig(readResourceJson(connectionsConfigFile))) !== canonical(connectionsConfig)) {
+      throw new Error('Engineering workspace configuration changed');
+    }
+  }
+  function engineeringCustody(expectedAttachment: ResourceConsoleEngineeringAttachment | null): ResourceWorkspaceCustody {
+    const assertHost = () => {
+      assertWorkspace();
+      if (attachmentPending || attachment !== expectedAttachment || attachment && attachment.state() !== 'closed') {
+        throw new Error('Engineering attachment is not drained or changed');
+      }
+    };
+    assertHost();
+    return createResourceWorkspaceCustody(supervisor!, quotaLease, assertHost);
+  }
   async function attachEngineering(input: ResourceConsoleEngineeringAttachmentInput): Promise<ResourceConsoleEngineeringAttachment> {
     if (!input || types.isProxy(input) || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) throw new Error('Invalid engineering attachment');
     const descriptors = Object.getOwnPropertyDescriptors(input);
@@ -729,15 +756,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     const selected = Object.fromEntries(Object.entries(descriptors).map(([key, property]) => [key, property.value])) as ResourceConsoleEngineeringAttachmentInput;
     const previous = attachment;
     const assertHost = (checkAttachment = true) => {
-      if (!ready || closing || signal?.aborted || hostStopped() || !supervisor || !workspace || !projectsFile || engineeringFaulted) throw new Error('Engineering workspace unavailable');
+      assertWorkspace();
       if (checkAttachment && selected.expectedAttachment !== attachment) throw new Error('Engineering attachment changed');
-      if (canonical(validateResourcePool(readResourceJson(poolFile))) !== canonical(pool) ||
-        canonical(validateResourceBindings(readResourceJson(bindingsFile), pool)) !== canonical(bindings) ||
-        canonical(readResourceJson(projectsFile, 256 * 1024)) !== canonical(catalog) ||
-        quotaConfigFile && canonical(validateResourceQuotaRefreshConfig(readResourceJson(quotaConfigFile), pool, bindings)) !== canonical(quotaConfig) ||
-        connectionsConfigFile && canonical(validateResourceConnectionConfig(readResourceJson(connectionsConfigFile))) !== canonical(connectionsConfig)) {
-        throw new Error('Engineering workspace configuration changed');
-      }
     };
     assertHost();
     if (attachmentPending || previous && previous.state() !== 'closed') throw new Error('Previous engineering attachment is not drained');
@@ -802,6 +822,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
     }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
+      isTaskExecutionStopped: id => taskLifetimes.get(id)?.isStopped() ?? false,
       ...(Object.hasOwn(options, 'isExecutionStopped') ? { isExecutionStopped: hostStopped } : {}),
       ...(projects === undefined ? {} : { projects }),
       readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
@@ -840,6 +861,20 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     await initialComponent?.start();
     if (closing || signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
-      scope: { ...scope }, close, engineeringAttachment: () => attachment, attachEngineering };
+      scope: { ...scope }, close, engineeringAttachment: () => attachment, attachEngineering, engineeringCustody,
+      submitTask: (input, lifetime) => {
+        assertWorkspace();
+        const child = captureResourceEngineeringLifetime(lifetime === undefined ? {} : { engineeringLifetime: lifetime });
+        if (child.isStopped()) throw new Error('Resource task lifetime stopped');
+        const job = supervisor!.submit(input);
+        // Admission is synchronous; no timer can dispatch between publishing
+        // this job and installing its veto. A retry cannot replace the old stop.
+        if (child.configured && !taskLifetimes.has(job.id)) taskLifetimes.set(job.id, child);
+        return job;
+      },
+      cancelTaskAndDrain: (id, expectedTaskDigest) => {
+        if (!supervisor) throw new Error('Resource supervisor unavailable');
+        return supervisor.cancelAndDrain(id, expectedTaskDigest);
+      } };
   } catch (error) { await close(); throw error; }
 }

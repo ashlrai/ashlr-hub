@@ -29,7 +29,7 @@ import type { ResourceEngineeringAutonomousSetupOptions } from '../src/core/reso
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.clearAllMocks(); });
-type Mode = 'measured' | 'unknown' | 'tampered-history' | 'changed-receipt' | 'stop' | 'stop-before-publication';
+type Mode = 'measured' | 'unknown' | 'stale-queue' | 'tampered-history' | 'changed-receipt' | 'stop' | 'stop-before-publication';
 async function fixture(mode: Mode) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mission-feedback-loop-')));
   const root = join(base, 'ledger'), missionRoot = join(base, 'mission'), workspace = join(base, 'project');
@@ -85,6 +85,8 @@ async function fixture(mode: Mode) {
   const controller = new AbortController(); const prepared: ResourceEngineeringAutonomousSetupOptions[] = [];
   const scopes = new Map<string, ResourceEngineeringAutonomousSetupOptions>(); let active: ResourceEngineeringAutonomousSetupOptions | undefined;
   let isOpen = false; let task: ResourceTask | undefined; let resultRead = false;
+  let proposalWork: Promise<unknown> | undefined;
+  let queueReads = 0; const drainReads: number[] = [];
   adapters.check.mockImplementation((value: ResourceEngineeringAutonomousSetupOptions) => { const checked = plan(value); scopes.set(checked.paths.profiles, value); return checked; });
   adapters.prepare.mockImplementation((value: ResourceEngineeringAutonomousSetupOptions & { expectedPlanDigest: string }, host: { beforePublication(): void }) => {
     if (prepared.length && mode === 'stop-before-publication') controller.abort();
@@ -94,7 +96,7 @@ async function fixture(mode: Mode) {
   const tipFor = (value: ResourceEngineeringAutonomousSetupOptions) => ({ enrollmentId: value.output === setup.output ? 'initial' : 'second',
     enrollmentDigest: 'b'.repeat(64), projectId: 'default', commit: (value.output === setup.output ? 'c' : 'd').repeat(40) });
   adapters.proof.mockImplementation(({ setup: value, proposalFeedback }: { setup: ResourceEngineeringAutonomousSetupOptions; proposalFeedback?: string }) => {
-    expect(isOpen).toBe(false); const tip = tipFor(value);
+    expect(active).toBeUndefined(); const tip = tipFor(value);
     const usage = { attempts: 1, joinedAttempts: 1, reportedAttempts: mode === 'unknown' ? 0 : 1, unknownAttempts: mode === 'unknown' ? 1 : 0,
       recordedInputTokens: mode === 'unknown' ? 0 : 10, recordedOutputTokens: mode === 'unknown' ? 0 : 5,
       totalTokens: mode === 'unknown' ? null : 15, complete: mode !== 'unknown' };
@@ -112,22 +114,40 @@ async function fixture(mode: Mode) {
       executionAuthorized: false, effectsExecuted: false, providerContacted: false, evidenceDigest: missionHash(tip), tip, continuation: 'eligible',
       ...(proposalFeedback ? { feedback: projectEngineeringMissionFeedback({ tip, deliveryDigest: '1'.repeat(64), outcomes }) } : {}) };
   });
-  adapters.start.mockImplementation(async (options: { engineeringPreparationFile?: string }) => {
-    expect(isOpen).toBe(false); isOpen = true; active = scopes.get(options.engineeringPreparationFile ?? '');
-    return { url: 'http://127.0.0.1:1', consoleUrl: 'http://127.0.0.1:1', close: async () => { isOpen = false; } };
+  adapters.start.mockImplementation(async () => {
+    expect(isOpen).toBe(false); isOpen = true;
+    let attachment: { id: string; close(): Promise<void> } | null = null;
+    return { url: 'http://127.0.0.1:1', consoleUrl: 'http://127.0.0.1:1', close: async () => { isOpen = false; },
+      engineeringAttachment: () => attachment, engineeringCustody: () => undefined,
+      attachEngineering: async (options: { engineeringPreparationFile: string }) => {
+        active = scopes.get(options.engineeringPreparationFile);
+        attachment = { id: options.engineeringPreparationFile, close: async () => {
+          if (active) drainReads.push(queueReads); active = undefined;
+        } }; return attachment;
+      },
+      submitTask: (body: Record<string, unknown>) => {
+        const { retainHistory: _retain, projectId: _project, ...submitted } = body;
+        task = { ...submitted, schemaVersion: 1, cwd: workspace } as ResourceTask;
+        proposalWork = runResourceTask({ root, pool, bindings, observations, task, signal: controller.signal });
+      },
+      cancelTaskAndDrain: async () => { await proposalWork; } };
   });
   adapters.request.mockImplementation(async ({ path, body }: { path: string; body?: Record<string, unknown> }) => {
-    if (path === '/api/resources/engineering-supervision') return { configId: (active!.policy as typeof policy).id, sourceState: 'healthy', paused: false,
-      deadlineAt: config.deadlineAt, entries: [{ state: 'completed' }] };
+    if (path === '/api/resources/engineering-supervision') {
+      queueReads++;
+      return { configId: (active!.policy as typeof policy).id, sourceState: 'healthy', paused: false,
+        deadlineAt: config.deadlineAt, entries: [{ enrollmentId: 'initial', state: 'completed' },
+          ...(mode === 'stale-queue' && queueReads === 1 ? [] : [{ enrollmentId: 'child', state: 'completed' }])] };
+    }
     if (path === '/api/resources/engineering-successors') return { supervisionId: (active!.policy as typeof policy).id,
-      deadlineAt: config.deadlineAt, entries: [{ state: 'admitted' }] };
+      deadlineAt: config.deadlineAt, entries: [{ state: 'admitted', successorId: 'child' }] };
     if (path === '/api/resources/tasks') {
       const { retainHistory: _retain, projectId: _project, ...submitted } = body!;
       task = { ...submitted, schemaVersion: 1, cwd: workspace } as ResourceTask;
       const result = await runResourceTask({ root, pool, bindings, observations, task, signal: controller.signal });
       expect(result.receipt?.status).toBe('completed'); return {};
     }
-    if (path === '/api/resources') return { supervisor: { paused: false, closing: false, jobs: [{ id: task!.id, state: 'settled' }] } };
+    if (path === '/api/resources') { await proposalWork; return { supervisor: { paused: false, closing: false, jobs: [{ id: task!.id, state: 'settled' }] } }; }
     if (path.endsWith('/history')) {
       resultRead = true;
       return { id: task!.id, prompt: task!.prompt, output: { text: mode === 'tampered-history' ? canonical({ action: 'stop' }) : output, truncated: false } };
@@ -140,8 +160,8 @@ async function fixture(mode: Mode) {
     const actual = adapters.start.getMockImplementation()!;
     adapters.start.mockImplementation(async (...args) => {
       const handle = await actual(...args);
-      return { ...handle, close: async () => {
-        await handle.close();
+      return { ...handle, cancelTaskAndDrain: async () => {
+        await handle.cancelTaskAndDrain();
         if (resultRead) {
           const file = join(root, 'pool-state.json'); const state = JSON.parse(readFileSync(file, 'utf8'));
           state.attempts[0].outputDigest = '0'.repeat(64);
@@ -150,15 +170,16 @@ async function fixture(mode: Mode) {
       } };
     });
   }
-  return { config, prepared, contexts, errors, controller, recipe, policy, allocation,
+  return { config, prepared, contexts, errors, controller, recipe, policy, allocation, drainReads,
     status: () => resourcePoolStatus(root, pool, bindings, []), records: () => readEngineeringMissionRecords(config) };
 }
 
 describe('measured feedback through an accounted proposal into the next mission scope', () => {
-  it.each(['measured', 'unknown'] as const)('retains %s evidence, uses the delivered seed, and never renews policy or repeats settled proposal transport', async mode => {
+  it.each(['measured', 'unknown', 'stale-queue'] as const)('retains %s evidence, uses the delivered seed, and never renews policy or repeats settled proposal transport', async mode => {
     const f = await fixture(mode);
     expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'completed', reason: 'scope-limit', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
     expect(f.errors).toEqual([]); expect(f.contexts).toHaveLength(1);
+    if (mode === 'stale-queue') expect(f.drainReads[0]).toBe(2);
     expect(f.contexts[0]).toMatchObject({ feedbackVersion: 'measured-outcomes-v1', measuredFeedback: {
       authority: 'observation-only', productionAccepted: null, source: { enrollmentId: 'initial', commit: 'c'.repeat(40) },
       campaigns: [{ seed: { score: 150 }, selected: [{ score: 149, deltaFromSeed: 1 }],

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-const runtime = vi.hoisted(() => ({ setup: vi.fn(), start: vi.fn(), close: vi.fn(), request: vi.fn(), proof: vi.fn(), releaseFails: false }));
+const runtime = vi.hoisted(() => ({ setup: vi.fn(), start: vi.fn(), close: vi.fn(), request: vi.fn(), submit: vi.fn(), proof: vi.fn(), releaseFails: false }));
 vi.mock('../src/core/resources/engineering-predecessor-check.js', () => ({ checkResourceEngineeringPredecessor: runtime.proof }));
 vi.mock('../src/core/resources/engineering-autonomous-setup.js', () => ({
   checkResourceEngineeringAutonomousSetup: runtime.setup,
@@ -55,7 +55,14 @@ beforeEach(() => {
   vi.clearAllMocks(); runtime.releaseFails = false;
   runtime.setup.mockReturnValue({ planDigest: 'a'.repeat(64), initialEnrollmentDigest: 'b'.repeat(64), paths: {} });
   runtime.close.mockResolvedValue(undefined);
-  runtime.start.mockResolvedValue({ url: 'http://127.0.0.1:1', consoleUrl: 'http://127.0.0.1:1/private-token', close: runtime.close });
+  runtime.submit.mockImplementation(() => { throw Error('Fixture stops before dispatch'); });
+  runtime.start.mockImplementation(async () => {
+    let attachment: { id: string; close(): Promise<void> } | null = null;
+    return { url: 'http://127.0.0.1:1', consoleUrl: 'http://127.0.0.1:1/private-token', close: runtime.close,
+      engineeringAttachment: () => attachment, engineeringCustody: () => undefined,
+      attachEngineering: async () => { attachment = { id: 'fixture', close: async () => {} }; return attachment; },
+      submitTask: runtime.submit, cancelTaskAndDrain: async () => {} };
+  });
   runtime.request.mockRejectedValue(Error('PRIVATE_PROVIDER_ERROR'));
   runtime.proof.mockReturnValue({ status: 'held' });
 });
@@ -92,9 +99,9 @@ describe('mission invocation cleanup diagnostics', () => {
     runtime.proof.mockImplementation(options => ({ ...proof, ...(options.proposalFeedback ? { feedback } : {}) }));
     runtime.request.mockImplementation(async options => {
       if (options.path === '/api/resources/engineering-supervision') return { configId: 'queue', sourceState: 'healthy', paused: false,
-        deadlineAt: config.deadlineAt, entries: [{ state: 'completed' }] };
+        deadlineAt: config.deadlineAt, entries: [{ enrollmentId: 'initial', state: 'completed' }, { enrollmentId: 'child', state: 'completed' }] };
       if (options.path === '/api/resources/engineering-successors') return { supervisionId: 'queue', deadlineAt: config.deadlineAt,
-        entries: [{ state: 'admitted' }] };
+        entries: [{ state: 'admitted', successorId: 'child' }] };
       throw Error('Fixture stops after durable proposal, before dispatch');
     });
     expect(await runResourceEngineeringMission(config)).toMatchObject({ state: 'held', reason: 'proposing-held' });
@@ -110,13 +117,14 @@ describe('mission invocation cleanup diagnostics', () => {
       acceptance: 'Fixed acceptance', initialObjective: 'Initial objective', delivered: proof.tip }));
     }
     expect(before.find(row => row.kind === 'settled')!.payload).not.toHaveProperty('feedback');
-    runtime.start.mockClear(); runtime.request.mockClear();
+    runtime.start.mockClear(); runtime.request.mockClear(); runtime.submit.mockClear();
     proof.sampledAt = new Date(Date.parse(config.deadlineAt) + 1000).toISOString();
     expect(await runResourceEngineeringMission(config)).toMatchObject({ state: 'held', reason: 'proposing-held' });
     expect(readEngineeringMissionRecords(config)).toEqual(before);
     expect(runtime.start).toHaveBeenCalledTimes(1);
-    expect(runtime.request).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ path: '/api/resources/tasks',
-      body: expect.objectContaining({ id: proposal.task.id, prompt: proposal.task.prompt }) }));
+    expect(runtime.request).not.toHaveBeenCalled();
+    expect(runtime.submit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ id: proposal.task.id, prompt: proposal.task.prompt }),
+      expect.objectContaining({ signal: expect.any(AbortSignal), isExecutionStopped: expect.any(Function) }));
     if (enabled) {
       // A newly read change cannot silently rewrite a retained task or dispatch
       // with arbitrary feedback extracted from its stored prompt.
