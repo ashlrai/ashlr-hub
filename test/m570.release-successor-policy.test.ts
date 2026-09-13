@@ -98,10 +98,10 @@ describe('M570 release successor policy v1', () => {
     });
     expect(existsSync(productionPolicyPath)).toBe(true);
     expect(verifyReleaseSuccessorPolicyFile(productionPolicyPath, '3.4.0').policy).toMatchObject({
-      release: { requiredFirstParentRevision: 'de8c728e194a43d291cc1d0082903ca18211b5b5' },
+      release: { requiredFirstParentRevision: '5c270bc73890e474463c31764d51e76196ad2e3f' },
       package: {
         version: '3.4.0',
-        integrity: 'sha512-Rvdolf8q4+9Q72aTKp6znG3MhnJIbZiuhHxr4hQraq6UFu9zQMGBmUrN3CM6xxPww3Xv+4MaiNbBvwuEvpaitw==',
+        integrity: 'sha512-YEOXbGvZ04QJh+eBLVOLbq6eTURKB51pjr20/vQOXvaIYpGhCyar7xhyMAuZIqlfSJWUggmmIoU3vbJNfGJfQA==',
       },
       localVerification: { requiredReceiptSchemaVersion: 3 },
     });

@@ -28,9 +28,9 @@ requires a separately reviewed successor contract.
 
 ## Current 3.4.0 release readiness
 
-Rechecked on 2026-09-08: npm `latest` and `candidate` still resolve to `3.3.2`,
-and GitHub Actions remains repository-disabled. Keep Actions disabled; all
-successor verification runs locally.
+Rechecked on 2026-09-13: npm `latest` and `candidate` still resolve to `3.3.2`,
+and the `3.4.0` registry version and Git tag are absent. Keep GitHub Actions
+disabled; all successor verification runs locally.
 
 Report each delivery layer separately:
 
@@ -41,9 +41,12 @@ Report each delivery layer separately:
 | npm publication and promotion | A supported successor publisher, verified registry identity, package acceptance, and a separately authorized production promotion. A local receipt alone does not provide these. |
 | Runtime activation | Installation and live acceptance of the intended runtime, with its actual service, provider, and resource-control state verified. Registry availability does not activate a fleet. |
 
-The tracked 3.4.0 policy binds an earlier artifact and merge parent; it is not
-ready to attest the newer Universe changes. Before running the gate, rebind the
-policy to the new reproducible tarball SRI, committed verification-contract
+The tracked 3.4.0 policy now binds the reproducible package built from source
+checkpoint `e9ddb5832ee894085f64c67d8177530c8f99c41b` and the protected parent
+observed on 2026-09-13. The full local-production gate has not yet passed for
+this candidate. A successful offline installed CLI/SDK smoke is narrower than
+that gate and does not attest provider execution or runtime activation. Before
+each gate, verify the policy's package SRI, committed verification-contract
 digest, and exact protected first parent. The tested source must be an exactly
 clean **two-parent merge** whose first parent matches that policy; an ordinary
 feature commit or dirty checkout does not qualify. Keep the candidate release
