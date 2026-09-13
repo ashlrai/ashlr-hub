@@ -13,6 +13,9 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Native collector failure visibility
 
+- Distinguishes pre-invocation activity reservation failure from shared queued
+  cancellation, preserving its cause without exposing raw errors or weakening
+  partial-publication cleanup holds.
 - Retains the first observed connection failure separately from cancelled peers,
   including bounded cleanup details in the Account connections panel.
 - Disables plugin startup for metadata-only Codex clients using process-local

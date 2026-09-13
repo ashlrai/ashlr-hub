@@ -2509,6 +2509,13 @@ failure observed before this monitor requested cancellation. Neither establishes
 the initiating failure across all shared collectors. The Account connections
 panel preserves that distinction even after stopped rows replace live metadata.
 This in-memory record is diagnostic only, not a durable recovery receipt.
+`activity-reservation-failed` means this exact coordinator invocation failed while
+publishing its activity reservation, before calling the native client. It has no
+invented process-cleanup diagnostics. The coordinator reports that phase before
+shared cancellation, preserves its original rejection, and still withholds
+cleanup because publication may be partial. Normal pre-cancelled or queued peer
+calls are not relabeled as reservation failures. A diagnostic observer cannot
+replace the original failure or release queued work.
 
 Codex metadata probes disable `features.plugins` and `features.remote_plugin`
 using process-only configuration overrides. Account and quota reads do not need

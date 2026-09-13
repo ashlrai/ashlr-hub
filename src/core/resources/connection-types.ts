@@ -5,7 +5,7 @@ import { sanitizeCodexProbeCleanupDiagnostics, type CodexProbeCleanupDiagnostics
 export interface ResourceConnectionFailure {
   accountId: string;
   observedAt: string;
-  reasonCode: 'native-cleanup-unconfirmed' | 'native-result-invalid' | 'native-call-rejected' | 'activity-settlement-failed';
+  reasonCode: 'native-cleanup-unconfirmed' | 'native-result-invalid' | 'native-call-rejected' | 'activity-settlement-failed' | 'activity-reservation-failed';
   /** A cancelled peer is not evidence of the initiating failure. */
   cancellationAlreadyRequested: boolean;
   cleanupDiagnostics?: CodexProbeCleanupDiagnostics;
@@ -23,7 +23,7 @@ export function validResourceConnectionFailure(value: unknown): value is Resourc
     const row = value as ResourceConnectionFailure;
     if (typeof row.accountId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(row.accountId) ||
       typeof row.observedAt !== 'string' || !Number.isFinite(Date.parse(row.observedAt)) || new Date(row.observedAt).toISOString() !== row.observedAt ||
-      !['native-cleanup-unconfirmed', 'native-result-invalid', 'native-call-rejected', 'activity-settlement-failed'].includes(row.reasonCode) ||
+      !['native-cleanup-unconfirmed', 'native-result-invalid', 'native-call-rejected', 'activity-settlement-failed', 'activity-reservation-failed'].includes(row.reasonCode) ||
       typeof row.cancellationAlreadyRequested !== 'boolean') return false;
     if (Object.hasOwn(value, 'cleanupDiagnostics')) {
       const diagnostic = row.cleanupDiagnostics;

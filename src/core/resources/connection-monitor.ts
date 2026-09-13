@@ -111,7 +111,10 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         throw new Error('Native connection settlement unavailable');
       }
     };
-    try { return await (options.coordinator ? options.coordinator.run(collect, (value) => value.status !== 'uncertain') : collect()); }
+    try { return await (options.coordinator ? options.coordinator.run(collect, (value) => value.status !== 'uncertain', () => {
+      // Publication may be partial even though no native client was invoked.
+      recordFailure(accountId, 'activity-reservation-failed'); uncertain = true;
+    }) : collect()); }
     catch (error) {
       // A settled native result can still fail durable activity publication.
       // Record before the outer monitor replaces all account rows with stopped.

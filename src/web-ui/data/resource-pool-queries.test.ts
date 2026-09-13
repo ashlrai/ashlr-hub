@@ -356,6 +356,11 @@ describe('optional native execution response boundary', () => {
 });
 
 describe('connection and allocation response boundaries', () => {
+  it('accepts a pre-invocation reservation failure without invented process diagnostics', async () => {
+    const connections = { ...connection(), firstFailure: { accountId: 'codex-a', observedAt: NOW,
+      reasonCode: 'activity-reservation-failed', cancellationAlreadyRequested: false } };
+    await expect(extension({ connections })).resolves.toMatchObject({ connections });
+  });
   it('accepts a bounded first connection failure without inferring an account is usable', async () => {
     const connections = { ...connection(), firstFailure: { accountId: 'codex-a', observedAt: NOW,
       reasonCode: 'native-cleanup-unconfirmed', cancellationAlreadyRequested: false,
