@@ -95,6 +95,19 @@ describe('quota reservation response and mutation boundary', () => {
 describe('explicit engineering supervision capability', () => {
   const projectScope = () => ({ ...resourceFixture().scope, defaultProjectId: 'default',
     projects: [{ id: 'default', label: 'Hub', workspace: '/private/project', enabled: true }] });
+  it.each(['running', 'stopping', 'closed', 'held'])('accepts engineering lifecycle %s without mutation', async (engineeringLifecycle) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringLifecycle });
+    await expect(resourceConsoleScopeQuery.fetch()).resolves.toMatchObject({ engineeringLifecycle });
+    expect(write).not.toHaveBeenCalled();
+  });
+  it.each([false, null, 1, 'complete', {}])('rejects malformed engineering lifecycle %#', async (engineeringLifecycle) => {
+    read.mockResolvedValue({ ...projectScope(), engineeringSupported: true, engineeringLifecycle });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
+  it('rejects engineering lifecycle without an engineering capability', async () => {
+    read.mockResolvedValue({ ...projectScope(), engineeringLifecycle: 'closed' });
+    await expect(resourceConsoleScopeQuery.fetch()).rejects.toThrow('did not establish an explicit');
+  });
   it.each([{}, { engineeringSupported: true }, { engineeringSupported: true, engineeringSupervisionSupported: true },
     { engineeringSupported: true, engineeringPreparationSupported: true }, { engineeringSupported: true, engineeringOutcomesSupported: true },
     { engineeringSupported: true, engineeringPreparationSupported: true, engineeringSupervisionSupported: true, engineeringPreparationAutoAdmission: true }])(

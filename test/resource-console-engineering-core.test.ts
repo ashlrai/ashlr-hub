@@ -270,7 +270,8 @@ describe('owned console engineering evidence', () => {
       } finally { await restarted.close(); }
     } finally { await owner.close(); await f.supervisor.close(); }
   });
-  it.each(['reserved', 'uncertain', 'completed', 'cancelled'] as const)('checks real shared-ledger %s receipts after graph work without claiming attribution', async (status) => {
+  it.each((['reserved', 'uncertain', 'completed', 'cancelled'] as const).flatMap(status =>
+    [false, true].map(preserve => ({ status, preserve }))))('checks real shared-ledger $status receipts with preserve=$preserve without claiming attribution', async ({ status, preserve }) => {
     const f = await ownerFixture(); const owner = f.create();
     let release!: (value: workerTransport.ResourceWorkerResult) => void;
     const result: workerTransport.ResourceWorkerResult = { status: status === 'reserved' ? 'cancelled' : status,
@@ -291,8 +292,8 @@ describe('owned console engineering evidence', () => {
       owner.launch({ enrollmentId: 'engineering', expectedEnrollmentDigest: owner.catalog()[0]!.enrollmentDigest });
       await Promise.resolve(); await Promise.resolve();
       if (status === 'reserved' || status === 'uncertain') {
-        await expect(owner.close()).rejects.toThrow('Shared resource pool termination evidence unavailable');
-      } else await expect(owner.close()).resolves.toBeUndefined();
+        await expect(owner.close(preserve ? { preserveSupervisorTasks: true } : undefined)).rejects.toThrow('Shared resource pool termination evidence unavailable');
+      } else await expect(owner.close(preserve ? { preserveSupervisorTasks: true } : undefined)).resolves.toBeUndefined();
     } finally {
       release?.(result); await task;
       await owner.close().catch(() => {}); await f.supervisor.close();

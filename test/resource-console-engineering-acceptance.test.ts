@@ -165,7 +165,7 @@ describe.runIf(process.platform === 'darwin')('independent Workspace engineering
     expect((await http(handle, `${engineeringPath}/${rows[0]!.id}/readiness?ignored=true`)).status).toBe(400);
     expect(await status(handle)).toMatchObject({ state: 'ready', launched: false, cancelled: false });
     const input = launchInput(rows[0]!);
-    for (const headers of [{}, { 'x-ashlr-token': handle.readToken, origin: handle.url }, { 'x-ashlr-token': handle.controlToken! }]) {
+    for (const headers of [{}, { 'x-ashlr-token': handle.readToken, origin: handle.url }, { 'x-ashlr-token': handle.controlToken! }] as Array<Record<string, string>>) {
       expect((await http(handle, `${engineeringPath}/start`, input, headers)).status).toBeGreaterThanOrEqual(400);
     }
     expect((await http(handle, `${engineeringPath}/start`, { ...input, expectedEnrollmentDigest: 'f'.repeat(64) })).status).toBe(409);
@@ -282,6 +282,30 @@ describe.runIf(process.platform === 'darwin')('independent Workspace engineering
     expect(retried.status, retried.text).toBe(409);
     expect(await status(restarted)).toMatchObject({ cancelled: true, cancellable: false });
     expect(f.requests).toHaveLength(1); expect(f.ledger()).toEqual(before); expect(git(f.repo, 'branch', '--list', f.branch)).toBe('');
+  });
+
+  it('closes engineering independently while human work and the same console remain usable', async () => {
+    const f = await fixture({ holdEngineering: true, maxConcurrent: 2 }); const handle = await f.start();
+    const enrollment = (await enrollments(handle))[0]!;
+    expect((await http(handle, '/api/resources/tasks', { id: 'human-survives', projectId: 'second', prompt: 'ordinary-held',
+      allowedWorkerIds: ['local-worker'], mode: 'read-only', timeoutMs: 30_000, maxOutputTokens: 100 })).status).toBe(202);
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1), { timeout: 10_000 });
+    expect((await http(handle, `${engineeringPath}/start`, launchInput(enrollment))).status).toBe(202);
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2), { timeout: 15_000 });
+    const stopPath = '/api/resources/engineering-runtime/close';
+    const closed = await http(handle, stopPath, {});
+    expect(closed.status, closed.text).toBe(200); expect(JSON.parse(closed.text)).toEqual({ engineeringLifecycle: 'closed' });
+    expect(f.ledger().find((row) => row.id === 'human-survives')?.status).toBe('reserved');
+    expect(f.ledger().filter((row) => row.id !== 'human-survives').map((row) => row.status)).toEqual(['cancelled']);
+    expect((await http(handle, stopPath, {})).status).toBe(200);
+    expect((await http(handle, `${engineeringPath}/start`, launchInput(enrollment))).status).toBe(503);
+    expect((await http(handle, '/api/resources/console')).text).toContain('"engineeringLifecycle":"closed"');
+    expect((await http(handle, '/api/resources/tasks', { id: 'human-after-close', projectId: 'second', prompt: 'ordinary-fast',
+      allowedWorkerIds: ['local-worker'], mode: 'read-only', timeoutMs: 5000, maxOutputTokens: 100 })).status).toBe(202);
+    await vi.waitFor(() => expect(f.ledger().find((row) => row.id === 'human-after-close')?.status).toBe('completed'), { timeout: 10_000 });
+    await expect(handle.close()).resolves.toBeUndefined();
+    expect(f.ledger().find((row) => row.id === 'human-survives')?.status).toBe('cancelled');
+    expect(f.requests).toHaveLength(3); expect(git(f.repo, 'branch', '--list', f.branch)).toBe('');
   });
 
   it('closes concurrent ordinary and engineering work only after both shared-ledger reservations settle', async () => {

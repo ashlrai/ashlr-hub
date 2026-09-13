@@ -60,7 +60,8 @@ export interface ResourceConsoleEngineeringOwner {
   awaitSettlement(id: string): Promise<void>;
   launch(input: ResourceConsoleEngineeringLaunch, controls?: ResourceConsoleEngineeringLaunchControls): ResourceConsoleEngineeringJob;
   cancel(id: string): ResourceConsoleEngineeringJob;
-  close(): Promise<void>;
+  /** Preserve only provably live ordinary supervisor tasks during component close. */
+  close(options?: { preserveSupervisorTasks: true }): Promise<void>;
 }
 export interface ResourceConsoleEngineeringLaunchControls {
   signal?: AbortSignal;
@@ -611,7 +612,11 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
       active.get(id)?.abort.abort();
       return owner.snapshot(id);
     },
-    close() {
+    close(closeOptions) {
+      if (closeOptions !== undefined && (!exact(closeOptions, ['preserveSupervisorTasks']) || closeOptions.preserveSupervisorTasks !== true)) {
+        fail('INVALID_INPUT', 'Invalid engineering close options');
+      }
+      const preserveSupervisorTasks = closeOptions?.preserveSupervisorTasks === true;
       if (closePromise) return closePromise;
       closing = true; signal?.removeEventListener('abort', onAbort);
       for (const value of active.values()) value.abort.abort();
@@ -626,9 +631,12 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
           // Failed trial publication can omit attributable generation task IDs,
           // so conservatively inspect the existing shared ledger. This fence
           // deliberately makes no claim that an unresolved receipt is ours.
+          // Component-only close can preserve a peer only when its live
+          // supervisor proves fresh-dispatch custody of the exact task.
           try {
             const receipts = resourcePoolStatus(control.root, pool, bindings, []).attempts;
-            if (receipts.some((receipt) => receipt.status === 'reserved' || receipt.status === 'uncertain')) throw new Error();
+            if (receipts.some((receipt) => (receipt.status === 'reserved' || receipt.status === 'uncertain') &&
+              !(preserveSupervisorTasks && supervisor.ownsActiveTaskReceipt?.(receipt) === true))) throw new Error();
           } catch { fail('UNAVAILABLE', 'Shared resource pool termination evidence unavailable'); }
         }
         if (faults.size) fail('UNAVAILABLE', 'Engineering shutdown evidence unavailable');

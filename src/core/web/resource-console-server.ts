@@ -235,6 +235,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   let quotaPublicationFailed = false;
   let metadataCollector: ResourceConsoleSnapshot['metadataCollector'];
   let origin = ''; let port = 0; let closing: Promise<void> | null = null; let ready = false;
+  let engineeringClosing: Promise<void> | null = null;
+  let engineeringFaulted = false;
+  const engineeringStopped = () => hostStopped() || engineeringClosing !== null || scope.engineeringLifecycle === 'stopping';
 
   // Configured-but-blocked collection remains managed. Never fall back to
   // owner-supplied observations as if they were a current native quota read.
@@ -352,6 +355,18 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         }
         if (!supervisor || !controlToken) throw new RequestError(403, 'Execution is disabled for this console');
         if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
+        if (url.pathname === '/api/resources/engineering-runtime/close') {
+          if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
+          if (!engineering) throw new RequestError(403, 'Engineering is not configured');
+          if (!exact(await body(req), [])) throw new RequestError(400, 'Engineering close expects an empty object');
+          if (closing) throw new RequestError(503, 'Console is closing');
+          await closeEngineering();
+          if (scope.engineeringLifecycle !== 'closed') throw new RequestError(503, 'Engineering shutdown uncertain');
+          sendJson(res, 200, { engineeringLifecycle: scope.engineeringLifecycle }); return;
+        }
+        if (url.pathname.startsWith('/api/resources/engineering') && scope.engineeringLifecycle !== undefined && scope.engineeringLifecycle !== 'running') {
+          throw new RequestError(503, 'Engineering runtime is not running');
+        }
         if (url.pathname === '/api/resources/engineering/profiles') {
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
@@ -363,7 +378,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineeringPreparation) throw new RequestError(403, 'Engineering preparation is not configured');
           const input = await body(req);
-          if (closing) throw new RequestError(503, 'Console is closing');
+          if (closing || scope.engineeringLifecycle !== 'running') throw new RequestError(503, 'Engineering runtime is not running');
           if (url.pathname.endsWith('/check')) { sendSnapshot(res, await engineeringPreparation.check(input)); return; }
           sendSnapshot(res, automaticAdmission ? await automaticAdmission.prepare(input) : await engineeringPreparation.prepare(input)); return;
         }
@@ -371,7 +386,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineeringSupervision) throw new RequestError(403, 'Engineering supervision is not configured');
           const input = await body(req);
-          if (closing) throw new RequestError(503, 'Console is closing');
+          if (closing || scope.engineeringLifecycle !== 'running') throw new RequestError(503, 'Engineering runtime is not running');
           sendSnapshot(res, engineeringSupervision.admit(input)); return;
         }
         if (url.pathname === '/api/resources/engineering-supervision') {
@@ -383,6 +398,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             throw new RequestError(400, 'Expected a pause mode and current supervision revision');
           }
           if (closing) throw new RequestError(503, 'Console is closing');
+          if (scope.engineeringLifecycle !== 'running') throw new RequestError(503, 'Engineering runtime is not running');
           sendSnapshot(res, engineeringSupervision.setPaused(input.paused, Number(input.expectedRevision))); return;
         }
         const engineeringCancel = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/cancel$/.exec(url.pathname);
@@ -390,7 +406,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');
           const input = await body(req);
-          if (closing) throw new RequestError(503, 'Console is closing');
+          if (closing || scope.engineeringLifecycle !== 'running') throw new RequestError(503, 'Engineering runtime is not running');
           if (engineeringCancel) {
             if (!exact(input, [])) throw new RequestError(400, 'Engineering cancellation expects an empty JSON object');
             sendSnapshot(res, engineering.cancel(engineeringCancel[1]!));
@@ -583,6 +599,25 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   });
   server.requestTimeout = 30_000; server.headersTimeout = 10_000;
 
+  const closeEngineering = (): Promise<void> => {
+    if (engineeringClosing) return engineeringClosing;
+    scope.engineeringLifecycle = 'stopping';
+    // Fence every engineering producer before awaiting any drain. Human queue,
+    // sessions, metadata collectors and HTTP retain their independent lifetime.
+    engineeringClosing = (async () => {
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => engineeringBackground?.close()),
+        Promise.resolve().then(() => automaticAdmission?.close()),
+        Promise.resolve().then(() => engineeringSupervision?.close()),
+        Promise.resolve().then(() => engineering?.close({ preserveSupervisorTasks: true })),
+      ]);
+      if (engineeringFaulted || results.some((result) => result.status === 'rejected')) {
+        scope.engineeringLifecycle = 'held'; throw new Error('Engineering shutdown uncertain');
+      }
+      scope.engineeringLifecycle = 'closed';
+    })();
+    return engineeringClosing;
+  };
   const close = (): Promise<void> => {
     if (closing) return closing;
     ready = false; sessions.clear(); signal?.removeEventListener('abort', aborted);
@@ -619,9 +654,16 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       let quotaClosed = true;
       try { quotaLease?.close(quotaPublicationFailed || results[0]?.status !== 'fulfilled' || results[1]?.status !== 'fulfilled'); } catch { quotaClosed = false; }
       quotaLease = null;
-      if (quotaPublicationFailed || !quotaClosed || [...executionResults, ...results].some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
+      if (engineeringFaulted || quotaPublicationFailed || !quotaClosed || [...executionResults, ...results].some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
     })();
     return closing;
+  };
+  const engineeringFault = () => {
+    engineeringFaulted = true;
+    if (scope.engineeringLifecycle === 'closed') scope.engineeringLifecycle = 'held';
+    // A failed engineering component must stop its own producers, not healthy
+    // human work. Startup still fails closed before exposing a partial service.
+    void (ready ? closeEngineering() : close()).catch(() => {});
   };
   const aborted = () => { void close().catch(() => {}); };
   try {
@@ -663,15 +705,18 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (publishedProjects !== undefined && typeof supervisor?.projectFileBinding === 'function') scope.workspaceFilesSupported = true;
     if ((engineeringCatalog || engineeringPreparationConfig) && supervisor) {
       engineering = createResourceConsoleEngineeringOwner({ ...(engineeringCatalog ? { catalog: engineeringCatalog } : {}),
-        isExecutionStopped: hostStopped,
+        isExecutionStopped: engineeringStopped,
         ...(engineeringPreparationConfig ? { registrationEnabled: true } : {}), supervisor, root,
         poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? { quotaConfigFile } : {}), signal,
         waitForResourceDrain: async () => {
           // Both peers share this ledger. Their own idempotent close paths must
           // settle before the graph owner judges remaining reserved receipts.
-          await Promise.all([supervisor!.close(), engineeringBackground?.close()]);
+          if (!engineeringClosing || closing) {
+            await Promise.all([supervisor!.close(), engineeringBackground?.close()]);
+          } else await engineeringBackground?.close();
         } });
       scope.engineeringSupported = true;
+      scope.engineeringLifecycle = 'running';
       scope.engineeringOutcomesSupported = true;
       if (engineeringPreparationConfig && engineeringPreparationFile && workspace && projectsFile) {
         const preparationOptions = { config: engineeringPreparationConfig,
@@ -682,8 +727,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           // Main-thread owner callbacks never synchronously wait on that worker;
           // HTTP controls and the durable queue keep their original ownership.
           engineeringBackground = await createEngineeringBackground({ preparation: preparationOptions,
-            owner: engineering, supervisor, isClosing: () => closing !== null || hostStopped(), signal,
-            onFault: () => { void close().catch(() => {}); } });
+            owner: engineering, supervisor, isClosing: () => closing !== null || engineeringStopped(), signal,
+            onFault: engineeringFault });
           engineeringPreparation = engineeringBackground;
         } else engineeringPreparation = createResourceConsoleEngineeringPreparation({ ...preparationOptions, owner: engineering });
         scope.engineeringPreparationSupported = true;
@@ -696,7 +741,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
       if (engineeringSupervisionConfig?.autoAdmitPrepared && engineeringPreparation && engineeringSupervision) {
         automaticAdmission = createResourceEngineeringAutomaticAdmission({ preparation: engineeringPreparation,
-          supervision: engineeringSupervision, isClosing: () => closing !== null || hostStopped(), onFatal: () => { void close().catch(() => {}); } });
+          supervision: engineeringSupervision, isClosing: () => closing !== null || engineeringStopped(), onFatal: engineeringFault });
       }
       if (engineeringSuccessorsConfig && engineeringSuccessorsFile && successorProfile && engineeringBackground && engineeringSupervision) {
         await engineeringBackground.configureSuccessors({ root, configFile: engineeringSuccessorsFile,

@@ -23,6 +23,39 @@ prove that no provider work occurred. Native Windows workers report
 `worker-kill-cancellation-unsupported` before launch because owned cancellation
 is not implemented there; the local HTTP worker remains supported.
 
+## Close engineering without closing the workspace
+
+For an engineering-enabled console, a control-authenticated request to
+`POST /api/resources/engineering-runtime/close` with an explicit matching
+`Origin` and an empty JSON object closes the engineering component for this
+console lifetime. This is a mutating stop operation, not a read or a pause.
+It stops automatic admission, successor planning and graph supervision, requests
+owned generation cancellation, and awaits their existing cleanup paths.
+
+The same HTTP listener, read session, ordinary task queue and metadata collectors
+remain available. Human tasks can continue and new ordinary tasks can be submitted
+through their normal quota controls. A remaining reserved receipt is tolerated
+only when the live ordinary supervisor proves fresh-dispatch custody of its exact
+task and pool identity. External, generation-origin, cancelling or uncertain work
+does not receive that exemption. A failed cleanup returns 503 and retains `held`;
+it must not be interpreted as successful termination.
+
+Read `engineeringLifecycle` from `GET /api/resources/console` using the read
+session: `running`, `stopping`, `closed`, or `held`. Repeated close requests await
+the same result. New engineering mutations are refused after close begins, while
+read-only engineering evidence remains inspectable. Closing the entire console
+still drains ordinary work and closes collectors and HTTP as before.
+An engineering worker or automatic-admission fault after startup also closes
+only this component and retains `held` evidence. Unresolved component faults
+remain visible as an uncertain result when the entire console is later closed.
+
+There is no same-console engineering restart operation yet. A new explicitly
+started console lifetime still reconciles its existing durable queues and graph
+records; component close does not erase work, renew deadlines, or bypass held
+records. This is not a durable fleet-wide STOP, and it does not yet separate the
+standing mission controller's lifetime from its console. Those remain distinct
+integration work; do not use this endpoint as a substitute for global KILL.
+
 ## Engineering workspace
 
 The scoped console offers **Workspace** alongside **Resources**, also reachable

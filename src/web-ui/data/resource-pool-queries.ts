@@ -201,6 +201,8 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       scope.workspaceFilesSupported !== undefined && (typeof scope.workspaceFilesSupported !== 'boolean' ||
         scope.workspaceFilesSupported && (scope.readOnly || !scope.projects)) ||
       scope.engineeringSupported !== undefined && (scope.engineeringSupported !== true || scope.readOnly || !scope.projects) ||
+      scope.engineeringLifecycle !== undefined && (scope.engineeringSupported !== true ||
+        !['running', 'stopping', 'closed', 'held'].includes(scope.engineeringLifecycle)) ||
       scope.engineeringPreparationSupported !== undefined && (scope.engineeringPreparationSupported !== true || scope.engineeringSupported !== true) ||
       scope.engineeringPreparationAutoAdmission !== undefined && (scope.engineeringPreparationAutoAdmission !== true ||
         scope.engineeringPreparationSupported !== true || scope.engineeringSupervisionSupported !== true) ||

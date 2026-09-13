@@ -78,6 +78,8 @@ export interface ResourcePoolSupervisor {
   submit(input: ResourceConsoleTaskInput): ResourceSupervisorJob;
   /** Optional exact retained task pin for host-driven, scoped cancellation. */
   cancel(id: string, expectedTaskDigest?: string): ResourceSupervisorJob;
+  /** Live custody only, not settlement. Never accepts external or uncertain work. */
+  ownsActiveTaskReceipt(receipt: ResourceTaskReceipt): boolean;
   setPaused(paused: boolean): ResourceSupervisorSnapshot;
   output(id: string): ResourceConsoleOutput | null;
   history(id: string): ResourceConsoleTranscript | null;
@@ -524,7 +526,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   let closePromise: Promise<void> | null = null;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let timerAt = 0;
-  const active = new Map<string, { controller: AbortController; promise: Promise<void> }>();
+  const active = new Map<string, { controller: AbortController; promise: Promise<void>; workerStarted: boolean }>();
   const attemptedAt = new Map<string, number>();
   const dispatched = new Set<string>();
   const outputs = new Map<string, ResourceConsoleOutput>();
@@ -621,7 +623,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     update(job.id, { state: 'dispatching', reason: 'dispatch-requested', workerId: null });
     // Publish the supervisor's irreversible intent before entering the runtime.
     // A crash anywhere after this point is never recovered by replaying input.
-    const controller = new AbortController(); const owned = { controller, promise: Promise.resolve() };
+    const controller = new AbortController(); const owned = { controller, promise: Promise.resolve(), workerStarted: false };
     active.set(job.id, owned);
     dispatched.add(job.id);
     attemptedAt.set(job.id, performance.now());
@@ -629,7 +631,13 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     let admissionProjectHold: string | null = null;
     owned.promise = runResourceTask({ root, pool, bindings, observations, task: input, signal: controller.signal,
       unavailableWorkerIds, quotaUnavailableWorkerIds,
-      ...(projectBindings || hasHostVeto ? { beforeWorkerDispatch: () => !hostStopped() && projectHold(job.projectId) === null, readAdmissionEvidence: () => {
+      beforeWorkerDispatch: () => {
+        // Runtime invokes this only for this call's fresh reservation, never
+        // replay. An active scheduler promise alone is not transport custody.
+        owned.workerStarted = !hostStopped() && projectHold(job.projectId) === null;
+        return owned.workerStarted;
+      },
+      ...(projectBindings || hasHostVeto ? { readAdmissionEvidence: () => {
         admissionProjectHold = hostStopped() ? 'host-execution-stopped' : projectHold(job.projectId);
         return { observations, unavailableWorkerIds: admissionProjectHold ? [...workerIds] : unavailableWorkerIds, quotaUnavailableWorkerIds };
       } } : {}) }).then((result) => {
@@ -817,6 +825,17 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
         state.schemaVersion === 1 && input.retainHistory === true ? 2 : state.schemaVersion,
         jobs: [...detached(state.jobs), job] };
       assertStateHeadroom(next); persist(next); schedule(0); return publicJob(job);
+    },
+    ownsActiveTaskReceipt(receipt) {
+      try {
+        ensureAvailable();
+        if (receipt.status !== 'reserved' || receipt.origin !== undefined) return false;
+        const job = state.jobs.find((row) => row.id === receipt.id);
+        const owned = active.get(receipt.id);
+        return !!job && !!owned?.workerStarted && !owned.controller.signal.aborted && job.state === 'dispatching' &&
+          job.taskDigest === receipt.taskDigest && originFor(job).poolDigest === receipt.poolDigest &&
+          job.allowedWorkerIds.includes(receipt.workerId) && (job.workerId === null || job.workerId === receipt.workerId);
+      } catch { return false; }
     },
     cancel(id, expectedTaskDigest) {
       ensureAvailable(); if (typeof id !== 'string' || !ID.test(id)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource task id');

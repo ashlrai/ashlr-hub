@@ -28,6 +28,8 @@ export interface ResourceConsoleScope {
   workspaceFilesSupported?: true;
   /** Explicit host-enrolled evaluated engineering; separate from ordinary task completion. */
   engineeringSupported?: true;
+  /** Current console lifetime only; closing engineering does not close human tasks. */
+  engineeringLifecycle?: 'running' | 'stopping' | 'closed' | 'held';
   /** Read-only evaluation and shared-ledger attribution; never routing authority. */
   engineeringOutcomesSupported?: true;
   /** Host-pinned objective preparation and durable same-console enrollment. */

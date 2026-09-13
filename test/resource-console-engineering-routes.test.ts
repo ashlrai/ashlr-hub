@@ -110,6 +110,21 @@ describe('host-configured engineering successor HTTP boundary', () => {
     await expect(start(config())).rejects.toThrow('Configuration refused');
     expect(successors.start).not.toHaveBeenCalled(); expect(successors.close).toHaveBeenCalledOnce();
   });
+  it('isolates a running engineering worker fault from the human console and retains held evidence', async () => {
+    const handle = await start(config());
+    const onFault = background.create.mock.calls[0]![0].onFault as () => void;
+    onFault();
+    await vi.waitFor(() => expect(owner.close).toHaveBeenCalledExactlyOnceWith({ preserveSupervisorTasks: true }));
+    await vi.waitFor(async () => {
+      const response = await fetch(`${handle.url}/api/resources/console`, { headers: { 'x-ashlr-token': handle.readToken } });
+      expect(await response.json()).toMatchObject({ engineeringLifecycle: 'held' });
+    });
+    expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+    expect((await post(handle, '/api/resources/queue', { paused: true })).status).toBe(200);
+    expect((await post(handle)).status).toBe(503); expect(owner.launch).not.toHaveBeenCalled();
+    await expect(handle.close()).rejects.toThrow('Resource console shutdown uncertain');
+    handles.splice(handles.indexOf(handle), 1); // Expected terminal refusal was asserted above.
+  });
   it('keeps unconfigured successor work absent and does not expose host config paths', async () => {
     const handle = await start();
     const scopeResponse = await fetch(`${handle.url}/api/resources/console`, { headers: { 'x-ashlr-token': handle.readToken } });
@@ -313,6 +328,44 @@ function post(handle: ResourceConsoleServerHandle, path = '/api/resources/engine
 }
 
 describe('engineering HTTP capability boundary', () => {
+  it('fences engineering while draining but keeps the ordinary queue and read session available', async () => {
+    const handle = await start(); const path = '/api/resources/engineering-runtime/close';
+    expect((await post(handle, '/api/resources/queue', { paused: true })).status).toBe(200);
+    let finish!: () => void;
+    owner.close.mockReturnValue(new Promise<void>(resolve => { finish = resolve; }));
+    const closing = post(handle, path, {});
+    try {
+      await vi.waitFor(() => expect(owner.close).toHaveBeenCalledOnce());
+      const scope = await fetch(`${handle.url}/api/resources/console`, { headers: { 'x-ashlr-token': handle.readToken } });
+      expect(await scope.json()).toMatchObject({ engineeringLifecycle: 'stopping' });
+      expect((await post(handle)).status).toBe(503); expect(owner.launch).not.toHaveBeenCalled();
+      expect((await post(handle, '/api/resources/tasks', { id: 'human-during-drain', prompt: 'inert fixture',
+        allowedWorkerIds: ['local'], mode: 'read-only', timeoutMs: 1000, maxOutputTokens: 16 })).status).toBe(202);
+      expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+    } finally { finish(); }
+    expect((await closing).status).toBe(200);
+    expect((await post(handle, path, {})).status).toBe(200); expect(owner.close).toHaveBeenCalledOnce();
+  });
+
+  it('requires explicit control and origin for component close and reports held drains without closing HTTP', async () => {
+    const handle = await start(); const path = '/api/resources/engineering-runtime/close';
+    for (const headers of [{}, { 'x-ashlr-token': handle.readToken, origin: handle.url },
+      { 'x-ashlr-token': handle.controlToken! }]) {
+      expect((await post(handle, path, {}, headers as Record<string, string>)).status).toBeGreaterThanOrEqual(400);
+    }
+    expect((await post(handle, path, { force: true })).status).toBe(400); expect(owner.close).not.toHaveBeenCalled();
+    owner.close.mockRejectedValue(new Error('PRIVATE_SHUTDOWN_DIAGNOSTIC'));
+    const held = await post(handle, path, {}); expect(held.status).toBe(503);
+    expect(await held.text()).not.toContain('PRIVATE_SHUTDOWN_DIAGNOSTIC');
+    expect(owner.close).toHaveBeenCalledExactlyOnceWith({ preserveSupervisorTasks: true });
+    const scope = await fetch(`${handle.url}/api/resources/console`, { headers: { 'x-ashlr-token': handle.readToken } });
+    expect(await scope.json()).toMatchObject({ engineeringLifecycle: 'held' });
+    expect((await fetch(`${handle.url}/health`)).status).toBe(200);
+    expect((await post(handle)).status).toBe(503); expect(owner.launch).not.toHaveBeenCalled();
+    expect((await post(handle, path, {})).status).toBe(503); expect(owner.close).toHaveBeenCalledOnce();
+    owner.close.mockResolvedValue(undefined);
+  });
+
   it('publishes metadata through read auth without launching and preserves query refusal', async () => {
     const handle = await start(); expect(handle.scope.engineeringSupported).toBe(true);
     expect((await fetch(`${handle.url}/api/resources/engineering`)).status).toBe(401);

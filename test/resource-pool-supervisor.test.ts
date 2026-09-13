@@ -371,6 +371,33 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     expect(next.snapshot().error).toBeNull();
   });
 
+  it('does not infer transport custody from a scheduler promise before the runtime dispatch boundary', async () => {
+    const f = await fixture({ hold: true }); const supervisor = await f.start();
+    const run = runtime.runResourceTask; let checked = false;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation(options => run({ ...options, beforeWorkerDispatch: () => {
+      const receipt = f.ledger().attempts[0];
+      expect(receipt.status).toBe('reserved'); expect(supervisor.ownsActiveTaskReceipt(receipt)).toBe(false);
+      checked = true; return options.beforeWorkerDispatch!();
+    } }));
+    supervisor.submit(f.task()); await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    expect(checked).toBe(true); expect(supervisor.ownsActiveTaskReceipt(f.ledger().attempts[0])).toBe(true);
+    supervisor.cancel('task-a'); await settled(supervisor);
+  });
+
+  it('proves only live exact ordinary custody, never uncertain, relabelled or cancelled work', async () => {
+    const f = await fixture({ hold: true }); const supervisor = await f.start(); supervisor.submit(f.task());
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    const receipt = f.ledger().attempts[0];
+    expect(supervisor.ownsActiveTaskReceipt(receipt)).toBe(true);
+    for (const patch of [{ status: 'uncertain' }, { status: 'completed' }, { id: 'external' },
+      { taskDigest: '0'.repeat(64) }, { poolDigest: '0'.repeat(64) }, { workerId: 'external' },
+      { origin: { kind: 'universe-generation', universeId: 'other', runId: 'other', variantId: 'other' } }]) {
+      expect(supervisor.ownsActiveTaskReceipt({ ...receipt, ...patch })).toBe(false);
+    }
+    supervisor.cancel('task-a'); expect(supervisor.ownsActiveTaskReceipt(receipt)).toBe(false);
+    await settled(supervisor); await supervisor.close(); expect(supervisor.ownsActiveTaskReceipt(receipt)).toBe(false);
+  });
+
   it('cancels queued work without contacting a worker and retains idempotent metadata', async () => {
     const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
     expect(supervisor.cancel('task-a')).toMatchObject({ state: 'cancelled', outcome: 'cancelled', cancellable: false });
