@@ -1569,6 +1569,28 @@ tasks within the existing 4 MiB supervisor state limit. Capacity refusal happens
 before dispatch. Deleting retained text frees text capacity, **not** the existing
 256-job identity limit; task tombstones and quota accounting remain intact.
 
+The source now includes a **standalone archive staging store**, not an enabled
+console-history migration. Its
+[projection and codec](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/console-history-archive.ts)
+validate the complete existing console state before selecting terminal jobs.
+The [private store](https://github.com/ashlrai/ashlr-hub/blob/master/src/core/resources/console-history-archive-store.ts)
+separates immutable task metadata from deletable prompt/output/context payloads.
+Deletion markers follow the stable scope/task identity across different source
+snapshots; replay cannot restore deleted or missing published text. A deletion
+marker commits before payload cleanup, so cleanup failure can leave bytes on disk
+while reads already suppress them; an explicit deletion retry completes cleanup.
+This is not encryption or secure disk erasure.
+
+Staging requires an explicitly supplied existing private root and writes only
+that archive. Constructing or reading the store does not start a supervisor.
+The store bounds records and bytes, refuses unknown or conflicting evidence, and
+uses the existing ownership lock protocol. It does not remove active-state jobs,
+change the 256-job limit, migrate a console, or reset resource allowances. Active
+compaction requires a shared archive-aware identity lookup, versioned state and
+source proofs, recovery/pool-evolution compatibility, and explicit history access.
+Do not treat a `staged` result as completion of that migration or as execution
+authority. Schemas 1–7 retain their current validation and admission behavior.
+
 For a settled or cancelled task, unlock controls and choose **Delete transcript**,
 then confirm. This removes this transcript, its copied context and console-session output, not task
 records, provider history, backups, crash-left temporary copies or recoverable disk

@@ -107,6 +107,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-quota-scopes.test.ts', // final HTTP quota projection and shared account ceilings
   'test/resource-console-history-server.test.ts', // private history HTTP reads, deletes and restart persistence
   'test/resource-console-history.test.ts', // durable supervisor transcripts with real inert transports
+  'test/resource-console-history-archive-store.test.ts', // actual private staging, deletion and restart evidence
   'test/resource-console-history-acceptance.test.ts', // independent restart, deletion and receipt reconciliation
   'test/resource-console-followup.test.ts', // context headroom and corrupted durable-state refusal
   'test/resource-console-followup-server.test.ts', // authenticated follow-up HTTP and shared quota accounting
