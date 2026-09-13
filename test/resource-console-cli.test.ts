@@ -14,8 +14,8 @@ function server(execute = false) {
       workspace: execute ? '/private/fixture/workspace' : null, maxParallel: execute ? 4 : 0, maxQueued: execute ? 64 : 0 },
     close: vi.fn(async () => {}) };
 }
-function signal(name: 'SIGINT' | 'SIGTERM', before: ReturnType<typeof process.listeners>): void {
-  const added = process.listeners(name).find((listener) => !before.includes(listener)); expect(added).toBeDefined(); added!();
+function signal(name: 'SIGINT' | 'SIGTERM', before: NodeJS.SignalsListener[]): void {
+  const added = process.listeners(name).find((listener) => !before.includes(listener)); expect(added).toBeDefined(); added!(name);
 }
 let out: ReturnType<typeof vi.spyOn>; let err: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
@@ -25,6 +25,25 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('explicit foreground resource console CLI', () => {
+  it.each([false, true])('passes managed mission enrollment with explicit startup=%s', async automatic => {
+    const handle = server(true); backend.start.mockResolvedValue(handle); const before = process.listeners('SIGTERM');
+    const running = cmdResourceConsole([...args, '--execute', '--workspace', '/private/fixture/workspace', '--projects', '/private/fixture/projects.json',
+      '--engineering-mission', '/private/fixture/mission.json', ...(automatic ? ['--mission-auto-start'] : []), '--json']);
+    try {
+      await vi.waitFor(() => expect(out).toHaveBeenCalledOnce());
+      expect(backend.start.mock.calls[0]![0]).toMatchObject({ engineeringMissionFile: '/private/fixture/mission.json', projectsFile: '/private/fixture/projects.json' });
+      expect(backend.start.mock.calls[0]![0].engineeringMissionAutoStart).toBe(automatic ? true : undefined);
+    } finally { signal('SIGTERM', before); await running; }
+    expect(await running).toBe(0);
+  });
+  it.each([
+    ['--mission-auto-start'], ['--engineering-mission', '/private/mission.json'],
+    ['--execute', '--workspace', '/private/work', '--engineering-mission', '/private/mission.json'],
+    ['--execute', '--workspace', '/private/work', '--projects', '/private/projects.json', '--engineering-mission', '/private/mission.json', '--engineering', '/private/engineering.json'],
+    ['--execute', '--workspace', '/private/work', '--projects', '/private/projects.json', '--engineering-mission', '/private/mission.json', '--mission-auto-start', '--mission-auto-start'],
+  ])('refuses ambiguous mission enrollment before startup: %j', async (...extra) => {
+    expect(await cmdResourceConsole([...args, ...extra])).toBe(2); expect(backend.start).not.toHaveBeenCalled();
+  });
   it.each([[], ['--help', '--json'], ['--root', '/'], ['--root', 'relative'], [...args, '--unknown'],
     [...args, '--port', '-1'], [...args, '--port', '65536'], [...args, '--port', '01'], [...args, '--port', '1.5'],
     [...args, '--execute'], [...args, '--workspace', '/private/work'], [...args, '--max-parallel', '2'],

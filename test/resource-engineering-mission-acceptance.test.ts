@@ -16,6 +16,8 @@ import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { checkResourceEngineeringAutonomousSetup, prepareResourceEngineeringAutonomousSetup } from '../src/core/resources/engineering-autonomous-setup.js';
 import { runResourceEngineeringMission } from '../src/core/resources/engineering-mission.js';
+import * as missionRunner from '../src/core/resources/engineering-mission.js';
+import type { EngineeringMissionSnapshot } from '../src/core/resources/engineering-mission-manager-types.js';
 import * as missionProof from '../src/core/resources/engineering-mission-proof.js';
 import * as missionConsole from '../src/core/resources/engineering-mission-console.js';
 import { readEngineeringMissionRecords, type ResourceEngineeringMissionConfig } from '../src/core/resources/engineering-mission-store.js';
@@ -185,8 +187,10 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
     const abandoned = json(join(f.root, 'resource-console-state.json')).jobs.find((job: { id: string }) => job.id.startsWith('mission-proposal-'));
     expect(abandoned).toMatchObject({ state: 'queued', executionDeadlineAt: f.config.deadlineAt });
+    const missionFile = join(f.base, 'managed-mission.json'); save(missionFile, f.config);
     const workspace = await startResourceConsoleServer({ root: f.root, workspace: f.project, poolFile: f.paths.pool,
-      bindingsFile: f.paths.bindings, observationsFile: f.paths.observations, projectsFile: f.paths.projects, execute: true, port: 0 });
+      bindingsFile: f.paths.bindings, observationsFile: f.paths.observations, projectsFile: f.paths.projects,
+      engineeringMissionFile: missionFile, execute: true, port: 0 });
     cleanup.push(() => workspace.close());
     // A failed assertion can bypass the normal human response below. Release
     // this test-owned held transport before draining the workspace, otherwise
@@ -200,8 +204,30 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
       mode: 'read-only', timeoutMs: 900_000, maxOutputTokens: 128, retainHistory: true });
     await vi.waitFor(() => expect(f.humanResponses).toHaveLength(1));
     const sharedUrls: Array<string | null> = [];
-    const second = await runResourceEngineeringMission(f.config, { workspace: { handle: workspace, expectedAttachment: null },
-      onProgress(value) { phases.push(`${value.scope}:${value.phase}`); sharedUrls.push(value.consoleUrl); } });
+    // Observe the actual runner without replacing execution. The operator HTTP
+    // surface must be the caller, using this already-live human workspace.
+    const actualRun = runResourceEngineeringMission;
+    let completed!: (report: Awaited<ReturnType<typeof actualRun>>) => void;
+    const completion = new Promise<Awaited<ReturnType<typeof actualRun>>>(resolve => { completed = resolve; });
+    const observedRun = vi.spyOn(missionRunner, 'runResourceEngineeringMission').mockImplementation(async (input, host = {}) => {
+      const report = await actualRun(input, { ...host, onProgress(value) {
+        phases.push(`${value.scope}:${value.phase}`); sharedUrls.push(value.consoleUrl); host.onProgress?.(value);
+      } }); completed(report); return report;
+    });
+    cleanup.push(async () => { observedRun.mockRestore(); });
+    const initialResponse = await fetch(`${workspace.url}/api/resources/engineering-mission`, { headers: { 'x-ashlr-token': workspace.readToken } });
+    expect(initialResponse.status).toBe(200); const initialMission = await initialResponse.json() as EngineeringMissionSnapshot;
+    expect(initialMission).toMatchObject({ state: 'idle', revision: 0, enabled: false });
+    const startResponse = await fetch(`${workspace.url}/api/resources/engineering-mission/start`, { method: 'POST',
+      headers: { origin: workspace.url, 'x-ashlr-token': workspace.controlToken!, 'content-type': 'application/json' },
+      body: JSON.stringify({ expectedControllerId: initialMission.controllerId, expectedConfigDigest: initialMission.configDigest, expectedRevision: 0 }) });
+    expect(startResponse.status).toBe(202); expect(await startResponse.json()).toMatchObject({ state: 'running', enabled: true, revision: 1 });
+    const second = await completion; observedRun.mockRestore();
+    await vi.waitFor(async () => {
+      const response = await fetch(`${workspace.url}/api/resources/engineering-mission`, { headers: { 'x-ashlr-token': workspace.readToken } });
+      expect(await response.json()).toMatchObject({ state: second.state, scope: second.scopesReserved, deadlineAt: f.config.deadlineAt,
+        lastOutcome: { state: second.state, reason: second.reason, scopesReserved: second.scopesReserved } });
+    });
     expect(second, JSON.stringify({ second, phases, calls: f.calls, errors: f.errors, proofFailures, consoleFailures, fixture: f.base })).toMatchObject({ state: 'completed', reason: 'stop-requested', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
     expect(second.tip).not.toBeNull(); expect(git(f.project, 'show', `${second.tip!.commit}:value.json`)).toBe('3');
     expect(git(f.project, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.project, 'status', '--porcelain=v1')).toBe('');

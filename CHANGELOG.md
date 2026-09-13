@@ -11,6 +11,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Managed standing mission workspace
+
+- Adds explicit `--engineering-mission` enrollment and optional
+  `--mission-auto-start` to the Resources workspace, sharing its existing pool.
+- Exposes identity/revision-checked start/stop/status and a mission phase strip.
+  Stop intent survives restart; shutdown drains mission work before the human
+  workspace. The original deadline and account reservations are unchanged.
+- Keeps the current scope's close control separate from standing-mission stop.
+  No resident service installation or actual-account activation is implied.
+
 ### Cooperative standing-mission setup
 
 - Moves mission setup materialization and publication-time predecessor checks

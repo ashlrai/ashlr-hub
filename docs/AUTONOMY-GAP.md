@@ -166,6 +166,10 @@ mission deadline and fixed per-scope evaluator/resource policy, honors host stop
 at dispatch/publication, and reconciles retained results rather than issuing new
 proposal identities. This source integration is not an installed resident service,
 an unlimited-history scheduler, or actual-account commissioning evidence.
+The [managed mission workspace](RESOURCE-POOLS.md#manage-a-standing-mission-from-the-workspace)
+adds host-pinned start/stop/status, a current-phase interface, persistent stop
+intent and optional one-attempt console startup. It composes the same runner and
+drains before shared workspace shutdown; it does not activate a resident daemon.
 The generated command still needs actual account capacity and an appropriate
 fixed evaluator. The [graded Hub verification benchmark proposal](../artifacts/hub-verification-benchmark-plan.md#installed-builtin-measurement-route)
 now has a closed installed `preparation-measurement-v1` launch route on

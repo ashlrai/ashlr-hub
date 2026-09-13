@@ -271,7 +271,8 @@ account values, prompts, raw provider messages or local paths.
 
 Component close is not a durable fleet-wide STOP; do not
 use it as a substitute for global KILL. These in-process APIs do not install an
-always-on service or provide a browser control for starting a standing mission.
+always-on service. The explicit managed-mission mode below adds browser controls
+without activating the dormant resident daemon.
 Worker isolation is not a resident-service installation or an actual-account
 commissioning result. Provider qualification and unattended operating evidence
 remain separate from the local materialization tests.
@@ -546,6 +547,47 @@ The second sample reconstructs those facts independently; nothing is cached
 across calls or campaigns. The ordinary setup check and completed setup replay
 remain independent of delivery: a prepared-but-unrun setup is valid setup
 evidence, not proof of completed engineering work.
+
+### Manage a standing mission from the workspace
+
+Add `--engineering-mission /absolute/private/mission.json` to an executing
+resource console with an explicit `--projects` catalog. Use the existing mission
+configuration described below; its workspace, project catalog, resource ledger,
+pool, bindings, observations and optional shared quota collector must match the
+console exactly. Do not combine this flag with the other `--engineering*`
+configuration flags: the mission attaches and replaces its own scopes.
+
+This host enrollment is inert by default. Unlock controls in Resources and use
+**Start mission** to begin the pinned plan. This can consume configured provider
+allowance and edit the enrolled files through the existing evaluated runner.
+The phase strip shows current preparation, build, settlement, verification and
+improvement work. Scope/deadline observations and the last in-process outcome are
+not a fresh Git proof or a claim of production deployment. The standalone status
+command below remains the durable history view across host restarts.
+
+**Stop mission** first records disabled intent in the private `mission-controls`
+journal, then aborts and drains mission-owned work. A `202` response acknowledges
+the saved request; wait for `stopped` or `held` to learn the drain outcome. Human
+tasks, conversations and metadata collection stay available. A lost response is
+not evidence that the action failed: refresh status, never blindly replay a start.
+Held work is not automatically retried, and a stop cannot clear held uncertainty.
+
+Optional `--mission-auto-start` makes one attempt when the console starts, unless
+a persisted stop disables it. A normal console shutdown does not rewrite that
+intent; shutdown drains the mission before the shared supervisor and collector.
+Restart uses the same original mission deadline, scope reservations and account
+limits. It does not extend the allowance or create an unlimited self-improvement
+loop. This mode installs no operating-system service and changes no account
+enrollment or General/Spark reservation.
+
+Authenticated `GET /api/resources/engineering-mission` returns browser-safe live
+controller metadata. Control-token-authenticated, same-origin `POST` to
+`/api/resources/engineering-mission/start` or `/stop` requires exactly
+`{expectedControllerId,expectedConfigDigest,expectedRevision}` from a fresh read.
+Old controller identities, stale revisions, active starts and changed config
+are refused. Browser requests cannot provide paths, prompts, budgets or new
+objectives. Controls are capped at 4096 durable revisions per mission identity;
+unreadable or incomplete history is not treated as a new mission.
 
 ### Run a bounded standing mission
 

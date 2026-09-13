@@ -5,6 +5,7 @@ import { validResourceNativeProcessForReceipt } from '../../core/resources/nativ
 import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-store.js';
 import { ApiError, apiGet, apiPost } from './client.js';
 import type { QueryDef } from './queries.js';
+import type { EngineeringMissionCommand, EngineeringMissionSnapshot } from '../../core/resources/engineering-mission-manager-types.js';
 
 function absolutePath(value: unknown): value is string {
   return typeof value === 'string' && /^(?:\/|[a-zA-Z]:[\\/]|\\\\)/.test(value) &&
@@ -202,6 +203,7 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
         scope.workspaceFilesSupported && (scope.readOnly || !scope.projects)) ||
       scope.engineeringSupported !== undefined && (scope.engineeringSupported !== true || scope.readOnly || !scope.projects) ||
       scope.engineeringAttachmentSupported !== undefined && (scope.engineeringAttachmentSupported !== true || scope.readOnly || !scope.projects) ||
+      scope.engineeringMissionSupported !== undefined && (scope.engineeringMissionSupported !== true || scope.engineeringAttachmentSupported !== true) ||
       scope.engineeringAttachmentId !== undefined && (scope.engineeringAttachmentSupported !== true ||
         typeof scope.engineeringAttachmentId !== 'string' || !/^[a-f0-9]{32}$/.test(scope.engineeringAttachmentId) ||
         scope.engineeringSupported !== true || scope.engineeringLifecycle === undefined) ||
@@ -265,6 +267,36 @@ async function control<T>(path: string, body: unknown, disabledMessage = 'Task e
 }
 
 export const submitResourceTask = (task: ResourceConsoleTaskInput) => control<{ job: ResourceSupervisorJob }>('/api/resources/tasks', task);
+function missionSnapshot(value: unknown): EngineeringMissionSnapshot {
+  if (!record(value) || !exact(value, ['schemaVersion', 'missionId', 'configDigest', 'controllerId', 'revision', 'enabled', 'autoStart',
+    'state', 'phase', 'scope', 'maxScopes', 'deadlineAt', 'sampledAt', 'remainingMs', 'lastOutcome']) || value.schemaVersion !== 1 ||
+    typeof value.missionId !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.missionId) ||
+    typeof value.configDigest !== 'string' || !/^[a-f0-9]{64}$/.test(value.configDigest) ||
+    typeof value.controllerId !== 'string' || !/^[a-f0-9]{32}$/.test(value.controllerId) ||
+    !Number.isSafeInteger(value.revision) || Number(value.revision) < 0 || Number(value.revision) > 4096 ||
+    typeof value.enabled !== 'boolean' || typeof value.autoStart !== 'boolean' ||
+    !['idle', 'running', 'stopping', 'completed', 'stopped', 'held', 'closed'].includes(String(value.state)) ||
+    value.phase !== null && !['startup', 'preparing', 'executing', 'draining', 'verifying', 'reconciling', 'proposing'].includes(String(value.phase)) ||
+    !Number.isSafeInteger(value.maxScopes) || Number(value.maxScopes) < 1 || Number(value.maxScopes) > 64 ||
+    !Number.isSafeInteger(value.scope) || Number(value.scope) < 0 || Number(value.scope) > Number(value.maxScopes) ||
+    !timestamp(value.deadlineAt) || !timestamp(value.sampledAt) || !Number.isSafeInteger(value.remainingMs) || Number(value.remainingMs) < 0 ||
+    value.lastOutcome !== null && (!record(value.lastOutcome) || !exact(value.lastOutcome, ['state', 'reason', 'scopesReserved']) ||
+      !['completed', 'stopped', 'held'].includes(String(value.lastOutcome.state)) || typeof value.lastOutcome.reason !== 'string' ||
+      !/^[a-z][a-z0-9-]{0,100}$/.test(value.lastOutcome.reason) || !Number.isSafeInteger(value.lastOutcome.scopesReserved) ||
+      Number(value.lastOutcome.scopesReserved) < 0 || Number(value.lastOutcome.scopesReserved) > Number(value.maxScopes))) {
+    throw new Error('Mission status could not be verified.');
+  }
+  return value as unknown as EngineeringMissionSnapshot;
+}
+export async function readResourceEngineeringMission(signal?: AbortSignal) {
+  return missionSnapshot(await apiGet<unknown>('/api/resources/engineering-mission', signal));
+}
+export async function controlResourceEngineeringMission(action: 'start' | 'stop', input: EngineeringMissionCommand, signal?: AbortSignal) {
+  const result = missionSnapshot(await control<unknown>(`/api/resources/engineering-mission/${action}`, input, 'Mission controls are unavailable.', signal));
+  if (signal?.aborted || result.controllerId !== input.expectedControllerId || result.configDigest !== input.expectedConfigDigest ||
+    result.revision !== input.expectedRevision + 1 || result.enabled !== (action === 'start')) throw new Error('Mission control was not confirmed. Check status.');
+  return result;
+}
 export async function readResourceEngineeringScope(scope: Pick<ResourceConsoleScope, 'root' | 'poolId' | 'workspace'>, signal?: AbortSignal) {
   const current = await resourceConsoleScopeQuery.fetch(signal);
   if (signal?.aborted || current.root !== scope.root || current.poolId !== scope.poolId || current.workspace !== scope.workspace) {

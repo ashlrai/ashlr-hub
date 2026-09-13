@@ -37,6 +37,14 @@ beforeEach(() => { setMutationToken('a'.repeat(64)); });
 afterEach(() => { act(() => clearMutationToken()); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('engineering component lifecycle controls', () => {
+  it('keeps managed scope observation without offering a misleading scope-close action', async () => {
+    const f = attachmentFixture(), ready = vi.fn();
+    render(<EngineeringLifecycle scope={{ ...f.scope, engineeringMissionSupported: true }} unlocked onUnlock={vi.fn()} onReadyChange={ready} />);
+    await screen.findByText('Current mission scope');
+    await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true, 'a'.repeat(32)));
+    expect(screen.queryByRole('button', { name: 'Close engineering' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Check engineering status' })).toBeEnabled(); expect(f.close).not.toHaveBeenCalled();
+  });
   it('discovers host attachment without any mutation and publishes its capabilities', async () => {
     const f = attachmentFixture(null), ready = vi.fn(), changed = vi.fn();
     render(<EngineeringLifecycle scope={f.scope} unlocked onUnlock={vi.fn()} onReadyChange={ready} onScopeChange={changed} />);
@@ -52,7 +60,7 @@ describe('engineering component lifecycle controls', () => {
     await screen.findByText('Running'); fireEvent.click(screen.getByRole('button', { name: 'Close engineering' }));
     await screen.findByText('Closed'); f.replace('b'.repeat(32));
     fireEvent.click(screen.getByRole('button', { name: 'Check engineering status' }));
-    await screen.findByText('Running'); expect(ready).toHaveBeenLastCalledWith(true, 'b'.repeat(32));
+    await screen.findByText('Running'); await waitFor(() => expect(ready).toHaveBeenLastCalledWith(true, 'b'.repeat(32)));
     expect(screen.queryByText(/still reports running after a close attempt/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Close engineering' })); await screen.findByText('Closed');
     expect(f.fetcher.mock.calls.filter(([, init]) => init?.method === 'POST').map(([, init]) => JSON.parse(String(init?.body))))

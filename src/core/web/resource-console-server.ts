@@ -32,6 +32,10 @@ import { createResourceEngineeringComponent, type ResourceEngineeringComponent }
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from '../resources/engineering-successor-coordinator.js';
 import { captureResourceExecutionVeto } from '../resources/execution-veto.js';
 import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } from '../resources/engineering-lifetime.js';
+import { createEngineeringMissionManager, type EngineeringMissionManager } from '../resources/engineering-mission-manager.js';
+import { validateResourceEngineeringMissionConfig } from '../resources/engineering-mission-store.js';
+import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
+import { readEngineeringMissionControl } from '../resources/engineering-mission-control.js';
 
 export interface ResourceConsoleServerOptions {
   /** Whole-console host veto, never exposed as browser-configurable policy. */
@@ -54,6 +58,9 @@ export interface ResourceConsoleServerOptions {
   engineeringSupervisionFile?: string;
   /** Explicit private policy for accounted proposal and delivered-seed successor work. */
   engineeringSuccessorsFile?: string;
+  /** Host-pinned standing mission; the browser cannot choose paths or budgets. */
+  engineeringMissionFile?: string;
+  engineeringMissionAutoStart?: boolean;
   allocationControls?: boolean;
   port?: number;
   execute?: boolean;
@@ -188,6 +195,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const quotaConfigFile = options.quotaConfigFile === undefined ? null : validateUniverseConsoleRoot(options.quotaConfigFile);
   const connectionsConfigFile = options.connectionsConfigFile === undefined ? null : validateUniverseConsoleRoot(options.connectionsConfigFile);
   const projectsFile = options.projectsFile === undefined ? null : validateUniverseConsoleRoot(options.projectsFile);
+  const missionFile = options.engineeringMissionFile === undefined ? null : validateUniverseConsoleRoot(options.engineeringMissionFile);
   const initialEngineeringPaths = engineeringPaths(options);
   const { engineeringFile, engineeringPreparationFile, engineeringSupervisionFile, engineeringSuccessorsFile } = initialEngineeringPaths;
   if (engineeringLifetime.configured && engineeringFile === null && engineeringPreparationFile === null) {
@@ -199,6 +207,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     !Number.isSafeInteger(maxParallel) || maxParallel < 1 || maxParallel > 16 ||
     (options.execute !== undefined && typeof options.execute !== 'boolean') ||
     (options.allocationControls !== undefined && typeof options.allocationControls !== 'boolean') ||
+    (options.engineeringMissionAutoStart !== undefined && typeof options.engineeringMissionAutoStart !== 'boolean') ||
+    options.engineeringMissionAutoStart === true && missionFile === null ||
+    missionFile !== null && (options.execute !== true || projectsFile === null || engineeringLifetime.configured ||
+      engineeringFile !== null || engineeringPreparationFile !== null || engineeringSupervisionFile !== null || engineeringSuccessorsFile !== null) ||
     (options.execute === true ? !options.workspace : options.workspace !== undefined || options.maxParallel !== undefined || projectsFile !== null) ||
     engineeringFile !== null && (options.execute !== true || projectsFile === null) ||
     engineeringPreparationFile !== null && (options.execute !== true || projectsFile === null) ||
@@ -216,6 +228,20 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const projects = projectsFile ? validateResourceConsoleProjects((catalog as { projects: unknown }).projects) : undefined;
   if (projects) { projects.forEach((project) => Object.freeze(project)); Object.freeze(projects); }
   const initialEngineering = readEngineeringConfiguration(initialEngineeringPaths);
+  const missionConfig = missionFile ? validateResourceEngineeringMissionConfig(readResourceJson(missionFile, 512 * 1024)) : null;
+  // Managed shutdown is ordered by this console. Passing the outer signal to
+  // shared owners would release their custody before the mission can drain.
+  const sharedOwnerSignal = missionConfig ? undefined : signal;
+  if (missionConfig) {
+    readEngineeringMissionControl(missionConfig);
+    const runtime = validateResourceGenerationRuntime(readResourceJson(missionConfig.initial.setup.resourceRuntime));
+    if (runtime.root !== root || runtime.poolPath !== poolFile || runtime.bindingsPath !== bindingsFile ||
+      runtime.observationsPath !== observationsFile ||
+      missionConfig.initial.setup.workspace !== workspace || missionConfig.initial.setup.projectsFile !== projectsFile ||
+      (runtime.quotaConfigPath ?? null) !== quotaConfigFile || quotaConfigFile && runtime.quotaEvidenceMode !== 'shared-collector') {
+      throw new Error('Mission requires the same workspace and resource runtime');
+    }
+  }
   const { engineeringSuccessorsConfig } = initialEngineering;
   const configuredWorkspaces = workspace ? [workspace, ...(projects?.map((project) => project.workspace) ?? [])] : [];
   const contains = (parent: string, target: string) => {
@@ -225,7 +251,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
   const controlFiles = [poolFile, bindingsFile, observationsFile, ...(quotaConfigFile ? [quotaConfigFile] : []),
     ...(connectionsConfigFile ? [connectionsConfigFile] : []), ...(projectsFile ? [projectsFile] : []),
     ...(engineeringFile ? [engineeringFile] : []), ...(engineeringSupervisionFile ? [engineeringSupervisionFile] : []),
-    ...(engineeringPreparationFile ? [engineeringPreparationFile] : []), ...(engineeringSuccessorsFile ? [engineeringSuccessorsFile] : [])];
+    ...(engineeringPreparationFile ? [engineeringPreparationFile] : []), ...(engineeringSuccessorsFile ? [engineeringSuccessorsFile] : []),
+    ...(missionFile && missionConfig ? [missionFile, missionConfig.root, missionConfig.initial.setup.resourceRuntime] : [])];
+  if (missionConfig && (contains(root, missionConfig.root) || contains(missionConfig.root, root) ||
+    configuredWorkspaces.some(path => contains(missionConfig.root, path)))) throw new Error('Mission records overlap the workspace or resource ledger');
   for (const selectedWorkspace of configuredWorkspaces) {
     // Legacy scopes allowed a workspace below the store; catalog adoption is stricter.
     if (contains(selectedWorkspace, root) || projects !== undefined && contains(root, selectedWorkspace) ||
@@ -252,10 +281,12 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     ...(quotaConfig ? { quotaRefreshEnabled: true } : {}), ...(connectionsConfig ? { connectionsEnabled: true } : {}),
     ...(options.allocationControls ? { allocationWritable: true } : {}),
     ...(options.execute && projectsFile ? { engineeringAttachmentSupported: true } : {}),
+    ...(missionConfig ? { engineeringMissionSupported: true } : {}),
     ...(options.execute ? { historySupported: true, followUpSupported: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
   let engineeringComponent: ResourceEngineeringComponent | null = null;
+  let missionManager: EngineeringMissionManager | null = null;
   let attachment: ResourceConsoleEngineeringAttachment | null = null;
   let attachmentPending = false;
   let quotaRefresher: ResourceQuotaRefresher | null = null;
@@ -393,6 +424,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         if (!supervisor || !controlToken) throw new RequestError(403, 'Execution is disabled for this console');
         if (!safeEqual(headerValue(req, 'x-ashlr-token'), controlToken)) throw new RequestError(401, 'Control token required');
         if (url.pathname === '/api/resources/engineering-runtime/close') {
+          if (missionManager) throw new RequestError(409, 'Stop the managed mission instead of closing its current scope');
           if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Engineering requires an explicit matching Origin');
           if (!engineering) throw new RequestError(403, 'Engineering is not configured');
           const input = await body(req);
@@ -404,6 +436,21 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (scope.engineeringLifecycle !== 'closed') throw new RequestError(503, 'Engineering shutdown uncertain');
           sendJson(res, 200, { engineeringLifecycle: scope.engineeringLifecycle,
             ...(pinned ? { engineeringAttachmentId: selectedAttachmentId } : {}) }); return;
+        }
+        if (url.pathname === '/api/resources/engineering-mission/start' || url.pathname === '/api/resources/engineering-mission/stop') {
+          if (headerValue(req, 'origin') !== origin) throw new RequestError(403, 'Mission controls require an explicit matching Origin');
+          if (!missionManager) throw new RequestError(403, 'Managed mission is not configured');
+          const input = await body(req);
+          if (!exact(input, ['expectedControllerId', 'expectedConfigDigest', 'expectedRevision']) ||
+            typeof input.expectedControllerId !== 'string' || !/^[a-f0-9]{32}$/.test(input.expectedControllerId) ||
+            typeof input.expectedConfigDigest !== 'string' || !/^[a-f0-9]{64}$/.test(input.expectedConfigDigest) ||
+            !Number.isSafeInteger(input.expectedRevision) || Number(input.expectedRevision) < 0) throw new RequestError(400, 'Expected mission identity and current revision');
+          if (closing || hostStopped()) throw new RequestError(503, 'Console is closing');
+          try {
+            const command = { expectedControllerId: input.expectedControllerId, expectedConfigDigest: input.expectedConfigDigest, expectedRevision: Number(input.expectedRevision) };
+            sendJson(res, 202, missionManager[url.pathname.endsWith('/start') ? 'start' : 'stop'](command));
+          } catch { throw new RequestError(409, 'Mission control changed or unavailable; check mission status'); }
+          return;
         }
         if (url.pathname.startsWith('/api/resources/engineering') && scope.engineeringLifecycle !== undefined &&
           (scope.engineeringLifecycle !== 'running' || engineeringStopped())) {
@@ -519,6 +566,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
       if (method !== 'GET') throw new RequestError(405, 'Method not allowed');
       if (url.pathname === '/api/resources/console') { sendJson(res, 200, scope); return; }
+      if (url.pathname === '/api/resources/engineering-mission') {
+        if (!missionManager) throw new RequestError(404, 'Managed mission is not configured');
+        sendJson(res, 200, missionManager.snapshot()); return;
+      }
       if (url.pathname === '/api/resources/engineering-supervision') {
         if (!engineeringSupervision) throw new RequestError(403, 'Engineering supervision is not configured');
         sendSnapshot(res, engineeringSupervision.snapshot()); return;
@@ -649,6 +700,9 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     if (closing) return closing;
     ready = false; sessions.clear(); signal?.removeEventListener('abort', aborted);
     closing = (async () => {
+      // Let the mission drain exact owned work while the supervisor/collector
+      // still exist. The child never owns or closes the human workspace.
+      const missionResults = missionManager ? await Promise.allSettled([Promise.resolve().then(() => missionManager!.close())]) : [];
       // Keep the paired collector alive while owned execution settles. Closing
       // invalidates requests immediately, not the evidence required by teardown.
       const executionResults = await Promise.allSettled([
@@ -673,7 +727,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       let quotaClosed = true;
       try { quotaLease?.close(quotaPublicationFailed || results[0]?.status !== 'fulfilled' || results[1]?.status !== 'fulfilled'); } catch { quotaClosed = false; }
       quotaLease = null;
-      if (engineeringFaulted || quotaPublicationFailed || !quotaClosed || [...executionResults, ...results].some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
+      if (engineeringFaulted || quotaPublicationFailed || !quotaClosed || [...missionResults, ...executionResults, ...results].some((result) => result.status === 'rejected')) throw new Error('Resource console shutdown uncertain');
     })();
     return closing;
   };
@@ -822,13 +876,14 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
     }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
-      ...(Object.hasOwn(options, 'isExecutionStopped') ? { isExecutionStopped: hostStopped } : {}),
+      ...(missionConfig ? { isExecutionStopped: () => !!closing || signal?.aborted === true || hostStopped() }
+        : Object.hasOwn(options, 'isExecutionStopped') ? { isExecutionStopped: hostStopped } : {}),
       ...(projects === undefined ? {} : { projects }),
       readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
         return quotaRefresher ? quotaRefresher.readObservations(base) : base; },
       ...(quotaConfig ? { readUnavailableWorkerIds: () => quotaRefresher ? quotaRefresher.unavailableWorkerIds()
         : quotaConfig.workers.map((row) => row.workerId),
-        readQuotaUnavailableWorkerIds: () => quotaRefresher?.quotaUnavailableWorkerIds() ?? [] } : {}), signal });
+        readQuotaUnavailableWorkerIds: () => quotaRefresher?.quotaUnavailableWorkerIds() ?? [] } : {}), signal: sharedOwnerSignal });
     const publishedProjects = supervisor?.projects?.();
     if (publishedProjects !== undefined) { scope.projects = publishedProjects; scope.defaultProjectId = 'default'; }
     if (publishedProjects !== undefined && typeof supervisor?.projectFileBinding === 'function') scope.workspaceFilesSupported = true;
@@ -841,25 +896,25 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       resourcePoolStatus(root, pool, bindings, []);
       if (quotaLease) {
         quotaLease.markPending();
-        metadataCoordinator = createNativeMetadataCoordinator({ signal,
+        metadataCoordinator = createNativeMetadataCoordinator({ signal: sharedOwnerSignal,
           beginNativeActivity: () => quotaLease!.beginNativeActivity() });
         metadataCollector = { state: 'running', reasonCode: 'collector-running', sampledAt: new Date().toISOString() };
       }
     }
     if (quotaConfig && quotaLease) {
-      quotaRefresher = createResourceQuotaRefresher({ pool, bindings, config: quotaConfig, cwd: root, signal,
+      quotaRefresher = createResourceQuotaRefresher({ pool, bindings, config: quotaConfig, cwd: root, signal: sharedOwnerSignal,
         assertOwnership: quotaLease!.assertOwnership, coordinator: metadataCoordinator!, onChange: publishQuotaEvidence });
       publishQuotaEvidence();
       if (quotaPublicationFailed) throw new Error('Resource quota evidence publication failed');
       quotaHeartbeat = setInterval(publishQuotaEvidence, 1_000); quotaHeartbeat.unref?.();
     }
     if (connectionsConfig && quotaLease) connectionMonitor = createResourceConnectionMonitor({ config: connectionsConfig, cwd: root,
-      signal, assertOwnership: quotaLease!.assertOwnership, coordinator: metadataCoordinator! });
+      signal: sharedOwnerSignal, assertOwnership: quotaLease!.assertOwnership, coordinator: metadataCoordinator! });
     if (signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
     signal?.addEventListener('abort', aborted, { once: true }); ready = true;
     await initialComponent?.start();
     if (closing || signal?.aborted || hostStopped()) throw new Error('Resource console startup cancelled');
-    return { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
+    const handle: ResourceConsoleWorkspaceHandle = { url: origin, consoleUrl: `${origin}/resources/`, port, readToken: sessions.readToken, controlToken,
       scope: { ...scope }, close, engineeringAttachment: () => attachment, attachEngineering, engineeringCustody,
       submitTask: (input, lifetime) => {
         assertWorkspace();
@@ -876,5 +931,11 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         assertWorkspace();
         return supervisor!.recover(input, lifetime);
       } };
+    if (missionConfig && missionFile) {
+      missionManager = createEngineeringMissionManager({ config: missionConfig, configFile: missionFile,
+        autoStart: options.engineeringMissionAutoStart === true, workspace: handle, isStopped: () => !!closing || hostStopped() });
+      missionManager.startConfigured();
+    }
+    return handle;
   } catch (error) { await close(); throw error; }
 }

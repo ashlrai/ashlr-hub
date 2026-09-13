@@ -84,6 +84,11 @@ export function EngineeringLifecycle({ scope, unlocked, onUnlock, onReadyChange,
       if (pending.current === operation) { pending.current = null; if (alive.current) { setBusy(false); void refresh(); } }
     }
   }
+  if (scope.engineeringMissionSupported) return <section className={styles.panel} aria-label="Engineering lifecycle">
+    <div className={styles.heading}><h2>Current mission scope</h2><StatusBadge status={labels[state]}
+      tone={state === 'held' || state === 'unknown' ? 'unknown' : 'neutral'} /></div>
+    <div className={styles.actions}><button type="button" onClick={() => { void refresh(); }}>Check engineering status</button></div>
+  </section>;
   return <section className={styles.panel} aria-label="Engineering lifecycle">
     <div className={styles.summary}><div className={styles.heading}><h2>Engineering runtime</h2>
       <StatusBadge status={labels[state]} tone={state === 'held' || state === 'unknown' ? 'unknown' : state === 'stopping' ? 'warning' : 'neutral'} /></div>

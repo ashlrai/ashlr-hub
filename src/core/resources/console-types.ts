@@ -7,6 +7,7 @@ import type { ResourceConnectionsSnapshot } from './connection-types.js';
 import type { ResourceQuotaScopeAccess } from './quota-scope-access.js';
 
 export interface ResourceConsoleScope {
+  engineeringMissionSupported?: boolean;
   schemaVersion: 1;
   mode: 'resource-pool';
   root: string;

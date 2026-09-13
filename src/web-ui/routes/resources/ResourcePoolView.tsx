@@ -22,6 +22,7 @@ import { FleetMap } from './FleetMap.js';
 import { buildResourceFleet } from './fleet-model.js';
 import { WorkspaceView } from '../workspace/WorkspaceView.js';
 import { EngineeringLifecycle } from '../workspace/EngineeringLifecycle.js';
+import { EngineeringMission } from '../workspace/EngineeringMission.js';
 import styles from './ResourcePoolView.module.css';
 
 export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConsoleScope }) {
@@ -218,6 +219,7 @@ export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConso
           onClick={() => hold.hasHold ? hold.clear() : setUnlockOpen(true)}>{hold.hasHold ? 'Lock controls' : 'Unlock controls'}</button> : null}
       </div>
     </header>
+    {initialScope.engineeringMissionSupported ? <EngineeringMission unlocked={hold.hasHold} onUnlock={() => setUnlockOpen(true)} /> : null}
     {initialScope.engineeringLifecycle !== undefined || initialScope.engineeringAttachmentSupported ? <EngineeringLifecycle scope={initialScope} unlocked={hold.hasHold}
       onUnlock={() => setUnlockOpen(true)} onReadyChange={setEngineeringReady} onScopeChange={setObservedScope} /> : null}
     <div className={styles.statusBar}><div className={styles.freshness}>
@@ -335,6 +337,6 @@ export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConso
     {unlockOpen ? <MutationTokenDialog open onClose={() => setUnlockOpen(false)} tokenLabel="Control token"
       tokenHelp="the control token this resource console printed" reason={scope.readOnly
         ? `This console’s separate control token enables ${snapshot?.workerAccess ? 'allocation and fleet account access' : 'allocation'} changes only. Task execution remains disabled.${snapshot?.quotaScopeAccess ? ' It also enables quota reservations, without clearing account pauses.' : ''}`
-        : `This console’s separate control token enables configured ${snapshot?.workerAccess ? 'account access, ' : ''}${snapshot?.quotaScopeAccess ? 'quota reservations, ' : ''}allocation, queue, submit, and owned-task cancellation actions.${scope.workspaceFilesSupported ? ' It also permits explicit project file previews.' : ''} Read access alone cannot dispatch work.`} /> : null}
+        : `This console’s separate control token enables configured ${snapshot?.workerAccess ? 'account access, ' : ''}${snapshot?.quotaScopeAccess ? 'quota reservations, ' : ''}allocation, queue, submit, and owned-task cancellation actions.${scope.engineeringMissionSupported ? ' It also permits starting and stopping the host-selected standing mission.' : ''}${scope.workspaceFilesSupported ? ' It also permits explicit project file previews.' : ''} Read access alone cannot dispatch work.`} /> : null}
   </div>;
 }

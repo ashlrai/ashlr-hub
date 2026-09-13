@@ -7,6 +7,8 @@ const USAGE = `usage: ashlr resources pool console --root ABS --pool ABS --bindi
        add --engineering-preparation ABS to prepare objectives from trusted work profiles
        add --engineering-supervision ABS to run a digest-confirmed engineering queue automatically
        add --engineering-successors ABS to propose and prepare follow-up work from verified deliveries
+       add --engineering-mission ABS to manage a standing mission in this workspace
+       add --mission-auto-start to attempt that mission when this console starts
        add --quota-config ABS to refresh explicitly pinned Codex account metadata
        add --connections-config ABS to monitor explicit Codex/Claude/Grok accounts
        add --allocation-controls for usage ceilings, whole-account pauses and General/Spark reservations
@@ -67,6 +69,15 @@ admit a new objective at that delivered commit. The profile retains its evaluato
 file scope and campaign limits. Restart retains the original deadline and proposal
 identities; lost output is held rather than regenerated. Inspect authenticated
 GET /api/resources/engineering-successors for bounded metadata, not private prompts.
+--engineering-mission requires --execute and --projects and replaces the other
+engineering configuration flags. Its existing private mission JSON must bind this
+exact workspace, project catalog, resource files and shared quota collector.
+The workspace can start and stop the mission with identity/revision-checked controls.
+Stop persists across restarts and drains only mission-owned work, not human tasks.
+--mission-auto-start makes one startup attempt unless a saved stop disables it.
+No retry loop renews the original mission deadline, scope limit or account reserves.
+Held results require investigation; a completed mission is not a new allowance.
+No OS service is installed. Console shutdown drains the mission before its pool.
 Queued intents and pause state are durable; previously dispatching work is never
 silently replayed after restart. Ordinary output is bounded and session-only;
 opt-in transcripts persist locally until deleted. Accepted follow-ups freeze copied
@@ -84,7 +95,7 @@ Exit codes: 0 clean shutdown/help, 1 startup/shutdown failure, 2 invalid argumen
 `;
 class UsageError extends Error {}
 type Options = { help: true } | { help: false; root: string; poolFile: string; bindingsFile: string;
-  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; engineeringFile?: string; engineeringPreparationFile?: string; engineeringSupervisionFile?: string; engineeringSuccessorsFile?: string; allocationControls?: boolean;
+  observationsFile: string; quotaConfigFile?: string; connectionsConfigFile?: string; projectsFile?: string; engineeringFile?: string; engineeringPreparationFile?: string; engineeringSupervisionFile?: string; engineeringSuccessorsFile?: string; engineeringMissionFile?: string; engineeringMissionAutoStart?: boolean; allocationControls?: boolean;
   port: number; execute: boolean; workspace?: string; maxParallel?: number; json: boolean };
 
 function path(value: string): string {
@@ -98,13 +109,14 @@ function parse(args: string[]): Options {
       [...arg].some((char) => char.charCodeAt(0) < 32 || char.charCodeAt(0) >= 127 && char.charCodeAt(0) <= 159)) ||
     Buffer.byteLength(args.join('\0')) > 32 * 1024) throw new UsageError('Arguments exceed the bounded text contract');
   if (args.length === 1 && ['--help', '-h'].includes(args[0]!)) return { help: true };
-  const values = new Map<string, string>(); let execute = false; let json = false; let allocationControls = false;
+  const values = new Map<string, string>(); let execute = false; let json = false; let allocationControls = false; let missionAutoStart = false;
   for (let index = 0; index < args.length; index++) {
     const flag = args[index]!;
     if (flag === '--execute') { if (execute) throw new UsageError('Duplicate console option'); execute = true; continue; }
     if (flag === '--json') { if (json) throw new UsageError('Duplicate console option'); json = true; continue; }
     if (flag === '--allocation-controls') { if (allocationControls) throw new UsageError('Duplicate console option'); allocationControls = true; continue; }
-    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects', '--engineering', '--engineering-preparation', '--engineering-supervision', '--engineering-successors'].includes(flag) || values.has(flag)) {
+    if (flag === '--mission-auto-start') { if (missionAutoStart) throw new UsageError('Duplicate console option'); missionAutoStart = true; continue; }
+    if (!['--root', '--pool', '--bindings', '--observations', '--port', '--workspace', '--max-parallel', '--quota-config', '--connections-config', '--projects', '--engineering', '--engineering-preparation', '--engineering-supervision', '--engineering-successors', '--engineering-mission'].includes(flag) || values.has(flag)) {
       throw new UsageError('Unknown or duplicate console option');
     }
     const value = args[++index];
@@ -125,6 +137,10 @@ function parse(args: string[]): Options {
   if (values.has('--engineering-successors') && (!values.has('--engineering-supervision') || !values.has('--engineering-preparation'))) {
     throw new UsageError('Engineering successors require supervision and preparation profiles');
   }
+  if (missionAutoStart && !values.has('--engineering-mission') || values.has('--engineering-mission') &&
+    (!execute || !values.has('--projects') || ['--engineering', '--engineering-preparation', '--engineering-supervision', '--engineering-successors'].some(flag => values.has(flag)))) {
+    throw new UsageError('Managed mission requires execution and projects, without other engineering flags');
+  }
   const portText = values.get('--port') ?? '0'; const parallelText = values.get('--max-parallel') ?? '4';
   if (!/^(0|[1-9]\d{0,4})$/.test(portText) || Number(portText) > 65_535 ||
     !/^[1-9]\d?$/.test(parallelText) || Number(parallelText) > 16) throw new UsageError('Invalid port or parallel limit');
@@ -137,6 +153,8 @@ function parse(args: string[]): Options {
     ...(values.has('--engineering-preparation') ? { engineeringPreparationFile: path(values.get('--engineering-preparation')!) } : {}),
     ...(values.has('--engineering-supervision') ? { engineeringSupervisionFile: path(values.get('--engineering-supervision')!) } : {}),
     ...(values.has('--engineering-successors') ? { engineeringSuccessorsFile: path(values.get('--engineering-successors')!) } : {}),
+    ...(values.has('--engineering-mission') ? { engineeringMissionFile: path(values.get('--engineering-mission')!) } : {}),
+    ...(missionAutoStart ? { engineeringMissionAutoStart: true } : {}),
     ...(allocationControls ? { allocationControls: true } : {}),
     port: Number(portText), execute, ...(execute ? { workspace: path(values.get('--workspace')!), maxParallel: Number(parallelText) } : {}), json };
 }
