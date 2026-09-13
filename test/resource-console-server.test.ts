@@ -7,6 +7,7 @@ import { startResourceConsoleServer, type ResourceConsoleServerHandle, type Reso
 import * as readers from '../src/core/web/resource-console-reads.js';
 import * as refreshers from '../src/core/resources/quota-refresh.js';
 import * as supervisors from '../src/core/resources/pool-supervisor.js';
+import * as killPolicy from '../src/core/sandbox/policy.js';
 import { projectResourceConsoleEvidence } from '../src/core/web/resource-console-public.js';
 import { mergeResourceObservations, resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
@@ -42,6 +43,23 @@ async function http(handle: ResourceConsoleServerHandle, path: string, method = 
 }
 
 describe('resource console HTTP fences', () => {
+  it('publishes current global stop state without authority paths or clearing the stop', async () => {
+    const handle = await start();
+    const read = vi.spyOn(killPolicy, 'readKillSwitch');
+    for (const state of ['active', 'inactive', 'unknown'] as const) {
+      read.mockReturnValue(state === 'unknown'
+        ? { state, sourceState: 'degraded', reason: 'uninspectable', path: '/PRIVATE/KILL', errorCode: 'PRIVATE' }
+        : { state, sourceState: 'healthy', reason: state === 'active' ? 'present' : 'missing', path: '/PRIVATE/KILL' });
+      const response = await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken });
+      expect(response.status).toBe(200);
+      expect(JSON.parse(response.text).executionStop).toEqual({ state, sampledAt: expect.any(String) });
+      expect(response.text).not.toContain('PRIVATE');
+    }
+    read.mockImplementation(() => { throw new Error('PRIVATE'); });
+    const response = await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken });
+    expect(response.status).toBe(200); expect(JSON.parse(response.text).executionStop.state).toBe('unknown');
+    expect(response.text).not.toContain('PRIVATE');
+  });
   it('requires an exact pin for awaited cancellation and leaves the console usable', async () => {
     const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
     const handle = await start({ execute: true, workspace });

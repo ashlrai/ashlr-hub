@@ -356,6 +356,14 @@ describe('optional native execution response boundary', () => {
 });
 
 describe('connection and allocation response boundaries', () => {
+  it.each(['active', 'inactive', 'unknown'])('accepts closed global stop evidence: %s', async state => {
+    const executionStop = { state, sampledAt: NOW };
+    await expect(extension({ executionStop })).resolves.toMatchObject({ executionStop });
+  });
+  it.each([null, {}, { state: 'ready', sampledAt: NOW }, { state: 'inactive', sampledAt: 'not-a-time' },
+    { state: 'inactive', sampledAt: NOW, path: '/PRIVATE/KILL' }, { state: 'active' }])('rejects malformed or private stop evidence %#', async executionStop => {
+    await expect(extension({ executionStop })).rejects.toThrow();
+  });
   it('accepts a pre-invocation reservation failure without invented process diagnostics', async () => {
     const connections = { ...connection(), firstFailure: { accountId: 'codex-a', observedAt: NOW,
       reasonCode: 'activity-reservation-failed', cancellationAlreadyRequested: false } };

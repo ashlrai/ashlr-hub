@@ -6,7 +6,7 @@ import styles from './EngineeringMission.module.css';
 
 const phases = ['preparing', 'executing', 'draining', 'verifying', 'proposing'] as const;
 const labels = { preparing: 'Prepare', executing: 'Build', draining: 'Settle', verifying: 'Verify', proposing: 'Improve' };
-export function EngineeringMission({ unlocked, onUnlock }: { unlocked: boolean; onUnlock(): void }) {
+export function EngineeringMission({ unlocked, onUnlock, executionAvailable }: { unlocked: boolean; onUnlock(): void; executionAvailable: boolean }) {
   const [sample, setSample] = useState<EngineeringMissionSnapshot | null>(null);
   const [fresh, setFresh] = useState(false), [busy, setBusy] = useState(false), [uncertain, setUncertain] = useState(false);
   const [checked, setChecked] = useState(false);
@@ -29,7 +29,7 @@ export function EngineeringMission({ unlocked, onUnlock }: { unlocked: boolean; 
       window.clearInterval(timer); document.removeEventListener('visibilitychange', poll); };
   }, [refresh]);
   async function act(action: 'start' | 'stop') {
-    if (pending.current || !sample || !fresh) return;
+    if (pending.current || !sample || !fresh || action === 'start' && !executionAvailable) return;
     if (!unlocked) { onUnlock(); return; }
     reading.current?.abort(); reading.current = null;
     const abort = new AbortController(); pending.current = abort; setBusy(true); setFresh(false); setUncertain(false);
@@ -45,7 +45,7 @@ export function EngineeringMission({ unlocked, onUnlock }: { unlocked: boolean; 
       if (alive.current && !pending.current) { setBusy(false); void refresh(); } }
   }
   const state = fresh ? sample?.state ?? 'checking' : checked ? 'unknown' : 'checking';
-  const canStart = fresh && sample && ['idle', 'stopped'].includes(sample.state) && sample.remainingMs > 0;
+  const canStart = executionAvailable && fresh && sample && ['idle', 'stopped'].includes(sample.state) && sample.remainingMs > 0;
   const canStop = fresh && sample && (sample.enabled || sample.state === 'running') && sample.state !== 'stopping';
   return <section className={styles.panel} aria-label="Standing mission">
     <div className={styles.title}><h2>Standing mission</h2><StatusBadge status={state} tone={state === 'held' || state === 'unknown' ? 'unknown' : state === 'running' ? 'info' : 'neutral'} />

@@ -175,6 +175,8 @@ export const RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS = {
 
 export interface ResourceConsoleSnapshot extends ResourceConsoleEvidence {
   supervisor: ResourceSupervisorSnapshot | null;
+  /** Read-only global stop observation. Missing legacy evidence is not inactive. */
+  executionStop?: { state: 'active' | 'inactive' | 'unknown'; sampledAt: string };
   /** Independent read-only local record inspection, not collector activity or quota. */
   collectorInspection?: ResourceCollectorInspection;
   /** Local collector lifecycle, not a provider health or quota observation. */

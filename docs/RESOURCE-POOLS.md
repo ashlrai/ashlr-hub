@@ -2184,6 +2184,19 @@ a guarantee that a provider will accept the task or that overage is disabled.
 
 ## Run one task
 
+The Resources workspace displays the current global execution stop separately
+from account capacity. Its read-only `executionStop` snapshot contains only
+`state` (`active`, `inactive`, or `unknown`) and `sampledAt`; authority paths and
+filesystem errors are not exposed. An inactive stop is not task readiness.
+The existing worker checks remain authoritative immediately before and during
+execution. This observation does not clear the stop or change queue/account policy.
+
+Active, unknown, missing legacy or failed-read stop evidence withholds task
+submission, queue resume and mission start in the UI. Existing authorized pause,
+owned-task cancellation and mission stop remain usable; read-only sessions gain
+none of those controls. Account observation and permitted reserve settings remain
+independent. There is no stop-clearing endpoint or button in this workspace.
+
 An explicit task file:
 
 ```json

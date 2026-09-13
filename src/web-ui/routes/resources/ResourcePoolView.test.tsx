@@ -305,6 +305,20 @@ describe('resource dispatch desk', () => {
     expect(within(screen.getByRole('region', { name: 'Task external-task' })).getByText(/not a process heartbeat/)).toBeInTheDocument();
   });
 
+  it.each(['active', 'unknown', 'missing'] as const)('keeps stop controls available while global stop is %s', async state => {
+    const f = setup(); if (state === 'missing') delete f.snapshot.executionStop; else f.snapshot.executionStop!.state = state;
+    setMutationToken('d'.repeat(64)); const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
+    await screen.findByRole('heading', { name: 'Routing board' });
+    expect(screen.getByRole('region', { name: 'Global execution stop' })).toHaveTextContent(state === 'active' ? 'Global stop active' : 'Global stop status unavailable');
+    expect(screen.getByRole('button', { name: 'Queue task' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: 'Pause queue' }));
+    expect(await screen.findByRole('button', { name: 'Resume queue' })).toBeDisabled();
+    await user.click(screen.getByRole('button', { name: /^owned-task/ }));
+    await user.click(screen.getByRole('button', { name: 'Cancel owned task' }));
+    await waitFor(() => expect(f.request.mock.calls.some(([path]) => path.endsWith('/owned-task/cancel'))).toBe(true));
+    expect(screen.queryByRole('button', { name: /clear.*stop/i })).not.toBeInTheDocument();
+  });
+
   it('loads output only on demand and renders provider text without HTML execution', async () => {
     const f = setup(); const user = userEvent.setup(); render(<ResourcePoolView scope={f.scope} />);
     await screen.findByRole('heading', { name: 'Routing board' });
@@ -360,6 +374,7 @@ describe('resource dispatch desk', () => {
     f.request.mockResolvedValueOnce(json({ error: 'unavailable' }, 503));
     await user.click(screen.getByRole('button', { name: 'Refresh' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('last successful read');
+    expect(screen.getByRole('region', { name: 'Global execution stop' })).toHaveTextContent('Global stop status is historical');
     expect(screen.getByRole('heading', { name: 'Routing board' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Pause queue' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Queue task' })).toBeDisabled();
@@ -471,14 +486,21 @@ describe('resource dispatch desk', () => {
     expect(f.request.mock.calls.filter(([path]) => path.endsWith('/output'))).toHaveLength(reads);
   });
 
-  it.each(['read-only', 'degraded', 'closing'] as const)('withholds execution when %s', async (kind) => {
-    const f = setup(); if (kind === 'read-only') { f.scope.readOnly = true; f.scope.workspace = null; }
+  it.each(['read-only', 'degraded', 'closing', 'stop-active', 'stop-unknown', 'stop-missing'] as const)('withholds execution when %s', async (kind) => {
+    const f = setup(); if (kind === 'read-only') { f.scope.readOnly = true; f.scope.workspace = null; f.snapshot.executionStop!.state = 'active'; }
     if (kind === 'degraded') { f.snapshot.sourceState = 'degraded'; f.snapshot.plan = null; }
     if (kind === 'closing') f.snapshot.supervisor!.closing = true;
+    if (kind === 'stop-active') f.snapshot.executionStop!.state = 'active';
+    if (kind === 'stop-unknown') f.snapshot.executionStop!.state = 'unknown';
+    if (kind === 'stop-missing') delete f.snapshot.executionStop;
     setMutationToken('d'.repeat(64)); render(<ResourcePoolView scope={f.scope} />);
     await screen.findByRole('heading', { name: 'Routing board' });
     expect(screen.getByRole('button', { name: 'Queue task' })).toBeDisabled();
     expect(f.request.mock.calls.every(([, init]) => init?.method === 'GET')).toBe(true);
+    if (kind === 'read-only') {
+      expect(screen.getByRole('region', { name: 'Global execution stop' })).toHaveTextContent('read-only session cannot start, pause or cancel');
+      expect(screen.getByRole('region', { name: 'Global execution stop' })).not.toHaveTextContent('cancellation remain available');
+    }
   });
 
   it('validates task limits and allowlist before sending a control request', async () => {

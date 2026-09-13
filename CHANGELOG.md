@@ -11,6 +11,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Global execution stop visibility
+
+- Displays live global-stop evidence separately from account capacity in the
+  Resources workspace, without exposing private authority paths.
+- Withholds task submission, queue resume and mission start on active, unknown
+  or historical stop evidence while preserving authorized stop controls.
+- Keeps real worker admission and the global stop unchanged; no activation or
+  stop-clearing capability is added.
+
 ### Native collector failure visibility
 
 - Distinguishes pre-invocation activity reservation failure from shared queued

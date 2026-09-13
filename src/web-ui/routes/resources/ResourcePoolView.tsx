@@ -71,7 +71,7 @@ export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConso
   const stopEnabled = !scope.readOnly && !!supervisor && !supervisor.closing;
   // The cache retains its error during a retry. Starting that retry is not
   // evidence of recovery and must not reopen dispatch or hide stale labels.
-  const enabled = stopEnabled && !supervisor.error &&
+  const enabled = stopEnabled && snapshot?.executionStop?.state === 'inactive' && !supervisor.error &&
     snapshot?.sourceState !== 'degraded' && !historical && query.status !== 'loading';
   const allocationEnabled = scope.allocationWritable === true && !!snapshot?.allocation &&
     snapshot.sourceState !== 'degraded' && !historical && query.status !== 'loading';
@@ -219,7 +219,7 @@ export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConso
           onClick={() => hold.hasHold ? hold.clear() : setUnlockOpen(true)}>{hold.hasHold ? 'Lock controls' : 'Unlock controls'}</button> : null}
       </div>
     </header>
-    {initialScope.engineeringMissionSupported ? <EngineeringMission unlocked={hold.hasHold} onUnlock={() => setUnlockOpen(true)} /> : null}
+    {initialScope.engineeringMissionSupported ? <EngineeringMission unlocked={hold.hasHold} executionAvailable={enabled} onUnlock={() => setUnlockOpen(true)} /> : null}
     {initialScope.engineeringLifecycle !== undefined || initialScope.engineeringAttachmentSupported ? <EngineeringLifecycle scope={initialScope} unlocked={hold.hasHold}
       onUnlock={() => setUnlockOpen(true)} onReadyChange={setEngineeringReady} onScopeChange={setObservedScope} /> : null}
     <div className={styles.statusBar}><div className={styles.freshness}>
@@ -232,6 +232,15 @@ export function ResourcePoolView({ scope: initialScope }: { scope: ResourceConso
       <p>{query.error?.message} Any records below are from the last successful read. New tasks and queue resume wait for a fresh read; pause and owned-task cancellation remain available.</p></div> : null}
     {snapshot?.sourceState === 'degraded' ? <div className={styles.notice} role="alert"><strong>Resource evidence is incomplete</strong>
       <p>{snapshot.reasons.join('; ') || 'The selected records could not be verified.'} New tasks and queue resume are unavailable; pause and owned-task cancellation remain available.</p></div> : null}
+    {snapshot ? <section className={styles.executionStop} aria-label="Global execution stop" aria-live="polite"
+      data-stopped={historical || snapshot.executionStop?.state !== 'inactive'}>
+      <strong>{historical ? 'Global stop status is historical' : snapshot.executionStop?.state === 'active' ? 'Global stop active'
+        : snapshot.executionStop?.state === 'inactive' ? 'Global stop inactive' : 'Global stop status unavailable'}</strong>
+      <p>{!historical && snapshot.executionStop?.state === 'inactive'
+        ? 'Account capacity is separate from execution readiness. Quota, ownership and task checks still apply.'
+        : scope.readOnly ? 'This read-only session cannot start, pause or cancel tasks. Account capacity does not override the global stop. This console cannot clear it.'
+          : 'New task submission and queue resume are withheld. Pause and owned-task cancellation remain available. This console cannot clear the global stop.'}</p>
+    </section> : null}
     {actionError ? <div className={styles.notice} role="alert">{actionError}</div> : null}
     {notice ? <p className={styles.actionNotice} role="status">{notice}</p> : null}
     {query.status === 'loading' ? <section className={styles.loading} aria-label="Loading resource pool"><SkeletonLine width="50%" /><SkeletonLine /><SkeletonLine width="80%" /></section> : null}

@@ -16,6 +16,10 @@ function absolutePath(value: unknown): value is string {
 }
 
 const QUOTA_STATES = new Set(['pending', 'refreshing', 'observed', 'failed', 'timed-out', 'cancelled', 'uncertain', 'expired', 'closed']);
+function validExecutionStop(value: unknown): boolean {
+  return value === undefined || record(value) && exact(value, ['state', 'sampledAt']) &&
+    ['active', 'inactive', 'unknown'].includes(value.state as string) && timestamp(value.sampledAt);
+}
 /** Passive local evidence, deliberately separate from an owning collector's lifecycle. */
 export function validResourceCollectorInspection(value: unknown): value is NonNullable<ResourceConsoleSnapshot['collectorInspection']> {
   if (!record(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
@@ -245,6 +249,7 @@ export function resourceConsoleSnapshotQuery(poolId: string): QueryDef<ResourceC
         !validNativeDiagnostics(snapshot.activeAttempts, snapshot.pool.workers) ||
         !validNativeDiagnostics(snapshot.recentAttempts, snapshot.pool.workers) ||
         !validQuotaRefresh(snapshot.quotaRefresh, snapshot.pool.workers) || !validConnections(snapshot.connections) || !validMetadataCollector(snapshot.metadataCollector) ||
+        !validExecutionStop(snapshot.executionStop) ||
         snapshot.collectorInspection !== undefined && !validResourceCollectorInspection(snapshot.collectorInspection) ||
         snapshot.allocation !== undefined && !validAllocation(snapshot.allocation) ||
         snapshot.workerAccess !== undefined && (!validWorkerAccess(snapshot.workerAccess) ||

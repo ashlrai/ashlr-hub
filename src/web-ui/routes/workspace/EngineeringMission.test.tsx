@@ -18,8 +18,21 @@ function fixture() {
 beforeEach(() => setMutationToken('a'.repeat(64)));
 afterEach(() => { act(() => clearMutationToken()); vi.unstubAllGlobals(); vi.restoreAllMocks(); vi.useRealTimers(); });
 describe('standing mission operating strip', () => {
+  it('withholds mission start while execution is stopped but preserves mission stop', async () => {
+    const f = fixture(); const view = render(<EngineeringMission executionAvailable={false} unlocked onUnlock={vi.fn()} />);
+    await screen.findByText('hub-improvement');
+    expect(screen.getByRole('button', { name: 'Start mission' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Start mission' }));
+    expect(f.fetcher.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false);
+    f.patch({ enabled: true, state: 'running', phase: 'executing' });
+    fireEvent.click(screen.getByRole('button', { name: 'Check mission status' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stop mission' })).toBeEnabled());
+    view.rerender(<EngineeringMission executionAvailable={false} unlocked onUnlock={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Stop mission' }));
+    await waitFor(() => expect(f.fetcher.mock.calls.some(([url, options]) => url.endsWith('/stop') && options?.method === 'POST')).toBe(true));
+  });
   it('observes without starting and uses exact identity/revision for explicit controls', async () => {
-    const f = fixture(); render(<EngineeringMission unlocked onUnlock={vi.fn()} />);
+    const f = fixture(); render(<EngineeringMission executionAvailable unlocked onUnlock={vi.fn()} />);
     await screen.findByText('hub-improvement'); expect(f.fetcher.mock.calls.some(([, options]) => options?.method === 'POST')).toBe(false);
     expect(screen.getByRole('button', { name: 'Start mission' })).toBeEnabled();
     fireEvent.click(screen.getByRole('button', { name: 'Start mission' }));
@@ -34,7 +47,7 @@ describe('standing mission operating strip', () => {
     expect(screen.getByRole('button', { name: 'Stop mission' })).toBeDisabled();
   });
   it('unlocks without generating and withholds expired or held starts', async () => {
-    const f = fixture(), unlock = vi.fn(); render(<EngineeringMission unlocked={false} onUnlock={unlock} />);
+    const f = fixture(), unlock = vi.fn(); render(<EngineeringMission executionAvailable unlocked={false} onUnlock={unlock} />);
     await screen.findByText('hub-improvement'); fireEvent.click(screen.getByRole('button', { name: 'Unlock to start mission' }));
     expect(unlock).toHaveBeenCalledOnce(); expect(f.fetcher.mock.calls.every(([, options]) => options?.method !== 'POST')).toBe(true);
     f.patch({ remainingMs: 0 }); fireEvent.click(screen.getByRole('button', { name: 'Check mission status' }));
@@ -43,7 +56,7 @@ describe('standing mission operating strip', () => {
     await screen.findByRole('alert'); expect(screen.getByRole('button', { name: 'Unlock to start mission' })).toBeDisabled();
   });
   it('does not leave stale live controls enabled when status fails', async () => {
-    const f = fixture(); render(<EngineeringMission unlocked onUnlock={vi.fn()} />); await screen.findByText('hub-improvement');
+    const f = fixture(); render(<EngineeringMission executionAvailable unlocked onUnlock={vi.fn()} />); await screen.findByText('hub-improvement');
     f.fetcher.mockResolvedValue(json({}, 503)); fireEvent.click(screen.getByRole('button', { name: 'Check mission status' }));
     await screen.findByText('Live status unavailable. Controls wait for a fresh observation.');
     expect(screen.getByRole('button', { name: 'Start mission' })).toBeDisabled();
@@ -51,13 +64,13 @@ describe('standing mission operating strip', () => {
   it('reconciles a lost mutation response without replaying the command', async () => {
     const f = fixture(); const normal = f.fetcher.getMockImplementation()!;
     f.fetcher.mockImplementation(async (url, options) => { const result = await normal(url, options); if (options?.method === 'POST') throw Error('Lost reply'); return result; });
-    render(<EngineeringMission unlocked onUnlock={vi.fn()} />); await screen.findByText('hub-improvement');
+    render(<EngineeringMission executionAvailable unlocked onUnlock={vi.fn()} />); await screen.findByText('hub-improvement');
     fireEvent.click(screen.getByRole('button', { name: 'Start mission' })); await screen.findByRole('alert');
     await waitFor(() => expect(screen.getByRole('button', { name: 'Stop mission' })).toBeEnabled());
     expect(f.fetcher.mock.calls.filter(([, options]) => options?.method === 'POST')).toHaveLength(1);
   });
   it('times out a stuck observer and can recover without accepting its late response', async () => {
-    vi.useFakeTimers(); const f = fixture(); render(<EngineeringMission unlocked onUnlock={vi.fn()} />); await act(async () => {});
+    vi.useFakeTimers(); const f = fixture(); render(<EngineeringMission executionAvailable unlocked onUnlock={vi.fn()} />); await act(async () => {});
     let finish!: (value: Response) => void;
     f.fetcher.mockImplementationOnce(() => new Promise(resolve => { finish = resolve; }));
     fireEvent.click(screen.getByRole('button', { name: 'Check mission status' }));

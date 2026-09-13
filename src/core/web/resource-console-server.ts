@@ -31,6 +31,7 @@ import { serveStatic } from './static.js';
 import { createResourceEngineeringComponent, type ResourceEngineeringComponent } from '../resources/engineering-component.js';
 import { validateResourceEngineeringSuccessorCoordinatorConfig } from '../resources/engineering-successor-coordinator.js';
 import { captureResourceExecutionVeto } from '../resources/execution-veto.js';
+import { readResourceExecutionStop } from '../resources/execution-stop.js';
 import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } from '../resources/engineering-lifetime.js';
 import { createEngineeringMissionManager, type EngineeringMissionManager } from '../resources/engineering-mission-manager.js';
 import { validateResourceEngineeringMissionConfig } from '../resources/engineering-mission-store.js';
@@ -640,6 +641,7 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
             evidence = withholdResourceConsoleWorkers(evidence, [], expandResourceQuotaDenials(pool, bindings, quotaUnavailable));
           }
           sendSnapshot(res, { ...evidence, supervisor: supervisor?.snapshot() ?? null,
+            executionStop: readResourceExecutionStop(),
             // Passive local evidence is not an acquisition attempt or provider
             // health. Keep configured/executing collector lifecycle unchanged.
             ...(!options.execute && !quotaConfigFile && !connectionsConfigFile ? {
