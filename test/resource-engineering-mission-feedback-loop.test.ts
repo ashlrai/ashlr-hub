@@ -26,10 +26,13 @@ import { missionHash, readEngineeringMissionRecords, readResourceEngineeringMiss
 import { projectEngineeringMissionFeedback } from '../src/core/resources/engineering-mission-feedback.js';
 import type { ResourceEngineeringOutcomes } from '../src/core/resources/engineering-outcomes-types.js';
 import type { ResourceEngineeringAutonomousSetupOptions } from '../src/core/resources/engineering-autonomous-setup.js';
+import { createResourcePoolSupervisor, type ResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
+import type { ResourceConsoleTaskInput } from '../src/core/resources/console-types.js';
+import type { ResourceEngineeringLifetime } from '../src/core/resources/engineering-lifetime.js';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.clearAllMocks(); });
-type Mode = 'measured' | 'unknown' | 'stale-queue' | 'tampered-history' | 'changed-receipt' | 'stop' | 'stop-before-publication';
+type Mode = 'measured' | 'unknown' | 'stale-queue' | 'tampered-history' | 'changed-receipt' | 'stop' | 'stop-before-publication' | 'restart-recovery';
 async function fixture(mode: Mode) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mission-feedback-loop-')));
   const root = join(base, 'ledger'), missionRoot = join(base, 'mission'), workspace = join(base, 'project');
@@ -86,6 +89,7 @@ async function fixture(mode: Mode) {
   const scopes = new Map<string, ResourceEngineeringAutonomousSetupOptions>(); let active: ResourceEngineeringAutonomousSetupOptions | undefined;
   let isOpen = false; let task: ResourceTask | undefined; let resultRead = false;
   let proposalWork: Promise<unknown> | undefined;
+  let durableOwner: ResourcePoolSupervisor | undefined; let crashOnce = mode === 'restart-recovery';
   let queueReads = 0; const drainReads: number[] = [];
   adapters.check.mockImplementation((value: ResourceEngineeringAutonomousSetupOptions) => { const checked = plan(value); scopes.set(checked.paths.profiles, value); return checked; });
   adapters.prepare.mockImplementation((value: ResourceEngineeringAutonomousSetupOptions & { expectedPlanDigest: string }, host: { beforePublication(): void }) => {
@@ -116,8 +120,12 @@ async function fixture(mode: Mode) {
   });
   adapters.start.mockImplementation(async () => {
     expect(isOpen).toBe(false); isOpen = true;
+    if (mode === 'restart-recovery') {
+      durableOwner = await createResourcePoolSupervisor({ root, pool, bindings, workspace, readObservations: () => observations, pollIntervalMs: 20 });
+      const owned = durableOwner; cleanup.push(() => owned.close());
+    }
     let attachment: { id: string; close(): Promise<void> } | null = null;
-    return { url: 'http://127.0.0.1:1', consoleUrl: 'http://127.0.0.1:1', close: async () => { isOpen = false; },
+    return { url: 'http://127.0.0.1:1', consoleUrl: 'http://127.0.0.1:1', close: async () => { await durableOwner?.close(); isOpen = false; },
       engineeringAttachment: () => attachment, engineeringCustody: () => undefined,
       attachEngineering: async (options: { engineeringPreparationFile: string }) => {
         active = scopes.get(options.engineeringPreparationFile);
@@ -125,12 +133,21 @@ async function fixture(mode: Mode) {
           if (active) drainReads.push(queueReads); active = undefined;
         } }; return attachment;
       },
-      submitTask: (body: Record<string, unknown>) => {
+      recoverTask: (body: Record<string, unknown>, lifetime: ResourceEngineeringLifetime) => {
         const { retainHistory: _retain, projectId: _project, ...submitted } = body;
         task = { ...submitted, schemaVersion: 1, cwd: workspace } as ResourceTask;
+        if (durableOwner) {
+          const job = durableOwner.recover(body as unknown as ResourceConsoleTaskInput, lifetime);
+          task.id = job.id;
+          if (crashOnce) { crashOnce = false; void durableOwner.close(); throw Error('Fixture owner lost after durable admission'); }
+          return job;
+        }
         proposalWork = runResourceTask({ root, pool, bindings, observations, task, signal: controller.signal });
+        return { id: task.id };
       },
-      cancelTaskAndDrain: async () => { await proposalWork; } };
+      cancelTaskAndDrain: async (id: string, expectedTaskDigest: string) => {
+        if (durableOwner) await durableOwner.cancelAndDrain(id, expectedTaskDigest); else await proposalWork;
+      } };
   });
   adapters.request.mockImplementation(async ({ path, body }: { path: string; body?: Record<string, unknown> }) => {
     if (path === '/api/resources/engineering-supervision') {
@@ -147,9 +164,13 @@ async function fixture(mode: Mode) {
       const result = await runResourceTask({ root, pool, bindings, observations, task, signal: controller.signal });
       expect(result.receipt?.status).toBe('completed'); return {};
     }
-    if (path === '/api/resources') { await proposalWork; return { supervisor: { paused: false, closing: false, jobs: [{ id: task!.id, state: 'settled' }] } }; }
+    if (path === '/api/resources') {
+      if (durableOwner) return { supervisor: durableOwner.snapshot() };
+      await proposalWork; return { supervisor: { paused: false, closing: false, jobs: [{ id: task!.id, state: 'settled' }] } };
+    }
     if (path.endsWith('/history')) {
       resultRead = true;
+      if (durableOwner) return durableOwner.history(task!.id);
       return { id: task!.id, prompt: task!.prompt, output: { text: mode === 'tampered-history' ? canonical({ action: 'stop' }) : output, truncated: false } };
     }
     throw Error('Unexpected fixture route');
@@ -171,10 +192,28 @@ async function fixture(mode: Mode) {
     });
   }
   return { config, prepared, contexts, errors, controller, recipe, policy, allocation, drainReads,
+    consoleState: () => JSON.parse(readFileSync(join(root, 'resource-console-state.json'), 'utf8')),
     status: () => resourcePoolStatus(root, pool, bindings, []), records: () => readEngineeringMissionRecords(config) };
 }
 
 describe('measured feedback through an accounted proposal into the next mission scope', () => {
+  it('automatically recovers a crashed proposal owner and joins the replacement result on later restart', async () => {
+    const f = await fixture('restart-recovery');
+    expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'held', reason: 'shutdown-unresolved' });
+    expect(f.contexts).toEqual([]); expect(f.status().attempts).toEqual([]);
+    const before = f.records(); const intent = before.find(row => row.kind === 'proposal')!;
+    expect(f.consoleState().jobs[0].state).toBe('queued');
+    expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'completed', scopesReserved: 2, deadlineAt: f.config.deadlineAt });
+    expect(f.records().find(row => row.kind === 'proposal')).toEqual(intent);
+    const jobs = f.consoleState().jobs;
+    expect(jobs).toHaveLength(2); expect(jobs[0]).toMatchObject({ state: 'cancelled', reason: 'task-owner-unavailable' });
+    expect(jobs[1]).toMatchObject({ recoveryOf: jobs[0].id, state: 'settled', outcome: 'completed', executionDeadlineAt: f.config.deadlineAt });
+    expect(f.status().attempts).toHaveLength(1); expect(f.status().attempts[0]!.id).toBe(jobs[1].id);
+    expect(f.status().allocation).toEqual(f.allocation); expect(f.contexts).toHaveLength(1);
+    const final = f.records();
+    expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'completed', scopesReserved: 2 });
+    expect(f.records()).toEqual(final); expect(f.contexts).toHaveLength(1); expect(f.errors).toEqual([]);
+  }, 30_000);
   it.each(['measured', 'unknown', 'stale-queue'] as const)('retains %s evidence, uses the delivered seed, and never renews policy or repeats settled proposal transport', async mode => {
     const f = await fixture(mode);
     expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'completed', reason: 'scope-limit', scopesReserved: 2, deadlineAt: f.config.deadlineAt });

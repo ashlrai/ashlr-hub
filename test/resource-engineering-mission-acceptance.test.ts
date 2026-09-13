@@ -9,6 +9,7 @@ import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { canonical } from '../src/core/universe/artifacts.js';
 import { writePrivateFileAtomically } from '../src/core/util/private-file-write.js';
 import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
+import * as supervisorModule from '../src/core/resources/pool-supervisor.js';
 import { startResourceConsoleServer } from '../src/core/web/resource-console-server.js';
 import { resourcePoolStatus, setResourcePoolAllocation, setResourceWorkerAccess } from '../src/core/resources/pool-runtime.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
@@ -121,6 +122,32 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(readEngineeringMissionInvocations(f.config)).toMatchObject({ count: 1, unfinishedCount: 0,
       latest: { outcome: { state: 'stopped', reason: first.reason } } });
     const firstRows = readEngineeringMissionRecords(f.config); expect(firstRows.some(row => row.kind === 'settled')).toBe(true);
+    let interruptedOwner!: Awaited<ReturnType<typeof createResourcePoolSupervisor>>;
+    const createOwner = supervisorModule.createResourcePoolSupervisor;
+    const captureOwner = vi.spyOn(supervisorModule, 'createResourcePoolSupervisor').mockImplementation(async options => {
+      interruptedOwner = await createOwner(options); return interruptedOwner;
+    });
+    const interruptedWorkspace = await startResourceConsoleServer({ root: f.root, workspace: f.project, poolFile: f.paths.pool,
+      bindingsFile: f.paths.bindings, observationsFile: f.paths.observations, projectsFile: f.paths.projects, execute: true, port: 0 })
+      .finally(() => captureOwner.mockRestore());
+    cleanup.push(() => interruptedWorkspace.close());
+    const admit = interruptedWorkspace.recoverTask;
+    interruptedWorkspace.recoverTask = (task, lifetime) => {
+      admit(task, lifetime);
+      // Lose the real owner after atomic job publication and before any timer
+      // can dispatch. This models the crash boundary, not a provider failure.
+      // Workspace.close alone is graceful: it defers queue close to a microtask,
+      // allowing the mission to cancel its task first. Lose queue custody now.
+      void interruptedOwner.close();
+      void interruptedWorkspace.close(); throw Error('Fixture owner interrupted after admission');
+    };
+    const interrupted = await runResourceEngineeringMission(f.config, { workspace: { handle: interruptedWorkspace, expectedAttachment: null } });
+    expect(interrupted, JSON.stringify({ interrupted, calls: f.calls, errors: f.errors }))
+      .toMatchObject({ state: 'held', reason: 'shutdown-unresolved', deadlineAt: f.config.deadlineAt });
+    await interruptedWorkspace.close();
+    expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
+    const abandoned = json(join(f.root, 'resource-console-state.json')).jobs.find((job: { id: string }) => job.id.startsWith('mission-proposal-'));
+    expect(abandoned).toMatchObject({ state: 'queued', executionDeadlineAt: f.config.deadlineAt });
     const workspace = await startResourceConsoleServer({ root: f.root, workspace: f.project, poolFile: f.paths.pool,
       bindingsFile: f.paths.bindings, observationsFile: f.paths.observations, projectsFile: f.paths.projects, execute: true, port: 0 });
     cleanup.push(() => workspace.close());
@@ -138,6 +165,9 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(second.tip).not.toBeNull(); expect(git(f.project, 'show', `${second.tip!.commit}:value.json`)).toBe('3');
     expect(git(f.project, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.project, 'status', '--porcelain=v1')).toBe('');
     expect(f.calls).toEqual({ generation: 3, successor: 2, mission: 1 }); expect(f.errors).toEqual([]);
+    const recovered = json(join(f.root, 'resource-console-state.json')).jobs.find((job: { recoveryOf?: string }) => job.recoveryOf === abandoned.id);
+    expect(recovered).toMatchObject({ state: 'settled', outcome: 'completed', executionDeadlineAt: f.config.deadlineAt });
+    expect(resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts.some(row => row.id === abandoned.id)).toBe(false);
     const ledger = resourcePoolStatus(f.root, f.pool, f.bindings, f.observations);
     expect(ledger.attempts).toHaveLength(7);
     expect(ledger.attempts.filter(row => row.id !== 'human-running').every(row => row.status === 'completed' && row.workerId === 'repair')).toBe(true);
@@ -179,8 +209,8 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     expect(f.calls).toEqual({ generation: 3, successor: 2, mission: 1 });
     expect(readEngineeringMissionRecords(f.config)).toEqual(final);
     const invocations = readEngineeringMissionInvocations(f.config);
-    expect(invocations).toMatchObject({ count: 3, unfinishedCount: 0,
-      latest: { index: 3, outcome: { state: 'completed', reason: 'stop-requested', scopesReserved: 2 } } });
+    expect(invocations).toMatchObject({ count: 4, unfinishedCount: 0,
+      latest: { index: 4, outcome: { state: 'completed', reason: 'stop-requested', scopesReserved: 2 } } });
     expect(invocations.latest!.timings.some(row => row.phase === 'reconciling')).toBe(true);
   }, 1800_000);
 });

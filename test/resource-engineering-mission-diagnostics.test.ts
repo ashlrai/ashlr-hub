@@ -61,7 +61,7 @@ beforeEach(() => {
     return { url: 'http://127.0.0.1:1', consoleUrl: 'http://127.0.0.1:1/private-token', close: runtime.close,
       engineeringAttachment: () => attachment, engineeringCustody: () => undefined,
       attachEngineering: async () => { attachment = { id: 'fixture', close: async () => {} }; return attachment; },
-      submitTask: runtime.submit, cancelTaskAndDrain: async () => {} };
+      recoverTask: runtime.submit, cancelTaskAndDrain: async () => {} };
   });
   runtime.request.mockRejectedValue(Error('PRIVATE_PROVIDER_ERROR'));
   runtime.proof.mockReturnValue({ status: 'held' });

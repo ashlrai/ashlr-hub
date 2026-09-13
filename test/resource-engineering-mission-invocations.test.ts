@@ -82,7 +82,8 @@ describe('mission invocation observations', () => {
     const f = fixture(); if (kind === 'ownership') f.release(); else f.unbind();
     expect(() => beginEngineeringMissionInvocation(f.config, f.host)).toThrow(); expect(readdirSync(f.root)).toEqual([]);
   });
-  it.each(['mission-feedback-unavailable', 'mission-feedback-exceeds-bound'])('retains fixed feedback diagnostic %s', reason => {
+  it.each(['mission-feedback-unavailable', 'mission-feedback-exceeds-bound', 'mission-proposal-recovery-evidence-changed',
+    'mission-workspace-attachment-changed'])('retains fixed feedback diagnostic %s', reason => {
     const f = fixture();
     beginEngineeringMissionInvocation(f.config, f.host).finish({ state: 'held', reason, scopesReserved: 1 });
     expect(readEngineeringMissionInvocations(f.config).latest?.outcome).toEqual({ state: 'held', reason, scopesReserved: 1 });

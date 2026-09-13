@@ -80,6 +80,13 @@ describe('host-configured engineering successor HTTP boundary', () => {
     expect(after.jobs[0]).toMatchObject({ state: 'cancelled', reason: 'task-owner-unavailable', executionDeadlineAt: deadlineAt });
     expect(after.jobs[1]).toMatchObject({ id: 'human', state: 'queued' });
     expect(() => next.submitTask(task)).toThrow('execution owner already set');
+    expect((await post(next, '/api/resources/tasks/mission-child/recover', {})).status).toBe(404);
+    expect((await post(next, '/api/resources/queue', { paused: false })).status).toBe(200);
+    const recovered = next.recoverTask(task, { deadlineAt });
+    expect(recovered.id).not.toBe(task.id);
+    const state = JSON.parse(readFileSync(file, 'utf8'));
+    expect(state).toMatchObject({ schemaVersion: 7 });
+    expect(state.jobs.at(-1)).toMatchObject({ recoveryOf: task.id, executionDeadlineAt: deadlineAt });
   });
   const route = '/api/resources/engineering-successors';
   function config(overrides: Record<string, unknown> = {}) {

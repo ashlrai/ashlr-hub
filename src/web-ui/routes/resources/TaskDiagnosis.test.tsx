@@ -19,6 +19,7 @@ afterEach(() => { vi.unstubAllGlobals(); });
 describe('receipt-bound task diagnosis', () => {
   it.each([
     ['task-owner-unavailable', 'Cancelled after restart: mission owner unavailable'],
+    ['task-recovery-evidence-unavailable', 'Recovery held: prior attempt evidence is unresolved'],
     ['host-execution-stopped', 'Waiting: host lifetime stopped or deadline reached'],
   ])('explains the bounded host reason %s without inventing a worker receipt', (reason, label) => {
     const job = { ...resourceFixture().snapshot.supervisor!.jobs[2]!, reason, outputAvailable: false };

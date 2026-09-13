@@ -87,6 +87,7 @@ export interface ResourceConsoleWorkspaceHandle extends ResourceConsoleServerHan
   engineeringCustody(expectedAttachment: ResourceConsoleEngineeringAttachment | null): ResourceWorkspaceCustody;
   /** Synchronous admission prevents a late HTTP request from outliving mission cleanup. */
   submitTask(input: ResourceConsoleTaskInput, lifetime?: ResourceEngineeringLifetime): ReturnType<ResourcePoolSupervisor['submit']>;
+  recoverTask: ResourcePoolSupervisor['recover'];
   cancelTaskAndDrain: ResourcePoolSupervisor['cancelAndDrain'];
 }
 
@@ -870,6 +871,10 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       cancelTaskAndDrain: (id, expectedTaskDigest) => {
         if (!supervisor) throw new Error('Resource supervisor unavailable');
         return supervisor.cancelAndDrain(id, expectedTaskDigest);
+      },
+      recoverTask: (input, lifetime) => {
+        assertWorkspace();
+        return supervisor!.recover(input, lifetime);
       } };
   } catch (error) { await close(); throw error; }
 }

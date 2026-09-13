@@ -162,7 +162,7 @@ delivery checks remain required. Double-read completion excludes only exact
 owned ordinary receipts and verified live collector timestamp churn, not
 engineering evidence or accounting policy.
 
-Mission proposals use host-only synchronous `submitTask` admission and
+Mission proposals use host-only synchronous `recoverTask` admission and
 `cancelTaskAndDrain(id, expectedTaskDigest)`. This prevents an unobserved late
 HTTP submission from arriving after mission cleanup. Neither method creates a
 second worker runtime. `submitTask(input, lifetime)` binds the optional child
@@ -179,10 +179,28 @@ reason `task-owner-unavailable`. Ordinary human queue replay is unchanged.
 Exact completed receipts still reconcile; reserved or uncertain dispatch stays
 unresolved. Ownership/deadline records survive history deletion, project
 registration and pool evolution. They are not bearer credentials, and browser
-submissions cannot supply them. Schema6 requires upgraded readers; do not
-downgrade or strip its ownership fields. Automatic mission re-enrollment of
-abandoned proposals is not implemented: the mission remains held rather than
-reusing a cancelled task ID. Restarting the runner still checks its persisted deadline.
+submissions cannot supply them.
+
+`recoverTask(input, lifetime)` follows the original proposal's recorded chain.
+After re-verifying the mission's completed predecessor, it can automatically
+replace an abandoned read-only proposal whose cancellation reason is exactly
+`task-owner-unavailable` and whose entire predecessor chain has no runtime
+receipt. The replacement gets a deterministic new ID and a `recoveryOf` edge,
+published atomically in console schema7. The cancelled predecessor and its
+history remain intact. A repeated request finds the same queued or completed
+attempt; another owner loss can append another edge within the existing job
+capacity and original mission deadline. Prompt, worker allowlist, project,
+retention, timeout and output limits cannot change during recovery.
+
+Manual cancellations, failed/uncertain attempts, changed identities, pool epochs
+or expired deadlines do not authorize replacement. Runtime admission rechecks
+all retired ancestors for contradictory receipts. Saved mission results are
+joined to the exact effective attempt, never the retired original ID. Ordinary
+human work is not enrolled in this automatic recovery path. There is no browser
+recovery endpoint. Schema6/7 require upgraded readers; never downgrade records
+by stripping ownership or recovery fields. This recovers never-dispatched
+proposals, not interrupted evaluators or unverified deliveries.
+Restarting the runner still checks its persisted deadline.
 Component close is not a durable fleet-wide STOP; do not
 use it as a substitute for global KILL. These in-process APIs do not install an
 always-on service or provide a browser control for starting a standing mission.

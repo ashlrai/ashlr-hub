@@ -50,9 +50,11 @@ type DurableJob = Omit<ResourceSupervisorJob, 'cancellable' | 'outputAvailable' 
   /** Attribution only: the live accepting instance must still own the private veto. */
   executionOwnerId?: string;
   executionDeadlineAt?: string;
+  /** Immutable edge to an abandoned, never-dispatched child. */
+  recoveryOf?: string;
 };
 export interface ResourceConsoleDurableState {
-  schemaVersion: 1 | 2 | 3 | 4 | 5 | 6;
+  schemaVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   /** Original scope anchor, never rewritten when the active pool evolves. */
   scopeDigest: string;
   paused: boolean; jobs: DurableJob[]; projects?: ResourceConsoleProjectBinding[];
@@ -82,6 +84,8 @@ export interface ResourcePoolSupervisor {
   /** Synchronous owning/paused/enabled/directory check at engineering effect boundaries. */
   projectExecutionBinding(projectId: string): ResourceConsoleProjectBinding;
   submit(input: ResourceConsoleTaskInput, lifetime?: ResourceEngineeringLifetime): ResourceSupervisorJob;
+  /** Explicit host recovery; never retries manual cancellations or uncertain work. */
+  recover(input: ResourceConsoleTaskInput, lifetime: ResourceEngineeringLifetime): ResourceSupervisorJob;
   /** Optional exact retained task pin for host-driven, scoped cancellation. */
   cancel(id: string, expectedTaskDigest?: string): ResourceSupervisorJob;
   /** Cancel exactly one retained task and await its verified transport settlement. */
@@ -244,7 +248,35 @@ function consoleEpochs(history: ResourcePoolConfigSnapshot[] | undefined, pool: 
   return epochs;
 }
 
-/** Strict detached schema1–6 validation; no ownership, recovery, reads or writes. */
+export function resourceConsoleRecoveryId(prior: { id: string; taskDigest: string }): string {
+  return `recovery-${digest(canonical({ domain: 'ashlr-console-recovery-v1', id: prior.id, taskDigest: prior.taskDigest })).slice(0, 40)}`;
+}
+
+/** Read-only identity join over already decoded state, never execution authority. */
+export function resourceConsoleTaskContinuation(state: ResourceConsoleDurableState, original: ResourceTask,
+  projectId?: string, deadlineAt?: string): DurableJob[] {
+  const task = validateResourceTask(original);
+  const root = state.jobs.find(row => row.id === task.id);
+  if (!root) return [];
+  const chain: DurableJob[] = []; let current: DurableJob | undefined = root;
+  while (current) {
+    if (chain.length >= MAX_RESOURCE_SUPERVISOR_JOBS || chain.some(row => row.id === current!.id) ||
+      current.taskDigest !== digest(canonical({ ...task, id: current.id })) || current.projectId !== projectId ||
+      (current.executionOwnerId !== undefined && current.executionDeadlineAt !== deadlineAt) ||
+      (chain.length > 0 && current.executionOwnerId === undefined) ||
+      (chain.length === 0 ? current.recoveryOf !== undefined : current.recoveryOf !== chain.at(-1)!.id)) {
+      throw new ResourceSupervisorError('CONFLICT', 'Resource task recovery identity changed');
+    }
+    chain.push(current);
+    const children = state.jobs.filter(row => row.recoveryOf === current!.id);
+    if (children.length > 1 || children.length && (current.state !== 'cancelled' || current.reason !== 'task-owner-unavailable' ||
+      children[0]!.id !== resourceConsoleRecoveryId(current))) throw new ResourceSupervisorError('CONFLICT', 'Resource task recovery chain changed');
+    current = children[0];
+  }
+  return detached(chain);
+}
+
+/** Strict detached schema1–7 validation; no ownership, recovery, reads or writes. */
 export function decodeResourceConsoleState(value: unknown, options: {
   pool: ResourcePool; bindings: ResourceBinding[]; workspace: string;
   /** Must be obtained from verified ledger evidence by the caller. Required for schema5. */
@@ -269,7 +301,7 @@ export function decodeResourceConsoleState(value: unknown, options: {
     if (!object(value) || !exact(value, ['schemaVersion', 'scopeDigest', 'paused', 'jobs',
       ...(value.schemaVersion === 4 || Number(value.schemaVersion) >= 5 && Object.hasOwn(value, 'projects') ? ['projects'] : []),
       ...(Number(value.schemaVersion) >= 5 ? ['originPoolDigest'] : [])]) ||
-      ![1, 2, 3, 4, 5, 6].includes(Number(value.schemaVersion)) ||
+      ![1, 2, 3, 4, 5, 6, 7].includes(Number(value.schemaVersion)) ||
       typeof value.schemaVersion !== 'number' ||
       Number(value.schemaVersion) >= 5 && options.configHistory === undefined ||
       value.scopeDigest !== scopeFor(value) || typeof value.paused !== 'boolean' || !Array.isArray(value.jobs) ||
@@ -292,7 +324,8 @@ export function decodeResourceConsoleState(value: unknown, options: {
         ...(continuation ? ['parent', 'submissionDigest', 'context'] : []), ...(Object.hasOwn(row, 'projectId') ? ['projectId'] : []),
         ...(Object.hasOwn(row, 'originPoolDigest') ? ['originPoolDigest'] : []),
         ...(Object.hasOwn(row, 'executionOwnerId') ? ['executionOwnerId'] : []),
-        ...(Object.hasOwn(row, 'executionDeadlineAt') ? ['executionDeadlineAt'] : [])]) ||
+        ...(Object.hasOwn(row, 'executionDeadlineAt') ? ['executionDeadlineAt'] : []),
+        ...(Object.hasOwn(row, 'recoveryOf') ? ['recoveryOf'] : [])]) ||
         typeof row.id !== 'string' || !ID.test(row.id) || ids.has(row.id) ||
         typeof row.state !== 'string' || !STATES.includes(row.state) || !iso(row.enqueuedAt) || !iso(row.updatedAt) ||
         row.updatedAt < row.enqueuedAt || !Array.isArray(row.allowedWorkerIds) || row.allowedWorkerIds.length < 1 ||
@@ -303,12 +336,25 @@ export function decodeResourceConsoleState(value: unknown, options: {
         !(row.outcome === null || typeof row.outcome === 'string' && OUTCOMES.includes(row.outcome)) ||
         !(row.reason === null || typeof row.reason === 'string' && /^[a-z0-9-]{1,120}$/.test(row.reason)) ||
         typeof row.taskDigest !== 'string' || !HASH.test(row.taskDigest)) throw new Error('Invalid resource supervisor job');
-      if (Object.hasOwn(row, 'executionOwnerId') && (value.schemaVersion !== 6 || typeof row.executionOwnerId !== 'string' ||
+      if (Object.hasOwn(row, 'executionOwnerId') && (Number(value.schemaVersion) < 6 || typeof row.executionOwnerId !== 'string' ||
         !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(row.executionOwnerId))) {
         throw new Error('Invalid task execution owner');
       }
       if (Object.hasOwn(row, 'executionDeadlineAt') && (!Object.hasOwn(row, 'executionOwnerId') || !iso(row.executionDeadlineAt))) {
         throw new Error('Invalid task execution deadline');
+      }
+      if (Object.hasOwn(row, 'recoveryOf')) {
+        const prior = (value.jobs as DurableJob[]).find(job => job.id === row.recoveryOf);
+        if (value.schemaVersion !== 7 || typeof row.recoveryOf !== 'string' || !ids.has(row.recoveryOf) || !prior ||
+          prior.state !== 'cancelled' || prior.reason !== 'task-owner-unavailable' || prior.executionOwnerId === undefined ||
+          row.executionOwnerId === undefined || row.executionDeadlineAt === undefined || row.executionDeadlineAt !== prior.executionDeadlineAt ||
+          row.projectId !== prior.projectId || row.mode !== 'read-only' || prior.mode !== 'read-only' ||
+          row.parent !== undefined || prior.parent !== undefined || row.retainHistory !== prior.retainHistory ||
+          canonical(row.allowedWorkerIds) !== canonical(prior.allowedWorkerIds) ||
+          row.id !== resourceConsoleRecoveryId(prior) ||
+          (value.jobs as DurableJob[]).filter(job => job.recoveryOf === prior.id).length !== 1) {
+          throw new Error('Invalid task recovery edge');
+        }
       }
       if (Object.hasOwn(row, 'projectId') && (Number(value.schemaVersion) < 4 || typeof row.projectId !== 'string' ||
         row.projectId === 'default' || !projectBindings?.some((project) => project.id === row.projectId))) throw new Error('Invalid task project');
@@ -396,7 +442,7 @@ export function previewResourceConsolePoolEvolution(value: unknown, options: {
   if (previous.jobs.some((job) => job.state === 'dispatching' || job.state === 'unresolved')) {
     throw new ResourceSupervisorError('CONFLICT', 'Settle unresolved console work before pool evolution');
   }
-  const next: ResourceConsoleDurableState = { ...previous, schemaVersion: previous.schemaVersion === 6 ? 6 : 5,
+  const next: ResourceConsoleDurableState = { ...previous, schemaVersion: previous.schemaVersion >= 6 ? previous.schemaVersion : 5,
     originPoolDigest: previous.originPoolDigest ?? fromDigest };
   return decodeResourceConsoleState(next, { ...options.to, workspace: options.workspace, configHistory });
 }
@@ -623,7 +669,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   function publicJob(job: DurableJob): ResourceSupervisorJob {
     const { taskDigest: _digest, input: _input, retainHistory: _consent, history,
       submissionDigest: _submission, context: _context, originPoolDigest: _origin,
-      executionOwnerId: _owner, executionDeadlineAt: _deadline, ...publicFields } = job;
+      executionOwnerId: _owner, executionDeadlineAt: _deadline, recoveryOf: _recovery, ...publicFields } = job;
     return detached({ ...publicFields, cancellable: !closing && !error && (job.state === 'queued' || job.state === 'dispatching' && active.has(job.id)),
       outputAvailable: outputs.has(job.id), ...(history ? { historyAvailable: true as const } : {}) });
   }
@@ -665,7 +711,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
   function start(job: DurableJob, observations: ResourceObservation[], unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]): void {
     if (!job.input) throw new Error('Queued task input unavailable');
-    const initialProjectHold = taskStopped(job.id) ? 'host-execution-stopped' : projectHold(job.projectId);
+    const initialProjectHold = recoveryHold(job.recoveryOf) ?? (taskStopped(job.id) ? 'host-execution-stopped' : projectHold(job.projectId));
     if (initialProjectHold) { if (job.reason !== initialProjectHold) update(job.id, { reason: initialProjectHold }); return; }
     update(job.id, { state: 'dispatching', reason: 'dispatch-requested', workerId: null });
     // Publish the supervisor's irreversible intent before entering the runtime.
@@ -681,11 +727,11 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       beforeWorkerDispatch: () => {
         // Runtime invokes this only for this call's fresh reservation, never
         // replay. An active scheduler promise alone is not transport custody.
-        owned.workerStarted = !taskStopped(job.id) && projectHold(job.projectId) === null;
+        owned.workerStarted = recoveryHold(job.recoveryOf) === null && !taskStopped(job.id) && projectHold(job.projectId) === null;
         return owned.workerStarted;
       },
-      ...(projectBindings || hasHostVeto || readTaskVeto ? { readAdmissionEvidence: () => {
-        admissionProjectHold = taskStopped(job.id) ? 'host-execution-stopped' : projectHold(job.projectId);
+      ...(projectBindings || hasHostVeto || readTaskVeto || job.executionOwnerId ? { readAdmissionEvidence: () => {
+        admissionProjectHold = recoveryHold(job.recoveryOf) ?? (taskStopped(job.id) ? 'host-execution-stopped' : projectHold(job.projectId));
         return { observations, unavailableWorkerIds: admissionProjectHold ? [...workerIds] : unavailableWorkerIds, quotaUnavailableWorkerIds };
       } } : {}) }).then((result) => {
       if (result.replayed || !result.receipt) dispatched.delete(job.id);
@@ -774,43 +820,24 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
     schedule();
   }
 
-  const supervisor: ResourcePoolSupervisor = {
-    engineeringBinding(projectId) {
+  function recoveryHold(recoveryOf?: string): string | null {
+    if (!recoveryOf) return null;
+    try {
+      const attempts = resourcePoolStatus(root, pool, bindings, []).attempts;
+      const seen = new Set<string>(); let id: string | undefined = recoveryOf;
+      while (id) {
+        const prior = state.jobs.find(row => row.id === id);
+        if (seen.has(id) || !prior || prior.state !== 'cancelled' || prior.reason !== 'task-owner-unavailable' ||
+          prior.executionOwnerId === undefined || prior.mode !== 'read-only' || prior.parent ||
+          originFor(prior).poolDigest !== poolDigest || attempts.some(row => row.id === id)) return 'task-recovery-evidence-unavailable';
+        seen.add(id); id = prior.recoveryOf;
+      }
+      return null;
+    } catch { return 'task-recovery-evidence-unavailable'; }
+  }
+  function submitTask(value: ResourceConsoleTaskInput, lifetime?: ResourceEngineeringLifetime, recoveryOf?: string): ResourceSupervisorJob {
       ensureAvailable();
-      if (typeof projectId !== 'string' || !ID.test(projectId)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource project');
-      if (!projectBindings || state.schemaVersion < 4) throw new ResourceSupervisorError('UNAVAILABLE', 'Register engineering projects first');
-      const project = projectBindings.find((row) => row.id === projectId);
-      if (!project) throw new ResourceSupervisorError('NOT_FOUND', 'Resource project was not found');
-      return { project: detached(project), root, poolDigest };
-    },
-    projectExecutionBinding(projectId) {
-      ensureAvailable();
-      if (hostStopped()) throw new ResourceSupervisorError('UNAVAILABLE', 'Host execution stopped');
-      if (state.paused) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor is paused');
-      return supervisor.projectFileBinding(projectId);
-    },
-    projectFileBinding(projectId) {
-      ensureAvailable();
-      if (typeof projectId !== 'string' || !ID.test(projectId)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource project');
-      if (!projectBindings || state.schemaVersion < 4) throw new ResourceSupervisorError('UNAVAILABLE', 'Register projects before browsing files.');
-      const binding = projectBindings.find((project) => project.id === projectId);
-      if (!binding) throw new ResourceSupervisorError('NOT_FOUND', 'Resource project was not found');
-      const reason = projectHold(projectId);
-      if (reason) throw new ResourceSupervisorError('UNAVAILABLE', reason);
-      return detached(binding);
-    },
-    projects() {
-      return projectBindings ? detached(projectBindings.map(({ dev: _dev, ino: _ino, ...project }) =>
-        ({ ...project, enabled: enabledProjects.has(project.id) }))) : undefined;
-    },
-    snapshot() {
-      if (!closing && !error) { try { own(); } catch { /* Snapshot reports loss without private diagnostics. */ } }
-      return { instanceId, paused: state.paused, closing, error: error ?? sourceError, maxParallel, maxQueued,
-        activeCount: active.size, queuedCount: state.jobs.filter((job) => job.state === 'queued').length,
-        jobs: state.jobs.map(publicJob) };
-    },
-    submit(value, lifetime) {
-      ensureAvailable();
+      const admissionDigest = persistedDigest;
       const child = captureResourceEngineeringLifetime(lifetime === undefined ? {} : { engineeringLifetime: lifetime });
       // Choose the historical codec without invoking an unvalidated accessor.
       const descriptor = object(value) ? Object.getOwnPropertyDescriptor(value, 'id') : undefined;
@@ -819,6 +846,9 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       const retryCodec = previous ? originCodec(previous) : null;
       const input = retryCodec ? retryCodec.taskInput(value) : taskInput(value);
       if (previous) {
+        if (recoveryOf !== undefined && previous.recoveryOf !== recoveryOf) {
+          throw new ResourceSupervisorError('CONFLICT', 'Resource task recovery identity already used');
+        }
         // A retry may observe terminal evidence, but cannot adopt a lost owner,
         // convert ordinary work to mission work, or replace the original veto.
         if ((previous.executionOwnerId !== undefined) !== child.configured ||
@@ -869,21 +899,84 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       if (previousRuntime && (previousRuntime.taskDigest !== taskDigest || previousRuntime.poolDigest !== poolDigest)) {
         throw new ResourceSupervisorError('CONFLICT', 'Resource task identity already used');
       }
+      if (recoveryOf && (previousRuntime || recoveryHold(recoveryOf))) {
+        throw new ResourceSupervisorError('CONFLICT', 'Resource task recovery evidence unavailable');
+      }
+      // Host callbacks can synchronously submit, cancel, pause or close. Never
+      // publish an intent built before such a change, even when they return false.
+      ensureAvailable();
+      if (persistedDigest !== admissionDigest) throw new ResourceSupervisorError('CONFLICT', 'Resource queue changed during admission');
       const now = new Date().toISOString();
       const job: DurableJob = { id: input.id, state: 'queued', enqueuedAt: now, updatedAt: now,
         allowedWorkerIds: [...input.allowedWorkerIds], mode: input.mode, workerId: null, outcome: null, reason: null, input, taskDigest,
         ...(input.projectId ? { projectId: input.projectId } : {}),
         ...(state.schemaVersion >= 5 ? { originPoolDigest: poolDigest } : {}),
         ...(child.configured ? { executionOwnerId: instanceId, ...(child.deadlineAt ? { executionDeadlineAt: child.deadlineAt } : {}) } : {}),
+        ...(recoveryOf ? { recoveryOf } : {}),
         ...(input.parent ? { parent: detached(input.parent), submissionDigest: submissionDigestFor(input), context: context! } : {}),
         ...(input.retainHistory === true ? { retainHistory: true as const, history: { prompt: input.prompt, output: null } } : {}) };
-      const next: DurableState = { ...detached(state), schemaVersion: child.configured ? 6 : state.schemaVersion >= 4 ? state.schemaVersion : input.parent ? 3 :
+      const next: DurableState = { ...detached(state), schemaVersion: recoveryOf || state.schemaVersion === 7 ? 7 : child.configured ? 6 : state.schemaVersion >= 4 ? state.schemaVersion : input.parent ? 3 :
         state.schemaVersion === 1 && input.retainHistory === true ? 2 : state.schemaVersion,
         ...(child.configured ? { originPoolDigest: state.originPoolDigest ?? poolDigest } : {}),
         jobs: [...detached(state.jobs), job] };
       assertStateHeadroom(next); persist(next);
       if (child.configured) taskLifetimes.set(job.id, child);
       schedule(0); return publicJob(job);
+  }
+
+  const supervisor: ResourcePoolSupervisor = {
+    engineeringBinding(projectId) {
+      ensureAvailable();
+      if (typeof projectId !== 'string' || !ID.test(projectId)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource project');
+      if (!projectBindings || state.schemaVersion < 4) throw new ResourceSupervisorError('UNAVAILABLE', 'Register engineering projects first');
+      const project = projectBindings.find((row) => row.id === projectId);
+      if (!project) throw new ResourceSupervisorError('NOT_FOUND', 'Resource project was not found');
+      return { project: detached(project), root, poolDigest };
+    },
+    projectExecutionBinding(projectId) {
+      ensureAvailable();
+      if (hostStopped()) throw new ResourceSupervisorError('UNAVAILABLE', 'Host execution stopped');
+      if (state.paused) throw new ResourceSupervisorError('UNAVAILABLE', 'Resource supervisor is paused');
+      return supervisor.projectFileBinding(projectId);
+    },
+    projectFileBinding(projectId) {
+      ensureAvailable();
+      if (typeof projectId !== 'string' || !ID.test(projectId)) throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid resource project');
+      if (!projectBindings || state.schemaVersion < 4) throw new ResourceSupervisorError('UNAVAILABLE', 'Register projects before browsing files.');
+      const binding = projectBindings.find((project) => project.id === projectId);
+      if (!binding) throw new ResourceSupervisorError('NOT_FOUND', 'Resource project was not found');
+      const reason = projectHold(projectId);
+      if (reason) throw new ResourceSupervisorError('UNAVAILABLE', reason);
+      return detached(binding);
+    },
+    projects() {
+      return projectBindings ? detached(projectBindings.map(({ dev: _dev, ino: _ino, ...project }) =>
+        ({ ...project, enabled: enabledProjects.has(project.id) }))) : undefined;
+    },
+    snapshot() {
+      if (!closing && !error) { try { own(); } catch { /* Snapshot reports loss without private diagnostics. */ } }
+      return { instanceId, paused: state.paused, closing, error: error ?? sourceError, maxParallel, maxQueued,
+        activeCount: active.size, queuedCount: state.jobs.filter((job) => job.state === 'queued').length,
+        jobs: state.jobs.map(publicJob) };
+    },
+    submit: (value, lifetime) => submitTask(value, lifetime),
+    recover(value, lifetime) {
+      ensureAvailable();
+      const child = captureResourceEngineeringLifetime({ engineeringLifetime: lifetime });
+      const input = taskInput(value);
+      if (!child.deadlineAt || input.mode !== 'read-only' || input.parent) {
+        throw new ResourceSupervisorError('INVALID_INPUT', 'Recovery requires a deadline-bound read-only task');
+      }
+      const chain = resourceConsoleTaskContinuation(state, taskFor(input), input.projectId, child.deadlineAt);
+      if (chain.some(row => originFor(row).poolDigest !== poolDigest || (row.retainHistory === true) !== (input.retainHistory === true))) {
+        throw new ResourceSupervisorError('CONFLICT', 'Resource task recovery scope changed');
+      }
+      const previous = chain.at(-1);
+      if (!previous || previous.state !== 'cancelled') return submitTask({ ...input, ...(previous ? { id: previous.id } : {}) }, lifetime);
+      if (state.paused || child.isStopped()) throw new ResourceSupervisorError('UNAVAILABLE', 'host-execution-stopped');
+      if (recoveryHold(previous.id)) throw new ResourceSupervisorError('CONFLICT', 'Resource task recovery evidence unavailable');
+      return submitTask({ ...input, id: resourceConsoleRecoveryId(previous) },
+        { deadlineAt: child.deadlineAt, isExecutionStopped: child.isStopped }, previous.id);
     },
     ownsActiveTaskReceipt(receipt) {
       try {

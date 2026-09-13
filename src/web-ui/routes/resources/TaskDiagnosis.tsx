@@ -98,6 +98,7 @@ const TASK_REASONS: Record<string, string> = {
   'not-yet-dispatched': 'Not yet dispatched', 'dispatch-requested': 'Dispatch requested',
   'no-eligible-capacity': 'No eligible capacity', 'queued-task-cancelled': 'Queued task cancelled',
   'task-owner-unavailable': 'Cancelled after restart: mission owner unavailable',
+  'task-recovery-evidence-unavailable': 'Recovery held: prior attempt evidence is unresolved',
   'host-execution-stopped': 'Waiting: host lifetime stopped or deadline reached',
   'cancellation-requested': 'Cancellation requested', 'task-identity-conflict': 'Task identity conflict',
   'previous-dispatch-unresolved': 'Previous dispatch unresolved', 'settlement-unavailable': 'Settlement unavailable',

@@ -28,6 +28,7 @@ const REASONS = new Set(['stop-requested', 'scope-limit', 'shutdown-unresolved',
     'mission successor scope changed', 'mission scope did not settle', 'mission completion proof unavailable',
     'recorded mission completion changed', 'mission proposal identity changed', 'mission proposal receipt mismatch',
     'mission feedback unavailable', 'mission feedback exceeds bound',
+    'mission proposal recovery evidence changed', 'mission workspace attachment changed',
     'mission proposal console unavailable', 'mission proposal unresolved', 'mission proposal did not complete',
     'mission proposal output unavailable', 'mission proposal result changed', 'mission scope limit unavailable']
     .map(reason => reason.replaceAll(' ', '-')),

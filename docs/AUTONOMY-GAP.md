@@ -91,8 +91,13 @@ receipts, unfinished engineering and changed ownership still hold progress.
 Child proposals now retain supervisor ownership and the original deadline in
 schema6. Plain console restart cancels abandoned, never-dispatched children
 without cancelling ordinary queued human work; exact terminal receipts still
-reconcile. Automatically re-enrolling abandoned proposals remains a separate
-recovery gap, and older readers must be upgraded before using schema6 records.
+reconcile. The mission runner can now recover a never-dispatched, abandoned
+read-only proposal using a new schema7 job and immutable predecessor edge.
+It re-verifies delivery, task identity, absence of ancestor receipts and the
+original deadline; manual cancellations and uncertain work remain held. Repeated
+recovery uses existing job-capacity and time limits, not renewed allowances.
+Older readers must be upgraded before using schema6/7 records. Interrupted
+evaluator/worker recovery is not covered by this never-dispatched-proposal path.
 This closes the foreground coexistence gap, not resident service installation,
 browser mission-start controls or actual-account commissioning.
 Terminal/browser panels, conversation compaction and native desktop bootstrap

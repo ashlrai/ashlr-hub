@@ -5,7 +5,7 @@ import { createServer, type ServerResponse } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { createResourcePoolSupervisor, readResourceSupervisorCustody, ResourceSupervisorError, type ResourcePoolSupervisor,
+import { createResourcePoolSupervisor, readResourceSupervisorCustody, resourceConsoleRecoveryId, ResourceSupervisorError, type ResourcePoolSupervisor,
   type ResourcePoolSupervisorOptions } from '../src/core/resources/pool-supervisor.js';
 import { runResourceTask } from '../src/core/resources/pool-runtime.js';
 import * as runtime from '../src/core/resources/pool-runtime.js';
@@ -104,6 +104,92 @@ async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reser
 }
 
 describe.skipIf(process.platform === 'win32')('durable foreground resource supervisor', () => {
+  it('never overwrites a reentrant submission from a host lifetime callback', async () => {
+    const f = await fixture(); const owner = await f.start(); owner.setPaused(true);
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString(); let entered = false;
+    expect(() => owner.submit(f.task(), { deadlineAt, isExecutionStopped: () => {
+      if (!entered) { entered = true; owner.submit(f.task(), { deadlineAt }); }
+      return false;
+    } })).toThrow('queue changed during admission');
+    expect(f.state().jobs).toHaveLength(1);
+    owner.setPaused(false); await settled(owner); expect(f.requests).toHaveLength(1);
+  });
+  it('refuses stale admission after its callback closes the owner', async () => {
+    const f = await fixture(); const owner = await f.start(); let closing: Promise<void> | undefined;
+    expect(() => owner.submit(f.task(), { isExecutionStopped: () => { closing = owner.close(); return false; } })).toThrow('unavailable');
+    await closing; expect(f.state().jobs).toEqual([]); expect(f.requests).toEqual([]);
+  });
+  it('recovers repeated abandoned proposals with an immutable chain and only one actual dispatch', async () => {
+    const f = await fixture(); const original = f.task('mission', { retainHistory: true });
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    let owner = await f.start(); owner.setPaused(true); owner.submit(original, lifetime); await owner.close();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      owner = await f.start(); owner.setPaused(false);
+      const prior = f.state().jobs.at(-1); const before = canonical(f.state().jobs);
+      const recovered = owner.recover(original, lifetime);
+      expect(recovered.id).toBe(resourceConsoleRecoveryId(prior));
+      expect(canonical(f.state().jobs.slice(0, -1))).toBe(before);
+      expect(f.state()).toMatchObject({ schemaVersion: 7 });
+      expect(f.state().jobs.at(-1)).toMatchObject({ recoveryOf: prior.id, executionDeadlineAt: lifetime.deadlineAt });
+      expect(owner.recover(original, lifetime).id).toBe(recovered.id);
+      // Crash window after the atomic new job+edge, before the first dispatch timer.
+      await owner.close();
+    }
+    expect(f.requests).toEqual([]);
+    owner = await f.start(); const recovered = owner.recover(original, lifetime);
+    await settled(owner, recovered.id); expect(f.requests).toHaveLength(1);
+    expect(owner.recover(original, lifetime)).toMatchObject({ id: recovered.id, state: 'settled', outcome: 'completed' });
+    owner.deleteHistory('mission'); expect(f.state().jobs.at(-1).recoveryOf).toBe(f.state().jobs.at(-2).id);
+    await owner.close(); owner = await f.start();
+    expect(owner.recover(original, lifetime)).toMatchObject({ id: recovered.id, state: 'settled' });
+    expect(f.requests).toHaveLength(1);
+  });
+  it('never recovers an explicit cancellation or changes the original proposal limits', async () => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task('manual'), lifetime); owner.cancel('manual');
+    owner.submit(f.task('abandoned'), lifetime); await owner.close(); owner = await f.start(); owner.setPaused(false);
+    expect(() => owner.recover(f.task('manual'), lifetime)).toThrow('recovery evidence unavailable');
+    expect(() => owner.recover(f.task('abandoned', { prompt: 'Different objective' }), lifetime)).toThrow('recovery identity changed');
+    expect(() => owner.recover(f.task('abandoned', { timeoutMs: 10_000 }), lifetime)).toThrow('recovery identity changed');
+    expect(() => owner.recover(f.task('abandoned'), { deadlineAt: new Date(Date.now() + 120_000).toISOString() })).toThrow('recovery identity changed');
+    expect(f.state().jobs).toHaveLength(2); expect(f.requests).toEqual([]);
+  });
+  it.each(['schema', 'orphan', 'deadline', 'manual-parent', 'task-drift'] as const)('rejects a damaged recovery graph: %s', async kind => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task(), lifetime); await owner.close(); owner = await f.start(); owner.setPaused(false);
+    owner.recover(f.task(), lifetime); await owner.close();
+    const state = f.state(); const child = state.jobs[1];
+    if (kind === 'schema') state.schemaVersion = 6;
+    if (kind === 'orphan') child.recoveryOf = 'missing';
+    if (kind === 'deadline') child.executionDeadlineAt = new Date(Date.parse(lifetime.deadlineAt) + 1).toISOString();
+    if (kind === 'manual-parent') state.jobs[0].reason = 'queued-task-cancelled';
+    if (kind === 'task-drift') {
+      child.input.prompt = 'Different task';
+      child.taskDigest = digest(canonical({ ...child.input, schemaVersion: 1, cwd: f.workspace }));
+    }
+    save(join(f.root, 'resource-console-state.json'), state);
+    if (kind === 'task-drift') { owner = await f.start(); expect(() => owner.recover(f.task(), lifetime)).toThrow('recovery identity changed'); }
+    else await expect(f.start()).rejects.toThrow();
+    expect(f.requests).toEqual([]);
+  });
+  it('refuses recovery if an abandoned predecessor has any runtime receipt', async () => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task(), lifetime); await owner.close(); owner = await f.start(); owner.setPaused(false);
+    await runResourceTask({ ...f.options, observations: [observed('local')], task: { ...f.task(), schemaVersion: 1, cwd: f.workspace } });
+    expect(() => owner.recover(f.task(), lifetime)).toThrow('recovery evidence unavailable');
+    expect(f.state().jobs).toHaveLength(1); expect(f.requests).toHaveLength(1);
+  });
+  it.each(['mode', 'deadline', 'paused'] as const)('withholds inadmissible %s recovery without changing history', async kind => {
+    const f = await fixture(); let owner = await f.start(); owner.setPaused(true);
+    const lifetime = { deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+    owner.submit(f.task(), lifetime); await owner.close(); owner = await f.start();
+    const before = canonical(f.state());
+    expect(() => owner.recover(f.task('task-a', kind === 'mode' ? { mode: 'workspace-write' } : {}), kind === 'deadline' ? {} : lifetime)).toThrow();
+    expect(canonical(f.state())).toBe(before); expect(f.requests).toEqual([]);
+  });
   it('persists child ownership and cancels only abandoned children on plain restart', async () => {
     const f = await fixture(); const first = await f.start(); first.setPaused(true);
     const deadlineAt = new Date(Date.now() + 60_000).toISOString();

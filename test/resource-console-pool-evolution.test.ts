@@ -1,7 +1,7 @@
 /** Pure epoch migration: no filesystem, transport, enrollment, or account effects. */
 import { describe, expect, it } from 'vitest';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
-import { decodeResourceConsoleState, previewResourceConsolePoolEvolution,
+import { decodeResourceConsoleState, previewResourceConsolePoolEvolution, resourceConsoleRecoveryId,
   type ResourceConsoleDurableState } from '../src/core/resources/pool-supervisor.js';
 import { resourceConsoleConversationPrompt, resourceConsoleTranscriptDigest } from '../src/core/resources/console-conversation.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
@@ -37,6 +37,18 @@ function source(): ResourceConsoleDurableState {
 }
 
 describe('console pool epochs', () => {
+  it('retains recovery edges without downgrading schema7 or rehashing historical tasks', () => {
+    const state = source(); state.schemaVersion = 7; state.originPoolDigest = configHistory[0]!.poolDigest;
+    const prior = state.jobs[1]!;
+    Object.assign(prior, { state: 'cancelled', outcome: 'cancelled', reason: 'task-owner-unavailable', input: null,
+      executionOwnerId: '12345678-1234-4123-8123-123456789abc', executionDeadlineAt: at });
+    const child = queued({ ...task(prior.id), id: resourceConsoleRecoveryId(prior) });
+    Object.assign(child, { recoveryOf: prior.id, executionOwnerId: '22345678-1234-4123-8123-123456789abc', executionDeadlineAt: at });
+    state.jobs.push(child);
+    const next = previewResourceConsolePoolEvolution(state, options)!;
+    expect(next.schemaVersion).toBe(7); expect(next.jobs).toEqual(state.jobs);
+    expect(decodeResourceConsoleState(next, current)).toEqual(next);
+  });
   it('preserves schema6 owner and deadline records through additive pool evolution', () => {
     const state = source(); state.schemaVersion = 6; state.originPoolDigest = configHistory[0]!.poolDigest;
     Object.assign(state.jobs[1]!, { executionOwnerId: '12345678-1234-4123-8123-123456789abc', executionDeadlineAt: at });

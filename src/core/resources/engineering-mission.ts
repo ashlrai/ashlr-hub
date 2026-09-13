@@ -12,7 +12,7 @@ import { checkResourceEngineeringAutonomousSetup, prepareResourceEngineeringAuto
   validateResourceEngineeringAutonomousSetupPolicy, type ResourceEngineeringAutonomousSetupOptions } from './engineering-autonomous-setup.js';
 import { checkResourceEngineeringPredecessor, type ResourceEngineeringPredecessorCheck } from './engineering-predecessor-check.js';
 import { pinResourceConsoleProject, matchesResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
-import { decodeResourceConsoleState, ResourceSupervisorError } from './pool-supervisor.js';
+import { decodeResourceConsoleState, resourceConsoleTaskContinuation, resourceConsoleRecoveryId, ResourceSupervisorError } from './pool-supervisor.js';
 import { readResourceWorkspaceCustody } from './workspace-custody.js';
 import { readResourceJson, resourcePoolStatus, readResourcePoolHistory, validateResourceTask, type ResourceTask } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
@@ -159,15 +159,27 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
       return requestEngineeringMissionConsole<T>({ handle: handle!, path, ...(body === undefined ? {} : { body }),
         signal: abort.signal, remainingMs: () => Math.min(deadline - Date.now(), monotonicDeadline - performance.now()), assertActive: guard, wait });
     };
-    const consoleStart = async (setup?: ResourceEngineeringAutonomousSetupOptions, allowedQueuedId?: string) => {
+    const continuation = (original: ResourceTask) => {
+      const file = join(runtime.root, 'resource-console-state.json');
+      if (!present(file)) return [];
+      const state = decodeResourceConsoleState(readResourceJson(file, 4 * 1024 * 1024), { pool, bindings,
+        workspace: config.initial.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
+      return resourceConsoleTaskContinuation(state, original, recipe.projectId === 'default' ? undefined : recipe.projectId, config.deadlineAt);
+    };
+    const consoleStart = async (setup?: ResourceEngineeringAutonomousSetupOptions, allowedTask?: ResourceTask) => {
       guard();
       if (!handle) {
         const file = join(runtime.root, 'resource-console-state.json');
         if (present(file)) {
           const state = decodeResourceConsoleState(readResourceJson(file, 4 * 1024 * 1024), { pool, bindings,
             workspace: config.initial.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
-          requireFact(!state.paused && state.jobs.every(job => job.state !== 'queued' || job.id === allowedQueuedId) &&
-            state.jobs.every(job => !['dispatching', 'unresolved'].includes(job.state)), 'Mission console contains stopped or unrelated work');
+          const attempts = resourcePoolStatus(runtime.root, pool, bindings, []).attempts;
+          const ownedProposal = (job: typeof state.jobs[number]) => allowedTask && job.id === allowedTask.id &&
+            job.taskDigest === missionHash(allowedTask) && job.executionOwnerId !== undefined && job.executionDeadlineAt === config.deadlineAt;
+          requireFact(!state.paused && state.jobs.every(job => job.state !== 'queued' || ownedProposal(job)) &&
+            state.jobs.every(job => job.state !== 'unresolved' && (job.state !== 'dispatching' || ownedProposal(job) &&
+              attempts.some(row => row.id === job.id && row.taskDigest === job.taskDigest && row.poolDigest === poolDigest &&
+                job.allowedWorkerIds.includes(row.workerId) && row.status === 'completed'))), 'Mission console contains stopped or unrelated work');
         }
         guard();
         handle = await startResourceConsoleServer({ root: runtime.root, workspace: config.initial.setup.workspace,
@@ -263,6 +275,16 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         const { feedback: _feedback, ...completion } = proof; write('settled', completion);
       } else {
         progress('reconciling');
+        // Reopening only the recorded child cannot dispatch it: constructor
+        // recovery cancels queued child work or joins a proven terminal receipt.
+        // This removes the abandoned queue fence before re-proving delivery.
+        const recorded = get<{ task: ResourceTask; poolDigest: string }>('proposal');
+        if (!handle && recorded && !get('result')) {
+          requireFact(recorded.poolDigest === poolDigest, 'Mission proposal identity changed');
+          const original = validateResourceTask(recorded.task);
+          const last = continuation(original).at(-1);
+          if (last && ['queued', 'dispatching'].includes(last.state)) await consoleStart(undefined, { ...original, id: last.id });
+        }
         const fresh = checkResourceEngineeringPredecessor({ setup, expectedPlanDigest: expectedPlan.planDigest,
           expectedDeadlineAt: get<{ deadlineAt: string }>('running')!.deadlineAt,
           ...(config.proposalFeedback ? { proposalFeedback: config.proposalFeedback } : {}) }, [], workspaceCustody());
@@ -291,21 +313,29 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         guard();
         intent = { task: expectedTask, poolDigest }; write('proposal', intent);
       }
-      const task = validateResourceTask(intent.task); requireFact(missionExact(intent, ['task', 'poolDigest']) &&
-        intent.poolDigest === poolDigest && canonical(task) === canonical(expectedTask), 'Mission proposal identity changed');
+      const originalTask = validateResourceTask(intent.task); requireFact(missionExact(intent, ['task', 'poolDigest']) &&
+        intent.poolDigest === poolDigest && canonical(originalTask) === canonical(expectedTask), 'Mission proposal identity changed');
+      let task = { ...originalTask, id: continuation(originalTask).at(-1)?.id ?? originalTask.id };
       let result = get<{ output: string; receiptDigest: string }>('result');
       const receipt = () => {
-        const row = resourcePoolStatus(runtime.root, pool, bindings, []).attempts.find(row => row.id === task.id);
+        const attempts = resourcePoolStatus(runtime.root, pool, bindings, []).attempts;
+        const chain = continuation(originalTask);
+        requireFact((chain.at(-1)?.id ?? originalTask.id) === task.id &&
+          !attempts.some(row => chain.slice(0, -1).some(prior => prior.id === row.id)), 'Mission proposal recovery evidence changed');
+        const row = attempts.find(row => row.id === task.id);
         if (row) requireFact(row.taskDigest === missionHash(task) && row.poolDigest === poolDigest && task.allowedWorkerIds.includes(row.workerId), 'Mission proposal receipt mismatch');
         return row;
       };
       if (!result) {
-        if (!handle) await consoleStart(undefined, task.id);
-        const { schemaVersion: _schema, cwd: _cwd, ...submission } = task;
+        if (!handle) await consoleStart(undefined, task);
+        const last = continuation(originalTask).at(-1);
+        task = { ...originalTask, id: last?.state === 'cancelled' ? resourceConsoleRecoveryId(last) : last?.id ?? originalTask.id };
+        const { schemaVersion: _schema, cwd: _cwd, ...submission } = originalTask;
         guard();
         proposalTask = { id: task.id, digest: missionHash(task) };
-        handle!.submitTask({ ...submission, retainHistory: true, projectId: recipe.projectId },
+        const admitted = handle!.recoverTask({ ...submission, retainHistory: true, projectId: recipe.projectId },
           { signal: abort.signal, isExecutionStopped: stopped, deadlineAt: config.deadlineAt });
+        requireFact(admitted.id === task.id, 'Mission proposal identity changed');
         while (true) {
           const view = await request<ResourceConsoleSnapshot>('/api/resources');
           requireFact(view.supervisor && !view.supervisor.paused && !view.supervisor.closing, 'Mission proposal console unavailable');
