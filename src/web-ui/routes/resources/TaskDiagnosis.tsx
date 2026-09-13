@@ -100,6 +100,8 @@ const TASK_REASONS: Record<string, string> = {
   'task-owner-unavailable': 'Cancelled after restart: mission owner unavailable',
   'task-recovery-evidence-unavailable': 'Recovery held: prior attempt evidence is unresolved',
   'host-execution-stopped': 'Waiting: host lifetime stopped or deadline reached',
+  'supervisor-kill-active': 'Waiting: global stop active',
+  'supervisor-kill-unavailable': 'Waiting: global stop status unavailable',
   'cancellation-requested': 'Cancellation requested', 'task-identity-conflict': 'Task identity conflict',
   'previous-dispatch-unresolved': 'Previous dispatch unresolved', 'settlement-unavailable': 'Settlement unavailable',
   'dispatch-settlement-unavailable': 'Dispatch settlement unavailable',

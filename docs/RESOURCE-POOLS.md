@@ -2197,6 +2197,17 @@ owned-task cancellation and mission stop remain usable; read-only sessions gain
 none of those controls. Account observation and permitted reserve settings remain
 independent. There is no stop-clearing endpoint or button in this workspace.
 
+The foreground resource queue also checks the authoritative stop before
+publishing dispatch intent and again during runtime admission. An active or
+unreadable stop keeps undispatched jobs queued with `supervisor-kill-active` or
+`supervisor-kill-unavailable`, without reserving an attempt. Their inputs,
+identities and original deadlines are retained. When the source becomes healthy
+and inactive, the same queue owner automatically retries eligible jobs within
+their existing lifetimes; clearing the stop does not renew an expired deadline
+or override an operator pause. Queued cancellation remains available. A stop
+after reservation still uses the final dispatch check and existing worker
+cancellation; already-recorded attempts are never erased or silently replayed.
+
 An explicit task file:
 
 ```json

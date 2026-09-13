@@ -9,6 +9,7 @@ import { createResourcePoolSupervisor, readResourceSupervisorCustody, resourceCo
   type ResourcePoolSupervisorOptions } from '../src/core/resources/pool-supervisor.js';
 import { runResourceTask } from '../src/core/resources/pool-runtime.js';
 import * as runtime from '../src/core/resources/pool-runtime.js';
+import * as killPolicy from '../src/core/sandbox/policy.js';
 import type { ResourceConsoleTaskInput } from '../src/core/resources/console-types.js';
 import type { ResourceObservation, ResourcePool, ResourceWorker } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
@@ -70,6 +71,111 @@ async function settled(supervisor: ResourcePoolSupervisor, id = 'task-a') {
   await vi.waitFor(() => expect(supervisor.snapshot().jobs.find((job) => job.id === id)?.state).toBe('settled'));
   return supervisor.snapshot().jobs.find((job) => job.id === id)!;
 }
+
+describe.skipIf(process.platform === 'win32')('global stop preserves queued work', () => {
+  it.each(['active', 'unknown', 'throws'] as const)('holds %s without consuming attempts, then admits the same job after clear', async (state) => {
+    let stopped = true;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => {
+      if (!stopped) return { state: 'inactive', sourceState: 'healthy', reason: 'missing', path: '/PRIVATE/KILL' };
+      if (state === 'throws') throw new Error('PRIVATE_SOURCE_ERROR');
+      return state === 'active'
+        ? { state: 'active', sourceState: 'healthy', reason: 'present', path: '/PRIVATE/KILL' }
+        : { state: 'unknown', sourceState: 'degraded', reason: 'uninspectable', path: '/PRIVATE/KILL' };
+    });
+    const f = await fixture(); const supervisor = await f.start();
+    const dispatched = vi.spyOn(runtime, 'runResourceTask');
+    supervisor.submit(f.task()); const original = f.state().jobs[0];
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]).toMatchObject({ state: 'queued',
+      reason: state === 'active' ? 'supervisor-kill-active' : 'supervisor-kill-unavailable', cancellable: true }));
+    await sleep(60);
+    expect(dispatched).not.toHaveBeenCalled(); expect(f.requests).toEqual([]);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toEqual([]);
+    expect(f.state().jobs[0]).toMatchObject({ input: original.input, taskDigest: original.taskDigest, enqueuedAt: original.enqueuedAt });
+    expect(JSON.stringify(supervisor.snapshot())).not.toContain('PRIVATE');
+    stopped = false;
+    expect(await settled(supervisor)).toMatchObject({ id: original.id, outcome: 'completed' });
+    expect(f.requests).toHaveLength(1);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toHaveLength(1);
+  });
+
+  it('rechecks a stop appearing between queue dispatch and runtime admission', async () => {
+    let stopped = false;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture(); const supervisor = await f.start();
+    const originalRun = runtime.runResourceTask;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation((options) => { stopped = true; return originalRun(options); });
+    supervisor.submit(f.task());
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]).toMatchObject({ state: 'queued', reason: 'supervisor-kill-active' }));
+    expect(f.requests).toEqual([]);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toEqual([]);
+    supervisor.cancel('task-a');
+    expect(supervisor.snapshot().jobs[0]).toMatchObject({ state: 'cancelled', reason: 'queued-task-cancelled' });
+  });
+
+  it('does not renew a child deadline while held by the global stop', async () => {
+    let stopped = true;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture(); const supervisor = await f.start();
+    const deadlineAt = new Date(Date.now() + 250).toISOString();
+    supervisor.submit(f.task(), { deadlineAt });
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('supervisor-kill-active'));
+    await sleep(270); stopped = false;
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    expect(f.state().jobs[0].executionDeadlineAt).toBe(deadlineAt);
+    expect(f.requests).toEqual([]);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toEqual([]);
+  });
+
+  it('retains a reservation if the stop appears after admission and never silently replays it', async () => {
+    let stopped = false;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture(); const supervisor = await f.start();
+    const originalRun = runtime.runResourceTask;
+    vi.spyOn(runtime, 'runResourceTask').mockImplementation((options) => originalRun({ ...options,
+      beforeWorkerDispatch: () => { stopped = true; return options.beforeWorkerDispatch!(); } }));
+    supervisor.submit(f.task());
+    expect(await settled(supervisor)).toMatchObject({ outcome: 'failed', reason: 'worker-dispatch-precondition-failed' });
+    const attempts = runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts;
+    expect(attempts).toHaveLength(1); expect(f.requests).toEqual([]);
+    stopped = false; await sleep(60);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts).toEqual(attempts);
+    expect(f.requests).toEqual([]);
+  });
+
+  it('preserves an operator pause and queued identity across restart', async () => {
+    let stopped = true;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture(); const first = await f.start(); first.submit(f.task());
+    await vi.waitFor(() => expect(first.snapshot().jobs[0]?.reason).toBe('supervisor-kill-active'));
+    const original = f.state().jobs[0]; first.setPaused(true); await first.close();
+    const next = await f.start(); stopped = false; await sleep(80);
+    expect(next.snapshot()).toMatchObject({ paused: true, queuedCount: 1, activeCount: 0 });
+    expect(f.state().jobs[0]).toMatchObject({ taskDigest: original.taskDigest, input: original.input });
+    expect(f.requests).toEqual([]);
+    next.setPaused(false); expect(await settled(next)).toMatchObject({ outcome: 'completed' });
+    expect(f.requests).toHaveLength(1);
+  });
+
+  it('still cancels an active worker while retaining undispatched jobs', async () => {
+    let stopped = false;
+    vi.spyOn(killPolicy, 'readKillSwitch').mockImplementation(() => ({ state: stopped ? 'active' : 'inactive',
+      sourceState: 'healthy', reason: stopped ? 'present' : 'missing', path: '/PRIVATE/KILL' }));
+    const f = await fixture({ hold: true }); const supervisor = await f.start({ maxParallel: 1 });
+    supervisor.submit(f.task('running'));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    stopped = true; supervisor.submit(f.task('waiting'));
+    expect(await settled(supervisor, 'running')).toMatchObject({ outcome: 'cancelled', reason: 'worker-kill-active' });
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs.find(job => job.id === 'waiting')).toMatchObject({
+      state: 'queued', reason: 'supervisor-kill-active', cancellable: true }));
+    expect(f.requests).toHaveLength(1);
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts.map(row => row.id)).toEqual(['running']);
+    supervisor.cancel('waiting');
+  });
+});
 
 /** Build only test-owned valid queued records; escaped prompts exercise serialized, not raw, limits. */
 async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reserveTransitions: boolean) {

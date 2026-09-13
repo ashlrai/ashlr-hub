@@ -20,6 +20,7 @@ import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResou
 import type { ResourceConsoleContextTurn, ResourceConsoleOutput, ResourceConsoleTaskInput, ResourceConsoleTranscript,
   ResourceConsoleProject, ResourceConsoleProjectInput, ResourceSupervisorJob, ResourceSupervisorSnapshot } from './console-types.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
+import { readResourceExecutionStop } from './execution-stop.js';
 import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } from './engineering-lifetime.js';
 
 export class ResourceSupervisorError extends Error {
@@ -494,7 +495,6 @@ export function previewResourceConsoleProjects(options: {
 /** Scope is explicit and immutable; no input callback can alter the chosen worker bindings. */
 export async function createResourcePoolSupervisor(options: ResourcePoolSupervisorOptions): Promise<ResourcePoolSupervisor> {
   const hostStopped = captureResourceExecutionVeto(options);
-  const hasHostVeto = Object.hasOwn(options, 'isExecutionStopped');
   const taskVeto = Object.getOwnPropertyDescriptor(options, 'isTaskExecutionStopped');
   if (taskVeto && (!Object.hasOwn(taskVeto, 'value') || typeof taskVeto.value !== 'function') ||
     !taskVeto && 'isTaskExecutionStopped' in options) throw new Error('Invalid task execution veto');
@@ -713,7 +713,7 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
   }
   function start(job: DurableJob, observations: ResourceObservation[], unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]): void {
     if (!job.input) throw new Error('Queued task input unavailable');
-    const initialProjectHold = recoveryHold(job.recoveryOf) ?? (taskStopped(job.id) ? 'host-execution-stopped' : projectHold(job.projectId));
+    const initialProjectHold = dispatchHold(job);
     if (initialProjectHold) { if (job.reason !== initialProjectHold) update(job.id, { reason: initialProjectHold }); return; }
     update(job.id, { state: 'dispatching', reason: 'dispatch-requested', workerId: null });
     // Publish the supervisor's irreversible intent before entering the runtime.
@@ -729,13 +729,13 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       beforeWorkerDispatch: () => {
         // Runtime invokes this only for this call's fresh reservation, never
         // replay. An active scheduler promise alone is not transport custody.
-        owned.workerStarted = recoveryHold(job.recoveryOf) === null && !taskStopped(job.id) && projectHold(job.projectId) === null;
+        owned.workerStarted = dispatchHold(job) === null;
         return owned.workerStarted;
       },
-      ...(projectBindings || hasHostVeto || readTaskVeto || job.executionOwnerId ? { readAdmissionEvidence: () => {
-        admissionProjectHold = recoveryHold(job.recoveryOf) ?? (taskStopped(job.id) ? 'host-execution-stopped' : projectHold(job.projectId));
+      readAdmissionEvidence: () => {
+        admissionProjectHold = dispatchHold(job);
         return { observations, unavailableWorkerIds: admissionProjectHold ? [...workerIds] : unavailableWorkerIds, quotaUnavailableWorkerIds };
-      } } : {}) }).then((result) => {
+      } }).then((result) => {
       if (result.replayed || !result.receipt) dispatched.delete(job.id);
       if (!result.receipt) {
         update(job.id, { state: controller.signal.aborted || closing ? 'cancelled' : 'queued',
@@ -766,6 +766,16 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       // The attached settlement handler isolates a competing runtime identity.
       if (!(cause instanceof ResourceSupervisorError && cause.code === 'CONFLICT')) throw cause;
     }
+  }
+  function dispatchHold(job: DurableJob): string | null {
+    const ownerHold = recoveryHold(job.recoveryOf) ?? (taskStopped(job.id) ? 'host-execution-stopped' : null);
+    if (ownerHold) return ownerHold;
+    // A global stop is reversible, not a failed task attempt. Check before
+    // intent publication and again at runtime admission; keep worker-time
+    // cancellation for stops that appear after the final reservation check.
+    const stop = readResourceExecutionStop().state;
+    if (stop !== 'inactive') return stop === 'active' ? 'supervisor-kill-active' : 'supervisor-kill-unavailable';
+    return projectHold(job.projectId);
   }
   function admissionConstraint(): { account: string[]; quota: string[] } | null {
     try { return { account: validateUnavailableResourceWorkerIds(readUnavailableWorkerIds(), pool),

@@ -11,6 +11,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Global-stop queue recovery
+
+- Holds undispatched resource jobs while the global stop is active or unreadable,
+  preserving task identity and input without recording a cancelled attempt.
+- Rechecks stop authority during admission and before worker dispatch; retains
+  existing cancellation for running work and original mission deadlines.
+- Shows distinct queue waiting reasons and automatically retries eligible work
+  after the stop clears, without clearing it or overriding queue pause.
+
 ### Global execution stop visibility
 
 - Displays live global-stop evidence separately from account capacity in the
