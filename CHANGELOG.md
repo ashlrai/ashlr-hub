@@ -11,6 +11,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Native collector failure visibility
+
+- Preserves sanitized last-attempt cleanup diagnostics in continuous quota
+  snapshots and the Native quota reads panel, including evidence-publication
+  failure versus unconfirmed process-group exit.
+- Keeps unknown evidence explicit, clears old details on a new attempt, and
+  preserves existing cleanup holds and account reserves. No automatic retry or
+  recovery authority is added.
+
 ### Managed standing mission workspace
 
 - Adds explicit `--engineering-mission` enrollment and optional

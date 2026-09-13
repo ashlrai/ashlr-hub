@@ -2,6 +2,7 @@ import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapsh
   ResourceSupervisorJob, ResourceSupervisorSnapshot } from '../../core/resources/console-types.js';
 import { RESOURCE_COLLECTOR_RECOVERY_REASONS, RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS } from '../../core/resources/console-types.js';
 import { validResourceNativeProcessForReceipt } from '../../core/resources/native-diagnostics.js';
+import { sanitizeCodexProbeCleanupDiagnostics } from '../../core/resources/codex-probe-diagnostics.js';
 import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-store.js';
 import { ApiError, apiGet, apiPost } from './client.js';
 import type { QueryDef } from './queries.js';
@@ -156,12 +157,17 @@ function validQuotaRefresh(value: unknown, workers: ResourceConsoleSnapshot['poo
   const known = new Set(workers.filter((worker) => worker?.provider === 'codex').map((worker) => worker.id));
   const seen = new Set<string>();
   for (const row of value.workers) {
-    if (!record(row) || !exact(row, ['workerId', 'status', 'lastAttemptAt', 'lastSuccessAt', 'nextAttemptAt', 'reason']) ||
+    if (!record(row) || !exact(row, ['workerId', 'status', 'lastAttemptAt', 'lastSuccessAt', 'nextAttemptAt', 'reason',
+      ...(Object.hasOwn(row, 'cleanupDiagnostics') ? ['cleanupDiagnostics'] : [])]) ||
       typeof row.workerId !== 'string' || !known.has(row.workerId) || seen.has(row.workerId) ||
       typeof row.status !== 'string' || !QUOTA_STATES.has(row.status) || typeof row.reason !== 'string' || !QUOTA_REASONS.has(row.reason) ||
       ![row.lastAttemptAt, row.lastSuccessAt, row.nextAttemptAt].every((time) => time === null || timestamp(time)) ||
       row.lastSuccessAt !== null && row.lastAttemptAt === null ||
       value.state === 'closed' && (row.nextAttemptAt !== null || row.status !== 'closed' && row.status !== 'uncertain')) return false;
+    if (Object.hasOwn(row, 'cleanupDiagnostics') && (row.lastAttemptAt === null ||
+      !['failed', 'timed-out', 'cancelled', 'uncertain', 'closed'].includes(row.status) ||
+      !record(row.cleanupDiagnostics) || !exact(row.cleanupDiagnostics, ['failure', 'processGroupSettlement', 'timedOut', 'cancelled']) ||
+      !sanitizeCodexProbeCleanupDiagnostics(row.cleanupDiagnostics))) return false;
     seen.add(row.workerId);
   }
   return true;

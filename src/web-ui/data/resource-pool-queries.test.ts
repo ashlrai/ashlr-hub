@@ -500,6 +500,22 @@ describe('allocation mutations', () => {
 });
 
 describe('optional native quota response boundary', () => {
+  it('accepts safe last-attempt cleanup evidence in a terminal snapshot', async () => {
+    const value = refresh(); value.state = 'closed'; Object.assign(row(value), { status: 'uncertain', reason: 'managed-quota-uncertain',
+      nextAttemptAt: null, cleanupDiagnostics: { failure: 'group-exit-unconfirmed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false } });
+    await expect(query(value)).resolves.toMatchObject({ quotaRefresh: value });
+  });
+  it.each(['private-field', 'private-value', 'missing-field', 'without-attempt', 'successful'])('rejects %s cleanup diagnostics', async kind => {
+    const value = refresh(); Object.assign(row(value), { status: 'failed', reason: 'managed-quota-failed',
+      cleanupDiagnostics: { failure: 'process-failed', processGroupSettlement: 'group-exit-confirmed', timedOut: false, cancelled: false } });
+    const diagnostic = row(value).cleanupDiagnostics as Record<string, unknown>;
+    if (kind === 'private-field') diagnostic.log = 'PRIVATE';
+    if (kind === 'private-value') diagnostic.failure = 'PRIVATE';
+    if (kind === 'missing-field') delete diagnostic.cancelled;
+    if (kind === 'without-attempt') Object.assign(row(value), { lastAttemptAt: null, lastSuccessAt: null });
+    if (kind === 'successful') Object.assign(row(value), { status: 'observed', reason: 'managed-quota-observed' });
+    await expect(query(value)).rejects.toThrow();
+  });
   it.each([undefined, null])('preserves legacy absence %#', async (value) => { await expect(query(value)).resolves.toBeDefined(); });
   it('accepts a bounded enrolled-Codex snapshot and forwards only the existing fixed endpoint', async () => {
     const value = refresh(); const output = await query(value); expect(output.quotaRefresh).toEqual(value);

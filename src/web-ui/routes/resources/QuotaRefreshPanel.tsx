@@ -2,6 +2,7 @@ import type { ResourceConsoleSnapshot, ResourceCollectorRecoveryDiagnosis } from
 import { RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS } from '../../../core/resources/console-types.js';
 import { StatusBadge, type Tone } from '../../components/primitives/StatusBadge.js';
 import { resourceTime } from './CapacityBoard.js';
+import { sanitizeCodexProbeCleanupDiagnostics, type CodexProbeCleanupDiagnostics } from '../../../core/resources/codex-probe-diagnostics.js';
 import styles from './ResourcePoolView.module.css';
 
 const STATES: Record<string, { label: string; tone: Tone }> = {
@@ -30,6 +31,20 @@ const REASONS: Record<string, string> = {
   'managed-quota-unknown': 'A quota percentage or reset is unknown. Admission is withheld.',
   'managed-quota-reserve-reached': 'A native quota window reached its configured reserve. Admission is withheld.',
   'managed-allocation-unavailable': 'The saved usage allocation could not be read. Admission is withheld until allocation evidence is available.',
+};
+const CLEANUP_FAILURES: Record<CodexProbeCleanupDiagnostics['failure'], string> = {
+  'runner-rejected': 'The process runner returned no cleanup result.',
+  'probe-rejected': 'The metadata probe returned no valid cleanup result.',
+  'lifecycle-publication-failed': 'Process lifecycle evidence could not be recorded.',
+  'group-exit-unconfirmed': 'The process group was not confirmed stopped within the cleanup window.',
+  'native-timed-out': 'The native read exceeded its deadline.',
+  'native-cancelled': 'The native read was cancelled.',
+  'process-failed': 'The native process failed.',
+  'diagnostics-unavailable': 'No detailed cleanup evidence was supplied.',
+};
+const SETTLEMENTS: Record<CodexProbeCleanupDiagnostics['processGroupSettlement'], string> = {
+  'not-started': 'No process started', 'group-exit-confirmed': 'Process-group exit confirmed',
+  unconfirmed: 'Process-group exit unconfirmed', unknown: 'Process-group exit unknown',
 };
 type Collector = NonNullable<ResourceConsoleSnapshot['metadataCollector']>;
 const COLLECTOR_REASONS: Record<Collector['reasonCode'], string> = {
@@ -144,11 +159,15 @@ export function QuotaRefreshPanel({ refresh, collector, selectedWorkerId, onSele
               ? { label: 'Observed; allocation unavailable', tone: 'unknown' as const }
             : Object.hasOwn(STATES, row.status) ? STATES[row.status]! : { label: 'Unknown', tone: 'unknown' as const };
           const reason = Object.hasOwn(REASONS, row.reason) ? REASONS[row.reason]! : 'Metadata status details are unavailable.';
+          const cleanup = sanitizeCodexProbeCleanupDiagnostics(row.cleanupDiagnostics);
           return <tr key={row.workerId}>
             <th scope="row"><button type="button" className={styles.performanceWorker}
               aria-pressed={selectedWorkerId === row.workerId} onClick={() => onSelect(row.workerId)}>{row.workerId}</button></th>
             <td><StatusBadge status={historical ? 'unknown' : state.label} tone={historical ? 'unknown' : state.tone}>
-              {historical ? `Last reported: ${state.label}` : state.label}</StatusBadge><small>{historical ? `Last reported detail: ${reason}` : reason}</small></td>
+              {historical ? `Last reported: ${state.label}` : state.label}</StatusBadge><small>{historical ? `Last reported detail: ${reason}` : reason}</small>
+              {cleanup ? <small>Last attempt detail: {CLEANUP_FAILURES[cleanup.failure]} {SETTLEMENTS[cleanup.processGroupSettlement]}.
+                {' '}Timeout: {cleanup.timedOut === 'unknown' ? 'unknown' : cleanup.timedOut ? 'yes' : 'no'};
+                {' '}cancellation: {cleanup.cancelled === 'unknown' ? 'unknown' : cleanup.cancelled ? 'yes' : 'no'}.</small> : null}</td>
             <td>{row.lastSuccessAt ? resourceTime(row.lastSuccessAt) : 'No successful sample'}
               {row.lastAttemptAt ? <small>Last attempt: {resourceTime(row.lastAttemptAt)}</small> : null}</td>
             <td>{row.nextAttemptAt ? resourceTime(row.nextAttemptAt)

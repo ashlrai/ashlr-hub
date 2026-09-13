@@ -58,6 +58,8 @@ export interface ResourceQuotaRefreshRow {
   lastSuccessAt: string | null;
   nextAttemptAt: string | null;
   reason: string;
+  /** Last failed attempt only; never quota evidence or permission to retry. */
+  cleanupDiagnostics?: CodexProbeCleanupDiagnostics;
 }
 export interface ResourceQuotaRefreshSnapshot {
   schemaVersion: 1;
@@ -164,6 +166,7 @@ interface ManagedWorker {
   nextAttemptMs: number | null;
   failures: number;
   observation: ResourceObservation | null;
+  cleanupDiagnostics?: CodexProbeCleanupDiagnostics;
 }
 
 function checkedOptions(options: ResourceQuotaRefresherOptions) {
@@ -273,6 +276,7 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
 
   async function refresh(row: ManagedWorker): Promise<void> {
     row.status = 'refreshing'; row.reason = 'managed-quota-refreshing';
+    row.cleanupDiagnostics = undefined;
     row.lastAttemptAt = new Date().toISOString(); row.nextAttemptMs = null;
     changed();
     let succeeded = false;
@@ -299,9 +303,15 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
             !['observed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(status.value)) {
             throw new Error('Native quota settlement unavailable');
           }
+          if (status.value !== 'observed') {
+            const property = Object.getOwnPropertyDescriptor(result, 'cleanupDiagnostics');
+            row.cleanupDiagnostics = (property && 'value' in property ? sanitizeCodexProbeCleanupDiagnostics(property.value) : undefined)
+              ?? Object.freeze({ failure: 'diagnostics-unavailable', processGroupSettlement: 'unknown', timedOut: 'unknown', cancelled: 'unknown' });
+          }
           if (status.value === 'uncertain') unsettled();
           return result;
         } catch {
+          row.cleanupDiagnostics ??= Object.freeze({ failure: 'probe-rejected', processGroupSettlement: 'unknown', timedOut: 'unknown', cancelled: 'unknown' });
           unsettled();
           throw new Error('Native quota settlement unavailable');
         }
@@ -407,7 +417,8 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
             status: row.status === 'uncertain' ? 'uncertain' : closed ? 'closed' : reason === 'managed-quota-expired' ? 'expired' : row.status,
             lastAttemptAt: row.lastAttemptAt, lastSuccessAt: row.lastSuccessAt,
             nextAttemptAt: closed || row.nextAttemptMs === null ? null : new Date(row.nextAttemptMs).toISOString(),
-            reason: reason ?? row.reason };
+            reason: reason ?? row.reason,
+            ...(row.cleanupDiagnostics ? { cleanupDiagnostics: { ...row.cleanupDiagnostics } } : {}) };
         }) });
     },
     close,

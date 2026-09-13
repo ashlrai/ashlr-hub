@@ -190,6 +190,31 @@ function managedFixture() {
 }
 
 describe('managed quota server lifecycle and coherent reads', () => {
+  it('serves actual collector cleanup diagnostics while preserving the unresolved-work fence', async () => {
+    const original = refreshers.createResourceQuotaRefresher;
+    const f = managedFixture();
+    f.created.mockImplementation(input => original({ ...input, _probe: async request => ({
+      schemaVersion: 1, scope: 'codex-native-metadata', workerId: request.workerId,
+      poolDigest: digest(canonical({ pool: request.pool, bindings: request.bindings })),
+      status: 'uncertain', reason: 'probe-termination-uncertain', startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      accountHint: null, planType: null, observation: null,
+      cleanupDiagnostics: { failure: 'lifecycle-publication-failed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false },
+    }) }));
+    const handle = await start();
+    expect((await http(handle, '/api/resources')).status).toBe(401);
+    await vi.waitFor(async () => {
+      const response = await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken });
+      expect(response.status).toBe(200);
+      const value = JSON.parse(response.text);
+      expect(value.quotaRefresh).toMatchObject({ state: 'closed', workers: [{ status: 'uncertain', cleanupDiagnostics: {
+        failure: 'lifecycle-publication-failed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false,
+      } }] });
+      expect(value.plan.selectedWorkerId).toBeNull();
+    });
+    await expect(handle.close()).rejects.toThrow(/shutdown uncertain/);
+    expect(existsSync(f.marker)).toBe(true);
+  });
+
   it('retries a pending-to-observed transition before publishing current eligibility', async () => {
     const f = managedFixture(); f.state.observations = []; f.state.unavailable = ['codex-a']; f.state.status = 'pending';
     f.snapshot.mockImplementationOnce(async (managed) => {

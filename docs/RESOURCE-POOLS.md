@@ -2490,6 +2490,18 @@ exception cause, account hints or partial observations; they cannot authorize
 admission or refresh quota timestamps. A prior worker's `observed` status in an
 otherwise failed pass does not make its readings available for execution.
 
+Continuous collectors expose the same sanitized vocabulary as optional
+`quotaRefresh.workers[].cleanupDiagnostics` on `GET /api/resources`. The
+**Native quota reads** panel shows the last attempt's failure class, process-group
+settlement and timeout/cancellation flags. This distinguishes failed lifecycle
+recording from unconfirmed group exit without publishing native logs or account
+identities. Detail survives collector shutdown but clears before the next attempt;
+missing evidence stays unknown. Older snapshots without this field remain valid.
+This is live-process diagnostic state, not durable recovery authorization. Retain
+the pending/activity records when cleanup is uncertain; do not delete them or
+retry merely because the UI can explain the failure. Fixed diagnostic detail does
+not bypass the existing ownership, quota or account-reservation checks.
+
 Universe resource generation can reuse this pinned configuration through its
 optional private [`quotaConfigPath`](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool).
 That mode performs one bounded capture per configured alias before a new
