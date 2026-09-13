@@ -97,6 +97,8 @@ const TASK_REASONS: Record<string, string> = {
   'worker-completed': 'Worker completed', 'task-completed': 'Task completed', 'task-reserved': 'Task reserved',
   'not-yet-dispatched': 'Not yet dispatched', 'dispatch-requested': 'Dispatch requested',
   'no-eligible-capacity': 'No eligible capacity', 'queued-task-cancelled': 'Queued task cancelled',
+  'task-owner-unavailable': 'Cancelled after restart: mission owner unavailable',
+  'host-execution-stopped': 'Waiting: host lifetime stopped or deadline reached',
   'cancellation-requested': 'Cancellation requested', 'task-identity-conflict': 'Task identity conflict',
   'previous-dispatch-unresolved': 'Previous dispatch unresolved', 'settlement-unavailable': 'Settlement unavailable',
   'dispatch-settlement-unavailable': 'Dispatch settlement unavailable',

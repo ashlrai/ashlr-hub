@@ -88,6 +88,11 @@ workspace. Setup and completion use genuine supervisor/collector custody so
 owned human tasks can continue; mission cleanup drains only its attachment and
 exact proposal task. Child deadlines are checked at worker dispatch. Unknown
 receipts, unfinished engineering and changed ownership still hold progress.
+Child proposals now retain supervisor ownership and the original deadline in
+schema6. Plain console restart cancels abandoned, never-dispatched children
+without cancelling ordinary queued human work; exact terminal receipts still
+reconcile. Automatically re-enrolling abandoned proposals remains a separate
+recovery gap, and older readers must be upgraded before using schema6 records.
 This closes the foreground coexistence gap, not resident service installation,
 browser mission-start controls or actual-account commissioning.
 Terminal/browser panels, conversation compaction and native desktop bootstrap

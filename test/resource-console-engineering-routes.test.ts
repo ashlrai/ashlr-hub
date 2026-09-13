@@ -1,5 +1,5 @@
 /** HTTP privilege/serialization boundary only; real engineering is covered separately. */
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { IncomingMessage, request } from 'node:http';
@@ -62,6 +62,25 @@ beforeEach(() => {
 });
 
 describe('host-configured engineering successor HTTP boundary', () => {
+  it('persists host child deadlines but refuses browser-supplied ownership', async () => {
+    const first = await start();
+    expect((await post(first, '/api/resources/queue', { paused: true })).status).toBe(200);
+    const task = { id: 'mission-child', prompt: 'Private proposal', allowedWorkerIds: ['local'], mode: 'read-only' as const,
+      timeoutMs: 1000, maxOutputTokens: 128 };
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    first.submitTask(task, { deadlineAt });
+    first.submitTask({ ...task, id: 'human' });
+    const file = join(options.root, 'resource-console-state.json');
+    const before = JSON.parse(readFileSync(file, 'utf8'));
+    expect(before.jobs[0]).toMatchObject({ executionDeadlineAt: deadlineAt });
+    expect(before.jobs[0].executionOwnerId).toBeTypeOf('string');
+    expect((await post(first, '/api/resources/tasks', { ...task, executionOwnerId: before.jobs[0].executionOwnerId })).status).toBe(400);
+    await first.close(); const next = await start();
+    const after = JSON.parse(readFileSync(file, 'utf8'));
+    expect(after.jobs[0]).toMatchObject({ state: 'cancelled', reason: 'task-owner-unavailable', executionDeadlineAt: deadlineAt });
+    expect(after.jobs[1]).toMatchObject({ id: 'human', state: 'queued' });
+    expect(() => next.submitTask(task)).toThrow('execution owner already set');
+  });
   const route = '/api/resources/engineering-successors';
   function config(overrides: Record<string, unknown> = {}) {
     const preparationFile = join(directory, 'profiles.json'); const supervisionFile = join(directory, 'supervision.json');

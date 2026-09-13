@@ -254,7 +254,6 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
     ...(options.execute ? { historySupported: true, followUpSupported: true } : {}) };
   const assets = join(dirname(fileURLToPath(import.meta.url)), 'public');
   let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | null = null;
-  const taskLifetimes = new Map<string, ReturnType<typeof captureResourceEngineeringLifetime>>();
   let engineeringComponent: ResourceEngineeringComponent | null = null;
   let attachment: ResourceConsoleEngineeringAttachment | null = null;
   let attachmentPending = false;
@@ -822,7 +821,6 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       }
     }
     if (workspace) supervisor = await createResourcePoolSupervisor({ root, pool, bindings, workspace, maxParallel,
-      isTaskExecutionStopped: id => taskLifetimes.get(id)?.isStopped() ?? false,
       ...(Object.hasOwn(options, 'isExecutionStopped') ? { isExecutionStopped: hostStopped } : {}),
       ...(projects === undefined ? {} : { projects }),
       readObservations: () => { const base = validateResourceObservations(readResourceJson(observationsFile), pool);
@@ -866,11 +864,8 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
         assertWorkspace();
         const child = captureResourceEngineeringLifetime(lifetime === undefined ? {} : { engineeringLifetime: lifetime });
         if (child.isStopped()) throw new Error('Resource task lifetime stopped');
-        const job = supervisor!.submit(input);
-        // Admission is synchronous; no timer can dispatch between publishing
-        // this job and installing its veto. A retry cannot replace the old stop.
-        if (child.configured && !taskLifetimes.has(job.id)) taskLifetimes.set(job.id, child);
-        return job;
+        return supervisor!.submit(input, child.configured ? { isExecutionStopped: child.isStopped,
+          ...(child.deadlineAt ? { deadlineAt: child.deadlineAt } : {}) } : undefined);
       },
       cancelTaskAndDrain: (id, expectedTaskDigest) => {
         if (!supervisor) throw new Error('Resource supervisor unavailable');

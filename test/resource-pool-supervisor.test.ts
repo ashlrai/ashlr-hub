@@ -104,6 +104,75 @@ async function nearCapacityFixture(f: Awaited<ReturnType<typeof fixture>>, reser
 }
 
 describe.skipIf(process.platform === 'win32')('durable foreground resource supervisor', () => {
+  it('persists child ownership and cancels only abandoned children on plain restart', async () => {
+    const f = await fixture(); const first = await f.start(); first.setPaused(true);
+    const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    first.submit(f.task('mission', { retainHistory: true }), { deadlineAt, isExecutionStopped: () => false });
+    first.submit(f.task('human'));
+    const original = f.state();
+    expect(original.schemaVersion).toBe(6);
+    expect(original.jobs[0]).toMatchObject({ executionOwnerId: first.snapshot().instanceId, executionDeadlineAt: deadlineAt });
+    expect(original.jobs[1]).not.toHaveProperty('executionOwnerId');
+    expect(first.snapshot().jobs[0]).not.toHaveProperty('executionOwnerId');
+    await first.close(); const next = await f.start(); next.setPaused(false); await settled(next, 'human');
+    expect(next.snapshot().jobs[0]).toMatchObject({ state: 'cancelled', outcome: 'cancelled', reason: 'task-owner-unavailable' });
+    expect(f.state().jobs[0]).toMatchObject({ executionOwnerId: original.jobs[0].executionOwnerId, executionDeadlineAt: deadlineAt, input: null });
+    expect(next.history('mission')?.prompt).toContain('PRIVATE_PROMPT mission');
+    next.deleteHistory('mission');
+    expect(f.state().jobs[0].executionOwnerId).toBe(original.jobs[0].executionOwnerId);
+    expect(f.requests).toHaveLength(1); expect(JSON.stringify(f.requests)).toContain('PRIVATE_PROMPT human');
+    expect(runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts.map(row => row.id)).toEqual(['human']);
+  });
+  it('keeps a child deadline and original veto immutable on duplicate submission', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true);
+    let stopped = false; const deadlineAt = new Date(Date.now() + 60_000).toISOString();
+    supervisor.submit(f.task(), { deadlineAt, isExecutionStopped: () => stopped });
+    supervisor.submit(f.task(), { deadlineAt, isExecutionStopped: () => false });
+    expect(() => supervisor.submit(f.task())).toThrow('execution owner already set');
+    expect(() => supervisor.submit(f.task(), { deadlineAt: new Date(Date.now() + 120_000).toISOString() })).toThrow('execution owner already set');
+    stopped = true; supervisor.setPaused(false);
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    expect(f.requests).toEqual([]);
+  });
+  it('checks the durable deadline before dispatch and refuses expired admission', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true);
+    const deadlineAt = new Date(Date.now() + 100).toISOString();
+    supervisor.submit(f.task(), { deadlineAt });
+    await sleep(120); supervisor.setPaused(false);
+    await vi.waitFor(() => expect(supervisor.snapshot().jobs[0]?.reason).toBe('host-execution-stopped'));
+    expect(() => supervisor.submit(f.task('late'), { deadlineAt })).toThrow('host-execution-stopped');
+    expect(f.requests).toEqual([]);
+  });
+  it('reconciles a proven completed child after restart without dispatching it again', async () => {
+    const f = await fixture(); const first = await f.start();
+    first.submit(f.task(), {}); await settled(first); await first.close();
+    // Model a crash after the runtime receipt, before the console settlement write.
+    const prior = f.state(); prior.jobs[0].state = 'dispatching'; prior.jobs[0].outcome = null;
+    prior.jobs[0].input = f.task(); save(join(f.root, 'resource-console-state.json'), prior);
+    const next = await f.start();
+    expect(next.snapshot().jobs[0]).toMatchObject({ state: 'settled', outcome: 'completed' });
+    expect(next.submit(f.task(), {})).toMatchObject({ state: 'settled', outcome: 'completed' });
+    await sleep(60); expect(f.requests).toHaveLength(1);
+  });
+  it('does not downgrade child ownership when registering projects after restart', async () => {
+    const f = await fixture(); const first = await f.start(); first.setPaused(true); first.submit(f.task(), {}); await first.close();
+    const workspace = join(base, 'other-project'); mkdirSync(workspace, { mode: 0o700 });
+    const next = await f.start({ projects: [{ id: 'other', label: 'Other', workspace }] });
+    expect(f.state()).toMatchObject({ schemaVersion: 6 });
+    expect(next.projects()?.some(row => row.id === 'other')).toBe(true);
+    expect(next.snapshot().jobs[0]?.reason).toBe('task-owner-unavailable');
+  });
+  it.each(['owner', 'deadline', 'orphan-deadline', 'downgrade'] as const)('refuses malformed durable child %s', async kind => {
+    const f = await fixture(); const first = await f.start(); first.setPaused(true);
+    first.submit(f.task(), { deadlineAt: new Date(Date.now() + 60_000).toISOString() }); await first.close();
+    const state = f.state();
+    if (kind === 'owner') state.jobs[0].executionOwnerId = 'forged';
+    if (kind === 'deadline') state.jobs[0].executionDeadlineAt = 'tomorrow';
+    if (kind === 'orphan-deadline') delete state.jobs[0].executionOwnerId;
+    if (kind === 'downgrade') state.schemaVersion = 5;
+    save(join(f.root, 'resource-console-state.json'), state);
+    await expect(f.start()).rejects.toThrow(); expect(f.requests).toEqual([]);
+  });
   it('withholds a stopped child task without stopping unrelated human dispatch', async () => {
     const f = await fixture(); let stopped = false;
     const supervisor = await f.start({ isTaskExecutionStopped: id => id === 'mission' && stopped });

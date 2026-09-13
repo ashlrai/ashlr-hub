@@ -305,7 +305,7 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
         guard();
         proposalTask = { id: task.id, digest: missionHash(task) };
         handle!.submitTask({ ...submission, retainHistory: true, projectId: recipe.projectId },
-          { signal: abort.signal, isExecutionStopped: stopped });
+          { signal: abort.signal, isExecutionStopped: stopped, deadlineAt: config.deadlineAt });
         while (true) {
           const view = await request<ResourceConsoleSnapshot>('/api/resources');
           requireFact(view.supervisor && !view.supervisor.paused && !view.supervisor.closing, 'Mission proposal console unavailable');

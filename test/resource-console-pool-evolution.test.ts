@@ -37,6 +37,15 @@ function source(): ResourceConsoleDurableState {
 }
 
 describe('console pool epochs', () => {
+  it('preserves schema6 owner and deadline records through additive pool evolution', () => {
+    const state = source(); state.schemaVersion = 6; state.originPoolDigest = configHistory[0]!.poolDigest;
+    Object.assign(state.jobs[1]!, { executionOwnerId: '12345678-1234-4123-8123-123456789abc', executionDeadlineAt: at });
+    const before = canonical(state);
+    const next = previewResourceConsolePoolEvolution(state, options)!;
+    expect(next.schemaVersion).toBe(6); expect(next.jobs).toEqual(state.jobs);
+    expect(decodeResourceConsoleState(next, current)).toEqual(next);
+    expect(canonical(state)).toBe(before);
+  });
   it.each([1, 2, 3, 4] as const)('leaves schema%i byte-compatible before explicit evolution', (schemaVersion) => {
     const state: ResourceConsoleDurableState = { schemaVersion, scopeDigest: scope(), paused: true, jobs: [],
       ...(schemaVersion === 4 ? { projects: [{ id: 'default', label: 'Default', workspace, dev: '1', ino: '2' }] } : {}) };

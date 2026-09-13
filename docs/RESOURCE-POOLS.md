@@ -169,10 +169,20 @@ second worker runtime. `submitTask(input, lifetime)` binds the optional child
 signal/veto before the queue can dispatch; the supervisor rechecks it at fresh
 worker dispatch. Retrying an ID cannot replace its retained child stop. Mission
 cancellation also drains its exact task immediately, without pausing human work.
-Child signals/vetoes are process-local. This change does not add durable mission
-attribution to ordinary proposal jobs; unattended console recovery needs that
-additional join before resuming a queued proposal under its original mission
-deadline. Restarting the mission runner still checks its persisted deadline.
+Child signals/vetoes remain process-local, but accepting a child now persists
+its supervisor instance identity and optional original `deadlineAt` in console
+schema6. Mission proposals supply their original mission deadline. The live
+owner checks both wall-clock and captured monotonic limits; retries cannot
+extend the deadline or replace the original veto. On plain console restart,
+an abandoned queued child with no dispatch receipt becomes `cancelled` with
+reason `task-owner-unavailable`. Ordinary human queue replay is unchanged.
+Exact completed receipts still reconcile; reserved or uncertain dispatch stays
+unresolved. Ownership/deadline records survive history deletion, project
+registration and pool evolution. They are not bearer credentials, and browser
+submissions cannot supply them. Schema6 requires upgraded readers; do not
+downgrade or strip its ownership fields. Automatic mission re-enrollment of
+abandoned proposals is not implemented: the mission remains held rather than
+reusing a cancelled task ID. Restarting the runner still checks its persisted deadline.
 Component close is not a durable fleet-wide STOP; do not
 use it as a substitute for global KILL. These in-process APIs do not install an
 always-on service or provide a browser control for starting a standing mission.
