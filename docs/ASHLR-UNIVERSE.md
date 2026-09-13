@@ -2819,6 +2819,12 @@ explicit local authoring operation installs a matching calibrated package.
 Ordinary builds do not invent a baseline or install this package. The measurement
 evaluator remains diagnostic-only.
 
+The public npm archive excludes the locally authored `preparation-score` package.
+It contains machine-specific calibration and a frozen compiler-project source
+snapshot, not a portable default evaluator. The release inventory also rejects
+these files if they appear in a pack report. Keep the verified local package for
+commissioning; a public package build does not publish or erase it.
+
 The score is the integer total of the original fifteen process regions. A full
 v2 report, both during-call qualifications, unchanged runtime/native identities,
 and an unchanged before/after candidate inventory are required. Only the content

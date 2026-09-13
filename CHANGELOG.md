@@ -11,6 +11,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Keep calibrated scoring local
+
+- Excludes the machine-specific preparation scorer and its frozen source snapshot
+  from public npm archives while retaining the installed local evaluator.
+- Rejects scorer files in release pack reports without relaxing file-mode or
+  dependency validation.
+
 ### Engineering preparation transport isolation
 
 - Rejects transport workspaces overlapping any console project, including the

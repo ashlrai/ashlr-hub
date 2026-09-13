@@ -486,10 +486,14 @@ function rootPackageIsPortable(
   packagedFiles: readonly string[],
 ): void {
   const declaredFiles = packageJson['files'];
+  const localScorerRoot = 'dist/core/universe/builtins/preparation-score';
   const allowedFiles = new Set([
     'CHANGELOG.md',
     'bin',
     'dist',
+    // A local calibrated package embeds machine identities and source snapshots.
+    // Excluding this exact root does not permit arbitrary release exclusions.
+    `!${localScorerRoot}/**`,
     'docs/README.md',
     'docs/QUICKSTART.md',
     'docs/DEMO.md',
@@ -529,6 +533,9 @@ function rootPackageIsPortable(
     new Set(declaredFiles).size !== declaredFiles.length ||
     requiredFiles.some((entry) => !declaredFiles.includes(entry))) {
     throw new Error('release package files declaration is not portable');
+  }
+  if (packagedFiles.some(path => path === localScorerRoot || path.startsWith(`${localScorerRoot}/`))) {
+    throw new Error('release package contains a local preparation scorer');
   }
   packageIsPortable(packageJson, [...packagedFiles], 'release package');
 }
