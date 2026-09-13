@@ -44,6 +44,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  */
 export const REAL_IO_TEST_FILES = [
   'test/builtin-activity-pgid-reuse.test.ts', // private activity journals with synthetic identity reuse probes
+  'test/builtin-activity-settlement-witness.test.ts', // private journals and one real owned subprocess
   'test/resource-quota-cleanup-diagnostics.test.ts', // private real collector leases with inert failure witnesses
   'test/resource-quota-native-lifecycle.test.ts', // real inert native protocol, shared quota lease and group settlement
   'test/collector-cleanup-reproduction.test.ts', // inert inherited descendants and actual native helper cleanup

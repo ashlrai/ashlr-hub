@@ -1,7 +1,7 @@
 /** Trusted built-in invocation custody. Never imported from a candidate tree. */
 import * as fs from 'node:fs';
 import { join, isAbsolute, resolve } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { exact, readMessage, publishMessage } from './preparation-verification-protocol.mjs';
 
 // Aggregate invocation custody, including candidate and detached tool groups.
@@ -10,12 +10,24 @@ export const MAX_BUILTIN_ACTIVITIES = 8192;
 const HASH = /^[a-f0-9]{64}$/;
 const fail = () => { throw new Error('BUILTIN_ACTIVITY_UNAVAILABLE'); };
 function owner(value) {
-  if (!exact(value, ['schemaVersion', 'invocationId', 'implementationDigest', 'deadlineAt']) || value.schemaVersion !== 1 ||
+  if (!exact(value, ['schemaVersion', 'invocationId', 'implementationDigest', 'deadlineAt']) || ![1, 2].includes(value.schemaVersion) ||
       typeof value.invocationId !== 'string' || !HASH.test(value.invocationId) ||
       typeof value.implementationDigest !== 'string' || !HASH.test(value.implementationDigest) ||
       typeof value.deadlineAt !== 'string' || !Number.isFinite(Date.parse(value.deadlineAt)) ||
       new Date(value.deadlineAt).toISOString() !== value.deadlineAt) fail();
-  return { schemaVersion: 1, invocationId: value.invocationId, implementationDigest: value.implementationDigest, deadlineAt: value.deadlineAt };
+  return { schemaVersion: value.schemaVersion, invocationId: value.invocationId, implementationDigest: value.implementationDigest, deadlineAt: value.deadlineAt };
+}
+function witnessKey(value, version) {
+  if (version === 1) { if (value !== undefined) fail(); return undefined; }
+  if (typeof value !== 'string' || !HASH.test(value)) fail();
+  return Buffer.from(value, 'hex');
+}
+// Authenticates the complete invocation transcript, not just a caller's claim
+// that a particular numeric PID exited. The secret stays outside the journal.
+function witnessProof(key, messages) {
+  const mac = createHmac('sha256', key).update('ashlr-builtin-settlement-v2\n');
+  for (const name of [...messages.keys()].sort()) mac.update(JSON.stringify([name, messages.get(name)]) + '\n');
+  return mac.digest('hex');
 }
 function ownerDigest(value) {
   return createHash('sha256').update(JSON.stringify(owner(value))).digest('hex');
@@ -44,17 +56,20 @@ export function initializeBuiltinActivity(root, value) {
       ownerDigest(readMessage(join(root, 'owner.json'))) !== ownerDigest(captured)) fail();
 }
 
-export function createBuiltinActivityTracker(root) {
+export function createBuiltinActivityTracker(root, settlementKey) {
   const identity = rootIdentity(root);
   const ownerStat = fs.lstatSync(join(root, 'owner.json'), { bigint: true });
   const capturedOwner = owner(readMessage(join(root, 'owner.json')));
+  const key = witnessKey(settlementKey, capturedOwner.schemaVersion);
   const capturedDigest = ownerDigest(capturedOwner);
   if (!sameFile(ownerStat, fs.lstatSync(join(root, 'owner.json'), { bigint: true })) ||
       JSON.stringify(names(root)) !== JSON.stringify(['owner.json'])) fail();
   let poisoned = false, completed = false;
   const activities = new Map();
+  const registeredPgids = new Map();
+  const messages = new Map([['owner.json', capturedOwner]]);
   const expectedNames = new Set(['owner.json']);
-  function invalid() { poisoned = true; fail(); }
+  function invalid() { poisoned = true; key?.fill(0); fail(); }
   function guard() {
     try {
       if (poisoned || completed || !sameRoot(identity, rootIdentity(root)) ||
@@ -64,7 +79,7 @@ export function createBuiltinActivityTracker(root) {
     } catch { invalid(); }
   }
   function write(name, value) {
-    try { guard(); publishMessage(join(root, name), value); expectedNames.add(name); guard(); }
+    try { guard(); publishMessage(join(root, name), value); expectedNames.add(name); guard(); messages.set(name, value); }
     catch { invalid(); }
   }
   return {
@@ -80,11 +95,19 @@ export function createBuiltinActivityTracker(root) {
         return {
           spawned(pgid) {
             if (activities.get(id) !== 'prepared' || !Number.isSafeInteger(pgid) || pgid < 1 || pgid > 2 ** 31 - 1) invalid();
-            write(`spawned-${id}.json`, { ...base, phase: 'spawned', pgid }); activities.set(id, 'spawned');
+            write(`spawned-${id}.json`, { ...base, phase: 'spawned', pgid }); activities.set(id, 'spawned'); registeredPgids.set(id, pgid);
           },
           settled(settlement) {
             if (!(settlement === 'not-started' && activities.get(id) === 'prepared' ||
                 settlement === 'group-exit-confirmed' && activities.get(id) === 'spawned')) invalid();
+            if (key && settlement === 'group-exit-confirmed') {
+              // Independently witness absence now, while this invocation owns
+              // the lifecycle callback. A later reused number is not this group.
+              let absent = false;
+              try { process.kill(-registeredPgids.get(id), 0); }
+              catch (error) { absent = error?.code === 'ESRCH'; }
+              if (!absent) invalid();
+            }
             write(`settled-${id}.json`, { ...base, phase: 'settled', settlement }); activities.set(id, 'settled');
           },
         };
@@ -92,24 +115,29 @@ export function createBuiltinActivityTracker(root) {
     },
     complete() {
       guard(); if ([...activities.values()].some(state => state !== 'settled')) invalid();
-      write('complete.json', { schemaVersion: 1, ownerDigest: capturedDigest, count: activities.size }); completed = true;
+      write('complete.json', { schemaVersion: capturedOwner.schemaVersion, ownerDigest: capturedDigest, count: activities.size,
+        ...(key ? { settlementProof: witnessProof(key, messages) } : {}) }); completed = true; key?.fill(0);
     },
   };
 }
 
-/** Read-only proof. Signal 0 checks absence; this function never kills or repairs. */
-export function inspectBuiltinActivity(root, expectedOwner) {
+/** Read-only proof. V1 probes current absence; V2 verifies authenticated
+ * settlement-time observations. Neither mode kills, repairs or adopts work. */
+export function inspectBuiltinActivity(root, expectedOwner, settlementKey) {
   try {
     const identity = rootIdentity(root), expectedDigest = ownerDigest(expectedOwner);
+    const key = witnessKey(settlementKey, expectedOwner.schemaVersion);
     const captured = new Map();
+    const messages = new Map();
     function read(name) {
       const path = join(root, name), before = fs.lstatSync(path, { bigint: true }), value = readMessage(path);
       if (value === null || !sameFile(before, fs.lstatSync(path, { bigint: true }))) fail();
-      captured.set(path, before); return value;
+      captured.set(path, before); if (name !== 'complete.json') messages.set(name, value); return value;
     }
     if (ownerDigest(read('owner.json')) !== expectedDigest) fail();
     const complete = read('complete.json');
-    if (!exact(complete, ['schemaVersion', 'ownerDigest', 'count']) || complete.schemaVersion !== 1 || complete.ownerDigest !== expectedDigest ||
+    if (!exact(complete, ['schemaVersion', 'ownerDigest', 'count', ...(key ? ['settlementProof'] : [])]) ||
+        complete.schemaVersion !== expectedOwner.schemaVersion || complete.ownerDigest !== expectedDigest ||
         !Number.isSafeInteger(complete.count) || complete.count < 0 || complete.count > MAX_BUILTIN_ACTIVITIES) fail();
     const expectedNames = ['owner.json', 'complete.json']; const pgids = new Set();
     for (let id = 1; id <= complete.count; id++) {
@@ -128,7 +156,10 @@ export function inspectBuiltinActivity(root, expectedOwner) {
       } else if (settled.settlement !== 'not-started') fail();
     }
     if (JSON.stringify(names(root)) !== JSON.stringify(expectedNames.sort())) fail();
-    for (const pgid of pgids) {
+    if (key) {
+      if (typeof complete.settlementProof !== 'string' || !HASH.test(complete.settlementProof) ||
+        !timingSafeEqual(Buffer.from(complete.settlementProof, 'hex'), Buffer.from(witnessProof(key, messages), 'hex'))) fail();
+    } else for (const pgid of pgids) {
       try { process.kill(-pgid, 0); return false; }
       catch (error) { if (error?.code !== 'ESRCH') return false; }
     }
