@@ -45,6 +45,7 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
 export const REAL_IO_TEST_FILES = [
   'test/builtin-activity-pgid-reuse.test.ts', // private activity journals with synthetic identity reuse probes
   'test/builtin-activity-settlement-witness.test.ts', // private journals and one real owned subprocess
+  'test/universe-builtin-evaluator-activity-enumeration.test.ts', // exact directory-membership checks and deterministic sort-work counters
   'test/resource-quota-cleanup-diagnostics.test.ts', // private real collector leases with inert failure witnesses
   'test/resource-quota-native-lifecycle.test.ts', // real inert native protocol, shared quota lease and group settlement
   'test/collector-cleanup-reproduction.test.ts', // inert inherited descendants and actual native helper cleanup
@@ -54,6 +55,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-mission-diagnostics.test.ts', // real journal and lease cleanup with execution doubles
   'test/resource-engineering-mission-feedback-loop.test.ts', // private mission/receipt journals and inert loopback transport
   'test/resource-engineering-mission-acceptance.test.ts', // two actual mission scopes, local transport, delivery and restart
+  'test/resource-engineering-mission-product-value-acceptance.test.ts', // fixed parser CLI evaluation, real mission scopes and local Git delivery
   'test/resource-engineering-setup-evidence.test.ts', // private Git setup receipts and fresh metadata reconstruction
   'test/universe-seed-batch.test.ts', // real SHA1/SHA256 seed materialization and bounded blob batches
   'test/resource-quota-scopes.test.ts', // scoped quota collection, native fixtures and console IPC
@@ -121,6 +123,9 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-engineering-successor-acceptance.test.ts', // actual proposal-to-successor delivery and accounting
   'test/resource-console-engineering-preparation-acceptance.test.ts', // actual objective HTTP preparation, restart and evaluated delivery
   'test/resource-engineering-outcomes.test.ts', // exact receipt joins against real private resource history and ledger
+  'test/resource-engineering-phase-evidence.test.ts', // private custody journals and observation-only phase joins
+  'test/resource-console-outcomes-async.test.ts', // real loopback outcomes cancellation and responsiveness, inert owner
+  'test/resource-engineering-outcomes-owner.test.ts', // private configuration and project inode drift with mocked proof transport
   'test/resource-engineering-outcomes-review.test.ts', // independent overflow, changed-sample and incomplete-proof regressions
   'test/resource-engineering-supervisor-admission.test.ts', // durable bounded queue admission and restart over private state
   'test/resource-engineering-supervision-state.test.ts', // read-only private supervision state and owner restart identity

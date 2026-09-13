@@ -26,6 +26,7 @@ import type { ResourceConsoleScope, ResourceConsoleTaskInput, ResourceConsoleSna
 import { validateResourceConsoleEngineeringPreparationConfig } from '../resources/console-engineering-preparation.js';
 import { createResourceConsoleReader, withholdResourceConsoleWorkers, withholdResourceConsoleQuotaScopeWorkers } from './resource-console-reads.js';
 import { createReadSessionBoundary, headerValue, requestUrl, safeEqual, sendJson } from './read-session.js';
+import { ReadProjectionError } from './bounded-read-worker.js';
 import { validateUniverseConsoleRoot } from './universe-console-reads.js';
 import { serveStatic } from './static.js';
 import { createResourceEngineeringComponent, type ResourceEngineeringComponent } from '../resources/engineering-component.js';
@@ -591,7 +592,32 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
       const engineeringOutcomes = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})\/outcomes$/.exec(url.pathname);
       if (engineeringOutcomes) {
         if (!engineering) throw new RequestError(403, 'Engineering is not enrolled for this console');
-        sendSnapshot(res, engineering.outcomes(engineeringOutcomes[1]!)); return;
+        const abort = new AbortController();
+        const disconnected = () => { if (!res.writableFinished) abort.abort(); };
+        req.once('aborted', disconnected); res.once('close', disconnected);
+        if (req.aborted || res.destroyed) disconnected();
+        try {
+          const report = await engineering.outcomes(engineeringOutcomes[1]!, { signal: abort.signal });
+          currentEngineering();
+          if (closing) throw new RequestError(503, 'Console is closing');
+          if (!abort.signal.aborted && !res.destroyed) sendSnapshot(res, report);
+        } catch (error) {
+          if (error instanceof ReadProjectionError && !abort.signal.aborted && !res.destroyed) {
+            // Fixed public diagnostics only; the private reader input and its
+            // native stderr must never be exposed as an HTTP error message.
+            const busy = error.code === 'READ_PROJECTION_BUSY';
+            const timeout = error.code === 'READ_PROJECTION_TIMEOUT';
+            const uncertain = error.code === 'READ_PROJECTION_CLEANUP_UNCONFIRMED';
+            sendJson(res, busy ? 429 : timeout ? 504 : 503, {
+              code: busy ? 'OUTCOME_READ_BUSY' : timeout ? 'OUTCOME_READ_TIMEOUT' : uncertain ? 'OUTCOME_READ_CLEANUP_UNCONFIRMED' : 'OUTCOME_READ_UNAVAILABLE',
+              error: busy ? 'An outcome proof read is already in progress.' : timeout ? 'Outcome proof exceeded its read deadline.' :
+                uncertain ? 'Outcome reader cleanup is unconfirmed; further reads are withheld.' : 'Outcome proof is unavailable.',
+            });
+          } else throw error;
+        } finally {
+          req.removeListener('aborted', disconnected); res.removeListener('close', disconnected);
+        }
+        return;
       }
       const engineeringStatus = /^\/api\/resources\/engineering\/([a-z0-9][a-z0-9_-]{0,63})$/.exec(url.pathname);
       if (url.pathname === '/api/resources/engineering' || engineeringStatus) {

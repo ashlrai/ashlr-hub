@@ -1,7 +1,7 @@
 /** Integration of real mission journals, feedback projection and accounted local
  * proposal transport. Delivered campaigns/setup/console adapters are synthetic;
  * this is NOT native evaluator, Git delivery, external model or product acceptance. */
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -37,7 +37,7 @@ import type { EngineeringSetupRequest, EngineeringSetupHost } from '../src/core/
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => { for (const close of cleanup.splice(0).reverse()) await close(); vi.clearAllMocks(); });
-type Mode = 'measured' | 'unknown' | 'stale-queue' | 'tampered-history' | 'changed-receipt' | 'stop' | 'stop-before-publication' | 'restart-recovery';
+type Mode = 'measured' | 'unknown' | 'stale-queue' | 'tampered-history' | 'changed-receipt' | 'stop' | 'stop-before-publication' | 'restart-recovery' | 'exhausted-recovery';
 async function fixture(mode: Mode) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'mission-feedback-loop-')));
   const root = join(base, 'ledger'), missionRoot = join(base, 'mission'), workspace = join(base, 'project');
@@ -74,6 +74,18 @@ async function fixture(mode: Mode) {
   const runtime = save('runtime.json', { schemaVersion: 1, root, workspace: join(base, 'transport'),
     poolPath: save('pool.json', pool), bindingsPath: save('bindings.json', bindings), observationsPath: save('observations.json', observations) });
   const allocation = setResourcePoolAllocation(root, pool, bindings, 75, 0);
+  if (mode === 'exhausted-recovery') {
+    // Actual completed loopback tasks exhaust the existing shared window. These
+    // are unrelated prior tasks, not fabricated campaign or evaluator receipts.
+    for (let index = 1; index <= 2; index++) {
+      const result = await runResourceTask({ root, pool, bindings, observations, task: {
+        schemaVersion: 1, id: `prior-accounted-${index}`, cwd: workspace, mode: 'read-only',
+        allowedWorkerIds: ['fixture'], maxOutputTokens: 256, timeoutMs: 5000,
+        prompt: canonical({ kind: 'engineering-mission-proposal', fixturePriorTask: index }),
+      } });
+      expect(result.receipt?.status).toBe('completed');
+    }
+  }
   const policy = { schemaVersion: 1, id: 'first-queue', registrationScope: 'first-scope', profileId: 'fixed', label: 'Fixed benchmark',
     acceptance: 'Fixed evaluator only; local branch is not product acceptance.', maxEnrollments: 2, maxConcurrent: 1,
     successors: { allowedWorkerIds: ['fixture'], maxOutputTokens: 256, proposalTimeoutMs: 5000, maxSuccessors: 1, pollIntervalMs: 100 } };
@@ -94,7 +106,7 @@ async function fixture(mode: Mode) {
   const scopes = new Map<string, ResourceEngineeringAutonomousSetupOptions>(); let active: ResourceEngineeringAutonomousSetupOptions | undefined;
   let isOpen = false; let task: ResourceTask | undefined; let resultRead = false;
   let proposalWork: Promise<unknown> | undefined;
-  let durableOwner: ResourcePoolSupervisor | undefined; let crashOnce = mode === 'restart-recovery';
+  let durableOwner: ResourcePoolSupervisor | undefined; let crashOnce = mode === 'restart-recovery' || mode === 'exhausted-recovery';
   let queueReads = 0; const drainReads: number[] = [];
   adapters.check.mockImplementation((value: ResourceEngineeringAutonomousSetupOptions) => { const checked = plan(value); scopes.set(checked.paths.profiles, value); return checked; });
   adapters.prepare.mockImplementation(async ({ input: value, predecessor }: EngineeringSetupRequest, host: EngineeringSetupHost) => {
@@ -132,7 +144,7 @@ async function fixture(mode: Mode) {
   });
   adapters.start.mockImplementation(async () => {
     expect(isOpen).toBe(false); isOpen = true;
-    if (mode === 'restart-recovery') {
+    if (mode === 'restart-recovery' || mode === 'exhausted-recovery') {
       durableOwner = await createResourcePoolSupervisor({ root, pool, bindings, workspace, readObservations: () => observations, pollIntervalMs: 20 });
       const owned = durableOwner; cleanup.push(() => owned.close());
     }
@@ -204,11 +216,56 @@ async function fixture(mode: Mode) {
     });
   }
   return { config, prepared, contexts, errors, controller, recipe, policy, allocation, drainReads,
+    ownerSnapshot: () => durableOwner?.snapshot(),
+    capacityStatus: () => resourcePoolStatus(root, pool, bindings, observations),
+    ownerLockPresent: () => existsSync(join(root, '.resource-console.lock')),
     consoleState: () => JSON.parse(readFileSync(join(root, 'resource-console-state.json'), 'utf8')),
     status: () => resourcePoolStatus(root, pool, bindings, []), records: () => readEngineeringMissionRecords(config) };
 }
 
 describe('measured feedback through an accounted proposal into the next mission scope', () => {
+  it('keeps an exhausted shared task window exhausted when a never-dispatched mission proposal is recovered', async () => {
+    const f = await fixture('exhausted-recovery');
+    const before = f.capacityStatus(), contexts = structuredClone(f.contexts), deadlineAt = f.config.deadlineAt;
+    expect(before.attempts).toHaveLength(2); expect(contexts).toHaveLength(2);
+    expect(before.attempts.every(row => row.status === 'completed')).toBe(true);
+    expect(before.plan.candidates).toEqual([]);
+    expect(before.plan.exclusions).toContainEqual(expect.objectContaining({ workerId: 'fixture', reasons: expect.arrayContaining(['operator-task-cap-reached']) }));
+    expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'held', reason: 'shutdown-unresolved', scopesReserved: 1, deadlineAt });
+    const originalRows = f.records(), intent = originalRows.find(row => row.kind === 'proposal')!;
+    const abandoned = f.consoleState().jobs[0];
+    expect(abandoned).toMatchObject({ state: 'queued', executionDeadlineAt: deadlineAt });
+    expect(f.status().attempts).toEqual(before.attempts); expect(f.contexts).toEqual(contexts);
+    expect(f.ownerLockPresent()).toBe(false);
+
+    const stop = new AbortController();
+    const running = runResourceEngineeringMission(f.config, { signal: stop.signal });
+    try {
+      // Unlike the synthetic completed scope above, this admission/recovery
+      // uses the real durable supervisor and real shared-ledger task limit.
+      await vi.waitFor(() => {
+        expect(f.ownerSnapshot()).toMatchObject({ activeCount: 0, queuedCount: 1, error: null });
+        const job = f.ownerSnapshot()!.jobs.find(row => row.id !== abandoned.id);
+        expect(job).toMatchObject({ state: 'queued', reason: 'no-eligible-capacity', workerId: null, outcome: null });
+      }, { timeout: 5000, interval: 20 });
+      const jobs = f.consoleState().jobs;
+      expect(jobs).toHaveLength(2);
+      expect(jobs[0]).toMatchObject({ id: abandoned.id, state: 'cancelled', reason: 'task-owner-unavailable', executionDeadlineAt: deadlineAt });
+      expect(jobs[1]).toMatchObject({ recoveryOf: abandoned.id, state: 'queued', executionDeadlineAt: deadlineAt });
+      expect(f.capacityStatus().plan.exclusions).toContainEqual(expect.objectContaining({ workerId: 'fixture', reasons: expect.arrayContaining(['operator-task-cap-reached']) }));
+      expect(f.contexts).toEqual(contexts); expect(f.status().attempts).toEqual(before.attempts);
+    } finally { stop.abort(); await running; }
+    expect(await running).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt });
+    expect(f.config.deadlineAt).toBe(deadlineAt); expect(f.ownerLockPresent()).toBe(false);
+    expect(f.ownerSnapshot()).toMatchObject({ closing: true, activeCount: 0, queuedCount: 0 });
+    expect(f.records().find(row => row.kind === 'proposal')).toEqual(intent);
+    for (const row of originalRows) expect(f.records().find(current => current.id === row.id)).toEqual(row);
+    expect(f.records().filter(row => row.kind === 'reserved')).toHaveLength(1);
+    expect(f.records().some(row => row.kind === 'result' || row.kind === 'finished')).toBe(false);
+    expect(f.prepared).toHaveLength(1); expect(f.contexts).toEqual(contexts); expect(f.errors).toEqual([]);
+    expect(f.capacityStatus()).toMatchObject({ attempts: before.attempts, allocation: before.allocation,
+      workerAccess: before.workerAccess, quotaScopeAccess: before.quotaScopeAccess });
+  }, 15000);
   it('automatically recovers a crashed proposal owner and joins the replacement result on later restart', async () => {
     const f = await fixture('restart-recovery');
     expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'held', reason: 'shutdown-unresolved' });

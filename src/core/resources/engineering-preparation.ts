@@ -1,9 +1,10 @@
 /** Trusted local registration bridge. No executor, scheduler, key creation or provider calls. */
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { closeSync, constants, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
 import { canonical, digest, executable, inspectPrivateDirectory, pinSeed, MAX_ARTIFACT_BYTES, MAX_ARTIFACT_ENTRIES } from '../universe/artifacts.js';
+import { parseGitBlobBatch } from '../universe/git-blob-batch.js';
 import { assertComparatorUnchanged, initUniverse, initUniverseWithCampaignDeliveryOrigin, manifestRecord, universePath, validateUniverseManifest } from '../universe/store.js';
 import { PREPARATION_PROCESS_SCORE_BUILTIN, resolveBuiltinEvaluator } from '../universe/builtin-evaluator-registry.js';
 import { PREPARATION_TYPECHECK_TARGET } from '../universe/preparation-typecheck-project.js';
@@ -61,6 +62,28 @@ function git(repo: string, args: string[], maxBuffer = 8 * 1024 * 1024): Buffer 
   return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', repo, ...args], {
     env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_OPTIONAL_LOCKS: '0' },
     timeout: 30_000, maxBuffer, stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
+function evaluatorBlobs(repo: string, oids: string[]): Buffer[] {
+  // No launch saving for one file: preserve its exact original command path.
+  const original = () => oids.map(oid => git(repo, ['cat-file', 'blob', oid]));
+  if (oids.length === 1) return original();
+  const maxBuffer = MAX_ARTIFACT_BYTES + 4 * 1024 * 1024;
+  const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-C', repo, 'cat-file', '--batch'], {
+    env: { PATH: process.env.PATH, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null', GIT_OPTIONAL_LOCKS: '0' },
+    timeout: 30_000, maxBuffer, input: `${oids.join('\n')}\n`, stdio: ['pipe', 'pipe', 'pipe'] });
+  // Never retry a killed, timed-out, failed-transport or structurally invalid
+  // result. The candidate broker intentionally has no meaningful child PID.
+  if (result.error !== undefined || result.signal !== null || !Number.isSafeInteger(result.status) ||
+      result.status === null || result.status < 0 || !Buffer.isBuffer(result.stdout) || !Buffer.isBuffer(result.stderr) ||
+      result.stdout.length + result.stderr.length > maxBuffer) fail('UNAVAILABLE', 'Preparation evaluator batch is unavailable');
+  // maxBuffer accounts for stdout AND stderr. A normally exited warning or
+  // command failure restarts the entire old sequence with its original limits.
+  if (result.stderr.length || result.status !== 0) return original();
+  const blobs = parseGitBlobBatch(result.stdout, oids, MAX_ARTIFACT_BYTES);
+  // Malformed frames and oversized payloads refuse; they never trigger retry.
+  if (blobs.some(blob => blob.length > 8 * 1024 * 1024)) fail('INVALID_INPUT', 'Preparation evaluator file exceeds byte bound');
+  return blobs;
 }
 
 interface SuccessorContext {
@@ -200,8 +223,12 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
     }
     if (!protectedFiles.length || protectedFiles.some(file => recipe.generation.files.includes(file)) ||
       recipe.generation.contextFiles.some(file => !entries.has(file))) fail('INVALID_INPUT', 'Fixed evaluator must be tracked and outside mutable paths');
-    evaluatorPins = { executable: command[0], executableDigest: digest(readFileSync(command[0]!)),
-      files: [...new Set(protectedFiles)].sort().map(file => ({ path: file, digest: digest(git(seed.repo, ['cat-file', 'blob', entries.get(file)!])) })) };
+    const evaluatorFiles = [...new Set(protectedFiles)].sort();
+    const executableDigest = digest(readFileSync(command[0]!));
+    // Keep path ordering and duplicate OIDs; no capture or source fence is reused.
+    const blobs = evaluatorBlobs(seed.repo, evaluatorFiles.map(file => entries.get(file)!));
+    evaluatorPins = { executable: command[0], executableDigest,
+      files: evaluatorFiles.map((file, index) => ({ path: file, digest: digest(blobs[index]!) })) };
   }
   const runtimeCheck = checkResourceGenerationRuntime({ resourceRuntime: options.resourceRuntime, expectedRuntimeDigest: runtimeDigest });
   if (runtimeCheck.status !== 'valid') fail('UNAVAILABLE', 'Preparation resource runtime is invalid');

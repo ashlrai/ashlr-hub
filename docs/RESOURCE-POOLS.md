@@ -1073,11 +1073,68 @@ or changing evidence yields an unavailable/degraded report; moved delivery
 branches lose their verified-delivery count. **Evidence coverage complete**
 describes the sampled evidence, not whether a campaign has finished.
 
+Outcome proof runs in a fixed, supervised local subprocess so artifact and Git
+verification do not block the console's HTTP event loop. Full enrollment pins
+are checked before and after the proof in that subprocess, and the owner checks
+the live project and accounting scope before publishing it. The reader allows
+one active request per engineering owner, with no pending queue or result cache.
+Its 60-second total budget reserves time for native process-group cleanup.
+Disconnecting the client cancels that read; closing engineering aborts and drains
+it. A normal process exit alone is not accepted as proof that Git children exited.
+
+Clients should handle these fixed HTTP outcomes without immediately retrying:
+
+- `429 OUTCOME_READ_BUSY`: another proof read is still active. Wait for it to
+  settle before requesting a new sample.
+- `504 OUTCOME_READ_TIMEOUT`: proof exceeded its deadline. The console remains
+  usable, but the request supplies no verified report.
+- `503 OUTCOME_READ_CLEANUP_UNCONFIRMED`: native cleanup could not be confirmed.
+  Further reads from that reader are withheld and engineering close fails rather
+  than claiming a clean shutdown. Investigate the local process state before
+  replacing the runtime; retrying does not clear this condition.
+- `503 OUTCOME_READ_UNAVAILABLE`: no acceptable report was produced. Do not
+  interpret unavailable evidence as a zero outcome or execution success.
+
+The browser's shared read client discards server error prose. For either 503 it
+directs you to local console diagnostics and conditionally warns that retrying
+cannot clear unconfirmed cleanup; it does not infer a cleanup verdict from the
+HTTP status alone. A later manual read can recover temporary unavailability, but
+a reader with unconfirmed cleanup needs investigation, not repeated reads.
+
+These changes isolate proof latency; they do not reduce its filesystem work or
+guarantee that a large campaign fits the deadline. Client deadlines shorter than
+the server budget can cancel otherwise-progressing reads. Keep read retries
+bounded and distinct from campaign execution or commissioning acceptance.
+
 This is cumulative campaign attribution, not costs isolated to one graph
 invocation. Raw worker receipts remain `verifiedAccepted: false`; the existing
 resource performance report remains `quality: 'unmeasured'`. This separate
 fixed-evaluator/local-branch report creates neither production acceptance nor
 automatic routing, account allocation, execution, repair or promotion authority.
+
+#### Verify the installed outcome reader
+
+For maintainers, the preparation acceptance suite exercises both the compiled
+distribution and an actual npm tarball unpacked outside the checkout. From the
+repository root on macOS with Node 24, installed development dependencies and
+an already-built `dist`, run:
+
+```sh
+npx --no-install vitest run test/resource-console-engineering-preparation-acceptance.test.ts -t 'reads a delivered rich outcome' --no-file-parallelism
+```
+
+The selected cases create private Git and loopback-worker fixtures, not provider
+tasks. They compare the native helper's rich report with the source console,
+assert unchanged accounting and execution counts, and check that packaged
+dependencies resolve without checkout source or development dependencies.
+They also close each built reader while a test-owned Git substitute is blocked,
+requiring cancellation and confirmed helper/child/process-group exit before
+fixture cleanup. This is direct reader-close coverage; the separate source
+console case exercises HTTP disconnect cancellation.
+Unselected cases are not passing evidence. This check neither rebuilds the
+runtime nor replaces evaluator qualification, the full local release gate or
+live commissioning. Preserve an active qualification's source and build pins
+instead of rebuilding underneath it.
 
 ### Automatic engineering supervision
 

@@ -2,9 +2,12 @@
 import { execFileSync } from 'node:child_process';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { runTrustedNpmCli } from '../scripts/build-release-dependency-inventory.mjs';
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { resourcePoolStatus, setResourcePoolAllocation, setResourceWorkerAccess } from '../src/core/resources/pool-runtime.js';
@@ -12,6 +15,8 @@ import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervi
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
 import type { ResourceEngineeringOutcomes } from '../src/core/resources/engineering-outcomes-types.js';
+import type { ResourceEngineeringOutcomesReader } from '../src/core/resources/engineering-outcomes-reader.js';
+import type { ResourceConsoleEngineeringCatalog } from '../src/core/resources/console-engineering.js';
 import { resourceEngineeringPreparationRegistrationRoot } from '../src/core/resources/engineering-preparation-registry.js';
 import { startResourceConsoleServer, type ResourceConsoleServerHandle } from '../src/core/web/resource-console-server.js';
 import { canonical, digest } from '../src/core/universe/artifacts.js';
@@ -67,8 +72,10 @@ console.log(JSON.stringify({passed:value===1,score:value===1?1:0,metrics:{value}
     });
   });
   await new Promise<void>(resolve => worker.listen(0, '127.0.0.1', resolve));
+  let retainForUncertainCleanup = false;
   cleanups.push(async () => {
     worker.closeAllConnections(); await new Promise<void>(resolve => worker.close(() => resolve()));
+    if (retainForUncertainCleanup) return;
     const writable = (file: string): void => { const stat = lstatSync(file); if (!stat.isDirectory() || stat.isSymbolicLink()) return;
       chmodSync(file, 0o700); for (const child of readdirSync(file)) writable(join(file, child)); };
     writable(base); rmSync(base, { recursive: true, force: true });
@@ -104,6 +111,7 @@ console.log(JSON.stringify({passed:value===1,score:value===1?1:0,metrics:{value}
   vi.spyOn(deliveryGit, 'deliveryGit').mockImplementation((...args) => { const api = originalGit(...args);
     return { ...api, createRef: async (...createArgs) => { publications++; await api.createRef(...createArgs); } }; });
   return { base, root, repo, revision, outputRoot, files, runtime, recipe, requests, protocolErrors, evaluations, allocation, workerAccess,
+    retainForUncertainCleanup: () => { retainForUncertainCleanup = true; },
     publications: () => publications, ledger: () => resourcePoolStatus(root, pool, bindings, observations) };
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -136,6 +144,114 @@ async function configured(taskLimits?: { maxTasksPerWindow: number; taskWindowMs
 async function jsonResponse<T>(response: Response, status = 200): Promise<T> {
   const value = await response.json(); expect(response.status, JSON.stringify(value)).toBe(status);
   expect(response.headers.get('cache-control')).toContain('no-store'); return value as T;
+}
+
+function unpackRuntimeTarball(): URL {
+  // A real offline pack with lifecycle scripts disabled: never rebuild frozen
+  // dist, install dependencies, or resolve the extracted runtime through source.
+  const scratch = realpathSync(mkdtempSync(join(tmpdir(), 'outcomes-npm-artifact-')));
+  cleanups.push(async () => { rmSync(scratch, { recursive: true, force: true }); });
+  const source = fileURLToPath(new URL('..', import.meta.url));
+  expect(scratch.startsWith(source)).toBe(false);
+  const packed = runTrustedNpmCli(['pack', '--ignore-scripts', '--offline', '--json', '--pack-destination', scratch],
+    { cwd: source, encoding: 'utf8', timeout: 120_000, maxBuffer: 16 * 1024 * 1024 });
+  expect(packed.status, packed.stderr).toBe(0);
+  const rows = JSON.parse(packed.stdout) as Array<{ filename: string; files: Array<{ path: string }> }>;
+  expect(rows).toHaveLength(1); expect(rows[0]!.filename).toMatch(/^[A-Za-z0-9._-]+\.tgz$/);
+  const archive = join(scratch, rows[0]!.filename);
+  const tarOptions = { encoding: 'utf8' as const, timeout: 30_000, maxBuffer: 16 * 1024 * 1024,
+    env: { PATH: process.env.PATH, TAR_OPTIONS: '' } };
+  const entries = execFileSync('/usr/bin/tar', ['-tzf', archive], tarOptions).trim().split('\n').sort();
+  expect(entries.every(entry => entry.startsWith('package/') && !entry.split('/').includes('..'))).toBe(true);
+  expect(entries.some(entry => entry.startsWith('package/src/') || entry.startsWith('package/dist/core/universe/builtins/preparation-score/'))).toBe(false);
+  execFileSync('/usr/bin/tar', ['-xzf', archive, '-C', scratch], tarOptions);
+  const installed = join(scratch, 'package');
+  // Neither this extraction nor any ancestor can supply a worktree/dev fallback.
+  for (let ancestor = scratch; ; ancestor = dirname(ancestor)) {
+    expect(existsSync(join(ancestor, 'node_modules'))).toBe(false);
+    if (dirname(ancestor) === ancestor) break;
+  }
+  const manifest = JSON.parse(readFileSync(join(installed, 'package.json'), 'utf8')) as {
+    dependencies: Record<string, string>; devDependencies: Record<string, string>; bundledDependencies: string[];
+  };
+  expect(Object.keys(manifest.dependencies).sort()).toEqual([...manifest.bundledDependencies].sort());
+  for (const name of Object.keys(manifest.devDependencies)) expect(existsSync(join(installed, 'node_modules', name))).toBe(false);
+  expect(existsSync(join(installed, 'src'))).toBe(false);
+  const requireInstalled = createRequire(join(installed, 'package.json'));
+  for (const name of ['@modelcontextprotocol/sdk/server/index.js', 'marked', 'tar']) {
+    expect(realpathSync(requireInstalled.resolve(name)).startsWith(`${installed}${sep}node_modules${sep}`)).toBe(true);
+  }
+  const evidence = { schemaVersion: 1, tarballSha256: digest(readFileSync(archive)), entryCount: entries.length,
+    inventorySha256: digest(canonical(entries)), sourceAbsent: true, devDependenciesAbsent: true, bundledResolutionContained: true };
+  // The test log retains compact package identity evidence; temporary bytes are
+  // removed by fixture cleanup, not published or installed into the host.
+  process.stderr.write(`outcomes npm artifact evidence ${JSON.stringify(evidence)}\n`);
+  return pathToFileURL(`${installed}${sep}`);
+}
+
+type NativeGitMarker = { pid: number; ppid: number; pgid: number };
+function simulatedStuckGit(f: Fixture) {
+  const bin = join(f.base, 'simulated-git-bin'), marker = join(f.base, 'simulated-git-started.json');
+  const terminated = join(f.base, 'simulated-git-term'), expired = join(f.base, 'simulated-git-expired');
+  mkdirSync(bin, { mode: 0o700 });
+  // This is not Git and never delegates to Git. INT/TERM are recorded but
+  // ignored; owned runner escalation must settle it before the finite fallback.
+  writeFileSync(join(bin, 'git'), `#!${process.execPath}\n` +
+    `const fs=require('node:fs'),cp=require('node:child_process');\n` +
+    `process.on('SIGTERM',()=>fs.writeFileSync(${JSON.stringify(terminated)},'SIGTERM',{mode:0o600}));\n` +
+    `process.on('SIGINT',()=>fs.writeFileSync(${JSON.stringify(terminated)},'SIGINT',{mode:0o600}));\n` +
+    `const pgid=Number(cp.execFileSync('/bin/ps',['-o','pgid=','-p',String(process.pid)],{encoding:'utf8'}).trim());\n` +
+    `fs.writeFileSync(${JSON.stringify(marker)},JSON.stringify({pid:process.pid,ppid:process.ppid,pgid}),{flag:'wx',mode:0o600});\n` +
+    `setTimeout(()=>{fs.writeFileSync(${JSON.stringify(expired)},'expired',{mode:0o600});process.exit(73)},15000);\n` +
+    `setInterval(()=>{},1000);\n`, { mode: 0o700, flag: 'wx' });
+  return { bin, marker, terminated, expired };
+}
+function nativeGitGroupGone(observed: NativeGitMarker): boolean {
+  return [observed.pid, observed.ppid, -observed.pgid].every(pid => {
+    try { process.kill(pid, 0); return false; }
+    catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+  });
+}
+async function closePackagedReaderInsideStuckGit(f: Fixture, reader: ResourceEngineeringOutcomesReader,
+  input: Parameters<ResourceEngineeringOutcomesReader['read']>[0], options: Parameters<ResourceEngineeringOutcomesReader['read']>[1]) {
+  const blocker = simulatedStuckGit(f), priorPath = process.env.PATH;
+  let observed: NativeGitMarker | undefined;
+  let response: Promise<{ completed: true } | { code: unknown }> | undefined;
+  let operationFailure: { error: unknown } | undefined;
+  let cleanupFailure: { error: unknown } | undefined;
+  try {
+    process.env.PATH = `${blocker.bin}:${priorPath ?? '/usr/bin:/bin'}`;
+    response = reader.read(input, options).then(() => ({ completed: true as const }), error => ({ code: error?.code }));
+    await vi.waitFor(() => {
+      expect(existsSync(blocker.marker)).toBe(true);
+      observed = JSON.parse(readFileSync(blocker.marker, 'utf8')) as NativeGitMarker;
+      expect(observed).toMatchObject({ pid: expect.any(Number), ppid: expect.any(Number), pgid: expect.any(Number) });
+    }, { timeout: 10000, interval: 20 });
+    expect(observed!.ppid).not.toBe(process.pid); expect(observed!.pgid).toBe(observed!.ppid);
+    expect(observed!.pid).not.toBe(observed!.ppid);
+    // Direct close is the only cancellation trigger: no abort-controller or
+    // mocked runner cleanup can make this compiled/native settlement pass.
+    await reader.close();
+    expect(await response).toEqual({ code: 'READ_PROJECTION_CANCELLED' });
+    expect(readFileSync(blocker.terminated, 'utf8')).toBe('SIGINT');
+    expect(existsSync(blocker.expired)).toBe(false);
+    expect(nativeGitGroupGone(observed!)).toBe(true);
+  } catch (error) {
+    operationFailure = { error };
+  } finally {
+    if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
+  }
+  try { await reader.close(); await response; }
+  catch (error) { f.retainForUncertainCleanup(); cleanupFailure = { error }; }
+  if (observed && !nativeGitGroupGone(observed)) {
+    f.retainForUncertainCleanup();
+    cleanupFailure ??= { error: new Error('Native fixture group settlement was not confirmed') };
+  }
+  // Preserve both failures when cleanup also fails; never replace the original
+  // assertion failure through control flow inside a finally block.
+  if (operationFailure && cleanupFailure) throw new AggregateError([operationFailure.error, cleanupFailure.error], 'Packaged read and native cleanup failed');
+  if (operationFailure) throw operationFailure.error;
+  if (cleanupFailure) throw cleanupFailure.error;
 }
 
 describe.runIf(process.platform === 'darwin')('same-console objective preparation and explicit engineering execution', () => {
@@ -210,6 +326,117 @@ describe.runIf(process.platform === 'darwin')('same-console objective preparatio
     expect(existsSync(resourceEngineeringPreparationRegistrationRoot(f.root))).toBe(false);
     expect(git(f.repo, 'rev-parse', 'HEAD')).toBe(f.revision); expect(git(f.repo, 'status', '--porcelain=v1')).toBe('');
   }, 150_000);
+
+  it.each(['compiled dist', 'unpacked npm tarball'] as const)('reads a delivered rich outcome through the %s helper without replaying work', async (runtime) => {
+    const runtimeRoot = runtime === 'compiled dist' ? new URL('..', import.meta.url) : unpackRuntimeTarball();
+    const f = await configured(); const server = await start(f); const input = objective('compiled-outcomes');
+    const plan = await jsonResponse<ResourceConsoleEngineeringObjectivePlan>(await api(server, 'engineering/prepare/check', input));
+    const prepared = await jsonResponse<ResourceConsoleEngineeringObjectivePrepared>(await api(server, 'engineering/prepare',
+      { ...input, expectedPlanDigest: plan.planDigest }));
+    expect((await api(server, 'engineering/start', { enrollmentId: input.id,
+      expectedEnrollmentDigest: prepared.enrollment.enrollmentDigest })).status).toBe(202);
+    await vi.waitFor(async () => {
+      expect(await jsonResponse(await api(server, `engineering/${input.id}`, undefined, server.readToken))).toMatchObject({ state: 'completed' });
+    }, { timeout: 45000, interval: 100 });
+    const sourceReport = await jsonResponse<ResourceEngineeringOutcomes>(await api(server, `engineering/${input.id}/outcomes`, undefined, server.readToken));
+    expect(sourceReport.campaigns[0]!.stages.verifiedLocalDeliveries).toBe(1);
+    expect(git(f.repo, 'show', `codex/${input.id}:value.json`)).toBe('1');
+    await server.close();
+    const catalog = JSON.parse(readFileSync(join(f.outputRoot, input.id, 'engineering.json'), 'utf8')) as ResourceConsoleEngineeringCatalog;
+    const enrolled = catalog.enrollments.find(row => row.id === prepared.enrollment.id)!;
+    expect(enrolled).toBeDefined();
+    // Import the built .js modules explicitly. The compiled reader selects its
+    // sibling .js child, not the source reader's tsx bootstrap. Never build here:
+    // missing artifacts fail this packaging gate rather than silently reroute.
+    const readerUrl = new URL('dist/core/resources/engineering-outcomes-reader.js', runtimeRoot);
+    const helperUrl = new URL('dist/core/resources/engineering-outcomes-read-process.js', runtimeRoot);
+    const factoryUrl = new URL('dist/core/universe/firm-engineering-control-handler.js', runtimeRoot);
+    expect(existsSync(readerUrl)).toBe(true); expect(existsSync(helperUrl)).toBe(true); expect(existsSync(factoryUrl)).toBe(true);
+    const { createResourceEngineeringOutcomesReader } = await import(readerUrl.href) as typeof import('../src/core/resources/engineering-outcomes-reader.js');
+    const { createFirmEngineeringControlHandler } = await import(factoryUrl.href) as typeof import('../src/core/universe/firm-engineering-control-handler.js');
+    const expectedNodeInput = createFirmEngineeringControlHandler(enrolled.host).nodeInput;
+    const reader = createResourceEngineeringOutcomesReader();
+    const before = inventory(f.base); const attempts = f.ledger().attempts;
+    const requests = f.requests.length, evaluations = f.evaluations.mock.calls.length, publications = f.publications();
+    try {
+      const report = await reader.read({ enrollment: prepared.enrollment, host: enrolled.host,
+        root: f.root, poolFile: f.files.poolFile, bindingsFile: f.files.bindingsFile }, { expectedNodeInput });
+      expect(report).toMatchObject({ sourceState: 'healthy', complete: true, authority: 'observation-only',
+        productionAccepted: null, routingChanged: false, usage: { attempts: 1, totalTokens: 30, complete: true },
+        timing: { measuredAttempts: 1, totalDurationMs: expect.any(Number), complete: true }, campaigns: [{
+          campaignId: input.id, seed: { status: 'measured', score: 0, passed: false },
+          stages: { evaluated: 1, passed: 1, selected: 1, verifiedLocalDeliveries: 1 },
+          niches: [{ score: 1, deltaFromSeed: 1 }], workers: [{ workerId: 'repair', passed: 1 }],
+        }] });
+      expect({ ...report, sampledAt: sourceReport.sampledAt }).toEqual(sourceReport);
+      expect(JSON.stringify(report)).not.toContain(f.base);
+    } finally { await reader.close(); }
+    expect(inventory(f.base)).toEqual(before); expect(f.ledger().attempts).toEqual(attempts);
+    expect(f.requests).toHaveLength(requests); expect(f.evaluations).toHaveBeenCalledTimes(evaluations);
+    expect(f.publications()).toBe(publications); expect(f.protocolErrors).toEqual([]);
+    expect(git(f.repo, 'show', `codex/${input.id}:value.json`)).toBe('1');
+    await closePackagedReaderInsideStuckGit(f, createResourceEngineeringOutcomesReader(), {
+      enrollment: prepared.enrollment, host: enrolled.host, root: f.root,
+      poolFile: f.files.poolFile, bindingsFile: f.files.bindingsFile,
+    }, { expectedNodeInput });
+    expect(f.ledger().attempts).toEqual(attempts); expect(f.requests).toHaveLength(requests);
+    expect(f.evaluations).toHaveBeenCalledTimes(evaluations); expect(f.publications()).toBe(publications);
+    expect(git(f.repo, 'show', `codex/${input.id}:value.json`)).toBe('1');
+  }, 180000);
+
+  it('aborts a real outcome reader inside simulated stuck Git and settles its helper and blocker group', async () => {
+    const f = await configured(); const server = await start(f); const input = objective('stuck-git-read');
+    const plan = await jsonResponse<ResourceConsoleEngineeringObjectivePlan>(await api(server, 'engineering/prepare/check', input));
+    const prepared = await jsonResponse<ResourceConsoleEngineeringObjectivePrepared>(await api(server, 'engineering/prepare',
+      { ...input, expectedPlanDigest: plan.planDigest }));
+    expect((await api(server, 'engineering/start', { enrollmentId: input.id,
+      expectedEnrollmentDigest: prepared.enrollment.enrollmentDigest })).status).toBe(202);
+    await vi.waitFor(async () => {
+      expect(await jsonResponse(await api(server, `engineering/${input.id}`, undefined, server.readToken))).toMatchObject({ state: 'completed' });
+    }, { timeout: 45000, interval: 100 });
+    expect(git(f.repo, 'show', `codex/${input.id}:value.json`)).toBe('1');
+    const proven = await jsonResponse<ResourceEngineeringOutcomes>(await api(server, `engineering/${input.id}/outcomes`, undefined, server.readToken));
+    expect(proven.campaigns[0]!.stages.verifiedLocalDeliveries).toBe(1);
+    const attempts = f.ledger().attempts; const requests = f.requests.length; const evaluations = f.evaluations.mock.calls.length;
+    const { bin, marker, terminated, expired } = simulatedStuckGit(f);
+    const priorPath = process.env.PATH; const abort = new AbortController();
+    let observed: { pid: number; ppid: number; pgid: number } | undefined;
+    let response: Promise<{ status: number } | { aborted: true }> | undefined;
+    try {
+      process.env.PATH = `${bin}:${priorPath ?? '/usr/bin:/bin'}`;
+      response = fetch(`${server.url}/api/resources/engineering/${input.id}/outcomes`, {
+        headers: { 'X-Ashlr-Token': server.readToken }, signal: abort.signal,
+      }).then(async value => { await value.arrayBuffer(); return { status: value.status }; }, error => {
+        if (error?.name !== 'AbortError') throw error; return { aborted: true as const };
+      });
+      await vi.waitFor(() => {
+        expect(existsSync(marker)).toBe(true);
+        observed = JSON.parse(readFileSync(marker, 'utf8')) as typeof observed;
+        expect(observed).toMatchObject({ pid: expect.any(Number), ppid: expect.any(Number), pgid: expect.any(Number) });
+      }, { timeout: 10000, interval: 20 });
+      expect(observed!.ppid).not.toBe(process.pid); expect(observed!.pgid).toBe(observed!.ppid);
+      expect(observed!.pid).not.toBe(observed!.ppid);
+      const health = await fetch(`${server.url}/health`, { signal: AbortSignal.timeout(1500) });
+      expect(health.status).toBe(200); expect(await health.json()).toEqual({ ok: true });
+      abort.abort(); expect(await response).toEqual({ aborted: true });
+      // Closing also waits for the same reader's native cleanup promise. The
+      // blocker ignores INT/TERM, so settlement requires runner escalation.
+      await server.close();
+      expect(existsSync(terminated)).toBe(true); expect(existsSync(expired)).toBe(false);
+      expect(readFileSync(terminated, 'utf8')).toBe('SIGINT'); // Native cancellation starts with INT; timeout starts with TERM.
+      for (const pid of [observed!.pid, observed!.ppid, -observed!.pgid]) {
+        let absent = false;
+        try { process.kill(pid, 0); } catch (error) { absent = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+        expect(absent).toBe(true);
+      }
+    } finally {
+      if (priorPath === undefined) delete process.env.PATH; else process.env.PATH = priorPath;
+      abort.abort(); await response?.catch(() => {}); await server.close();
+    }
+    expect(f.requests).toHaveLength(requests); expect(f.evaluations).toHaveBeenCalledTimes(evaluations);
+    expect(f.ledger().attempts).toEqual(attempts); expect(f.protocolErrors).toEqual([]);
+    expect(git(f.repo, 'show', `codex/${input.id}:value.json`)).toBe('1');
+  }, 75000);
 
   it('checks without effects, registers without execution, runs only on explicit request, and reloads the durable enrollment without replay', async () => {
     const f = await configured(); const server = await start(f); const input = objective();

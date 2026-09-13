@@ -5,6 +5,7 @@ import type { ResourceEngineeringOutcomes as Outcomes } from '../../../core/reso
 import { EngineeringOutcomes } from './EngineeringOutcomes.js';
 import { WorkspaceEngineering } from './WorkspaceEngineering.js';
 import { engineeringEnrollment, engineeringJob, engineeringReadiness } from './engineering-fixture.test-support.js';
+import { phaseFixture } from './engineering-phase-fixture.test-support.js';
 import { markCheckComplete } from '../../data/auth-store.js';
 const enrollment = engineeringEnrollment();
 const usage = () => ({ attempts: 1, joinedAttempts: 1, reportedAttempts: 1, unknownAttempts: 0, recordedInputTokens: 20, recordedOutputTokens: 10, totalTokens: 30, complete: true });
@@ -79,6 +80,91 @@ describe('on-demand engineering outcomes', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Refresh outcome evidence' })); await screen.findByRole('alert');
     expect(screen.queryByText('run-1')).not.toBeInTheDocument(); expect(screen.queryByText(/private\/token/)).not.toBeInTheDocument();
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it.each([429, 504])('shows a fixed actionable read message for HTTP %s without automatic retry', async status => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ error: '/private/token' }), { status }));
+    render(<EngineeringOutcomes enrollment={enrollment} available />); read();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(status === 429 ? 'proof read is in progress' : 'proof exceeded its read deadline');
+    expect(alert).not.toHaveTextContent('/private/token');
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(screen.getByRole('button', { name: 'Read outcome evidence' })).toBeEnabled();
+  });
+  it.each([
+    { status: 429, code: 'OUTCOME_READ_BUSY', message: 'Another outcome proof read is in progress.' },
+    { status: 504, code: 'OUTCOME_READ_TIMEOUT', message: 'Outcome proof exceeded its read deadline.' },
+    { status: 503, code: 'OUTCOME_READ_UNAVAILABLE', message: 'Outcome reader is unavailable. Check the local console diagnostics.' },
+  ])('recovers only on operator request after a $status refresh, without preserving stale phase success', async ({ status, code, message }) => {
+    value.campaigns[0]!.phaseEvidence = phaseFixture();
+    const view = render(<EngineeringOutcomes enrollment={enrollment} available />);
+    read(); await screen.findByText('run-1');
+    fireEvent.click(screen.getByText('Generation 1'));
+    expect(screen.getByText('Evaluator process group settled')).toBeVisible();
+    let settle!: (response: Response) => void;
+    vi.mocked(fetch).mockImplementationOnce(() => new Promise<Response>(resolve => { settle = resolve; }));
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh outcome evidence' }));
+    const pending = screen.getByRole('button', { name: 'Reading outcome evidence…' });
+    expect(pending).toBeDisabled(); expect(screen.getByRole('status')).toHaveTextContent('Reading campaign and local delivery evidence');
+    fireEvent.click(pending); expect(fetch).toHaveBeenCalledTimes(2);
+    // Local disclosure controls still work while the asynchronous proof is pending.
+    fireEvent.click(screen.getByText('Campaign and worker attribution'));
+    expect(screen.getByText('local-fixture')).toBeVisible();
+    await act(async () => settle(new Response(JSON.stringify({ code, error: '/private/token: native cleanup details' }), { status })));
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(message); expect(alert).toHaveTextContent('No work was started.');
+    expect(alert).not.toHaveTextContent('/private/token');
+    expect(screen.queryByText('run-1')).not.toBeInTheDocument();
+    expect(screen.queryByText('Evaluator process group settled')).not.toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'integer-campaign evaluation stages' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    view.rerender(<EngineeringOutcomes enrollment={{ ...enrollment }} available />);
+    expect(screen.getByRole('alert')).toHaveTextContent(message);
+    expect(fetch).toHaveBeenCalledTimes(2); expect(screen.getByRole('button', { name: 'Read outcome evidence' })).toBeEnabled();
+
+    value = fixture(); value.campaigns[0]!.niches[0]!.runId = 'recovered-run';
+    value.campaigns[0]!.phaseEvidence = { ...phaseFixture(), sourceState: 'unavailable', reason: 'phase-evidence-changed', seed: null, runs: [] };
+    read(); await screen.findByText('recovered-run');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByText(/changed during this read/)).toBeInTheDocument();
+    expect(screen.queryByText('Evaluator process group settled')).not.toBeInTheDocument();
+    expect(screen.getAllByText('30 reported tokens')).toHaveLength(3);
+    expect(screen.getByText(/Production acceptance is unmeasured/)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(vi.mocked(fetch).mock.calls.every(([path, options]) => String(path).endsWith('/outcomes') && options?.method === 'GET')).toBe(true);
+  });
+  it('aborts a disconnected read and ignores its late timeout after an explicit recovery succeeds', async () => {
+    let settleOld!: (response: Response) => void;
+    vi.mocked(fetch).mockImplementationOnce(() => new Promise<Response>(resolve => { settleOld = resolve; }));
+    const view = render(<EngineeringOutcomes enrollment={enrollment} available />); read();
+    const abandonedSignal = vi.mocked(fetch).mock.calls[0]![1]!.signal!;
+    expect(abandonedSignal.aborted).toBe(false);
+    view.rerender(<EngineeringOutcomes enrollment={enrollment} available={false} />);
+    expect(abandonedSignal.aborted).toBe(true);
+    expect(screen.getByRole('button', { name: 'Read outcome evidence' })).toBeDisabled();
+    view.rerender(<EngineeringOutcomes enrollment={enrollment} available />);
+    expect(fetch).toHaveBeenCalledOnce(); expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    value.campaigns[0]!.niches[0]!.runId = 'reconnected-run';
+    read(); await screen.findByText('reconnected-run');
+    await act(async () => settleOld(new Response(JSON.stringify({ error: '/private/stale-timeout' }), { status: 504 })));
+    expect(screen.getByText('reconnected-run')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Refresh outcome evidence' })).toBeEnabled();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it('keeps cleanup uncertainty visible when another operator read is also refused', async () => {
+    vi.mocked(fetch).mockImplementation(async () => new Response(JSON.stringify({
+      code: 'OUTCOME_READ_CLEANUP_UNCONFIRMED', error: '/private/native/error',
+    }), { status: 503 }));
+    render(<EngineeringOutcomes enrollment={enrollment} available />);
+    read();
+    expect(await screen.findByRole('alert')).toHaveTextContent('If cleanup is unconfirmed');
+    expect(fetch).toHaveBeenCalledOnce();
+    read();
+    expect(await screen.findByRole('alert')).toHaveTextContent('retrying cannot clear it');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('/private/');
+    expect(screen.queryByText('run-1')).not.toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(vi.mocked(fetch).mock.calls.every(([, options]) => options?.method === 'GET')).toBe(true);
   });
   it.each(['enrollment', 'project', 'session', 'connection'])('clears evidence when %s changes, without a new read', async kind => {
     const view = render(<EngineeringOutcomes enrollment={enrollment} available />); read(); await screen.findByText('run-1');

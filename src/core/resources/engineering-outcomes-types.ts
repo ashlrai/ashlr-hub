@@ -1,4 +1,19 @@
 /** Bounded observations, not production acceptance, causal credit or routing authority. */
+export interface ResourceEngineeringPhaseEvidence {
+  schemaVersion: 1;
+  scope: 'recorded-execution-phases';
+  liveness: 'not-attested';
+  sourceState: 'available' | 'unavailable';
+  reason: null | 'phase-evidence-unavailable' | 'phase-evidence-changed' | 'phase-evidence-bounds-exceeded';
+  seed: null | { state: 'unmeasured' | 'intent-recorded' | 'result-recorded'; startedAt: string | null; finishedAt: string | null };
+  runs: Array<{ runId: string; generation: number; state: 'not-recorded' | 'running' | 'completed' | 'interrupted' | 'failed';
+    workers: Array<{ variantId: string; taskId: string;
+      state: 'not-recorded' | 'unverified' | 'reserved' | 'completed' | 'failed' | 'timed-out' | 'cancelled' | 'uncertain';
+      startedAt: string | null; finishedAt: string | null }>;
+    evaluators: Array<{ trialId: string; variantId: string | null;
+      state: 'intent-recorded' | 'not-started' | 'group-exit-confirmed'; startedAt: string; finishedAt: string | null }> }>;
+}
+
 export interface ResourceEngineeringOutcomeUsage {
   /** Recorded dispatches or unresolved reserved generation slots; not provider requests. */
   attempts: number;
@@ -36,6 +51,8 @@ export interface ResourceEngineeringCampaignOutcome {
   state: string | null;
   sourceState: 'healthy' | 'unavailable';
   reasons: string[];
+  /** Optional bounded observation; absence includes legacy responses and response-size limits. */
+  phaseEvidence?: ResourceEngineeringPhaseEvidence;
   metric: { name: string; direction: 'maximize' | 'minimize'; minImprovement: number } | null;
   seed: { status: 'unmeasured' | 'pending' | 'measured' | 'unavailable'; score: number | null; passed: boolean | null };
   stages: ResourceEngineeringOutcomeStages;

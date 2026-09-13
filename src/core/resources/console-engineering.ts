@@ -14,7 +14,7 @@ import { createFirmEngineeringControlHandler, type FirmEngineeringControlHost } 
 import { readControlGraph, runControlGraph, validateControlGraph, type ControlGraphDefinition } from '../universe/control-graph.js';
 import { validateResourceGenerationRuntime } from '../universe/resource-generation.js';
 import { readResourceJson, resourcePoolStatus } from './pool-runtime.js';
-import { readResourceEngineeringOutcomes } from './engineering-outcomes.js';
+import { createResourceEngineeringOutcomesReader } from './engineering-outcomes-reader.js';
 import type { ResourceEngineeringOutcomes } from './engineering-outcomes-types.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
@@ -53,7 +53,7 @@ export interface ResourceConsoleEngineeringOwner {
   register(catalog: ResourceConsoleEngineeringCatalog): ResourceConsoleEngineeringEnrollment[];
   snapshot(id: string): ResourceConsoleEngineeringJob;
   readiness(id: string): ResourceConsoleEngineeringReadiness;
-  outcomes(id: string): ResourceEngineeringOutcomes;
+  outcomes(id: string, options?: { signal?: AbortSignal }): Promise<ResourceEngineeringOutcomes>;
   /** Host-only observational key. Null means incomplete/unstable evidence, never retry permission. */
   evidenceFingerprint(id: string): string | null;
   /** Await this owner's current invocation, including its existing cleanup. */
@@ -311,6 +311,7 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
   const prepared = emptyCatalog ? [] : prepareResourceConsoleEngineeringEnrollments({ ...control, catalog: startupCatalog!, projects, projectBindings });
   if (prepared.some((row) => row.accountingPoolDigest !== poolDigest)) fail('CONFLICT', 'Engineering accounting scope changed');
   let enrolled = new Map(prepared.map((value) => [value.row.id, value] as const));
+  const outcomesReader = createResourceEngineeringOutcomesReader();
   type Entry = NonNullable<ReturnType<typeof enrolled.get>>;
   const entry = (id: string): Entry => {
     if (typeof id !== 'string' || !ID.test(id)) fail('INVALID_INPUT', 'Invalid engineering enrollment');
@@ -463,24 +464,26 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
     checkRegistration: (input) => snapshot([...prepareRegistration(input).values()].map(value => value.summary)),
     register(input) { enrolled = prepareRegistration(input); return owner.catalog(); },
     readiness: (id) => readiness(entry(id)),
-    outcomes(id) {
+    async outcomes(id, readOptions) {
       const value = entry(id);
       const verify = () => {
-        if (closing) fail('UNAVAILABLE', 'Engineering owner is closing');
+        if (closing || readOptions?.signal?.aborted) fail('UNAVAILABLE', 'Engineering outcome read stopped');
+        if (entry(id) !== value) fail('UNAVAILABLE', 'Engineering outcome enrollment changed');
         const current = supervisor.engineeringBinding(value.row.projectId);
         const project = current.project;
         if (current.root !== control.root || current.poolDigest !== poolDigest ||
           canonical({ id: project.id, workspace: project.workspace, dev: project.dev, ino: project.ino }) !== canonical(value.projectIdentity) ||
           !matchesResourceConsoleProject(project)) fail('UNAVAILABLE', 'Engineering outcome project changed');
-        if (canonical(createFirmEngineeringControlHandler(value.row.host).nodeInput) !== canonical(value.binding.nodeInput)) {
-          fail('UNAVAILABLE', 'Engineering outcome enrollment changed');
-        }
       };
       // Observation never calls admission, claims a lease, clears a stop, or
       // attributes a different campaign to this enrollment after source drift.
+      // Full enrollment/comparator verification runs before and after the
+      // proof inside the supervised child: it also hashes seed artifacts and
+      // must not be repeated on the HTTP event loop.
       verify();
-      const report = readResourceEngineeringOutcomes({ enrollment: value.summary, host: value.row.host,
-        root: control.root, poolFile: control.poolFile, bindingsFile: control.bindingsFile });
+      const report = await outcomesReader.read({ enrollment: value.summary, host: value.row.host,
+        root: control.root, poolFile: control.poolFile, bindingsFile: control.bindingsFile },
+      { expectedNodeInput: value.binding.nodeInput, signal: readOptions?.signal });
       verify(); return report;
     },
     evidenceFingerprint(id) {
@@ -620,7 +623,7 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
       if (closePromise) return closePromise;
       closing = true; signal?.removeEventListener('abort', onAbort);
       for (const value of active.values()) value.abort.abort();
-      closePromise = Promise.allSettled([...active.values()].map((value) => value.promise)).then(async () => {
+      closePromise = Promise.allSettled([outcomesReader.close(), ...[...active.values()].map((value) => value.promise)]).then(async (settlements) => {
         // The server starts ordinary task shutdown alongside graph shutdown.
         // Await that same idempotent drain before inspecting their shared pool,
         // so a still-cancelling ordinary task is not a false uncertainty report.
@@ -639,7 +642,7 @@ export function createResourceConsoleEngineeringOwner(options: ResourceConsoleEn
               !(preserveSupervisorTasks && supervisor.ownsActiveTaskReceipt?.(receipt) === true))) throw new Error();
           } catch { fail('UNAVAILABLE', 'Shared resource pool termination evidence unavailable'); }
         }
-        if (faults.size) fail('UNAVAILABLE', 'Engineering shutdown evidence unavailable');
+        if (faults.size || settlements.some(result => result.status === 'rejected')) fail('UNAVAILABLE', 'Engineering shutdown evidence unavailable');
       });
       return closePromise;
     },

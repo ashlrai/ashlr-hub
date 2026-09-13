@@ -44,8 +44,21 @@ function sameFile(left, right) {
   return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mode === right.mode &&
     left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs && left.nlink === right.nlink;
 }
-function names(root) {
-  const result = fs.readdirSync(root); if (result.length > MAX_BUILTIN_ACTIVITIES * 3 + 2) fail(); return result.sort();
+function names(root, sorted = true) {
+  const result = fs.readdirSync(root); if (result.length > MAX_BUILTIN_ACTIVITIES * 3 + 2) fail(); return sorted ? result.sort() : result;
+}
+function hasExpectedNames(root, expected) {
+  // Keep every action-time directory scan, but membership needs no ordering.
+  // Duplicate detection also refuses inconsistent enumeration rather than
+  // allowing a repeated known entry to hide a missing expected entry.
+  const actual = names(root, false);
+  if (actual.length !== expected.size) return false;
+  const seen = new Set();
+  for (const name of actual) {
+    if (!expected.has(name) || seen.has(name)) return false;
+    seen.add(name);
+  }
+  return true;
 }
 
 /** Read the per-invocation secret only from the evaluator's bounded stdin pipe.
@@ -116,7 +129,7 @@ export function createBuiltinActivityTracker(root, settlementKey) {
       if (poisoned || completed || !sameRoot(identity, rootIdentity(root)) ||
           !sameFile(ownerStat, fs.lstatSync(join(root, 'owner.json'), { bigint: true })) ||
           ownerDigest(readMessage(join(root, 'owner.json'))) !== capturedDigest ||
-          JSON.stringify(names(root)) !== JSON.stringify([...expectedNames].sort())) invalid();
+          !hasExpectedNames(root, expectedNames)) invalid();
     } catch { invalid(); }
   }
   function write(name, value) {

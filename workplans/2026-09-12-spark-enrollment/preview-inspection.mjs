@@ -1,4 +1,6 @@
 // Temporary local visual acceptance, never an execution/metadata collector launch.
+import console from 'node:console';
+import process from 'node:process';
 import { constants, openSync, writeFileSync, fsyncSync, closeSync } from 'node:fs';
 import { isAbsolute, dirname } from 'node:path';
 import { inspectPrivateDirectory } from '../../dist/core/universe/artifacts.js';

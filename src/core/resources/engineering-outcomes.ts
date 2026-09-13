@@ -20,6 +20,7 @@ import { validateResourcePool } from './pool-policy.js';
 import { readResourceJson, readResourcePoolHistory, resourcePoolStatus } from './pool-runtime.js';
 import { resourceUsageScopeForProvider } from './performance.js';
 import { validateResourceBindings } from './worker.js';
+import { readEngineeringPhaseEvidence, unavailableEngineeringPhaseEvidence } from './engineering-phase-evidence.js';
 
 export interface ResourceEngineeringOutcomesOptions {
   /** Host-owned captured enrollment, not browser-supplied metadata. */
@@ -89,13 +90,14 @@ function capture(input: ResourceEngineeringOutcomesOptions): ResourceEngineering
   return value;
 }
 
-function sample(options: ResourceEngineeringOutcomesOptions): { report: ResourceEngineeringOutcomes; fingerprint: string } {
+function sample(options: ResourceEngineeringOutcomesOptions): { report: ResourceEngineeringOutcomes; fingerprint: string; phases: Map<string, string> } {
   const { enrollment, host } = options;
   const report: ResourceEngineeringOutcomes = { schemaVersion: 1, enrollmentId: enrollment.id, enrollmentDigest: enrollment.enrollmentDigest,
     sampledAt: '', sourceState: 'healthy', scope: 'campaign-evaluations-and-recorded-worker-usage', authority: 'observation-only',
     acceptanceScope: 'fixed-evaluator-and-local-branch-only', attribution: 'campaign-cumulative-not-graph-invocation',
     productionAccepted: null, routingChanged: false, complete: true, reasons: [], usage: usage(), timing: timing(), campaigns: [] };
   const fingerprints: string[] = [];
+  const phases = new Map<string, string>();
   const pin = (value: unknown) => fingerprints.push(digest(canonical(value)));
   const seen = new Set<string>();
   try {
@@ -156,6 +158,9 @@ function sample(options: ResourceEngineeringOutcomesOptions): { report: Resource
             seed.result.intentDigest === digest(canonical(seed.intent)) && seed.result.measurement) {
           row.seed = { status: 'measured', score: seed.result.measurement.score, passed: seed.result.measurement.passed };
         }
+        const phase = readEngineeringPhaseEvidence({ directory, campaign, universe,
+          evaluatorDigest: manifest.evaluationBuiltinDigest ?? null, receipts: ledger.attempts });
+        row.phaseEvidence = phase.evidence; phases.set(summary.id, phase.fingerprint);
         const retained = new Map<string, ResourceEngineeringCampaignOutcome['niches'][number]>();
         const workers = new Map<string, ResourceEngineeringCampaignOutcome['workers'][number]>();
         const runs = new Map(universe.runs.map(run => [run.id, run]));
@@ -237,6 +242,7 @@ function sample(options: ResourceEngineeringOutcomesOptions): { report: Resource
         row.sourceState = 'unavailable'; row.reasons = ['campaign-evidence-unavailable']; unavailable(row.usage);
         row.stages.verifiedLocalDeliveries = null; row.niches = []; unavailable(report.usage);
         unavailableTiming(row.timing); unavailableTiming(report.timing);
+        row.phaseEvidence = unavailableEngineeringPhaseEvidence();
       }
     }
     finish(report.usage);
@@ -249,10 +255,15 @@ function sample(options: ResourceEngineeringOutcomesOptions): { report: Resource
     if (error instanceof OutcomeAccountingOverflow) { report.usage = usage(); report.timing = timing(); }
     report.campaigns = []; unavailable(report.usage); unavailableTiming(report.timing);
   }
-  if (Buffer.byteLength(canonical(report)) > 192 * 1024) {
+  // New observation bytes must not change the legacy acceptance/accounting
+  // fingerprint or cause an otherwise valid outcome to exceed its old bound.
+  const originalReport = { ...report, campaigns: report.campaigns.map(({ phaseEvidence: _phase, ...row }) => row) };
+  if (Buffer.byteLength(canonical(originalReport)) > 192 * 1024) {
     report.campaigns = []; report.sourceState = 'unavailable'; report.complete = false; report.reasons = ['outcome-evidence-bounds-exceeded']; unavailable(report.usage); unavailableTiming(report.timing);
   }
-  return { report, fingerprint: digest(canonical({ fingerprints, report })) };
+  if (Buffer.byteLength(canonical(report)) > 192 * 1024) for (const row of report.campaigns) delete row.phaseEvidence;
+  const fingerprintReport = { ...report, campaigns: report.campaigns.map(({ phaseEvidence: _phase, ...row }) => row) };
+  return { report, fingerprint: digest(canonical({ fingerprints, report: fingerprintReport })), phases };
 }
 
 /** Two bounded observations, not a lock or an atomic snapshot. Unknown stays unknown. */
@@ -265,8 +276,16 @@ export function readResourceEngineeringOutcomes(input: ResourceEngineeringOutcom
     unavailableTiming(first.report.timing);
     for (const row of first.report.campaigns) { row.sourceState = 'unavailable'; row.reasons = ['evidence-changed-during-sampling']; unavailable(row.usage);
       unavailableTiming(row.timing); row.stages.verifiedLocalDeliveries = null; row.niches = [];
+      row.phaseEvidence = unavailableEngineeringPhaseEvidence('phase-evidence-changed');
       for (const worker of row.workers) { unavailable(worker.usage); unavailableTiming(worker.timing); } }
+  } else {
+    for (const row of first.report.campaigns) if (row.phaseEvidence && first.phases.get(row.campaignId) !== second.phases.get(row.campaignId)) {
+      row.phaseEvidence = unavailableEngineeringPhaseEvidence('phase-evidence-changed');
+    }
   }
   first.report.sampledAt = new Date().toISOString();
+  // Invalidation can add an unavailable phase to a previously size-trimmed
+  // response. Optional diagnostics must still respect the existing wire bound.
+  if (Buffer.byteLength(canonical(first.report)) > 192 * 1024) for (const row of first.report.campaigns) delete row.phaseEvidence;
   return first.report;
 }

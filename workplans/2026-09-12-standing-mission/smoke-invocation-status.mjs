@@ -1,10 +1,12 @@
 /** Compiled CLI observation smoke. Creates/removes only its own temporary fixture; no execution or providers. */
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import console from 'node:console';
 import { createHash } from 'node:crypto';
 import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const load = file => import(pathToFileURL(join(repository, 'dist', file)).href);

@@ -1,9 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ResourceEngineeringOutcomes as Outcomes } from '../../core/resources/engineering-outcomes-types.js';
-import { apiGet, apiPost } from './client.js';
+import { apiGet, apiPost, ApiError } from './client.js';
 import { readWorkspaceEngineeringOutcomes, validateWorkspaceEngineeringOutcomes } from './workspace-engineering-outcomes.js';
 import { engineeringEnrollment } from '../routes/workspace/engineering-fixture.test-support.js';
-vi.mock('./client.js', () => ({ apiGet: vi.fn(), apiPost: vi.fn() }));
+import { phaseFixture } from '../routes/workspace/engineering-phase-fixture.test-support.js';
+vi.mock('./client.js', async (original) => ({ ...await original<typeof import('./client.js')>(), apiGet: vi.fn(), apiPost: vi.fn() }));
 const selected = engineeringEnrollment();
 const usage = () => ({ attempts: 1, joinedAttempts: 1, reportedAttempts: 1, unknownAttempts: 0, recordedInputTokens: 20, recordedOutputTokens: 10, totalTokens: 30, complete: true });
 const timing = () => ({ scope: 'summed-worker-execution' as const, attempts: 1, measuredAttempts: 1, recordedDurationMs: 125, totalDurationMs: 125, complete: true });
@@ -19,6 +20,28 @@ function fixture(): Outcomes {
 }
 beforeEach(() => vi.clearAllMocks());
 describe('engineering outcome read boundary', () => {
+  it.each([429, 504])('reports a bounded read failure without exposing server text: %s', async status => {
+    vi.mocked(apiGet).mockRejectedValueOnce(new ApiError('/private/token', status, '/private/path'));
+    await expect(readWorkspaceEngineeringOutcomes(selected)).rejects.toThrow(status === 429 ? 'proof read is in progress' : 'proof exceeded its read deadline');
+    expect(apiPost).not.toHaveBeenCalled();
+  });
+  it('directs unavailable reads to local diagnostics without inventing a cleanup verdict or retrying', async () => {
+    vi.mocked(apiGet).mockRejectedValueOnce(new ApiError('/private/token cleanup complete', 503, '/private/path'));
+    const failure = await readWorkspaceEngineeringOutcomes(selected).catch(error => error);
+    expect(failure).toMatchObject({ name: 'WorkspaceEngineeringOutcomeReadError', reason: 'unavailable' });
+    expect(failure.message).toContain('Check the local console diagnostics.');
+    expect(failure.message).toContain('If cleanup is unconfirmed');
+    expect(failure.message).toContain('retrying cannot clear it');
+    expect(failure.message).not.toContain('/private/');
+    expect(apiGet).toHaveBeenCalledOnce(); expect(apiPost).not.toHaveBeenCalled();
+  });
+  it('accepts optional exact phase evidence and legacy absence without expanding acceptance', () => {
+    const value = fixture(); expect(validateWorkspaceEngineeringOutcomes(value, selected)).toEqual(value);
+    value.campaigns[0]!.phaseEvidence = phaseFixture();
+    expect(validateWorkspaceEngineeringOutcomes(value, selected).productionAccepted).toBeNull();
+    Object.assign(value.campaigns[0]!.phaseEvidence, { liveness: 'running' });
+    expect(() => validateWorkspaceEngineeringOutcomes(value, selected)).toThrow();
+  });
   it('reads the exact enrollment with read authority only and does not mutate input', async () => {
     const value = fixture(); const before = JSON.stringify(value); const abort = new AbortController();
     vi.mocked(apiGet).mockResolvedValue(value);

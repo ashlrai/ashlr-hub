@@ -2,8 +2,9 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import type { ResourceConsoleEngineeringEnrollment as Enrollment } from '../../../core/resources/console-engineering-types.js';
 import type { ResourceEngineeringOutcomes as Outcomes, ResourceEngineeringOutcomeUsage as Usage, ResourceEngineeringOutcomeTiming as Timing } from '../../../core/resources/engineering-outcomes-types.js';
 import { getAuthSnapshot, subscribeAuth } from '../../data/auth-store.js';
-import { engineeringOutcomeReasons, readWorkspaceEngineeringOutcomes } from '../../data/workspace-engineering-outcomes.js';
+import { engineeringOutcomeReasons, readWorkspaceEngineeringOutcomes, WorkspaceEngineeringOutcomeReadError } from '../../data/workspace-engineering-outcomes.js';
 import styles from './EngineeringOutcomes.module.css';
+import { EngineeringExecutionEvidence } from './EngineeringExecutionEvidence.js';
 
 const number = (v: number | null) => v === null ? 'Unavailable' : v.toLocaleString();
 const authPhase = () => getAuthSnapshot().phase;
@@ -46,9 +47,10 @@ export function EngineeringOutcomes({ enrollment, available }: { enrollment: Enr
     try {
       const value = await readWorkspaceEngineeringOutcomes(enrollment, abort.signal);
       if (!abort.signal.aborted && current.current === captured) setResult({ identity: captured, report: value });
-    } catch {
+    } catch (failure) {
       if (!abort.signal.aborted && current.current === captured) {
-        setResult(null); setError('Outcome evidence could not be verified. Read it again after checking the connection. No work was started.');
+        setResult(null); setError(failure instanceof WorkspaceEngineeringOutcomeReadError ? failure.message :
+          'Outcome evidence could not be verified. Read it again after checking the connection. No work was started.');
       }
     } finally { if (!abort.signal.aborted && current.current === captured) setBusy(false); }
   }
@@ -66,6 +68,7 @@ export function EngineeringOutcomes({ enrollment, available }: { enrollment: Enr
       {report.campaigns.map(c => <article key={c.campaignId} className={styles.campaign}>
         <h4>{c.campaignId}</h4><p>{c.state ?? 'State unavailable'}; {c.sourceState === 'healthy' ? 'campaign evidence verified' : 'campaign evidence unavailable'}.</p>
         {c.sourceState === 'healthy' ? <>
+        <EngineeringExecutionEvidence evidence={c.phaseEvidence} />
         <div className={styles.tableScroll} role="region" aria-label={`${c.campaignId} evaluation stages`} tabIndex={0}>
           <table><caption>Independent evidence stages</caption><thead><tr>{['Trials', 'Evaluated', 'Passed', 'Rejected', 'Selected', 'Strict improvements', 'Verified local deliveries'].map(label => <th scope="col" key={label}>{label}</th>)}</tr></thead>
             <tbody><tr>{[c.stages.trials, c.stages.evaluated, c.stages.passed, c.stages.rejected, c.stages.selected, c.stages.strictImprovements, c.stages.verifiedLocalDeliveries].map((v, i) => <td key={i}>{number(v)}</td>)}</tr></tbody></table></div>
