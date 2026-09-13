@@ -8,6 +8,7 @@ import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } 
 import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
 import { createWorkspaceProofHandlers } from './workspace-proof-host.js';
 import { createEngineeringWorkerRpcHost } from './engineering-worker-rpc.js';
+import { startEngineeringActiveMonitor } from './engineering-active-monitor.js';
 import { setupRequestDigest, type EngineeringSetupRequest } from './engineering-setup-context.js';
 import type { ResourceEngineeringAutonomousSetupReport } from './engineering-autonomous-setup-types.js';
 
@@ -70,8 +71,8 @@ export async function prepareEngineeringMissionSetup(input: EngineeringSetupRequ
     let failure: Error | undefined;
     let result: ResourceEngineeringAutonomousSetupReport | undefined;
     let received = false;
-    const stop = (error: Error) => { failure ??= error; rpc.close(); Atomics.notify(closeFlag, 0); };
-    const timer = setInterval(() => { try { assertActive(); } catch { stop(unavailable()); } }, 25);
+    const stop = (error: Error) => { failure ??= error; stopMonitor(); rpc.close(); Atomics.notify(closeFlag, 0); };
+    const stopMonitor = startEngineeringActiveMonitor(assertActive, () => stop(unavailable()));
     worker.on('message', (message: unknown) => {
       if (rpc.handle(message)) return;
       try {
@@ -93,7 +94,7 @@ export async function prepareEngineeringMissionSetup(input: EngineeringSetupRequ
     });
     worker.on('error', () => stop(unavailable()));
     worker.once('exit', code => {
-      clearInterval(timer); rpc.close(); proof.close();
+      stopMonitor(); rpc.close(); proof.close();
       // Natural exit follows all worker finally blocks. A crash, missing result,
       // stop, or failed cleanup never becomes a usable prepared enrollment.
       if (code !== 0 || failure || !received || !result) { reject(failure ?? unavailable()); return; }

@@ -113,6 +113,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-console-compaction-deadline.test.ts', // real archive publication followed by deadline/host/reentrancy vetoes
   'test/resource-console-state-storage.test.ts', // versioned private source projection and guarded archive staging
   'test/resource-engineering-compacted-proof-acceptance.test.ts', // genuine workspace custody and worker proofs over archived history
+  'test/resource-engineering-custody-acl-diagnostic.test.ts', // Darwin ACL subprocess timings with actual proof/setup workers and private Git fixtures
   'test/resource-pool-evolution-archive.test.ts', // versioned migration journal and archived history replay
   'test/private-file-publication-guard.test.ts', // exact private-file publication veto and temporary identity checks
   'test/resource-console-history-deletion-failure.test.ts', // real completed output withheld after exact root publication failure

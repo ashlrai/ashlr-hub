@@ -8,6 +8,7 @@ import { captureResourceEngineeringLifetime, type ResourceEngineeringLifetime } 
 import { readResourceWorkspaceCustody, type ResourceWorkspaceCustody } from './workspace-custody.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import { createWorkspaceProofHandlers } from './workspace-proof-host.js';
+import { startEngineeringActiveMonitor } from './engineering-active-monitor.js';
 import type { ResourceEngineeringAutonomousSetupOptions, ResourceEngineeringAutonomousSetupPlan } from './engineering-autonomous-setup-types.js';
 import type { ResourceEngineeringPredecessorCheck, ResourceEngineeringPredecessorCheckOptions } from './engineering-predecessor-check.js';
 
@@ -59,7 +60,7 @@ export async function readEngineeringMissionProof(request: EngineeringMissionPro
   return new Promise((resolve, reject) => {
     let finished = false;
     const finish = (error?: Error, value?: unknown) => {
-      if (finished) return; finished = true; clearInterval(timer); rpc.close(); proof.close();
+      if (finished) return; finished = true; stopMonitor(); rpc.close(); proof.close();
       // Every path waits for terminal worker exit; a later read never shares
       // an abandoned thread or accepts a late result from a stopped request.
       void worker.terminate().then(() => {
@@ -67,7 +68,7 @@ export async function readEngineeringMissionProof(request: EngineeringMissionPro
         try { assertActive(); resolve(copy(value)); } catch (cause) { reject(cause); }
       }, () => reject(unavailable()));
     };
-    const timer = setInterval(() => { try { assertActive(); } catch { finish(unavailable()); } }, 25);
+    const stopMonitor = startEngineeringActiveMonitor(assertActive, () => finish(unavailable()));
     worker.on('message', (message: unknown) => {
       if (finished || rpc.handle(message)) return;
       try {

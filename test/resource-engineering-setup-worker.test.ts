@@ -23,9 +23,30 @@ const result = { schemaVersion: 1, status: 'prepared', scope: 'local-autonomous-
 const lifetime = () => ({ deadlineAt: new Date(Date.now() + 60_000).toISOString() });
 const success = () => ({ type: 'engineering-setup-result', ok: true, value: result });
 beforeEach(() => { state.workers.length = 0; state.handlers = {}; state.flag = undefined; });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('cooperative setup worker lifecycle', () => {
+  it('monitors a received result until exit, then stops polling on failure without forcing cleanup', async () => {
+    vi.useFakeTimers(); let stopped = false; let finished = false;
+    const veto = vi.fn(() => stopped);
+    const run = prepareEngineeringMissionSetup(request, { lifetime: { ...lifetime(), isExecutionStopped: veto } })
+      .finally(() => { finished = true; });
+    const rejection = expect(run).rejects.toThrow('Engineering setup');
+    state.handlers['setup.authorize']!(setupRequestDigest(request));
+    const worker = state.workers[0]!; worker.emit('message', success());
+    expect(vi.getTimerCount()).toBe(1);
+    const before = veto.mock.calls.length;
+    vi.advanceTimersByTime(25); expect(veto).toHaveBeenCalledTimes(before + 1);
+    stopped = true; vi.advanceTimersByTime(25);
+    expect(vi.getTimerCount()).toBe(0); expect(Atomics.load(state.flag!, 0)).toBe(1);
+    const failedCalls = veto.mock.calls.length;
+    stopped = false; vi.advanceTimersByTime(1000); await Promise.resolve();
+    expect(veto).toHaveBeenCalledTimes(failedCalls); expect(finished).toBe(false);
+    expect(worker.terminate).not.toHaveBeenCalled();
+    // Recovery of the sampled condition cannot clear the recorded failure.
+    worker.emit('exit', 0); await rejection;
+    expect(worker.terminate).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
+  });
   it('requires the pinned one-use authorization and natural worker exit before returning', async () => {
     let finished = false;
     const run = prepareEngineeringMissionSetup(request, { lifetime: lifetime() }).then(value => { finished = true; return value; });

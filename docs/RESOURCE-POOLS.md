@@ -245,6 +245,16 @@ Cancellation is cooperative, not a hard wall-clock termination guarantee for an
 in-progress filesystem/Git operation; cleanup may finish after the deadline.
 The standalone synchronous setup API remains available for offline callers.
 
+Proof and setup ownership monitors schedule the next check 25 ms after the
+previous synchronous check finishes. This leaves an event-loop gap when native
+permission inspection costs more than the polling delay; it does not cache
+permissions or remove action-time checks. Idle revocation detection also includes
+event-loop delay and check duration, so 25 ms is not a hard response-time promise.
+Proof completion cancels its monitor before awaiting thread termination. Setup
+keeps monitoring through natural exit, with a sticky failure that cannot be
+reversed by a later successful result. Neither monitor renews the mission's
+execution deadline.
+
 Resource JSON reads discard and reopen once when an atomic replacement is
 detected between naming, opening and validating a file. The fresh attempt repeats
 all private-file, size, identity and JSON checks. In-place edits, unsafe files
@@ -3117,11 +3127,19 @@ of discarded windows is unproven; stop and reconcile the pool before a deliberat
 schema migration. The ledger remains readable and does not dispatch through the
 overflow.
 
-The bounded store retains up to 4,096 task identities and 4 MiB. Before starting
+The bounded store retains up to 4,096 task identities and 4 MiB including its
+persisted newline. Its ledger-specific JSON capture checks plain data descriptors
+before reading values and accounts for encoded bytes during traversal. It does
+not borrow the smaller evidence-pack cryptographic envelope. Receipt validation,
+quota accounting and replay checks still apply independently. Configuration
+history retains its own validation bounds, including the smaller nested
+evidence-pack envelope. Large configuration histories can still be refused
+before their nominal 2 MiB bound. This change does not expand epoch history or
+archive resource receipts. Before starting
 a worker, admission budgets worst-case settlement metadata for every reserved
 task and the bounded quota inventory. Insufficient receipt headroom refuses the
-new admission; it does not evict history. Existing receipt reads and replay
-behavior are unchanged. The store does not prune old identities into replayable
+new admission; it does not evict history. Existing receipt identity and replay
+rules are unchanged. The store does not prune old identities into replayable
 work. These limits, explicit enrollment, incomplete
 vendor quota coverage, and manual ambiguous-run recovery mean this is not yet an
 unattended production fleet. Universe's versioned generation receipts, measured

@@ -16,10 +16,12 @@ import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { MAX_RESOURCE_OBSERVATION_WINDOWS, RESOURCE_OBSERVATION_OVERFLOW, planResourceAssignment, validateResourceObservations, validateResourcePool,
   type ResourceAssignmentPlan, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask, type ResourceWorkerResult } from './worker.js';
-import { resourceUsageScopeForProvider, validResourceExecutionDuration, validResourceExecutionMeasurement, type ResourceExecutionMeasurement } from './performance.js';
-import { RESOURCE_NATIVE_PROCESS_SIGNALS, validResourceNativeProcessForReceipt, type ResourceNativeProcessDiagnostic } from './native-diagnostics.js';
+import { resourceUsageScopeForProvider, validResourceExecutionDuration } from './performance.js';
+import { RESOURCE_NATIVE_PROCESS_SIGNALS } from './native-diagnostics.js';
+import { checkedResourceTaskReceipt, type ResourceTaskReceipt } from './pool-receipt-codec.js';
+export type { ResourceTaskReceipt } from './pool-receipt-codec.js';
 import { resourcePoolConfigSnapshot, validateResourcePoolConfigHistory } from './pool-evolution-policy.js';
-import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
+import { captureResourcePoolStateJson } from './pool-state-capture.js';
 import type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
 export type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
 
@@ -35,28 +37,6 @@ export interface ResourceTask extends ResourceWorkerTask {
   allowedWorkerIds: string[];
   /** Optional host provenance, bound into task identity; absent on legacy tasks. */
   origin?: ResourceTaskOrigin;
-}
-export interface ResourceTaskReceipt {
-  schemaVersion: 1;
-  id: string;
-  taskDigest: string;
-  poolDigest: string;
-  workerId: string;
-  capacityKey: string;
-  status: 'reserved' | 'completed' | 'failed' | 'timed-out' | 'cancelled' | 'uncertain';
-  startedAt: string;
-  finishedAt: string | null;
-  outputDigest: string | null;
-  inputTokens: number | null;
-  outputTokens: number | null;
-  reason: string;
-  verifiedAccepted: false;
-  /** Persisted atomically at reservation, before execution or trial publication. */
-  origin?: ResourceTaskOrigin;
-  /** Absent on legacy receipts. No wall-clock-derived timing is backfilled. */
-  execution?: ResourceExecutionMeasurement;
-  /** Optional native invocation facts. Legacy receipts are never reconstructed from current host state. */
-  nativeProcess?: ResourceNativeProcessDiagnostic;
 }
 export interface ResourcePoolState {
   schemaVersion: 1 | 2;
@@ -215,38 +195,9 @@ function inspectRoot(root: string, create: boolean): boolean {
   return true;
 }
 
-function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceBinding[], pool: ResourcePool): value is ResourceTaskReceipt {
-  if (!object(value) || !exact(value, ['schemaVersion', 'id', 'taskDigest', 'poolDigest', 'workerId', 'capacityKey',
-    'status', 'startedAt', 'finishedAt', 'outputDigest', 'inputTokens', 'outputTokens', 'reason', 'verifiedAccepted',
-    ...(Object.hasOwn(value, 'origin') ? ['origin'] : []),
-    ...(Object.hasOwn(value, 'execution') ? ['execution'] : []),
-    ...(Object.hasOwn(value, 'nativeProcess') ? ['nativeProcess'] : [])]) ||
-    value.schemaVersion !== 1 || typeof value.id !== 'string' || !ID.test(value.id) ||
-    Object.hasOwn(value, 'origin') && !validResourceTaskOrigin(value.origin, value.id) ||
-    typeof value.taskDigest !== 'string' || !HASH.test(value.taskDigest) || value.poolDigest !== stateDigest ||
-    !bindings.some((binding) => binding.workerId === value.workerId && binding.capacityKey === value.capacityKey) ||
-    typeof value.status !== 'string' || !['reserved', ...TERMINAL, 'uncertain'].includes(value.status) || !iso(value.startedAt) ||
-    !(value.finishedAt === null || iso(value.finishedAt) && value.finishedAt >= value.startedAt) ||
-    !(value.outputDigest === null || typeof value.outputDigest === 'string' && HASH.test(value.outputDigest)) ||
-    !((value.inputTokens === null && value.outputTokens === null) || count(value.inputTokens) && count(value.outputTokens) &&
-      count(value.inputTokens + value.outputTokens)) || typeof value.reason !== 'string' || !/^[a-z0-9-]{1,120}$/.test(value.reason) ||
-    value.verifiedAccepted !== false || Object.hasOwn(value, 'execution') &&
-      (!validResourceExecutionMeasurement(value.execution) || value.status === 'reserved' ||
-        value.execution.usageScope !== null && value.inputTokens === null)) return false;
-  if (value.status === 'reserved') return value.finishedAt === null && value.outputDigest === null && value.inputTokens === null &&
-    !Object.hasOwn(value, 'nativeProcess');
-  const worker = pool.workers.find((candidate) => candidate.id === value.workerId);
-  if (!worker) return false;
-  if (Object.hasOwn(value, 'nativeProcess') && !validResourceNativeProcessForReceipt(value.nativeProcess, value.status, worker.provider)) return false;
-  if (value.execution !== undefined && (!validResourceExecutionMeasurement(value.execution) ||
-    value.execution.usageScope !== null && value.execution.usageScope !== resourceUsageScopeForProvider(worker.provider))) return false;
-  return value.finishedAt !== null && (value.status !== 'completed' || value.outputDigest !== null);
-}
-
 /** Pure strict epoch-aware decoder. Only the explicit offline migrator reads a pending barrier. */
 export function decodeResourcePoolState(value: unknown, pool: ResourcePool, bindings: ResourceBinding[], allowPendingEvolution = false): ResourcePoolState {
-  const serialized = canonicalEvidencePackJsonV3(value);
-  if (serialized === null || Buffer.byteLength(serialized) + 1 > MAX_STATE_BYTES) throw new Error('Invalid bounded resource ledger');
+  const serialized = captureResourcePoolStateJson(value);
   value = JSON.parse(serialized) as unknown;
   const active = resourcePoolConfigSnapshot(pool, bindings); const poolDigest = active.poolDigest;
   let history: ResourcePoolConfigSnapshot[] = [active];
@@ -266,7 +217,7 @@ export function decodeResourcePoolState(value: unknown, pool: ResourcePool, bind
     Object.hasOwn(value, 'quotaScopeAccess') && !checkedQuotaScopeAccess(value.quotaScopeAccess, pool, bindings) ||
     value.attempts.length > MAX_ATTEMPTS || !value.attempts.every((row) => {
       const origin = object(row) ? history.find(snapshot => snapshot.poolDigest === row.poolDigest) : undefined;
-      return origin !== undefined && checkedReceipt(row, origin.poolDigest, origin.bindings, origin.pool);
+      return origin !== undefined && checkedResourceTaskReceipt(row, origin.poolDigest, origin.bindings, origin.pool);
     }) ||
     new Set(value.attempts.map((row) => row.id)).size !== value.attempts.length) throw new Error('Resource ledger invalid or configuration changed');
   if (Object.hasOwn(value, 'pendingEvolution') && (!object(value.pendingEvolution) || !exact(value.pendingEvolution, ['planDigest']) ||
@@ -696,7 +647,7 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
     reason: result.reason, ...(result.nativeProcess === undefined ? {} : { nativeProcess: { ...result.nativeProcess } }),
     ...(dispatchAllowed ? { execution: { schemaVersion: 1 as const, scope: 'worker-execution' as const,
       durationMs: validResourceExecutionDuration(elapsed) ? elapsed : null, usageScope: result.usageScope ?? null } } : {}) };
-  if (!checkedReceipt(receipt, poolDigest, bindings, pool)) throw new Error('Resource worker returned invalid settlement evidence');
+  if (!checkedResourceTaskReceipt(receipt, poolDigest, bindings, pool)) throw new Error('Resource worker returned invalid settlement evidence');
   transaction(root, pool, bindings, poolDigest, (state) => {
     const index = state.attempts.findIndex((row) => row.id === reserved.id);
     if (index < 0 || canonical(state.attempts[index]) !== canonical(reserved)) throw new Error('Resource assignment changed before settlement');

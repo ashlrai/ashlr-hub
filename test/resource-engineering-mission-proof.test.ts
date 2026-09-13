@@ -19,9 +19,30 @@ const lifetime = () => ({ deadlineAt: new Date(Date.now() + 60_000).toISOString(
 const result = { schemaVersion: 1, status: 'planned', scope: 'local-autonomous-setup-only', planDigest: 'a'.repeat(64),
   executionStarted: false, providerContacted: false };
 beforeEach(() => { state.workers.length = 0; state.termination = undefined; });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('mission read-only proof lifecycle', () => {
+  it.each(['result', 'stop'] as const)('clears monitoring on %s while still waiting for termination and refusing a later stop', async mode => {
+    vi.useFakeTimers(); let stopped = false; let settled = false; let exit!: (code: number) => void;
+    const veto = vi.fn(() => stopped);
+    state.termination = () => new Promise(resolve => { exit = resolve; });
+    const run = readEngineeringMissionProof(request, { lifetime: { ...lifetime(), isExecutionStopped: veto } })
+      .finally(() => { settled = true; });
+    const rejection = expect(run).rejects.toThrow('Mission proof');
+    const worker = state.workers[0]!;
+    expect(vi.getTimerCount()).toBe(1);
+    if (mode === 'result') worker.emit('message', { type: 'mission-proof-result', ok: true, value: result });
+    else { stopped = true; vi.advanceTimersByTime(25); }
+    expect(worker.terminate).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+    const calls = veto.mock.calls.length;
+    vi.advanceTimersByTime(1000); await Promise.resolve();
+    expect(veto).toHaveBeenCalledTimes(calls); expect(settled).toBe(false);
+    // Successful evidence is rechecked after termination; a stopped read is
+    // already failed and cannot be revived by another worker message.
+    stopped = true; worker.emit('message', { type: 'mission-proof-result', ok: true, value: result });
+    exit(1); await rejection;
+    expect(worker.terminate).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+  });
   it('waits for confirmed worker termination before returning evidence', async () => {
     let exit!: (code: number) => void;
     state.termination = () => new Promise(resolve => { exit = resolve; });
