@@ -2502,6 +2502,21 @@ the pending/activity records when cleanup is uncertain; do not delete them or
 retry merely because the UI can explain the failure. Fixed diagnostic detail does
 not bypass the existing ownership, quota or account-reservation checks.
 
+Connection monitoring retains `connections.firstFailure` with a fixed reason,
+configured account ID, observation time and optional sanitized cleanup details.
+`cancellationAlreadyRequested` distinguishes a possible cancelled peer from a
+failure observed before this monitor requested cancellation. Neither establishes
+the initiating failure across all shared collectors. The Account connections
+panel preserves that distinction even after stopped rows replace live metadata.
+This in-memory record is diagnostic only, not a durable recovery receipt.
+
+Codex metadata probes disable `features.plugins` and `features.remote_plugin`
+using process-only configuration overrides. Account and quota reads do not need
+plugin catalogs; avoiding that startup activity prevents unnecessary background
+Git refreshes. This does not modify native profile configuration or disable
+plugins for actual worker tasks. Process-group cleanup checks and deadlines
+remain unchanged; unsupported or uncertain native behavior still withholds work.
+
 Universe resource generation can reuse this pinned configuration through its
 optional private [`quotaConfigPath`](ASHLR-UNIVERSE.md#generate-candidates-through-an-enrolled-resource-pool).
 That mode performs one bounded capture per configured alias before a new

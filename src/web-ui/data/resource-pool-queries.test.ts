@@ -356,6 +356,25 @@ describe('optional native execution response boundary', () => {
 });
 
 describe('connection and allocation response boundaries', () => {
+  it('accepts a bounded first connection failure without inferring an account is usable', async () => {
+    const connections = { ...connection(), firstFailure: { accountId: 'codex-a', observedAt: NOW,
+      reasonCode: 'native-cleanup-unconfirmed', cancellationAlreadyRequested: false,
+      cleanupDiagnostics: { failure: 'group-exit-unconfirmed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false } } };
+    await expect(extension({ connections })).resolves.toMatchObject({ connections });
+  });
+  it.each(['foreign-account', 'future', 'private-field', 'private-reason', 'bad-boolean', 'private-diagnostic', 'missing-field'])(
+    'rejects %s in first connection failure', async kind => {
+      const firstFailure: Record<string, unknown> = { accountId: 'codex-a', observedAt: NOW,
+        reasonCode: 'native-cleanup-unconfirmed', cancellationAlreadyRequested: false };
+      if (kind === 'foreign-account') firstFailure.accountId = 'unknown';
+      if (kind === 'future') firstFailure.observedAt = NEXT;
+      if (kind === 'private-field') firstFailure.stderr = 'PRIVATE';
+      if (kind === 'private-reason') firstFailure.reasonCode = 'PRIVATE';
+      if (kind === 'bad-boolean') firstFailure.cancellationAlreadyRequested = 'false';
+      if (kind === 'private-diagnostic') firstFailure.cleanupDiagnostics = { failure: 'PRIVATE' };
+      if (kind === 'missing-field') delete firstFailure.reasonCode;
+      await expect(extension({ connections: { ...connection(), firstFailure } })).rejects.toThrow();
+    });
   function connection() {
     return { sampledAt: NOW, refreshing: false, accounts: [{ id: 'codex-a', label: 'Personal', provider: 'codex',
       state: 'observed', authentication: 'signed-in', health: 'reachable', planType: 'pro', observedAt: NOW, expiresAt: NEXT,

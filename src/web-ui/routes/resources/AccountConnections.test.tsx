@@ -18,6 +18,26 @@ function snapshot(accounts = [account()], patch: Partial<ResourceConnectionsSnap
 }
 
 describe('account connections evidence', () => {
+  it.each([false, true])('distinguishes a cancelled peer from the first monitor failure (%s)', (cancelled) => {
+    render(<AccountConnections connections={snapshot([account()], { firstFailure: {
+      accountId: 'codex-a', observedAt: NOW, reasonCode: 'native-cleanup-unconfirmed',
+      cancellationAlreadyRequested: cancelled, cleanupDiagnostics: { failure: 'group-exit-unconfirmed',
+        processGroupSettlement: 'unconfirmed', timedOut: false, cancelled },
+    } })} />);
+    const failure = screen.getByRole('region', { name: 'First observed connection failure' });
+    expect(within(failure).getByText(/Personal — native-cleanup-unconfirmed/)).toBeVisible();
+    expect(within(failure).getByText(cancelled ? /Cancellation was already requested/ : /Recorded before this monitor/)).toBeVisible();
+    expect(within(failure).getByText(/process group: unconfirmed/)).toBeVisible();
+    expect(within(failure).getByText(/does not authorize retry/)).toBeVisible();
+    expect(within(failure).queryByRole('button')).not.toBeInTheDocument();
+  });
+  it('labels retained failure evidence as historical', () => {
+    render(<AccountConnections historical connections={snapshot([account()], { firstFailure: {
+      accountId: 'codex-a', observedAt: NOW, reasonCode: 'native-call-rejected', cancellationAlreadyRequested: true,
+    } })} />);
+    expect(screen.getByText('Recorded connection failure')).toBeVisible();
+    expect(screen.queryByText('Signed in')).not.toBeInTheDocument();
+  });
   it('shows approximate Claude native usage without claiming cache freshness or ceiling headroom', () => {
     render(<AccountConnections ceilingPercent={75} connections={snapshot([account({ provider: 'claude',
       label: 'Claude', health: 'unknown', reason: 'usage-native-reported', windows: [{ id: 'seven_day_fable', usedPercent: 2,

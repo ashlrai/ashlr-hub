@@ -71,6 +71,43 @@ describe('explicit connection configuration', () => {
 });
 
 describe('native metadata monitoring', () => {
+  it('retains the first native failure before shared abort replaces account rows', async () => {
+    const coordinator = createNativeMetadataCoordinator({ beginNativeActivity: () => ({ settle() {} }) });
+    const diagnostic = { failure: 'group-exit-unconfirmed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false };
+    const getter = vi.fn(() => 'PRIVATE');
+    Object.defineProperty(diagnostic, 'privateLog', { get: getter });
+    probes.codex.mockResolvedValue({ status: 'uncertain', cleanupDiagnostics: diagnostic });
+    const handle = start({ config: config(['codex', 'claude']), coordinator });
+    await settle();
+    expect(handle.snapshot().firstFailure).toEqual({ accountId: 'codex-0', observedAt: NOW,
+      reasonCode: 'native-cleanup-unconfirmed', cancellationAlreadyRequested: false,
+      cleanupDiagnostics: { failure: 'group-exit-unconfirmed', processGroupSettlement: 'unconfirmed', timedOut: false, cancelled: false } });
+    expect(handle.snapshot().accounts.every(row => row.authentication === 'unknown' && row.windows.length === 0)).toBe(true);
+    expect(getter).not.toHaveBeenCalled(); expect(JSON.stringify(handle.snapshot())).not.toContain('PRIVATE');
+    const detached = handle.snapshot(); detached.firstFailure!.accountId = 'changed'; diagnostic.cancelled = true;
+    await expect(handle.close()).rejects.toThrow('cleanup uncertain');
+    expect(handle.snapshot().firstFailure?.accountId).toBe('codex-0');
+    expect(handle.snapshot().firstFailure?.cleanupDiagnostics?.cancelled).toBe(false);
+    coordinator.dispose();
+  });
+
+  it('distinguishes native success followed by failed activity settlement', async () => {
+    const coordinator = createNativeMetadataCoordinator({ beginNativeActivity: () => ({ settle() { throw new Error('PRIVATE'); } }) });
+    const handle = start({ config: config(['codex']), coordinator }); await settle();
+    expect(handle.snapshot().firstFailure).toMatchObject({ accountId: 'codex-0', reasonCode: 'activity-settlement-failed', cancellationAlreadyRequested: true });
+    expect(JSON.stringify(handle.snapshot())).not.toContain('PRIVATE');
+    await expect(handle.close()).rejects.toThrow('cleanup uncertain'); coordinator.dispose();
+  });
+
+  it('labels a cancelled peer without claiming it initiated collection failure', async () => {
+    const controller = new AbortController(); let finish!: () => void;
+    probes.codex.mockImplementation(() => new Promise(resolve => { finish = () => resolve({ status: 'uncertain' }); }));
+    const handle = start({ config: config(['codex']), signal: controller.signal }); await settle();
+    controller.abort(); finish(); await settle();
+    expect(handle.snapshot().firstFailure).toMatchObject({ reasonCode: 'native-cleanup-unconfirmed', cancellationAlreadyRequested: true });
+    await expect(handle.close()).rejects.toThrow('cleanup uncertain');
+  });
+
   it.each(['codex', 'claude', 'grok'] as const)('forwards the durable lifecycle into %s without publishing it', async (provider) => {
     const processGroupLifecycle = { prepare: vi.fn() }; const settled = vi.fn();
     const coordinator = createNativeMetadataCoordinator({

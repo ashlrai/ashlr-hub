@@ -5,7 +5,8 @@ import { inspectPrivateDirectory } from '../universe/artifacts.js';
 import { probeCodexResourceAccount } from './codex-account-probe.js';
 import { probeClaudeAccountUsage } from './claude-account-usage.js';
 import { probeGrokAccount } from './grok-account-probe.js';
-import type { ResourceAccountConnection, ResourceConnectionsSnapshot } from './connection-types.js';
+import type { ResourceAccountConnection, ResourceConnectionsSnapshot, ResourceConnectionFailure } from './connection-types.js';
+import { sanitizeCodexProbeCleanupDiagnostics } from './codex-probe-diagnostics.js';
 import type { NativeMetadataCoordinator } from './metadata-coordinator.js';
 
 export interface ResourceConnectionConfig {
@@ -64,6 +65,18 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     provider: row.provider, state: 'checking', authentication: 'unknown', health: 'unknown', planType: null,
     observedAt: null, expiresAt: null, windows: [], reason: 'connection-not-checked', onDemandEnabled: null, executionSupported: row.provider !== 'grok' });
   let rows = config.accounts.map(blank);
+  let firstFailure: ResourceConnectionFailure | undefined;
+  const recordFailure = (accountId: string, reasonCode: ResourceConnectionFailure['reasonCode'], result?: unknown): void => {
+    if (firstFailure) return;
+    let cleanupDiagnostics;
+    try {
+      const property = result && typeof result === 'object' ? Object.getOwnPropertyDescriptor(result, 'cleanupDiagnostics') : undefined;
+      cleanupDiagnostics = property && 'value' in property ? sanitizeCodexProbeCleanupDiagnostics(property.value) : undefined;
+    } catch { /* Never inspect raw errors or execute provider-controlled accessors. */ }
+    firstFailure = { accountId, observedAt: new Date().toISOString(), reasonCode,
+      cancellationAlreadyRequested: abort.signal.aborted || options.coordinator?.signal.aborted === true,
+      ...(cleanupDiagnostics ? { cleanupDiagnostics } : {}) };
+  };
   const projectStopped = () => { rows = rows.map((row) => ({ ...row, state: 'unavailable', authentication: 'unknown',
     health: 'unknown', windows: [], reason: 'connection-monitor-stopped' })); };
   abort.signal.addEventListener('abort', projectStopped, { once: true });
@@ -71,7 +84,8 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
     try { options.assertOwnership(); }
     catch { uncertain = true; options.coordinator?.abort(); abort.abort(); throw new Error('Connection ownership unavailable'); }
   }
-  async function native<T extends { status: string }>(operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>): Promise<T> {
+  async function native<T extends { status: string }>(accountId: string, operation: (processGroupLifecycle?: VerifyProcessGroupLifecycle) => Promise<T>): Promise<T> {
+    let receivedResult: T | undefined;
     const collect = async (processGroupLifecycle?: VerifyProcessGroupLifecycle) => {
       if (options.coordinator) owns();
       if (abort.signal.aborted) throw new Error('Metadata collection stopped');
@@ -85,17 +99,25 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         const status = record(result) ? Object.getOwnPropertyDescriptor(result, 'status') : undefined;
         if (!status || !('value' in status) || typeof status.value !== 'string' ||
           !['observed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(status.value)) {
+          recordFailure(accountId, 'native-result-invalid');
           throw new Error('Native connection settlement unavailable');
         }
-        if (status.value === 'uncertain') unsettled();
+        receivedResult = result;
+        if (status.value === 'uncertain') { recordFailure(accountId, 'native-cleanup-unconfirmed', result); unsettled(); }
         return result;
       } catch {
         // An invocation that throws or rejects has provided no cleanup witness.
-        unsettled();
+        recordFailure(accountId, 'native-call-rejected'); unsettled();
         throw new Error('Native connection settlement unavailable');
       }
     };
-    return options.coordinator ? options.coordinator.run(collect, (value) => value.status !== 'uncertain') : collect();
+    try { return await (options.coordinator ? options.coordinator.run(collect, (value) => value.status !== 'uncertain') : collect()); }
+    catch (error) {
+      // A settled native result can still fail durable activity publication.
+      // Record before the outer monitor replaces all account rows with stopped.
+      if (receivedResult) { recordFailure(accountId, 'activity-settlement-failed', receivedResult); uncertain = true; }
+      throw error;
+    }
   }
   async function sample(account: ResourceConnectionConfig['accounts'][number], index: number): Promise<void> {
     let row = blank(account); row.state = 'unavailable'; row.health = 'unavailable'; row.reason = 'connection-probe-unavailable';
@@ -106,7 +128,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
         // contract only. No pool files, ledger, task or model selection is made.
         const pool = { schemaVersion: 1 as const, id: 'connection-metadata', workers: [{ id: account.id, provider: 'codex' as const,
           model: 'metadata-only', maxConcurrent: 1, reservePercent: 0, maxTasksPerWindow: 1, taskWindowMs: 60_000, priority: 1 }] };
-        const result = await native((processGroupLifecycle) => probeCodexResourceAccount({ pool, bindings: [{ workerId: account.id, capacityKey: account.id,
+        const result = await native(account.id, (processGroupLifecycle) => probeCodexResourceAccount({ pool, bindings: [{ workerId: account.id, capacityKey: account.id,
           kind: 'native-cli', command: account.command }], workerId: account.id, bucketIds: ['codex'], cwd: options.cwd,
           timeoutMs: 10_000, signal: abort.signal, ...(processGroupLifecycle ? { processGroupLifecycle } : {}),
           ...(hints.has(account.id) ? { expectedAccountHint: hints.get(account.id)! } : {}) }));
@@ -118,7 +140,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
             observedAt: result.observation.observedAt, expiresAt: result.observation.expiresAt, windows: result.observation.windows };
         }
       } else if (account.provider === 'claude') {
-        const result = await native((processGroupLifecycle) => probeClaudeAccountUsage({ command: account.command, cwd: options.cwd,
+        const result = await native(account.id, (processGroupLifecycle) => probeClaudeAccountUsage({ command: account.command, cwd: options.cwd,
           timeoutMs: 20_000, signal: abort.signal, ...(processGroupLifecycle ? { processGroupLifecycle } : {}) }));
         if (result.status === 'uncertain') uncertain = true;
         row.reason = result.reason;
@@ -131,7 +153,7 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
           observedAt: result.startedAt, expiresAt: new Date(Date.parse(result.startedAt) + 60_000).toISOString(), windows: result.windows };
         }
       } else {
-        const result = await native((processGroupLifecycle) => probeGrokAccount({ command: account.command, cwd: options.cwd, timeoutMs: 15_000, signal: abort.signal,
+        const result = await native(account.id, (processGroupLifecycle) => probeGrokAccount({ command: account.command, cwd: options.cwd, timeoutMs: 15_000, signal: abort.signal,
           ...(processGroupLifecycle ? { processGroupLifecycle } : {}),
           ...(hints.has(account.id) ? { expectedAccountHint: hints.get(account.id)! } : {}) }));
         if (result.status === 'uncertain') uncertain = true;
@@ -164,7 +186,8 @@ export function createResourceConnectionMonitor(options: { config: ResourceConne
   if (signal?.aborted) stopped(); else signal?.addEventListener('abort', stopped, { once: true });
   if (!abort.signal.aborted) pending = cycle();
   return {
-    snapshot: () => ({ sampledAt: new Date().toISOString(), refreshing, accounts: structuredClone(rows) }),
+    snapshot: () => ({ sampledAt: new Date().toISOString(), refreshing, accounts: structuredClone(rows),
+      ...(firstFailure ? { firstFailure: structuredClone(firstFailure) } : {}) }),
     async close() { closing = true; stopped(); signal?.removeEventListener('abort', stopped); await pending;
       rows = rows.map((row) => ({ ...row, health: 'unknown' }));
       if (uncertain) throw new Error('Native connection process cleanup uncertain'); },

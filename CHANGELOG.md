@@ -13,6 +13,10 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ### Native collector failure visibility
 
+- Retains the first observed connection failure separately from cancelled peers,
+  including bounded cleanup details in the Account connections panel.
+- Disables plugin startup for metadata-only Codex clients using process-local
+  overrides; leaves worker plugins, account policy and cleanup checks unchanged.
 - Preserves sanitized last-attempt cleanup diagnostics in continuous quota
   snapshots and the Native quota reads panel, including evidence-publication
   failure versus unconfirmed process-group exit.

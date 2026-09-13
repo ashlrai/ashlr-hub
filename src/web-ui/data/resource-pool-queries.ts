@@ -3,6 +3,7 @@ import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapsh
 import { RESOURCE_COLLECTOR_RECOVERY_REASONS, RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS } from '../../core/resources/console-types.js';
 import { validResourceNativeProcessForReceipt } from '../../core/resources/native-diagnostics.js';
 import { sanitizeCodexProbeCleanupDiagnostics } from '../../core/resources/codex-probe-diagnostics.js';
+import { validResourceConnectionFailure } from '../../core/resources/connection-types.js';
 import { clearMutationToken, getMutationToken, touchMutationHold } from './auth-store.js';
 import { ApiError, apiGet, apiPost } from './client.js';
 import type { QueryDef } from './queries.js';
@@ -97,9 +98,13 @@ function boundedText(value: unknown, maxBytes: number): value is string {
 }
 function validConnections(value: unknown): boolean {
   if (value === undefined || value === null) return true;
-  if (!record(value) || !exact(value, ['sampledAt', 'refreshing', 'accounts']) || !timestamp(value.sampledAt) ||
+  if (!record(value) || !exact(value, ['sampledAt', 'refreshing', 'accounts', ...(Object.hasOwn(value, 'firstFailure') ? ['firstFailure'] : [])]) || !timestamp(value.sampledAt) ||
     typeof value.refreshing !== 'boolean' || !Array.isArray(value.accounts) || value.accounts.length > 8) return false;
   const ids = new Set<string>();
+  const failure = value.firstFailure;
+  if (Object.hasOwn(value, 'firstFailure') && (!validResourceConnectionFailure(failure) ||
+    Date.parse(failure.observedAt) > Date.parse(value.sampledAt) ||
+    !value.accounts.some(account => record(account) && account.id === failure.accountId))) return false;
   for (const account of value.accounts) {
     if (!record(account) || !exact(account, ['id', 'label', 'provider', 'state', 'authentication', 'health', 'planType',
       'observedAt', 'expiresAt', 'windows', 'reason', 'onDemandEnabled', 'executionSupported']) ||
