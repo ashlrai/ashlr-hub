@@ -213,6 +213,11 @@ live quota observations and owner-proven ordinary task receipts. It still compar
 allocation, account-access policy and every engineering or unknown receipt.
 Every new dispatch independently checks fresh quota; historical verification
 never authorizes execution. Ownerless reads retain exact observation comparison.
+If a human task finishes between the worker's receipt read and the host's reply,
+the host can join the old reservation to its exact current terminal receipt.
+The live owner, task identity, worker/capacity, start time and complete reservation
+shape must match. Unknown, uncertain, mismatched or no-longer-owned work stays
+held. This historical join cannot resume a task or authorize another dispatch.
 
 Completed history remains inspectable under STOP or after the mission deadline.
 Each proof read has a separate two-minute elapsed-time read limit, not a new execution

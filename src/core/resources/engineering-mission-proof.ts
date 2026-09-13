@@ -74,7 +74,10 @@ export async function readEngineeringMissionProof(request: EngineeringMissionPro
       const value = copy<{ sampleId: number; receipt: ResourceTaskReceipt }>(input);
       if (!value || Object.keys(value).sort().join(',') !== 'receipt,sampleId' || !Number.isSafeInteger(value.sampleId)) throw unavailable();
       const owner = samples.get(value.sampleId); if (!owner) throw unavailable();
-      return owner.ownsReceipt(value.receipt);
+      // Receipt reads and replies are asynchronous. Keep the original scope,
+      // but use fresh genuine ownership when an ordinary task has progressed.
+      const fresh = readResourceWorkspaceCustody(custody!, owner);
+      return fresh.ownsReceipt(value.receipt) || fresh.ownsSettledReservation(value.receipt);
     },
   } });
   const worker = new Worker(entrypoint(), { workerData: { schemaVersion: 1, request: captured,

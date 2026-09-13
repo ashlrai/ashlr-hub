@@ -1,6 +1,6 @@
 /** Actual pinned registration, without starting a worker or evaluator. */
 import { execFileSync } from 'node:child_process';
-import { createServer } from 'node:http';
+import { createServer, type ServerResponse } from 'node:http';
 import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -129,6 +129,62 @@ describe('offline autonomous setup', () => {
       expect(supervisor.snapshot().jobs[0]!.state).toBe('dispatching');
     } finally {
       await supervisor?.close(); transport.closeAllConnections(); await new Promise<void>(resolve => transport.close(() => resolve()));
+    }
+  });
+  it('accepts a human receipt that settles after the worker reads its reservation', async () => {
+    let response: ServerResponse | undefined;
+    const transport = createServer((req, res) => { req.resume(); req.on('end', () => { response = res; }); });
+    await new Promise<void>(resolve => transport.listen(0, '127.0.0.1', resolve));
+    const address = transport.address(); if (!address || typeof address === 'string') throw Error('Missing fixture transport');
+    let supervisor: Awaited<ReturnType<typeof createResourcePoolSupervisor>> | undefined;
+    let settling: Promise<void> | undefined;
+    const createRpc = proofRpc.createEngineeringWorkerRpcHost;
+    let delayed = false;
+    const captureRpc = vi.spyOn(proofRpc, 'createEngineeringWorkerRpcHost').mockImplementation(options => {
+      const host = createRpc(options);
+      return { ...host, handle(message) {
+        const request = message as { method?: string };
+        if (!delayed && request.method === 'custody.receipt') {
+          delayed = true;
+          // Delay only transport delivery, not a host handler: settle a real
+          // supervisor-owned task while the worker holds its earlier snapshot.
+          settling = (async () => {
+            try {
+              response!.writeHead(200, { 'content-type': 'application/json' });
+              response!.end(JSON.stringify({ choices: [{ message: { content: 'Human result' }, finish_reason: 'stop' }] }));
+              await vi.waitFor(() => expect(supervisor!.snapshot().jobs[0]!.state).toBe('settled'));
+            } finally { host.handle(message); }
+          })();
+          void settling.catch(() => {}); // The test awaits and reports it below.
+          return true;
+        }
+        return host.handle(message);
+      } };
+    });
+    try {
+      const f = fixture(`http://127.0.0.1:${address.port}/v1`);
+      const plan = check(f.options); prepare({ ...f.options, expectedPlanDigest: plan.planDigest });
+      const runtime = readResourceJson(f.options.resourceRuntime) as { poolPath: string; bindingsPath: string };
+      const pool = validateResourcePool(readResourceJson(runtime.poolPath));
+      supervisor = await createResourcePoolSupervisor({ root: f.ledger, workspace: f.options.workspace, projects: [], pool,
+        bindings: validateResourceBindings(readResourceJson(runtime.bindingsPath), pool),
+        readObservations: () => readResourceJson(f.observationsPath) as ResourceObservation[] });
+      supervisor.submit({ id: 'human-settles', prompt: 'Local fixture completes', mode: 'read-only', allowedWorkerIds: ['worker'],
+        timeoutMs: 60_000, maxOutputTokens: 128 });
+      await vi.waitFor(() => expect(response).toBeDefined());
+      const custody = createResourceWorkspaceCustody(supervisor, null, () => {});
+      const actual = await readEngineeringMissionProof({ kind: 'setup', input: f.options }, { custody,
+        lifetime: { deadlineAt: new Date(Date.now() + 60_000).toISOString() } });
+      await settling;
+      expect(delayed).toBe(true);
+      expect(actual).toEqual(check(f.options, custody));
+      expect(actual.holds).not.toContain('resource-work-unresolved');
+    } finally {
+      captureRpc.mockRestore();
+      try { await settling; } finally {
+        await supervisor?.close();
+        transport.closeAllConnections(); await new Promise<void>(resolve => transport.close(() => resolve()));
+      }
     }
   });
   it('prepares on a genuine live workspace without draining queued human work or releasing borrowed locks', async () => {

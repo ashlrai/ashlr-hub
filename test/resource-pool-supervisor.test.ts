@@ -313,6 +313,34 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     writeFileSync(file, original);
     expect(readResourceWorkspaceCustody(custody).root).toBe(f.root);
   });
+  it.each(['completed', 'failed', 'cancelled', 'timed-out'] as const)('joins only an exact prior reservation to a proven %s settlement', async outcome => {
+    const f = await fixture({ hold: true }); const supervisor = await f.start();
+    supervisor.submit(f.task('task-a', { timeoutMs: outcome === 'timed-out' ? 1000 : 5000 }));
+    await vi.waitFor(() => expect(f.held).toHaveLength(1));
+    const reservation = runtime.resourcePoolStatus(f.root, f.pool, f.bindings, []).attempts[0]!;
+    const owner = readResourceSupervisorCustody(supervisor);
+    expect(owner.ownsSettledReservation(reservation)).toBe(false);
+    if (outcome === 'completed') f.held[0]!.end(result());
+    if (outcome === 'failed') { f.held[0]!.writeHead(500); f.held[0]!.end('Fixture refusal'); }
+    if (outcome === 'cancelled') await supervisor.cancelAndDrain('task-a', reservation.taskDigest);
+    expect((await settled(supervisor)).outcome).toBe(outcome);
+    expect(owner.ownsReceipt(reservation)).toBe(false);
+    expect(owner.ownsSettledReservation(reservation)).toBe(true);
+    const changes = [
+      { id: 'foreign' }, { taskDigest: '0'.repeat(64) }, { poolDigest: '0'.repeat(64) },
+      { workerId: 'foreign' }, { capacityKey: 'foreign' }, { startedAt: new Date(Date.parse(reservation.startedAt) - 1).toISOString() },
+      { status: 'uncertain' as const }, { inputTokens: 1 }, { outputDigest: '0'.repeat(64) },
+      { reason: 'different-reservation' }, { origin: {} as NonNullable<typeof reservation.origin> },
+    ];
+    for (const change of changes) expect(owner.ownsSettledReservation({ ...reservation, ...change })).toBe(false);
+    const ledgerPath = join(f.root, 'pool-state.json'), original = readFileSync(ledgerPath);
+    try {
+      const uncertain = f.ledger(); uncertain.attempts[0].status = 'uncertain'; save(ledgerPath, uncertain);
+      expect(owner.ownsSettledReservation(reservation)).toBe(false);
+    } finally { writeFileSync(ledgerPath, original); }
+    supervisor.setPaused(true); expect(owner.ownsSettledReservation(reservation)).toBe(false);
+    supervisor.setPaused(false); await supervisor.close(); expect(owner.ownsSettledReservation(reservation)).toBe(false);
+  });
   it('withholds queued mission work while retaining observation, cancellation and recovery', async () => {
     const f = await fixture(); let stop = false;
     const supervisor = await f.start({ projects: [], isExecutionStopped: () => stop });

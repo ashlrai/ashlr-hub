@@ -105,6 +105,12 @@ live, host-owned custody questions. STOP still permits bounded historical
 inspection without granting execution. New setup materialization and its final
 publication proof remain synchronous; full standing-mission responsiveness is
 not yet established by the read-worker change.
+Live proof replies also reconcile an exact prior human reservation against its
+proven terminal receipt, so ordinary completion during a read does not become
+false unresolved work. This does not recover uncertain workers. Effectful setup
+isolation must also shorten its shared pool-lock hold: settlement transactions
+currently have a bounded lock wait, so moving the existing long critical section
+to a thread unchanged would interfere with human completion.
 Terminal/browser panels, conversation compaction and native desktop bootstrap
 remain separate gaps.
 

@@ -103,6 +103,8 @@ export interface ResourcePoolSupervisor {
 export interface ResourceSupervisorCustody {
   root: string; workspace: string; poolDigest: string; lock: LocalStoreLock; stateDigest: string;
   ownsReceipt(receipt: ResourceTaskReceipt): boolean;
+  /** Read-only historical join: exact reservation prefix of a proven owned settlement. */
+  ownsSettledReservation(receipt: ResourceTaskReceipt): boolean;
 }
 const supervisorCustodies = new WeakMap<ResourcePoolSupervisor, () => ResourceSupervisorCustody>();
 export function readResourceSupervisorCustody(supervisor: ResourcePoolSupervisor): ResourceSupervisorCustody {
@@ -1151,6 +1153,23 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
           return jobs.some(job => job.id === receipt.id && job.taskDigest === receipt.taskDigest &&
             originFor(job).poolDigest === receipt.poolDigest && job.allowedWorkerIds.includes(receipt.workerId) &&
             job.state === 'settled' && job.workerId === receipt.workerId && job.outcome === receipt.status);
+        },
+        ownsSettledReservation(receipt: ResourceTaskReceipt) {
+          try {
+            // A worker may have read the reservation just before its human
+            // task settled. Re-prove live custody and the actual terminal row;
+            // never infer settlement from a task ID, elapsed time or old sample.
+            const fresh = readResourceSupervisorCustody(supervisor);
+            if (receipt.status !== 'reserved' || receipt.origin !== undefined) return false;
+            const terminal = resourcePoolStatus(root, pool, bindings, []).attempts.find(row => row.id === receipt.id);
+            if (!terminal || !['completed', 'failed', 'timed-out', 'cancelled'].includes(terminal.status) ||
+              !fresh.ownsReceipt(terminal)) return false;
+            const { execution: _execution, nativeProcess: _nativeProcess, ...base } = terminal;
+            const reservation = { ...base, status: 'reserved', finishedAt: null, outputDigest: null,
+              inputTokens: null, outputTokens: null, reason: 'task-reserved' };
+            return Object.keys(receipt).sort().join(',') === Object.keys(reservation).sort().join(',') &&
+              canonical(receipt) === canonical(reservation);
+          } catch { return false; }
         } });
     });
     schedule(0); return supervisor;
