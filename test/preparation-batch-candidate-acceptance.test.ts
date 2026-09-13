@@ -1,4 +1,4 @@
-/** Diagnostic comparison of a selected artifact against its source-pinned baseline.
+/** Current adopted batching compared with its exact pre-adoption source baseline.
  * A default pass proves correct measurement/refusal, not an accepted optimization.
  * ASHLR_REQUIRE_BATCH_IMPROVEMENT=1 retains the original strict reduction gate. */
 import { execFileSync } from 'node:child_process';
@@ -13,18 +13,20 @@ import { checkResourceEngineeringPreparation, prepareResourceEngineeringBundle, 
 import { createPreparationCandidateHarness, snapshotPreparationFixture, type PreparationCandidateSession } from './helpers/preparation-candidate-harness.js';
 import { createPreparationMutationInterceptor, type PreparationMutationRequest } from './helpers/preparation-mutation-interceptor.js';
 import { preparationManagerFixture } from './helpers/preparation-workflow-manager-fixture.js';
+import { PREPARATION_BATCH_TARGET, PREPARATION_BATCH_CURRENT_BLOB, PREPARATION_BATCH_BASELINE_BLOB,
+  PREPARATION_BATCH_PATCH_SHA256, preparationSourceBlob, reconstructPreparationBatchBaseline } from './helpers/preparation-batch-source.js';
 
 const repository = dirname(dirname(fileURLToPath(import.meta.url)));
-const target = 'src/core/resources/engineering-preparation.ts';
-const targetBlob = 'c0fa8821cc81e73ef9cc03d006cbffc08f8c6933';
+const target = PREPARATION_BATCH_TARGET;
+const targetBlob = PREPARATION_BATCH_CURRENT_BLOB;
 const patchFile = join(repository, 'artifacts/hub-verification-batch-candidate.patch');
 const supported = process.platform === 'darwin' && Number(process.versions.node.split('.')[0]) >= 24;
 const hash = (bytes: string | Buffer) => createHash('sha256').update(bytes).digest('hex');
-const gitBlob = (text: string) => createHash('sha1').update(`blob ${Buffer.byteLength(text)}\0`).update(text).digest('hex');
+const gitBlob = preparationSourceBlob;
 const environment = { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_OPTIONAL_LOCKS: '0',
   GIT_AUTHOR_DATE: '2026-09-01T00:00:00Z', GIT_COMMITTER_DATE: '2026-09-01T00:00:00Z' };
 let harness: Awaited<ReturnType<typeof createPreparationCandidateHarness>> | undefined;
-let candidate: string, patchDigest: string;
+let baselineSource: string, candidate: string, patchDigest: string;
 
 beforeAll(async () => {
   if (!supported) return;
@@ -33,22 +35,28 @@ beforeAll(async () => {
   harness = await createPreparationCandidateHarness(repository);
   expect(harness.source).toBe(original);
   const patch = readFileSync(patchFile); patchDigest = hash(patch);
-  // Apply the actual patch, never approximate it with source replacements.
+  expect(patchDigest).toBe(PREPARATION_BATCH_PATCH_SHA256);
+  // Reverse and reapply the retained patch, never approximate source replacements.
   // The private directory is outside any repository and has only this target.
   const root = join(harness.root, 'patch-application'); mkdirSync(root, { mode: 0o700 });
   mkdirSync(join(root, dirname(target)), { recursive: true, mode: 0o700 });
-  writeFileSync(join(root, target), original, { mode: 0o600 });
   const invoke = (...args: string[]) => execFileSync('/usr/bin/git', ['-c', 'core.hooksPath=/dev/null', 'apply', ...args], {
     cwd: root, env: environment, encoding: 'utf8', input: patch, timeout: 10000, maxBuffer: 1024 * 1024,
   });
   expect(patch.toString('utf8').match(/^diff --git .+$/gm)).toEqual([`diff --git a/${target} b/${target}`]);
   const inventory = invoke('--numstat', '-').trim().split('\n');
   expect(inventory).toHaveLength(1); expect(inventory[0]!.split('\t').slice(2)).toEqual([target]);
-  invoke('--check', '-'); invoke('-');
+  baselineSource = reconstructPreparationBatchBaseline(original, patch, (source, reverse) => {
+    writeFileSync(join(root, target), source, { mode: 0o600 });
+    const direction = reverse ? ['--reverse'] : [];
+    invoke(...direction, '--check', '-'); invoke(...direction, '-');
+    return readFileSync(join(root, target), 'utf8');
+  });
   expect(readdirSync(join(root, dirname(target)))).toEqual(['engineering-preparation.ts']);
-  candidate = readFileSync(join(root, target), 'utf8');
-  expect(candidate).not.toBe(original); expect(hash(readFileSync(patchFile))).toBe(patchDigest);
-  // Compile the whole patched source against the current fixed dependencies,
+  candidate = harness.source;
+  expect(readFileSync(join(root, target), 'utf8')).toBe(candidate);
+  expect(baselineSource).not.toBe(candidate); expect(hash(readFileSync(patchFile))).toBe(patchDigest);
+  // Compile both exact sources against the same current fixed dependencies,
   // without writing it into the live checkout or emitting build artifacts.
   const configFile = join(repository, 'tsconfig.json');
   const config = ts.readConfigFile(configFile, ts.sys.readFile);
@@ -56,13 +64,15 @@ beforeAll(async () => {
   const parsed = ts.parseJsonConfigFileContent(config.config, ts.sys, repository);
   expect(parsed.errors).toEqual([]);
   const options = { ...parsed.options, noEmit: true };
-  const host = ts.createCompilerHost(options), getSourceFile = host.getSourceFile.bind(host);
-  host.getSourceFile = (file, languageVersion, onError, shouldCreateNewSourceFile) => file === join(repository, target)
-    ? ts.createSourceFile(file, candidate, languageVersion, true)
-    : getSourceFile(file, languageVersion, onError, shouldCreateNewSourceFile);
-  const program = ts.createProgram(parsed.fileNames, options, host);
-  expect(program.getSourceFile(join(repository, target))?.getFullText()).toBe(candidate);
-  expect(ts.getPreEmitDiagnostics(program).map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'))).toEqual([]);
+  for (const source of [baselineSource, candidate]) {
+    const host = ts.createCompilerHost(options), getSourceFile = host.getSourceFile.bind(host);
+    host.getSourceFile = (file, languageVersion, onError, shouldCreateNewSourceFile) => file === join(repository, target)
+      ? ts.createSourceFile(file, source, languageVersion, true)
+      : getSourceFile(file, languageVersion, onError, shouldCreateNewSourceFile);
+    const program = ts.createProgram(parsed.fileNames, options, host);
+    expect(program.getSourceFile(join(repository, target))?.getFullText()).toBe(source);
+    expect(ts.getPreEmitDiagnostics(program).map(diagnostic => ts.flattenDiagnosticMessageText(diagnostic.messageText, '\n'))).toEqual([]);
+  }
   expect(readFileSync(join(repository, target), 'utf8')).toBe(original);
 }, 60000);
 
@@ -75,7 +85,7 @@ afterAll(() => {
 });
 
 type Sample = Awaited<ReturnType<PreparationCandidateSession['call']>>;
-describe.runIf(supported)('selected batching candidate native diagnostic comparison', () => {
+describe.runIf(supported)('adopted batching current-source native diagnostic comparison', () => {
   it('preserves exact behavior and drift refusal while reporting whether batching improves work', async () => {
     if (!harness) throw new Error('Candidate harness unavailable');
     const fixtureRoot = join(harness.root, 'fixture'); mkdirSync(fixtureRoot, { mode: 0o700 });
@@ -118,7 +128,7 @@ describe.runIf(supported)('selected batching candidate native diagnostic compari
       stderr: string; stderrBytes: number; inputBytes: number; stdoutBytes: number };
     const healthyBatches: Record<string, BatchTransport[][]> = {};
 
-    for (const [kind, source] of [['baseline', harness.source], ['candidate', candidate]] as const) {
+    for (const [kind, source] of [['baseline', baselineSource], ['candidate', candidate]] as const) {
       const before = snapshotPreparationFixture(fixtureRoot);
       let mutated: ReturnType<typeof snapshotPreparationFixture> | undefined;
       const batchTransport: BatchTransport[] = [];
@@ -225,7 +235,7 @@ describe.runIf(supported)('selected batching candidate native diagnostic compari
       [1, 2].every(index => baseline[index]!.measurement.blobProcesses === 8 && patched[index]!.measurement.blobProcesses === 2 &&
         baseline[index]!.measurement.processes - patched[index]!.measurement.processes === 6);
     if (process.env.ASHLR_PREPARATION_BATCH_REPORT === '1') console.info('PREPARATION_BATCH_COMPARISON', JSON.stringify({
-      baselineBlob: targetBlob, candidateDigest: hash(candidate), patchDigest, gitPin: harness.gitPin, improvementAccepted,
+      baselineBlob: PREPARATION_BATCH_BASELINE_BLOB, currentBlob: targetBlob, candidateDigest: hash(candidate), patchDigest, gitPin: harness.gitPin, improvementAccepted,
       samples: Object.fromEntries(Object.entries(observed).map(([kind, samples]) => [kind, samples.map(sample => sample.measurement)])),
       healthyBatches, ledgers,
     }));

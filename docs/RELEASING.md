@@ -78,27 +78,38 @@ execution. Changed gate semantics must be versioned in the contract and receipt
 verifier without reinterpreting historical receipts.
 
 From the repository root, with the locked development dependencies installed,
-inspect the proposed whole-file partition:
+verify the executable opt-in configurations and their actual shard membership:
 
 ```bash
-node scripts/check-release-test-coverage.mjs
+node scripts/check-release-test-coverage.mjs --configured
 ```
 
-The JSON report discovers the default project/file pairs from the local Vitest
-configuration, then verifies an exact-once split using the reviewed manifest in
+The schema-v2 JSON report independently discovers the default configuration,
+[`vitest.config.release-ordinary.ts`](../vitest.config.release-ordinary.ts), and
+[`vitest.config.release-native.ts`](../vitest.config.release-native.ts). It
+verifies their exact-once union against the reviewed manifest in
 [`release-native-candidates.mjs`](../test/config/release-native-candidates.mjs).
-It rejects missing manifest files, project mismatches, duplicate assignments,
-and uncovered files. New default files remain in the ordinary group. Review
-their timing separately: this inventory does not infer test duration or classify
-new long-running cases automatically.
+It also invokes the ordinary configuration's resolved sequencer for each of
+three shards, over all projects together, and checks for omissions, overlap,
+foreign files, or project mismatches. It does not approximate sharding from a
+files-only list or reimplement Vitest's hash algorithm.
+
+The ordinary configuration retains the default unit/real-I/O worker limits and
+excludes only the reviewed native files. The native configuration runs those
+whole files serially. Both derive from the unchanged default configuration,
+preserving setup, hooks, per-test deadlines and isolation. They are not wired
+into M571 yet. New default files remain in ordinary coverage; review their
+timing separately because this inventory does not classify new long-running
+cases automatically.
 
 This command loads trusted repository configuration but does not import test or
-setup modules. It rejects command-line filters and has a 30-second CLI ceiling,
+setup modules. It rejects selection filters and has a 30-second CLI ceiling,
 including cleanup; exceeding it is a failure with cleanup unconfirmed. The
 report explicitly says `testsExecuted: false` and `gateAttestation: false`.
-It describes a **proposed** partition, not the current three shards, expanded
-test-case counts, passing tests, or proof that either group's budget is adequate.
-No release command or receipt semantics change merely by running this check.
+It proves configured **file membership**, not expanded test-case counts, passing
+tests, custom sequencer sort behavior, or adequate execution budgets. No release
+command or receipt semantics change merely by running this check. Without
+`--configured`, the command retains its schema-v1 hypothetical partition report.
 
 ### Keep public source separate from private commissioning evidence
 

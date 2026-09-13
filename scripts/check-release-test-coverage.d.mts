@@ -13,3 +13,10 @@ export interface ReleaseTestCoverage {
 export function verifyReleaseTestCoverage(discovered: unknown, nativeCandidates: unknown, assignments: unknown): ReleaseTestCoverage;
 export function proposeReleaseTestCoverage(discovered: unknown, nativeCandidates?: unknown): ReleaseTestCoverage;
 export function discoverReleaseTestFiles(root: string): Promise<ReleaseTestFile[]>;
+export interface ConfiguredReleaseTestCoverage extends Omit<ReleaseTestCoverage, 'schemaVersion' | 'scope'> {
+  schemaVersion: 2;
+  scope: 'configured-whole-file-partition';
+  ordinaryShards: Array<{ index: number; count: 3; files: ReleaseTestFile[] }>;
+}
+export function verifyConfiguredReleaseTestCoverage(discovered: unknown, ordinaryFiles: unknown, nativeFiles: unknown, ordinaryShards: unknown, nativeCandidates?: unknown): ConfiguredReleaseTestCoverage;
+export function discoverConfiguredReleaseTestCoverage(root: string, nativeCandidates?: unknown): Promise<ConfiguredReleaseTestCoverage>;

@@ -43,6 +43,9 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/preparation-batch-source.test.ts', // exact reverse/forward Git patch proof in private scratch
+  'test/release-configured-coverage.test.ts', // actual configured Vitest sequencing in private sentinel fixtures
+  'test/release-vitest-partition.test.ts', // real config discovery and resolved execution-setting parity
   'test/release-test-coverage.test.ts', // actual Vitest discovery against private filesystem sentinels; never executes test modules
   'test/builtin-activity-pgid-reuse.test.ts', // private activity journals with synthetic identity reuse probes
   'test/builtin-activity-settlement-witness.test.ts', // private journals and one real owned subprocess

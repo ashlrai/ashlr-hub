@@ -1,6 +1,35 @@
 # Candidate: batch immutable evaluator blob reads
 
-Status: **unapplied; rebased for builtin recipes and retained-seed checks, native revalidation pending**.
+Status on 2026-09-13: **batching adopted in source; strict current-source native comparison passed**.
+Source checkpoint `e9ddb5832ee894085f64c67d8177530c8f99c41b` adopted the retained
+patch after the transport-project overlap fix. The current target Git blob is
+`fff44339010fb6fb665bbdbfc6d7005ef2caafa4`. The former acceptance fixture still
+pinned the pre-adoption blob and failed before executing its comparison; that
+failure is not a native workload pass.
+
+The successor comparison reconstructs the pre-batching baseline in private
+scratch by reversing the exact retained patch, requires baseline blob
+`3580166ed585378c051328edf62f403c62acee4b`, then reapplies the patch and demands
+byte-exact current source. Both arms retain the overlap safety fix. Historical
+pins and measurements below remain historical; they are not renewed by source
+adoption or by reconstructing a baseline.
+
+The repaired native test passed through `vitest.config.release-native.ts` with
+`ASHLR_REQUIRE_BATCH_IMPROVEMENT=1`: one complete case, zero skipped, 87.79 seconds
+total. Both reconstructed baseline and actual current source compiled against
+the same current dependencies. Four-file check and metadata reads each reduced
+blob launches from 8 to 2 and total broker launches by 6; the one-file check
+remained 36 broker / 2 blob launches. Current source SHA-256 was
+`c1baa8246215720f9ba0b3a72963278c0be317ec39f2b3ee3fb818a3de7d3f49`, using the
+same pinned developer Git identity recorded in the historical table below.
+Exact results, same-child drift refusal, accounting, and settled cleanup passed.
+This establishes the stated process-count improvement on those fixed reads,
+not wall-time savings, a complete release-gate pass, or fleet activation.
+
+### Historical proposal status
+
+The following records the proposal before adoption and its pending revalidation
+at that time; references to an unapplied candidate are not current runtime state.
 The historical candidate's strict native process-count comparison passed with
 pinned developer Git. That comparison preserved healthy results and during-call
 drift refusal, with two blob launches instead of eight for both four-file reads.
