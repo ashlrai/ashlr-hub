@@ -49,6 +49,19 @@ function fixture() {
   return { base, ledger, observationsPath, options: { recipe, workspace, resourceRuntime, projectsFile, output: join(base, 'bundle') } };
 }
 describe('evaluated engineering preparation bridge', () => {
+  it.each(['default', 'explicit'] as const)('rejects a transport workspace registered as a %s project before planning or writing output', (collision) => {
+    const f = fixture(); const runtime = JSON.parse(readFileSync(f.options.resourceRuntime, 'utf8'));
+    if (collision === 'default') {
+      save(f.options.projectsFile, { schemaVersion: 1, projects: [{ id: 'hub', label: 'Hub', workspace: f.options.workspace }] });
+      f.options.workspace = runtime.workspace; f.options.recipe.projectId = 'hub';
+    }
+    else save(f.options.projectsFile, { schemaVersion: 1, projects: [{ id: 'transport-project', label: 'Transport', workspace: runtime.workspace }] });
+    const dispatch = vi.spyOn(poolRuntime, 'runResourceTask').mockImplementation(() => { throw new Error('Unexpected dispatch'); });
+    expect(() => checkResourceEngineeringPreparation(f.options)).toThrow(/outside projects/);
+    expect(() => prepareResourceEngineeringBundle({ ...f.options, expectedPlanDigest: '0'.repeat(64) })).toThrow(/outside projects/);
+    expect(existsSync(f.options.output)).toBe(false); expect(existsSync(f.ledger)).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
+  });
   it('refuses a raw built-in evaluator recipe before output creation or worker dispatch', () => {
     const f = fixture();
     const dispatch = vi.spyOn(poolRuntime, 'runResourceTask').mockImplementation(() => { throw new Error('Unexpected worker dispatch during preparation'); });

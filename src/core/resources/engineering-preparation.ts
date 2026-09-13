@@ -103,7 +103,10 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
   }
   const controls = [options.resourceRuntime, options.projectsFile, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath,
     ...(runtime.quotaConfigPath ? [runtime.quotaConfigPath] : [])];
+  // Match enrollment's transport isolation before publishing a plan or seed:
+  // the console's implicit default project is still a writable project.
   if (preview.projects!.some(row => overlaps(options.output, row.workspace) || overlaps(runtime.root, row.workspace) ||
+    overlaps(runtime.workspace, row.workspace) ||
     controls.some(file => contains(row.workspace, file))) || [runtime.root, runtime.workspace, ...controls].some(file => overlaps(options.output, file))) {
     fail('INVALID_INPUT', 'Preparation output and controls must be outside projects and shared accounting');
   }

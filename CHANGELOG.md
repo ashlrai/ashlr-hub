@@ -11,6 +11,13 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Engineering preparation transport isolation
+
+- Rejects transport workspaces overlapping any console project, including the
+  implicit default, during plan checks and before creating preparation output.
+- Aligns preflight with enrollment's existing boundary, avoiding partial bundles
+  for configurations that were never eligible for enrollment.
+
 ### Global-stop queue recovery
 
 - Holds undispatched resource jobs while the global stop is active or unreadable,

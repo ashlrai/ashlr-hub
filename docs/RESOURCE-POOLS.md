@@ -348,6 +348,12 @@ A mismatch leaves incomplete output for inspection, without a receipt or eligibl
 campaign; no automatic repair or worker dispatch follows. A target-only successor
 is checked against its own requested seed, not forced back to the baseline bytes.
 
+Keep the resource runtime's transport workspace separate from every console
+project, including the implicit default project selected by `--workspace`.
+They cannot be the same directory or contain one another. Preparation checks
+this before returning a plan or creating output, matching enrollment validation.
+The transport is not a project to register in `projects.json`.
+
 1. Write a reviewed recipe as private `0600` JSON, including a new `codex/`
    delivery branch and explicit budgets. The [historical marker-filter recipe](FIRM-DEMO.md#a-real-hub-source-campaign)
    supplies a reproducible evaluator and failing seed. That defect is already
