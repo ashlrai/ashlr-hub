@@ -55,7 +55,8 @@ export async function runFixedUniverseEvaluator(record: ManifestRecord, root: st
     // Only the closed installed implementation runs outside an evaluator
     // sandbox. Neither seed command bytes nor supplied environment select code.
     const activityRoot = mkdtempSync(join(scratch, 'builtin-activity-'));
-    const owner: BuiltinActivityOwner = { schemaVersion: 1, invocationId: randomBytes(32).toString('hex'),
+    const settlementKey = randomBytes(32).toString('hex');
+    const owner: BuiltinActivityOwner = { schemaVersion: 2, invocationId: randomBytes(32).toString('hex'),
       implementationDigest: installed.digest, deadlineAt: new Date(Date.now() + remaining).toISOString() };
     initializeBuiltinActivity(activityRoot, owner);
     const builtinEnv = { PATH: `${dirname(installed.git.path)}:/usr/bin:/bin:${dirname(process.execPath)}`, HOME: scratch, TMPDIR: scratch,
@@ -66,12 +67,12 @@ export async function runFixedUniverseEvaluator(record: ManifestRecord, root: st
     if (dispatchRemaining <= 0 || signal.aborted) return { stdout: '', stderr: '', exitCode: -1, signal: null,
       timedOut: dispatchRemaining <= 0, cancelled: signal.aborted, processGroupSettlement: 'not-started' };
     const result = await runVerifySubprocessAsync(installed.command, { cwd: scratch, env: builtinEnv,
-      timeoutMs: dispatchRemaining, signal, requireProcessGroupExit: true });
+      input: settlementKey, timeoutMs: dispatchRemaining, signal, requireProcessGroupExit: true });
     // A controller's group alone says nothing about its separately owned
     // candidate/tool groups. Keep all activity evidence on any uncertainty.
     if (!['not-started', 'group-exit-confirmed'].includes(result.processGroupSettlement ?? '')) return { ...result,
       custodyDiagnostics: summarizeFixedEvaluatorCustody(result, 'outer-process-group') };
-    if (result.processGroupSettlement !== 'not-started' && !inspectBuiltinActivity(activityRoot, owner)) {
+    if (result.processGroupSettlement !== 'not-started' && !inspectBuiltinActivity(activityRoot, owner, settlementKey)) {
       return { ...result, error: 'Built-in evaluator process settlement unconfirmed', processGroupSettlement: 'unconfirmed',
         custodyDiagnostics: summarizeFixedEvaluatorCustody(result, 'nested-activity') };
     }

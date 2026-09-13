@@ -9,6 +9,7 @@ import { inspectBuiltinActivity, type BuiltinActivityOwner } from '../scripts/ev
 import { resolveBuiltinEvaluator } from '../src/core/universe/builtin-evaluator-registry.js';
 import { readBuiltinTrialCustody } from '../src/core/universe/builtin-trial-custody.js';
 import * as evaluator from '../src/core/universe/fixed-evaluator.js';
+import * as verify from '../src/core/run/verify-commands.js';
 import { parsePreparationMeasurementReport } from '../src/core/universe/preparation-measurement-report.js';
 import { runUniverse } from '../src/core/universe/runner.js';
 import { initUniverse, manifestRecord, parseEvaluation, readRecords, readUniverseOverview, universePath } from '../src/core/universe/store.js';
@@ -169,6 +170,7 @@ describe.runIf(supported)('actual installed builtin ordinary-trial custody', () 
 
   it('retains custody and scratch when the actual settled evaluator return is deliberately lost', async () => {
     const f = fixture();
+    const transport = vi.spyOn(verify, 'runVerifySubprocessAsync'); // Call-through; key stays in this test's memory only.
     const original = evaluator.runFixedUniverseEvaluator;
     let actual: Awaited<ReturnType<typeof original>> | undefined;
     let evaluatorScratch: string | undefined;
@@ -195,8 +197,12 @@ describe.runIf(supported)('actual installed builtin ordinary-trial custody', () 
     expect(activityNames).toHaveLength(1);
     const activityRoot = join(evaluatorScratch!, activityNames[0]!);
     const owner = JSON.parse(readFileSync(join(activityRoot, 'owner.json'), 'utf8')) as BuiltinActivityOwner;
-    expect(inspectBuiltinActivity(activityRoot, owner)).toBe(true);
-    // Only this fresh kernel-backed aggregate check permits fixture cleanup.
+    const key = transport.mock.calls.find(([, options]) => options.cwd === evaluatorScratch)?.[1].input;
+    expect(typeof key).toBe('string'); expect(owner.schemaVersion).toBe(2);
+    expect(inspectBuiltinActivity(activityRoot, owner)).toBe(false);
+    expect(inspectBuiltinActivity(activityRoot, owner, key)).toBe(true);
+    // Only authenticated kernel-backed observations permit fixture cleanup.
+    // The production result remains lost and its durable run stays held.
     preserveRoot = false;
     expect(readUniverseOverview({ root: f.store }).universes[0]!.elites).toEqual([]);
     const records = readRecords(f.directory);

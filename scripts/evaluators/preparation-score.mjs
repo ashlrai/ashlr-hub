@@ -11,7 +11,7 @@ import { scorePreparationProcesses, summarizePreparationProcessArtifact, assertP
 import { parsePreparationTypecheckProject, PREPARATION_TYPECHECK_TARGET } from '../../src/core/universe/preparation-typecheck-project.ts';
 import { runVerifySubprocessAsync } from '../../src/core/run/verify-commands.ts';
 import { setTimeout, clearTimeout } from 'node:timers';
-import { createBuiltinActivityTracker } from './measurement/preparation-verification-activity.mjs';
+import { openBuiltinActivityTracker } from './measurement/preparation-verification-activity.mjs';
 import { assertPreparationGit } from './measurement/preparation-verification-native.mjs';
 
 const ID = 'preparation-process-score-v1';
@@ -115,7 +115,7 @@ export async function runPreparationScore() {
     const base = dirname(fileURLToPath(import.meta.url));
     const bridgePath = join(base, 'measurement/preparation-bridge.mjs');
     if (process.argv.length !== 3 || process.argv[2] !== bridgePath || !process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY) fail();
-    activity = createBuiltinActivityTracker(process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY);
+    activity = await openBuiltinActivityTracker(process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY, stop.signal);
     const deadlineAt = Date.parse(activity.owner.deadlineAt);
     const deadlineMonotonicMs = startMono + (deadlineAt - startWall);
     guard = () => { if (stop.signal.aborted || !Number.isFinite(deadlineAt) || Date.now() >= deadlineAt ||

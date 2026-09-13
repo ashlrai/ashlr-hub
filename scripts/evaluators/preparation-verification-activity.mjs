@@ -48,6 +48,47 @@ function names(root) {
   const result = fs.readdirSync(root); if (result.length > MAX_BUILTIN_ACTIVITIES * 3 + 2) fail(); return result.sort();
 }
 
+/** Read the per-invocation secret only from the evaluator's bounded stdin pipe.
+ * Legacy owners never consume stdin. No secret is copied into argv or env. */
+export async function openBuiltinActivityTracker(root, signal, input = process.stdin) {
+  rootIdentity(root);
+  const captured = owner(readMessage(join(root, 'owner.json')));
+  if (captured.schemaVersion === 1) return createBuiltinActivityTracker(root);
+  const remaining = Math.min(5000, Date.parse(captured.deadlineAt) - Date.now());
+  if (signal?.aborted || remaining <= 0) fail();
+  const key = await new Promise((resolveKey, reject) => {
+    const bytes = Buffer.alloc(64); let length = 0, done = false;
+    const finish = error => {
+      if (done) return; done = true;
+      globalThis.clearTimeout(timer); signal?.removeEventListener('abort', abort);
+      input.removeListener('data', data); input.removeListener('end', end);
+      input.removeListener('error', failed); input.removeListener('close', failed); input.pause();
+      const text = bytes.toString('ascii'); bytes.fill(0);
+      if (error || length !== 64 || !HASH.test(text)) reject(new Error('BUILTIN_ACTIVITY_INPUT_UNAVAILABLE'));
+      else resolveKey(text);
+    };
+    const abort = () => finish(true), failed = () => finish(true), end = () => finish(false);
+    const data = chunk => {
+      if (done) return;
+      if (typeof chunk === 'string') chunk = Buffer.from(chunk, 'utf8');
+      if (!Buffer.isBuffer(chunk) || chunk.length > 64 - length) { finish(true); return; }
+      // Validate raw bytes: ASCII decoding alone would mask high-bit input.
+      if ([...chunk].some(byte => !(byte >= 48 && byte <= 57 || byte >= 97 && byte <= 102))) { finish(true); return; }
+      chunk.copy(bytes, length); length += chunk.length;
+    };
+    const timer = globalThis.setTimeout(abort, remaining);
+    input.on('data', data); input.once('end', end); input.once('error', failed); input.once('close', failed);
+    signal?.addEventListener('abort', abort, { once: true });
+    if (signal?.aborted || input.destroyed) abort();
+    else if (input.readableEnded) end();
+    else input.resume();
+  });
+  if (signal?.aborted || Date.now() >= Date.parse(captured.deadlineAt)) fail();
+  const tracker = createBuiltinActivityTracker(root, key);
+  if (ownerDigest(tracker.owner) !== ownerDigest(captured)) fail();
+  return tracker;
+}
+
 export function initializeBuiltinActivity(root, value) {
   const identity = rootIdentity(root), captured = owner(value);
   if (names(root).length !== 0) fail();

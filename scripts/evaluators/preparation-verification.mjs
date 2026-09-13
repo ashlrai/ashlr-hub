@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL, URL } from 'node:url';
 import { performance } from 'node:perf_hooks';
 import { runPreparationWorkload } from './preparation-workload.mjs';
-import { createBuiltinActivityTracker } from './preparation-verification-activity.mjs';
+import { openBuiltinActivityTracker } from './preparation-verification-activity.mjs';
 import { resolvePreparationGit } from './preparation-verification-native.mjs';
 
 export { runPreparationWorkload };
@@ -19,7 +19,7 @@ export async function runPreparationMeasurement() {
     try {
       const bridgePath = fileURLToPath(new URL('./preparation-bridge.mjs', import.meta.url));
       if (process.argv.length !== 3 || process.argv[2] !== bridgePath) throw new Error('Invalid fixed invocation');
-      if (process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY) activity = createBuiltinActivityTracker(process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY);
+      if (process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY) activity = await openBuiltinActivityTracker(process.env.ASHLR_UNIVERSE_BUILTIN_ACTIVITY, stop.signal);
       let gitPin;
       if (activity) {
         const text = process.env.ASHLR_UNIVERSE_BUILTIN_GIT;

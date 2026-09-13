@@ -1,11 +1,11 @@
-/** Real private journals; synthetic reuse cases plus an actual owned subprocess.
- * This primitive is not yet enabled by the installed evaluator launcher. */
+/** Real private journals; synthetic reuse cases plus actual owned subprocesses. */
 import { mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { PassThrough } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { initializeBuiltinActivity, createBuiltinActivityTracker, inspectBuiltinActivity,
+import { initializeBuiltinActivity, createBuiltinActivityTracker, inspectBuiltinActivity, openBuiltinActivityTracker,
   type BuiltinActivityOwner } from '../scripts/evaluators/preparation-verification-activity.mjs';
 import { runVerifySubprocessAsync } from '../src/core/run/verify-commands.js';
 
@@ -25,7 +25,7 @@ function finish(f: ReturnType<typeof fixture>) {
   const activity = f.tracker.lifecycle('tool').prepare(); activity.spawned(42420);
   activity.settled('group-exit-confirmed'); f.tracker.complete();
 }
-afterEach(() => { vi.restoreAllMocks(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 describe('invocation-authenticated settlement witness', () => {
   it('accepts previously witnessed exit despite synthetic numeric ID reuse without touching the new process', () => {
@@ -105,5 +105,65 @@ describe('invocation-authenticated settlement witness', () => {
     expect(result.processGroupSettlement).toBe('group-exit-confirmed');
     expect(result.exitCode).toBe(0); expect(result.stdout).toBe('owned-fixture');
     f.tracker.complete(); expect(inspectBuiltinActivity(f.root, f.owner, f.key)).toBe(true);
+  }, 15000);
+});
+
+describe('private evaluator input channel', () => {
+  it('accepts exactly 64 lowercase hex bytes across chunks and removes listeners', async () => {
+    const f = fixture(), input = new PassThrough(), stop = new AbortController();
+    const pending = openBuiltinActivityTracker(f.root, stop.signal, input);
+    input.write(f.key.slice(0, 17)); input.end(f.key.slice(17));
+    const tracker = await pending; tracker.complete();
+    expect(inspectBuiltinActivity(f.root, f.owner, f.key)).toBe(true);
+    for (const event of ['data', 'end', 'error', 'close']) expect(input.listenerCount(event)).toBe(0);
+  });
+  it.each(['short', 'long', 'uppercase', 'high-bit', 'newline', 'empty'])('rejects %s input without recording activity or leaking bytes', async kind => {
+    const f = fixture(), input = new PassThrough();
+    const pending = openBuiltinActivityTracker(f.root, undefined, input);
+    const failure = expect(pending).rejects.toThrow('BUILTIN_ACTIVITY_INPUT_UNAVAILABLE');
+    const bytes = kind === 'short' ? f.key.slice(0, 63) : kind === 'long' ? f.key + '0' : kind === 'uppercase' ? 'A'.repeat(64) :
+      kind === 'high-bit' ? Buffer.alloc(64, 0xe1) : kind === 'newline' ? f.key + '\n' : '';
+    input.end(bytes); await failure;
+    expect(readdirSync(f.root)).toEqual(['owner.json']);
+  });
+  it.each(['cancel', 'timeout', 'error', 'close'])('bounds stalled input on %s', async kind => {
+    vi.useFakeTimers();
+    const f = fixture(), input = new PassThrough(), stop = new AbortController();
+    const pending = openBuiltinActivityTracker(f.root, stop.signal, input);
+    const failure = expect(pending).rejects.toThrow('BUILTIN_ACTIVITY_INPUT_UNAVAILABLE');
+    input.write(f.key); // A complete key without EOF is not a complete frame.
+    if (kind === 'cancel') stop.abort();
+    if (kind === 'timeout') await vi.advanceTimersByTimeAsync(5000);
+    if (kind === 'error') input.emit('error', new Error('PRIVATE_TRANSPORT_DETAIL'));
+    if (kind === 'close') input.emit('close');
+    await failure; expect(readdirSync(f.root)).toEqual(['owner.json']);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it('refuses an owner swapped while waiting for the private key', async () => {
+    const f = fixture(), input = new PassThrough(), pending = openBuiltinActivityTracker(f.root, undefined, input);
+    writeFileSync(join(f.root, 'owner.json'), JSON.stringify({ ...f.owner, invocationId: 'c'.repeat(64) }));
+    input.end(f.key); await expect(pending).rejects.toThrow('BUILTIN_ACTIVITY_UNAVAILABLE');
+  });
+  it('does not consume stdin for a legacy owner', async () => {
+    const f = fixture(), input = new PassThrough();
+    const legacy = { ...f.owner, schemaVersion: 1 as const };
+    writeFileSync(join(f.root, 'owner.json'), JSON.stringify(legacy));
+    const tracker = await openBuiltinActivityTracker(f.root, undefined, input);
+    tracker.complete(); expect(inspectBuiltinActivity(f.root, legacy)).toBe(true);
+    expect(input.listenerCount('data')).toBe(0); expect(input.readableFlowing).toBe(null);
+  });
+  it('transfers a real invocation key over stdin without argv, environment or output exposure', async () => {
+    const f = fixture();
+    const module = new URL('../scripts/evaluators/preparation-verification-activity.mjs', import.meta.url).href;
+    const script = `import {openBuiltinActivityTracker} from ${JSON.stringify(module)};
+      const tracker = await openBuiltinActivityTracker(process.argv[1]); tracker.complete();
+      process.stdout.write(JSON.stringify({env:process.env, argv:process.argv, owner:tracker.owner}));`;
+    const result = await runVerifySubprocessAsync([process.execPath, '--input-type=module', '-e', script, f.root], {
+      cwd: f.root, env: {}, input: f.key, timeoutMs: 10_000, requireProcessGroupExit: true,
+    });
+    if (result.processGroupSettlement === 'unconfirmed') roots.splice(roots.indexOf(f.root), 1);
+    expect(result).toMatchObject({ exitCode: 0, stderr: '', processGroupSettlement: 'group-exit-confirmed' });
+    expect(JSON.stringify(result)).not.toContain(f.key);
+    expect(inspectBuiltinActivity(f.root, f.owner, f.key)).toBe(true);
   }, 15000);
 });

@@ -33,7 +33,7 @@ const transformed = ts.transform(owner, [context => root => {
 const printer = ts.createPrinter();
 const code = [...helpers, transformed.transformed[0]!].map(node => printer.printNode(ts.EmitHint.Unspecified, node, source)).join('\n');
 transformed.dispose();
-const invoke = compileFunction(`const {process,performance,createHash,dirname,join,fileURLToPath,createBuiltinActivityTracker,
+const invoke = compileFunction(`const {process,performance,createHash,dirname,join,fileURLToPath,openBuiltinActivityTracker,
   inspectPreparationScoreIdentity,readArtifactSnapshot,summarizePreparationProcessArtifact,assertPreparationProcessScope,
   PREPARATION_TYPECHECK_TARGET,runVerifySubprocessAsync,setTimeout,clearTimeout,scorePreparationProcesses}=deps;
   ${code}\nreturn runPreparationScore();`, ['deps', '__load', '__meta', 'globalThis', 'Date']);
@@ -95,7 +95,7 @@ async function run(options: Options = {}) {
   const score = vi.fn(() => ({ passed: true, score: 150, metrics: { improved: 0 } }));
   class Clock extends Date { static override now() { return wall; } }
   const result = await invoke({ process, performance: { now: () => mono }, createHash, dirname, join, fileURLToPath,
-    createBuiltinActivityTracker: () => ({ owner: { deadlineAt: new Date(NOW + duration).toISOString(), implementationDigest: identity.digest },
+    openBuiltinActivityTracker: async () => ({ owner: { deadlineAt: new Date(NOW + duration).toISOString(), implementationDigest: identity.digest },
       lifecycle: (kind: string) => { expect(kind).toBe('tool'); return { prepare }; }, complete }),
     inspectPreparationScoreIdentity: () => identity, readArtifactSnapshot: () => snapshot,
     summarizePreparationProcessArtifact: () => ({ digest: snapshot.digest }),

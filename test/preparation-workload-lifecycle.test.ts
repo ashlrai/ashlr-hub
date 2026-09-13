@@ -9,7 +9,7 @@ vi.mock('../scripts/evaluators/preparation-verification-native.mjs', () => ({
 vi.mock('../scripts/evaluators/preparation-verification-controller.mjs', () => ({
   createPreparationCandidateSession: dependencies.session, qualifyPreparationCandidate: dependencies.qualify,
 }));
-vi.mock('../scripts/evaluators/preparation-verification-activity.mjs', () => ({ createBuiltinActivityTracker: dependencies.activity }));
+vi.mock('../scripts/evaluators/preparation-verification-activity.mjs', () => ({ openBuiltinActivityTracker: dependencies.activity }));
 
 type Report = { checksPassed: boolean; metrics: { correctness_checks: number }; diagnostics: Array<{ code: string }> };
 type Context = { mode: string; candidateRoot: string; scratchRoot: string; gitPin: { path: string; digest: string };

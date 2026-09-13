@@ -51,6 +51,14 @@ describe('fixed builtin evaluator custody contract', () => {
     const env = vi.mocked(runVerifySubprocessAsync).mock.calls[0]![1]!.env!;
     expect(env.PATH).not.toContain('untrusted');
     expect(inspectBuiltinActivity).toHaveBeenCalledOnce();
+    const options = vi.mocked(runVerifySubprocessAsync).mock.calls[0]![1]!;
+    expect(options.input).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(env)).not.toContain(options.input);
+    expect(JSON.stringify(pins.command)).not.toContain(options.input);
+    const owner = vi.mocked(initializeBuiltinActivity).mock.calls[0]![1];
+    expect(owner.schemaVersion).toBe(2);
+    expect(JSON.stringify(owner)).not.toContain(options.input);
+    expect(inspectBuiltinActivity).toHaveBeenCalledWith('/scratch/builtin-activity-owned', owner, options.input);
   });
   it.each(['unconfirmed', undefined] as const)('preserves uncertain outer settlement %s despite passing-looking output', async settlement => {
     vi.mocked(runVerifySubprocessAsync).mockResolvedValue(response({ processGroupSettlement: settlement }));

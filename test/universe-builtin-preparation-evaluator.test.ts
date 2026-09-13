@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { performance } from 'node:perf_hooks';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { artifactDigest, copyArtifact, freezeArtifact } from '../src/core/universe/artifacts.js';
 import { initUniverse, manifestRecord, parseEvaluation, universePath, validateUniverseManifest, type ManifestRecord } from '../src/core/universe/store.js';
 import { runFixedUniverseEvaluator } from '../src/core/universe/fixed-evaluator.js';
@@ -26,6 +26,7 @@ const TRIAL_TIMEOUT = 900_000;
 const EVALUATION_TEST_TIMEOUT = EVALUATION_TIMEOUT + 60_000;
 let root: string, repo: string, universe: string, revision: string, record: ManifestRecord;
 const fixtureCustody = createFixtureCustody();
+const nativeVerify = verify.runVerifySubprocessAsync;
 const source = readFileSync(join(repository, target), 'utf8');
 type Measurement = PreparationMeasurementReport;
 function measurement(output: string): Measurement {
@@ -77,6 +78,7 @@ beforeAll(() => {
   revision = git('rev-parse', 'HEAD');
   initUniverse(manifest(), { root: universe }); record = manifestRecord(universePath(universe, 'builtin'));
 }, 60000);
+beforeEach(() => { vi.spyOn(verify, 'runVerifySubprocessAsync').mockImplementation(nativeVerify); });
 afterEach(() => { vi.restoreAllMocks(); });
 afterAll(() => {
   if (!root) return;
@@ -166,12 +168,16 @@ function completeActivities(directory: string, requireTool = true): void {
   expect(readdirSync(activity)).toContain('complete.json');
   const owner: BuiltinActivityOwner = JSON.parse(readFileSync(join(activity, 'owner.json'), 'utf8'));
   expect(owner.implementationDigest).toBe(record.evaluationBuiltinDigest);
-  expect(inspectBuiltinActivity(activity, owner)).toBe(true);
+  const key = vi.mocked(verify.runVerifySubprocessAsync).mock.calls.find(([, options]) => options.cwd === directory)?.[1].input;
+  expect(typeof key).toBe('string');
+  expect(owner.schemaVersion).toBe(2);
+  expect(inspectBuiltinActivity(activity, owner)).toBe(false); // No retrospective adoption without the invocation key.
+  expect(inspectBuiltinActivity(activity, owner, key)).toBe(true);
   const groups = spawnedActivities(activity);
   expect(groups.some(row => row.kind === 'candidate')).toBe(true);
   if (requireTool) expect(groups.some(row => row.kind === 'tool')).toBe(true);
-  const absent = groups.every(row => groupAbsent(row.pgid));
-  expect(absent, 'Every recorded group must be absent before interpreting completed workload evidence').toBe(true);
+  // Authenticated settlement-time observations establish original-group exit;
+  // a live historical number can now refer to an unrelated process.
 }
 
 describe.runIf(supported)('installed builtin preparation measurement', () => {
@@ -293,7 +299,7 @@ describe.runIf(supported)('installed builtin preparation measurement', () => {
   it('rechecks installed controller bytes after actual process settlement before returning its measurement', async () => {
     const copied = copiedInstalledBundle(); initUniverse(manifest('bundle-after'), { root: universe });
     const pinned = manifestRecord(universePath(universe, 'bundle-after'));
-    const original = verify.runVerifySubprocessAsync; let settled = false;
+    const original = nativeVerify; let settled = false;
     const run = vi.spyOn(verify, 'runVerifySubprocessAsync').mockImplementation(async (...args) => {
       const result = await original(...args);
       // Never execute modified code: inject drift only after the real entry

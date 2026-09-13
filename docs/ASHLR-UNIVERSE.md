@@ -2691,8 +2691,7 @@ do not clear the hold, signal a possibly unrelated process, or relabel a passing
 report as a successful capture. Diagnostics do not change settlement checks,
 retry authority or calibration eligibility.
 
-The activity library also provides an **unconnected version-two settlement
-witness** for runtime integration. It uses a private, per-invocation 32-byte key
+The fixed evaluator uses a **version-two settlement witness**. It uses a private, per-invocation 32-byte key
 to authenticate the complete owner and activity transcript. Before recording a
 spawned group's exit, the trusted tracker independently requires a kernel absence
 observation; present, denied or unknown results poison completion. The parent
@@ -2701,14 +2700,22 @@ This addresses delayed ID reuse, not all possible process races or escaped
 descendants. The kernel's distinction between PID allocation and an existing
 process group is visible in [Apple's process creation implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_fork.c).
 
-The production launcher still creates version-one owners. Version two has no
-CLI activation flag, does not migrate old records or release held captures,
-and refuses verification when its key is unavailable. Its secret is not stored
-in the activity journal or returned by the tracker. Integration must keep that
-key confined to the trusted parent and pinned evaluator, away from candidate
-code, candidate/tool subprocess environments, logs and persisted output, and prove this
-confinement before selecting version two. This mechanism trusts the installed
-runner; it is not protection against a compromised host or trusted evaluator.
+The parent sends the key through its existing private stdin pipe, never argv or
+environment variables. Both measurement and scoring adapters require exactly 64
+lowercase hexadecimal bytes followed by EOF. Input waits at most five seconds
+within the original invocation deadline and stops on cancellation. Malformed,
+missing or interrupted input cannot launch candidate work. Candidate and tool
+processes receive separate explicit environments and input messages; neither
+contains this key. The activity journal and tracker output do not contain it.
+
+Legacy version-one owners still use retrospective absence checks and do not
+consume stdin. Version two has no user-selected CLI activation flag, does not
+migrate old records or release held captures, and refuses verification when its
+key is unavailable. A parent crash before verification is not repaired by
+reconstructing a secret or trusting an unauthenticated completion. This mechanism
+trusts the installed runner; it is not protection against a compromised host or
+trusted evaluator. Source changes require a newly built, pinned and qualified
+evaluator bundle; they do not update an already running or installed runtime.
 
 An explicit `--report` mode emits only the retained report bytes, with no added
 newline or summary. Use the same capture ID to export an already completed report

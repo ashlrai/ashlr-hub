@@ -8,10 +8,11 @@ import { dirname, join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import ts from 'typescript';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { artifactDigest, freezeArtifact } from '../src/core/universe/artifacts.js';
 import { resolveBuiltinEvaluator } from '../src/core/universe/builtin-evaluator-registry.js';
 import { runFixedUniverseEvaluator } from '../src/core/universe/fixed-evaluator.js';
+import * as verify from '../src/core/run/verify-commands.js';
 import { initUniverse, manifestRecord, parseEvaluation, readRecords, universePath } from '../src/core/universe/store.js';
 import { parsePreparationMeasurementReport } from '../src/core/universe/preparation-measurement-report.js';
 import { extractPreparationScenarioVector, PREPARATION_SCENARIO_KEYS } from '../src/core/universe/preparation-measurement-comparison.js';
@@ -46,6 +47,7 @@ function executionDiagnostics(result: Awaited<ReturnType<typeof runFixedUniverse
   // Emit before assertions; never expose runner errors, diagnostic prose, or fixture paths.
   console.log(JSON.stringify({ kind: 'qualification-native-execution', scope: 'diagnostic-only',
     elapsedMs: Math.round(performance.now() - started), ...transport,
+    custodyBoundary: result.custodyDiagnostics?.boundary ?? null,
     reportBytes: Buffer.byteLength(result.stdout), reportSha256: createHash('sha256').update(result.stdout).digest('hex'),
     reportValid: report !== null, workload: report?.workload ?? null, checksPassed: report?.checksPassed ?? null,
     checks: report?.metrics.correctness_checks ?? null, diagnosticCodes: report?.diagnostics.map(row => row.code) ?? null,
@@ -85,16 +87,18 @@ function candidate(base: string, text: string): string {
   const path = join(base, 'candidate'); mkdirSync(join(path, dirname(target)), { recursive: true, mode: 0o700 });
   writeFileSync(join(path, target), text, { mode: 0o600 }); freezeArtifact(path); return path;
 }
-function assertActivity(directory: string, owner: BuiltinActivityOwner): void {
-  expect(inspectBuiltinActivity(directory, owner)).toBe(true);
+function assertActivity(directory: string, owner: BuiltinActivityOwner, key?: string): void {
+  expect(inspectBuiltinActivity(directory, owner, key)).toBe(true);
   const spawned = readdirSync(directory).filter(name => /^spawned-[1-9][0-9]*\.json$/.test(name));
   expect(spawned.length).toBeGreaterThan(0);
   for (const name of spawned) {
     const row = JSON.parse(readFileSync(join(directory, name), 'utf8')) as { pgid: number };
     expect(Number.isSafeInteger(row.pgid) && row.pgid > 0).toBe(true);
-    let absent = false;
-    try { process.kill(-row.pgid, 0); } catch (error) { absent = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
-    expect(absent).toBe(true);
+    if (owner.schemaVersion === 1) {
+      let absent = false;
+      try { process.kill(-row.pgid, 0); } catch (error) { absent = (error as NodeJS.ErrnoException).code === 'ESRCH'; }
+      expect(absent).toBe(true);
+    }
   }
 }
 function assertQualification(row: Qualification, name: Qualification['name']): void {
@@ -111,6 +115,7 @@ function assertQualification(row: Qualification, name: Qualification['name']): v
   expect(row.blobProcesses).toBe(row.requests.reduce((total, request) => total + request.blobProcesses, 0));
 }
 afterEach(() => {
+  vi.restoreAllMocks();
   if (!root) return;
   if (!safeToRemove) { console.warn(`Qualification acceptance retained unconfirmed fixture: ${root}`); root = undefined; return; }
   const writable = (path: string): void => {
@@ -122,6 +127,7 @@ afterEach(() => {
 
 describe.runIf(supported)('installed qualified preparation workload', () => {
   it('runs the actual default builtin with 23 checks, two qualifications and the same fifteen benchmark regions', async () => {
+    const dispatch = vi.spyOn(verify, 'runVerifySubprocessAsync'); // Call-through; retains key only in test memory.
     const base = privateRoot(), installed = resolveBuiltinEvaluator('preparation-measurement-v1');
     const source = readFileSync(join(repository, target), 'utf8');
     const repo = join(base, 'repository'), store = join(base, 'universe'), scratch = join(base, 'scratch');
@@ -153,8 +159,10 @@ describe.runIf(supported)('installed qualified preparation workload', () => {
     expect(activityNames).toHaveLength(1);
     const activityRoot = join(scratch, activityNames[0]!);
     const owner = JSON.parse(readFileSync(join(activityRoot, 'owner.json'), 'utf8')) as BuiltinActivityOwner;
-    if (result.processGroupSettlement === 'group-exit-confirmed' && inspectBuiltinActivity(activityRoot, owner)) {
-      assertActivity(activityRoot, owner); safeToRemove = true;
+    const key = dispatch.mock.calls.find(([, options]) => options.cwd === scratch)?.[1].input;
+    expect(typeof key).toBe('string'); expect(owner.schemaVersion).toBe(2);
+    if (result.processGroupSettlement === 'group-exit-confirmed' && inspectBuiltinActivity(activityRoot, owner, key)) {
+      assertActivity(activityRoot, owner, key); safeToRemove = true;
     }
     expect(transport).toEqual({
       code: 0, signal: null, hasRunnerError: false, stderrBytes: 0, timedOut: false, cancelled: false,
@@ -207,9 +215,10 @@ describe.runIf(supported)('fixed packaged same-call qualification controls', () 
     const fixtureRoot = join(base, 'fixture'), workRoot = join(base, 'work'), activityRoot = join(base, 'activity');
     for (const path of [fixtureRoot, workRoot, activityRoot]) mkdirSync(path, { mode: 0o700 });
     const deadlineAt = Date.now() + DURATION, deadlineMonotonicMs = performance.now() + DURATION;
-    const owner: BuiltinActivityOwner = { schemaVersion: 1, invocationId: randomBytes(32).toString('hex'),
+    const key = randomBytes(32).toString('hex');
+    const owner: BuiltinActivityOwner = { schemaVersion: 2, invocationId: randomBytes(32).toString('hex'),
       implementationDigest: installed.digest, deadlineAt: new Date(deadlineAt).toISOString() };
-    initializeBuiltinActivity(activityRoot, owner); const activity = createBuiltinActivityTracker(activityRoot);
+    initializeBuiltinActivity(activityRoot, owner); const activity = createBuiltinActivityTracker(activityRoot, key);
     const abort = new AbortController(), timer = setTimeout(() => abort.abort(), DURATION);
     safeToRemove = false;
     try {
@@ -219,9 +228,9 @@ describe.runIf(supported)('fixed packaged same-call qualification controls', () 
       try { returned = await qualifyPreparationCandidate({ name, fixture, bridge, bridgePath, candidateRoot, fixtureRoot, workRoot,
         activity, signal: abort.signal, gitPin: installed.git, deadlineAt, deadlineMonotonicMs }); }
       catch (caught) { error = caught; }
-      // This production tracker and independent group-absence inspection gate
+      // This production tracker and authenticated absence observations gate
       // teardown even when the expected result is a deliberate candidate refusal.
-      activity.complete(); assertActivity(activityRoot, owner); safeToRemove = true;
+      activity.complete(); assertActivity(activityRoot, owner, key); safeToRemove = true;
       if (kind === 'current') { expect(error).toBeUndefined(); expect(returned).toBeDefined(); assertQualification(returned!, name); }
       else {
         expect(returned).toBeUndefined();

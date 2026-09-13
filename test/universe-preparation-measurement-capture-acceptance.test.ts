@@ -72,7 +72,14 @@ describe.runIf(supported)('installed failed diagnostic capture through the publi
     expect(exitCode).toBe(1);
     expect(captured).toMatchObject({ state: 'recorded', scope: 'diagnostic-only', receipt: {
       outcome: 'captured', identityVerified: true, processGroupSettlement: 'group-exit-confirmed', report: { checksPassed: false },
+      custodyDiagnostics: { boundary: 'completed', exitCode: 0, signalled: false },
     } });
+    const work = join(directory, 'preparation-measurement-work', 'once');
+    const activityRoot = join(work, readdirSync(work).find(name => name.startsWith('builtin-activity-'))!);
+    expect(JSON.parse(readFileSync(join(activityRoot, 'owner.json'), 'utf8'))).toMatchObject({ schemaVersion: 2 });
+    expect(JSON.parse(readFileSync(join(activityRoot, 'complete.json'), 'utf8'))).toMatchObject({
+      schemaVersion: 2, settlementProof: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
     expect(run).toHaveBeenCalledOnce(); expect(errors).not.toHaveBeenCalled();
     const raw = captured.receipt!.report!.stdout;
     expect(parsePreparationMeasurementReport(raw)).toMatchObject({ checksPassed: false,
