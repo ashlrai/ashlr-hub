@@ -19,6 +19,7 @@ import { executeResourceWorker, validateResourceBindings, type ResourceBinding, 
 import { resourceUsageScopeForProvider, validResourceExecutionDuration } from './performance.js';
 import { RESOURCE_NATIVE_PROCESS_SIGNALS } from './native-diagnostics.js';
 import { checkedResourceTaskReceipt, type ResourceTaskReceipt } from './pool-receipt-codec.js';
+import { createResourcePoolReceiptQuery, type ResourcePoolReceiptQuery } from './pool-receipt-query.js';
 export type { ResourceTaskReceipt } from './pool-receipt-codec.js';
 import { resourcePoolConfigSnapshot, validateResourcePoolConfigHistory } from './pool-evolution-policy.js';
 import { captureResourcePoolStateJson } from './pool-state-capture.js';
@@ -29,7 +30,6 @@ const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_ATTEMPTS = 4_096;
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
-const TERMINAL = new Set(['completed', 'failed', 'timed-out', 'cancelled']);
 
 export interface ResourceTask extends ResourceWorkerTask {
   schemaVersion: 1;
@@ -347,7 +347,8 @@ export function mergeResourceObservations(previous: ResourceObservation[], incom
 }
 
 function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[], allowedWorkerIds: string[], nowMs: number,
-  unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[] = []): ResourceAssignmentPlan {
+  unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[] = [],
+  receipts: ResourcePoolReceiptQuery = createResourcePoolReceiptQuery(state.attempts)): ResourceAssignmentPlan {
   const ceiling = allocation(state).ceilingPercent;
   // Policy is an admission-only projection, never the identity used for receipts,
   // native probes or immutable enrollment. Zero is vetoed without reserve=100.
@@ -363,11 +364,11 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
   for (const binding of bindings) {
     const worker = pool.workers.find((row) => row.id === binding.workerId)!;
     const aliases = new Set(bindings.filter((row) => row.capacityKey === binding.capacityKey).map((row) => row.workerId));
-    const attempts = state.attempts.filter((row) => row.capacityKey === binding.capacityKey);
-    activeCounts[worker.id] = attempts.filter((row) => !TERMINAL.has(row.status)).length;
-    const recent = attempts.filter((row) => Date.parse(row.startedAt) > nowMs - worker.taskWindowMs);
-    taskReservationCounts[worker.id] = { count: recent.length,
-      nextEligibleAt: recent.length ? new Date(Math.min(...recent.map((row) => Date.parse(row.startedAt))) + worker.taskWindowMs).toISOString() : null };
+    const account = receipts.accountWindow(binding.capacityKey, worker.taskWindowMs, nowMs);
+    activeCounts[worker.id] = account.inFlightCount;
+    taskReservationCounts[worker.id] = { count: account.recentReservationCount,
+      nextEligibleAt: account.earliestRecentStartedAtMs === null ? null :
+        new Date(account.earliestRecentStartedAtMs + worker.taskWindowMs).toISOString() };
     const shared = state.observations.filter((row) => aliases.has(row.workerId));
     const hard = shared.find((row) => row.health === 'unavailable' ||
       sharesResourceQuota(worker, pool.workers.find((source) => source.id === row.workerId)!) && row.windows.some((window) =>
@@ -375,11 +376,8 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
     const retryAfter = shared.flatMap((row) => row.retryAfter ? [row.retryAfter] : []).sort().at(-1);
     // A host precondition veto consumed a reservation, but never invoked this
     // worker. Keep task-cap accounting without inferring a provider cooldown.
-    const failures = attempts.filter((row) => (row.status === 'failed' || row.status === 'timed-out') &&
-      !(row.status === 'failed' && row.reason === 'worker-dispatch-precondition-failed' && row.execution === undefined &&
-        row.nativeProcess === undefined && row.outputDigest === null && row.inputTokens === null && row.outputTokens === null));
-    const latestFailure = failures.map((row) => Date.parse(row.finishedAt!)).sort((a, b) => b - a)[0];
-    const cooldown = latestFailure === undefined ? undefined : new Date(latestFailure + 60_000).toISOString();
+    const cooldown = account.latestCooldownFailureFinishedAtMs === null ? undefined :
+      new Date(account.latestCooldownFailureFinishedAtMs + 60_000).toISOString();
     const retry = [retryAfter, cooldown].filter((value): value is string => value !== undefined).sort().at(-1);
     const current = observations.find((row) => row.workerId === worker.id);
     if (hard) {
@@ -428,7 +426,7 @@ function scope(poolValue: ResourcePool, bindingsValue: ResourceBinding[]): { poo
 
 /** Apply fresh invocation evidence to an owned or read-only in-memory state. */
 function freshAdmission(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[], allowedWorkerIds: string[],
-  current: unknown, unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]) {
+  current: unknown, unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[], receipts: ResourcePoolReceiptQuery) {
   if (!object(current) || !exact(current, ['observations', 'unavailableWorkerIds',
     ...(Object.hasOwn(current, 'quotaUnavailableWorkerIds') ? ['quotaUnavailableWorkerIds'] : [])])) {
     throw new Error('Invalid synchronous resource admission evidence');
@@ -441,7 +439,7 @@ function freshAdmission(state: PoolState, pool: ResourcePool, bindings: Resource
   // A current collector refusal must survive a newer external zero reading.
   // Occupancy/task caps remain waitable in the final plan, not converted into
   // an invocation-only health refusal. Both admission paths use this policy.
-  const currentPlan = plan({ ...state, observations }, pool, bindings, allowedWorkerIds, Date.now(), currentGates, currentQuotaGates);
+  const currentPlan = plan({ ...state, observations }, pool, bindings, allowedWorkerIds, Date.now(), currentGates, currentQuotaGates, receipts);
   for (const exclusion of currentPlan.exclusions) {
     if (exclusion.reasons.some((reason) => !['worker-not-allowed', 'concurrency-exhausted',
       'operator-task-cap-reached', 'operator-quota-scope-excluded'].includes(reason))) quotaUnavailable.add(exclusion.workerId);
@@ -459,8 +457,9 @@ export function resourceAdmissionPreflight(root: string, poolValue: ResourcePool
   if (!allowed.length) throw new Error('Invalid resource admission workers');
   const state = inspectRoot(root, false) ? loadState(root, pool, bindings, poolDigest)
     : { schemaVersion: 1 as const, poolDigest, observations: [], attempts: [] };
-  const gates = freshAdmission(state, pool, bindings, allowed, evidence, [], []);
-  return plan(state, pool, bindings, allowed, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds);
+  const receipts = createResourcePoolReceiptQuery(state.attempts);
+  const gates = freshAdmission(state, pool, bindings, allowed, evidence, [], [], receipts);
+  return plan(state, pool, bindings, allowed, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds, receipts);
 }
 
 /** Read-only: no directory, lock, observation, or assignment is published. */
@@ -598,19 +597,25 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
   if (signal?.aborted) throw new Error('Resource task cancelled before reservation');
   const admission = transaction(root, pool, bindings, poolDigest, (state) => {
     state.observations = mergeResourceObservations(state.observations, incoming);
-    const previous = state.attempts.find((row) => row.id === task.id);
-    if (previous) {
+    // This snapshot is complete because loadState validated the legacy ledger.
+    // A future indexed store must provide the same exact lookup/accounting
+    // contract; a recent-history page cannot establish absence or spare quota.
+    const receipts = createResourcePoolReceiptQuery(state.attempts);
+    const prior = receipts.get(task.id);
+    if (prior.status === 'found') {
+      const previous = prior.receipt;
       if (previous.taskDigest !== taskDigest || canonical(previous.origin ?? null) !== canonical(task.origin ?? null)) {
         throw new Error('Resource task identity conflict');
       }
       return { receipt: previous, plan: null, replayed: true };
     }
+    if (prior.status !== 'proven-absent') throw new Error('Resource receipt evidence unavailable');
     let gates = { unavailableWorkerIds: unavailable, quotaUnavailableWorkerIds: quotaUnavailable };
     if (options.readAdmissionEvidence) {
-      gates = freshAdmission(state, pool, bindings, task.allowedWorkerIds, options.readAdmissionEvidence(), unavailable, quotaUnavailable);
+      gates = freshAdmission(state, pool, bindings, task.allowedWorkerIds, options.readAdmissionEvidence(), unavailable, quotaUnavailable, receipts);
       if (signal?.aborted) throw new Error('Resource task cancelled before reservation');
     }
-    const assignment = plan(state, pool, bindings, task.allowedWorkerIds, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds);
+    const assignment = plan(state, pool, bindings, task.allowedWorkerIds, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds, receipts);
     if (!assignment.selectedWorkerId) return { receipt: null, plan: assignment, replayed: false };
     if (state.attempts.length >= MAX_ATTEMPTS) throw new Error('Resource ledger capacity reached');
     const binding = bindings.find((row) => row.workerId === assignment.selectedWorkerId)!;

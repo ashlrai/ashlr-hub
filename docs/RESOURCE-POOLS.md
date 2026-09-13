@@ -3160,6 +3160,24 @@ or a claim of unattended production reliability.
 
 ### Ledger recovery boundaries
 
+Admission and exact task replay use a receipt-query snapshot built from the
+complete validated ledger. Account summaries include every reservation in the
+configured time window, even cancellations and dispatch-precondition failures;
+reserved and uncertain work remains occupied regardless of age. Only a pristine
+dispatch-precondition failure is excluded from provider-failure cooldowns.
+Clock rollback does not discard future-dated reservations. A missing task is
+eligible for fresh admission only when its absence is established against that
+complete snapshot, never a recent-history page. This query boundary prepares
+indexed storage; it does not activate receipt archival or raise the limits below.
+
+The internal ordered immutable index is a storage foundation, not an alternate
+ledger selected by this release. It supports exact keys, bounded ordered pages
+and range counts against a pinned root. A count authenticates the root's subtree
+summaries; it does not prove that every unread historical file is available.
+Its private store stages durable nodes but never publishes an authoritative
+ledger root. A future migration must preserve receipt identity, account
+accounting, configuration history and provenance before activating that store.
+
 Each observation holds at most eight windows. If successive valid snapshots
 exceed that inventory, the ledger retains seven strongest readings and a
 `hub_observation_overflow` hard-denial marker. Its `100` is a refusal sentinel,

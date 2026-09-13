@@ -11,6 +11,16 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Receipt-query accounting foundation
+
+- Routes resource admission and exact task replay through a captured receipt-query
+  interface, preserving shared-account occupancy, reservation windows, cooldowns,
+  clock-rollback behavior and task identity checks.
+- Keeps the complete ledger as the source of accounting evidence. Recent task
+  pages do not establish spare quota or absence; receipt archival is not enabled.
+- Adds an internal immutable ordered index for exact lookup, bounded pages and
+  range counts, with private node staging separate from ledger-root publication.
+
 ### Keep calibrated scoring local
 
 - Excludes the machine-specific preparation scorer and its frozen source snapshot
