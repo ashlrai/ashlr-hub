@@ -2,6 +2,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { types } from 'node:util';
 import { canonical, digest, inspectPrivateDirectory } from './artifacts.js';
 import { parsePreparationMeasurementReport } from './preparation-measurement-report.js';
+import { validateFixedEvaluatorCustodyDiagnostics } from './fixed-evaluator-diagnostics.js';
 import { readImmutablePrivateRecords, writeImmutablePrivateRecord,
   type ImmutablePrivateRecordCodec, type ImmutablePrivateRecordStoreConfig } from '../util/immutable-private-record-store.js';
 import type { PreparationMeasurementCapture, PreparationMeasurementCaptureIntent as Intent,
@@ -71,8 +72,10 @@ function intent(input: unknown): Intent {
   return { ...value, artifact, evaluator: { ...evaluator, command, files, tools, git } } as unknown as Intent;
 }
 function receipt(input: unknown, parent: Intent): Receipt {
+  if (!input || typeof input !== 'object' || types.isProxy(input)) throw unavailable();
+  const hasDiagnostics = Object.hasOwn(input, 'custodyDiagnostics');
   const value = ownCaptureData(input, ['schemaVersion', 'intentDigest', 'finishedAt', 'durationMs', 'outcome', 'reason',
-    'processGroupSettlement', 'identityVerified', 'report']);
+    'processGroupSettlement', 'identityVerified', 'report', ...(hasDiagnostics ? ['custodyDiagnostics'] : [])]);
   if (value.schemaVersion !== 1 || value.intentDigest !== digest(canonical(parent)) || !timestamp(value.finishedAt) || Date.parse(value.finishedAt) < Date.parse(parent.startedAt) ||
     typeof value.durationMs !== 'number' || !Number.isFinite(value.durationMs) || value.durationMs < 0 || typeof value.identityVerified !== 'boolean' ||
     typeof value.processGroupSettlement !== 'string' || !['not-started', 'group-exit-confirmed', 'unconfirmed'].includes(value.processGroupSettlement)) throw unavailable();
@@ -91,6 +94,15 @@ function receipt(input: unknown, parent: Intent): Receipt {
   if (value.outcome === 'captured' && (!report || value.identityVerified !== true || value.processGroupSettlement !== 'group-exit-confirmed')) throw unavailable();
   if (value.processGroupSettlement === 'not-started' && report || value.reason === 'invalid-report' && report ||
     value.reason === 'integrity-changed' && value.identityVerified) throw unavailable();
+  if (hasDiagnostics) {
+    const diagnostics = validateFixedEvaluatorCustodyDiagnostics(value.custodyDiagnostics);
+    const settlement = { 'outer-process-group': 'unconfirmed', 'nested-activity': 'unconfirmed',
+      completed: 'group-exit-confirmed', 'not-started': 'not-started', unobserved: value.processGroupSettlement }[diagnostics.boundary];
+    if (settlement !== value.processGroupSettlement || diagnostics.outputTruncated === true && report ||
+      value.outcome === 'captured' && (diagnostics.exitCode !== null && diagnostics.exitCode !== 0 ||
+        diagnostics.signalled === true || diagnostics.timedOut === true || diagnostics.cancelled === true)) throw unavailable();
+    return { ...value, report, custodyDiagnostics: diagnostics } as unknown as Receipt;
+  }
   return { ...value, report } as unknown as Receipt;
 }
 export interface PreparationCaptureRecord { id: string; kind: 'intent' | 'receipt'; intent: Intent; receipt: Receipt | null }

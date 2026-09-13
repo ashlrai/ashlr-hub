@@ -12,6 +12,7 @@ import { readKillSwitch } from '../src/core/sandbox/policy.js';
 import type { ManifestRecord } from '../src/core/universe/store.js';
 import type { InstalledBuiltinEvaluator } from '../src/core/universe/builtin-evaluator-registry.js';
 import type { VerifySubprocessResult } from '../src/core/run/verify-commands.js';
+import { summarizeFixedEvaluatorCustody } from '../src/core/universe/fixed-evaluator-diagnostics.js';
 import type { ImmutablePrivateRecordStoreConfig } from '../src/core/util/immutable-private-record-store.js';
 
 const memory = vi.hoisted(() => ({ stores: new Map<string, unknown[]>(), reads: 0, writes: 0, readFault: false }));
@@ -74,6 +75,45 @@ beforeEach(() => {
   vi.mocked(runFixedUniverseEvaluator).mockImplementation(async (...args) => { args[9]?.(); return result(); });
 });
 describe('one-shot diagnostic capture (mocked execution and storage)', () => {
+  it.each(['outer-process-group', 'nested-activity'] as const)('retains %s diagnostics without discharging held custody', async boundary => {
+    const returned = result({ processGroupSettlement: 'unconfirmed', error: '/private/raw-error-must-not-be-retained' });
+    vi.mocked(runFixedUniverseEvaluator).mockImplementation(async (...args) => { args[9]?.();
+      return { ...returned, custodyDiagnostics: summarizeFixedEvaluatorCustody(returned, boundary) }; });
+    const value = await captureUniversePreparationMeasurement(request);
+    expect(value.receipt).toMatchObject({ outcome: 'held', reason: 'settlement-unconfirmed',
+      custodyDiagnostics: { schemaVersion: 1, boundary, exitCode: 0, signalled: false } });
+    expect(JSON.stringify(value)).not.toContain('/private/raw-error-must-not-be-retained');
+    const before = canonical(memory.stores.get(store));
+    expect(await captureUniversePreparationMeasurement(request)).toEqual({ ...value, disposition: 'replayed' });
+    expect(canonical(memory.stores.get(store))).toBe(before);
+    await expect(captureUniversePreparationMeasurement({ ...request, captureId: 'second' })).rejects.toThrow(/unresolved/);
+    expect(runFixedUniverseEvaluator).toHaveBeenCalledOnce();
+  });
+  it('replays legacy receipts without adding diagnostics or rewriting history', async () => {
+    await captureUniversePreparationMeasurement(request);
+    const rows = memory.stores.get(store)! as PreparationCaptureRecord[];
+    for (const row of rows) if (row.receipt) delete row.receipt.custodyDiagnostics;
+    const before = canonical(rows);
+    const observed = readUniversePreparationMeasurementCapture(request);
+    expect(observed.receipt).not.toHaveProperty('custodyDiagnostics');
+    expect(await captureUniversePreparationMeasurement(request)).toEqual({ ...observed, disposition: 'replayed' });
+    expect(canonical(memory.stores.get(store))).toBe(before);
+    expect(runFixedUniverseEvaluator).toHaveBeenCalledOnce();
+  });
+  it.each(['boundary', 'exit', 'signal', 'timeout', 'cancelled', 'truncated', 'extra'])('refuses contradictory or malformed persisted diagnostics: %s', async kind => {
+    await captureUniversePreparationMeasurement(request);
+    const row = (memory.stores.get(store)! as PreparationCaptureRecord[]).find(value => value.receipt)!;
+    const diagnostics = row.receipt!.custodyDiagnostics!;
+    if (kind === 'boundary') diagnostics.boundary = 'nested-activity';
+    if (kind === 'exit') diagnostics.exitCode = 1;
+    if (kind === 'signal') diagnostics.signalled = true;
+    if (kind === 'timeout') diagnostics.timedOut = true;
+    if (kind === 'cancelled') diagnostics.cancelled = true;
+    if (kind === 'truncated') diagnostics.outputTruncated = true;
+    if (kind === 'extra') Object.assign(diagnostics, { rawError: 'PRIVATE_VALUE' });
+    expect(() => readUniversePreparationMeasurementCapture(request)).toThrow(/unavailable/);
+    expect(runFixedUniverseEvaluator).toHaveBeenCalledOnce();
+  });
   it('retains a complete checks-satisfied report without manufacturing an evaluation score', async () => {
     const workflows = [
       { name: 'manager', methods: ['manager-open', 'bundle', 'manager-check', 'manager-replay', 'manager-check', 'manager-replay', 'manager-close'] },

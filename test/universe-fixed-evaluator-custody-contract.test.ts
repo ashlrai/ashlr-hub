@@ -54,13 +54,16 @@ describe('fixed builtin evaluator custody contract', () => {
   });
   it.each(['unconfirmed', undefined] as const)('preserves uncertain outer settlement %s despite passing-looking output', async settlement => {
     vi.mocked(runVerifySubprocessAsync).mockResolvedValue(response({ processGroupSettlement: settlement }));
-    expect((await run()).processGroupSettlement).toBe(settlement);
+    const result = await run();
+    expect(result.processGroupSettlement).toBe(settlement);
+    expect(result.custodyDiagnostics).toMatchObject({ boundary: 'outer-process-group', exitCode: 0, signalled: false });
     expect(inspectBuiltinActivity).not.toHaveBeenCalled();
     expect(artifactDigest).toHaveBeenCalledTimes(1);
   });
   it('turns a settled outer group with unresolved inner activity into explicit uncertainty', async () => {
     vi.mocked(inspectBuiltinActivity).mockReturnValue(false);
-    expect(await run()).toMatchObject({ processGroupSettlement: 'unconfirmed', error: 'Built-in evaluator process settlement unconfirmed' });
+    expect(await run()).toMatchObject({ processGroupSettlement: 'unconfirmed', error: 'Built-in evaluator process settlement unconfirmed',
+      custodyDiagnostics: { boundary: 'nested-activity', exitCode: 0, signalled: false } });
     expect(artifactDigest).toHaveBeenCalledTimes(1);
   });
   it('returns explicit not-started without pretending an activity ledger proved group absence', async () => {

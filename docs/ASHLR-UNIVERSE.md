@@ -2674,6 +2674,23 @@ Summaries include start/finish timestamps and label identity verification as
 `recorded-attempt-only`: replay reads historical evidence without revalidating
 the current runtime, comparator or account health.
 
+New receipts also retain fixed-field `custodyDiagnostics`: the observed boundary
+(`outer-process-group`, `nested-activity`, `completed`, `not-started`, or
+`unobserved`), exit code, and signal, timeout, cancellation and truncation flags.
+Unknown observations are `null`; older receipts omit the field and are not
+rewritten. These diagnostics exclude raw process errors, stderr, paths and signal
+names. `completed` describes the custody check, not a passing report or accepted
+candidate. JSON summaries include these fields when recorded; human summaries
+show the boundary and exit code. Inspect them to distinguish an unresolved outer process group
+from a completed outer runner whose nested activity could not be confirmed.
+
+A nested-activity refusal is not proof that a worker is still running: malformed
+or incomplete activity records and reuse of a historical numeric process-group
+ID can also prevent confirmation. Preserve the receipt and activity evidence;
+do not clear the hold, signal a possibly unrelated process, or relabel a passing
+report as a successful capture. Diagnostics do not change settlement checks,
+retry authority or calibration eligibility.
+
 An explicit `--report` mode emits only the retained report bytes, with no added
 newline or summary. Use the same capture ID to export an already completed report
 for the existing inspector. A new ID requests a new diagnostic execution, not a

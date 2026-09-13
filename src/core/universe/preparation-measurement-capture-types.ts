@@ -1,4 +1,5 @@
 /** Private diagnostic custody evidence. Never a trial, score or delivery receipt. */
+import type { FixedEvaluatorCustodyDiagnostics } from './fixed-evaluator-diagnostics.js';
 export interface PreparationMeasurementCaptureRequest {
   root: string;
   universeId: string;
@@ -31,6 +32,8 @@ export interface PreparationMeasurementCaptureReceipt {
   reason: 'execution-failed' | 'invalid-report' | 'integrity-changed' | 'cancelled' | 'deadline-reached' | 'settlement-unconfirmed' | null;
   processGroupSettlement: 'not-started' | 'group-exit-confirmed' | 'unconfirmed';
   identityVerified: boolean;
+  /** Optional only for legacy records; observations never override held custody. */
+  custodyDiagnostics?: FixedEvaluatorCustodyDiagnostics;
   /** Exact returned UTF-8 text, including whitespace; null if invalid or truncated. */
   report: { stdout: string; sha256: string; bytes: number; checksPassed: boolean } | null;
 }

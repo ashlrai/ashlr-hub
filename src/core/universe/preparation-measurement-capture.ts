@@ -2,7 +2,7 @@ import { join } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { types } from 'node:util';
 import { readKillSwitch } from '../sandbox/policy.js';
-import type { VerifySubprocessResult } from '../run/verify-commands.js';
+import { summarizeFixedEvaluatorCustody, validateFixedEvaluatorCustodyDiagnostics, type FixedEvaluatorResult } from './fixed-evaluator-diagnostics.js';
 import { artifactDigest, canonical, digest, privateDirectory } from './artifacts.js';
 import { resolveBuiltinEvaluator } from './builtin-evaluator-registry.js';
 import { assertUniverseExecution, withUniverseExecution } from './execution.js';
@@ -81,7 +81,7 @@ export async function captureUniversePreparationMeasurement(input: Request & { s
     guard();
     writePreparationCaptureRecord(directory, { id: `${request.captureId}.intent`, kind: 'intent', intent, receipt: null }, guard);
     let reachedDispatch = false;
-    let evaluation: VerifySubprocessResult | undefined;
+    let evaluation: FixedEvaluatorResult | undefined;
     let identityVerified = false;
     let failure: unknown;
     const abort = () => { stopped = 'cancelled'; controller.abort(); };
@@ -118,8 +118,11 @@ export async function captureUniversePreparationMeasurement(input: Request & { s
     else if (!evaluation || evaluation.error || evaluation.exitCode !== 0 || evaluation.signal !== null || settlement !== 'group-exit-confirmed') {
       outcome = 'failed'; reason = 'execution-failed';
     } else if (!report) { outcome = 'failed'; reason = 'invalid-report'; }
+    const custodyDiagnostics = evaluation?.custodyDiagnostics === undefined
+      ? summarizeFixedEvaluatorCustody(evaluation, evaluation?.processGroupSettlement === 'not-started' ? 'not-started' : 'unobserved')
+      : validateFixedEvaluatorCustodyDiagnostics(evaluation.custodyDiagnostics);
     const receipt: Receipt = { schemaVersion: 1, intentDigest: digest(canonical(intent)), finishedAt: new Date(Math.max(Date.now(), Date.parse(startedAt))).toISOString(),
-      durationMs: Math.max(0, performance.now() - started), outcome, reason, processGroupSettlement: settlement, identityVerified, report };
+      durationMs: Math.max(0, performance.now() - started), outcome, reason, processGroupSettlement: settlement, identityVerified, report, custodyDiagnostics };
     // Failed/held receipts record historical facts under ownership; current
     // cancellation or changed comparator must not erase returned diagnostics.
     const refused: { error?: unknown; known: boolean } = { known: false };

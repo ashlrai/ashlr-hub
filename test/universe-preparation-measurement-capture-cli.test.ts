@@ -62,6 +62,31 @@ afterEach(() => {
 });
 
 describe('one-shot preparation diagnostic capture CLI', () => {
+  it.each([true, false])('shows recorded custody diagnostics without changing held exit status (json=%s)', async json => {
+    const value = captured();
+    Object.assign(value, { state: 'held' });
+    Object.assign(value.receipt!, { outcome: 'held', reason: 'settlement-unconfirmed', processGroupSettlement: 'unconfirmed',
+      custodyDiagnostics: { schemaVersion: 1, boundary: 'nested-activity', exitCode: 0, signalled: false,
+        timedOut: false, cancelled: false, outputTruncated: false } });
+    backend.capture.mockResolvedValue(value);
+    expect(await cmdUniversePreparationMeasurementCapture([...args, ...(json ? ['--json'] : [])])).toBe(1);
+    if (json) expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({
+      custodyDiagnostics: value.receipt!.custodyDiagnostics, outcome: 'held', identityVerificationScope: 'recorded-attempt-only' });
+    else expect(output.mock.calls[0]![0]).toContain('Recorded custody boundary: nested-activity · exit code: 0');
+    expect(JSON.stringify(output.mock.calls)).not.toContain('PRIVATE');
+  });
+  it('keeps diagnostics absent for legacy receipts instead of inventing a successful check', async () => {
+    expect(await cmdUniversePreparationMeasurementCapture([...args, '--json'])).toBe(0);
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).not.toHaveProperty('custodyDiagnostics');
+  });
+  it('refuses malformed diagnostic fields without emitting their values', async () => {
+    const value = captured();
+    Object.assign(value.receipt!, { custodyDiagnostics: { rawError: 'PRIVATE_DIAGNOSTIC' } });
+    backend.capture.mockResolvedValue(value);
+    expect(await cmdUniversePreparationMeasurementCapture([...args, '--json'])).toBe(1);
+    expect(JSON.stringify(output.mock.calls)).not.toContain('PRIVATE_DIAGNOSTIC');
+    expect(JSON.parse(output.mock.calls[0]![0] as string)).toMatchObject({ error: 'CAPTURE_UNAVAILABLE' });
+  });
   it.each([true, false])('identifies recorded v2 qualification separately from capture identity (json=%s)', async json => {
     backend.capture.mockResolvedValue(qualifiedCapture());
     expect(await cmdUniversePreparationMeasurementCapture([...args, ...(json ? ['--json'] : [])])).toBe(0);

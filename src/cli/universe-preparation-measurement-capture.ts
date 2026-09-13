@@ -1,6 +1,7 @@
 import { isAbsolute, parse as parsePath, resolve } from 'node:path';
 import type { PreparationMeasurementCapture } from '../core/universe/preparation-measurement-capture-types.js';
 import { parsePreparationMeasurementReport, summarizePreparationMeasurementReport } from '../core/universe/preparation-measurement-report.js';
+import { validateFixedEvaluatorCustodyDiagnostics } from '../core/universe/fixed-evaluator-diagnostics.js';
 
 const USAGE = `usage: ashlr universe preparation-measurement-capture <universeId>
        --root <canonical absolute directory> --capture <safe id> [--json | --report]
@@ -51,6 +52,8 @@ function summary(value: PreparationMeasurementCapture) {
     comparatorDigest: value.intent?.comparatorDigest ?? null, identityVerified: receipt?.identityVerified ?? null,
     identityVerificationScope: 'recorded-attempt-only',
     processGroupSettlement: receipt?.processGroupSettlement ?? null,
+    ...(receipt?.custodyDiagnostics === undefined ? {} : {
+      custodyDiagnostics: validateFixedEvaluatorCustodyDiagnostics(receipt.custodyDiagnostics) }),
     report: receipt?.report ? { sha256: receipt.report.sha256, bytes: receipt.report.bytes,
       reportedChecksSatisfied: receipt.report.checksPassed, workload: measurement!.workload,
       qualificationStatus: measurement!.qualificationStatus } : null };
@@ -85,6 +88,7 @@ export async function cmdUniversePreparationMeasurementCapture(args: string[]): 
         `State: ${view.state} · disposition: ${view.disposition ?? 'unknown'} · outcome: ${view.outcome ?? 'unknown'}`,
         `Recorded attempt: ${view.startedAt ?? 'unknown'} → ${view.finishedAt ?? 'unfinished or unknown'}`,
         `Recorded process settlement: ${view.processGroupSettlement ?? 'unknown'} · recorded attempt identity verified: ${view.identityVerified ?? 'unknown'}`,
+        ...(view.custodyDiagnostics ? [`Recorded custody boundary: ${view.custodyDiagnostics.boundary} · exit code: ${view.custodyDiagnostics.exitCode ?? 'unknown'}`] : []),
         'Identity verification describes the recorded attempt, not current runtime health; replay does not freshly reverify it.',
         `Reported checks: ${report ? report.checksPassed ? 'satisfied' : 'not satisfied' : 'unknown'}`,
         `Recorded workload: ${view.report?.workload ?? 'unknown'} · during-call qualification: ${view.report?.qualificationStatus ?? 'unknown'}`,

@@ -4,11 +4,12 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { buildSandboxLauncher, escapeSbplPath } from '../sandbox/confine.js';
-import { runVerifySubprocessAsync, type VerifySubprocessResult } from '../run/verify-commands.js';
+import { runVerifySubprocessAsync } from '../run/verify-commands.js';
 import { artifactDigest, digest } from './artifacts.js';
 import { assertComparatorUnchanged, type ManifestRecord } from './store.js';
 import { resolveBuiltinEvaluator } from './builtin-evaluator-registry.js';
 import { initializeBuiltinActivity, inspectBuiltinActivity, type BuiltinActivityOwner } from '../../../scripts/evaluators/preparation-verification-activity.mjs';
+import { summarizeFixedEvaluatorCustody, type FixedEvaluatorResult } from './fixed-evaluator-diagnostics.js';
 
 /** Shared bounded evaluator confinement for ordinary trials and integration candidates. */
 export function confinedUniverseArgv(command: string[], writable: string, scratch: string, readable: string[], root: string): string[] {
@@ -39,7 +40,7 @@ export function confinedUniverseArgv(command: string[], writable: string, scratc
 /** Runs the already-pinned evaluator without granting any candidate write access. */
 export async function runFixedUniverseEvaluator(record: ManifestRecord, root: string, artifactPath: string,
   expectedArtifactDigest: string, scratch: string, timeoutMs: number, signal: AbortSignal, env: NodeJS.ProcessEnv,
-  requireProcessGroupExit = false, beforeStart?: () => void): Promise<VerifySubprocessResult> {
+  requireProcessGroupExit = false, beforeStart?: () => void): Promise<FixedEvaluatorResult> {
   const deadline = performance.now() + timeoutMs;
   assertComparatorUnchanged(record);
   if (artifactDigest(artifactPath) !== expectedArtifactDigest) throw new Error('Scored artifact changed before evaluation');
@@ -68,13 +69,16 @@ export async function runFixedUniverseEvaluator(record: ManifestRecord, root: st
       timeoutMs: dispatchRemaining, signal, requireProcessGroupExit: true });
     // A controller's group alone says nothing about its separately owned
     // candidate/tool groups. Keep all activity evidence on any uncertainty.
-    if (!['not-started', 'group-exit-confirmed'].includes(result.processGroupSettlement ?? '')) return result;
+    if (!['not-started', 'group-exit-confirmed'].includes(result.processGroupSettlement ?? '')) return { ...result,
+      custodyDiagnostics: summarizeFixedEvaluatorCustody(result, 'outer-process-group') };
     if (result.processGroupSettlement !== 'not-started' && !inspectBuiltinActivity(activityRoot, owner)) {
-      return { ...result, error: 'Built-in evaluator process settlement unconfirmed', processGroupSettlement: 'unconfirmed' };
+      return { ...result, error: 'Built-in evaluator process settlement unconfirmed', processGroupSettlement: 'unconfirmed',
+        custodyDiagnostics: summarizeFixedEvaluatorCustody(result, 'nested-activity') };
     }
     assertComparatorUnchanged(record);
     if (artifactDigest(artifactPath) !== expectedArtifactDigest) throw new Error('Scored artifact changed during evaluation');
-    return result;
+    return { ...result, custodyDiagnostics: summarizeFixedEvaluatorCustody(result,
+      result.processGroupSettlement === 'not-started' ? 'not-started' : 'completed') };
   }
   const evaluator = record.evaluationCommand;
   if (digest(readFileSync(evaluator[0]!)) !== record.evaluationExecutableDigest) throw new Error('Evaluator executable changed');
