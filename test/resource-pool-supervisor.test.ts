@@ -451,6 +451,56 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     supervisor.submit(f.task()); await sleep(60); expect(f.requests).toHaveLength(1);
   });
 
+  it('drains only the pinned task while human work and future submissions remain live', async () => {
+    const f = await fixture({ workers: [worker('one'), worker('two')], hold: true }); const supervisor = await f.start();
+    supervisor.submit(f.task('mission', { allowedWorkerIds: ['one'] }));
+    supervisor.submit(f.task('human', { allowedWorkerIds: ['two'] }));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    const pin = f.state().jobs.find((job: { id: string }) => job.id === 'mission').taskDigest as string;
+    const before = f.state();
+    await expect(supervisor.cancelAndDrain('mission', '0'.repeat(64))).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(f.state()).toEqual(before);
+    const [first, repeated] = await Promise.all([supervisor.cancelAndDrain('mission', pin), supervisor.cancelAndDrain('mission', pin)]);
+    expect(first).toMatchObject({ state: 'settled', outcome: 'cancelled' }); expect(repeated).toEqual(first);
+    expect(supervisor.snapshot()).toMatchObject({ closing: false, activeCount: 1 });
+    expect(supervisor.snapshot().jobs.find(job => job.id === 'human')?.state).toBe('dispatching');
+    supervisor.submit(f.task('next-human', { allowedWorkerIds: ['one'] }));
+    await vi.waitFor(() => expect(f.requests).toHaveLength(3));
+    for (const response of f.held) response.end(result());
+    expect(await settled(supervisor, 'human')).toMatchObject({ outcome: 'completed' });
+    expect(await settled(supervisor, 'next-human')).toMatchObject({ outcome: 'completed' });
+    await expect(supervisor.cancelAndDrain('mission', pin)).resolves.toMatchObject({ state: 'settled' });
+  });
+
+  it('drains a never-dispatched queued task without creating a reservation', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
+    const pin = f.state().jobs[0].taskDigest as string;
+    await expect(supervisor.cancelAndDrain('task-a', pin)).resolves.toMatchObject({ state: 'cancelled' });
+    expect(f.requests).toHaveLength(0);
+    await expect(supervisor.cancelAndDrain('task-a', pin)).resolves.toMatchObject({ state: 'cancelled' });
+  });
+
+  it.each([undefined, null, '', 'A'.repeat(64)])('refuses unpinned drain %j before cancellation', async pin => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
+    const before = f.state();
+    await expect(supervisor.cancelAndDrain('task-a', pin as string)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(f.state()).toEqual(before); expect(f.requests).toHaveLength(0);
+  });
+
+  it('does not infer drain settlement after a dispatched receipt disappears', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.submit(f.task()); await settled(supervisor);
+    const pin = f.state().jobs[0].taskDigest as string;
+    const ledger = f.ledger(); ledger.attempts = []; save(join(f.root, 'pool-state.json'), ledger);
+    await expect(supervisor.cancelAndDrain('task-a', pin)).rejects.toThrow();
+  });
+  it('rechecks retained queue bytes even when a prior cancellation needs no write', async () => {
+    const f = await fixture(); const supervisor = await f.start(); supervisor.setPaused(true); supervisor.submit(f.task());
+    const pin = f.state().jobs[0].taskDigest as string; supervisor.cancel('task-a', pin);
+    const state = f.state(); state.jobs[0].taskDigest = '0'.repeat(64); save(join(f.root, 'resource-console-state.json'), state);
+    await expect(supervisor.cancelAndDrain('task-a', pin)).rejects.toMatchObject({ code: 'UNAVAILABLE' });
+    expect(f.requests).toHaveLength(0);
+  });
+
   it('awaits owned work on idempotent shutdown and refuses new submissions', async () => {
     const f = await fixture({ hold: true }); const supervisor = await f.start(); supervisor.submit(f.task());
     await vi.waitFor(() => expect(f.requests).toHaveLength(1));
@@ -603,7 +653,9 @@ describe.skipIf(process.platform === 'win32')('durable foreground resource super
     const bindings: ResourceBinding[] = [{ workerId: 'native', capacityKey: 'native', kind: 'native-cli', command: [process.execPath, script] }];
     const patch = { pool, bindings, readObservations: () => [] }; const supervisor = await f.start(patch);
     supervisor.submit(f.task('native-task', { allowedWorkerIds: ['native'] }));
-    await vi.waitFor(() => expect(existsSync(started)).toBe(true)); supervisor.cancel('native-task');
+    await vi.waitFor(() => expect(existsSync(started)).toBe(true));
+    const pin = f.state().jobs[0].taskDigest as string;
+    await expect(supervisor.cancelAndDrain('native-task', pin)).rejects.toMatchObject({ code: 'UNAVAILABLE' });
     // Native ownership uses a documented 5-second termination grace. Observe
     // its completed settlement before close to cover the no-longer-active case.
     await vi.waitFor(() => expect(supervisor.snapshot().activeCount).toBe(0), { timeout: 10_000 });

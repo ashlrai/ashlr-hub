@@ -2479,6 +2479,13 @@ The foreground supervisor provides:
   A pin is an identity check, not additional authority: control authentication
   and the server's worker-ownership checks still apply. Active cancellation is
   a request; confirm terminal settlement before treating the task as stopped.
+  Controllers can add `"awaitSettlement":true` alongside the required digest
+  to cancel and await only that exact task's owning transport. The response is
+  successful only after durable state and terminal receipt checks; queued work
+  that never dispatched needs no receipt. Missing, changed or uncertain evidence
+  remains a refusal, not proof of worker exit. Other tasks, collectors and HTTP
+  remain open. Disconnecting the request does not reverse cancellation, and
+  retrying the same pin does not dispatch new work or renew any resource budget.
   This does not yet detach mission lifetime from the workspace service.
 - **Evidence recovery:** missing/corrupt observations stop new admissions but do
   not cancel admitted work. Polling recovers automatically after the selected

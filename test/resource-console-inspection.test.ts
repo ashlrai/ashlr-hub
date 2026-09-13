@@ -180,7 +180,8 @@ describe('passive collector inspection over authenticated HTTP', () => {
     const owner: supervisors.ResourcePoolSupervisor = { snapshot: () => ({ instanceId: 'fixture', paused: true, closing: false,
       error: null, maxParallel: 1, maxQueued: 1, activeCount: 0, queuedCount: 0, jobs: [] }),
       projects: () => undefined, projectFileBinding: unused, engineeringBinding: unused, projectExecutionBinding: unused,
-      submit: unused, cancel: unused, setPaused: unused, output: unused, history: unused, deleteHistory: unused, close: vi.fn(async () => {}) };
+      submit: unused, cancel: unused, cancelAndDrain: unused, ownsActiveTaskReceipt: unused,
+      setPaused: unused, output: unused, history: unused, deleteHistory: unused, close: vi.fn(async () => {}) };
     vi.mocked(supervisors.createResourcePoolSupervisor).mockResolvedValue(owner);
     const observed = vi.spyOn(leases, 'inspectResourceQuotaRefreshPending'); const before = inventory(base);
     const handle = await start({ execute: true, workspace }); const response = await http(handle);

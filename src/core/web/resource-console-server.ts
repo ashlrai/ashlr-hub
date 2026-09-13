@@ -459,9 +459,11 @@ export async function startResourceConsoleServer(options: ResourceConsoleServerO
           if (!exact(input, [])) throw new RequestError(400, 'History deletion expects an empty JSON object');
           sendJson(res, 200, { job: supervisor.deleteHistory(deleteHistory[1]!) });
         } else if (cancel) {
-          const pinned = exact(input, ['expectedTaskDigest']) && typeof input.expectedTaskDigest === 'string' && /^[a-f0-9]{64}$/.test(input.expectedTaskDigest);
-          if (!exact(input, []) && !pinned) throw new RequestError(400, 'Cancel expects an empty object or expectedTaskDigest');
-          sendJson(res, 200, { job: pinned ? supervisor.cancel(cancel[1]!, input.expectedTaskDigest as string) : supervisor.cancel(cancel[1]!) });
+          const drain = exact(input, ['expectedTaskDigest', 'awaitSettlement']) && input.awaitSettlement === true;
+          const pinned = (exact(input, ['expectedTaskDigest']) || drain) && typeof input.expectedTaskDigest === 'string' && /^[a-f0-9]{64}$/.test(input.expectedTaskDigest);
+          if (!exact(input, []) && !pinned) throw new RequestError(400, 'Cancel expects an empty object or expectedTaskDigest, optionally with awaitSettlement true');
+          sendJson(res, 200, { job: drain && pinned ? await supervisor.cancelAndDrain(cancel[1]!, input.expectedTaskDigest as string)
+            : pinned ? supervisor.cancel(cancel[1]!, input.expectedTaskDigest as string) : supervisor.cancel(cancel[1]!) });
         } else {
           if (!exact(input, ['paused']) || typeof input.paused !== 'boolean') throw new RequestError(400, 'Expected paused boolean');
           sendJson(res, 200, { supervisor: supervisor.setPaused(input.paused) });

@@ -42,6 +42,27 @@ async function http(handle: ResourceConsoleServerHandle, path: string, method = 
 }
 
 describe('resource console HTTP fences', () => {
+  it('requires an exact pin for awaited cancellation and leaves the console usable', async () => {
+    const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
+    const handle = await start({ execute: true, workspace });
+    const headers = { 'x-ashlr-token': handle.controlToken!, 'content-type': 'application/json' };
+    await http(handle, '/api/resources/queue', 'POST', headers, JSON.stringify({ paused: true }));
+    for (const id of ['mission', 'human']) await http(handle, '/api/resources/tasks', 'POST', headers, JSON.stringify({ id, prompt: 'fixture',
+      allowedWorkerIds: ['local'], mode: 'read-only', timeoutMs: 1000, maxOutputTokens: 100 }));
+    const file = join(options.root, 'resource-console-state.json'); const before = readFileSync(file, 'utf8');
+    const expectedTaskDigest = JSON.parse(before).jobs.find((job: { id: string }) => job.id === 'mission').taskDigest as string;
+    const path = '/api/resources/tasks/mission/cancel'; const body = JSON.stringify({ expectedTaskDigest, awaitSettlement: true });
+    expect((await http(handle, path, 'POST', { 'content-type': 'application/json' }, body)).status).toBe(401);
+    for (const input of [{ awaitSettlement: true }, { expectedTaskDigest, awaitSettlement: false }, { expectedTaskDigest, awaitSettlement: 'true' }]) {
+      expect((await http(handle, path, 'POST', headers, JSON.stringify(input))).status).toBe(400);
+    }
+    expect(readFileSync(file, 'utf8')).toBe(before);
+    const drained = await http(handle, path, 'POST', headers, body);
+    expect(drained.status).toBe(200); expect(JSON.parse(drained.text).job.state).toBe('cancelled');
+    expect(JSON.parse(readFileSync(file, 'utf8')).jobs.find((job: { id: string }) => job.id === 'human').state).toBe('queued');
+    expect((await http(handle, '/api/resources', 'GET', { 'x-ashlr-token': handle.readToken })).status).toBe(200);
+    expect((await http(handle, path, 'POST', headers, body)).status).toBe(200);
+  });
   it('accepts exact cancellation pins, rejects mismatches and preserves legacy human cancellation', async () => {
     const workspace = join(directory, 'workspace'); mkdirSync(workspace, { mode: 0o700 });
     const handle = await start({ execute: true, workspace });

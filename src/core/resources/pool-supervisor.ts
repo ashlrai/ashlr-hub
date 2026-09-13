@@ -78,6 +78,8 @@ export interface ResourcePoolSupervisor {
   submit(input: ResourceConsoleTaskInput): ResourceSupervisorJob;
   /** Optional exact retained task pin for host-driven, scoped cancellation. */
   cancel(id: string, expectedTaskDigest?: string): ResourceSupervisorJob;
+  /** Cancel exactly one retained task and await its verified transport settlement. */
+  cancelAndDrain(id: string, expectedTaskDigest: string): Promise<ResourceSupervisorJob>;
   /** Live custody only, not settlement. Never accepts external or uncertain work. */
   ownsActiveTaskReceipt(receipt: ResourceTaskReceipt): boolean;
   setPaused(paused: boolean): ResourceSupervisorSnapshot;
@@ -854,6 +856,34 @@ export async function createResourcePoolSupervisor(options: ResourcePoolSupervis
       else if (active.has(id)) { update(id, { reason: 'cancellation-requested' }); active.get(id)!.controller.abort(); }
       else if (job.state === 'dispatching' || job.state === 'unresolved') throw new ResourceSupervisorError('CONFLICT', 'Resource task is not owned by this console');
       return publicJob(state.jobs.find((row) => row.id === id)!);
+    },
+    async cancelAndDrain(id, expectedTaskDigest) {
+      if (typeof expectedTaskDigest !== 'string' || !HASH.test(expectedTaskDigest)) {
+        throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid expected task digest');
+      }
+      const verifyState = () => {
+        ensureAvailable();
+        if (digest(canonical(readResourceJson(statePath, MAX_STATE_BYTES))) !== persistedDigest) {
+          throw new ResourceSupervisorError('UNAVAILABLE', 'Resource task state changed');
+        }
+      };
+      verifyState();
+      // Capture this task's owning promise before cancellation. Never join the
+      // whole supervisor: other human tasks retain their independent lifetime.
+      const owned = active.get(id);
+      supervisor.cancel(id, expectedTaskDigest);
+      if (owned) await owned.promise;
+      verifyState();
+      const job = state.jobs.find((row) => row.id === id);
+      if (!job || job.taskDigest !== expectedTaskDigest || active.has(id) || !['settled', 'cancelled'].includes(job.state)) {
+        throw new ResourceSupervisorError('UNAVAILABLE', 'Resource task settlement unconfirmed');
+      }
+      const receipt = receiptFor(job, resourcePoolStatus(root, pool, bindings, []).attempts);
+      if (receipt ? ['reserved', 'uncertain'].includes(receipt.status) || job.state !== 'settled' ||
+        receipt.status !== job.outcome || receipt.workerId !== job.workerId : dispatched.has(id) || job.state === 'settled') {
+        throw new ResourceSupervisorError('UNAVAILABLE', 'Resource task settlement unconfirmed');
+      }
+      return publicJob(job);
     },
     setPaused(paused) {
       ensureAvailable(); if (typeof paused !== 'boolean') throw new ResourceSupervisorError('INVALID_INPUT', 'Invalid pause state');
