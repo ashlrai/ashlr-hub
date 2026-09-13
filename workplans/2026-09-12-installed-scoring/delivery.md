@@ -1,5 +1,28 @@
 # Scoring runtime checkpoint — September 12, 2026
 
+## Retained inventory correction — September 13, 2026
+
+The calibration driver inventories all three retained capture trees, each with
+its own 100,000-entry ceiling, plus a separate 100,000-entry budget for the seed
+and shared journal tree. Undeclared capture trees consume the shared budget.
+The 512 MiB aggregate byte ceiling, 64 MiB per-file ceiling, symlink fingerprints,
+and before/after identity checks remain unchanged. No evidence is pruned.
+Seed-only walks retain the original single-tree ceiling. Limit failures record
+closed entry/file/byte error codes rather than an undifferentiated assertion.
+
+The previous full calibration driver failed after its third capture: the retained
+tree contains 116,254 entries, beyond its original 100,000 aggregate ceiling.
+All three captures retained passing, identical diagnostic reports, but that does
+not turn the original driver result into a pass. Its launcher restored the stop
+and collector state. A separate read-only recovery produced a diagnostic
+descriptor without evaluator execution; scoring remains uncommissioned.
+
+Verification of this correction: 84 isolated driver tests pass, including exact
+entry and byte boundaries, oversized shared/undeclared trees, identity drift,
+symlink fingerprints and all aggregate call sites. Two read-only inventories of
+the actual retained tree matched, without invoking a capture or replay. This is
+inventory verification, not a fresh end-to-end calibration run or activation.
+
 ## Implemented, not commissioned
 
 Final local integration result:clean primary build at e732a824passed; all nine

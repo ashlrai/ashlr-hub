@@ -324,6 +324,112 @@ function declaration(name: string, statements = source.statements): ts.Statement
   assert.ok(found, `Driver declaration missing: ${name}`); return found;
 }
 const main = declaration('main') as ts.FunctionDeclaration;
+
+// Exercise the real inventory with an in-memory filesystem, never a capture or
+// live evidence root. Counts include directories, just like the production walk.
+const inventory = compileFunction(`
+  const { assert, root, directory, lstatSync, readdirSync, readlinkSync, readFileSync,
+    sha, join, relative, sep, isAbsolute } = fixture;
+  ${declaration('captureIds').getText(source)}
+  let code = 'CALIBRATION_NOT_CONFIRMED';
+  ${declaration('snapshot').getText(source)}
+  try { return { digest: snapshot(root, directory), code }; }
+  catch (error) { return { error, code }; }
+`, ['fixture']);
+function inventoryFixture(options: {
+  counts?: number[]; shared?: number; partition?: boolean; size?: bigint;
+  drift?: boolean; content?: string; link?: string;
+} = {}) {
+  const root = '/retained', directory = `${root}/universes/baseline`;
+  const work = `${directory}/preparation-measurement-work`;
+  const directories = new Map<string, string[]>([
+    [root, ['universes', 'shared']], [`${root}/universes`, ['baseline']],
+    [directory, ['preparation-measurement-work']], [work, []],
+    [`${root}/shared`, Array.from({ length: options.shared ?? 0 }, (_, i) => `f${i}`)],
+  ]);
+  for (const [index, count] of (options.counts ?? [1, 1, 1]).entries()) {
+    const id = `baseline-v2-${index + 1}`;
+    directories.get(work)!.push(id);
+    directories.set(`${work}/${id}`, Array.from({ length: count }, (_, i) => `f${i}`));
+  }
+  let reads = 0, stats = 0;
+  return {
+    fixture: {
+      assert, root, directory: options.partition === false ? undefined : directory,
+      join: path.join, relative: path.relative, sep: path.sep, isAbsolute: path.isAbsolute,
+      lstatSync: (name: string) => {
+        stats++;
+        return { dev: 1n, ino: 2n, mode: 0o700n, nlink: 1n,
+          size: directories.has(name) ? 0n : options.size ?? 1n,
+          mtimeNs: 1n, ctimeNs: options.drift ? BigInt(stats) : 1n,
+          isDirectory: () => directories.has(name), isSymbolicLink: () => !directories.has(name) && options.link !== undefined,
+          isFile: () => !directories.has(name) };
+      },
+      readdirSync: (name: string) => directories.get(name)!,
+      readlinkSync: () => options.link,
+      readFileSync: () => { reads++; return options.content ?? 'x'; },
+      sha: (bytes: string) => createHash('sha256').update(bytes).digest('hex'),
+    },
+    reads: () => reads,
+  };
+}
+describe('calibration retained inventory budgets (synthetic filesystem)', () => {
+  it('uses partitioning for every aggregate walk, never for a seed-only walk', () => {
+    const calls: ts.CallExpression[] = [];
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'snapshot') calls.push(node);
+      ts.forEachChild(node, visit);
+    };
+    visit(main);
+    const aggregate = calls.filter(call => call.arguments[0]?.getText(source) === 'root');
+    expect(aggregate).toHaveLength(4);
+    expect(aggregate.every(call => call.arguments.length === 2 && call.arguments[1]?.getText(source) === 'directory')).toBe(true);
+    expect(calls.filter(call => !aggregate.includes(call)).every(call => call.arguments.length === 1)).toBe(true);
+  });
+  it('preserves identical inventory fingerprints with and without partitioning', () => {
+    const f = inventoryFixture();
+    expect(inventory(f.fixture).digest).toBe(inventory({ ...f.fixture, directory: undefined }).digest);
+  });
+  it('includes three retained trees above the old aggregate cap without dropping evidence', () => {
+    const f = inventoryFixture({ counts: [37_740, 37_740, 37_740], shared: 3026 });
+    const result = inventory(f.fixture);
+    expect(result.error).toBeUndefined(); expect(result.digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(f.reads()).toBe(116_246);
+    expect(inventory({ ...f.fixture, directory: undefined }).code).toBe('CALIBRATION_SNAPSHOT_ENTRY_LIMIT');
+  });
+  it('accepts exactly 100000 entries in one declared capture tree', () => {
+    const f = inventoryFixture({ counts: [99_999] });
+    expect(inventory(f.fixture).error).toBeUndefined(); expect(f.reads()).toBe(99_999);
+  });
+  it.each([
+    { counts: [100_000] }, { counts: [], shared: 100_000 },
+    { counts: [0, 0, 0, 100_000] },
+  ])('refuses oversized captures, shared evidence or undeclared fourth trees: %j', options => {
+    expect(inventory(inventoryFixture(options).fixture).code).toBe('CALIBRATION_SNAPSHOT_ENTRY_LIMIT');
+  });
+  it('retains the 64 MiB per-file limit before reading oversized bytes', () => {
+    const f = inventoryFixture({ size: 64n * 1024n * 1024n + 1n });
+    expect(inventory(f.fixture).code).toBe('CALIBRATION_SNAPSHOT_FILE_LIMIT'); expect(f.reads()).toBe(0);
+  });
+  it('shares the 512 MiB ceiling across all capture partitions', () => {
+    expect(inventory(inventoryFixture({ counts: [3, 3, 2], size: 64n * 1024n * 1024n }).fixture).error).toBeUndefined();
+    const f = inventoryFixture({ counts: [3, 3, 3], size: 64n * 1024n * 1024n });
+    expect(inventory(f.fixture).code).toBe('CALIBRATION_SNAPSHOT_BYTE_LIMIT'); expect(f.reads()).toBe(8);
+  });
+  it('refuses identity drift and fingerprints both file bytes and symlink targets', () => {
+    expect(inventory(inventoryFixture({ drift: true }).fixture).error).toBeDefined();
+    const a = inventory(inventoryFixture({ content: 'a' }).fixture);
+    const b = inventory(inventoryFixture({ content: 'b' }).fixture);
+    expect(a.error).toBeUndefined(); expect(b.error).toBeUndefined(); expect(a.digest).not.toBe(b.digest);
+    const link = inventoryFixture({ link: '/never-followed/a' });
+    expect(inventory(link.fixture).digest).not.toBe(inventory(inventoryFixture({ link: '/never-followed/b' }).fixture).digest);
+    expect(link.reads()).toBe(0);
+  });
+  it.each(['/outside', '/retained', '/retained/../outside'])('refuses an out-of-scope partition: %s', directory => {
+    expect(inventory({ ...inventoryFixture().fixture, directory }).error).toBeDefined();
+  });
+});
+
 const finalStatements = main.body!.statements;
 const publication = finalStatements.findIndex(statement => ts.isExpressionStatement(statement) &&
   ts.isCallExpression(statement.expression) && ts.isIdentifier(statement.expression.expression) &&

@@ -50,19 +50,34 @@ function save(name, bytes) {
   assertRoot();
 }
 const saveJson = (name, value) => save(name, JSON.stringify(value, null, 2) + '\n');
-// Same bounded, byte-and-identity inventory as the retained single-capture driver.
-function snapshot(root) {
-  let count = 0, bytes = 0;
-  function visit(path) {
-    assert.ok(++count <= 100_000);
+// Retain all evidence: each declared capture gets the single-capture entry
+// budget, independently of the seed/journal budget. Bytes remain globally capped.
+// A single aggregate 100k cap rejects three otherwise bounded capture trees.
+function snapshot(root, captureDirectory) {
+  const counts = new Map([[root, 0]]);
+  if (captureDirectory !== undefined) {
+    const child = relative(root, captureDirectory);
+    assert.ok(child !== '' && child !== '..' && !child.startsWith(`..${sep}`) && !isAbsolute(child));
+    for (const id of captureIds) counts.set(join(captureDirectory, 'preparation-measurement-work', id), 0);
+  }
+  let bytes = 0;
+  const limit = (condition, failure) => {
+    if (!condition) { code = failure; throw new Error(failure); }
+  };
+  function visit(path, bucket = root) {
+    if (counts.has(path)) bucket = path;
+    const count = counts.get(bucket) + 1;
+    counts.set(bucket, count);
+    limit(count <= 100_000, 'CALIBRATION_SNAPSHOT_ENTRY_LIMIT');
     const before = lstatSync(path, { bigint: true });
     const identity = stat => [stat.dev, stat.ino, stat.mode, stat.nlink, stat.size, stat.mtimeNs, stat.ctimeNs].map(String);
     let content;
     if (before.isSymbolicLink()) content = { link: readlinkSync(path) };
-    else if (before.isDirectory()) content = Object.fromEntries(readdirSync(path).sort().map(name => [name, visit(join(path, name))]));
+    else if (before.isDirectory()) content = Object.fromEntries(readdirSync(path).sort().map(name => [name, visit(join(path, name), bucket)]));
     else {
-      assert.ok(before.isFile() && before.size <= 64n * 1024n * 1024n);
-      bytes += Number(before.size); assert.ok(bytes <= 512 * 1024 * 1024);
+      assert.ok(before.isFile());
+      limit(before.size <= 64n * 1024n * 1024n, 'CALIBRATION_SNAPSHOT_FILE_LIMIT');
+      bytes += Number(before.size); limit(bytes <= 512 * 1024 * 1024, 'CALIBRATION_SNAPSHOT_BYTE_LIMIT');
       content = sha(readFileSync(path));
     }
     assert.deepEqual(identity(lstatSync(path, { bigint: true })), identity(before));
@@ -294,21 +309,21 @@ async function main() {
     assert.equal(artifactDigest(record.seedArtifact.path), record.seedArtifact.digest);
     assert.deepEqual(readRecords(directory), beforeRecords); assert.equal(snapshot(record.seedArtifact.path), seedBefore);
     if (seedScope === 'private-one-file') assert.equal(snapshot(seedRepo), repoBefore); else assertSourceRepository();
-    const settled = snapshot(root);
+    const settled = snapshot(root, directory);
     assertSettledCapture(captured, readUniversePreparationMeasurementCapture(request));
     guard();
     const replay = await captureUniversePreparationMeasurement({ ...request, signal: controller.signal });
-    assert.equal(replay.disposition, 'replayed'); assert.deepEqual(replay.receipt, captured.receipt); assert.equal(snapshot(root), settled);
+    assert.equal(replay.disposition, 'replayed'); assert.deepEqual(replay.receipt, captured.receipt); assert.equal(snapshot(root, directory), settled);
     fresh();
     if (baselineVector) assert.deepEqual(vector, baselineVector); else baselineVector = vector;
     saveJson(`${captureId}-verified.json`, { schemaVersion: 1, scope: 'diagnostic-only', checks: 23,
       regions: 15, qualifications: 2, reportSha256: sha(raw), processGroupSettlement: 'group-exit-confirmed', unchangedReplay: true });
   }
   announce('calibration-publication'); fresh();
-  const settled = snapshot(root);
+  const settled = snapshot(root, directory);
   const descriptor = calibratePreparationMeasurements({ root, universeId, captureIds, expectedSourceDigest: sha(source) });
   assert.equal(descriptor.workload.id, 'preparation-workflows-v2'); assert.equal(descriptor.provenance.length, 3);
-  assert.deepEqual(descriptor.scenarios, baselineVector); assert.equal(snapshot(root), settled);
+  assert.deepEqual(descriptor.scenarios, baselineVector); assert.equal(snapshot(root, directory), settled);
   assert.deepEqual(parsePreparationMeasurementCalibration(JSON.stringify(descriptor)), descriptor);
   fresh(); saveJson('calibration.json', descriptor); fresh();
   announce('calibrated-and-retained');
