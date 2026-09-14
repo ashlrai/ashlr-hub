@@ -8,7 +8,13 @@ import { createOrderedImmutableIndexStore } from '../src/core/util/ordered-immut
 import { emptyOrderedImmutableIndexRoot, planOrderedImmutableIndexInsert, type OrderedImmutableIndexRoot } from '../src/core/util/ordered-immutable-index.js';
 
 const hooks = vi.hoisted(() => ({ afterWrite: null as ((target: string) => void) | null, denyAssurance: false,
-  denyAssurancePath: null as string | null }));
+  denyAssurancePath: null as string | null, readCalls: [] as string[], onAssurance: null as (() => void) | null }));
+vi.mock('../src/core/util/stable-file-read.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/core/util/stable-file-read.js')>();
+  return { ...actual, readStableRegularFile: (...args: Parameters<typeof actual.readStableRegularFile>) => {
+    hooks.readCalls.push(args[0]); return actual.readStableRegularFile(...args);
+  } };
+});
 vi.mock('../src/core/util/private-file-write.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/core/util/private-file-write.js')>();
   return { ...actual, writePrivateFileAtomically: (...args: Parameters<typeof actual.writePrivateFileAtomically>) => {
@@ -17,9 +23,11 @@ vi.mock('../src/core/util/private-file-write.js', async importOriginal => {
 });
 vi.mock('../src/core/util/private-storage.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
-  return { ...actual, assurePrivateStoragePath: (...args: Parameters<typeof actual.assurePrivateStoragePath>) =>
-    hooks.denyAssurance || args[0] === hooks.denyAssurancePath
-      ? { ok: false, reason: 'fixture-acl-denied' } : actual.assurePrivateStoragePath(...args) };
+  return { ...actual, assurePrivateStoragePath: (...args: Parameters<typeof actual.assurePrivateStoragePath>) => {
+    hooks.onAssurance?.();
+    return hooks.denyAssurance || args[0] === hooks.denyAssurancePath
+      ? { ok: false, reason: 'fixture-acl-denied' } : actual.assurePrivateStoragePath(...args);
+  } };
 });
 
 const key = (index: number) => `id-${String(index).padStart(6, '0')}`;
@@ -27,6 +35,7 @@ const valueDigest = (index: number) => createHash('sha256').update(String(index)
 let base: string | undefined;
 afterEach(() => {
   hooks.afterWrite = null; hooks.denyAssurance = false; hooks.denyAssurancePath = null; vi.restoreAllMocks();
+  hooks.readCalls = []; hooks.onAssurance = null;
   if (base) { rmSync(base, { recursive: true, force: true }); base = undefined; }
 });
 function fixture() {
@@ -57,6 +66,36 @@ function seed(rootPath: string, total: number): OrderedImmutableIndexRoot {
 }
 
 describe.skipIf(process.platform === 'win32')('private ordered index staging and cold reads', () => {
+  it('answers4096 lookups with one stable read per visited node and no cross-call cache', () => {
+    const f = fixture(); const root = seed(f.root, 1); const requested = Array.from({ length: 4096 }, (_, index) => index % 2 ? 'absent' : key(0));
+    expect(f.store.lookupMany(root, requested)).toEqual(requested.map(value => value === key(0) ? { found: true, valueDigest: valueDigest(0) } : { found: false }));
+    expect(hooks.readCalls).toEqual([nodePath(f.root, root.nodeDigest!)]);
+    writeFileSync(nodePath(f.root, root.nodeDigest!), '{}\n');
+    expect(() => f.store.lookupMany(root, [key(0), 'absent'])).toThrow('evidence unavailable');
+    expect(hooks.readCalls).toHaveLength(2);
+  });
+  it('reads shared branch nodes once and retains fresh custody even for empty batches', () => {
+    const f = fixture(); const root = seed(f.root, 40);
+    expect(f.store.lookupMany(root, [key(0), key(39), key(0), 'absent'])).toEqual([
+      { found: true, valueDigest: valueDigest(0) }, { found: true, valueDigest: valueDigest(39) },
+      { found: true, valueDigest: valueDigest(0) }, { found: false },
+    ]);
+    expect(hooks.readCalls).toHaveLength(3); expect(new Set(hooks.readCalls).size).toBe(3);
+    hooks.denyAssurancePath = f.root;
+    expect(() => f.store.lookupMany(root, [])).toThrow('evidence unavailable');
+  });
+  it('captures all batch arguments before custody adapters can mutate caller data', () => {
+    const f = fixture(); const committed = seed(f.root, 40); const root = { ...committed }; const keys = [key(0), key(39)];
+    const getter = vi.fn(); let changed = false;
+    hooks.onAssurance = () => {
+      if (!changed) { changed = true; root.count = 999; Object.defineProperty(keys, '1', { enumerable: true, get: getter }); }
+    };
+    expect(f.store.lookupMany(root, keys)).toEqual([0, 39].map(index => ({ found: true, valueDigest: valueDigest(index) })));
+    expect(getter).not.toHaveBeenCalled();
+    const adapter = vi.fn(); hooks.onAssurance = adapter;
+    expect(() => f.store.lookupMany(committed, new Array(1))).toThrow('Invalid ordered index input');
+    expect(adapter).not.toHaveBeenCalled();
+  });
   it('cold-reads more than4096 synthetic entries and stages another without selecting a ledger root', () => {
     const f = fixture(); const old = seed(f.root, 4353);
     const staged = f.store.stage(old, { key: key(4353), valueDigest: valueDigest(4353) }, { guard() {} });

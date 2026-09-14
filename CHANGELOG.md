@@ -11,6 +11,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Incremental receipt storage
+
+- Refuses missing-ledger initialization when fixed archive evidence remains,
+  including evidence created during admission callbacks or header staging.
+- Supports exact query composition over mixed unarchived and archived receipts.
+- Batches index lookups with per-call node reads, avoiding repeated file reopening
+  during complete hot/archive disjointness checks without caching permissions
+  across calls.
+- Adds a versioned storage adapter that stages bounded terminal compaction while
+  preserving all other receipts, policies and historical configurations. Candidate
+  generation does not publish a header or activate archive-backed execution.
+
 ### Receipt-ledger migration dependencies
 
 - Pins source-header identity through actual transaction publication, refusing

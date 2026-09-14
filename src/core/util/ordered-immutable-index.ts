@@ -85,6 +85,18 @@ export function captureOrderedImmutableIndexRoot(value: unknown): OrderedImmutab
   return result;
 }
 export function emptyOrderedImmutableIndexRoot(): OrderedImmutableIndexRoot { return { schemaVersion: 1, nodeDigest: null, count: 0, height: 0 }; }
+/** Bounded request capture, not a lifetime index limit. No element getters run. */
+export function captureOrderedImmutableIndexLookupKeys(value: unknown): string[] {
+  if (!value || typeof value !== 'object' || types.isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return fail();
+  const length: unknown = Object.getOwnPropertyDescriptor(value, 'length')?.value;
+  if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0 || length > 4096 ||
+    Reflect.ownKeys(value).length !== length + 1) return fail();
+  return Array.from({ length }, (_, index) => {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, 'value')) return fail();
+    return key(descriptor.value);
+  });
+}
 function range(value: unknown, page = false): OrderedImmutableIndexPageOptions {
   const fields = record(value === undefined ? {} : value, [], page ? ['gt', 'lt', 'limit'] : ['gt', 'lt']);
   const result: OrderedImmutableIndexPageOptions = {};
@@ -147,6 +159,10 @@ function reader(readNode: OrderedImmutableIndexNodeReader) {
 export function lookupOrderedImmutableIndex(rootValue: OrderedImmutableIndexRoot, keyValue: string, readNode: OrderedImmutableIndexNodeReader):
   { found: true; valueDigest: string } | { found: false } {
   const root = captureOrderedImmutableIndexRoot(rootValue); const wanted = key(keyValue); const load = reader(readNode);
+  return lookup(root, wanted, load);
+}
+function lookup(root: OrderedImmutableIndexRoot, wanted: string, load: ReturnType<typeof reader>):
+  { found: true; valueDigest: string } | { found: false } {
   if (root.nodeDigest === null) return { found: false };
   let node = load({ ...root, nodeDigest: root.nodeDigest }, true);
   while ('children' in node) {
@@ -156,6 +172,14 @@ export function lookupOrderedImmutableIndex(rootValue: OrderedImmutableIndexRoot
   }
   const found = node.entries.find(row => row.key === wanted);
   return found ? { found: true, valueDigest: found.valueDigest } : { found: false };
+}
+/** One reader cache per bounded immutable-root batch. Every visited reference is
+ * still checked; cached node bytes are never retained across separate calls. */
+export function lookupManyOrderedImmutableIndex(rootValue: OrderedImmutableIndexRoot, keysValue: readonly string[], readNode: OrderedImmutableIndexNodeReader):
+  Array<ReturnType<typeof lookupOrderedImmutableIndex>> {
+  const root = captureOrderedImmutableIndexRoot(rootValue); const keys = captureOrderedImmutableIndexLookupKeys(keysValue);
+  const load = reader(readNode);
+  return keys.map(wanted => lookup(root, wanted, load));
 }
 function outside(ref: Reference, selected: OrderedImmutableIndexRange): boolean { return selected.gt !== undefined && ref.maxKey <= selected.gt || selected.lt !== undefined && ref.minKey >= selected.lt; }
 function inside(ref: Reference, selected: OrderedImmutableIndexRange): boolean { return (selected.gt === undefined || ref.minKey > selected.gt) && (selected.lt === undefined || ref.maxKey < selected.lt); }

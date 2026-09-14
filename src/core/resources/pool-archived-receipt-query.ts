@@ -1,4 +1,4 @@
-/** Internal composition over an immutable archive root and validated active rows.
+/** Internal composition over an immutable archive root and validated hot rows.
  * Storage owns epoch validation/root custody; this adapter grants no admission
  * authority and never treats a recent page as complete historical evidence. */
 import { types } from 'node:util';
@@ -54,6 +54,8 @@ function summary(value: unknown, cutoff: number): ResourcePoolReceiptAccountWind
 }
 
 export function createArchivedResourcePoolReceiptQuery(input: {
+  /** Compatibility name: the bounded hot projection may contain every receipt
+   * status. Only reserved/uncertain rows contribute to unresolved occupancy. */
   active: readonly ResourceTaskReceipt[];
   archive: ResourcePoolReceiptArchive;
   root: ResourcePoolReceiptArchiveRoot;
@@ -66,25 +68,27 @@ export function createArchivedResourcePoolReceiptQuery(input: {
     return descriptor.value;
   });
   const root = capture<ResourcePoolReceiptArchiveRoot>(fields[2]);
-  const active = createResourcePoolReceiptQuery(fields[0] as readonly ResourceTaskReceipt[]);
-  const activeRows = active.unresolved();
-  if (activeRows.length > 4096 || activeRows.length !== (fields[0] as readonly ResourceTaskReceipt[]).length) return unavailable();
+  const hotRows = capture<ResourceTaskReceipt[]>(fields[0]);
+  if (!Array.isArray(hotRows) || hotRows.length > 4096) return unavailable();
+  // Capture and validate the ENTIRE hot projection before any archive callback.
+  // Storage still owns the receipt-domain/epoch validation of these rows.
+  const hotReceipts = createResourcePoolReceiptQuery(hotRows);
   // The package-internal archive is a trusted synchronous implementation, not
   // a user plugin. Detach the root even from its per-call argument objects.
   const archive = fields[1] as ResourcePoolReceiptArchive;
-  const ids = activeRows.map(row => row.id);
+  const ids = hotRows.map(row => row.id);
   const absence = batch(call(() => archive.getMany(structuredClone(root), [...ids])), ids);
   if (absence.some(row => row.status !== 'proven-absent')) return unavailable();
 
   const get = (id: string): ResourcePoolReceiptLookup => {
-    const hot = active.get(id);
+    const hot = hotReceipts.get(id);
     if (hot.status === 'found') return hot;
     return result(call(() => archive.get(structuredClone(root), id)), id);
   };
   return Object.freeze({
     get,
     getMany(requested: readonly string[]): ResourcePoolReceiptLookup[] {
-      const hot = active.getMany(requested); // Captures/validates IDs before archive calls.
+      const hot = hotReceipts.getMany(requested); // Captures/validates IDs before archive calls.
       const missing = [...new Set(hot.filter(row => row.status === 'proven-absent').map(row => row.id))];
       if (!missing.length) return hot;
       const cold: ResourcePoolReceiptLookup[] = [];
@@ -97,9 +101,9 @@ export function createArchivedResourcePoolReceiptQuery(input: {
       const byId = new Map(cold.map(row => [row.id, row]));
       return hot.map(row => row.status === 'found' ? row : structuredClone(byId.get(row.id)!));
     },
-    unresolved: active.unresolved,
+    unresolved: hotReceipts.unresolved,
     accountWindow(capacityKey: string, windowMs: number, nowMs: number): ResourcePoolReceiptAccountWindow {
-      const hot = active.accountWindow(capacityKey, windowMs, nowMs);
+      const hot = hotReceipts.accountWindow(capacityKey, windowMs, nowMs);
       const cold = summary(call(() => archive.accountWindow(structuredClone(root), capacityKey, windowMs, nowMs)), nowMs - windowMs);
       const recentReservationCount = hot.recentReservationCount + cold.recentReservationCount;
       if (!Number.isSafeInteger(recentReservationCount)) return unavailable();

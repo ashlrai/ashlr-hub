@@ -11,12 +11,15 @@ import type { ResourceTaskReceipt } from '../src/core/resources/pool-receipt-cod
 import type { ResourcePool } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 
-const assurance = vi.hoisted(() => ({ paths: [] as string[], deniedPath: null as string | null }));
+const assurance = vi.hoisted(() => ({ paths: [] as string[], deniedPath: null as string | null,
+  onFirstCall: null as (() => void) | null }));
 vi.mock('../src/core/util/private-storage.js', async importOriginal => {
   const actual = await importOriginal<typeof import('../src/core/util/private-storage.js')>();
   return { ...actual, assurePrivateStoragePath: (...args: Parameters<typeof actual.assurePrivateStoragePath>) => {
     assurance.paths.push(args[0]);
-    return args[0] === assurance.deniedPath ? { ok: false, reason: 'fixture-acl-denied' } : actual.assurePrivateStoragePath(...args);
+    const result = args[0] === assurance.deniedPath ? { ok: false, reason: 'fixture-acl-denied' } : actual.assurePrivateStoragePath(...args);
+    const callback = assurance.onFirstCall; assurance.onFirstCall = null; callback?.();
+    return result;
   } };
 });
 
@@ -44,11 +47,72 @@ function files(path: string): string[] {
 }
 const noGuard = { guard() {} };
 afterEach(() => {
-  assurance.paths = []; assurance.deniedPath = null;
+  assurance.paths = []; assurance.deniedPath = null; assurance.onFirstCall = null;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('terminal receipt archive backend (not activated)', () => {
+  it('captures batch root and all IDs before the first real custody callback', () => {
+    const { archive } = fixture(); const row = receipt();
+    const committed = archive.stage(emptyResourcePoolReceiptArchiveRoot(), row, noGuard).root;
+    const root = structuredClone(committed); const ids = ['task', 'missing', 'task']; const getter = vi.fn();
+    const mutate = vi.fn(() => {
+      Object.assign(root, emptyResourcePoolReceiptArchiveRoot());
+      Object.defineProperty(ids, '0', { enumerable: true, get: getter }); ids[1] = 'changed';
+    });
+    assurance.onFirstCall = mutate;
+    expect(archive.getMany(root, ids)).toEqual([
+      { status: 'found', id: row.id, receipt: row }, { status: 'proven-absent', id: 'missing' },
+      { status: 'found', id: row.id, receipt: row },
+    ]);
+    expect(mutate).toHaveBeenCalledOnce(); expect(getter).not.toHaveBeenCalled();
+    expect(root).toEqual(emptyResourcePoolReceiptArchiveRoot());
+    expect(archive.get(committed, row.id)).toEqual({ status: 'found', id: row.id, receipt: row });
+  });
+  it.each([false, true])('captures stage root, receipt and original guard before custody (veto=%s)', veto => {
+    const { archive, root: archivePath } = fixture(); const first = receipt({ id: 'first' });
+    const committed = archive.stage(emptyResourcePoolReceiptArchiveRoot(), first, noGuard).root;
+    const root = structuredClone(committed); const row = receipt({ id: 'second' }); const expected = structuredClone(row);
+    const before = files(archivePath).sort(); const getter = vi.fn();
+    const guard = vi.fn(() => { if (veto) throw new Error('Original captured guard refused'); });
+    const options = { guard };
+    const mutate = vi.fn(() => {
+      Object.assign(root, emptyResourcePoolReceiptArchiveRoot());
+      row.id = 'changed'; row.inputTokens = 10; row.outputTokens = 20;
+      Object.defineProperty(row, 'taskDigest', { enumerable: true, get: getter });
+      Object.defineProperty(options, 'guard', { enumerable: true, get: getter });
+    });
+    assurance.onFirstCall = mutate;
+    if (veto) {
+      expect(() => archive.stage(root, row, options)).toThrow('evidence unavailable');
+      expect(files(archivePath).sort()).toEqual(before); expect(guard).toHaveBeenCalledOnce();
+    } else {
+      const staged = archive.stage(root, row, options);
+      expect(staged.replayed).toBe(false); expect(staged.root.byId.count).toBe(2); expect(staged.root.byStart.count).toBe(2);
+      expect(archive.getMany(staged.root, ['first', 'second', 'changed'])).toEqual([
+        { status: 'found', id: 'first', receipt: first }, { status: 'found', id: 'second', receipt: expected },
+        { status: 'proven-absent', id: 'changed' },
+      ]);
+      expect(guard).toHaveBeenCalled();
+    }
+    expect(mutate).toHaveBeenCalledOnce(); expect(getter).not.toHaveBeenCalled();
+    expect(archive.get(committed, 'second')).toEqual({ status: 'proven-absent', id: 'second' });
+  });
+  it('shares node reads across a full absence batch without reusing permission observations on later calls', () => {
+    const { archive, root: path } = fixture();
+    const root = archive.stage(emptyResourcePoolReceiptArchiveRoot(), receipt(), noGuard).root;
+    assurance.paths = [];
+    expect(archive.getMany(root, ['missing-one'])).toEqual([{ status: 'proven-absent', id: 'missing-one' }]);
+    const singlePaths = [...assurance.paths]; assurance.paths = [];
+    const ids = Array.from({ length: 4096 }, (_, index) => 'missing-' + index);
+    expect(archive.getMany(root, ids)).toEqual(ids.map(id => ({ status: 'proven-absent', id })));
+    // Thousands of keys against one leaf should require the same custody/I/O
+    // observations as one key, not thousands of identical file reopenings.
+    expect(assurance.paths).toEqual(singlePaths);
+    const digest = root.byId.nodeDigest!;
+    assurance.deniedPath = join(path, 'index', 'nodes', digest.slice(0, 2), digest.slice(2, 4), `${digest}.json`);
+    expect(() => archive.getMany(root, ids)).toThrow('evidence unavailable');
+  });
   it('performs one fresh directory-pair assurance at every empty read boundary, with no permission cache', () => {
     const { archive, anchorPath, root } = fixture(); assurance.paths = [];
     expect(archive.get(emptyResourcePoolReceiptArchiveRoot(), 'missing').status).toBe('proven-absent');

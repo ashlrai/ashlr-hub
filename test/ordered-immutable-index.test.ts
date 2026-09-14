@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { captureOrderedImmutableIndexRoot, countOrderedImmutableIndex, emptyOrderedImmutableIndexRoot, lookupOrderedImmutableIndex,
+import { captureOrderedImmutableIndexRoot, countOrderedImmutableIndex, emptyOrderedImmutableIndexRoot, lookupOrderedImmutableIndex, lookupManyOrderedImmutableIndex,
   pageOrderedImmutableIndex, selectOrderedImmutableIndex, planOrderedImmutableIndexInsert, ORDERED_IMMUTABLE_INDEX_NODE_BYTES } from '../src/core/util/ordered-immutable-index.js';
 
 const key = (index: number) => `id-${String(index).padStart(6, '0')}`;
@@ -19,6 +19,57 @@ function fixture(total: number, reverse = false) {
 }
 
 describe('immutable ordered commitment index', () => {
+  it('batch lookups read each unique visited node once while preserving order, repeats and exact absence', () => {
+    const f = fixture(1200); const keys = Array.from({ length: 4096 }, (_, index) => index % 4 === 0 ? 'absent' : key(index % 1200));
+    const expected = keys.map(wanted => lookupOrderedImmutableIndex(f.root, wanted, f.read));
+    const pointReads = f.read.mock.calls.length; f.read.mockClear();
+    expect(lookupManyOrderedImmutableIndex(f.root, keys, f.read)).toEqual(expected);
+    const visited = f.read.mock.calls.map(([hash]) => hash);
+    expect(visited.length).toBe(new Set(visited).size); expect(visited.length).toBeLessThan(pointReads / 10);
+    f.read.mockClear();
+    expect(lookupManyOrderedImmutableIndex(f.root, Array(4096).fill('absent'), f.read)).toEqual(Array.from({ length: 4096 }, () => ({ found: false })));
+    expect(f.read).toHaveBeenCalledTimes(1);
+  });
+  it('captures the entire key batch and root before reader callbacks, with independent result objects', () => {
+    const f = fixture(40); const root = { ...f.root }; const keys = [key(1), key(39), key(1)]; const getter = vi.fn(); let changed = false;
+    const read = (hash: string) => {
+      if (!changed) { changed = true; root.count = 999; Object.defineProperty(keys, '1', { enumerable: true, get: getter }); }
+      return f.read(hash);
+    };
+    const result = lookupManyOrderedImmutableIndex(root, keys, read);
+    expect(result).toEqual([1, 39, 1].map(index => ({ found: true, valueDigest: valueDigest(index) })));
+    expect(getter).not.toHaveBeenCalled();
+    if (result[0]!.found) result[0]!.valueDigest = valueDigest(99);
+    expect(result[2]).toEqual({ found: true, valueDigest: valueDigest(1) });
+  });
+  it('revalidates each reference even when a forged second range shares cached leaf bytes', () => {
+    const f = fixture(16); const leafDigest = f.root.nodeDigest!;
+    const bytes = JSON.stringify({ schemaVersion: 1, height: 1, children: [
+      { nodeDigest: leafDigest, minKey: key(0), maxKey: key(15), count: 16, height: 0 },
+      { nodeDigest: leafDigest, minKey: key(16), maxKey: key(31), count: 16, height: 0 },
+    ] }) + '\n';
+    const root = { schemaVersion: 1 as const, nodeDigest: digestNode(bytes), count: 32, height: 1 };
+    f.nodes.set(root.nodeDigest, bytes);
+    expect(lookupManyOrderedImmutableIndex(root, [key(0)], f.read)).toEqual([{ found: true, valueDigest: valueDigest(0) }]);
+    f.read.mockClear();
+    expect(() => lookupManyOrderedImmutableIndex(root, [key(0), key(16)], f.read)).toThrow('evidence unavailable');
+    expect(f.read.mock.calls.map(([hash]) => hash)).toEqual([root.nodeDigest, leafDigest]);
+  });
+  it('rejects every malformed batch before touching the reader', () => {
+    const f = fixture(1); const getter = vi.fn(); const accessor = [key(0)]; Object.defineProperty(accessor, '0', { enumerable: true, get: getter });
+    const symbol = [key(0)]; Object.defineProperty(symbol, Symbol('foreign'), { value: true });
+    for (const keys of [null, {}, new Array(1), accessor, symbol, Array(4097).fill('a'), ['a', '\n'], new Proxy(['a'], { ownKeys: getter })]) {
+      expect(() => lookupManyOrderedImmutableIndex(f.root, keys as never, f.read)).toThrow('Invalid ordered index input');
+    }
+    expect(f.read).not.toHaveBeenCalled(); expect(getter).not.toHaveBeenCalled();
+    expect(lookupManyOrderedImmutableIndex(f.root, [], f.read)).toEqual([]); expect(f.read).not.toHaveBeenCalled();
+  });
+  it.each(['missing', 'corrupt'] as const)('does not reuse cached node evidence after a %s next-call change', kind => {
+    const f = fixture(40); expect(lookupManyOrderedImmutableIndex(f.root, [key(39), key(39)], f.read)).toHaveLength(2);
+    const target = f.read.mock.calls.at(-1)![0];
+    if (kind === 'missing') f.nodes.delete(target); else f.nodes.set(target, '{}\n');
+    expect(() => lookupManyOrderedImmutableIndex(f.root, [key(0), key(39)], f.read)).toThrow('evidence unavailable');
+  });
   it('proves empty absence without reading files', () => {
     const read = vi.fn(); const root = emptyOrderedImmutableIndexRoot();
     expect(lookupOrderedImmutableIndex(root, 'a', read)).toEqual({ found: false });

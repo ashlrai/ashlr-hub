@@ -167,6 +167,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-pool-runtime.test.ts', // durable admission, concurrent tasks, and replay
   'test/resource-pool-publication.test.ts', // real header source CAS, private staging and publication fault recovery
   'test/resource-pool-receipt-archive-certificate.test.ts', // explicit private fixture keys and real archive derivation proofs
+  'test/resource-pool-orphaned-archive.test.ts', // real missing-header residue and publication races
+  'test/resource-pool-state-storage.test.ts', // signed cold storage plus retained hot receipts and custody checks
   'test/resource-receipt-query-runtime.test.ts', // real receipt queries preserve alias accounting, rollback, cooldown and replay
   'test/ordered-immutable-index-store.test.ts', // private disk staging, cold index reads and interrupted publication recovery
   'test/resource-pool-receipt-archive.test.ts', // real terminal payload/index staging, epoch accounting and interrupted archive recovery

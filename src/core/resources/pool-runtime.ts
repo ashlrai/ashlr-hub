@@ -233,7 +233,10 @@ export function decodeResourcePoolState(value: unknown, pool: ResourcePool, bind
 }
 function loadState(root: string, pool: ResourcePool, bindings: ResourceBinding[], poolDigest: string): PoolState {
   const file = join(root, 'pool-state.json');
-  if (!existsSync(file)) return { schemaVersion: 1, poolDigest, observations: [], attempts: [] };
+  if (ledgerIdentity(file) === null) {
+    assertNoOrphanedReceiptArchive(root);
+    return { schemaVersion: 1, poolDigest, observations: [], attempts: [] };
+  }
   return decodeResourcePoolState(readResourceJson(file, MAX_STATE_BYTES), pool, bindings);
 }
 /** Read-only verified snapshots; never returns execution authority or repairs an interrupted upgrade. */
@@ -251,6 +254,14 @@ function ledgerIdentity(file: string): BigIntStats | null {
     throw new Error('Resource ledger source unavailable');
   }
 }
+/** Missing active state is empty only when no fixed archive identity remains.
+ * lstat deliberately detects dangling links and unsafe entries without opening,
+ * repairing, or interpreting any orphaned receipt evidence. */
+function assertNoOrphanedReceiptArchive(root: string): void {
+  if (ledgerIdentity(join(root, 'receipt-archive')) !== null || ledgerIdentity(join(root, 'receipt-archive.key')) !== null) {
+    throw new Error('Resource ledger incomplete: receipt archive remains without active state');
+  }
+}
 function sameLedgerSnapshot(left: BigIntStats, right: BigIntStats): boolean {
   return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
     left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink && left.size === right.size &&
@@ -262,6 +273,7 @@ function sameLedgerSnapshot(left: BigIntStats, right: BigIntStats): boolean {
 function transactionSource(root: string, pool: ResourcePool, bindings: ResourceBinding[], poolDigest: string) {
   const directory = lstatSync(root, { bigint: true });
   const file = join(root, 'pool-state.json'); const before = ledgerIdentity(file);
+  if (before === null) assertNoOrphanedReceiptArchive(root);
   const state: PoolState = before === null ? { schemaVersion: 1, poolDigest, observations: [], attempts: [] }
     : decodeResourcePoolState(readResourceJson(file, MAX_STATE_BYTES), pool, bindings);
   function assertCurrent(): void {
@@ -276,6 +288,7 @@ function transactionSource(root: string, pool: ResourcePool, bindings: ResourceB
       (before === null ? current !== null : current === null || !sameLedgerSnapshot(before, current))) {
       throw new Error('Resource ledger source changed');
     }
+    if (before === null) assertNoOrphanedReceiptArchive(root);
   }
   assertCurrent(); return { state, assertCurrent };
 }

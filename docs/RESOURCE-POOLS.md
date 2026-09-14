@@ -3188,6 +3188,11 @@ new state. A failed publication never reruns admission effects. If the rename
 succeeded before a durability failure, the installed reservation remains and
 the next invocation resolves its existing identity. Temporary cleanup removes
 only the transaction's own inode; a foreign replacement remains for inspection.
+If `pool-state.json` is missing but `receipt-archive` or `receipt-archive.key`
+remains, status, policy writes and admission refuse the incomplete ledger. A
+dangling link counts as remaining evidence. The runtime neither resets accounting
+nor repairs or deletes those entries; initial publication rechecks this condition
+after callbacks and staging as well.
 
 The internal ordered immutable index is a storage foundation, not an alternate
 ledger selected by this release. It supports exact keys, bounded ordered pages
@@ -3215,6 +3220,10 @@ The active/archive query adapter combines these two disjoint sets, refuses
 duplicate identities between them and retains all unresolved occupancy. Large
 exact-ID requests use bounded batches against the same captured archive root;
 batching does not change the meaning of absence or reset accounting.
+Within one bounded ID batch, the index shares immutable node bytes across
+lookups and still validates each visited reference. It discards that cache at
+the end of the operation. Subsequent calls repeat storage-custody checks; this
+is not a cross-call permission cache or a proof of unvisited-file availability.
 
 An internal derivation certifier can bind the entire archive root, including
 failure pointers, to its pool, originating configuration history, prior
@@ -3231,6 +3240,28 @@ projects, source freshness, retention of all other active receipts and atomic
 selection of the new header. Certificate validity alone does not establish the
 current root, prevent rollback, or defend against the user who can read its key.
 It also does not attest availability of every unvisited historical file.
+
+The internal `pool-state-storage` adapter can read a schema-3 candidate containing
+a strict schema-2 hot state and a verified archive certificate. The hot state
+retains **all** unarchived receipts, including completed work. Exact queries first
+prove that every hot ID is absent from the selected cold root, then combine both
+sets for identity, occupancy and account-window accounting. Unknown usage stays
+unknown; policies and historical configurations are not recomputed or reset.
+
+`stageResourcePoolReceiptCompaction` takes an authentic captured storage view and
+one to eight selected hot terminal IDs. It derives immutable cold records and a
+new certificate, preserves the remaining hot rows in order, and returns a new
+candidate header. It does not publish `pool-state.json`, create archive/key
+enrollment, dispatch tasks or activate schema 3 in the runtime. Interrupted
+staging leaves the source ledger unchanged; the same source and selection can
+be retried. A changed captured key/root or a failed host guard refuses staging.
+
+Storage-view `isCurrent()` checks captured archive/key custody and visited
+evidence only. The runtime must still check the exact active header and writer
+ownership at publication, budget the **whole** header for future settlement,
+and migrate full-history proofs, evolution and public metrics before selecting
+schema 3. A valid certificate is not permission to omit hot rows or substitute
+a recent-history page for lifetime accounting.
 
 To measure this storage layer locally, build the checkout and run:
 

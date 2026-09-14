@@ -158,10 +158,11 @@ export function createResourcePoolReceiptArchive(input: { root: string; anchorPa
     }
     return root;
   }
-  function get(root: ResourcePoolReceiptArchiveRoot, requested: string): ResourcePoolReceiptLookup {
+  function get(root: ResourcePoolReceiptArchiveRoot, requested: string,
+    known?: { found: true; valueDigest: string } | { found: false }): ResourcePoolReceiptLookup {
     const taskId = id(requested);
     if (root.byId.nodeDigest === null) return { status: 'proven-absent', id: taskId };
-    const found = index().lookup(root.byId, idKey(taskId));
+    const found = known ?? index().lookup(root.byId, idKey(taskId));
     if (!found.found) return { status: 'proven-absent', id: taskId };
     const receipt = payload(found.valueDigest);
     if (receipt.id !== taskId) return fail();
@@ -170,7 +171,7 @@ export function createResourcePoolReceiptArchive(input: { root: string; anchorPa
     return { status: 'found', id: taskId, receipt };
   }
   function verifiedRoot(value: ResourcePoolReceiptArchiveRoot): ResourcePoolReceiptArchiveRoot {
-    bound(); const root = rootValue(value);
+    const root = rootValue(value); bound();
     for (const pointer of root.latestFailures) {
       const found = get(root, pointer.id);
       if (found.status !== 'found' || found.receipt.capacityKey !== pointer.capacityKey || !qualifiesFailure(found.receipt) ||
@@ -186,7 +187,14 @@ export function createResourcePoolReceiptArchive(input: { root: string; anchorPa
     get: (root, requested) => read(root, captured => get(captured, requested)),
     getMany(root, values) {
       const ids = capture<string[]>(values); if (!Array.isArray(ids) || ids.length > 4096) return fail('INVALID_INPUT');
-      ids.forEach(id); return read(root, captured => ids.map(requested => get(captured, requested)));
+      ids.forEach(id); return read(root, captured => {
+        if (!ids.length || captured.byId.nodeDigest === null) return ids.map(requested => get(captured, requested));
+        // A mixed hot projection can require thousands of absence proofs. Share
+        // immutable node reads within this batch, not permission or freshness
+        // observations across calls. Found rows still prove payload and start key.
+        const found = index().lookupMany(captured.byId, ids.map(idKey));
+        return ids.map((requested, position) => get(captured, requested, found[position]!));
+      });
     },
     accountWindow(rootInput, capacityKey, windowMs, nowMs) {
       if (!capacities.has(capacityKey) || !Number.isSafeInteger(windowMs) || windowMs < 1 || typeof nowMs !== 'number' || !Number.isFinite(nowMs)) return fail('INVALID_INPUT');
@@ -228,12 +236,14 @@ export function createResourcePoolReceiptArchive(input: { root: string; anchorPa
       });
     },
     stage(rootInput, value, optionsInput) {
-      const root = verifiedRoot(rootInput); const receipt = terminal(value);
+      const root = rootValue(rootInput); const receipt = terminal(value);
       if (!optionsInput || typeof optionsInput !== 'object' || types.isProxy(optionsInput) ||
         ![Object.prototype, null].includes(Object.getPrototypeOf(optionsInput)) || Reflect.ownKeys(optionsInput).length !== 1) return fail('INVALID_INPUT');
       const guardDescriptor = Object.getOwnPropertyDescriptor(optionsInput, 'guard');
       if (!guardDescriptor?.enumerable || !('value' in guardDescriptor) || typeof guardDescriptor.value !== 'function') return fail('INVALID_INPUT');
       const hostGuard = guardDescriptor.value as () => unknown;
+      // Capture all caller-owned inputs before any custody adapter can run.
+      verifiedRoot(root);
       function guarded() {
         bound(); let result: unknown;
         try { result = hostGuard(); } catch { return fail(); }

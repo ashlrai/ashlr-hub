@@ -26,7 +26,7 @@ function fixture(cold: ResourceTaskReceipt[] = [], active: ResourceTaskReceipt[]
   return { input, archive, root, create: () => createArchivedResourcePoolReceiptQuery(input) };
 }
 
-describe('active plus immutable archived receipt queries', () => {
+describe('bounded hot plus immutable archived receipt queries', () => {
   it('proves every active ID absent in one batch and merges exact lookups without pages', () => {
     const f = fixture([receipt('old', 'completed')], [receipt('live', 'reserved'), receipt('held', 'uncertain')]);
     const query = f.create();
@@ -75,8 +75,47 @@ describe('active plus immutable archived receipt queries', () => {
     vi.mocked(f.archive.get).mockImplementation(() => { throw new Error('PRIVATE_PAYLOAD_MISSING'); });
     expect(() => query.get('old')).toThrow(/^Resource receipt query unavailable$/);
   });
-  it.each(['completed', 'failed', 'cancelled', 'timed-out'] as const)('rejects %s in the active root before archive contact', status => {
-    const f = fixture([], [receipt('bad', status)]); expect(f.create).toThrow(); expect(f.archive.getMany).not.toHaveBeenCalled();
+  it.each(['completed', 'failed', 'cancelled', 'timed-out'] as const)('preserves hot %s after proving archive disjointness', status => {
+    const row = receipt('hot', status); const f = fixture([], [row]); const query = f.create();
+    expect(f.archive.getMany).toHaveBeenCalledExactlyOnceWith(f.root, ['hot']);
+    expect(query.get('hot')).toEqual({ status: 'found', id: 'hot', receipt: row });
+    expect(query.unresolved()).toEqual([]); expect(f.archive.get).not.toHaveBeenCalled();
+  });
+  it('joins exactly selected hot/cold replay identities and counts all hot statuses without counting terminals as occupied', () => {
+    const cold = [receipt('cold', 'completed', -5), receipt('cold-failure', 'timed-out', 10)];
+    const hot = [receipt('hot', 'completed'), receipt('reserved', 'reserved', -1), receipt('uncertain', 'uncertain', -2),
+      receipt('hot-failure', 'failed', 20), { ...receipt('veto', 'failed', 30), reason: 'worker-dispatch-precondition-failed' }];
+    const f = fixture(cold, hot); const query = f.create(); const complete = createResourcePoolReceiptQuery([...cold, ...hot]);
+    expect(f.archive.getMany).toHaveBeenCalledExactlyOnceWith(f.root, hot.map(row => row.id));
+    const requested = ['hot', 'cold', 'hot-failure', 'cold-failure', 'missing', 'hot', 'reserved'];
+    expect(query.getMany(requested)).toEqual(complete.getMany(requested));
+    expect(f.archive.getMany).toHaveBeenLastCalledWith(f.root, ['cold', 'cold-failure', 'missing']);
+    expect(query.unresolved()).toEqual(hot.slice(1, 3));
+    for (const now of [NOW - 100, NOW, NOW + 20, NOW + 100_000]) {
+      expect(query.accountWindow('account', 60_000, now)).toEqual(complete.accountWindow('account', 60_000, now));
+    }
+    expect(query.accountWindow('account', 60_000, NOW).latestCooldownFailureFinishedAtMs).toBe(NOW + 21);
+    expect(f.archive.page).not.toHaveBeenCalled(); expect(f.archive.stage).not.toHaveBeenCalled();
+  });
+  it('rejects even identical terminal receipts in both hot and archive projections', () => {
+    const row = receipt('same', 'completed'); const f = fixture([row], [structuredClone(row)]);
+    expect(f.create).toThrow(/^Resource receipt query unavailable$/);
+    expect(f.archive.getMany).toHaveBeenCalledExactlyOnceWith(f.root, ['same']);
+  });
+  it('requires proven absence for hot terminals, never unknown evidence', () => {
+    const f = fixture([], [receipt('hot', 'cancelled')]);
+    vi.mocked(f.archive.getMany).mockReturnValue([{ status: 'unavailable', id: 'hot' }] as unknown as ResourcePoolReceiptLookup[]);
+    expect(f.create).toThrow(/^Resource receipt query unavailable$/);
+  });
+  it('validates every hot row before archive contact and rejects duplicate/malformed/accessor terminal rows', () => {
+    const getter = vi.fn();
+    const batches = [
+      [receipt('same', 'completed'), receipt('same', 'failed')],
+      [receipt('valid', 'reserved'), { ...receipt('invalid', 'completed'), startedAt: 'not-a-time' }],
+      [receipt('valid', 'completed'), Object.defineProperty(receipt('private', 'failed'), 'id', { enumerable: true, get: getter })],
+    ];
+    for (const rows of batches) { const f = fixture([], rows); expect(f.create).toThrow(); expect(f.archive.getMany).not.toHaveBeenCalled(); }
+    expect(getter).not.toHaveBeenCalled();
   });
   it('rejects duplicate active identities and archive overlap', () => {
     const duplicate = fixture([], [receipt('same', 'reserved'), receipt('same', 'uncertain')]);
