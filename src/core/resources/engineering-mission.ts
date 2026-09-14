@@ -134,6 +134,7 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
     requireFact(projectWorkspace, 'Mission project unavailable');
     for (const path of [runtime.root, runtime.workspace, config.initial.setup.workspace, config.initial.setup.resourceRuntime,
       config.initial.setup.projectsFile, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath,
+      ...(runtime.archiveKeyFile ? [runtime.archiveKeyFile] : []),
       ...projects.map(row => row.workspace), ...(runtime.quotaConfigPath ? [runtime.quotaConfigPath] : [])]) {
       requireFact(!contains(config.root, path) && !contains(path, config.root), 'Mission records overlap execution controls');
     }

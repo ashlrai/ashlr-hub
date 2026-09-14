@@ -523,6 +523,12 @@ must be separate from the entire Universe store, pool ledger, and candidate
 directory. Keep
 credentials in the enrolled native account setup, not in this runtime file.
 
+For read-only [archived outcome accounting](RESOURCE-POOLS.md#read-engineering-outcomes-and-resource-use),
+the runtime may explicitly pin an `archiveKeyFile` directly inside its ledger
+root. Only the path belongs in this configuration, never key bytes. It changes
+the runtime digest; existing enrollments are not silently rebound. This option
+does not provision a key, migrate the ledger or enable schema-3 task execution.
+
 Check the entire local setup before a campaign:
 
 ```sh

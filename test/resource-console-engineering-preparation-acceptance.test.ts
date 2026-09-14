@@ -1,6 +1,6 @@
 /** Same-console objective preparation with a fixed evaluator and test-owned loopback worker only. */
 import { execFileSync } from 'node:child_process';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
@@ -11,6 +11,8 @@ import { runTrustedNpmCli } from '../scripts/build-release-dependency-inventory.
 import { loadOrCreateKey } from '../src/core/foundry/provenance.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { resourcePoolStatus, setResourcePoolAllocation, setResourceWorkerAccess } from '../src/core/resources/pool-runtime.js';
+import { readResourcePoolStorage, stageResourcePoolReceiptCompaction } from '../src/core/resources/pool-state-storage.js';
+import { readResourcePoolStorageSnapshot } from '../src/core/resources/pool-state-reader.js';
 import { createResourcePoolSupervisor } from '../src/core/resources/pool-supervisor.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import type { ResourceEngineeringRecipe } from '../src/core/resources/engineering-preparation-types.js';
@@ -329,7 +331,11 @@ describe.runIf(process.platform === 'darwin')('same-console objective preparatio
 
   it.each(['compiled dist', 'unpacked npm tarball'] as const)('reads a delivered rich outcome through the %s helper without replaying work', async (runtime) => {
     const runtimeRoot = runtime === 'compiled dist' ? new URL('..', import.meta.url) : unpackRuntimeTarball();
-    const f = await configured(); const server = await start(f); const input = objective('compiled-outcomes');
+    const f = await configured(); const archiveKeyFile = join(f.root, 'receipt-archive.key');
+    // Pin the path before enrollment; legacy execution must not discover or
+    // require a key. This fixture enrolls its key only after all work has stopped.
+    save(f.files.runtimeFile, { ...f.runtime, archiveKeyFile });
+    const server = await start(f); const input = objective('compiled-outcomes');
     const plan = await jsonResponse<ResourceConsoleEngineeringObjectivePlan>(await api(server, 'engineering/prepare/check', input));
     const prepared = await jsonResponse<ResourceConsoleEngineeringObjectivePrepared>(await api(server, 'engineering/prepare',
       { ...input, expectedPlanDigest: plan.planDigest }));
@@ -382,6 +388,38 @@ describe.runIf(process.platform === 'darwin')('same-console objective preparatio
     expect(f.ledger().attempts).toEqual(attempts); expect(f.requests).toHaveLength(requests);
     expect(f.evaluations).toHaveBeenCalledTimes(evaluations); expect(f.publications()).toBe(publications);
     expect(git(f.repo, 'show', `codex/${input.id}:value.json`)).toBe('1');
+    // Test-owned offline compaction, not a live runtime migration: the server
+    // and workers are stopped, and only the observation helper consumes schema3.
+    const pool = validateResourcePool(JSON.parse(readFileSync(f.files.poolFile, 'utf8')));
+    const bindings = validateResourceBindings(JSON.parse(readFileSync(f.files.bindingsFile, 'utf8')), pool);
+    const file = join(f.root, 'pool-state.json'); const original = readFileSync(file, 'utf8');
+    mkdirSync(join(f.root, 'receipt-archive'), { mode: 0o700 });
+    writeFileSync(archiveKeyFile, '11'.repeat(32) + '\n', { mode: 0o600, flag: 'wx' });
+    const storage = readResourcePoolStorage(JSON.parse(original), { root: f.root, pool, bindings, archiveKeyFile });
+    const header = stageResourcePoolReceiptCompaction(storage, attempts.map(row => row.id), {
+      guard() { expect(readFileSync(file, 'utf8')).toBe(original); },
+    });
+    expect(header.hotState.attempts).toEqual([]); save(file, header);
+    const archivedBefore = inventory(f.base); const archivedReader = createResourceEngineeringOutcomesReader();
+    try {
+      const report = await archivedReader.read({ enrollment: prepared.enrollment, host: enrolled.host,
+        root: f.root, poolFile: f.files.poolFile, bindingsFile: f.files.bindingsFile }, { expectedNodeInput });
+      expect({ ...report, sampledAt: sourceReport.sampledAt }).toEqual(sourceReport);
+      expect(report).toMatchObject({ sourceState: 'healthy', complete: true, usage: { totalTokens: 30 },
+        campaigns: [{ stages: { verifiedLocalDeliveries: 1 } }] });
+    } finally { await archivedReader.close(); }
+    expect(inventory(f.base)).toEqual(archivedBefore);
+    expect(readResourcePoolStorageSnapshot(f.root, pool, bindings, archiveKeyFile).view.receipts
+      .getMany(attempts.map(row => row.id))).toEqual(attempts.map(receipt => ({ id: receipt.id, status: 'found', receipt })));
+    expect(f.requests).toHaveLength(requests); expect(f.evaluations).toHaveBeenCalledTimes(evaluations);
+    expect(f.publications()).toBe(publications);
+    unlinkSync(archiveKeyFile); const unavailableReader = createResourceEngineeringOutcomesReader();
+    try {
+      const report = await unavailableReader.read({ enrollment: prepared.enrollment, host: enrolled.host,
+        root: f.root, poolFile: f.files.poolFile, bindingsFile: f.files.bindingsFile }, { expectedNodeInput });
+      expect(report).toMatchObject({ sourceState: 'unavailable', complete: false, usage: { totalTokens: null } });
+      expect(existsSync(archiveKeyFile)).toBe(false);
+    } finally { await unavailableReader.close(); }
   }, 180000);
 
   it('aborts a real outcome reader inside simulated stuck Git and settles its helper and blocker group', async () => {

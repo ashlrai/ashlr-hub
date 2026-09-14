@@ -17,7 +17,10 @@ import type { UniverseTrial } from '../universe/types.js';
 import type { ResourceConsoleEngineeringEnrollment } from './console-engineering-types.js';
 import type { ResourceEngineeringCampaignOutcome, ResourceEngineeringOutcomes, ResourceEngineeringOutcomeUsage, ResourceEngineeringOutcomeTiming } from './engineering-outcomes-types.js';
 import { validateResourcePool } from './pool-policy.js';
-import { readResourceJson, readResourcePoolHistory, resourcePoolStatus } from './pool-runtime.js';
+import { readResourceJson, type ResourceTaskReceipt } from './pool-runtime.js';
+import { resourcePoolConfigSnapshot } from './pool-evolution-policy.js';
+import { readResourcePoolStorageSnapshot } from './pool-state-reader.js';
+import { compareResourcePoolStorageReceipts } from './pool-state-storage.js';
 import { resourceUsageScopeForProvider } from './performance.js';
 import { validateResourceBindings } from './worker.js';
 import { readEngineeringPhaseEvidence, unavailableEngineeringPhaseEvidence } from './engineering-phase-evidence.js';
@@ -90,7 +93,19 @@ function capture(input: ResourceEngineeringOutcomesOptions): ResourceEngineering
   return value;
 }
 
-function sample(options: ResourceEngineeringOutcomesOptions): { report: ResourceEngineeringOutcomes; fingerprint: string; phases: Map<string, string> } {
+function captureLedger(options: ResourceEngineeringOutcomesOptions) {
+  const pool = validateResourcePool(readResourceJson(options.poolFile));
+  const bindings = validateResourceBindings(readResourceJson(options.bindingsFile), pool);
+  const runtime = validateResourceGenerationRuntime(readResourceJson(options.host.resourceRuntime));
+  if (digest(canonical(runtime)) !== options.host.expectedRuntimeDigest || runtime.root !== options.root ||
+      runtime.poolPath !== options.poolFile || runtime.bindingsPath !== options.bindingsFile) throw new Error();
+  const snapshot = readResourcePoolStorageSnapshot(options.root, pool, bindings, runtime.archiveKeyFile);
+  const history = snapshot.view.hotState.configurationHistory ?? [resourcePoolConfigSnapshot(pool, bindings)];
+  return { pool, history, snapshot, fingerprint: digest(canonical({ pool, bindings, runtime, history })) };
+}
+
+function sample(options: ResourceEngineeringOutcomesOptions): { report: ResourceEngineeringOutcomes; fingerprint: string;
+  phases: Map<string, string>; ledger: ReturnType<typeof captureLedger> | null } {
   const { enrollment, host } = options;
   const report: ResourceEngineeringOutcomes = { schemaVersion: 1, enrollmentId: enrollment.id, enrollmentDigest: enrollment.enrollmentDigest,
     sampledAt: '', sourceState: 'healthy', scope: 'campaign-evaluations-and-recorded-worker-usage', authority: 'observation-only',
@@ -100,16 +115,13 @@ function sample(options: ResourceEngineeringOutcomesOptions): { report: Resource
   const phases = new Map<string, string>();
   const pin = (value: unknown) => fingerprints.push(digest(canonical(value)));
   const seen = new Set<string>();
+  let ledger: ReturnType<typeof captureLedger> | null = null;
   try {
-    const pool = validateResourcePool(readResourceJson(options.poolFile));
-    const bindings = validateResourceBindings(readResourceJson(options.bindingsFile), pool);
-    const runtime = validateResourceGenerationRuntime(readResourceJson(host.resourceRuntime));
-    if (digest(canonical(runtime)) !== host.expectedRuntimeDigest || runtime.root !== options.root ||
-        runtime.poolPath !== options.poolFile || runtime.bindingsPath !== options.bindingsFile) throw new Error();
-    const history = readResourcePoolHistory(options.root, pool, bindings);
-    const ledger = resourcePoolStatus(options.root, pool, bindings, []);
-    pin({ pool, bindings, runtime, history, attempts: ledger.attempts });
-    const receipts = new Map(ledger.attempts.map(receipt => [receipt.id, receipt]));
+    ledger = captureLedger(options);
+    const { pool, history, snapshot } = ledger;
+    // Physical compaction and live scheduling controls are not receipt changes.
+    // Full logical history is compared separately through private captured views.
+    fingerprints.push(ledger.fingerprint);
     const controllerDirectory = portfolioControllerDirectory(host.definition.id, { root: host.root });
     let controller: ReturnType<typeof foldPortfolioController> | null = null;
     try { lstatSync(controllerDirectory); }
@@ -158,8 +170,24 @@ function sample(options: ResourceEngineeringOutcomesOptions): { report: Resource
             seed.result.intentDigest === digest(canonical(seed.intent)) && seed.result.measurement) {
           row.seed = { status: 'measured', score: seed.result.measurement.score, passed: seed.result.measurement.passed };
         }
+        // Include pipeline failures with no trial or witness, and withheld work:
+        // its exact receipt presence is still evidence, not inferred absence.
+        const requested: string[] = [];
+        for (const step of campaign.steps) for (const variantId of step.variantIds) {
+          if (occurrences + requested.length >= MAX_TRIALS) throw new Error();
+          requested.push(resourceGenerationTaskId({ universeId: universe.manifest.id, runId: step.runId, variantId }));
+        }
+        const ids = [...new Set(requested)]; const found = snapshot.view.receipts.getMany(ids);
+        if (!Array.isArray(found) || found.length !== ids.length) throw new Error();
+        const receipts = new Map<string, ResourceTaskReceipt>();
+        for (let index = 0; index < ids.length; index++) {
+          const result = found[index]; const id = ids[index]!;
+          if (!result || result.id !== id) throw new Error();
+          if (result.status === 'found' && result.receipt?.id === id) receipts.set(id, result.receipt);
+          else if (result.status !== 'proven-absent') throw new Error();
+        }
         const phase = readEngineeringPhaseEvidence({ directory, campaign, universe,
-          evaluatorDigest: manifest.evaluationBuiltinDigest ?? null, receipts: ledger.attempts });
+          evaluatorDigest: manifest.evaluationBuiltinDigest ?? null, receipts: [...receipts.values()] });
         row.phaseEvidence = phase.evidence; phases.set(summary.id, phase.fingerprint);
         const retained = new Map<string, ResourceEngineeringCampaignOutcome['niches'][number]>();
         const workers = new Map<string, ResourceEngineeringCampaignOutcome['workers'][number]>();
@@ -249,6 +277,11 @@ function sample(options: ResourceEngineeringOutcomesOptions): { report: Resource
     finishTiming(report.timing);
     report.complete = report.campaigns.every(row => row.sourceState === 'healthy' && row.reasons.length === 0) && report.usage.complete && report.timing.complete;
     if (!report.complete) { report.sourceState = 'degraded'; report.reasons = ['outcome-evidence-incomplete']; }
+    // Acquisition pins the source file, but outcome joins are two bounded
+    // observations, not a writer lock. Ordinary quota refreshes and compaction
+    // may replace that file; compare logical receipts across samples instead.
+    // Archive/key custody must still survive the joins.
+    if (!snapshot.isCustodyCurrent()) throw new Error();
   } catch (error) {
     report.sourceState = 'unavailable'; report.complete = false;
     report.reasons = [error instanceof OutcomeAccountingOverflow ? 'usage-accounting-overflow' : 'enrollment-or-ledger-unavailable'];
@@ -263,14 +296,29 @@ function sample(options: ResourceEngineeringOutcomesOptions): { report: Resource
   }
   if (Buffer.byteLength(canonical(report)) > 192 * 1024) for (const row of report.campaigns) delete row.phaseEvidence;
   const fingerprintReport = { ...report, campaigns: report.campaigns.map(({ phaseEvidence: _phase, ...row }) => row) };
-  return { report, fingerprint: digest(canonical({ fingerprints, report: fingerprintReport })), phases };
+  return { report, fingerprint: digest(canonical({ fingerprints, report: fingerprintReport })), phases, ledger };
 }
 
 /** Two bounded observations, not a lock or an atomic snapshot. Unknown stays unknown. */
 export function readResourceEngineeringOutcomes(input: ResourceEngineeringOutcomesOptions): ResourceEngineeringOutcomes {
   const options = capture(input);
   const first = sample(options); const second = sample(options);
-  if (first.fingerprint !== second.fingerprint) {
+  let receiptsStable = first.ledger === null && second.ledger === null;
+  if (first.ledger && second.ledger) {
+    try {
+      // A short ledger-only fence also catches writes during the second join.
+      // It does not rerun campaign projections or freeze the header while those
+      // slower reads run. Each complete comparison has its own bounded budget.
+      const current = captureLedger(options);
+      receiptsStable = first.ledger.fingerprint === second.ledger.fingerprint && second.ledger.fingerprint === current.fingerprint &&
+        compareResourcePoolStorageReceipts(first.ledger.snapshot.view, second.ledger.snapshot.view,
+          { maxNodes: 4096, maxChanges: 0 }).equal &&
+        compareResourcePoolStorageReceipts(second.ledger.snapshot.view, current.snapshot.view,
+          { maxNodes: 4096, maxChanges: 0 }).equal &&
+        first.ledger.snapshot.isCustodyCurrent() && second.ledger.snapshot.isCustodyCurrent() && current.snapshot.isCurrent();
+    } catch { receiptsStable = false; }
+  }
+  if (first.fingerprint !== second.fingerprint || !receiptsStable) {
     first.report.sourceState = 'degraded'; first.report.complete = false; first.report.reasons = ['evidence-changed-during-sampling'];
     unavailable(first.report.usage);
     unavailableTiming(first.report.timing);

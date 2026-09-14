@@ -11,6 +11,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Archive-backed outcome accounting
+
+- Reads campaign outcome evidence from complete hot/archive receipt history,
+  including incomplete runs, without loading lifetime history into an array.
+- Accepts pure compaction and usage refreshes during observations, with complete
+  receipt comparisons and a final ledger-only fence; preserves unknown usage
+  and existing control pins.
+- Adds explicit digest-pinned archive-key paths and checked read-only installed
+  header snapshots with source, privacy and archive-custody validation.
+- Keeps archive-backed observation separate from task-admission activation;
+  no key discovery, creation, repair or live header migration is automatic.
+
 ### Receipt-history comparison and settlement capacity
 
 - Proves complete logical receipt equality across hot/archive compaction with

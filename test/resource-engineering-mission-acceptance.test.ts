@@ -134,6 +134,13 @@ async function fixture() {
 describe.runIf(process.platform === 'darwin')('actual standing engineering mission', () => {
   it('reconciles scope one after owner restart, proposes and executes scope two on the same ledger, then honors stop', async () => {
     const f = await fixture(); const stop = new AbortController(); const phases: string[] = [];
+    // Report real phase transitions, not timer heartbeats: the runner can then
+    // distinguish a long progressing acceptance test from a silent stalled phase.
+    let lastPhase = '';
+    const recordPhase = (value: { scope: number; phase: string }) => {
+      const phase = `${value.scope}:${value.phase}`; phases.push(phase);
+      if (phase !== lastPhase) { lastPhase = phase; console.info('MISSION_PHASE', phase); }
+    };
     const proofFailures: string[] = []; const readProof = missionProof.readEngineeringMissionProof;
     const observeProof = vi.spyOn(missionProof, 'readEngineeringMissionProof').mockImplementation(async (request, host) => {
       try {
@@ -154,7 +161,7 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     });
     cleanup.push(async () => { observeConsole.mockRestore(); });
     const first = await runResourceEngineeringMission(f.config, { signal: stop.signal, onProgress(value) {
-      phases.push(`${value.scope}:${value.phase}`); if (value.scope === 1 && value.phase === 'verifying') stop.abort();
+      recordPhase(value); if (value.scope === 1 && value.phase === 'verifying') stop.abort();
     } });
     expect(first, JSON.stringify({ first, phases, calls: f.calls, errors: f.errors, proofFailures, consoleFailures, fixture: f.base })).toMatchObject({ state: 'stopped', scopesReserved: 1, deadlineAt: f.config.deadlineAt });
     expect(f.calls).toEqual({ generation: 2, successor: 1, mission: 0 });
@@ -180,7 +187,9 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
       void interruptedOwner.close();
       void interruptedWorkspace.close(); throw Error('Fixture owner interrupted after admission');
     };
-    const interrupted = await runResourceEngineeringMission(f.config, { workspace: { handle: interruptedWorkspace, expectedAttachment: null } });
+    const interrupted = await runResourceEngineeringMission(f.config, {
+      workspace: { handle: interruptedWorkspace, expectedAttachment: null }, onProgress: recordPhase,
+    });
     expect(interrupted, JSON.stringify({ interrupted, calls: f.calls, errors: f.errors, proofFailures, consoleFailures }))
       .toMatchObject({ state: 'held', reason: 'shutdown-unresolved', deadlineAt: f.config.deadlineAt });
     await interruptedWorkspace.close();
@@ -211,7 +220,7 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     const completion = new Promise<Awaited<ReturnType<typeof actualRun>>>(resolve => { completed = resolve; });
     const observedRun = vi.spyOn(missionRunner, 'runResourceEngineeringMission').mockImplementation(async (input, host = {}) => {
       const report = await actualRun(input, { ...host, onProgress(value) {
-        phases.push(`${value.scope}:${value.phase}`); sharedUrls.push(value.consoleUrl); host.onProgress?.(value);
+        recordPhase(value); sharedUrls.push(value.consoleUrl); host.onProgress?.(value);
       } }); completed(report); return report;
     });
     cleanup.push(async () => { observedRun.mockRestore(); });
@@ -268,7 +277,7 @@ describe.runIf(process.platform === 'darwin')('actual standing engineering missi
     // neither restart a console nor propose a replacement task on any scope.
     const stopped = new AbortController(); stopped.abort(); const replayPhases: string[] = []; const replayUrls: Array<string | null> = [];
     const replay = await runResourceEngineeringMission(f.config, { signal: stopped.signal,
-      onProgress(value) { replayPhases.push(`${value.scope}:${value.phase}`); replayUrls.push(value.consoleUrl); } });
+      onProgress(value) { recordPhase(value); replayPhases.push(`${value.scope}:${value.phase}`); replayUrls.push(value.consoleUrl); } });
     expect(replay, JSON.stringify({ replay, second, replayPhases })).toEqual(second); expect(replayPhases).toContain('2:reconciling');
     // Observer exceptions are intentionally isolated by the runner, so assertions
     // belong outside that callback where a regression can actually fail the test.

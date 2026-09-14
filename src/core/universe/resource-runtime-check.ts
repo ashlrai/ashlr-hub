@@ -119,6 +119,7 @@ export function checkResourceGenerationRuntime(options: { resourceRuntime: strin
       if (contains(runtime.workspace, runtime.root) || contains(runtime.root, runtime.workspace) ||
         realpathSync(dirname(runtime.root)) !== dirname(runtime.root)) throw new Error();
       for (const file of [options.resourceRuntime, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath,
+        ...(runtime.archiveKeyFile ? [runtime.archiveKeyFile] : []),
         ...(runtime.quotaConfigPath ? [runtime.quotaConfigPath] : []),
         ...(runtime.localModelConfigPath ? [runtime.localModelConfigPath] : [])]) {
         if (contains(runtime.workspace, file)) throw new Error();

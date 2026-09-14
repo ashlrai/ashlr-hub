@@ -127,6 +127,7 @@ function capture(input: ResourceEngineeringPreparationOptions, successor?: Succe
     fail('CONFLICT', 'Preparation project is missing, disabled or changed');
   }
   const controls = [options.resourceRuntime, options.projectsFile, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath,
+    ...(runtime.archiveKeyFile ? [runtime.archiveKeyFile] : []),
     ...(runtime.quotaConfigPath ? [runtime.quotaConfigPath] : [])];
   // Match enrollment's transport isolation before publishing a plan or seed:
   // the console's implicit default project is still a writable project.

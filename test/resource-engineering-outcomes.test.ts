@@ -1,5 +1,5 @@
 /** Real private accounting/config files; controlled evidence-reader projections, no workers/evaluators. */
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -14,6 +14,10 @@ import { readResourceEngineeringOutcomes, type ResourceEngineeringOutcomesOption
 import type { ResourcePool, ResourceObservation } from '../src/core/resources/pool-policy.js';
 import type { ResourceBinding } from '../src/core/resources/worker.js';
 import type { ResourcePoolState, ResourceTaskReceipt } from '../src/core/resources/pool-runtime.js';
+import * as receiptQueries from '../src/core/resources/pool-receipt-query.js';
+import * as receiptArchives from '../src/core/resources/pool-receipt-archive.js';
+import { readResourcePoolStorage, stageResourcePoolReceiptCompaction } from '../src/core/resources/pool-state-storage.js';
+import * as storage from '../src/core/resources/pool-state-storage.js';
 import type { UniverseCampaignSummary, UniverseSummary, UniverseRun, UniverseTrial } from '../src/core/universe/types.js';
 
 const roots: string[] = [];
@@ -98,6 +102,116 @@ function fixture(secondWorker = false) {
 }
 
 describe('engineering outcomes receipt joins', () => {
+  it('refuses identical header replacement during final logical comparison without renewing the last source fence', () => {
+    const f = fixture(); f.add(1, true);
+    const file = join(f.root, 'pool-state.json'); const bytes = readFileSync(file); const inode = lstatSync(file, { bigint: true }).ino;
+    const before = tree(f.outer); const compare = storage.compareResourcePoolStorageReceipts; let comparisons = 0;
+    vi.spyOn(storage, 'compareResourcePoolStorageReceipts').mockImplementation((...args) => {
+      const result = compare(...args); expect(result.equal).toBe(true);
+      if (++comparisons === 2) {
+        const temporary = join(f.root, 'fixture-replacement.json');
+        writeFileSync(temporary, bytes, { mode: 0o600 }); renameSync(temporary, file);
+      }
+      return result; // Actual complete comparison, never fabricated equality.
+    });
+    expect(f.read()).toMatchObject({ sourceState: 'degraded', complete: false,
+      reasons: ['evidence-changed-during-sampling'], usage: { complete: false, totalTokens: null },
+      timing: { complete: false, totalDurationMs: null } });
+    expect(comparisons).toBe(2); expect(delivery.readUniverseDeliveries).toHaveBeenCalledTimes(2);
+    expect(lstatSync(file, { bigint: true }).ino).not.toBe(inode); expect(readFileSync(file)).toEqual(bytes);
+    expect(tree(f.outer)).toBe(before);
+  });
+  it('refuses runtime configuration drift after the second sample was captured', () => {
+    const f = fixture(); f.add(1, true); let projections = 0;
+    const changed = { ...f.runtime, capacityWaitMs: 1 }; let published = '';
+    vi.mocked(delivery.readUniverseDeliveries).mockImplementation(() => {
+      if (++projections === 2) { f.save(f.options.host.resourceRuntime, changed); published = tree(f.outer); }
+      return { sourceState: 'missing', deliveries: [], reasons: [] };
+    });
+    expect(f.read()).toMatchObject({ sourceState: 'degraded', complete: false,
+      reasons: ['evidence-changed-during-sampling'], usage: { totalTokens: null }, timing: { totalDurationMs: null } });
+    expect(projections).toBe(2); expect(JSON.parse(readFileSync(f.options.host.resourceRuntime, 'utf8'))).toEqual(changed);
+    expect(tree(f.outer)).toBe(published);
+  });
+  it('does not query a later campaign archive after the global occurrence budget is exhausted', () => {
+    const f = fixture(); const seed = f.add(1, false);
+    // Synthetic evidence-reader projections, not 4096 actual dispatched tasks.
+    // The archive, certificate, payload and all receipt queries below are real.
+    const variants = Array.from({ length: 64 }, (_, index) => ({ ...structuredClone(f.universe.manifest.variants[0]!), id: `variant-${index}` }));
+    f.universe.manifest.variants = variants; f.universe.runs = [];
+    Object.assign(f.universe.manifest.budget, { maxTrials: 64 });
+    Object.assign(f.campaign.definition.budget, { maxGenerations: 64, maxModelRequests: 4096 });
+    f.campaign.steps = Array.from({ length: 64 }, (_, index) => ({ ...structuredClone(f.campaign.steps[0]!),
+      ordinal: index + 1, generation: index + 1, runId: `bounded-run-${index}`, variantIds: variants.map(row => row.id),
+      state: 'failed' as const, reservedModelRequests: 64, trialCount: 0, tokensUsed: 0 }));
+    const later = structuredClone(f.campaign); later.definition.id = 'later'; later.definition.universeId = 'later-universe';
+    later.steps = [{ ...structuredClone(later.steps[0]!), runId: 'later-run', variantIds: ['variant-0'], reservedModelRequests: 1 }];
+    const laterUniverse = structuredClone(f.universe); laterUniverse.manifest.id = 'later-universe';
+    const laterId = resourceGenerationTaskId({ universeId: 'later-universe', runId: 'later-run', variantId: 'variant-0' });
+    f.options.enrollment.campaigns.push({ ...structuredClone(f.options.enrollment.campaigns[0]!), id: 'later', branch: 'codex/later' });
+    f.options.host.definition.tasks.push({ campaignId: 'later', dependsOn: [] });
+    f.options.host.deliveryPlan.deliveries.push({ ...f.options.host.deliveryPlan.deliveries[0]!, campaignId: 'later', branch: 'codex/later' });
+    f.controller.first.enrollment.pins.push({ ...f.controller.first.enrollment.pins[0]!, campaignId: 'later', universeId: 'later-universe' });
+    let selected = f.campaign; const projected: string[] = [];
+    vi.mocked(campaignStore.readCampaignEvents).mockImplementation(directory => { selected = directory.endsWith('/later') ? later : f.campaign; return []; });
+    vi.mocked(campaignStore.foldCampaignEvents).mockImplementation(() => ({ created: { definition: selected.definition } }) as ReturnType<typeof campaignStore.foldCampaignEvents>);
+    vi.mocked(campaignStore.projectCampaign).mockImplementation(() => { projected.push(selected.definition.id); return selected; });
+    vi.mocked(universeStore.projectUniverse).mockImplementation(() => selected === later ? laterUniverse : f.universe);
+    const archiveKeyFile = join(f.root, 'receipt-archive.key'); mkdirSync(join(f.root, 'receipt-archive'), { mode: 0o700 });
+    writeFileSync(archiveKeyFile, '11'.repeat(32) + '\n', { mode: 0o600 });
+    const runtime = { ...f.runtime, archiveKeyFile }; f.save(f.options.host.resourceRuntime, runtime);
+    f.options.host.expectedRuntimeDigest = digest(canonical(runtime));
+    const header = stageResourcePoolReceiptCompaction(readResourcePoolStorage(f.state,
+      { root: f.root, pool: f.pool, bindings: f.bindings, archiveKeyFile }), [seed.receipt.id], { guard() {} });
+    f.save(join(f.root, 'pool-state.json'), header);
+    const createArchive = receiptArchives.createResourcePoolReceiptArchive; const batches: string[][] = [];
+    vi.spyOn(receiptArchives, 'createResourcePoolReceiptArchive').mockImplementation(options => {
+      const archive = createArchive(options);
+      return { ...archive, getMany(root, ids) { batches.push([...ids]); return archive.getMany(root, ids); } };
+    });
+    const result = f.read();
+    expect(projected).toEqual(['campaign', 'later', 'campaign', 'later']);
+    expect(batches.filter(ids => ids.length === 4096)).toHaveLength(2);
+    expect(batches.some(ids => ids.includes(laterId))).toBe(false);
+    expect(result.usage).toMatchObject({ attempts: 4096, joinedAttempts: 0, unknownAttempts: 4096, totalTokens: null });
+    expect(result.campaigns[0]!.usage.attempts).toBe(4096);
+    expect(result.campaigns[1]).toMatchObject({ sourceState: 'unavailable', reasons: ['campaign-evidence-unavailable'], usage: { attempts: 0 } });
+  });
+  it('queries deterministic step IDs despite missing trials or withheld generation', () => {
+    const f = fixture(); const first = f.add(1, false); const second = f.add(2, false);
+    first.run.trials = []; first.run.status = 'failed';
+    second.trial.generation!.resource!.dispatch = 'withheld';
+    const createQuery = receiptQueries.createResourcePoolReceiptQuery; const batches: string[][] = [];
+    vi.spyOn(receiptQueries, 'createResourcePoolReceiptQuery').mockImplementation(rows => {
+      const query = createQuery(rows);
+      return { ...query, getMany(ids) { batches.push([...ids]); return query.getMany(ids); } };
+    });
+    const result = f.read();
+    expect(batches.filter(ids => ids.includes(first.receipt.id) || ids.includes(second.receipt.id)))
+      .toEqual([[first.receipt.id, second.receipt.id], [first.receipt.id, second.receipt.id]]);
+    expect(result.campaigns[0]).toMatchObject({ sourceState: 'unavailable', reasons: ['campaign-evidence-unavailable'] });
+    expect(result.usage.totalTokens).toBeNull(); // Withheld witness plus an actual receipt must not disappear.
+  });
+  it.each(['foreign-envelope', 'foreign-receipt', 'unknown', 'sparse', 'throw'] as const)(
+    'refuses malformed exact query evidence (%s), not a fabricated absent receipt', kind => {
+      const f = fixture(); const { receipt } = f.add(1, true);
+      const createQuery = receiptQueries.createResourcePoolReceiptQuery; let called = 0;
+      vi.spyOn(receiptQueries, 'createResourcePoolReceiptQuery').mockImplementation(rows => {
+        const query = createQuery(rows);
+        return { ...query, getMany(ids) {
+          const result = query.getMany(ids); if (!ids.includes(receipt.id)) return result; called++;
+          if (kind === 'throw') throw new Error('PRIVATE_QUERY_ERROR');
+          if (kind === 'sparse') return new Array(ids.length) as typeof result;
+          if (kind === 'unknown') return [{ id: receipt.id, status: 'unavailable' }] as unknown as typeof result;
+          if (kind === 'foreign-envelope') result[0]!.id = 'foreign';
+          if (kind === 'foreign-receipt' && result[0]?.status === 'found') result[0].receipt.id = 'foreign';
+          return result;
+        } };
+      });
+      const result = f.read(); expect(called).toBe(2);
+      expect(result.campaigns[0]).toMatchObject({ sourceState: 'unavailable', reasons: ['campaign-evidence-unavailable'] });
+      expect(result.complete).toBe(false); expect(result.usage.totalTokens).toBeNull(); expect(JSON.stringify(result)).not.toContain('PRIVATE_QUERY_ERROR');
+    });
   it('reads idle evidence without writes or fabricated measured zero usage', () => {
     const f = fixture(); const before = tree(f.outer); const result = f.read();
     expect(result).toMatchObject({ sourceState: 'healthy', complete: true, productionAccepted: null, routingChanged: false,

@@ -90,6 +90,25 @@ beforeEach(() => {
 afterEach(() => { vi.restoreAllMocks(); rmSync(base, { recursive: true, force: true }); });
 
 describe('host-pinned resource runtime consumption', () => {
+  it('pins an explicit archive path without reading or provisioning a key during legacy handoff', async () => {
+    const f = fixture(); const configured = { ...f.runtime, archiveKeyFile: join(f.runtime.root, 'explicit.key') };
+    save(f.runtimePath, configured);
+    expect(await f.run({ expectedRuntimeDigest: digest(canonical(configured)) })).toMatchObject({ resource: { dispatch: 'settled' } });
+    expect(existsSync(configured.archiveKeyFile)).toBe(false); expect(runResourceTask).toHaveBeenCalledOnce();
+    expect(JSON.stringify(vi.mocked(runResourceTask).mock.calls[0]![0].task)).not.toContain('explicit.key');
+    vi.mocked(runResourceTask).mockClear();
+    expect(await f.run({ expectedRuntimeDigest: digest(canonical(f.runtime)) })).toMatchObject({ status: 'failed', resource: { dispatch: 'not-started' } });
+    expect(runResourceTask).not.toHaveBeenCalled();
+  });
+  it.each(['workspace', 'candidate', 'universe'] as const)('refuses archive key controls inside %s before handoff', async kind => {
+    const f = fixture(); const boundary = kind === 'workspace' ? f.runtime.workspace : kind === 'candidate' ? f.candidatePath : f.context.resourceUniverseRoot!;
+    // Keep the key a valid direct child while putting its accounting root inside
+    // a writable execution boundary; the real preflight must refuse the overlap.
+    save(f.runtimePath, { ...f.runtime, root: boundary, archiveKeyFile: join(boundary, 'explicit.key') });
+    expect(await f.run()).toMatchObject({ status: 'failed', resource: { dispatch: 'not-started' } });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(refreshResourceQuotaOnce).not.toHaveBeenCalled();
+    expect(existsSync(join(boundary, 'explicit.key'))).toBe(false);
+  });
   it.each(['expired', 'invalid'])('withholds an %s absolute deadline before contact', async (kind) => {
     const f = fixture();
     const deadlineAt = kind === 'expired' ? new Date(Date.now() - 1).toISOString() : 'yesterday';

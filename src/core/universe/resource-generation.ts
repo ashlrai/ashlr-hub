@@ -4,6 +4,7 @@ import { lstatSync, readdirSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
+import { types } from 'node:util';
 import { mergeResourceObservations, readResourceJson, readResourcePoolAllocation, resourcePoolQueryStatus, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
 import { refreshResourceQuotaOnce, validateResourceQuotaRefreshConfig } from '../resources/quota-refresh.js';
 import { readSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
@@ -26,6 +27,8 @@ export interface ResourceGenerationRuntime {
   observationsPath: string;
   root: string;
   workspace: string;
+  /** Explicit host-pinned archive key path; never discovered, created or read here. */
+  archiveKeyFile?: string;
   quotaConfigPath?: string;
   /** Consume the live console collector; never launch a competing metadata probe. */
   quotaEvidenceMode?: 'shared-collector';
@@ -74,12 +77,14 @@ function contains(parent: string, child: string): boolean {
 function overlaps(left: string, right: string): boolean { return contains(left, right) || contains(right, left); }
 export function validateResourceGenerationRuntime(value: unknown): ResourceGenerationRuntime {
   const keys = ['schemaVersion', 'poolPath', 'bindingsPath', 'observationsPath', 'root', 'workspace'];
-  if (value === null || typeof value !== 'object' || Array.isArray(value) ||
+  if (value === null || typeof value !== 'object' || types.isProxy(value) || Array.isArray(value) ||
     ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
     !keys.every((key) => Object.hasOwn(value, key)) || Reflect.ownKeys(value).some((key) => typeof key !== 'string' ||
-      ![...keys, 'quotaConfigPath', 'quotaEvidenceMode', 'localModelConfigPath', 'capacityWaitMs'].includes(key) || !('value' in Object.getOwnPropertyDescriptor(value, key)!))) throw new Error();
+      ![...keys, 'archiveKeyFile', 'quotaConfigPath', 'quotaEvidenceMode', 'localModelConfigPath', 'capacityWaitMs'].includes(key) ||
+      !Object.getOwnPropertyDescriptor(value, key)!.enumerable || !('value' in Object.getOwnPropertyDescriptor(value, key)!))) throw new Error();
   const config = value as Record<string, unknown>;
   if (config.schemaVersion !== 1 || !keys.slice(1).every((key) => path(config[key])) ||
+    Object.hasOwn(config, 'archiveKeyFile') && (!path(config.archiveKeyFile) || dirname(config.archiveKeyFile) !== config.root) ||
     Object.hasOwn(config, 'quotaConfigPath') && !path(config.quotaConfigPath) ||
     Object.hasOwn(config, 'quotaEvidenceMode') && (config.quotaEvidenceMode !== 'shared-collector' || !path(config.quotaConfigPath)) ||
     Object.hasOwn(config, 'localModelConfigPath') && !path(config.localModelConfigPath) ||
@@ -156,6 +161,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     }
     if (overlaps(runtime.root, context.resourceUniverseRoot) || overlaps(runtime.root, context.candidatePath)) throw new Error();
     for (const file of [context.resourceRuntime, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath,
+      ...(runtime.archiveKeyFile ? [runtime.archiveKeyFile] : []),
       ...(runtime.quotaConfigPath ? [runtime.quotaConfigPath] : []),
       ...(runtime.localModelConfigPath ? [runtime.localModelConfigPath] : [])]) {
       if ([context.resourceUniverseRoot, context.candidatePath, runtime.workspace].some((boundary) => contains(boundary, file))) throw new Error();

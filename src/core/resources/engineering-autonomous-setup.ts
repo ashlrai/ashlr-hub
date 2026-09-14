@@ -94,6 +94,7 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspacePr
     successors: join(options.output, 'successors.json'), intent: join(options.output, 'setup-intent.json'), receipt: join(options.output, 'setup-receipt.json'),
     initialBundle: join(options.output, recipe.id), registration: join(resourceEngineeringPreparationRegistrationRoot(runtime.root, policy.registrationScope), 'records', `${recipe.id}.json`) };
   const controls = [options.resourceRuntime, options.projectsFile, runtime.poolPath, runtime.bindingsPath, runtime.observationsPath,
+    ...(runtime.archiveKeyFile ? [runtime.archiveKeyFile] : []),
     ...(runtime.quotaConfigPath ? [runtime.quotaConfigPath] : [])];
   for (const other of [runtime.root, runtime.workspace, ...preview.bindings.map(row => row.workspace), ...controls]) {
     if (contains(options.output, other) || contains(other, options.output)) fail('Setup output must be outside projects, runtime and accounting controls');

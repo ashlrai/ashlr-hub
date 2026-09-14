@@ -1061,6 +1061,24 @@ again. Changing the project, enrollment or authenticated session discards the
 previous result. A failed refresh removes the old report rather than presenting
 it as current.
 
+Outcome accounting can also read an installed schema-3 receipt header when the
+private resource-runtime configuration explicitly contains `archiveKeyFile`.
+That canonical path must be a direct child of the ledger root and is covered by
+the enrollment's existing runtime digest. Changing it requires a matching host
+pin; neither the browser nor the reader discovers, creates or repairs a key.
+Omitting it preserves legacy configuration bytes and behavior. Legacy reads do
+not open the optional key. This read-only support does not enable schema-3 task
+admission or select a new ledger header.
+
+Each sample captures one checked source and queries every declared campaign task
+ID, including incomplete runs without a trial or generation witness. Complete
+logical receipt history is compared between samples, independently of physical
+hot/archive placement. Pure compaction between samples leaves accounting
+unchanged; an unrelated receipt addition or mutation still invalidates the
+observation. Missing evidence or exhausted comparison work budgets cannot become
+a complete report. Existing policy exclusions from the accounting fingerprint
+remain unchanged; equality of receipts is not equality of scheduling controls.
+
 The report connects each declared campaign trial to its exact shared-ledger
 resource receipt, including historical pool/worker identity. It shows separate
 counts for evaluated, passed, rejected, selected and strictly improved candidates,
@@ -1147,6 +1165,10 @@ They also close each built reader while a test-owned Git substitute is blocked,
 requiring cancellation and confirmed helper/child/process-group exit before
 fixture cleanup. This is direct reader-close coverage; the separate source
 console case exercises HTTP disconnect cancellation.
+The same selected cases then install a test-owned compacted header after all
+work stops, verify the compiled and unpacked readers return the identical rich
+outcome without replaying work, and check that missing-key evidence is unavailable
+rather than zero usage. This test publication occurs only inside the fixture.
 Unselected cases are not passing evidence. This check neither rebuilds the
 runtime nor replaces evaluator qualification, the full local release gate or
 live commissioning. Preserve an active qualification's source and build pins
@@ -3286,6 +3308,20 @@ ownership at publication, budget the **whole** header for future settlement,
 and migrate full-history proofs, evolution and public metrics before selecting
 schema 3. A valid certificate is not permission to omit hot rows or substitute
 a recent-history page for lifetime accounting.
+
+The read-only `readResourcePoolStorageSnapshot` pairs an authentic storage view
+with a separate `isCurrent()` check for the exact installed source. It preserves
+private root/file checks, fixed orphan-archive refusal and pending-evolution
+barriers. Same-byte file replacement invalidates the snapshot without renewing
+it. Acquisition conservatively refuses concurrent replacement, even when the
+generic JSON reader could reopen it once. No read creates storage or takes a
+writer lease. Its separate `isCustodyCurrent()` checks original directory and
+archive/key custody without claiming header freshness. Outcome sampling retains
+that custody through two campaign observations, then takes a final ledger-only
+capture. Complete logical-history and configuration comparisons across all three
+captures allow ordinary quota refreshes and valid compaction while rejecting late
+receipt changes. The final capture must remain source-current through comparison;
+these bounded observations are not an atomic multi-file snapshot or a writer lock.
 
 To measure this storage layer locally, build the checkout and run:
 
