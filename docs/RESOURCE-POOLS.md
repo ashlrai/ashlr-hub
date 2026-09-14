@@ -3170,7 +3170,8 @@ eligible for fresh admission only when its absence is established against that
 complete snapshot, never a recent-history page. This query boundary prepares
 indexed storage; it does not activate receipt archival or raise the limits below.
 
-Capacity waiting, generation handoff and supervisor recovery use
+Capacity waiting, generation handoff, supervisor recovery, mission proposal joins,
+successor coordination, setup and runtime readiness checks use
 `resourcePoolQueryStatus`: its plan and receipt queries describe one captured
 ledger snapshot, and it deliberately has no `attempts` array. New work requires
 explicit absence for the requested identity; missing, foreign or unavailable
@@ -3178,6 +3179,15 @@ query results cannot authorize collector contact or recovery. A successful read
 remains a hint: final admission rechecks the ledger under its writer lock.
 The legacy `resourcePoolStatus` complete-history DTO remains unchanged for public
 metrics and proof consumers that have not yet migrated.
+
+Resource transactions retain the exact source-header identity, or its proven
+absence, before admission callbacks run. They recheck that source inside
+publication after staging the new header. An external edit, removal or even a
+byte-identical inode replacement refuses publication instead of overwriting the
+new state. A failed publication never reruns admission effects. If the rename
+succeeded before a durability failure, the installed reservation remains and
+the next invocation resolves its existing identity. Temporary cleanup removes
+only the transaction's own inode; a foreign replacement remains for inspection.
 
 The internal ordered immutable index is a storage foundation, not an alternate
 ledger selected by this release. It supports exact keys, bounded ordered pages
@@ -3188,6 +3198,10 @@ ledger root. A future migration must preserve receipt identity, account
 accounting, configuration history and provenance before activating that store.
 Before returning a staged root, it rechecks every newly staged node after the
 final host callback, including split siblings outside the inserted-key path.
+Exact zero-based rank selection, optionally within exclusive key bounds, uses
+authenticated subtree counts and the selected path. This supports future exact
+lifetime percentiles without materializing all receipts; the public performance
+report has not yet switched to this representation.
 
 The internal terminal-receipt archive stores immutable receipt payloads plus
 task-ID and capacity/start-time indexes. It preserves originating configurations,
@@ -3201,6 +3215,22 @@ The active/archive query adapter combines these two disjoint sets, refuses
 duplicate identities between them and retains all unresolved occupancy. Large
 exact-ID requests use bounded batches against the same captured archive root;
 batching does not change the meaning of absence or reset accounting.
+
+An internal derivation certifier can bind the entire archive root, including
+failure pointers, to its pool, originating configuration history, prior
+certificate and source-state digest. It accepts an explicitly enrolled private
+key file and derives roots by staging validated terminal receipts; there is no
+operation to sign an arbitrary caller-supplied root. The key is never discovered,
+created, repaired or rotated by this module. Missing or changed key custody
+refuses verification. Batches contain at most eight selected receipts, a staging
+bound rather than a lifetime limit; empty genesis is supported separately.
+
+This certifier is not activated by the resource runtime and does not install a
+Phantom integration. The host still owns key confinement outside agent-writable
+projects, source freshness, retention of all other active receipts and atomic
+selection of the new header. Certificate validity alone does not establish the
+current root, prevent rollback, or defend against the user who can read its key.
+It also does not attest availability of every unvisited historical file.
 
 To measure this storage layer locally, build the checkout and run:
 

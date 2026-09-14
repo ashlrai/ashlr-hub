@@ -159,7 +159,7 @@ describe.skipIf(process.platform === 'win32')('read-only resource runtime config
     save(f.runtime.bindingsPath, bindings); mkdirSync(f.runtime.root, { mode: 0o700 });
     save(join(f.runtime.root, 'pool-state.json'), { schemaVersion: 1, poolDigest: digest(canonical({ pool: f.pool, bindings })),
       observations: [], attempts: [], workerAccess: { pausedWorkerIds: ['codex-a'], revision: 1, updatedAt: f.at(-1000) } });
-    const status = vi.spyOn(poolRuntime, 'resourcePoolStatus'); const before = inventory(base); const result = f.check();
+    const status = vi.spyOn(poolRuntime, 'resourcePoolQueryStatus'); const before = inventory(base); const result = f.check();
     expect(status).toHaveBeenCalledTimes(1);
     expect(result.counts).toEqual({ workers: 4, eligibleWorkers: 2, excludedWorkers: 2, capacities: 3, eligibleCapacities: 2 });
     for (const row of result.workers.slice(0, 2)) expect(row).toMatchObject({ eligibility: 'excluded',
@@ -291,6 +291,17 @@ describe.skipIf(process.platform === 'win32')('read-only resource runtime config
     save(join(f.runtime.root, 'pool-state.json'), { schemaVersion: 1, poolDigest: f.poolDigest, observations: [], attempts: [] });
     const before = inventory(base); const result = f.check(); expect(result).toMatchObject({ status: 'valid', sourceState: 'healthy' });
     expect(inventory(base)).toEqual(before);
+  });
+  it('reports unavailable complete unresolved-query evidence without contact or partial roster', () => {
+    const f = fixture(); const read = poolRuntime.resourcePoolQueryStatus; const queried = vi.fn();
+    vi.spyOn(poolRuntime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
+      const status = read(...args);
+      return { ...status, receipts: { ...status.receipts, unresolved() { queried(); throw new Error('PRIVATE_QUERY_FAILURE'); } } };
+    });
+    const before = inventory(base); const result = f.check();
+    expect(queried).toHaveBeenCalled(); expect(result).toMatchObject({ status: 'invalid', workers: [], providerContacted: false });
+    expect(result.checks).toContainEqual({ code: 'ledger', status: 'failed' });
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_QUERY_FAILURE'); expect(inventory(base)).toEqual(before);
   });
   it('redacts a malformed ledger and leaves it unchanged', () => {
     const f = fixture(); mkdirSync(f.runtime.root, { mode: 0o700 }); save(join(f.runtime.root, 'pool-state.json'), { private: base });

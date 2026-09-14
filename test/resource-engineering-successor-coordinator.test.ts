@@ -12,6 +12,7 @@ import type { EngineeringCoordinatorLifecycleReport, ResourceEngineeringSuccesso
 import type { ResourceConsoleEngineeringSupervisionSnapshot } from '../src/core/resources/console-engineering-supervisor-types.js';
 import type { ResourceConsoleEngineeringEnrollment } from '../src/core/resources/console-engineering-types.js';
 import * as runtime from '../src/core/resources/pool-runtime.js';
+import { createResourcePoolReceiptQuery, type ResourcePoolReceiptLookup } from '../src/core/resources/pool-receipt-query.js';
 import * as capacity from '../src/core/resources/capacity-wait.js';
 import * as records from '../src/core/util/immutable-private-record-store.js';
 import * as locks from '../src/core/fleet/local-store-lock.js';
@@ -43,7 +44,7 @@ function fixture() {
     selectedWorkerId: 'worker', exclusions: [], candidates: [{ workerId: 'worker', provider: 'local' as const, model: 'fixture',
       priority: 1, reason: 'eligible' as const, usedPercent: null, activeCount: 0, taskReservationCount: 0, pressure: 0 }] };
   // Only these read-only ledger fields are consumed by the coordinator.
-  const status = vi.spyOn(runtime, 'resourcePoolStatus').mockImplementation(() => ({ attempts, plan: eligiblePlan }) as unknown as ReturnType<typeof runtime.resourcePoolStatus>);
+  const status = vi.spyOn(runtime, 'resourcePoolQueryStatus').mockImplementation(() => ({ receipts: createResourcePoolReceiptQuery(attempts), plan: eligiblePlan }) as unknown as ReturnType<typeof runtime.resourcePoolQueryStatus>);
   vi.spyOn(runtime, 'resourceAdmissionPreflight').mockImplementation((store, definition, transports, _allowed, value) => {
     const evidence = value as ReturnType<ResourceEngineeringSuccessorCoordinatorOptions['readAdmissionEvidence']>;
     return status(store, definition, transports, evidence.observations, evidence.unavailableWorkerIds, evidence.quotaUnavailableWorkerIds ?? []).plan;
@@ -86,6 +87,32 @@ const until = (owner: ReturnType<typeof createResourceEngineeringSuccessorCoordi
   vi.waitFor(() => expect(owner.snapshot().entries[0]?.state).toBe(state), { timeout: 5000, interval: 20 });
 
 describe('bounded engineering successor coordinator', () => {
+  it.each(['missing', 'foreign-absence', 'foreign-receipt', 'unknown', 'throws'] as const)(
+    'refuses %s receipt-query evidence before dispatch or preparing a successor', async kind => {
+      const f = fixture(); const read = f.status.getMockImplementation()!; const lookedUp = vi.fn();
+      f.status.mockImplementation((...args) => {
+        const status = read(...args);
+        return { ...status, receipts: { ...status.receipts, get(id: string): ResourcePoolReceiptLookup {
+          lookedUp(id);
+          if (kind === 'throws') throw new Error('PRIVATE_RECEIPT_QUERY_FAILURE');
+          if (kind === 'missing') return undefined as unknown as ResourcePoolReceiptLookup;
+          if (kind === 'foreign-absence') return { status: 'proven-absent', id: 'foreign' };
+          if (kind === 'unknown') return { status: 'unavailable', id } as unknown as ResourcePoolReceiptLookup;
+          return { status: 'found', id, receipt: { id: 'foreign' } as runtime.ResourceTaskReceipt };
+        } } };
+      });
+      const reports: EngineeringCoordinatorLifecycleReport[] = []; f.options.onLifecycle = row => reports.push(row);
+      const owner = f.create(); owner.start();
+      // A bad proposal is held independently; it must not crash the whole
+      // coordinator or dispatch through unavailable evidence.
+      await vi.waitFor(() => expect(owner.snapshot().entries[0]).toMatchObject({ state: 'held', reason: 'successor-evidence-unavailable' }),
+        { timeout: 5000, interval: 20 });
+      expect(owner.snapshot().state).toBe('running');
+      expect(lookedUp).toHaveBeenCalled(); expect(f.run).not.toHaveBeenCalled(); expect(f.provider).not.toHaveBeenCalled();
+      expect(f.prepare).not.toHaveBeenCalled(); expect(f.options.supervision.admit).not.toHaveBeenCalled();
+      expect(JSON.stringify(reports)).not.toContain('PRIVATE_RECEIPT_QUERY_FAILURE');
+      await expect(owner.close()).rejects.toThrow('Successor closed with unresolved proposal execution');
+    });
   it('persists scope-bound proposal origin before calling the accounted task runtime', async () => {
     const f = fixture(); const run = f.run.getMockImplementation()!; let sawOrigin = false;
     f.run.mockImplementation(async options => {

@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import { validateResourcePool, validateResourceObservations, type ResourceExclusionReason, type ResourceWorker } from '../resources/pool-policy.js';
-import { readResourceJson, resourcePoolStatus } from '../resources/pool-runtime.js';
+import { readResourceJson, resourcePoolQueryStatus } from '../resources/pool-runtime.js';
 import { validateResourceBindings } from '../resources/worker.js';
 import { validateResourceQuotaRefreshConfig } from '../resources/quota-refresh.js';
 import { validateResourceLocalModelConfig } from '../resources/local-model-refresh.js';
@@ -141,7 +141,7 @@ export function checkResourceGenerationRuntime(options: { resourceRuntime: strin
     const local = runtime.localModelConfigPath ? check('local-model-refresh', () =>
       validateResourceLocalModelConfig(readResourceJson(runtime.localModelConfigPath!), pool, bindings)) : null;
     if (!local) result.checks.find((row) => row.code === 'local-model-refresh')!.status = 'not-configured';
-    const snapshot = check('ledger', () => resourcePoolStatus(runtime.root, pool, bindings, observations));
+    const snapshot = check('ledger', () => resourcePoolQueryStatus(runtime.root, pool, bindings, observations));
     const pausedCapacities = new Set(bindings.filter((binding) => snapshot.workerAccess.pausedWorkerIds.includes(binding.workerId))
       .map((binding) => binding.capacityKey));
     const eligibleIds = new Set(snapshot.plan.candidates.map((row) => row.workerId));
@@ -166,7 +166,7 @@ export function checkResourceGenerationRuntime(options: { resourceRuntime: strin
       if (pausedCapacities.has(binding.capacityKey)) policyHolds.push('owner-paused');
       if (exclusionReasons.includes('operator-quota-scope-excluded')) policyHolds.push('quota-scope-reserved');
       if (worker.provider !== 'local' && snapshot.allocation.ceilingPercent === 0) policyHolds.push('subscription-allocation-disabled');
-      const attempts = snapshot.attempts.filter((row) => row.capacityKey === binding.capacityKey);
+      const attempts = snapshot.receipts.unresolved(binding.capacityKey);
       const ownership = attempts.some((row) => row.status === 'uncertain') ? 'uncertain'
         : attempts.some((row) => row.status === 'reserved') ? 'reserved' : null;
       return { workerId: worker.id, provider: worker.provider, capacityKey: binding.capacityKey, transport: binding.kind,

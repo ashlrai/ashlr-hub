@@ -8,7 +8,7 @@ import { canonical, digest, inspectPrivateDirectory } from '../universe/artifact
 import { writeImmutablePrivateRecord } from '../util/immutable-private-record-store.js';
 import { pinResourceConsoleProject, matchesResourceConsoleProject } from './console-projects.js';
 import { validateResourcePool } from './pool-policy.js';
-import { resourceAdmissionPreflight, resourcePoolStatus, runResourceTask, validateResourceTask } from './pool-runtime.js';
+import { resourceAdmissionPreflight, resourcePoolQueryStatus, runResourceTask, validateResourceTask } from './pool-runtime.js';
 import { ResourceSupervisorError } from './pool-supervisor.js';
 import { validateResourceBindings } from './worker.js';
 import { waitForResourceCapacity } from './capacity-wait.js';
@@ -131,7 +131,10 @@ export function createResourceEngineeringSuccessorCoordinator(options: Options):
     read();
   }
   function receipt(intent: Intent) {
-    const row = resourcePoolStatus(root, pool, bindings, []).attempts.find(row => row.id === intent.task.id);
+    const result = resourcePoolQueryStatus(root, pool, bindings, []).receipts.get(intent.task.id);
+    if (!result || result.id !== intent.task.id || result.status !== 'found' && result.status !== 'proven-absent' ||
+      result.status === 'found' && result.receipt?.id !== intent.task.id) fail('Successor receipt evidence unavailable');
+    const row = result.status === 'found' ? result.receipt : undefined;
     if (row && (row.taskDigest !== hash(intent.task) || row.poolDigest !== poolDigest || !config.allowedWorkerIds.includes(row.workerId) ||
       canonical(row.origin ?? null) !== canonical(intent.task.origin ?? null))) fail('Successor task identity changed');
     return row;

@@ -24,6 +24,7 @@ import { canonical, digest } from '../src/core/universe/artifacts.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
 import { resourcePoolStatus, runResourceTask, setResourcePoolAllocation, type ResourceTask } from '../src/core/resources/pool-runtime.js';
+import * as runtime from '../src/core/resources/pool-runtime.js';
 import { runResourceEngineeringMission } from '../src/core/resources/engineering-mission.js';
 import { missionHash, readEngineeringMissionRecords, readResourceEngineeringMissionStatus, type ResourceEngineeringMissionConfig } from '../src/core/resources/engineering-mission-store.js';
 import { projectEngineeringMissionFeedback } from '../src/core/resources/engineering-mission-feedback.js';
@@ -236,6 +237,28 @@ async function fixture(mode: Mode, proposalStatus?: ProposalStatus) {
 }
 
 describe('measured feedback through an accounted proposal into the next mission scope', () => {
+  it.each(['missing', 'foreign', 'unknown', 'throws'] as const)(
+    'does not consume a settled proposal with %s receipt batch evidence', async kind => {
+      const f = await fixture('measured'); const read = runtime.resourcePoolQueryStatus; const queried = vi.fn();
+      const status = vi.spyOn(runtime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
+        const sample = read(...args);
+        return { ...sample, receipts: { ...sample.receipts, getMany(ids) {
+          const rows = sample.receipts.getMany(ids);
+          if (!rows.some(row => row.status === 'found' && row.receipt.status === 'completed')) return rows;
+          queried(ids);
+          if (kind === 'throws') throw new Error('PRIVATE_RECEIPT_QUERY_FAILURE');
+          if (kind === 'missing') return [];
+          return rows.map(row => ({ ...row, ...(kind === 'foreign' ? { id: 'foreign' } : { status: 'unavailable' }) })) as typeof rows;
+        } } };
+      });
+      try {
+        const result = await runResourceEngineeringMission(f.config);
+        expect(result).toMatchObject({ state: 'held', scopesReserved: 1 }); expect(queried).toHaveBeenCalled();
+        expect(JSON.stringify(result)).not.toContain('PRIVATE_RECEIPT_QUERY_FAILURE');
+        expect(f.records().some(row => row.kind === 'result')).toBe(false); expect(f.prepared).toHaveLength(1);
+        expect(f.contexts).toHaveLength(1); expect(f.status().attempts).toHaveLength(1); expect(f.errors).toEqual([]);
+      } finally { status.mockRestore(); }
+    }, 30_000);
   it('polls only the exact proposal identity through queued, dispatching and settled status without requiring all history', async () => {
     const f = await fixture('measured', 'progress');
     expect(await runResourceEngineeringMission(f.config)).toMatchObject({ state: 'completed', scopesReserved: 2 });

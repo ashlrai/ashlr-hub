@@ -165,11 +165,37 @@ function query(root: OrderedImmutableIndexRoot, selected: OrderedImmutableIndexR
   const node = root.nodeDigest === null ? null : load({ ...root, nodeDigest: root.nodeDigest }, true);
   const total = (current: Node): number => 'entries' in current ? current.entries.filter(row => matches(row.key, selected)).length :
     current.children.reduce((sum, child) => sum + (outside(child, selected) ? 0 : inside(child, selected) ? child.count : total(load(child))), 0);
-  return { load, node, total: node ? total(node) : 0 };
+  return { load, node, countNode: total, total: node ? total(node) : 0 };
 }
 /** Counts authenticate the committed range, not availability of every unread subtree file. */
 export function countOrderedImmutableIndex(rootValue: OrderedImmutableIndexRoot, options: OrderedImmutableIndexRange, readNode: OrderedImmutableIndexNodeReader): number {
   return query(captureOrderedImmutableIndexRoot(rootValue), range(options), readNode).total;
+}
+/** Zero-based rank within an exclusive range. Skips authenticated subtree counts,
+ * reading only range boundaries and the selected path; unread files are not
+ * attested available. Null means the committed range has no entry at this rank. */
+export function selectOrderedImmutableIndex(rootValue: OrderedImmutableIndexRoot, rank: number,
+  readNode: OrderedImmutableIndexNodeReader, options: OrderedImmutableIndexRange = {}): OrderedImmutableIndexEntry | null {
+  if (typeof rank !== 'number' || !Number.isSafeInteger(rank) || rank < 0) return fail();
+  const root = captureOrderedImmutableIndexRoot(rootValue); const selected = range(options);
+  const state = query(root, selected, readNode);
+  if (rank >= state.total || state.node === null) return null;
+  let remaining = rank; let node = state.node;
+  while ('children' in node) {
+    let next: Node | undefined;
+    for (const child of node.children) {
+      const size = outside(child, selected) ? 0 : inside(child, selected) ? child.count : state.countNode(state.load(child));
+      if (remaining >= size) { remaining -= size; continue; }
+      next = state.load(child); break;
+    }
+    if (next === undefined) return fail('UNAVAILABLE');
+    node = next;
+  }
+  for (const row of node.entries) {
+    if (!matches(row.key, selected)) continue;
+    if (remaining-- === 0) return { ...row };
+  }
+  return fail('UNAVAILABLE');
 }
 /** Ascending exclusive bounds; nextAfter navigates the same caller-pinned root. */
 export function pageOrderedImmutableIndex(rootValue: OrderedImmutableIndexRoot, options: OrderedImmutableIndexPageOptions, readNode: OrderedImmutableIndexNodeReader):

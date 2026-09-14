@@ -17,6 +17,7 @@ import * as ownership from '../src/core/fleet/local-store-lock.js';
 import * as bundle from '../src/core/resources/engineering-preparation.js';
 import * as deliveredSource from '../src/core/resources/engineering-delivered-source.js';
 import { setResourcePoolAllocation, readResourceJson, resourcePoolStatus } from '../src/core/resources/pool-runtime.js';
+import * as runtime from '../src/core/resources/pool-runtime.js';
 import type { ResourceObservation } from '../src/core/resources/pool-policy.js';
 import { validateResourcePool } from '../src/core/resources/pool-policy.js';
 import { validateResourceBindings } from '../src/core/resources/worker.js';
@@ -80,6 +81,21 @@ function evidence(directory: string): string {
   visit(directory); return JSON.stringify(rows);
 }
 describe('offline autonomous setup', () => {
+  it('refuses unavailable complete unresolved-query evidence without publishing setup', () => {
+    const f = fixture(); const read = runtime.resourcePoolQueryStatus; const queried = vi.fn();
+    vi.spyOn(runtime, 'resourcePoolQueryStatus').mockImplementation((...args) => {
+      const status = read(...args);
+      return { ...status, receipts: { ...status.receipts, unresolved(capacityKey?: string) {
+        // Let the nested per-capacity readiness check finish; exercise setup's
+        // own complete-set read, not its earlier preparation preflight.
+        if (capacityKey !== undefined) return status.receipts.unresolved(capacityKey);
+        queried(); throw new Error('Receipt query unavailable');
+      } } };
+    });
+    const before = evidence(f.base);
+    expect(() => check(f.options)).toThrow('Receipt query unavailable'); expect(queried).toHaveBeenCalled();
+    expect(evidence(f.base)).toBe(before); expect(readdirSync(f.options.output)).toEqual([]);
+  });
   it('creates and exactly replays an offline setup through the fixed worker', async () => {
     const f = fixture(); const plan = check(f.options);
     const request = { input: { ...f.options, expectedPlanDigest: plan.planDigest } };

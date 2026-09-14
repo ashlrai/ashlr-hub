@@ -11,6 +11,17 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Receipt-ledger migration dependencies
+
+- Pins source-header identity through actual transaction publication, refusing
+  changed sources and preserving foreign temporary replacements on cleanup.
+- Moves mission proposal, successor, setup and runtime-readiness joins to exact
+  receipt queries without replacing complete history with recent pages.
+- Adds exact index rank selection for future lifetime percentile queries.
+- Adds explicit-key archive derivation certificates covering full roots and
+  failure pointers. No live key enrollment, ledger migration or archive-backed
+  runtime activation occurs automatically.
+
 ### Receipt archive performance evidence
 
 - Removes redundant archive directory-check adapters while keeping fresh

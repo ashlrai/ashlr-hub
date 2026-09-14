@@ -66,6 +66,9 @@ describe.skipIf(process.platform === 'win32')('private ordered index staging and
     expect(cold.lookup(old, key(4353))).toEqual({ found: false });
     expect(cold.lookup(staged.root, 'missing')).toEqual({ found: false });
     expect(cold.count(staged.root, { gt: key(100), lt: key(4200) })).toBe(4099);
+    expect(cold.select(staged.root, 4353)).toEqual({ key: key(4353), valueDigest: valueDigest(4353) });
+    expect(cold.select(staged.root, 4098, { gt: key(100), lt: key(4200) })).toEqual({ key: key(4199), valueDigest: valueDigest(4199) });
+    expect(cold.select(old, 4353)).toBeNull();
     const pages: string[] = []; let gt: string | undefined;
     do {
       const page = cold.page(staged.root, { ...(gt ? { gt } : {}), limit: 256 });
@@ -83,6 +86,24 @@ describe.skipIf(process.platform === 'win32')('private ordered index staging and
     expect(f.store.stage(next.root, entry, { guard() {} })).toEqual({ root: next.root, nodesStaged: 0, replayed: true });
     expect(() => f.store.stage(next.root, { ...entry, valueDigest: valueDigest(99) }, { guard() {} })).toThrow('identity conflict');
     expect(f.store.count(old, {})).toBe(32);
+  });
+  it('cold-selects exact rows with fresh ACL, selected-node and pinned-root checks', () => {
+    const f = fixture(); const root = seed(f.root, 40);
+    const cold = createOrderedImmutableIndexStore(f.config);
+    expect(cold.select(root, 0, { gt: key(20) })).toEqual({ key: key(21), valueDigest: valueDigest(21) });
+    hooks.denyAssurance = true;
+    expect(() => cold.select(root, 0)).toThrow('evidence unavailable');
+    expect(() => cold.select(emptyOrderedImmutableIndexRoot(), 0)).toThrow('evidence unavailable');
+    hooks.denyAssurance = false;
+    const branch = JSON.parse(readFileSync(nodePath(f.root, root.nodeDigest!), 'utf8')) as { children: Array<{ nodeDigest: string }> };
+    const selectedPath = nodePath(f.root, branch.children[1]!.nodeDigest); const bytes = readFileSync(selectedPath, 'utf8');
+    writeFileSync(selectedPath, '{}\n');
+    expect(() => cold.select(root, 39)).toThrow('evidence unavailable');
+    writeFileSync(selectedPath, bytes);
+    expect(cold.select(root, 39)?.key).toBe(key(39));
+    renameSync(f.root, f.root + '-old'); mkdirSync(f.root, { mode: 0o700 });
+    expect(() => cold.select(emptyOrderedImmutableIndexRoot(), 0)).toThrow('evidence unavailable');
+    expect(readdirSync(f.root)).toEqual([]); // Read-only selection creates no storage.
   });
   it.each(['missing', 'corrupt'] as const)('refuses a %s off-path split sibling changed by the final callback', kind => {
     const f = fixture(); const old = seed(f.root, 32);

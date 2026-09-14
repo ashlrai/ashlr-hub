@@ -6,7 +6,7 @@ import { excludedResourceQuotaScopeWorkerIds, validateResourceQuotaScopeExclusio
   type ResourceQuotaScopeAccess, type ResourceQuotaScopeExclusion } from './quota-scope-access.js';
 export type { ResourceQuotaScopeAccess, ResourceQuotaScopeExclusion } from './quota-scope-access.js';
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
-  readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
+  readSync, realpathSync, renameSync, unlinkSync, writeSync, type BigIntStats } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { acquireLocalStoreLock, ownsLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
@@ -244,13 +244,51 @@ export function readResourcePoolHistory(root: string, pool: ResourcePool, bindin
   return structuredClone(state.configurationHistory ?? [active]);
 }
 
-function writeState(root: string, state: PoolState): void {
+function ledgerIdentity(file: string): BigIntStats | null {
+  try { return lstatSync(file, { bigint: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw new Error('Resource ledger source unavailable');
+  }
+}
+function sameLedgerSnapshot(left: BigIntStats, right: BigIntStats): boolean {
+  return left.dev === right.dev && left.ino === right.ino && left.mode === right.mode &&
+    left.uid === right.uid && left.gid === right.gid && left.nlink === right.nlink && left.size === right.size &&
+    left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+/** Capture the exact source before callbacks can change it. The writer lease is
+ * necessary but does not authorize overwriting a replaced or externally edited
+ * header. Directory timestamps intentionally change when staging a new header. */
+function transactionSource(root: string, pool: ResourcePool, bindings: ResourceBinding[], poolDigest: string) {
+  const directory = lstatSync(root, { bigint: true });
+  const file = join(root, 'pool-state.json'); const before = ledgerIdentity(file);
+  const state: PoolState = before === null ? { schemaVersion: 1, poolDigest, observations: [], attempts: [] }
+    : decodeResourcePoolState(readResourceJson(file, MAX_STATE_BYTES), pool, bindings);
+  function assertCurrent(): void {
+    if (!inspectRoot(root, false)) throw new Error('Resource ledger source changed');
+    if (before !== null && !assurePrivateStoragePath(file, 'file', 'inspect-existing', { anchorPath: root }).ok) {
+      throw new Error('Resource ledger source changed');
+    }
+    // Assurance may invoke a platform adapter. Compare only after it returns;
+    // never let a successful check renew the captured source identity.
+    const currentDirectory = lstatSync(root, { bigint: true }); const current = ledgerIdentity(file);
+    if (currentDirectory.dev !== directory.dev || currentDirectory.ino !== directory.ino ||
+      (before === null ? current !== null : current === null || !sameLedgerSnapshot(before, current))) {
+      throw new Error('Resource ledger source changed');
+    }
+  }
+  assertCurrent(); return { state, assertCurrent };
+}
+
+function writeState(root: string, state: PoolState, prepublish: () => void): void {
   const bytes = Buffer.from(canonical(state) + '\n');
   if (bytes.length > MAX_STATE_BYTES) throw new Error('Resource ledger capacity reached');
   const temporary = join(root, `.pool-state-${randomUUID()}.tmp`);
   let fd: number | undefined;
+  let identity: BigIntStats | undefined;
   try {
     fd = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+    identity = fstatSync(fd, { bigint: true });
     let offset = 0;
     while (offset < bytes.length) {
       const written = writeSync(fd, bytes, offset, bytes.length - offset);
@@ -259,11 +297,29 @@ function writeState(root: string, state: PoolState): void {
     }
     fsyncSync(fd); closeSync(fd); fd = undefined;
     inspectRoot(root, false);
+    const staged = readResourceJson(temporary, MAX_STATE_BYTES);
+    const current = lstatSync(temporary, { bigint: true });
+    if (current.dev !== identity.dev || current.ino !== identity.ino || canonical(staged) !== canonical(state)) {
+      throw new Error('Resource ledger staged header changed');
+    }
+    // Last check is inside publication, after durable staging and before rename.
+    // It must not replay the admission callback or renew the captured source.
+    prepublish();
+    const finalStaged = readResourceJson(temporary, MAX_STATE_BYTES);
+    const finalIdentity = lstatSync(temporary, { bigint: true });
+    if (!sameLedgerSnapshot(current, finalIdentity) || canonical(finalStaged) !== canonical(state)) {
+      throw new Error('Resource ledger staged header changed');
+    }
     renameSync(temporary, join(root, 'pool-state.json'));
     fsyncDirectory(root);
   } finally {
     if (fd !== undefined) closeSync(fd);
-    try { unlinkSync(temporary); } catch { /* Only this transaction's private temporary file. */ }
+    try {
+      const remaining = lstatSync(temporary, { bigint: true });
+      // A foreign replacement is evidence, not this transaction's scratch file.
+      if (identity && remaining.dev === identity.dev && remaining.ino === identity.ino &&
+        remaining.isFile() && !remaining.isSymbolicLink() && remaining.nlink === 1n && remaining.uid === identity.uid) unlinkSync(temporary);
+    } catch { /* Missing or uncertain temporary custody is not cleanup authority. */ }
   }
 }
 
@@ -571,11 +627,16 @@ function transaction<T>(root: string, pool: ResourcePool, bindings: ResourceBind
   if (!lock) throw new Error('Resource store busy or unavailable');
   let outcome: { ok: true; result: T } | { ok: false; error: unknown };
   try {
-    const state = loadState(root, pool, bindings, poolDigest);
+    const source = transactionSource(root, pool, bindings, poolDigest); const state = source.state;
+    const guard = () => {
+      if (!ownsLocalStoreLock(lock)) throw new Error('Resource store ownership lost');
+      source.assertCurrent();
+    };
+    guard();
     const result = change(state);
     state.observations = validateResourceObservations(state.observations, pool);
-    if (!ownsLocalStoreLock(lock)) throw new Error('Resource store ownership lost');
-    writeState(root, state);
+    guard();
+    writeState(root, state, guard);
     if (!ownsLocalStoreLock(lock)) throw new Error('Resource store ownership lost');
     outcome = { ok: true, result };
   } catch (error) { outcome = { ok: false, error }; }

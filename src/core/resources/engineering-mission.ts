@@ -14,7 +14,8 @@ import { pinResourceConsoleProject, matchesResourceConsoleProject, validateResou
 import { resourceConsoleTaskContinuation, resourceConsoleRecoveryId, ResourceSupervisorError } from './pool-supervisor.js';
 import { readResourceWorkspaceCustody } from './workspace-custody.js';
 import { readResourceConsoleStorage } from './console-state-storage.js';
-import { readResourceJson, resourcePoolStatus, readResourcePoolHistory, validateResourceTask, type ResourceTask } from './pool-runtime.js';
+import { readResourceJson, resourcePoolQueryStatus, readResourcePoolHistory, validateResourceTask, type ResourceTask } from './pool-runtime.js';
+import type { ResourcePoolReceiptQuery } from './pool-receipt-query.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { parseResourceEngineeringSuccessorProposal } from './engineering-successor-store.js';
@@ -43,6 +44,16 @@ export interface ResourceEngineeringMissionHost {
 }
 class MissionEvidenceError extends Error {}
 const requireFact = (value: unknown, reason: string): void => { if (!value) throw new MissionEvidenceError(reason); };
+function missionReceipts(query: ResourcePoolReceiptQuery, ids: string[]) {
+  const results = query.getMany([...ids]);
+  requireFact(Array.isArray(results) && results.length === ids.length, 'Mission receipt evidence unavailable');
+  return new Map(ids.map((id, index) => {
+    const result = results[index];
+    if (!result || result.id !== id || result.status !== 'found' && result.status !== 'proven-absent' ||
+      result.status === 'found' && result.receipt?.id !== id) throw new MissionEvidenceError('Mission receipt evidence unavailable');
+    return [id, result.status === 'found' ? result.receipt : undefined] as const;
+  }));
+}
 const present = (path: string): boolean => { try { lstatSync(path); return true; } catch (error) {
   if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error;
 } };
@@ -192,13 +203,18 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
           const storage = readResourceConsoleStorage(readResourceJson(file, 4 * 1024 * 1024), { root: runtime.root, pool, bindings,
             workspace: config.initial.setup.workspace, configHistory: readResourcePoolHistory(runtime.root, pool, bindings) });
           const state = storage.hotState;
-          const attempts = resourcePoolStatus(runtime.root, pool, bindings, []).attempts;
+          const receipts = missionReceipts(resourcePoolQueryStatus(runtime.root, pool, bindings, []).receipts,
+            state.jobs.filter(job => job.state === 'dispatching').map(job => job.id));
           const ownedProposal = (job: typeof state.jobs[number]) => allowedTask && job.id === allowedTask.id &&
             job.taskDigest === missionHash(allowedTask) && job.executionOwnerId !== undefined && job.executionDeadlineAt === config.deadlineAt;
+          const completedProposal = (job: typeof state.jobs[number]) => {
+            const row = receipts.get(job.id);
+            return row && row.taskDigest === job.taskDigest && row.poolDigest === poolDigest &&
+              job.allowedWorkerIds.includes(row.workerId) && row.status === 'completed';
+          };
           requireFact(!state.paused && state.jobs.every(job => job.state !== 'queued' || ownedProposal(job)) &&
             state.jobs.every(job => job.state !== 'unresolved' && (job.state !== 'dispatching' || ownedProposal(job) &&
-              attempts.some(row => row.id === job.id && row.taskDigest === job.taskDigest && row.poolDigest === poolDigest &&
-                job.allowedWorkerIds.includes(row.workerId) && row.status === 'completed'))), 'Mission console contains stopped or unrelated work');
+              completedProposal(job))), 'Mission console contains stopped or unrelated work');
           requireFact(storage.isCurrent(), 'Mission console history changed');
         }
         guard();
@@ -340,11 +356,13 @@ export async function runResourceEngineeringMission(input: ResourceEngineeringMi
       let task = { ...originalTask, id: continuation(originalTask).at(-1)?.id ?? originalTask.id };
       let result = get<{ output: string; receiptDigest: string }>('result');
       const receipt = () => {
-        const attempts = resourcePoolStatus(runtime.root, pool, bindings, []).attempts;
+        const query = resourcePoolQueryStatus(runtime.root, pool, bindings, []).receipts;
         const chain = continuation(originalTask);
+        const priorIds = chain.slice(0, -1).map(prior => prior.id);
+        const receipts = missionReceipts(query, [...priorIds, task.id]);
         requireFact((chain.at(-1)?.id ?? originalTask.id) === task.id &&
-          !attempts.some(row => chain.slice(0, -1).some(prior => prior.id === row.id)), 'Mission proposal recovery evidence changed');
-        const row = attempts.find(row => row.id === task.id);
+          priorIds.every(id => receipts.get(id) === undefined), 'Mission proposal recovery evidence changed');
+        const row = receipts.get(task.id);
         if (row) requireFact(row.taskDigest === missionHash(task) && row.poolDigest === poolDigest && task.allowedWorkerIds.includes(row.workerId), 'Mission proposal receipt mismatch');
         return row;
       };

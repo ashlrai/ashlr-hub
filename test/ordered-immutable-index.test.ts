@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { captureOrderedImmutableIndexRoot, countOrderedImmutableIndex, emptyOrderedImmutableIndexRoot, lookupOrderedImmutableIndex,
-  pageOrderedImmutableIndex, planOrderedImmutableIndexInsert, ORDERED_IMMUTABLE_INDEX_NODE_BYTES } from '../src/core/util/ordered-immutable-index.js';
+  pageOrderedImmutableIndex, selectOrderedImmutableIndex, planOrderedImmutableIndexInsert, ORDERED_IMMUTABLE_INDEX_NODE_BYTES } from '../src/core/util/ordered-immutable-index.js';
 
 const key = (index: number) => `id-${String(index).padStart(6, '0')}`;
 const valueDigest = (index: number) => createHash('sha256').update(String(index)).digest('hex');
@@ -24,6 +24,7 @@ describe('immutable ordered commitment index', () => {
     expect(lookupOrderedImmutableIndex(root, 'a', read)).toEqual({ found: false });
     expect(countOrderedImmutableIndex(root, {}, read)).toBe(0);
     expect(pageOrderedImmutableIndex(root, {}, read)).toEqual({ items: [], totalMatches: 0, nextAfter: null });
+    expect(selectOrderedImmutableIndex(root, 0, read)).toBeNull();
     expect(read).not.toHaveBeenCalled();
   });
   it('retains more than 4096 synthetic identities, exact absence, strict ranges and bounded navigation', () => {
@@ -50,6 +51,77 @@ describe('immutable ordered commitment index', () => {
     expect(lookupOrderedImmutableIndex(plan.root, 'a', f.read)).toMatchObject({ found: true });
     expect(pageOrderedImmutableIndex(plan.root, { limit: 1 }, f.read).items[0].key).toBe('a');
     expect(plan.nodes.length).toBeLessThanOrEqual(2 * (before.height + 1) + 1);
+  });
+  it('selects exact ranks beyond4096 with logarithmic touched paths, not preceding pages', () => {
+    // Synthetic ordered identities only, not thousands of resource executions.
+    const f = fixture(4353);
+    for (const rank of [0, 1, 15, 16, 31, 32, 100, 2048, 4096, 4352]) {
+      f.read.mockClear();
+      expect(selectOrderedImmutableIndex(f.root, rank, f.read)).toEqual({ key: key(rank), valueDigest: valueDigest(rank) });
+      expect(f.read.mock.calls.length).toBeLessThanOrEqual(f.root.height + 1);
+    }
+    const selected = { gt: key(100), lt: key(4200) };
+    for (const rank of [0, 15, 2049, 4098]) {
+      f.read.mockClear();
+      expect(selectOrderedImmutableIndex(f.root, rank, f.read, selected)).toEqual({ key: key(rank + 101), valueDigest: valueDigest(rank + 101) });
+      expect(f.read.mock.calls.length).toBeLessThanOrEqual(3 * f.root.height + 1);
+    }
+    expect(selectOrderedImmutableIndex(f.root, 4099, f.read, selected)).toBeNull();
+    expect(selectOrderedImmutableIndex(f.root, Number.MAX_SAFE_INTEGER, f.read)).toBeNull();
+    expect(selectOrderedImmutableIndex(f.root, 0, f.read, { gt: 'id-002', lt: 'id-003' })?.key).toBe(key(2000));
+    expect(selectOrderedImmutableIndex(f.root, 999, f.read, { gt: 'id-002', lt: 'id-003' })?.key).toBe(key(2999));
+    expect(selectOrderedImmutableIndex(f.root, 1000, f.read, { gt: 'id-002', lt: 'id-003' })).toBeNull();
+  });
+  it.each([false, true])('selects all ranks across ascending/descending split shape=%s', reverse => {
+    const f = fixture(65, reverse);
+    const selected = { gt: key(15), lt: key(49) };
+    for (let rank = 0; rank < 33; rank++) {
+      expect(selectOrderedImmutableIndex(f.root, rank, f.read, selected)?.key).toBe(key(rank + 16));
+    }
+    expect(selectOrderedImmutableIndex(f.root, 33, f.read, selected)).toBeNull();
+    expect(selectOrderedImmutableIndex(f.root, 0, f.read, { gt: key(64) })).toBeNull();
+    expect(selectOrderedImmutableIndex(f.root, 0, f.read, { lt: key(0) })).toBeNull();
+    expect(selectOrderedImmutableIndex(f.root, 0, f.read, { gt: key(1), lt: key(2) })).toBeNull();
+  });
+  it.each(['missing', 'corrupt'] as const)('refuses a %s selected node without treating it as out of range', kind => {
+    const f = fixture(40); const rootBytes = f.nodes.get(f.root.nodeDigest!)!;
+    const selectedDigest = (JSON.parse(rootBytes) as { children: Array<{ nodeDigest: string }> }).children[1]!.nodeDigest;
+    if (kind === 'missing') f.nodes.delete(selectedDigest); else f.nodes.set(selectedDigest, '{}\n');
+    expect(countOrderedImmutableIndex(f.root, {}, f.read)).toBe(40);
+    expect(selectOrderedImmutableIndex(f.root, 0, f.read)?.key).toBe(key(0));
+    expect(() => selectOrderedImmutableIndex(f.root, 39, f.read)).toThrow('evidence unavailable');
+    expect(selectOrderedImmutableIndex(f.root, 40, f.read)).toBeNull();
+    f.nodes.set(f.root.nodeDigest!, '{}\n');
+    expect(() => selectOrderedImmutableIndex(f.root, 40, f.read)).toThrow('evidence unavailable');
+  });
+  it('captures selection root/range before reader callbacks and detaches selected entries', () => {
+    const f = fixture(65); const root = { ...f.root }; const selected = { gt: key(15), lt: key(49) };
+    const getter = vi.fn(() => { throw new Error('must not invoke'); }); let changed = false;
+    const read = (hash: string) => {
+      if (!changed) {
+        changed = true; root.count = 1;
+        Object.defineProperty(selected, 'gt', { enumerable: true, get: getter });
+        selected.lt = key(17);
+      }
+      return f.read(hash);
+    };
+    const row = selectOrderedImmutableIndex(root, 20, read, selected)!;
+    expect(row.key).toBe(key(36)); expect(getter).not.toHaveBeenCalled(); row.key = 'changed';
+    expect(selectOrderedImmutableIndex(f.root, 36, f.read)?.key).toBe(key(36));
+  });
+  it.each([-1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, '0', null])('rejects malformed selection rank %s before reading', rank => {
+    const read = vi.fn();
+    expect(() => selectOrderedImmutableIndex(emptyOrderedImmutableIndexRoot(), rank as number, read)).toThrow('Invalid ordered index input');
+    expect(read).not.toHaveBeenCalled();
+  });
+  it('rejects hostile selection ranges and malformed roots without evaluating hooks', () => {
+    const trap = vi.fn(() => { throw new Error('hostile'); }); const empty = emptyOrderedImmutableIndexRoot();
+    for (const selected of [Object.defineProperty({}, 'gt', { enumerable: true, get: trap }),
+      new Proxy({}, { getPrototypeOf: trap }), { gt: 'z', lt: 'a' }, { limit: 1 }, { gt: undefined }]) {
+      expect(() => selectOrderedImmutableIndex(empty, 0, trap, selected)).toThrow('Invalid ordered index input');
+    }
+    expect(() => selectOrderedImmutableIndex({ ...empty, count: 1 }, 0, trap)).toThrow();
+    expect(trap).not.toHaveBeenCalled();
   });
   it('replays identical values without new nodes and refuses identity substitution', () => {
     const f = fixture(40);

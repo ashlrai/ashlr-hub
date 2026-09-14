@@ -18,7 +18,7 @@ import { readResourceEngineeringDeliveredRegistration, type ResourceEngineeringD
 import { previewResourceConsoleProjects, ResourceSupervisorError } from './pool-supervisor.js';
 import { matchesResourceConsoleProject, pinResourceConsoleProject, validateResourceConsoleProjects } from './console-projects.js';
 import { readResourceConsoleStorage } from './console-state-storage.js';
-import { readResourceJson, readResourcePoolHistory, resourcePoolStatus } from './pool-runtime.js';
+import { readResourceJson, readResourcePoolHistory, resourcePoolQueryStatus } from './pool-runtime.js';
 import { validateResourcePool } from './pool-policy.js';
 import { validateResourceBindings } from './worker.js';
 import { captureResourceExecutionVeto } from './execution-veto.js';
@@ -109,7 +109,7 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspacePr
   supervision('0'.repeat(64));
   const bundleOptions = { recipe, output: paths.initialBundle, resourceRuntime: options.resourceRuntime, workspace: options.workspace, projectsFile: options.projectsFile };
   const bundlePlan = checkResourceEngineeringPreparation(bundleOptions);
-  const poolState = resourcePoolStatus(runtime.root, pool, bindings, []);
+  const poolState = resourcePoolQueryStatus(runtime.root, pool, bindings, []);
   const owner = custody === undefined ? null : readResourceWorkspaceProof(custody,
     { root: runtime.root, workspace: options.workspace, poolDigest: hash({ pool, bindings }) });
   if (owner && (!consoleStorage || !matchesWorkspaceProofStorage(owner, consoleStorage))) fail('Workspace state changed during setup');
@@ -125,7 +125,7 @@ function capture(input: Options, internal = false, custody?: ResourceWorkspacePr
   if (!owner?.lockPaths.includes(join(runtime.root, '.resource-quota-refresh.lock')) &&
     present(join(runtime.root, '.resource-quota-refresh.lock'))) holds.push('quota-ownership-present');
   if (!owner?.metadataPending && present(join(runtime.root, '.resource-quota-refresh-pending.json'))) holds.push('quota-work-unresolved');
-  if (poolState.attempts.some(row => row.status === 'uncertain' || row.status === 'reserved' && !owner?.ownsReceipt(row))) holds.push('resource-work-unresolved');
+  if (poolState.receipts.unresolved().some(row => row.status === 'uncertain' || row.status === 'reserved' && !owner?.ownsReceipt(row))) holds.push('resource-work-unresolved');
   const completed = present(paths.receipt);
   if (!internal && !completed) {
     if (present(join(runtime.root, SETUP_LOCK))) fail('Setup publication ownership unavailable');

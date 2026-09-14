@@ -8,7 +8,7 @@ import { fsyncDirectory } from './durability.js';
 import { writePrivateFileAtomically } from './private-file-write.js';
 import { readStableRegularFile } from './stable-file-read.js';
 import { assurePrivateStoragePath } from './private-storage.js';
-import { captureOrderedImmutableIndexRoot, countOrderedImmutableIndex, lookupOrderedImmutableIndex, pageOrderedImmutableIndex,
+import { captureOrderedImmutableIndexRoot, countOrderedImmutableIndex, lookupOrderedImmutableIndex, pageOrderedImmutableIndex, selectOrderedImmutableIndex,
   planOrderedImmutableIndexInsert, ORDERED_IMMUTABLE_INDEX_NODE_BYTES, OrderedImmutableIndexError,
   type OrderedImmutableIndexEntry, type OrderedImmutableIndexRoot, type OrderedImmutableIndexRange,
   type OrderedImmutableIndexPageOptions } from './ordered-immutable-index.js';
@@ -48,6 +48,7 @@ function present(value: string): boolean {
 export interface OrderedImmutableIndexStore {
   lookup(root: OrderedImmutableIndexRoot, key: string): ReturnType<typeof lookupOrderedImmutableIndex>;
   count(root: OrderedImmutableIndexRoot, range: OrderedImmutableIndexRange): number;
+  select(root: OrderedImmutableIndexRoot, rank: number, range?: OrderedImmutableIndexRange): OrderedImmutableIndexEntry | null;
   page(root: OrderedImmutableIndexRoot, options: OrderedImmutableIndexPageOptions): ReturnType<typeof pageOrderedImmutableIndex>;
   /** Return only after NEW reachable nodes are durable; caller still owns root CAS. */
   stage(root: OrderedImmutableIndexRoot, entry: OrderedImmutableIndexEntry, options: { guard(): void }):
@@ -88,6 +89,7 @@ export function createOrderedImmutableIndexStore(value: { root: string; anchorPa
   return {
     lookup: (commitment, key) => inspect(() => lookupOrderedImmutableIndex(commitment, key, read)),
     count: (commitment, range) => inspect(() => countOrderedImmutableIndex(commitment, range, read)),
+    select: (commitment, rank, range) => inspect(() => selectOrderedImmutableIndex(commitment, rank, read, range)),
     page: (commitment, options) => inspect(() => pageOrderedImmutableIndex(commitment, options, read)),
     stage(commitment, added, value) {
       const options = fields(value, ['guard']);
