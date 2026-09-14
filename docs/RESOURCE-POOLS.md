@@ -3256,6 +3256,30 @@ enrollment, dispatch tasks or activate schema 3 in the runtime. Interrupted
 staging leaves the source ledger unchanged; the same source and selection can
 be retried. A changed captured key/root or a failed host guard refuses staging.
 
+Before returning a candidate, staging now checks full-header settlement capacity
+and proves the complete logical receipt set is unchanged. The capacity envelope
+includes the certificate, header wrapper, one persisted newline, future results
+for every reservation and the bounded quota inventory. It shares the existing
+runtime sizing model; a header that fits now but cannot hold those results is
+refused before publication. This is not a new post-execution settlement gate.
+
+`compareResourcePoolStorageReceipts` compares authentic captured views for the
+same ledger root, pool ID and explicit archive-key enrollment. It returns sorted
+receipt IDs with before/after payload commitments, exact equality and whether
+all prior receipts are preserved unchanged. Hot-to-cold movement produces no
+logical change; unknown usage remains distinct from measured zero. Policies,
+configuration history and source-file freshness require separate caller checks.
+
+Comparison skips equal immutable subtrees and reads changed receipt IDs, rather
+than loading lifetime history into an array. Callers supply `maxNodes` (1–4,096)
+and `maxChanges` (0–4,096); the latter limits **logical** changes, so zero permits
+pure compaction. Cold-index reconciliation independently allows up to 4,096
+physical changes. Exhausting either proof budget refuses comparison, never
+returns partial equality or a partial diff. These are per-call work limits, not
+lifetime receipt limits. `nodesRead` counts unique comparison-index nodes only,
+not certificate, custody or payload I/O. Equal commitments do not attest the
+availability of every unread historical file.
+
 Storage-view `isCurrent()` checks captured archive/key custody and visited
 evidence only. The runtime must still check the exact active header and writer
 ownership at publication, budget the **whole** header for future settlement,

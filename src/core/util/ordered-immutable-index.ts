@@ -11,6 +11,8 @@ export interface OrderedImmutableIndexRoot { schemaVersion: 1; nodeDigest: strin
 export interface OrderedImmutableIndexEntry { key: string; valueDigest: string }
 export interface OrderedImmutableIndexRange { gt?: string; lt?: string }
 export interface OrderedImmutableIndexPageOptions extends OrderedImmutableIndexRange { limit?: number }
+export interface OrderedImmutableIndexComparisonOptions { maxNodes: number; maxChanges: number }
+export interface OrderedImmutableIndexChange { key: string; beforeDigest: string | null; afterDigest: string | null }
 export interface OrderedImmutableIndexNode { nodeDigest: string; bytes: string }
 export type OrderedImmutableIndexNodeReader = (nodeDigest: string) => string;
 interface Reference { nodeDigest: string; minKey: string; maxKey: string; count: number; height: number }
@@ -18,8 +20,8 @@ interface Leaf { schemaVersion: 1; height: 0; entries: OrderedImmutableIndexEntr
 interface Branch { schemaVersion: 1; height: number; children: Reference[] }
 type Node = Leaf | Branch;
 export class OrderedImmutableIndexError extends Error {
-  constructor(readonly code: 'INVALID_INPUT' | 'CONFLICT' | 'UNAVAILABLE') {
-    super(code === 'INVALID_INPUT' ? 'Invalid ordered index input' : code === 'CONFLICT' ? 'Ordered index identity conflict' : 'Ordered index evidence unavailable');
+  constructor(readonly code: 'INVALID_INPUT' | 'CONFLICT' | 'UNAVAILABLE' | 'BUDGET_EXCEEDED') {
+    super(code === 'INVALID_INPUT' ? 'Invalid ordered index input' : code === 'CONFLICT' ? 'Ordered index identity conflict' : code === 'BUDGET_EXCEEDED' ? 'Ordered index comparison budget exceeded' : 'Ordered index evidence unavailable');
     this.name = 'OrderedImmutableIndexError';
   }
 }
@@ -180,6 +182,77 @@ export function lookupManyOrderedImmutableIndex(rootValue: OrderedImmutableIndex
   const root = captureOrderedImmutableIndexRoot(rootValue); const keys = captureOrderedImmutableIndexLookupKeys(keysValue);
   const load = reader(readNode);
   return keys.map(wanted => lookup(root, wanted, load));
+}
+export function captureOrderedImmutableIndexComparisonOptions(value: unknown): OrderedImmutableIndexComparisonOptions {
+  const fields = record(value, ['maxNodes', 'maxChanges']);
+  for (const name of ['maxNodes', 'maxChanges'] as const) {
+    if (typeof fields[name] !== 'number' || !Number.isInteger(fields[name]) || fields[name] < (name === 'maxNodes' ? 1 : 0) || fields[name] > 4096) return fail();
+  }
+  return { maxNodes: fields.maxNodes as number, maxChanges: fields.maxChanges as number };
+}
+/** Exact logical comparison of caller-pinned commitments, not authority or proof
+ * that unread equal subtrees remain available. Budgets never yield partial success.
+ * At most4096 unique32KiB node bodies are cached, only for this invocation. */
+export function compareOrderedImmutableIndexes(beforeValue: OrderedImmutableIndexRoot, afterValue: OrderedImmutableIndexRoot,
+  optionsValue: OrderedImmutableIndexComparisonOptions, readNode: OrderedImmutableIndexNodeReader):
+  { equal: boolean; preservesBefore: boolean; changes: OrderedImmutableIndexChange[]; nodesRead: number; skippedSubtrees: number } {
+  const before = captureOrderedImmutableIndexRoot(beforeValue); const after = captureOrderedImmutableIndexRoot(afterValue);
+  const options = captureOrderedImmutableIndexComparisonOptions(optionsValue); const read = reader(readNode);
+  const visited = new Set<string>(); let skippedSubtrees = 0;
+  function load(ref: Reference, isRoot: boolean): Node {
+    if (!visited.has(ref.nodeDigest)) {
+      if (visited.size >= options.maxNodes) return fail('BUDGET_EXCEEDED');
+      visited.add(ref.nodeDigest);
+    }
+    return read(ref, isRoot);
+  }
+  type Token = { ref: Reference; isRoot: boolean } | { entry: OrderedImmutableIndexEntry };
+  function initial(root: OrderedImmutableIndexRoot): Token[] {
+    if (root.nodeDigest === null) return [];
+    // Root bounds come from its verified bytes, not caller-supplied metadata.
+    if (!visited.has(root.nodeDigest)) {
+      if (visited.size >= options.maxNodes) return fail('BUDGET_EXCEEDED');
+      visited.add(root.nodeDigest);
+    }
+    const node = read({ ...root, nodeDigest: root.nodeDigest }, true);
+    return [{ ref: summarize(node, root.nodeDigest), isRoot: true }];
+  }
+  const left = initial(before); const right = initial(after); const changes: OrderedImmutableIndexChange[] = [];
+  const minimum = (token: Token) => 'ref' in token ? token.ref.minKey : token.entry.key;
+  const maximum = (token: Token) => 'ref' in token ? token.ref.maxKey : token.entry.key;
+  function expand(stack: Token[]): void {
+    const token = stack.pop()!;
+    if (!('ref' in token)) return fail('UNAVAILABLE');
+    const node = load(token.ref, token.isRoot);
+    const children: Token[] = 'entries' in node ? node.entries.map(entry => ({ entry })) : node.children.map(ref => ({ ref, isRoot: false }));
+    stack.push(...children.reverse());
+  }
+  function changed(key: string, beforeDigest: string | null, afterDigest: string | null): void {
+    if (changes.length >= options.maxChanges) return fail('BUDGET_EXCEEDED');
+    changes.push({ key, beforeDigest, afterDigest });
+  }
+  while (left.length || right.length) {
+    const a = left.at(-1); const b = right.at(-1);
+    if (a && b && 'ref' in a && 'ref' in b && a.ref.nodeDigest === b.ref.nodeDigest &&
+      a.ref.minKey === b.ref.minKey && a.ref.maxKey === b.ref.maxKey && a.ref.count === b.ref.count && a.ref.height === b.ref.height) {
+      // If bytes are already cached, still validate both reference contexts.
+      if (visited.has(a.ref.nodeDigest)) { load(a.ref, a.isRoot); load(b.ref, b.isRoot); }
+      left.pop(); right.pop(); skippedSubtrees++; continue;
+    }
+    if (a && 'ref' in a && (!b || maximum(a) < minimum(b))) { expand(left); continue; }
+    if (b && 'ref' in b && (!a || maximum(b) < minimum(a))) { expand(right); continue; }
+    if (a && 'ref' in a && (!b || !('ref' in b) || a.ref.height >= b.ref.height)) { expand(left); continue; }
+    if (b && 'ref' in b) { expand(right); continue; }
+    if (a && !('entry' in a) || b && !('entry' in b)) return fail('UNAVAILABLE');
+    if (a && (!b || a.entry.key < b.entry.key)) { changed(a.entry.key, a.entry.valueDigest, null); left.pop(); }
+    else if (b && (!a || b.entry.key < a.entry.key)) { changed(b.entry.key, null, b.entry.valueDigest); right.pop(); }
+    else if (a && b) {
+      if (a.entry.valueDigest !== b.entry.valueDigest) changed(a.entry.key, a.entry.valueDigest, b.entry.valueDigest);
+      left.pop(); right.pop();
+    }
+  }
+  return { equal: changes.length === 0, preservesBefore: changes.every(change => change.beforeDigest === null), changes,
+    nodesRead: visited.size, skippedSubtrees };
 }
 function outside(ref: Reference, selected: OrderedImmutableIndexRange): boolean { return selected.gt !== undefined && ref.maxKey <= selected.gt || selected.lt !== undefined && ref.minKey >= selected.lt; }
 function inside(ref: Reference, selected: OrderedImmutableIndexRange): boolean { return (selected.gt === undefined || ref.minKey > selected.gt) && (selected.lt === undefined || ref.maxKey < selected.lt); }

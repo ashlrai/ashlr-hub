@@ -22,6 +22,11 @@ const MAX_PAYLOAD_BYTES = 64 * 1024;
 const MAX_DATE = 8_640_000_000_000_000;
 const DATE_OFFSET = 8_640_000_000_000_000n;
 const TERMINAL = new Set(['completed', 'failed', 'timed-out', 'cancelled']);
+/** Canonical receipt commitment shared by archive derivation and logical history
+ * comparison. Hashing alone neither validates a receipt nor grants authority. */
+export function resourcePoolReceiptArchivePayloadDigest(receipt: ResourceTaskReceipt): string {
+  return createHash('sha256').update(`resource-terminal-receipt-v1\n${captureResourcePoolStateJson(receipt)}\n`).digest('hex');
+}
 export interface ResourcePoolReceiptArchiveRoot {
   schemaVersion: 1;
   byId: OrderedImmutableIndexRoot;
@@ -120,7 +125,7 @@ export function createResourcePoolReceiptArchive(input: { root: string; anchorPa
     return receipt;
   }
   function payloadBytes(receipt: ResourceTaskReceipt): string { return captureResourcePoolStateJson(receipt) + '\n'; }
-  const payloadDigest = (receipt: ResourceTaskReceipt) => hash(`resource-terminal-receipt-v1\n${payloadBytes(receipt)}`);
+  const payloadDigest = resourcePoolReceiptArchivePayloadDigest;
   function payloadStore(expected: string): ImmutablePrivateRecordStoreConfig<ResourceTaskReceipt> {
     if (!/^[a-f0-9]{64}$/.test(expected)) return fail();
     const anchorPath = join(config.root, 'payloads', expected.slice(0, 2));

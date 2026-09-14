@@ -8,10 +8,10 @@ import { fsyncDirectory } from './durability.js';
 import { writePrivateFileAtomically } from './private-file-write.js';
 import { readStableRegularFile } from './stable-file-read.js';
 import { assurePrivateStoragePath } from './private-storage.js';
-import { captureOrderedImmutableIndexRoot, captureOrderedImmutableIndexLookupKeys, countOrderedImmutableIndex, lookupOrderedImmutableIndex, lookupManyOrderedImmutableIndex, pageOrderedImmutableIndex, selectOrderedImmutableIndex,
+import { captureOrderedImmutableIndexRoot, captureOrderedImmutableIndexLookupKeys, captureOrderedImmutableIndexComparisonOptions, compareOrderedImmutableIndexes, countOrderedImmutableIndex, lookupOrderedImmutableIndex, lookupManyOrderedImmutableIndex, pageOrderedImmutableIndex, selectOrderedImmutableIndex,
   planOrderedImmutableIndexInsert, ORDERED_IMMUTABLE_INDEX_NODE_BYTES, OrderedImmutableIndexError,
   type OrderedImmutableIndexEntry, type OrderedImmutableIndexRoot, type OrderedImmutableIndexRange,
-  type OrderedImmutableIndexPageOptions } from './ordered-immutable-index.js';
+  type OrderedImmutableIndexPageOptions, type OrderedImmutableIndexComparisonOptions } from './ordered-immutable-index.js';
 
 function unavailable(): never { throw new OrderedImmutableIndexError('UNAVAILABLE'); }
 function fields(value: unknown, names: readonly string[]): Record<string, unknown> {
@@ -48,6 +48,7 @@ function present(value: string): boolean {
 export interface OrderedImmutableIndexStore {
   lookup(root: OrderedImmutableIndexRoot, key: string): ReturnType<typeof lookupOrderedImmutableIndex>;
   lookupMany(root: OrderedImmutableIndexRoot, keys: readonly string[]): ReturnType<typeof lookupManyOrderedImmutableIndex>;
+  compare(before: OrderedImmutableIndexRoot, after: OrderedImmutableIndexRoot, options: OrderedImmutableIndexComparisonOptions): ReturnType<typeof compareOrderedImmutableIndexes>;
   count(root: OrderedImmutableIndexRoot, range: OrderedImmutableIndexRange): number;
   select(root: OrderedImmutableIndexRoot, rank: number, range?: OrderedImmutableIndexRange): OrderedImmutableIndexEntry | null;
   page(root: OrderedImmutableIndexRoot, options: OrderedImmutableIndexPageOptions): ReturnType<typeof pageOrderedImmutableIndex>;
@@ -88,6 +89,11 @@ export function createOrderedImmutableIndexStore(value: { root: string; anchorPa
   }
   function inspect<T>(action: () => T): T { bound(); const result = action(); bound(); return result; }
   return {
+    compare(before, after, options) {
+      const left = captureOrderedImmutableIndexRoot(before); const right = captureOrderedImmutableIndexRoot(after);
+      const budgets = captureOrderedImmutableIndexComparisonOptions(options);
+      return inspect(() => compareOrderedImmutableIndexes(left, right, budgets, read));
+    },
     lookup: (commitment, key) => inspect(() => lookupOrderedImmutableIndex(commitment, key, read)),
     lookupMany(commitment, keys) {
       const captured = captureOrderedImmutableIndexRoot(commitment); const requested = captureOrderedImmutableIndexLookupKeys(keys);

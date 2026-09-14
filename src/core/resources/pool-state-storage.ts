@@ -8,10 +8,14 @@ import { resourcePoolConfigSnapshot } from './pool-evolution-policy.js';
 import { captureResourcePoolStateJson } from './pool-state-capture.js';
 import { createResourcePoolReceiptQuery, type ResourcePoolReceiptQuery } from './pool-receipt-query.js';
 import { createArchivedResourcePoolReceiptQuery } from './pool-archived-receipt-query.js';
-import { createResourcePoolReceiptArchive } from './pool-receipt-archive.js';
+import { createResourcePoolReceiptArchive, resourcePoolReceiptArchivePayloadDigest } from './pool-receipt-archive.js';
 import { createResourcePoolReceiptArchiveCertifier, type ResourcePoolReceiptArchiveCertificate } from './pool-receipt-archive-certificate.js';
 import type { ResourcePool } from './pool-policy.js';
 import type { ResourceBinding } from './worker.js';
+import { resourcePoolSettlementEnvelopeBytes } from './pool-settlement-headroom.js';
+import { captureOrderedImmutableIndexComparisonOptions, compareOrderedImmutableIndexes, emptyOrderedImmutableIndexRoot,
+  type OrderedImmutableIndexComparisonOptions } from '../util/ordered-immutable-index.js';
+import { createOrderedImmutableIndexStore } from '../util/ordered-immutable-index-store.js';
 
 const MAX_BYTES = 4 * 1024 * 1024;
 const TERMINAL = new Set(['completed', 'failed', 'timed-out', 'cancelled']);
@@ -121,6 +125,86 @@ export function readResourcePoolStorage(value: unknown, settings: ResourcePoolSt
   } catch { return fail(); }
 }
 
+/** Full header envelope, including its certificate and one trailing newline.
+ * Reads private captured data, never caller-mutated view fields or serializers.
+ * Check each prospective header before admission/compaction publication; this
+ * check is not a new gate to reject settlement after worker execution. */
+export function requireResourcePoolStorageSettlementHeadroom(view: ResourcePoolStorageView): void {
+  const captured = captures.get(view);
+  if (!captured || !captured.current()) return fail();
+  const source = JSON.parse(captured.sourceJson) as ResourcePoolStoredState;
+  const hot = source.schemaVersion === 3 ? source.hotState : source;
+  const overhead = Buffer.byteLength(captured.sourceJson) - Buffer.byteLength(encode(hot));
+  const projectedBytes = overhead + resourcePoolSettlementEnvelopeBytes(hot, captured.options.pool);
+  if (!Number.isSafeInteger(projectedBytes) || overhead < 0 || projectedBytes > MAX_BYTES) {
+    throw new Error('Resource ledger settlement capacity reached');
+  }
+  if (!captured.current()) return fail();
+}
+
+/** Exact logical receipt-set delta across two captured snapshots, irrespective of
+ * hot/cold placement. This does NOT compare policies, grant dispatch authority,
+ * establish source-file freshness or prove availability of unread equal subtrees.
+ * maxChanges bounds the final logical delta; cold reconciliation has a separate
+ * 4096-change work ceiling. Exhaustion fails closed, never returns a partial diff.
+ * nodesRead counts only unique index-comparison nodes, not custody/payload I/O. */
+export function compareResourcePoolStorageReceipts(before: ResourcePoolStorageView, after: ResourcePoolStorageView,
+  limits: OrderedImmutableIndexComparisonOptions): {
+    equal: boolean; preservesBefore: boolean;
+    changes: Array<{ id: string; beforeDigest: string | null; afterDigest: string | null }>;
+    nodesRead: number; skippedSubtrees: number;
+  } {
+  try {
+    const budgets = captureOrderedImmutableIndexComparisonOptions(limits);
+    const left = captures.get(before); const right = captures.get(after);
+    if (!left || !right || left.options.root !== right.options.root || left.options.pool.id !== right.options.pool.id ||
+      left.options.archiveKeyFile !== right.options.archiveKeyFile) return fail();
+    const current = () => { if (!left.current() || !right.current()) fail(); };
+    current();
+    const leftSource = JSON.parse(left.sourceJson) as ResourcePoolStoredState;
+    const rightSource = JSON.parse(right.sourceJson) as ResourcePoolStoredState;
+    const leftRoot = leftSource.schemaVersion === 3 ? leftSource.archiveCertificate.archiveRoot.byId : emptyOrderedImmutableIndexRoot();
+    const rightRoot = rightSource.schemaVersion === 3 ? rightSource.archiveCertificate.archiveRoot.byId : emptyOrderedImmutableIndexRoot();
+    const coldLimits = { maxNodes: budgets.maxNodes, maxChanges: 4096 };
+    const cold = leftRoot.nodeDigest === null && rightRoot.nodeDigest === null
+      ? compareOrderedImmutableIndexes(leftRoot, rightRoot, coldLimits, () => fail())
+      : createOrderedImmutableIndexStore({ root: join(left.options.root, 'receipt-archive', 'index'),
+        anchorPath: join(left.options.root, 'receipt-archive') }).compare(leftRoot, rightRoot, coldLimits);
+    current();
+    const hotDigests = (source: ResourcePoolStoredState) => new Map(
+      (source.schemaVersion === 3 ? source.hotState : source).attempts.map(row => [row.id, resourcePoolReceiptArchivePayloadDigest(row)]));
+    const leftHot = hotDigests(leftSource); const rightHot = hotDigests(rightSource);
+    const ids = new Set<string>();
+    for (const row of cold.changes) {
+      const id = Buffer.from(row.key, 'hex').toString('utf8');
+      if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id) || Buffer.from(id, 'utf8').toString('hex') !== row.key) return fail();
+      ids.add(id);
+    }
+    for (const [id, digest] of leftHot) if (rightHot.get(id) !== digest) ids.add(id);
+    for (const [id, digest] of rightHot) if (leftHot.get(id) !== digest) ids.add(id);
+    const ordered = [...ids].sort();
+    const changes: Array<{ id: string; beforeDigest: string | null; afterDigest: string | null }> = [];
+    // Queries retain their original archive/key custody. Only changed IDs are
+    // read; unchanged archive history is never materialized into the hot ledger.
+    for (let offset = 0; offset < ordered.length; offset += 4096) {
+      const batch = ordered.slice(offset, offset + 4096);
+      const oldRows = before.receipts.getMany(batch); const newRows = after.receipts.getMany(batch);
+      for (let index = 0; index < batch.length; index++) {
+        const oldRow = oldRows[index]!; const newRow = newRows[index]!;
+        const beforeDigest = oldRow.status === 'found' ? resourcePoolReceiptArchivePayloadDigest(oldRow.receipt) : null;
+        const afterDigest = newRow.status === 'found' ? resourcePoolReceiptArchivePayloadDigest(newRow.receipt) : null;
+        if (beforeDigest !== afterDigest) {
+          if (changes.length >= budgets.maxChanges) return fail();
+          changes.push({ id: batch[index]!, beforeDigest, afterDigest });
+        }
+      }
+    }
+    current();
+    return { equal: changes.length === 0, preservesBefore: changes.every(row => row.beforeDigest === null),
+      changes, nodesRead: cold.nodesRead, skippedSubtrees: cold.skippedSubtrees };
+  } catch { return fail(); }
+}
+
 /** Stage at most eight exact hot terminal rows. Unselected rows, including
  * unfinished work, remain byte-equivalent and in order. The returned header is
  * NOT installed. Host must recheck source/lease and settlement headroom at CAS. */
@@ -167,10 +251,12 @@ export function stageResourcePoolReceiptCompaction(view: ResourcePoolStorageView
     guard();
     certifier.verify(certificate);
     const checked = readResourcePoolStorage(candidate, captured.options);
+    requireResourcePoolStorageSettlementHeadroom(checked);
     for (const row of receipts) {
       const found = checked.receipts.get(row.id);
       if (found.status !== 'found' || encode(found.receipt) !== encode(row)) return fail();
     }
+    if (!compareResourcePoolStorageReceipts(original, checked, { maxNodes: 4096, maxChanges: 0 }).equal) return fail();
     certifier.verify(certificate);
     if (!captured.current() || !checked.isCurrent()) return fail();
     return structuredClone(candidate);

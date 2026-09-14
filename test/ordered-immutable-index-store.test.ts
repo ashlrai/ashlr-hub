@@ -66,6 +66,35 @@ function seed(rootPath: string, total: number): OrderedImmutableIndexRoot {
 }
 
 describe.skipIf(process.platform === 'win32')('private ordered index staging and cold reads', () => {
+  it('compares cold committed trees through a split with unique reads and fresh subsequent custody', () => {
+    const f = fixture(); const old = seed(f.root, 32);
+    const next = f.store.stage(old, { key: key(32), valueDigest: valueDigest(32) }, { guard() {} }).root;
+    hooks.readCalls = [];
+    const result = f.store.compare(old, next, { maxNodes: 4, maxChanges: 1 });
+    expect(result).toMatchObject({ equal: false, preservesBefore: true, nodesRead: 4,
+      changes: [{ key: key(32), beforeDigest: null, afterDigest: valueDigest(32) }] });
+    expect(hooks.readCalls).toHaveLength(4); expect(new Set(hooks.readCalls).size).toBe(4);
+    expect(() => f.store.compare(old, next, { maxNodes: 3, maxChanges: 1 })).toThrow('comparison budget exceeded');
+    const child = JSON.parse(readFileSync(nodePath(f.root, next.nodeDigest!), 'utf8')).children[1].nodeDigest as string;
+    writeFileSync(nodePath(f.root, child), '{}\n');
+    expect(() => f.store.compare(old, next, { maxNodes: 4, maxChanges: 1 })).toThrow('evidence unavailable');
+    hooks.denyAssurancePath = f.root;
+    expect(() => f.store.compare(old, old, { maxNodes: 1, maxChanges: 0 })).toThrow('evidence unavailable');
+  });
+  it('captures comparison roots and budgets before ACL callbacks and refuses subsequent custody loss', () => {
+    const f = fixture(); const pinned = seed(f.root, 1); const before = { ...pinned }; const after = { ...pinned };
+    const budgets = { maxNodes: 1, maxChanges: 0 }; const getter = vi.fn(); let changed = false;
+    hooks.onAssurance = () => {
+      if (!changed) { changed = true; before.count = 99; Object.defineProperty(after, 'count', { get: getter }); budgets.maxNodes = 0; }
+    };
+    expect(f.store.compare(before, after, budgets)).toMatchObject({ equal: true }); expect(getter).not.toHaveBeenCalled();
+    const adapter = vi.fn(); hooks.onAssurance = adapter;
+    expect(() => f.store.compare(pinned, pinned, { maxNodes: 0, maxChanges: 0 })).toThrow('Invalid ordered index input');
+    expect(adapter).not.toHaveBeenCalled();
+    // Private-storage denial on a later action must not use prior cached custody.
+    hooks.onAssurance = null; hooks.denyAssurance = true;
+    expect(() => f.store.compare(emptyOrderedImmutableIndexRoot(), emptyOrderedImmutableIndexRoot(), { maxNodes: 1, maxChanges: 0 })).toThrow('evidence unavailable');
+  });
   it('answers4096 lookups with one stable read per visited node and no cross-call cache', () => {
     const f = fixture(); const root = seed(f.root, 1); const requested = Array.from({ length: 4096 }, (_, index) => index % 2 ? 'absent' : key(0));
     expect(f.store.lookupMany(root, requested)).toEqual(requested.map(value => value === key(0) ? { found: true, valueDigest: valueDigest(0) } : { found: false }));

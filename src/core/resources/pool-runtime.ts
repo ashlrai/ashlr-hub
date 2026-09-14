@@ -16,8 +16,9 @@ import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { MAX_RESOURCE_OBSERVATION_WINDOWS, RESOURCE_OBSERVATION_OVERFLOW, planResourceAssignment, validateResourceObservations, validateResourcePool,
   type ResourceAssignmentPlan, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask, type ResourceWorkerResult } from './worker.js';
-import { resourceUsageScopeForProvider, validResourceExecutionDuration } from './performance.js';
-import { RESOURCE_NATIVE_PROCESS_SIGNALS } from './native-diagnostics.js';
+import { validResourceExecutionDuration } from './performance.js';
+import { requireResourcePoolSettlementHeadroom } from './pool-settlement-headroom.js';
+export { requireResourcePoolSettlementHeadroom } from './pool-settlement-headroom.js';
 import { checkedResourceTaskReceipt, type ResourceTaskReceipt } from './pool-receipt-codec.js';
 import { createResourcePoolReceiptQuery, type ResourcePoolReceiptQuery } from './pool-receipt-query.js';
 export type { ResourceTaskReceipt } from './pool-receipt-codec.js';
@@ -333,37 +334,6 @@ function writeState(root: string, state: PoolState, prepublish: () => void): voi
       if (identity && remaining.dev === identity.dev && remaining.ino === identity.ino &&
         remaining.isFile() && !remaining.isSymbolicLink() && remaining.nlink === 1n && remaining.uid === identity.uid) unlinkSync(temporary);
     } catch { /* Missing or uncertain temporary custody is not cleanup authority. */ }
-  }
-}
-
-/** Budget future evidence before contact; never turn settlement into another admission gate. */
-export function requireResourcePoolSettlementHeadroom(state: ResourcePoolState, pool: ResourcePool): void {
-  // A nonnegative IEEE-754 value can need 17 significant digits plus the seven
-  // characters preceding them at the smallest non-exponential decimal scale.
-  // This actual valid sample has that maximal JSON width (24 characters).
-  const widestNumber = 1.0000000000000002e-6;
-  const widestDate = new Date(8_640_000_000_000_000).toISOString();
-  const quotaDate = '9999-12-31T23:59:59.999Z';
-  const longestSignal = RESOURCE_NATIVE_PROCESS_SIGNALS.reduce((longest, signal) => signal.length > longest.length ? signal : longest);
-  const attempts = state.attempts.map((receipt) => {
-    if (receipt.status !== 'reserved') return receipt;
-    const provider = pool.workers.find((worker) => worker.id === receipt.workerId)!.provider;
-    return { ...receipt, status: 'completed', finishedAt: widestDate, outputDigest: '0'.repeat(64),
-      inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER,
-      reason: 'x'.repeat(120), execution: { schemaVersion: 1, scope: 'worker-execution',
-        durationMs: widestNumber, usageScope: resourceUsageScopeForProvider(provider) },
-      ...(provider === 'local' ? {} : { nativeProcess: { schemaVersion: 1, scope: 'native-process',
-        exitCode: null, signal: longestSignal, stderrPresent: false, outputTruncated: false } }) };
-  });
-  // Other admissions can persist quota refreshes while these tasks run. Reserve
-  // the bounded enrollment inventory as well, including native result events.
-  // These are byte envelopes, not accepted observations or fabricated receipts.
-  const observations = pool.workers.map((worker) => ({ workerId: worker.id, observedAt: quotaDate,
-    expiresAt: quotaDate, updatedAt: quotaDate, health: 'unavailable', retryAfter: quotaDate,
-    windows: Array.from({ length: MAX_RESOURCE_OBSERVATION_WINDOWS }, (_, index) => ({
-      id: String(index).padStart(64, '0'), usedPercent: widestNumber, resetsAt: quotaDate })) }));
-  if (Buffer.byteLength(canonical({ ...state, attempts, observations }) + '\n') > MAX_STATE_BYTES) {
-    throw new Error('Resource ledger settlement capacity reached');
   }
 }
 

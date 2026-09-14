@@ -11,6 +11,18 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Receipt-history comparison and settlement capacity
+
+- Proves complete logical receipt equality across hot/archive compaction with
+  bounded index comparison, including additions, changes and removals.
+- Skips equal immutable subtrees; proof-budget exhaustion refuses comparison
+  without returning partial success or treating a recent page as full history.
+- Shares the runtime settlement-sizing model with full versioned-header checks,
+  including certificate overhead and future in-flight results. Staging refuses
+  candidates without sufficient capacity and verifies unchanged logical history.
+- Keeps candidate preparation separate from live header selection, provider
+  execution and migration of full-history consumers.
+
 ### Incremental receipt storage
 
 - Refuses missing-ledger initialization when fixed archive evidence remains,

@@ -7,7 +7,7 @@ import { dirname, isAbsolute, resolve } from 'node:path';
 import { types } from 'node:util';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { readStableRegularFile } from '../util/stable-file-read.js';
-import { createResourcePoolReceiptArchive, emptyResourcePoolReceiptArchiveRoot, type ResourcePoolReceiptArchiveRoot } from './pool-receipt-archive.js';
+import { createResourcePoolReceiptArchive, emptyResourcePoolReceiptArchiveRoot, resourcePoolReceiptArchivePayloadDigest as payloadDigest, type ResourcePoolReceiptArchiveRoot } from './pool-receipt-archive.js';
 import { checkedResourceTaskReceipt, type ResourceTaskReceipt } from './pool-receipt-codec.js';
 import { validateResourcePoolConfigHistory } from './pool-evolution-policy.js';
 import type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
@@ -63,9 +63,6 @@ function directory(path: string): BigIntStats {
 function path(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 4096 && isAbsolute(value) && resolve(value) === value &&
     ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
-}
-function payloadDigest(receipt: ResourceTaskReceipt): string {
-  return hash(`resource-terminal-receipt-v1\n${encoded(receipt)}\n`);
 }
 
 /** keyFile must already exist directly inside the private ledger anchor, beside

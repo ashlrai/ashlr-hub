@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
-import { captureOrderedImmutableIndexRoot, countOrderedImmutableIndex, emptyOrderedImmutableIndexRoot, lookupOrderedImmutableIndex, lookupManyOrderedImmutableIndex,
+import { captureOrderedImmutableIndexRoot, compareOrderedImmutableIndexes, countOrderedImmutableIndex, emptyOrderedImmutableIndexRoot, lookupOrderedImmutableIndex, lookupManyOrderedImmutableIndex,
   pageOrderedImmutableIndex, selectOrderedImmutableIndex, planOrderedImmutableIndexInsert, ORDERED_IMMUTABLE_INDEX_NODE_BYTES } from '../src/core/util/ordered-immutable-index.js';
 
 const key = (index: number) => `id-${String(index).padStart(6, '0')}`;
@@ -19,6 +19,72 @@ function fixture(total: number, reverse = false) {
 }
 
 describe('immutable ordered commitment index', () => {
+  it('compares logically equal maps across unrelated split shapes', () => {
+    const a = fixture(600); const b = fixture(600, true); expect(a.root.nodeDigest).not.toBe(b.root.nodeDigest);
+    const read = vi.fn((hash: string) => a.nodes.get(hash) ?? b.nodes.get(hash)!);
+    const result = compareOrderedImmutableIndexes(a.root, b.root, { maxNodes: 4096, maxChanges: 0 }, read);
+    expect(result).toMatchObject({ equal: true, preservesBefore: true, changes: [] });
+    expect(read.mock.calls.length).toBe(result.nodesRead); expect(new Set(read.mock.calls.map(([hash]) => hash)).size).toBe(result.nodesRead);
+  });
+  it.each([32, 528, 4353])('proves bounded extension through splits at size%d and skips shared subtrees', total => {
+    const f = fixture(total); const next = planOrderedImmutableIndexInsert(f.root, { key: key(total), valueDigest: valueDigest(total) }, f.read);
+    for (const node of next.nodes) f.nodes.set(node.nodeDigest, node.bytes);
+    if (total === 32 || total === 528) expect(next.root.height).toBe(f.root.height + 1);
+    f.read.mockClear();
+    const result = compareOrderedImmutableIndexes(f.root, next.root, { maxNodes: 4096, maxChanges: 1 }, f.read);
+    expect(result).toMatchObject({ equal: false, preservesBefore: true, changes: [{ key: key(total), beforeDigest: null, afterDigest: valueDigest(total) }] });
+    if (total > 32) { expect(result.skippedSubtrees).toBeGreaterThan(0); expect(result.nodesRead).toBeLessThan(20); }
+    expect(compareOrderedImmutableIndexes(next.root, f.root, { maxNodes: 4096, maxChanges: 1 }, f.read)).toMatchObject({
+      equal: false, preservesBefore: false, changes: [{ key: key(total), beforeDigest: valueDigest(total), afterDigest: null }],
+    });
+    expect(compareOrderedImmutableIndexes(f.root, next.root, { maxNodes: result.nodesRead, maxChanges: 1 }, f.read)).toEqual(result);
+    expect(() => compareOrderedImmutableIndexes(f.root, next.root, { maxNodes: result.nodesRead - 1, maxChanges: 1 }, f.read)).toThrow('comparison budget exceeded');
+    expect(() => compareOrderedImmutableIndexes(f.root, next.root, { maxNodes: 4096, maxChanges: 0 }, f.read)).toThrow('comparison budget exceeded');
+  });
+  it('returns complete sorted additions, removals and changed identities, never a truncated diff', () => {
+    const f = fixture(16); const original = JSON.parse(f.nodes.get(f.root.nodeDigest!)!);
+    original.entries.shift(); original.entries[1].valueDigest = valueDigest(900);
+    original.entries.push({ key: key(99), valueDigest: valueDigest(99) });
+    const bytes = JSON.stringify(original) + '\n'; const next = { ...f.root, nodeDigest: digestNode(bytes) }; f.nodes.set(next.nodeDigest, bytes);
+    const result = compareOrderedImmutableIndexes(f.root, next, { maxNodes: 2, maxChanges: 3 }, f.read);
+    expect(result).toMatchObject({ equal: false, preservesBefore: false, changes: [
+      { key: key(0), beforeDigest: valueDigest(0), afterDigest: null },
+      { key: key(2), beforeDigest: valueDigest(2), afterDigest: valueDigest(900) },
+      { key: key(99), beforeDigest: null, afterDigest: valueDigest(99) },
+    ] });
+    expect(() => compareOrderedImmutableIndexes(f.root, next, { maxNodes: 2, maxChanges: 2 }, f.read)).toThrow('comparison budget exceeded');
+  });
+  it('handles empty genesis/removal and still validates equal nonempty root bytes', () => {
+    const f = fixture(1); const empty = emptyOrderedImmutableIndexRoot();
+    expect(compareOrderedImmutableIndexes(empty, empty, { maxNodes: 1, maxChanges: 0 }, f.read)).toEqual({ equal: true, preservesBefore: true, changes: [], nodesRead: 0, skippedSubtrees: 0 });
+    expect(compareOrderedImmutableIndexes(empty, f.root, { maxNodes: 1, maxChanges: 1 }, f.read)).toMatchObject({ preservesBefore: true, equal: false });
+    expect(compareOrderedImmutableIndexes(f.root, empty, { maxNodes: 1, maxChanges: 1 }, f.read)).toMatchObject({ preservesBefore: false, equal: false });
+    f.read.mockClear(); expect(compareOrderedImmutableIndexes(f.root, f.root, { maxNodes: 1, maxChanges: 0 }, f.read)).toMatchObject({ equal: true, nodesRead: 1 });
+    expect(f.read).toHaveBeenCalledTimes(1); f.nodes.set(f.root.nodeDigest!, '{}\n');
+    expect(() => compareOrderedImmutableIndexes(f.root, f.root, { maxNodes: 1, maxChanges: 0 }, f.read)).toThrow('evidence unavailable');
+  });
+  it('captures roots and strict comparison budgets before callbacks, rejecting hostile options', () => {
+    const f = fixture(1); const a = { ...f.root }; const b = { ...f.root }; const options = { maxNodes: 1, maxChanges: 0 }; const getter = vi.fn();
+    expect(compareOrderedImmutableIndexes(a, b, options, hash => {
+      a.count = 99; Object.defineProperty(b, 'count', { get: getter }); options.maxNodes = 0; return f.read(hash);
+    })).toMatchObject({ equal: true }); expect(getter).not.toHaveBeenCalled();
+    f.read.mockClear();
+    for (const bad of [null, {}, { maxNodes: 0, maxChanges: 0 }, { maxNodes: 4097, maxChanges: 0 }, { maxNodes: 1, maxChanges: -1 },
+      { maxNodes: 1, maxChanges: 4097 }, { maxNodes: 1.5, maxChanges: 0 }, { maxNodes: 1, maxChanges: 0, extra: 1 },
+      Object.defineProperty({ maxChanges: 0 }, 'maxNodes', { enumerable: true, get: getter }), new Proxy(options, { ownKeys: getter })]) {
+      expect(() => compareOrderedImmutableIndexes(f.root, f.root, bad as never, f.read)).toThrow('Invalid ordered index input');
+    }
+    expect(f.read).not.toHaveBeenCalled(); expect(getter).not.toHaveBeenCalled();
+  });
+  it('does not treat changed reference bounds as equal merely because the digest is cached', () => {
+    const f = fixture(16); const leaf = f.root.nodeDigest!;
+    const bytes = JSON.stringify({ schemaVersion: 1, height: 1, children: [
+      { nodeDigest: leaf, minKey: key(0), maxKey: key(15), count: 16, height: 0 },
+      { nodeDigest: leaf, minKey: key(16), maxKey: key(31), count: 16, height: 0 },
+    ] }) + '\n';
+    const forged = { schemaVersion: 1 as const, nodeDigest: digestNode(bytes), count: 32, height: 1 }; f.nodes.set(forged.nodeDigest, bytes);
+    expect(() => compareOrderedImmutableIndexes(f.root, forged, { maxNodes: 2, maxChanges: 32 }, f.read)).toThrow('evidence unavailable');
+  });
   it('batch lookups read each unique visited node once while preserving order, repeats and exact absence', () => {
     const f = fixture(1200); const keys = Array.from({ length: 4096 }, (_, index) => index % 4 === 0 ? 'absent' : key(index % 1200));
     const expected = keys.map(wanted => lookupOrderedImmutableIndex(f.root, wanted, f.read));

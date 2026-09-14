@@ -169,6 +169,8 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-pool-receipt-archive-certificate.test.ts', // explicit private fixture keys and real archive derivation proofs
   'test/resource-pool-orphaned-archive.test.ts', // real missing-header residue and publication races
   'test/resource-pool-state-storage.test.ts', // signed cold storage plus retained hot receipts and custody checks
+  'test/resource-pool-storage-headroom.test.ts', // full-header settlement capacity and signed compaction fixtures
+  'test/resource-pool-storage-comparison.test.ts', // exact logical hot/cold history comparison and custody drift
   'test/resource-receipt-query-runtime.test.ts', // real receipt queries preserve alias accounting, rollback, cooldown and replay
   'test/ordered-immutable-index-store.test.ts', // private disk staging, cold index reads and interrupted publication recovery
   'test/resource-pool-receipt-archive.test.ts', // real terminal payload/index staging, epoch accounting and interrupted archive recovery
