@@ -12,6 +12,7 @@
  * testable (see diff-parser.test.ts) independent of rendering.
  */
 
+
 export type DiffLineKind = 'context' | 'add' | 'del';
 
 export interface DiffLine {
@@ -101,12 +102,14 @@ function parseFileChunk(chunk: string, index: number): DiffFile {
     const line = lines[i]!;
     const oldMatch = OLD_PATH_RE.exec(line);
     if (oldMatch) {
-      oldPath = oldMatch[2] ? null : stripPathPrefix(oldMatch[1]!);
+      // Preserve paths that start with a/ or b/ but aren't /dev/null
+      oldPath = oldMatch[2] ? null : oldMatch[1];
       continue;
     }
     const newMatch = NEW_PATH_RE.exec(line);
     if (newMatch) {
-      newPath = newMatch[2] ? null : stripPathPrefix(newMatch[1]!);
+      // Preserve paths that start with a/ or b/ but aren't /dev/null
+      newPath = newMatch[2] ? null : newMatch[1];
       bodyStart = i + 1;
       break;
     }
@@ -172,7 +175,7 @@ function parseFileChunk(chunk: string, index: number): DiffFile {
       const raw = lines[i]!;
       if (raw.startsWith('\\')) {
         i++;
-        continue; // "\ No newline at end of file"
+        continue; // "\\ No newline at end of file"
       }
       const marker = raw[0];
       const text = raw.slice(1);
