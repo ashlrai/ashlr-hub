@@ -61,10 +61,6 @@ const OLD_PATH_RE = /^--- (?:a\/(.+)|(\/dev\/null))\s*$/;
 const NEW_PATH_RE = /^\+\+\+ (?:b\/(.+)|(\/dev\/null))\s*$/;
 const HUNK_HEADER_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$/;
 
-function stripPathPrefix(p: string): string {
-  return p.replace(/^[ab]\//, '');
-}
-
 /** Split raw text into per-file chunks: before each `diff --git` line if
  * any are present, otherwise before each `--- ` line. */
 function splitFileChunks(text: string): string[] {
@@ -101,12 +97,12 @@ function parseFileChunk(chunk: string, index: number): DiffFile {
     const line = lines[i]!;
     const oldMatch = OLD_PATH_RE.exec(line);
     if (oldMatch) {
-      oldPath = oldMatch[2] ? null : stripPathPrefix(oldMatch[1]!);
+      oldPath = oldMatch[2] ? null : oldMatch[1];
       continue;
     }
     const newMatch = NEW_PATH_RE.exec(line);
     if (newMatch) {
-      newPath = newMatch[2] ? null : stripPathPrefix(newMatch[1]!);
+      newPath = newMatch[2] ? null : newMatch[1];
       bodyStart = i + 1;
       break;
     }
