@@ -28,7 +28,7 @@ function day(over: Partial<DailyUsage> & { day: string }): DailyUsage {
 }
 
 function series(days: DailyUsage[]): UsageSeries {
-  return { window: '7d', days, generatedAt: null };
+  return { window: '7d', days, generatedAt: null, estimated: true, caveats: [] };
 }
 
 const THREE_DAYS = series([

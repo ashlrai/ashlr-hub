@@ -19,7 +19,7 @@ import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialo
 import { useToast } from '../../../components/primitives/Toast.js';
 import { clearReadSession } from '../../../data/auth-store.js';
 import { ApiError, DispatchDisabledError } from '../../../data/client.js';
-import { useMutationHold, useQuery, useRefetch } from '../../../data/hooks.js';
+import { useMutationHold, useQuery, useRefresh } from '../../../data/hooks.js';
 import { NewChatDialog } from '../NewChatDialog.js';
 import { QuickSwitcher } from '../QuickSwitcher.js';
 import { ResourcesPanel } from '../ResourcesPanel.js';
@@ -49,6 +49,7 @@ import {
   VERSE_RESOURCES,
   VERSE_SIDEBAR,
 } from '../verse-ui-store.js';
+import { forgetComposerMemory } from '../chat/composer-state.js';
 import { forgetVerseSession, setVerseSession, setVerseSessionStatus } from '../verse-store.js';
 import { Workspace } from '../Workspace.js';
 import styles from './ChatSection.module.css';
@@ -77,8 +78,8 @@ function describeError(err: unknown): string {
 export function ChatSection() {
   const bootstrap = useQuery(verseBootstrapQuery);
   const sessionsQuery = useQuery(verseSessionsQuery);
-  const refetchSessions = useRefetch(verseSessionsQuery);
-  const refetchBootstrap = useRefetch(verseBootstrapQuery);
+  const refetchSessions = useRefresh(verseSessionsQuery);
+  const refetchBootstrap = useRefresh(verseBootstrapQuery);
   const hold = useMutationHold();
   const toast = useToast();
   const ui = useVerseUi();
@@ -249,6 +250,9 @@ export function ChatSection() {
       try {
         await deleteVerseSession(id);
         forgetVerseSession(id);
+        // The transcript is gone from disk; the verbatim prompts must not
+        // survive it in browser storage under a dead session id.
+        forgetComposerMemory(id);
         setSelectedId(null);
         toast.show('Chat deleted.', 'neutral');
         return true;

@@ -15,14 +15,19 @@
  * this chat runs on and offers "New chat on …" per seat, which asks the
  * parent to start a new chat rather than mutating this one.
  */
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { VerseSeat } from '../../data/api-types.js';
+import { CONTEXT_DANGER_PERCENT, CONTEXT_WARN_PERCENT } from './ContextMeter.js';
+import { costHint, loadDraft, loadHistory, pushHistory, saveDraft } from './chat/composer-state.js';
 import { DictationButton } from './DictationButton.js';
 import type { SeatChoice } from './SeatSelector.js';
-import { seatPillLabel } from './verse-model.js';
+import { seatCapacity, SEAT_CAPACITY_WORD, seatPillLabel } from './verse-model.js';
+import { formatTokens } from './verse-store.js';
 import styles from './Composer.module.css';
 
 export interface ComposerProps {
+  /** Which chat this box belongs to — drafts and ↑ history are per session. */
+  sessionId?: string | null;
   seats: readonly VerseSeat[];
   seat: SeatChoice;
   /** Engine of the current chat; only used for the pill's identity dot. */
@@ -33,6 +38,9 @@ export interface ComposerProps {
   locked: boolean;
   /** True when this session already has turns — the hint row has done its job. */
   hintSeen?: boolean;
+  /** Live context occupancy, for the pre-send cost hint. */
+  contextTokens?: number | null;
+  contextWindow?: number | null;
   onSend: (text: string) => Promise<boolean> | boolean;
   onStop: () => void;
   onSeatChange: (choice: SeatChoice) => void;
@@ -40,28 +48,105 @@ export interface ComposerProps {
 }
 
 const MAX_TEXT_BYTES = 64 * 1024;
+
+/**
+ * How long typing must pause before the draft is written to `localStorage`.
+ *
+ * `saveDraft` re-parses the whole drafts map, mutates it, re-serialises it and
+ * writes it back synchronously — up to 40 sessions of 64 KB. On every keystroke
+ * that lands on the main thread inside the composer's own render commit, which
+ * is the one place in the app where the operator feels a stall directly. The
+ * draft is a crash-recovery convenience, so 400ms of exposure costs nothing;
+ * every path that actually loses the component flushes it immediately.
+ */
+const DRAFT_WRITE_DEBOUNCE_MS = 400;
 /** DESIGN §5: the box grows to 40% of the viewport, then scrolls. */
 const MAX_HEIGHT_RATIO = 0.4;
 const MAX_HEIGHT_FALLBACK_PX = 320;
 
-export function Composer({ seats, seat, engine, running, disabled, disabledReason, locked, hintSeen = false,
+export function Composer({ sessionId = null, seats, seat, engine, running, disabled, disabledReason, locked,
+  hintSeen = false, contextTokens = null, contextWindow = null,
   onSend, onStop, onSeatChange, autoFocus = false }: ComposerProps) {
-  const [draft, setDraft] = useState('');
+  // A draft survives ⌘K, a reload and a crash; it is restored on mount and
+  // written back on every keystroke (Composer is keyed by session id, so a
+  // mount is exactly one chat).
+  const [draft, setDraft] = useState(() => loadDraft(sessionId));
   const [interim, setInterim] = useState('');
   const [sending, setSending] = useState(false);
   const [listening, setListening] = useState(false);
   const [sentHere, setSentHere] = useState(false);
+  /** -1 = editing a fresh draft; 0..n-1 = walking back through sent messages. */
+  const [historyAt, setHistoryAt] = useState(-1);
+  // `useRef` takes a VALUE, not a lazy initializer: written as
+  // `useRef(loadHistory(sessionId))` this re-read and re-parsed the whole sent
+  // map from localStorage on every render — every keystroke and every streamed
+  // token — and threw the result away each time. `useState`'s initializer is
+  // the lazy one, and it runs exactly once, which is what the ref wanted.
+  const [initialHistory] = useState(() => loadHistory(sessionId));
+  const history = useRef<string[]>(initialHistory);
+  const stashed = useRef('');
   const textarea = useRef<HTMLTextAreaElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const helpId = useId();
   const text = interim ? `${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}${interim}` : draft;
-  const tooLong = new TextEncoder().encode(text).length > MAX_TEXT_BYTES;
+  const tooLong = useMemo(() => new TextEncoder().encode(text).length > MAX_TEXT_BYTES, [text]);
   const canSend = !disabled && !running && !sending && text.trim().length > 0 && !tooLong;
   const showHint = !hintSeen && !sentHere;
+  const cost = useMemo(
+    () => costHint(text, contextTokens, contextWindow, CONTEXT_WARN_PERCENT, CONTEXT_DANGER_PERCENT),
+    [text, contextTokens, contextWindow],
+  );
+
+  // Persist the draft as it is typed, but not ON every keystroke — see
+  // DRAFT_WRITE_DEBOUNCE_MS. Dictation interim text is deliberately NOT
+  // persisted: it is not committed until the recognizer finalizes it.
+  //
+  // `persistedDraft` is what storage already holds, seeded with the value
+  // `loadDraft` returned, so mounting does not write back what it just read.
+  const persistedDraft = useRef(draft);
+  const latestDraft = useRef(draft);
+  latestDraft.current = draft;
+
+  const flushDraft = useCallback(() => {
+    if (persistedDraft.current === latestDraft.current) return;
+    persistedDraft.current = latestDraft.current;
+    saveDraft(sessionId, latestDraft.current);
+  }, [sessionId]);
+
+  useEffect(() => {
+    if (persistedDraft.current === draft) return undefined;
+    const id = setTimeout(flushDraft, DRAFT_WRITE_DEBOUNCE_MS);
+    return () => clearTimeout(id);
+  }, [draft, flushDraft]);
+
+  // A tab closing, and the component going away (⌘K to another chat), are the
+  // two ways the debounce window could otherwise swallow the last few
+  // characters. Both flush synchronously.
+  useEffect(() => {
+    window.addEventListener('beforeunload', flushDraft);
+    return () => {
+      window.removeEventListener('beforeunload', flushDraft);
+      flushDraft();
+    };
+  }, [flushDraft]);
 
   useEffect(() => {
     if (autoFocus) textarea.current?.focus();
   }, [autoFocus]);
+
+  // ⌘. stops the running turn from anywhere in the app, the way ⌘. has meant
+  // "cancel" on this platform for forty years. Only armed while a turn is
+  // actually running, so it can never fire on an idle chat.
+  useEffect(() => {
+    if (!running) return;
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== '.' || (!event.metaKey && !event.ctrlKey) || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      onStop();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [running, onStop]);
 
   // When the reply finishes, hand focus back to the box unless the operator
   // moved it somewhere deliberate outside the composer. Focus on <body>, on a
@@ -84,14 +169,24 @@ export function Composer({ seats, seat, engine, running, disabled, disabledReaso
     node.style.height = `${Math.min(node.scrollHeight, max)}px`;
   }, [text]);
 
-  async function submit() {
+  const submit = useCallback(async () => {
     if (!canSend) return;
     const value = text.trim();
     setSending(true);
     try {
       const ok = await onSend(value);
       if (ok) {
+        const last = history.current[history.current.length - 1];
+        if (last !== value) history.current = [...history.current, value];
+        pushHistory(sessionId, value);
+        setHistoryAt(-1);
+        stashed.current = '';
         setDraft('');
+        // Clear the stored draft now: the message is sent, and leaving it in
+        // storage for the debounce window risks restoring a sent prompt.
+        persistedDraft.current = '';
+        latestDraft.current = '';
+        saveDraft(sessionId, '');
         setInterim('');
         setSentHere(true);
       }
@@ -99,12 +194,68 @@ export function Composer({ seats, seat, engine, running, disabled, disabledReaso
       setSending(false);
       textarea.current?.focus();
     }
+  }, [canSend, text, onSend, sessionId]);
+
+  /**
+   * Shell-style recall. ↑ from the top of an untouched box walks back through
+   * what was already sent here; ↓ walks forward and finally restores whatever
+   * was being written. Only fires at the very start/end of the text, so
+   * multi-line editing keeps both arrow keys.
+   */
+  function recall(delta: -1 | 1): boolean {
+    const list = history.current;
+    if (list.length === 0) return false;
+    if (historyAt === -1) {
+      if (delta > 0) return false;
+      stashed.current = draft;
+      const next = list.length - 1;
+      setHistoryAt(next);
+      setDraft(list[next]!);
+      setInterim('');
+      return true;
+    }
+    const next = historyAt + delta;
+    if (next < 0) return true;
+    if (next >= list.length) {
+      setHistoryAt(-1);
+      setDraft(stashed.current);
+      return true;
+    }
+    setHistoryAt(next);
+    setDraft(list[next]!);
+    return true;
   }
 
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    const node = event.currentTarget;
+    const collapsed = node.selectionStart === node.selectionEnd;
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault();
       void submit();
+      return;
+    }
+    // ⌘/Ctrl+Enter also sends, so a hand already on the modifier for a
+    // multi-line draft does not have to reach for plain Enter.
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+      event.preventDefault();
+      void submit();
+      return;
+    }
+    // ⌘. is NOT handled here: the document-level listener above owns it, and
+    // handling it in both places called onStop twice whenever the box had
+    // focus — which is nearly always.
+    //
+    // History walking. ↑ enters history only from the very start of an
+    // untouched box, so multi-line editing keeps the arrow keys; once IN
+    // history both arrows walk it, because a recalled message leaves the
+    // caret at its end and a second ↑ must still step back, the way a shell
+    // does. Typing anything leaves history (see the textarea's onChange).
+    if (event.key === 'ArrowUp' && collapsed && (historyAt !== -1 || (node.selectionStart === 0 && !interim))) {
+      if (recall(-1)) event.preventDefault();
+      return;
+    }
+    if (event.key === 'ArrowDown' && collapsed && historyAt !== -1) {
+      if (recall(1)) event.preventDefault();
     }
   }
 
@@ -119,7 +270,7 @@ export function Composer({ seats, seat, engine, running, disabled, disabledReaso
       <div className={`${styles.box} ${listening ? styles.boxListening : ''}`}>
         <textarea ref={textarea} className={styles.textarea} value={text} rows={1} placeholder={placeholder}
           aria-label="Message" disabled={disabled}
-          onChange={(event) => { setInterim(''); setDraft(event.target.value); }} onKeyDown={onKeyDown} />
+          onChange={(event) => { setInterim(''); setHistoryAt(-1); setDraft(event.target.value); }} onKeyDown={onKeyDown} />
         <div className={styles.row}>
           <SeatPill seats={seats} seat={seat} engine={engine} disabled={disabled} onNewChat={onSeatChange} />
           <div className={styles.spacer} />
@@ -128,7 +279,8 @@ export function Composer({ seats, seat, engine, running, disabled, disabledReaso
             onFinal={(chunk) => setDraft((current) => (current && !current.endsWith(' ') ? `${current} ${chunk}` : `${current}${chunk}`))}
             onListeningChange={setListening} />
           {running ? (
-            <button key="stop" type="button" className={styles.stop} onClick={onStop} aria-label="Stop the running turn">
+            <button key="stop" type="button" className={styles.stop} onClick={onStop}
+              title="Stop the running turn (⌘.)" aria-label="Stop the running turn">
               <span className={styles.stopIcon} aria-hidden="true" />Stop
             </button>
           ) : (
@@ -138,14 +290,23 @@ export function Composer({ seats, seat, engine, running, disabled, disabledReaso
           )}
         </div>
       </div>
-      <p id={helpId} className={`${styles.help} ${showHint || tooLong || listening || running || disabled ? '' : styles.helpQuiet}`}>
+      {cost ? (
+        <p className={styles.cost} data-tone={cost.tone} role="status">
+          <span className={styles.costFigure}>≈{formatTokens(cost.draftTokens)}</span> tokens for this message —
+          sending would reach <span className={styles.costFigure}>{cost.projectedPercent}%</span> of the context window.
+          {cost.tone === 'danger' ? ' Start a new chat to keep the agent sharp.' : ''}
+          <span className="visually-hidden"> This is an estimate; the provider counts the real total.</span>
+        </p>
+      ) : null}
+      <p id={helpId} className={`${styles.help} ${showHint || tooLong || listening || running || disabled || historyAt !== -1 ? '' : styles.helpQuiet}`}>
         {tooLong ? <span role="alert" className={styles.helpError}>Message is over 64 KB — trim it before sending.</span>
           : listening ? 'Listening… Esc stops dictation.'
             : disabled && disabledReason ? disabledReason
-              : running ? 'Reply in progress — your draft stays here · Stop interrupts the turn'
-                : showHint
-                  ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>⌘N</kbd> new chat · <kbd>⌘K</kbd> switch</>
-                  : null}
+              : running ? <>Reply in progress — your draft stays here · <kbd>⌘.</kbd> or Stop interrupts the turn</>
+                : historyAt !== -1 ? <>Recalled message {historyAt + 1} of {history.current.length} · <kbd>↓</kbd> returns to your draft</>
+                  : showHint
+                    ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>↑</kbd> recalls · <kbd>⌘N</kbd> new chat · <kbd>⌘K</kbd> switch</>
+                    : null}
       </p>
     </form>
   );
@@ -220,16 +381,29 @@ function SeatPill({ seats, seat, engine, disabled, onNewChat }: SeatPillProps) {
         <div id={menuId} role="menu" aria-label="Seat" className={styles.seatMenu} onKeyDown={onMenuKey}>
           <p className={styles.seatMenuHeading}>This chat runs on <strong>{label}</strong></p>
           {options.length === 0 ? <p className={styles.seatMenuEmpty}>No other seats are available right now.</p> : null}
-          {options.map((s) => (
-            <button key={s.id} type="button" role="menuitem" className={`${styles.seatMenuItem} ${styles[`engine-${s.engine}`] ?? ''}`}
-              onClick={() => { setOpen(false); onNewChat({ seatId: s.id, model: s.models[0]!.id }); }}>
-              <span className={styles.engineDot} aria-hidden="true" />
-              <span className={styles.seatMenuText}>
-                <span className={styles.seatMenuPrimary}>New chat on {s.label}</span>
-                <span className={styles.seatMenuSecondary}>{s.models[0]!.label}{s.id === seat.seatId ? ' · same seat' : ''}</span>
-              </span>
-            </button>
-          ))}
+          {options.map((s) => {
+            // The capacity belongs HERE, at the point of choice. This menu
+            // filtered only on `health.state !== 'unavailable'`, and Claude's
+            // health is `unknown` by construction, so a seat with a 100%-used
+            // weekly window looked exactly like a fresh one.
+            const capacity = seatCapacity(s);
+            return (
+              <button key={s.id} type="button" role="menuitem" className={`${styles.seatMenuItem} ${styles[`engine-${s.engine}`] ?? ''}`}
+                data-capacity={capacity.cls}
+                onClick={() => { setOpen(false); onNewChat({ seatId: s.id, model: s.models[0]!.id }); }}>
+                <span className={styles.engineDot} aria-hidden="true" />
+                <span className={styles.seatMenuText}>
+                  <span className={styles.seatMenuPrimary}>New chat on {s.label}</span>
+                  <span className={styles.seatMenuSecondary}>{s.models[0]!.label}{s.id === seat.seatId ? ' · same seat' : ''}</span>
+                  {capacity.cls === 'unread' ? null : (
+                    <span className={styles.seatMenuCapacity}>
+                      {SEAT_CAPACITY_WORD[capacity.cls]} · {capacity.text}
+                    </span>
+                  )}
+                </span>
+              </button>
+            );
+          })}
         </div>
       ) : null}
     </div>

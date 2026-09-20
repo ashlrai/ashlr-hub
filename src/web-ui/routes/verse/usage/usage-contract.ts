@@ -88,6 +88,7 @@ const WIRE_ACCOUNT_KEYS = {
   provider: 'provider',
   state: 'state',
   authentication: 'authentication',
+  health: 'health',
   planType: 'planType',
   observedAt: 'observedAt',
   windows: 'windows',
@@ -103,6 +104,7 @@ const WIRE_WINDOW_KEYS = {
   resetsAt: 'resetsAt',
   nativeReport: 'nativeReport',
   limitReached: 'limitReached',
+  measured: 'measured',
 } as const satisfies Record<string, keyof VerseAccountWindow>;
 
 const WIRE_CREDITS_KEYS = {
@@ -134,6 +136,11 @@ const WIRE_LOCAL_RUNTIME_KEYS = {
   reachable: 'reachable',
   models: 'models',
   reason: 'reason',
+  // V2.1: a RETAINED known-good reading rather than a fresh probe. Both must
+  // be projected — a stale reading presented as fresh is the exact failure
+  // this seam exists to prevent.
+  stale: 'stale',
+  staleForMs: 'staleForMs',
 } as const satisfies Record<string, keyof VerseLocalRuntimeReport>;
 
 const WIRE_LOCAL_MODEL_KEYS = {
@@ -142,6 +149,11 @@ const WIRE_LOCAL_MODEL_KEYS = {
   state: 'state',
   sizeBytes: 'sizeBytes',
   sizeVramBytes: 'sizeVramBytes',
+  placement: 'placement',
+  gpuPercent: 'gpuPercent',
+  memoryPercent: 'memoryPercent',
+  family: 'family',
+  arch: 'arch',
   expiresAt: 'expiresAt',
   contextLength: 'contextLength',
   nativeContextLength: 'nativeContextLength',
@@ -224,6 +236,16 @@ export interface AccountWindow {
    * "limit reached", never as "100% used".
    */
   limitReached: boolean;
+  /**
+   * False when `usedPercent` is a FLAGGED SENTINEL rather than a reading.
+   *
+   * Codex writes `rateLimitReachedType` upstream as the value 100, so a bare
+   * 100 is indistinguishable from a genuinely measured 100 by the time it
+   * arrives. The server distinguishes them; this surface must not collapse
+   * them back together. Absent on the wire → assumed measured UNLESS the
+   * limit flag is set, which is the only case where the sentinel is written.
+   */
+  measured: boolean;
 }
 
 /**
@@ -245,6 +267,12 @@ export interface Account {
   provider: AccountProvider;
   state: 'checking' | 'observed' | 'signed-out' | 'unavailable';
   authentication: 'signed-in' | 'signed-out' | 'unknown';
+  /**
+   * The connection monitor's own health verdict. Claude's is ALWAYS `unknown`
+   * by construction (docs/VERSE-TELEMETRY-V2.md) — that is not a fault and is
+   * never rendered as one.
+   */
+  health: string | null;
   planType: string | null;
   observedAt: string | null;
   windows: AccountWindow[];
@@ -311,6 +339,14 @@ export interface UsageSeries {
   window: SeriesWindow;
   days: DailyUsage[];
   generatedAt: string | null;
+  /**
+   * The server states outright that every cost column here is estimated.
+   * Carried through rather than re-asserted locally so the disclosure the UI
+   * prints is the one the producer actually made.
+   */
+  estimated: boolean;
+  /** The server's own caveats, rendered verbatim beside the charts. */
+  caveats: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -327,6 +363,18 @@ export interface LocalModel {
   sizeBytes: number | null;
   /** Of `sizeBytes`, how much sits in VRAM. null = not reported. */
   sizeVramBytes: number | null;
+  /**
+   * Where the weights actually sit. `split` is the one that matters: a model
+   * that only half-fits the GPU runs at a fraction of the speed of one that
+   * fits, and that is the difference between usable and not.
+   */
+  placement: 'gpu' | 'cpu' | 'split' | 'unknown';
+  /** The runtime's own GPU share, 0–100. Preferred over recomputing it. */
+  gpuPercent: number | null;
+  /** Resident size against total machine memory, 0–100, else null. */
+  memoryPercent: number | null;
+  family: string | null;
+  arch: string | null;
   /** Keep-alive expiry (ISO). Only meaningful while `loaded`. */
   expiresAt: string | null;
   /** e.g. "79.7B". Provider string, never parsed into a number for display. */
@@ -355,12 +403,41 @@ export interface LocalModel {
   supportsTools: boolean | null;
 }
 
+/**
+ * One runtime's own reachability, kept per-runtime rather than folded into the
+ * flattened list, because STALENESS is per-runtime and must be stated.
+ *
+ * `stale` means the server served a RETAINED known-good reading after a probe
+ * TIMED OUT (core `VERSE_LOCAL_LAST_GOOD_TTL_MS`). That is the honest choice
+ * server-side — a timeout is "no answer yet", not "the runtime is gone" — but
+ * it obliges this surface to say plainly that the numbers are N seconds old
+ * rather than presenting them as fresh.
+ */
+export interface LocalRuntimeStatus {
+  runtime: 'ollama' | 'lmstudio';
+  reachable: boolean;
+  /** Machine-readable degradation code; never rendered as a sentence. */
+  reason: string | null;
+  /** True when this report is a retained reading rather than a fresh probe. */
+  stale: boolean;
+  /** Age of that retained reading in ms. Null when `stale` is false. */
+  staleForMs: number | null;
+  modelCount: number;
+}
+
 export interface LocalModelsSnapshot {
   reachable: boolean;
   models: LocalModel[];
   /** Machine memory budget in bytes, or null when the server did not say. */
   memoryBudgetBytes: number | null;
+  /** Machine memory reported free right now, or null. */
+  freeMemoryBytes: number | null;
   reason: string | null;
+  /** Per-runtime reachability and staleness. Empty on a flat legacy body. */
+  runtimes: LocalRuntimeStatus[];
+  /** The server's own plain-language caveats for this snapshot. */
+  notes: string[];
+  sampledAt: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -421,6 +498,8 @@ function projectWindow(raw: unknown): AccountWindow | null {
   const id = str(r, 'id') ?? str(r, 'label');
   if (id === null) return null;
   const native = record(r['nativeReport']);
+  const limitReached = bool(r, 'limitReached') || bool(r, 'rateLimitReached');
+  const measuredRaw = r['measured'];
   return {
     id,
     label: str(r, 'label'),
@@ -428,7 +507,11 @@ function projectWindow(raw: unknown): AccountWindow | null {
     resetsAt: str(r, 'resetsAt') ?? str(r, 'resets_at'),
     resetDescription:
       (native ? str(native, 'resetDescription') : null) ?? str(r, 'resetDescription'),
-    limitReached: bool(r, 'limitReached') || bool(r, 'rateLimitReached'),
+    limitReached,
+    // Absent → measured, EXCEPT under a limit flag, which is the one case the
+    // upstream writes the sentinel 100. Defaulting a flagged window to
+    // `measured: true` would let a denial print as "100% used".
+    measured: typeof measuredRaw === 'boolean' ? measuredRaw : !limitReached,
   };
 }
 
@@ -471,6 +554,7 @@ function projectAccount(raw: unknown): Account | null {
         ? state
         : 'unavailable',
     authentication: auth === 'signed-in' || auth === 'signed-out' ? auth : 'unknown',
+    health: str(r, 'health'),
     planType: str(r, 'planType') ?? str(r, 'plan_type'),
     observedAt: str(r, 'observedAt'),
     windows,
@@ -583,6 +667,11 @@ export function projectUsageSeries(raw: unknown, requested: SeriesWindow): Usage
       .filter((d): d is DailyUsage => d !== null)
       .sort((a, b) => a.day.localeCompare(b.day)),
     generatedAt: root ? str(root, 'generatedAt') : null,
+    // The producer asserts estimation explicitly. Absent → still true: every
+    // cost column on this route is price-table derived, and defaulting the
+    // disclosure OFF would drop it exactly when the server is older.
+    estimated: root ? bool(root, 'estimated', true) : true,
+    caveats: root ? list(root['caveats']).filter((c): c is string => typeof c === 'string') : [],
   };
 }
 
@@ -604,12 +693,20 @@ function projectLocalModel(raw: unknown, runtime: LocalModel['runtime']): LocalM
   const nativeContext = num(r, 'nativeContextLength') ?? num(r, 'nativeContext');
   const configuredContext = num(r, 'contextLength') ?? num(r, 'configuredContext');
 
+  const placement = str(r, 'placement');
+
   return {
     name,
     runtime,
     loaded: state !== null ? state === 'loaded' : bool(r, 'loaded') || bool(r, 'resident'),
     sizeBytes: num(r, 'sizeBytes') ?? num(r, 'size'),
     sizeVramBytes: num(r, 'sizeVramBytes') ?? num(r, 'size_vram'),
+    placement:
+      placement === 'gpu' || placement === 'cpu' || placement === 'split' ? placement : 'unknown',
+    gpuPercent: clampPercent(num(r, 'gpuPercent')),
+    memoryPercent: clampPercent(num(r, 'memoryPercent')),
+    family: str(r, 'family'),
+    arch: str(r, 'arch'),
     expiresAt: str(r, 'expiresAt') ?? str(r, 'expires_at'),
     parameterSize: str(r, 'parameterSize') ?? str(r, 'parameter_size'),
     quantization: str(r, 'quantization') ?? str(r, 'quantization_level'),
@@ -628,17 +725,27 @@ function projectLocalModel(raw: unknown, runtime: LocalModel['runtime']): LocalM
 function projectRuntimeReport(
   raw: unknown,
   runtime: NonNullable<LocalModel['runtime']>,
-): { reachable: boolean; models: LocalModel[]; reason: string | null } | null {
+): { status: LocalRuntimeStatus; models: LocalModel[] } | null {
   const r = record(raw);
   if (!r) return null;
   const rawModels = Array.isArray(r['models']) ? r['models'] : null;
   if (rawModels === null) return null;
+  const models = rawModels
+    .map((m) => projectLocalModel(m, runtime))
+    .filter((m): m is LocalModel => m !== null);
+  const stale = bool(r, 'stale');
   return {
-    reachable: bool(r, 'reachable'),
-    models: rawModels
-      .map((m) => projectLocalModel(m, runtime))
-      .filter((m): m is LocalModel => m !== null),
-    reason: str(r, 'reason'),
+    models,
+    status: {
+      runtime,
+      reachable: bool(r, 'reachable'),
+      reason: str(r, 'reason'),
+      stale,
+      // Only meaningful under `stale`. A staleForMs on a fresh report would be
+      // a contradiction, and printing it would age a current reading.
+      staleForMs: stale ? num(r, 'staleForMs') : null,
+      modelCount: models.length,
+    },
   };
 }
 
@@ -664,7 +771,7 @@ export function projectLocalModels(raw: unknown): LocalModelsSnapshot | null {
 
   if (ollama !== null || lmStudio !== null) {
     const reports = [ollama, lmStudio].filter((x): x is NonNullable<typeof x> => x !== null);
-    const reachable = reports.some((x) => x.reachable);
+    const reachable = reports.some((x) => x.status.reachable);
     const machine = record(root['machine']);
     return {
       reachable,
@@ -673,7 +780,13 @@ export function projectLocalModels(raw: unknown): LocalModelsSnapshot | null {
         (machine ? num(machine, 'totalMemoryBytes') : null) ??
         num(root, 'memoryBudgetBytes') ??
         num(root, 'memoryBudget'),
-      reason: reachable ? null : (reports.map((x) => x.reason).find((x) => x !== null) ?? null),
+      freeMemoryBytes: machine ? num(machine, 'freeMemoryBytes') : null,
+      reason: reachable
+        ? null
+        : (reports.map((x) => x.status.reason).find((x) => x !== null) ?? null),
+      runtimes: reports.map((x) => x.status),
+      notes: list(root['notes']).filter((n): n is string => typeof n === 'string'),
+      sampledAt: str(root, 'sampledAt'),
     };
   }
 
@@ -683,6 +796,13 @@ export function projectLocalModels(raw: unknown): LocalModelsSnapshot | null {
     reachable: bool(root, 'reachable', true),
     models: rawModels.map((m) => projectLocalModel(m, null)).filter((m): m is LocalModel => m !== null),
     memoryBudgetBytes: num(root, 'memoryBudgetBytes') ?? num(root, 'memoryBudget'),
+    freeMemoryBytes: num(root, 'freeMemoryBytes'),
     reason: str(root, 'reason'),
+    // A flat legacy body carries no per-runtime reachability, so there is
+    // nothing to attribute and nothing to call stale. An empty list says that
+    // honestly; a fabricated entry would not.
+    runtimes: [],
+    notes: list(root['notes']).filter((n): n is string => typeof n === 'string'),
+    sampledAt: str(root, 'sampledAt'),
   };
 }

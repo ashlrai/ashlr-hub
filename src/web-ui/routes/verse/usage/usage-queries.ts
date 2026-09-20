@@ -193,7 +193,7 @@ export const verseLocalModelsQuery: QueryDef<OptionalRead> = {
 
 // One QueryDef per window, created once at module scope: useQuery keys on
 // `def.key`, and minting a fresh object per render would be harmless but
-// useRefetch's useCallback deps would churn for no reason.
+// useRefresh/useRefetch's useCallback deps would churn for no reason.
 const SERIES_QUERIES: Record<SeriesWindow, QueryDef<OptionalRead>> = {
   '7d': {
     key: `${USAGE_SERIES_KEY_PREFIX}:7d`,

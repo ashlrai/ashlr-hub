@@ -1,0 +1,281 @@
+/**
+ * OnboardingFlow.test.tsx — the first-run tour as the operator meets it.
+ *
+ * The assertions that matter are about restraint: it never blocks the app,
+ * it disappears permanently the moment it is answered, and it never claims a
+ * seat or a runtime is fine when the read did not say so.
+ */
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { evictAll } from '../../../data/cache.js';
+import { resetVerseUi, getVerseUiState } from '../verse-ui-store.js';
+import { OnboardingFlow } from './OnboardingFlow.js';
+import { OnboardingPanel } from './OnboardingPanel.js';
+import {
+  VERSE_ONBOARDING_STORAGE_KEY,
+  getOnboardingState,
+  resetOnboarding,
+} from './onboarding-store.js';
+
+const ACCOUNTS = {
+  sampledAt: '2026-09-20T10:00:00.000Z',
+  refreshing: false,
+  accounts: [
+    {
+      id: 'claude',
+      label: 'Claude Max',
+      provider: 'claude',
+      state: 'observed',
+      authentication: 'signed-in',
+      planType: 'max',
+      windows: [{ id: 'seven_day', usedPercent: 58, resetsAt: null }],
+    },
+    {
+      id: 'grok',
+      label: 'Grok',
+      provider: 'grok',
+      state: 'signed-out',
+      authentication: 'signed-out',
+      reason: 'The Grok seat is signed out.',
+      windows: [],
+    },
+  ],
+};
+
+const LOCAL_MODELS = {
+  machine: { totalMemoryBytes: 137_438_953_472, freeMemoryBytes: 48_242_049_024 },
+  ollama: {
+    reachable: true,
+    baseUrl: 'http://localhost:11434',
+    reason: null,
+    models: [
+      { label: 'qwen3:8b', state: 'available', sizeBytes: 1_073_741_824, capabilities: ['completion', 'tools'], supportsTools: true },
+    ],
+  },
+  lmStudio: { reachable: false, baseUrl: 'http://localhost:1234', models: [], reason: 'lmstudio-unreachable' },
+  notes: [],
+};
+
+function json(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
+}
+
+function routes(overrides: Record<string, () => Response> = {}) {
+  return vi.fn(async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.pathname : String(input);
+    for (const [path, make] of Object.entries(overrides)) {
+      if (url.startsWith(path)) return make();
+    }
+    if (url.startsWith('/api/verse/accounts')) return json(ACCOUNTS);
+    if (url.startsWith('/api/verse/local-models')) return json(LOCAL_MODELS);
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+}
+
+async function stepTo(user: ReturnType<typeof userEvent.setup>, times: number): Promise<void> {
+  for (let i = 0; i < times; i += 1) {
+    await user.click(screen.getByRole('button', { name: 'Next' }));
+  }
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  evictAll();
+  resetVerseUi();
+  resetOnboarding();
+  vi.stubGlobal('fetch', routes());
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
+
+describe('OnboardingFlow — presence and dismissal', () => {
+  it('opens on a first run and names the step it is on', () => {
+    render(<OnboardingFlow />);
+    expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
+    expect(screen.getByText('Getting started · 1 of 5')).toBeInTheDocument();
+  });
+
+  it('is not a modal: no dialog role, no backdrop, nothing to trap focus', () => {
+    const { container } = render(<OnboardingFlow />);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(container.querySelector('[aria-modal="true"]')).toBeNull();
+    // It is a region, so a screen reader can reach it deliberately and skip
+    // past it just as easily.
+    expect(screen.getByRole('region', { name: 'Welcome to Verse' })).toBeInTheDocument();
+  });
+
+  it('Skip closes it and records the answer so it never returns', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<OnboardingFlow />);
+    await user.click(screen.getByRole('button', { name: 'Skip setup' }));
+
+    expect(screen.queryByText('Welcome to Verse')).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(VERSE_ONBOARDING_STORAGE_KEY)!).dismissedAt).toEqual(expect.any(String));
+
+    rerender(<OnboardingFlow />);
+    expect(screen.queryByText('Welcome to Verse')).not.toBeInTheDocument();
+  });
+
+  /**
+   * Deliberately narrowed from "Escape dismisses it from anywhere".
+   *
+   * "Anywhere" was the defect, not the feature. This card is not a modal (the
+   * app behind it stays clickable, which is the whole design constraint), so a
+   * document-level Escape handler also caught every Escape the operator pressed
+   * for something else — closing the command palette, backing out of a seat
+   * menu, stopping dictation — and each one permanently wrote `dismissedAt`
+   * with no confirmation and no undo short of Settings → Replay. It also called
+   * `preventDefault()` unconditionally, suppressing whatever they were actually
+   * trying to close.
+   */
+  it('Escape dismisses it when the focus is inside the card', async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    screen.getByRole('button', { name: 'Close getting started' }).focus();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByText('Welcome to Verse')).not.toBeInTheDocument();
+    expect(getOnboardingState().dismissedAt).not.toBeNull();
+  });
+
+  it('Escape pressed elsewhere in the app leaves the tour alone', async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    // Nothing in the card has focus — this is the operator dismissing some
+    // other transient surface while the tour happens to be open.
+    document.body.focus();
+    await user.keyboard('{Escape}');
+    expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
+    expect(getOnboardingState().dismissedAt).toBeNull();
+  });
+
+  it('walks forward and back through all five steps', async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    await stepTo(user, 1);
+    expect(screen.getByText('Your seats')).toBeInTheDocument();
+    await stepTo(user, 1);
+    expect(screen.getByText('Local runtime')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Back' }));
+    expect(screen.getByText('Your seats')).toBeInTheDocument();
+    await stepTo(user, 3);
+    expect(screen.getByText('Make it yours')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Next' })).not.toBeInTheDocument();
+  });
+
+  it('the last step records completion and hands the shell a new-chat request', async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    await stepTo(user, 4);
+    await user.click(screen.getByRole('button', { name: 'Start a first chat' }));
+
+    expect(getOnboardingState().completedAt).not.toBeNull();
+    expect(getOnboardingState().dismissedAt).toBeNull();
+    expect(getVerseUiState().section).toBe('chat');
+    expect(getVerseUiState().command?.name).toBe('new-chat');
+    expect(screen.queryByText('Make it yours')).not.toBeInTheDocument();
+  });
+});
+
+describe('OnboardingFlow — what it says about the machine', () => {
+  it('flags the signed-out seat with the exact fix and leaves the connected one alone', async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    await stepTo(user, 1);
+
+    await waitFor(() => expect(screen.getByText('Grok')).toBeInTheDocument());
+    expect(screen.getByText('signed out')).toBeInTheDocument();
+    expect(screen.getByText('Reconnect the Grok seat through `ashlr resources`.')).toBeInTheDocument();
+    expect(screen.getByText(/1 seat is signed out/)).toBeInTheDocument();
+    expect(screen.getByText('Claude Max')).toBeInTheDocument();
+  });
+
+  it('says it cannot tell, rather than inventing a roster, when the route is absent', async () => {
+    vi.stubGlobal('fetch', routes({ '/api/verse/accounts': () => new Response('nope', { status: 404 }) }));
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    await stepTo(user, 1);
+
+    await waitFor(() => expect(screen.getByText(/did not report a per-account roster/)).toBeInTheDocument());
+    expect(screen.queryByText('connected')).not.toBeInTheDocument();
+  });
+
+  it('reports the local runtime with its tool-capable count', async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    await stepTo(user, 2);
+
+    await waitFor(() => expect(screen.getByText(/1 local model available/)).toBeInTheDocument());
+    expect(screen.getByText('available')).toBeInTheDocument();
+    expect(screen.getByText(/consume no provider quota/)).toBeInTheDocument();
+  });
+
+  it('never presents an unanswered probe as "not installed"', async () => {
+    vi.stubGlobal(
+      'fetch',
+      routes({
+        '/api/verse/local-models': () =>
+          json({
+            machine: LOCAL_MODELS.machine,
+            ollama: { reachable: false, baseUrl: 'http://localhost:11434', models: [], reason: 'ollama-unreachable' },
+            lmStudio: { reachable: false, baseUrl: 'http://localhost:1234', models: [], reason: 'lmstudio-unreachable' },
+            notes: [],
+          }),
+      }),
+    );
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    await stepTo(user, 2);
+
+    // `verseLocalModelsQuery` deliberately re-reads a reported-unreachable
+    // runtime twice (350ms + 1200ms) before believing it, so this waits past
+    // that ladder rather than asserting on the first, provisional answer.
+    await waitFor(
+      () => expect(screen.getByText(/cannot tell whether one is not running or not installed/)).toBeInTheDocument(),
+      { timeout: 4_000 },
+    );
+    expect(screen.getByText('unreachable')).toBeInTheDocument();
+  });
+
+  it('states the three stops at their real blast radius, and never calls the kill switch a pause', async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    await stepTo(user, 3);
+
+    expect(screen.getByText('Pause')).toBeInTheDocument();
+    expect(screen.getByText('Stop loop')).toBeInTheDocument();
+    expect(screen.getByText('Emergency stop')).toBeInTheDocument();
+    expect(screen.getByText(/engages the GLOBAL kill switch/)).toBeInTheDocument();
+    expect(screen.getByText(/Every mutating path refuses/)).toBeInTheDocument();
+  });
+
+  it('points at Settings from the last step', async () => {
+    const user = userEvent.setup();
+    render(<OnboardingFlow />);
+    await stepTo(user, 4);
+    await user.click(screen.getByRole('button', { name: 'Open Settings' }));
+    expect(getVerseUiState().section).toBe('settings');
+    // Opening Settings does not answer the tour — it is still there to finish.
+    expect(getOnboardingState().open).toBe(true);
+  });
+});
+
+describe('OnboardingPanel — replay from Settings', () => {
+  it('reopens the tour and reports that it had been skipped', async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <OnboardingPanel />
+        <OnboardingFlow />
+      </>,
+    );
+    await user.click(screen.getByRole('button', { name: 'Skip setup' }));
+    expect(screen.getByText(/Skipped\./)).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Replay' }));
+    expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Showing' })).toBeDisabled();
+  });
+});

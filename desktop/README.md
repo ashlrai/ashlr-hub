@@ -26,7 +26,27 @@ or an installation channel.
 | Windows | `.msi` / `.exe` draft only |
 | Linux | Not produced while quarantined |
 
-To build one for yourself, see [Build an installable app](#build-an-installable-app).
+### Installing the build you make yourself
+
+That policy is about *publishing*. Building Ashlr for your own Mac and keeping
+it in the Dock is supported and is what the rest of this document describes:
+
+1. [Build it](#the-exact-steps-on-this-mac) — `cargo tauri build`.
+2. Copy it into place, replacing any previous copy:
+   ```sh
+   REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
+   rm -rf /Applications/Ashlr.app
+   cp -R "$REPO/desktop/src-tauri/target/release/bundle/macos/Ashlr.app" /Applications/
+   ```
+3. Open it **once** with right-click → Open, because the build is unsigned —
+   see [First open on an unsigned build](#first-open-on-an-unsigned-build-gatekeeper).
+4. With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
+
+To update later, quit Ashlr, repeat steps 1–2, and launch again. The
+right-click-Open exemption is remembered per app path, so a rebuild copied over
+`/Applications/Ashlr.app` normally opens straight away; if a macOS update
+resets that, do step 3 again. Nothing in `~/.ashlr` is touched by installing or
+replacing the bundle — your config, seats and window state all survive.
 
 ---
 
@@ -171,7 +191,15 @@ fails if one is ever added.
 - **Size and position are remembered** in `~/.ashlr/desktop/window-state.json`
   (geometry and last theme only — nothing else). Restored geometry is clamped to
   the monitors that exist at launch: a window saved on a display that is now
-  unplugged re-centres instead of opening off-screen.
+  unplugged re-centres instead of opening off-screen. The monitor list is read
+  from the `AppHandle`, not from the launch window — that window is on its way
+  out when the geometry is restored, and is already gone on the crash-recovery
+  path, which made the saved position silently vanish.
+  `app.windows[0].center` in `tauri.conf.json` is deliberately **`false`**: a
+  config-level `center: true` is applied *after* the builder's `.position()` and
+  quietly discards the restored position. Centring is done in `main.rs`, only
+  when there is nothing to restore. Turning that config flag back on re-breaks
+  position restore with no error anywhere.
 - **Minimum size 900 × 620**, matching the 900px floor the design language
   requires the layout to work at.
 - **No white flash**: the window background is painted with the theme canvas
@@ -186,6 +214,21 @@ fails if one is ever added.
 | Sidecar failed to spawn | The spawn error, and the `prepare-sidecar.mjs` fix. |
 | Sidecar exited early | The exit code plus the last few output lines. |
 | Timed out (30 s) | Says the server never reported listening, and how to reproduce in a terminal. |
+
+There is no state in which the window spins forever: every path ends in either
+the Verse window or one of the four failure states above, within 30 seconds.
+
+The failure window is sized to its content — the port-conflict state carries no
+sidecar output and gets a short window, the states that do carry diagnostics get
+a taller one.
+
+**A lease held by `ashlr resource-console`.** The account collector takes a
+lease in `~/.ashlr` while it refreshes seat quotas. If `ashlr resource-console`
+already holds it, `ashlr verse` does *not* fail — the lease is declared
+read-only-safe, so the server still starts and the console shows the seats it
+can read. If the collector instead refuses to start, the sidecar exits and you
+get **Sidecar exited early** with its own last lines, which name the lease. The
+app does not invent a lease-specific screen for a case the CLI degrades through.
 
 Diagnostics shown there are redacted by `launch_state::redact_diagnostic`: any
 line containing `token`, `secret`, `password`, `api_key`, `authorization`,
@@ -205,6 +248,38 @@ The Edit menu is not decoration: without it WKWebView has nothing to claim ⌘C 
 ⌘V / ⌘Z, and copy, paste and undo silently do nothing in the composer.
 
 Zoom is clamped to 0.5×–2.0× in 0.1 steps and snaps back to exactly 1.0.
+
+### The sidecar never outlives the window
+
+Closing the Verse window hides it to the tray. **Quitting** stops the sidecar.
+Three exit paths have to leave a clean machine behind, and only the first of
+them gets a turn in Tauri's event loop — `src-tauri/src/sidecar_guard.rs` covers
+the other two:
+
+| How the app ends | What reaps the sidecar |
+|---|---|
+| ⌘Q, the Ashlr menu, the tray's Quit | `RunEvent::Exit` → `reap_sidecar`, which kills the sidecar **and its worker children** (the Bun binary runs its projection/background workers as separate processes that hold file locks in `~/.ashlr`). |
+| A signal — `pkill`, `kill`, Ctrl-C on a foreground run | An async-signal-safe handler kills the recorded pid, then `_exit`s. |
+| SIGKILL or a crash — nothing of ours runs | The **next launch** repairs it. Before the port is probed, the ownership record written at spawn time is read back; if the app that wrote it is gone while its sidecar is still alive, that sidecar is orphaned and is killed. |
+
+Without the third row, one crash left `ashlr verse` holding 127.0.0.1:7777
+forever and every relaunch landed on the port-conflict screen — honest, but a
+broken app.
+
+The record is `~/.ashlr/.desktop-sidecar.json`: two pids, a port, and the
+sidecar's own path. **No token can be in it** — a test asserts the shape has
+exactly those four fields. Nothing is killed unless *all four* of these hold:
+the record names the port we are about to bind, the desktop pid that wrote it is
+dead, the recorded sidecar pid is alive, and that pid's argv still starts with
+our own sidecar binary path. The last one is what makes pid recycling harmless:
+a recycled pid belongs to some other program, whose argv is not our sidecar.
+
+To check for yourself after quitting:
+
+```sh
+pgrep -fl "Contents/MacOS/ashlr verse"   # expect: no output
+lsof -ti tcp:7777                        # expect: no output
+```
 
 ### Tray (menu-bar) item
 
@@ -318,8 +393,22 @@ node desktop/scripts/prepare-sidecar.mjs    # → desktop/src-tauri/binaries/ash
 cd desktop && npm run icons                 # = cargo tauri icon src-tauri/icons/icon.svg
 
 # 4. Release build — the .app and the .dmg.
+#    beforeBundleCommand runs the bundle policy assertion, then dmg-preflight.
 cd desktop && cargo tauri build
 ```
+
+Timing on this Mac: about 6 minutes cold (the release profile is `lto = true`,
+`codegen-units = 1`, `panic = "abort"`), about 90 seconds when only the bundling
+needs to be redone. Nothing in step 4 needs the network.
+
+> **Step 4 alone re-bundles stale web assets.** `cargo tauri build` ships
+> whatever is sitting in `src-tauri/binaries/` and `src-tauri/resources/public/`.
+> Those only change when steps 1–2 are re-run. After any change to `src/web-ui`
+> or `src/core`, run steps 1–2 again or the new build will contain the old
+> console. Check what you are about to ship with:
+> ```sh
+> ls -l desktop/src-tauri/resources/public/app.js   # is this newer than your edit?
+> ```
 
 Output under `desktop/src-tauri/target/release/bundle/`:
 
@@ -340,31 +429,77 @@ cd desktop && cargo tauri build --debug
 
 ### Is the DMG step broken?
 
-**No — not on this machine, as of this build.** `cargo tauri build` completes
-`Bundling Ashlr.app` → `Bundling Ashlr_0.1.0_aarch64.dmg` → `Running
-bundle_dmg.sh` → `Finished 2 bundles` with exit code 0, on a cold release
-target, in about a minute. Nothing in this repo's configuration was changed to
-achieve that.
+**No.** `cargo tauri build` on this Mac completes `Bundling Ashlr.app` →
+`Bundling Ashlr_0.1.0_aarch64.dmg` → `Running bundle_dmg.sh` → `Finished 2
+bundles`, exit code 0, in about 90 seconds once the Rust crate is compiled.
 
-If `bundle_dmg.sh` *does* fail for you, it is almost always environmental, and
-the cause is one of these — check them in order:
+It *had* failed, and the cause was leftover state rather than our configuration:
 
-1. **A previous `Ashlr` volume is still mounted.** `bundle_dmg.sh` fails to
-   attach a second image with the same volume name.
-   `hdiutil detach /Volumes/Ashlr` (or check `mount | grep Ashlr`), then rebuild.
-2. **No window-server session.** The script drives Finder over AppleScript to
-   lay out the disk-image window. Over plain SSH, in a locked screen session, or
-   in CI without a GUI login, the AppleScript step errors with
-   `execution error: Finder got an error`. Build from a logged-in graphical
-   session, or produce only the app bundle: `cargo tauri build --bundles app`.
-3. **Terminal lacks Automation (Apple Events) permission for Finder.** System
-   Settings → Privacy & Security → Automation → your terminal → enable Finder.
-   The failure looks like `Not authorized to send Apple events to Finder`.
-4. **A stale `bundle/dmg/` directory** from an interrupted run. Remove
-   `desktop/src-tauri/target/release/bundle/dmg/` and rebuild.
+> Tauri bundles the DMG with a vendored fork of create-dmg (`bundle_dmg.sh`). It
+> writes an interstitial read-write image next to the .app named
+> `rw.<pid>.Ashlr_<version>_<arch>.dmg`, attaches it with
+> `hdiutil attach -mountrandom /Volumes` (which mounts it as `/Volumes/dmg.XXXXXX`,
+> **not** `/Volumes/Ashlr`), lays the window out, detaches, and compresses.
+> Interrupt the build anywhere between the attach and the detach — a Ctrl-C, a
+> killed parent, a timed-out agent step — and the volume stays mounted and the
+> partial image stays on disk. The next build then fails without naming the real
+> cause: `hdiutil attach` collides with the attached image, or `find_mount_dir`
+> resolves the wrong device and the script exits 1 with *"unable to proceed with
+> final disk image creation"*.
 
-None of these is fixable in our configuration, which is why nothing was changed
-for them. The bundle-policy assertion is untouched.
+This repo was in exactly that state: `/Volumes/dmg.gQvqCb` was still attached
+from an interrupted debug build, next to a 173 MB
+`rw.34706.Ashlr_0.1.0_aarch64.dmg`. Detaching and deleting them made the release
+DMG build on the first attempt.
+
+So it is now cleaned up automatically. `scripts/dmg-preflight.mjs` runs as part
+of `beforeBundleCommand`, detaches any attached image whose `image-path` is
+inside **this repo's** `desktop/src-tauri/target` tree, and deletes partial
+`rw.<pid>.*.dmg` files there. It touches nothing outside that tree, so a disk
+image you have open from anywhere else is never detached. It is idempotent and
+safe to run by hand:
+
+```sh
+cd desktop && node scripts/dmg-preflight.mjs
+```
+
+The bundle-policy assertion is **unchanged** and still runs first —
+`beforeBundleCommand` is now
+`node scripts/assert-desktop-bundle-policy.mjs && node scripts/dmg-preflight.mjs`,
+so a refused Linux bundle still short-circuits before the preflight.
+
+#### If it still fails: the Finder AppleScript
+
+The one cause the preflight cannot fix is environmental. `bundle_dmg.sh` drives
+**Finder over AppleScript** to position the icons in the disk-image window. That
+needs an Aqua login session *and* Automation permission for whatever is running
+the build. Over plain SSH, on a locked-out screen session, or in CI with no GUI
+login, it fails with `execution error: Not authorized to send Apple events to
+Finder. (-1743)` (or `Finder got an error`) and the bundler exits **64**.
+
+Check whether your shell has the permission at all:
+
+```sh
+osascript -e 'tell application "Finder" to get name of startup disk'
+```
+
+If that errors, either grant it (System Settings → Privacy & Security →
+Automation → your terminal → Finder) or skip the cosmetic step. There is no
+Tauri config option for it; the switch is create-dmg's `--skip-jenkins`, which
+the bundler passes **only when `CI` is set**:
+
+```sh
+cd desktop && CI=1 cargo tauri build
+```
+
+That produces a DMG with default icon positions and no custom window layout. The
+`Ashlr.app` inside is identical either way. Prefer this over
+`cargo tauri build --bundles app`, which skips the DMG entirely.
+
+**The .app is the artifact that matters.** Even when the DMG step fails, the
+bundler has already written
+`target/release/bundle/macos/Ashlr.app` — it is complete and installable, and
+the failure is only about the disk image wrapped around it.
 
 ### First open on an unsigned build (Gatekeeper)
 
@@ -479,17 +614,20 @@ desktop/
    launch window with a theme-matched background.
 2. If `~/.ashlr/.desktop-initialized` is absent, invoke `ashlr setup --yes`
    (the current CLI refuses before config or service work).
-3. Probe `127.0.0.1:7777`. Already open → the port-in-use launch state.
-4. Spawn `ashlr verse --port 7777 --no-open --json` (falling back once to
-   `ashlr serve --port 7777 --allow-dispatch --json`).
-5. On the JSON startup record: build the Verse window with the restored
+3. Reclaim a sidecar orphaned by a previous crash, if the ownership record
+   names one (see [The sidecar never outlives the window](#the-sidecar-never-outlives-the-window)).
+4. Probe `127.0.0.1:7777`. Already open → the port-in-use launch state.
+5. Spawn `ashlr verse --port 7777 --no-open --json` (falling back once to
+   `ashlr serve --port 7777 --allow-dispatch --json`), and write the ownership
+   record.
+6. On the JSON startup record: build the Verse window with the restored
    geometry, the inset traffic lights and the shell-contract script, then close
    the launch window. No record within 30 s → the timeout launch state.
-6. Window moves and resizes are written back (throttled), and on every exit.
-7. The window's close button hides it to the tray. **Every** exit path — ⌘Q,
-   the Ashlr menu, the tray, a signal — reaps the sidecar in
-   `RunEvent::ExitRequested | RunEvent::Exit`, so no orphan `ashlr verse` is
-   left behind.
+7. Window moves and resizes are written back (throttled), and on every exit.
+8. The window's close button hides it to the tray. **Every** exit path — ⌘Q,
+   the Ashlr menu, the tray, a signal, or the next launch after a crash — reaps
+   the sidecar and its worker children, so no orphan `ashlr verse` is left
+   behind.
 
 ### Tests
 
@@ -497,11 +635,17 @@ desktop/
 cd desktop/src-tauri && cargo test
 ```
 
-Covers the startup-record parser and the guarantee that the token line is never
-forwarded, the shell contract's origin gate and JSON encoding, drag-region
-mapping, launch-state copy and redaction, window-state clamping across monitor
-changes, zoom stepping, and the assertion that the native menu never claims a
-shortcut the web UI owns.
+55 tests. They cover the startup-record parser and the guarantee that the token
+line is never forwarded, the shell contract's origin gate and JSON encoding,
+drag-region mapping, launch-state copy and redaction, launch-window sizing,
+window-state clamping across monitor changes, zoom stepping, the assertion that
+the native menu never claims a shortcut the web UI owns, and the orphan-reclaim
+decision — including that a live sibling app's sidecar is never killed, that a
+recycled pid can never be mistaken for ours, and that the ownership record has
+no field a token could hide in.
+
+Nothing here spawns a server, binds a port, or reads `~/.ashlr`: every test is a
+pure decision function or a JSON round-trip.
 
 ---
 
@@ -519,6 +663,19 @@ Look for `[ashlr-desktop]` lines on stderr. Reproduce the server on its own:
 **"sidecar not configured" panic**
 `binaries/ashlr-<triple>` is missing. Run `node desktop/scripts/prepare-sidecar.mjs`
 from the repo root.
+
+**An `ashlr verse` is still running after I quit**
+It should not be — see
+[The sidecar never outlives the window](#the-sidecar-never-outlives-the-window).
+If one survives (say the app was SIGKILLed), the next launch kills it before
+probing the port, so just launch Ashlr again. To clear it by hand:
+`pkill -f "Contents/MacOS/ashlr verse"`.
+
+**`cargo tauri build` fails at `bundle_dmg.sh`**
+The `.app` is already built and installable; only the disk image failed. See
+[Is the DMG step broken?](#is-the-dmg-step-broken). Run
+`node scripts/dmg-preflight.mjs` and build again, or `CI=1 cargo tauri build` to
+skip the Finder layout step.
 
 **`cargo tauri dev` fails with icon errors**
 Run `npm run icons` from `desktop/`.

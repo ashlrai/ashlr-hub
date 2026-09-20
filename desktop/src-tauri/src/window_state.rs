@@ -253,6 +253,29 @@ mod tests {
     }
 
     #[test]
+    fn the_real_two_monitor_layout_on_this_mac_keeps_the_saved_position() {
+        // 1920x1080 main display with the scaled Retina laptop screen to its
+        // right — the exact layout the app failed to restore on.
+        let monitors = [
+            MonitorRect { x: 0.0, y: 0.0, width: 1920.0, height: 1080.0 },
+            MonitorRect { x: 1920.0, y: 0.0, width: 1512.0, height: 982.0 },
+        ];
+        let saved = WindowState {
+            width: 1150.0,
+            height: 760.0,
+            x: Some(140.0),
+            y: Some(90.0),
+            maximized: false,
+            theme: None,
+        };
+        let restored = saved.clamped_to(&monitors);
+        assert_eq!(restored.x, Some(140.0), "saved x was dropped");
+        assert_eq!(restored.y, Some(90.0), "saved y was dropped");
+        assert_eq!(restored.width, 1150.0);
+        assert_eq!(restored.height, 760.0);
+    }
+
+    #[test]
     fn position_on_a_still_present_monitor_is_kept() {
         let s = WindowState {
             width: 1280.0,

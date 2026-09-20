@@ -16,6 +16,14 @@
  *
  * Identity is the 2px engine marker on the leading edge — the only
  * engine-hued element on the card (docs/VERSE-DESIGN-V2.md §2).
+ *
+ * The card HEAD is the control that opens the detail view. Making the whole
+ * <article> clickable would have meant either a div with an onClick and no
+ * keyboard path, or a <button> wrapping the window meters — and a `role=meter`
+ * inside a button is not a thing assistive tech can make sense of. A real
+ * button spanning the label and the verdict badge is a large target, is
+ * reachable by keyboard for free, and carries `aria-expanded`/`aria-controls`
+ * so the relationship to the detail region is announced rather than implied.
  */
 import type { CSSProperties, ReactNode } from 'react';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
@@ -59,18 +67,57 @@ function CreditsRow({ credits }: { credits: AccountCardModel['credits'] }): Reac
   );
 }
 
-export function AccountCard({ card }: { card: AccountCardModel }): ReactNode {
+export function AccountCard({
+  card,
+  onOpen,
+  expanded = false,
+  triggerId,
+  detailId,
+}: {
+  card: AccountCardModel;
+  /** Omitted when there is nothing to open — the head then stays inert text. */
+  onOpen?: ((id: string) => void) | undefined;
+  expanded?: boolean;
+  triggerId?: string | undefined;
+  detailId?: string | undefined;
+}): ReactNode {
   const engineStyle = { '--engine-color': card.color } as CSSProperties;
   const showReconnect = card.verdict.state === 'signed-out';
+  const openable = onOpen !== undefined && card.hasDetail;
+
+  const head = (
+    <>
+      <span className={styles.cardLabel}>{card.label}</span>
+      <StatusBadge status={card.verdict.state} tone={VERDICT_TONE[card.verdict.state]}>
+        {card.verdict.headline}
+      </StatusBadge>
+    </>
+  );
 
   return (
-    <article className={styles.card} style={engineStyle} aria-label={`${card.label} usage`}>
-      <div className={styles.cardHead}>
-        <span className={styles.cardLabel}>{card.label}</span>
-        <StatusBadge status={card.verdict.state} tone={VERDICT_TONE[card.verdict.state]}>
-          {card.verdict.headline}
-        </StatusBadge>
-      </div>
+    <article
+      className={styles.card}
+      style={engineStyle}
+      aria-label={`${card.label} usage`}
+      data-selected={expanded ? 'true' : undefined}
+    >
+      {openable ? (
+        <button
+          type="button"
+          id={triggerId}
+          className={`${styles.cardHead} ${styles.cardTrigger}`}
+          aria-expanded={expanded}
+          {...(detailId ? { 'aria-controls': detailId } : {})}
+          onClick={() => onOpen(card.id)}
+        >
+          {head}
+          <span className={styles.cardChevron} aria-hidden="true">
+            {expanded ? '\u2212' : '+'}
+          </span>
+        </button>
+      ) : (
+        <div className={styles.cardHead}>{head}</div>
+      )}
 
       <div className={styles.cardMeta}>
         <span>{ENGINE_LABEL[card.engine]}</span>

@@ -22,7 +22,7 @@
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine, SkeletonRow } from '../../../components/primitives/Skeleton.js';
-import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { useQuery, useRefresh } from '../../../data/hooks.js';
 import { ActivityPanel } from '../autonomy/ActivityPanel.js';
 import { CapsPanel } from '../autonomy/CapsPanel.js';
 import { DaemonControls } from '../autonomy/DaemonControls.js';
@@ -40,7 +40,7 @@ export function AutonomySection() {
   const control = useQuery(verseControlQuery);
   const caps = useQuery(verseCapsQuery);
   const bootstrap = useQuery(verseBootstrapQuery);
-  const refetchControl = useRefetch(verseControlQuery);
+  const refetchControl = useRefresh(verseControlQuery);
   const guard = useGuardedAction();
 
   const dispatchEnabled = (bootstrap.data?.dispatchEnabled ?? true) && !guard.readOnly;

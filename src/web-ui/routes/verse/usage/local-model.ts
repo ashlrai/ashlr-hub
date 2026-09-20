@@ -22,19 +22,36 @@
  *
  * Pure: no React, no I/O.
  */
-import type { LocalModel, LocalModelsSnapshot } from './usage-contract.js';
+import type { LocalModel, LocalModelsSnapshot, LocalRuntimeStatus } from './usage-contract.js';
 
 export type ToolSupport = 'supported' | 'unsupported' | 'unknown';
 
 export interface LocalModelRow {
   name: string;
+  /** Which runtime reported it, so a flattened list stays attributable. */
+  runtime: LocalModel['runtime'];
   resident: boolean;
+  /**
+   * Where the weights sit. `split` is the one that changes the answer: a model
+   * that only half-fits the GPU is usable but slow, and an operator should see
+   * that before picking the seat rather than discovering it mid-turn.
+   */
+  placement: LocalModel['placement'];
+  /** Resident size against total machine memory (0–100), or null. */
+  memoryPct: number | null;
+  family: string | null;
   sizeBytes: number | null;
   sizeVramBytes: number | null;
   /** Share of resident bytes held in VRAM (0–100), or null when unreported. */
   gpuPct: number | null;
-  /** ms until keep-alive expiry; null when not resident or not reported. */
+  /** ms until keep-alive expiry AT BUILD TIME; null when not resident or not reported. */
   expiresInMs: number | null;
+  /**
+   * Epoch ms of the keep-alive expiry — the durable fact. A rendered countdown
+   * must derive from THIS against a live clock; `expiresInMs` is frozen into
+   * the view model and would print the same number forever.
+   */
+  expiresAtMs: number | null;
   parameterSize: string | null;
   quantization: string | null;
   nativeContext: number | null;
@@ -69,18 +86,30 @@ export function resolveToolSupport(
 
 export function buildLocalModelRow(model: LocalModel, now: number): LocalModelRow {
   const expiresMs = model.expiresAt ? Date.parse(model.expiresAt) : Number.NaN;
+  // The runtime's own `gpuPercent` is authoritative — it knows how the layers
+  // were actually placed. Recomputing from size/size_vram is the fallback for
+  // a server that predates the field, never an override of it.
   const gpuPct =
-    model.sizeBytes !== null && model.sizeBytes > 0 && model.sizeVramBytes !== null
+    model.gpuPercent ??
+    (model.sizeBytes !== null && model.sizeBytes > 0 && model.sizeVramBytes !== null
       ? Math.max(0, Math.min(100, (model.sizeVramBytes / model.sizeBytes) * 100))
-      : null;
+      : null);
 
   return {
     name: model.name,
+    runtime: model.runtime,
     resident: model.loaded,
+    placement: model.placement,
+    // Only a RESIDENT model occupies memory. `sizeBytes` for an unloaded model
+    // is the on-disk size, so a machine-memory share computed from it would
+    // report memory that is not in use.
+    memoryPct: model.loaded ? model.memoryPercent : null,
+    family: model.family,
     sizeBytes: model.sizeBytes,
     sizeVramBytes: model.sizeVramBytes,
     gpuPct,
     expiresInMs: model.loaded && !Number.isNaN(expiresMs) ? expiresMs - now : null,
+    expiresAtMs: model.loaded && !Number.isNaN(expiresMs) ? expiresMs : null,
     parameterSize: model.parameterSize,
     quantization: model.quantization,
     nativeContext: model.nativeContext,
@@ -101,6 +130,58 @@ export interface LocalModelsView {
   residentBytes: number | null;
   memoryBudgetBytes: number | null;
   memoryUsedPct: number | null;
+  /** The machine's own reported free memory, or null. */
+  freeMemoryBytes: number | null;
+  /** Per-runtime reachability and staleness, for the panel's banner. */
+  runtimes: LocalRuntimeStatus[];
+  /** The server's plain-language caveats for this snapshot. */
+  notes: string[];
+  /** Models that CAN drive an agentic session. */
+  agenticCount: number;
+  /** Models that explicitly cannot. Separate from `unknownToolCount`. */
+  nonAgenticCount: number;
+  /** Models whose runtime did not say — never counted as "cannot". */
+  unknownToolCount: number;
+}
+
+/**
+ * The staleness verdict for the whole local reading.
+ *
+ * A retained known-good report is the right server-side choice (a timeout is
+ * "no answer yet", not "the runtime is gone"), but it obliges this surface to
+ * say the numbers are N seconds old rather than presenting them as fresh.
+ * The oldest retained report wins, because a panel is only as fresh as its
+ * stalest input.
+ */
+export interface LocalStaleness {
+  stale: boolean;
+  /** Age of the OLDEST retained reading, in ms. Null when nothing is stale. */
+  staleForMs: number | null;
+  /** Which runtimes were served from a retained reading. */
+  runtimes: LocalRuntimeStatus['runtime'][];
+}
+
+export function localStaleness(runtimes: readonly LocalRuntimeStatus[]): LocalStaleness {
+  const stale = runtimes.filter((r) => r.stale);
+  if (stale.length === 0) return { stale: false, staleForMs: null, runtimes: [] };
+  const ages = stale.map((r) => r.staleForMs).filter((ms): ms is number => ms !== null);
+  return {
+    stale: true,
+    // A retained report with no reported age is still stale; the age is simply
+    // unknown, and null says that rather than implying "0ms old".
+    staleForMs: ages.length === 0 ? null : Math.max(...ages),
+    runtimes: stale.map((r) => r.runtime),
+  };
+}
+
+/** "12s" / "4m 30s" — how old a retained reading is, for a plain sentence. */
+export function formatAge(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms) || ms < 0) return 'an unreported interval';
+  const total = Math.round(ms / 1000);
+  if (total < 60) return `${total}s`;
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return s === 0 ? `${m}m` : `${m}m ${s}s`;
 }
 
 export function buildLocalModelsView(
@@ -131,6 +212,15 @@ export function buildLocalModelsView(
       residentBytes !== null && budget !== null && budget > 0
         ? Math.max(0, Math.min(100, (residentBytes / budget) * 100))
         : null,
+    freeMemoryBytes: snapshot.freeMemoryBytes,
+    runtimes: snapshot.runtimes,
+    notes: snapshot.notes,
+    // Three counts, not two: "cannot drive a session" and "the runtime did not
+    // say" are different facts, and folding the second into the first would
+    // turn an unanswered question into a hard gate.
+    agenticCount: rows.filter((r) => r.tools === 'supported').length,
+    nonAgenticCount: rows.filter((r) => r.tools === 'unsupported').length,
+    unknownToolCount: rows.filter((r) => r.tools === 'unknown').length,
   };
 }
 

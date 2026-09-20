@@ -38,8 +38,19 @@ const EVENT_TO_CACHE_KEYS: Record<SseEventName, string[]> = {
   // (data/queries.ts) does. Also refreshing 'control-snapshot' here so
   // /control/daemon and /control/security (both read off controlSnapshotQuery)
   // stay live on the same daemon-tick cadence instead of only on page load.
-  daemon: ['daemon', 'control-snapshot'],
-  'daemon-observation': ['daemon', 'control-snapshot'],
+  // `/api/verse/control` and `/api/verse/audit` ARE the daemon projection, so
+  // they ride the same signal. Without this the Autonomy cockpit — running
+  // state, last tick outcome, today's spend against the cap — was frozen at
+  // whatever was true when the section mounted, and DEFAULT_QUERY_FRESH_MS
+  // then made a rail switch away and back inside 10s a no-op too.
+  //
+  // Deliberately NOT a coarse `verse-` prefix sweep: `verse-usage-accounts`
+  // and `verse-usage-local-models` spawn provider probes, and firing those on
+  // every daemon tick would turn a liveness fix into a process storm. Those
+  // two poll on their own visibility-gated 30s cadence in UsageSection,
+  // matching the collector's cycle.
+  daemon: ['daemon', 'control-snapshot', 'verse-control', 'verse-usage-control', 'verse-caps'],
+  'daemon-observation': ['daemon', 'control-snapshot', 'verse-control', 'verse-usage-control', 'verse-caps'],
   // fleet-activity pings are the closest live signal fleet state changed;
   // 'fleet' (fleetStatusQuery, /control/fleet's queue depth + lease health)
   // has no dedicated SSE event of its own, so it rides these instead of only

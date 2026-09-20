@@ -180,9 +180,10 @@ export function Workspace(props: WorkspaceProps) {
       <Transcript transcript={view.transcript} loaded={view.loaded} loadError={view.loadError} onRetry={onRetry} />
 
       {session ? (
-        <Composer key={session.id} seats={seats} seat={{ seatId: session.seatId, model: session.model }} engine={session.engine}
-          running={running} disabled={!dispatchEnabled} disabledReason={disabledReason} locked={locked}
-          hintSeen={session.turnCount > 0} onSend={onSend} onStop={onStop} onSeatChange={onSeatChange} autoFocus />
+        <Composer key={session.id} sessionId={session.id} seats={seats} seat={{ seatId: session.seatId, model: session.model }}
+          engine={session.engine} running={running} disabled={!dispatchEnabled} disabledReason={disabledReason} locked={locked}
+          hintSeen={session.turnCount > 0} contextTokens={session.usage.contextTokens} contextWindow={contextWindow}
+          onSend={onSend} onStop={onStop} onSeatChange={onSeatChange} autoFocus />
       ) : null}
     </section>
   );

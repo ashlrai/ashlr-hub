@@ -17,7 +17,7 @@ import { useMemo, useState } from 'react';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { Select } from '../../../components/primitives/Select.js';
 import { SkeletonRow } from '../../../components/primitives/Skeleton.js';
-import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { useQuery, useRefresh } from '../../../data/hooks.js';
 import { verseAuditQuery, VERSE_AUDIT_DEFAULT_LIMIT } from './control-queries.js';
 import type { AuditEntry, DaemonDispatchTrace, VerseControlSnapshot } from './control-types.js';
 // formatStamp, not formatClock: these three tables span days (the audit trail
@@ -165,7 +165,7 @@ export function AuditTrail() {
     [limit, action, result],
   );
   const query = useQuery(def);
-  const refetch = useRefetch(def);
+  const refetch = useRefresh(def);
 
   const entries = query.data?.entries ?? [];
 

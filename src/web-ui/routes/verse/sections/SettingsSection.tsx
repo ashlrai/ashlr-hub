@@ -10,6 +10,7 @@
  * object rather than four inventions.
  */
 import { useAppearance } from '../../../data/hooks.js';
+import { OnboardingPanel } from '../onboarding/OnboardingPanel.js';
 import { AboutPanel } from './AboutPanel.js';
 import { AppearancePanel } from './AppearancePanel.js';
 import { ConnectionPanel } from './ConnectionPanel.js';
@@ -29,6 +30,7 @@ export function SettingsSection() {
           <AppearancePanel appearance={appearance} onChange={set} onReset={reset} />
           <ConnectionPanel />
           <ShortcutsPanel />
+          <OnboardingPanel />
           <AboutPanel />
         </div>
       </div>

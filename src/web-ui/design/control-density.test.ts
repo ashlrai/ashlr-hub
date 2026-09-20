@@ -52,6 +52,12 @@ const FILES = [
   'routes/verse/sections/AutonomySection.module.css',
   'routes/verse/sections/SettingsSection.module.css',
   'routes/verse/usage/usage.module.css',
+  // The two stylesheets added in the V2.1 chat/onboarding run. They were
+  // outside the contract while it was being written, which is exactly how the
+  // drift this test describes gets in: onboarding.module.css was already
+  // sizing its section icons with a 22px literal.
+  'routes/verse/chat/chat.module.css',
+  'routes/verse/onboarding/onboarding.module.css',
   'components/primitives/Button.module.css',
   'components/primitives/Input.module.css',
   'components/primitives/Select.module.css',

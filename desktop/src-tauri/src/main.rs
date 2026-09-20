@@ -17,7 +17,8 @@
 //!      traffic lights inset into the 48px header strip, and the shell-contract
 //!      initialization script (see `shell_contract.rs`). The launch window then
 //!      closes.
-//!   5. The sidecar is killed on every exit path, not just the tray's Quit.
+//!   5. The sidecar is killed on every exit path, not just the tray's Quit —
+//!      including signals and a previous run's crash (see `sidecar_guard`).
 
 use std::{
     net::TcpStream,
@@ -47,9 +48,10 @@ use tauri_plugin_updater::UpdaterExt;
 mod app_menu;
 mod launch_state;
 mod shell_contract;
+mod sidecar_guard;
 mod window_state;
 
-use launch_state::{LaunchFailure, LaunchPhase};
+use launch_state::{LaunchFailure, LaunchPayload, LaunchPhase};
 use window_state::{MonitorRect, ShellTheme, WindowState};
 
 // ── constants ────────────────────────────────────────────────────────────────
@@ -302,8 +304,16 @@ fn tauri_color(theme: ShellTheme) -> tauri::window::Color {
 
 // ── window state ─────────────────────────────────────────────────────────────
 
-fn monitor_rects(window: &WebviewWindow) -> Vec<MonitorRect> {
-    let Ok(monitors) = window.available_monitors() else {
+/// The monitors attached right now, as logical rects.
+///
+/// Read from the `AppHandle` rather than from a window: the only window alive
+/// when the geometry is restored is the launch window, and it is on its way out
+/// (or already gone on the crash-recovery path). An empty list makes
+/// `WindowState::clamped_to` drop the saved position and centre instead — which
+/// is correct when there really is no display information, and silently loses
+/// the user's window position when it is merely unavailable.
+fn monitor_rects(handle: &AppHandle) -> Vec<MonitorRect> {
+    let Ok(monitors) = handle.available_monitors() else {
         return Vec::new();
     };
     monitors
@@ -442,17 +452,23 @@ fn set_launch_phase(handle: &AppHandle, phase: &LaunchPhase) {
         // The failure state carries a hint, diagnostics and buttons; the window
         // is not resizable by the user, so it is grown here rather than making
         // the starting state a mostly-empty box.
-        let (w, h) = launch_window_size(phase);
+        let (w, h) = launch_window_size(&payload);
         let _ = window.set_size(LogicalSize::new(w, h));
         let _ = window.center();
         let _ = window.show();
     }
 }
 
-/// Launch-window size per phase.
-fn launch_window_size(phase: &LaunchPhase) -> (f64, f64) {
-    match phase {
-        LaunchPhase::Failed(_) => (540.0, 460.0),
+/// Launch-window size for a payload.
+///
+/// Sized from the payload rather than the phase because the failure states are
+/// not all the same height: "port is already in use" is diagnosed from the
+/// probe and carries no sidecar output, so the tall window it used to get left
+/// a dead band of empty canvas above the buttons.
+fn launch_window_size(payload: &LaunchPayload) -> (f64, f64) {
+    match payload.phase {
+        "failed" if payload.detail.is_empty() => (540.0, 330.0),
+        "failed" => (540.0, 460.0),
         _ => (480.0, 300.0),
     }
 }
@@ -526,10 +542,17 @@ fn create_main_window(handle: &AppHandle, startup: Option<&SidecarStartup>) {
         };
 
         // Restore geometry against the monitors that exist right now.
-        let monitors = handle2
-            .get_webview_window(LAUNCH_WINDOW_LABEL)
-            .map(|w| monitor_rects(&w))
-            .unwrap_or_default();
+        //
+        // `app.windows[0].center` in tauri.conf.json is deliberately `false`:
+        // a config-level `center: true` is applied *after* the builder's
+        // `.position()` and silently discards the restored position. Centring
+        // is done here instead, only when there is no position to restore.
+        let monitors = monitor_rects(&handle2);
+        if monitors.is_empty() {
+            eprintln!(
+                "[ashlr-desktop] no monitor information available — centring instead of restoring the saved position"
+            );
+        }
         let restored = saved.clamped_to(&monitors);
 
         let mut builder = builder
@@ -668,9 +691,34 @@ fn reap_sidecar(handle: &AppHandle) {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
-    if let Some(child) = guard.take() {
-        let _ = child.kill();
-    }
+    let Some(child) = guard.take() else {
+        // No child of ours to reap. Crucially, do NOT clear the ownership
+        // record here: on startup this runs *before* `reclaim_orphan`, and
+        // clearing it would delete the only evidence that a previous run
+        // crashed while its sidecar is still holding the port.
+        return;
+    };
+    // `CommandChild::kill` signals only the immediate process. The Bun sidecar
+    // runs its projection/background workers as separate children, so the tree
+    // is stopped as well — otherwise those keep file locks in `~/.ashlr` after
+    // the window is gone.
+    //
+    // ORDER MATTERS. This used to be `child.kill(); kill_tree(pid);`, which
+    // achieved nothing: `child.kill()` is SIGKILL, so by the time `kill_tree`
+    // shelled out to `pgrep -P <pid>` the workers had already been reparented
+    // to pid 1 and the enumeration came back empty. The only pid ever signalled
+    // was one that was already dead, and the workers leaked on the ordinary ⌘Q
+    // path — the exact failure the extra call was added to prevent.
+    //
+    // `terminate_tree` walks the tree while the parent is still alive and gives
+    // it a bounded SIGTERM grace first, so `ashlr verse` gets to run the
+    // shutdown that releases its resource-quota lease.
+    let pid = child.pid() as i32;
+    sidecar_guard::terminate_tree(pid);
+    // Now let Tauri reap its own handle; the process is already gone.
+    let _ = child.kill();
+    drop(guard);
+    sidecar_guard::clear();
 }
 
 /// Start (or restart) the whole boot sequence: probe the port, spawn the
@@ -686,6 +734,24 @@ fn start_sequence(handle: AppHandle) {
     set_launch_phase(&handle, &LaunchPhase::Starting);
 
     reap_sidecar(&handle);
+
+    // A previous run that was SIGKILLed (or crashed) never got to reap its
+    // sidecar, which is then still holding the port. Without this the app is
+    // permanently stuck on the "port is already in use" screen after one crash.
+    match sidecar_guard::reclaim_orphan(SERVE_PORT) {
+        sidecar_guard::Reclaim::Killed(pid) => {
+            eprintln!(
+                "[ashlr-desktop] reclaimed the sidecar (pid {pid}) orphaned by a previous run"
+            );
+            // Give the kernel a moment to release the listening socket, or the
+            // probe below still sees the port as taken.
+            thread::sleep(Duration::from_millis(PORT_PROBE_MS));
+        }
+        sidecar_guard::Reclaim::OwnedByLiveApp => eprintln!(
+            "[ashlr-desktop] another Ashlr window already owns the sidecar on {SERVE_PORT}"
+        ),
+        sidecar_guard::Reclaim::StaleRecordCleared | sidecar_guard::Reclaim::NothingRecorded => {}
+    }
 
     // A port that is already open means our own bind will fail. Say so now
     // rather than after a 30s spinner.
@@ -765,6 +831,10 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
         }
     };
 
+    // Record who owns this sidecar before anything else can go wrong, so a
+    // crash from here on is repairable by the next launch.
+    sidecar_guard::record(child.pid(), SERVE_PORT, mode.args());
+
     // Store the child so we can kill it on exit (replacing a dead one on fallback).
     match handle.try_state::<AppState>() {
         Some(state) => {
@@ -773,6 +843,10 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
                 Err(poisoned) => poisoned.into_inner(),
             };
             if let Some(previous) = guard.take() {
+                // Same ordering rule as `reap_sidecar`: the tree has to be
+                // walked while the parent is alive, or `pgrep -P` finds nothing.
+                let previous_pid = previous.pid() as i32;
+                sidecar_guard::terminate_tree(previous_pid);
                 let _ = previous.kill();
             }
             *guard = Some(child);
@@ -874,6 +948,20 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
                         mode.label(),
                         status.code
                     );
+                    // Disarm the guard: this pid is dead. Without this,
+                    // `SIDECAR_PID` kept pointing at it for the rest of the
+                    // app's life — the common case, since the app then parks on
+                    // the "sidecar stopped while starting" screen — and a later
+                    // SIGTERM/SIGINT/SIGHUP ran `terminate_handler`, which
+                    // signals unconditionally with no argv check. Once the
+                    // kernel recycled that pid, the victim was a stranger's
+                    // process. `reclaim_orphan` goes to real trouble to prove a
+                    // pid is ours before killing it; the warm paths cannot, so
+                    // they must not stay armed on a pid known to be gone.
+                    //
+                    // The fallback below re-`record()`s via
+                    // `spawn_server_sidecar`, so the Serve child stays covered.
+                    sidecar_guard::clear();
                     if !ready.load(Ordering::SeqCst) && mode == SidecarMode::Verse {
                         eprintln!(
                             "[ashlr-desktop] `ashlr verse` unavailable in this build — falling back to `ashlr serve --allow-dispatch`"
@@ -937,6 +1025,10 @@ fn check_for_updates(handle: AppHandle) {
 
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
+
+    // `pkill`, a `kill` from a terminal, or Ctrl-C on a foreground run never
+    // reach Tauri's event loop. Arm the reaper before a sidecar can exist.
+    sidecar_guard::install_signal_handlers();
 
     // ── restore the saved window geometry + theme ────────────────────────────
     let saved = window_state::load().unwrap_or_default();
@@ -1192,6 +1284,7 @@ fn main() {
         // Reaping the sidecar in one place is what keeps orphan `ashlr verse`
         // processes off the machine.
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            eprintln!("[ashlr-desktop] exiting — reaping the sidecar");
             if let Some(state) = handle.try_state::<AppState>() {
                 if let Some(win) = handle.get_webview_window(MAIN_WINDOW_LABEL) {
                     if let Ok(mut guard) = state.window.lock() {
@@ -1325,6 +1418,22 @@ mod tests {
         // Nothing at all: dark, because that is the design's primary look and a
         // dark window behind a dark page is the invisible failure.
         assert_eq!(startup_theme(None, None), ShellTheme::Dark);
+    }
+
+    #[test]
+    fn a_failure_without_diagnostics_does_not_get_a_window_full_of_empty_canvas() {
+        let port = LaunchPhase::Failed(LaunchFailure::PortInUse { port: SERVE_PORT }).payload(&[]);
+        assert!(port.detail.is_empty(), "the port probe produces no sidecar output");
+        let (_, short) = launch_window_size(&port);
+
+        let exited = LaunchPhase::Failed(LaunchFailure::SidecarExited { code: Some(1) })
+            .payload(&["EADDRINUSE".to_string(), "stack".to_string()]);
+        let (_, tall) = launch_window_size(&exited);
+
+        assert!(tall > short, "a failure with diagnostics needs more room, got {tall} vs {short}");
+
+        let (_, starting) = launch_window_size(&LaunchPhase::Starting.payload(&[]));
+        assert!(starting < short, "the starting state is the smallest window");
     }
 
     #[test]

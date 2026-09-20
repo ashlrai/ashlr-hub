@@ -72,6 +72,13 @@ const TEXT_PAIRS: Array<[string, string]> = [
   // assert that the replacement actually clears the bar in both themes.
   ['--text-secondary', '--bg-hover'],
   ['--text-secondary', '--bg-selected'],
+  // Also the diff gutter's line numbers (chat.module.css .diffNo): real
+  // content — the number an operator reads to locate a change in their editor
+  // — so they owe the body floor on the code ground. They were painted with
+  // --text-disabled (2.33:1 light / 2.48:1 dark), borrowing WCAG's
+  // disabled-text exemption for content that is not disabled. --text-tertiary
+  // does NOT fix that: it measures 4.40:1 on light --bg-code, under the floor
+  // (the 4.83:1 figure is against --bg-surface, a different ground).
   ['--text-secondary', '--bg-code'],
   // --bg-active is the PRESS ground. Every chrome control now steps to it on
   // :active, so a tertiary child of a pressed row lands here: --text-tertiary
@@ -114,10 +121,17 @@ const NON_TEXT_PAIRS: Array<[string, string]> = [
   ['--border-focus', '--bg-canvas'],
   ['--accent-500', '--bg-surface'],
   ['--accent-500', '--bg-canvas'],
-  // The dashed "unknown" rule in the Usage panel (usage.module.css
-  // .unknownRule) is the designed representation of ABSENCE — a border that
-  // carries meaning, so it owes the 3:1 floor. It is pinned separately from
-  // the structural hairlines below, which are deliberately exempt.
+  // --text-tertiary as a MEANING-CARRYING non-text mark on the surface. Three
+  // usages depend on this pin, all of which owe 3:1 and none of which may use
+  // a structural hairline:
+  //   - the dashed "unknown" rule in Usage (usage.module.css .unknownRule),
+  //     the designed representation of ABSENCE;
+  //   - chart gridlines and axes (usage.module.css .charts sets --chart-axis
+  //     to this token and --chart-grid to a mix of it), which are what an eye
+  //     reads a value against;
+  //   - the in-chat search-hit gutter rule (Transcript.module.css
+  //     .turn[data-match]), the only indication that a turn matched a query.
+  // The structural hairlines below are deliberately exempt; these are not.
   ['--text-tertiary', '--bg-surface'],
 ];
 

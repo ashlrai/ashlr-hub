@@ -134,6 +134,20 @@
         border-left: 2px solid var(--border-strong);
         padding-left: 10px;
       }
+      /* Commands the user is meant to type. The Rust strings mark them with
+         backticks (src-tauri/src/launch_state.rs); rendering them as literal
+         backticks reads like a typo, so they become real inline code. */
+      .hint code {
+        font: 11.5px/1.4 var(--font-mono);
+        color: var(--text-secondary);
+        background: var(--bg-surface);
+        border: 1px solid var(--border-default);
+        border-radius: 3px;
+        padding: 0 4px;
+        user-select: text;
+        cursor: text;
+        white-space: nowrap;
+      }
 
       /* Indeterminate hairline, not a spinner. */
       .progress {
@@ -249,13 +263,34 @@
           } catch (_) {}
         }
 
+        // Split on backtick pairs and build text/<code> nodes. Deliberately
+        // node-by-node rather than innerHTML: the hint is native-authored, but
+        // nothing on this page should be able to turn a string into markup.
+        function renderHint(text) {
+          el.hint.textContent = '';
+          var parts = String(text).split('`');
+          for (var i = 0; i < parts.length; i++) {
+            if (parts[i] === '') continue;
+            // Odd indices sit between a pair of backticks — unless the string
+            // has an unmatched one, in which case the tail stays plain text.
+            var isCode = i % 2 === 1 && i < parts.length - 1;
+            var node = isCode ? document.createElement('code') : null;
+            if (node) {
+              node.textContent = parts[i];
+              el.hint.appendChild(node);
+            } else {
+              el.hint.appendChild(document.createTextNode(parts[i]));
+            }
+          }
+        }
+
         function render(state) {
           if (!state || typeof state !== 'object') return;
           el.body.setAttribute('data-phase', String(state.phase || 'starting'));
           el.headline.textContent = state.headline || '';
           el.message.textContent = state.message || '';
 
-          el.hint.textContent = state.hint || '';
+          renderHint(state.hint || '');
           el.hint.hidden = !state.hint;
 
           var detail = Array.isArray(state.detail) ? state.detail : [];

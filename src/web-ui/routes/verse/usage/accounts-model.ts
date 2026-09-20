@@ -47,8 +47,19 @@ export interface WindowView {
   tone: WindowTone;
   /** Verbatim provider prose. Rendered as-is, never turned into a countdown. */
   resetText: string | null;
+  /**
+   * The MACHINE-READABLE reset instant (ISO), when the provider gave one.
+   *
+   * Claude's is structurally always null — its reset is prose in `resetText`
+   * and may never be turned into a countdown — so this is the only field a
+   * countdown may ever be computed from, and the capacity strip keeps the two
+   * channels apart for exactly that reason.
+   */
+  resetsAt: string | null;
   /** True when the provider flagged the limit rather than measuring a percent. */
   limitReached: boolean;
+  /** False when the percent behind this window is a sentinel, not a reading. */
+  measured: boolean;
 }
 
 /** Human names for the window ids the probes actually emit. */
@@ -81,7 +92,9 @@ export function toWindowView(w: AccountWindow): WindowView {
     usedPct: w.limitReached ? null : w.usedPercent,
     tone: w.limitReached ? 'danger' : w.usedPercent === null ? 'ok' : windowTone(w.usedPercent),
     resetText: reset,
+    resetsAt: w.resetsAt,
     limitReached: w.limitReached,
+    measured: w.measured,
   };
 }
 
@@ -346,6 +359,14 @@ export interface AccountCardModel {
   color: string;
   plan: string | null;
   verdict: AccountVerdict;
+  /**
+   * Every window this account reported, binding first, for the detail view.
+   * The card itself still leads with `binding` and quiets `others`; this is
+   * the same data in one list so the detail view never re-derives an order.
+   */
+  allWindows: WindowView[];
+  /** Probe evidence, shown in the detail view rather than on the card face. */
+  evidence: AccountEvidence;
   /** The binding window, already viewified. Null when nothing was measured. */
   binding: WindowView | null;
   /** Every other window, in the order the provider reported them. */
@@ -356,6 +377,8 @@ export interface AccountCardModel {
   observedAt: string | null;
   /** Sort rank; lower is more usable. */
   rank: number;
+  /** True when this card has anything worth opening a detail view for. */
+  hasDetail: boolean;
   /**
    * Where these windows came from, when that is not simply "this account's own
    * probe" — e.g. an engine-wide subscription-tracker reading shared by two
@@ -364,10 +387,43 @@ export interface AccountCardModel {
   sourceNote: string | null;
 }
 
+/**
+ * What a probe actually told us, kept off the card face and shown in the
+ * detail view. None of it is a measurement; all of it is why a measurement is
+ * or is not there, which is the question a card's verdict raises.
+ */
+export interface AccountEvidence {
+  state: Account['state'];
+  authentication: Account['authentication'];
+  /**
+   * The monitor's health verdict. Claude's is `unknown` BY CONSTRUCTION
+   * (docs/VERSE-TELEMETRY-V2.md) and the detail view says so rather than
+   * drawing it as a fault.
+   */
+  health: string | null;
+  /** The verbatim machine code. Evidence, never prose. */
+  reasonCode: string | null;
+  observedAt: string | null;
+  /** The server's plain-language facts for this account. */
+  notes: string[];
+  unsupported: Account['unsupported'];
+}
+
 export function buildAccountCard(account: Account, sourceNote: string | null = null): AccountCardModel {
   const binding = bindingWindow(account);
   const verdict = accountVerdict(account, binding);
   const engine: VerseEngine = account.provider;
+  const others = account.windows.filter((w) => w.id !== binding?.id).map(toWindowView);
+  const bindingView = binding ? toWindowView(binding) : null;
+  const evidence: AccountEvidence = {
+    state: account.state,
+    authentication: account.authentication,
+    health: account.health,
+    reasonCode: account.reason,
+    observedAt: account.observedAt,
+    notes: account.notes,
+    unsupported: account.unsupported,
+  };
   return {
     id: account.id,
     label: account.label,
@@ -375,8 +431,15 @@ export function buildAccountCard(account: Account, sourceNote: string | null = n
     color: ENGINE_COLOR[engine],
     plan: account.planType,
     verdict,
-    binding: binding ? toWindowView(binding) : null,
-    others: account.windows.filter((w) => w.id !== binding?.id).map(toWindowView),
+    allWindows: bindingView ? [bindingView, ...others] : others,
+    evidence,
+    hasDetail:
+      account.windows.length > 0 ||
+      account.notes.length > 0 ||
+      account.credits !== null ||
+      account.reason !== null,
+    binding: bindingView,
+    others,
     credits: account.credits,
     reconnectCommand: account.reconnectCommand,
     observedAt: account.observedAt,
@@ -555,6 +618,11 @@ function seatAccount(input: {
           resetsAt: w.resetsAt === null ? null : new Date(w.resetsAt * 1000).toISOString(),
           resetDescription: null,
           limitReached: false,
+          // `resolveWindowSignal` only ever emits a REAL reading (see
+          // usage-model.ts): every branch that could be ledger-derived or a
+          // placeholder returns `unknown` instead. So a window that reaches
+          // here is measured by construction.
+          measured: true,
         }))
       : [];
 
@@ -564,6 +632,9 @@ function seatAccount(input: {
     provider: seat.engine,
     state: signal.kind === 'measured' ? 'observed' : 'unavailable',
     authentication: 'unknown',
+    // The coarse fallback sources carry no health verdict at all. Null is
+    // "not reported"; inventing 'healthy' here would be a claim nothing made.
+    health: null,
     planType: subscription?.plan ?? null,
     observedAt: seat.health.observedAt,
     windows,

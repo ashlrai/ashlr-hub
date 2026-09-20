@@ -18,7 +18,11 @@ const LABELS: Record<UniverseCampaignReadinessView['disposition'], string> = {
 
 function RecordedCheck({ campaignId, universeId }: { campaignId: string; universeId: string }) {
   const query = useMemo(() => universeCampaignReadinessQuery(campaignId, universeId), [campaignId, universeId]);
-  const { data, status } = useQuery(query);
+  // `freshMs: 0` opts out of useQuery's default mount-freshness window. This
+  // component only mounts when the operator discloses it, so every mount IS
+  // the request for a new sample — accepting a cached one because it is a few
+  // seconds old would silently answer a click with the previous reading.
+  const { data, status } = useQuery(query, { freshMs: 0 });
   const refresh = useRefetch(query);
   const busy = status === 'loading' || status === 'refreshing' || status === 'idle';
   const historical = busy || status === 'error';

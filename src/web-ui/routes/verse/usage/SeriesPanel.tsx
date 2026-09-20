@@ -29,8 +29,11 @@ import type { DailyUsage, SeriesWindow, UsageSeries } from './usage-contract.js'
 import {
   CACHE_CAVEAT,
   COST_ESTIMATE_NOTE,
+  LOCAL_CLOUD_SERIES_UNAVAILABLE,
   WINDOW_LABEL,
+  averagesFor,
   buildCacheSeries,
+  buildCacheTokenSeries,
   buildSpendSeries,
   buildTokenSeries,
   sparklinePoints,
@@ -54,6 +57,22 @@ const SPEND_COLUMNS: TableColumn<DailyUsage>[] = [
     label: 'Estimated spend',
     numeric: true,
     render: (r) => chartFormat.formatUsd(r.estCostUsd),
+  },
+];
+
+const CACHE_TOKEN_COLUMNS: TableColumn<DailyUsage>[] = [
+  { key: 'day', label: 'Day', render: (r) => chartFormat.formatDayLabel(r.day) },
+  {
+    key: 'read',
+    label: 'Cache read',
+    numeric: true,
+    render: (r) => (r.cacheRead === null ? 'not reported' : chartFormat.formatCompact(r.cacheRead)),
+  },
+  {
+    key: 'write',
+    label: 'Cache write',
+    numeric: true,
+    render: (r) => (r.cacheWrite === null ? 'not reported' : chartFormat.formatCompact(r.cacheWrite)),
   },
 ];
 
@@ -88,9 +107,11 @@ export function SeriesPanel({
   loading: boolean;
 }): ReactNode {
   const totals = series ? totalsFor(series.days) : null;
+  const averages = series ? averagesFor(series.days) : null;
   const tokens = buildTokenSeries(series);
   const spend = buildSpendSeries(series);
   const cache = buildCacheSeries(series);
+  const cacheTokens = buildCacheTokenSeries(series);
 
   return (
     <section className={styles.panel} aria-labelledby="verse-usage-series">
@@ -156,6 +177,33 @@ export function SeriesPanel({
               caption="Rollup rows, not billed calls"
               trend={sparklinePoints(series, (d) => d.sessions)}
               trendLabel="Sessions per day"
+            />
+            {/* Averages are per RECORDED day, never per calendar day: dividing
+                by the window length would understate every figure by however
+                many days the rollup has no row for. */}
+            <StatTile
+              label="Estimated spend per active day"
+              value={
+                <span className={styles.num}>
+                  {averages?.estCostUsdPerDay === null || averages === null
+                    ? 'unknown'
+                    : chartFormat.formatUsd(averages.estCostUsdPerDay)}
+                </span>
+              }
+              caption={`Across the ${totals?.dayCount ?? 0} days that carry a rollup row — not the ${window} calendar span`}
+            />
+            <StatTile
+              label="Heaviest day"
+              value={
+                <span className={styles.num}>
+                  {averages?.peakCostDay ? chartFormat.formatUsd(averages.peakCostDay.usd) : 'unknown'}
+                </span>
+              }
+              caption={
+                averages?.peakCostDay
+                  ? `${chartFormat.formatDayLabel(averages.peakCostDay.day)} — estimated, not billed`
+                  : 'No day in this window carries a cost row.'
+              }
             />
           </div>
 
@@ -236,7 +284,56 @@ export function SeriesPanel({
                 />
               ) : null}
             </ChartContainer>
+
+            <ChartContainer
+              title="Cache read and write tokens"
+              description={WINDOW_LABEL[window]}
+              caveat={CACHE_CAVEAT}
+              empty={!cacheTokens.available}
+              emptyMessage={cacheTokens.available ? '' : cacheTokens.reason}
+              table={
+                cacheTokens.available ? (
+                  <TableView
+                    caption="Cache read and write tokens per day"
+                    columns={CACHE_TOKEN_COLUMNS}
+                    rows={series.days}
+                    rowKey={(r) => r.day}
+                  />
+                ) : undefined
+              }
+            >
+              {cacheTokens.available ? (
+                <LineChart
+                  series={cacheTokens.series}
+                  formatX={(x) => chartFormat.formatTimeLabel(x)}
+                  formatY={(y) => chartFormat.formatCompact(y)}
+                  ariaLabel={`Cache read and write tokens per day over ${WINDOW_LABEL[window].toLowerCase()}`}
+                />
+              ) : null}
+            </ChartContainer>
+
+            {/* The local/cloud split has no dated source. Refusing the chart
+                out loud, in the place the chart would occupy, is the honest
+                answer — see LOCAL_CLOUD_SERIES_UNAVAILABLE. */}
+            <ChartContainer
+              title="Local vs cloud per day"
+              description={WINDOW_LABEL[window]}
+              empty
+              emptyMessage={LOCAL_CLOUD_SERIES_UNAVAILABLE}
+            >
+              {null}
+            </ChartContainer>
           </div>
+
+          {series.caveats.length > 0 ? (
+            <ul className={styles.noteList}>
+              {series.caveats.map((c) => (
+                <li key={c} className={styles.capacityMuted}>
+                  {c}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </>
       )}
     </section>

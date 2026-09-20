@@ -29,6 +29,9 @@
  */
 
 import { evictAll, invalidatePrefix } from './cache.js';
+// The composer owns its own storage format, so the key names live with it
+// rather than being duplicated here where they could drift.
+import { clearComposerMemory } from '../routes/verse/chat/composer-state.js';
 
 const READ_CLIENT_STORAGE_KEY = 'ashlr.readClientProof.v1';
 const READ_CLIENT_RE = /^[a-f0-9]{64}$/;
@@ -170,6 +173,11 @@ export async function clearReadSession(): Promise<void> {
 function expireNow(): void {
   clearMutationToken();
   evictAll();
+  // `evictAll` clears the query cache so nothing stale leaks into the next
+  // session's first paint. The composer's drafts and sent-message history live
+  // in localStorage, not in that cache, and they are verbatim prompt text —
+  // exactly the kind of content this wipe exists for.
+  clearComposerMemory();
   setState({ phase: 'unauthenticated', checked: true });
 }
 

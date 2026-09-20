@@ -36,6 +36,20 @@ export const LOCAL_SAVINGS_NOTE =
 export const SERIES_TOO_THIN =
   'Fewer than two days in this window carry a rollup row, which is not a trend.';
 
+/**
+ * Why there is no per-day local/cloud line, stated where the chart would be.
+ *
+ * `GET /api/verse/usage-series` returns `buildRollup(window, cfg).byDay`, and
+ * `DailyUsage` has no per-engine or per-tier columns at all — the tier split
+ * exists only in `/api/control`'s `usage.byProvider`, which is a single
+ * AGGREGATE for its window with no dates on it. Splitting the daily totals by
+ * the aggregate's ratio would draw a smooth, plausible, entirely invented
+ * pair of lines. So the chart is refused and the aggregate is shown instead,
+ * under its own window, labelled as an aggregate.
+ */
+export const LOCAL_CLOUD_SERIES_UNAVAILABLE =
+  'The daily rollup carries no per-engine or local/cloud columns, and the only tier split available is a single aggregate with no dates on it. Apportioning the daily totals by that aggregate\u2019s ratio would invent a shape nobody measured, so no per-day split is drawn — the aggregate below is the real figure.';
+
 export type SeriesProjection =
   | { available: true; series: Series[]; days: DailyUsage[] }
   | { available: false; reason: string };
@@ -129,6 +143,68 @@ export function buildCacheSeries(series: UsageSeries | null): SeriesProjection {
     series: [
       { id: 'cacheHitRate', label: 'Cache hit rate', points: points(series.days, (d) => d.cacheHitRate) },
     ],
+  };
+}
+
+/**
+ * Cache READ and WRITE token counts, which are a different fact from the hit
+ * RATE: a day can have a healthy rate on tiny volume. Refused outright when no
+ * day reports either column, because a flat pair of zero lines would read as
+ * "the cache did nothing" when the truth is "nothing was reported".
+ */
+export function buildCacheTokenSeries(series: UsageSeries | null): SeriesProjection {
+  if (!series) return { available: false, reason: 'No usage series has been loaded.' };
+  const known =
+    knownCount(series.days, (d) => d.cacheRead) + knownCount(series.days, (d) => d.cacheWrite);
+  if (known === 0) {
+    return {
+      available: false,
+      reason:
+        'No day in this window reported cache read or write tokens, so there is nothing to plot. This is an absent signal, not zero cache activity.',
+    };
+  }
+  if (series.days.length < 2) return { available: false, reason: SERIES_TOO_THIN };
+  return {
+    available: true,
+    days: series.days,
+    series: [
+      { id: 'cacheRead', label: 'Cache read', points: points(series.days, (d) => d.cacheRead) },
+      { id: 'cacheWrite', label: 'Cache write', points: points(series.days, (d) => d.cacheWrite) },
+    ],
+  };
+}
+
+export interface SeriesAverages {
+  /** Per RECORDED day, not per calendar day — the denominator is stated. */
+  tokensInPerDay: number | null;
+  tokensOutPerDay: number | null;
+  estCostUsdPerDay: number | null;
+  /** The busiest recorded day, for "what does a heavy day cost me". */
+  peakCostDay: { day: string; usd: number } | null;
+}
+
+/**
+ * Averages over the days that actually carry a row. Dividing by the window
+ * length instead would understate every figure by however many days the
+ * rollup has no data for, which is the difference between "I spend $4 a day"
+ * and "I spend $4 on the days I work".
+ */
+export function averagesFor(days: readonly DailyUsage[]): SeriesAverages {
+  if (days.length === 0) {
+    return {
+      tokensInPerDay: null,
+      tokensOutPerDay: null,
+      estCostUsdPerDay: null,
+      peakCostDay: null,
+    };
+  }
+  const totals = totalsFor(days);
+  const peak = days.reduce((best, d) => (d.estCostUsd > best.estCostUsd ? d : best));
+  return {
+    tokensInPerDay: totals.tokensIn / days.length,
+    tokensOutPerDay: totals.tokensOut / days.length,
+    estCostUsdPerDay: totals.estCostUsd / days.length,
+    peakCostDay: { day: peak.day, usd: peak.estCostUsd },
   };
 }
 

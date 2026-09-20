@@ -27,14 +27,16 @@
  * Every honesty decision lives in the model modules, not here.
  */
 import type { ReactNode } from 'react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { ApiError } from '../../../data/client.js';
-import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { useQuery, useRefetch, useRefresh } from '../../../data/hooks.js';
 import { controlSnapshotQuery } from '../../../data/queries.js';
 import { SkeletonCardGrid, SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { StatTile, chartFormat } from '../../../components/charts/index.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import { AccountCard } from '../usage/AccountCard.js';
+import { AccountDetail } from '../usage/AccountDetail.js';
+import { CapacityStrip } from '../usage/CapacityStrip.js';
 import { LimitsPanel } from '../usage/LimitsPanel.js';
 import { LocalCloudPanel } from '../usage/LocalCloudPanel.js';
 import { LocalCard, LocalModelsPanel } from '../usage/LocalModelsPanel.js';
@@ -54,7 +56,8 @@ import {
   buildLocalCard,
   collectAccountNotes,
 } from '../usage/accounts-model.js';
-import { buildLocalModelsView } from '../usage/local-model.js';
+import { buildLocalModelsView, localStaleness } from '../usage/local-model.js';
+import { buildCapacityOverview } from '../usage/capacity-model.js';
 import {
   projectAccountsSnapshot,
   projectLocalModels,
@@ -93,8 +96,50 @@ function StateBlock({
   );
 }
 
+/**
+ * How often the probe-spawning reads re-run while this section is on screen.
+ *
+ * Matches the collector's own cycle: reading faster cannot surface anything
+ * newer, and each read costs a handful of short-lived process spawns (zero
+ * tokens, zero paid quota — see docs/VERSE-TELEMETRY-V2.md).
+ */
+const USAGE_POLL_MS = 30_000;
+
+/**
+ * Re-read on an interval, but only while the document is actually visible.
+ *
+ * Accounts and local models have no server-side change signal to ride — there
+ * is no SSE event that means "a provider's window moved" — so without this the
+ * whole section was a mount-only snapshot: a Usage screen left open while the
+ * loop worked overnight showed the capacity it had at mount, looking live.
+ * Gating on visibility keeps a backgrounded window from spawning probes
+ * forever, and `useRefetch` coalesces with any read already in flight.
+ */
+function useVisiblePoll(refetch: () => void, intervalMs: number): void {
+  useEffect(() => {
+    let id: ReturnType<typeof setInterval> | null = null;
+    const stop = (): void => {
+      if (id !== null) clearInterval(id);
+      id = null;
+    };
+    const sync = (): void => {
+      const visible = typeof document === 'undefined' || document.visibilityState === 'visible';
+      if (visible && id === null) id = setInterval(refetch, intervalMs);
+      else if (!visible) stop();
+    };
+    sync();
+    document.addEventListener('visibilitychange', sync);
+    return () => {
+      document.removeEventListener('visibilitychange', sync);
+      stop();
+    };
+  }, [refetch, intervalMs]);
+}
+
 export function UsageSection(): ReactNode {
   const [seriesWindow, setSeriesWindow] = useState<SeriesWindow>('7d');
+  /** Which account card has its detail view open. Null = none. */
+  const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
 
   const accounts = useQuery(verseAccountsQuery);
   const localModels = useQuery(verseLocalModelsQuery);
@@ -104,13 +149,21 @@ export function UsageSection(): ReactNode {
   const verseControl = useQuery(verseControlQuery);
   const bootstrap = useQuery(verseBootstrapQuery);
 
-  const refetchAccounts = useRefetch(verseAccountsQuery);
-  const refetchLocalModels = useRefetch(verseLocalModelsQuery);
-  const refetchSeries = useRefetch(usageSeriesQuery(seriesWindow));
-  const refetchFrontier = useRefetch(frontierUsageQuery);
-  const refetchControl = useRefetch(controlSnapshotQuery);
-  const refetchVerseControl = useRefetch(verseControlQuery);
-  const refetchBootstrap = useRefetch(verseBootstrapQuery);
+  const refetchAccounts = useRefresh(verseAccountsQuery);
+  const refetchLocalModels = useRefresh(verseLocalModelsQuery);
+  const refetchSeries = useRefresh(usageSeriesQuery(seriesWindow));
+  const refetchFrontier = useRefresh(frontierUsageQuery);
+  const refetchControl = useRefresh(controlSnapshotQuery);
+  const refetchVerseControl = useRefresh(verseControlQuery);
+  const refetchBootstrap = useRefresh(verseBootstrapQuery);
+
+  // Live without a server signal. Kept to the two reads that actually go stale
+  // on their own; everything else rides the daemon SSE event (data/sse.ts) or
+  // the Refresh button.
+  const pollAccounts = useRefetch(verseAccountsQuery);
+  const pollLocalModels = useRefetch(verseLocalModelsQuery);
+  useVisiblePoll(pollAccounts, USAGE_POLL_MS);
+  useVisiblePoll(pollLocalModels, USAGE_POLL_MS);
 
   const refreshAll = (): void => {
     refetchAccounts();
@@ -183,6 +236,28 @@ export function UsageSection(): ReactNode {
     if (localCard) entries.push({ key: 'local', rank: localCard.rank, label: 'Local', kind: 'local', card: localCard });
     return entries.sort((a, b) => a.rank - b.rank || a.label.localeCompare(b.label));
   }, [cards, localCard]);
+
+  // The two-second answer, over the same card models the grid renders — so
+  // the strip and the cards can never disagree about a seat's state.
+  const capacity = useMemo(
+    () => buildCapacityOverview({ cards, localCard, localView }),
+    [cards, localCard, localView],
+  );
+
+  const localStale = useMemo(() => localStaleness(localView?.runtimes ?? []), [localView]);
+
+  // Resolve the selection against the CURRENT cards rather than holding a card
+  // object in state: a refresh rebuilds every model, and a stale captured card
+  // would keep rendering readings the next poll already replaced. A selection
+  // whose account has disappeared resolves to null and the detail closes.
+  const selectedCard = useMemo(
+    () => (selectedAccountId === null ? null : (cards.find((c) => c.id === selectedAccountId) ?? null)),
+    [cards, selectedAccountId],
+  );
+
+  const toggleAccount = (id: string): void => {
+    setSelectedAccountId((current) => (current === id ? null : id));
+  };
 
   const split = useMemo(() => buildLocalCloudSplit(control.data?.usage), [control.data]);
   const limitRows = useMemo(
@@ -288,6 +363,12 @@ export function UsageSection(): ReactNode {
           </div>
         ) : (
           <>
+            <CapacityStrip
+              overview={capacity}
+              selectedId={selectedAccountId}
+              onSelectSeat={toggleAccount}
+            />
+
             <section className={styles.panel} aria-labelledby="verse-usage-accounts">
               <div className={styles.panelHead}>
                 <h3 id="verse-usage-accounts" className={styles.panelTitle}>
@@ -323,15 +404,34 @@ export function UsageSection(): ReactNode {
                   then refresh — this is an empty roster, not a set of accounts at zero.
                 </p>
               ) : (
-                <div className={styles.cards}>
-                  {gridCards.map((entry) =>
-                    entry.kind === 'account' ? (
-                      <AccountCard key={entry.key} card={entry.card} />
-                    ) : (
-                      <LocalCard key={entry.key} card={entry.card} />
-                    ),
-                  )}
-                </div>
+                <>
+                  <div className={styles.cards}>
+                    {gridCards.map((entry) =>
+                      entry.kind === 'account' ? (
+                        <AccountCard
+                          key={entry.key}
+                          card={entry.card}
+                          onOpen={toggleAccount}
+                          expanded={selectedAccountId === entry.key}
+                          triggerId={`verse-account-trigger-${entry.key}`}
+                          detailId={`verse-account-detail-${entry.key}`}
+                        />
+                      ) : (
+                        <LocalCard key={entry.key} card={entry.card} staleness={localStale} />
+                      ),
+                    )}
+                  </div>
+
+                  {selectedCard ? (
+                    <div id={`verse-account-detail-${selectedCard.id}`}>
+                      <AccountDetail
+                        card={selectedCard}
+                        headingId={`verse-account-heading-${selectedCard.id}`}
+                        onClose={() => setSelectedAccountId(null)}
+                      />
+                    </div>
+                  ) : null}
+                </>
               )}
             </section>
 

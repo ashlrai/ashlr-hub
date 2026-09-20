@@ -24,6 +24,7 @@ import { reportThemeToShell, subscribeDesktopCommands } from '../../app/desktop-
 import { useQuery, useTheme } from '../../data/hooks.js';
 import { inboxListQuery } from '../../data/queries.js';
 import { SECTION_ICON, VerseMark } from './verse-icons.js';
+import { OnboardingFlow } from './onboarding/OnboardingFlow.js';
 import { useVerseUi } from './useVerseUi.js';
 import {
   requestVerseCommand,
@@ -213,6 +214,15 @@ export function VerseApp() {
           </Suspense>
         </RouteErrorBoundary>
       </div>
+      {/*
+        First run only, and OUTSIDE the error boundary's subtree on purpose:
+        it is a docked card, not a modal — no backdrop, no focus trap — so the
+        rail and the mounted section stay fully usable while it is open, and a
+        section that throws does not take the guidance down with it. It renders
+        nothing at all once the operator has skipped or finished it
+        (onboarding/onboarding-store.ts).
+      */}
+      <OnboardingFlow />
     </div>
   );
 }

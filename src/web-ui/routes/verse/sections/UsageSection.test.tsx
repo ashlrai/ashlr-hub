@@ -308,7 +308,12 @@ describe('UsageSection — local availability', () => {
   it('shows residency, the GPU split, params, quant, context and tool support', async () => {
     render(<UsageSection />);
     await waitFor(() => expect(screen.getByText('Local availability')).toBeInTheDocument());
-    const row = screen.getByText('qwen3-coder').closest('tr');
+    // The name now appears in the model table, in the resident-memory chart,
+    // and in that chart's table twin. The MODEL TABLE is the row this test is
+    // about, so it is selected by the caption rather than by being the only
+    // occurrence of the name on the screen.
+    const table = screen.getByRole('table', { name: /residency, tool support/i });
+    const row = within(table).getByText('qwen3-coder').closest('tr');
     expect(row).not.toBeNull();
     expect(within(row!).getByText('resident')).toBeInTheDocument();
     expect(within(row!).getByText(/88% GPU/)).toBeInTheDocument();
@@ -492,10 +497,13 @@ describe('UsageSection — token output and spend', () => {
     expect(screen.getByText('Estimated spend · 7d')).toBeInTheDocument();
   });
 
-  it('carries the Codex cache caveat next to the cache chart', async () => {
+  it('carries the Codex cache caveat next to every cache chart', async () => {
     render(<UsageSection />);
     await waitFor(() => expect(screen.getAllByText('Cache hit rate').length).toBeGreaterThan(0));
-    expect(screen.getByText(/hardcoded 0 upstream/)).toBeInTheDocument();
+    // Both cache charts — the hit RATE and the read/write TOKEN counts — carry
+    // it: the Codex zeros distort each of them, and a caveat on only one would
+    // leave the other reading as a complete picture.
+    expect(screen.getAllByText(/hardcoded 0 upstream/).length).toBe(2);
   });
 
   it('labels localSavingsUsd as the flat heuristic it is', async () => {
@@ -611,5 +619,91 @@ describe('UsageSection — degraded, empty, error and unauthorized states', () =
     await waitFor(() => expect(screen.getByText('Spend')).toBeInTheDocument());
     expect(screen.getByText(/daemon tick ledger is not\s+drawn again here/)).toBeInTheDocument();
     expect(screen.queryByRole('img', { name: 'Autonomous loop spend per day' })).not.toBeInTheDocument();
+  });
+});
+
+describe('UsageSection — the capacity strip', () => {
+  it('answers "what can I run right now" in one line, over the whole roster', async () => {
+    render(<UsageSection />);
+    // Claude is blocked by its per-model week; Codex A is fully used but has a
+    // spendable balance, so it is USABLE; Codex B is at 31%; Grok is signed
+    // out; the local seat is resident. Three of five.
+    await waitFor(() =>
+      expect(screen.getByText(/3 of 5 seats are usable right now\./)).toBeInTheDocument(),
+    );
+  });
+
+  it('gives every seat a state WORD, not just a tint', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(screen.getAllByText('usable').length).toBe(3));
+    expect(screen.getAllByText('blocked').length).toBe(2);
+  });
+
+  /**
+   * Codex publishes a real reset instant; Claude publishes a sentence. The
+   * strip must use the first as a countdown and print the second verbatim —
+   * and it must never claim "no reset" when a dated one exists.
+   */
+  it('keeps the dated reset and the prose reset in separate channels', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(screen.getByText('Nearest reset')).toBeInTheDocument());
+    expect(screen.queryByText(/absent timestamp, not "never"/)).not.toBeInTheDocument();
+    expect(screen.getByText('Resets reported as text')).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/resets Sep 25 at 7pm \(America\/New_York\)/).length,
+    ).toBeGreaterThan(0);
+  });
+
+  it('reports local headroom against the machine budget rather than as a bare count', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(screen.getByText('Local headroom')).toBeInTheDocument());
+    // 128 GB budget, 64 GB resident.
+    expect(screen.getByText(/free of 128 GB/)).toBeInTheDocument();
+  });
+
+  it('counts the models that can actually drive a session, apart from the rest', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(screen.getByText('Agentic locally')).toBeInTheDocument());
+    expect(screen.getByText(/of 2 installed models can drive a session/)).toBeInTheDocument();
+  });
+});
+
+describe('UsageSection — per-account depth on demand', () => {
+  it('opens every window of an account from its card, not just the binding one', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(card('Claude Max')).toBeInTheDocument());
+    await userEvent.click(within(card('Claude Max')).getByRole('button', { name: /Claude Max/ }));
+    expect(await screen.findByText('All windows (3)')).toBeInTheDocument();
+    expect(screen.getByText('Probe evidence')).toBeInTheDocument();
+  });
+
+  it('refuses to draw a history no source retains', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(card('Work Codex')).toBeInTheDocument());
+    await userEvent.click(within(card('Work Codex')).getByRole('button', { name: /Work Codex/ }));
+    expect(await screen.findByText(/No per-account history is retained/)).toBeInTheDocument();
+  });
+
+  /**
+   * The detail view shows the credit balance as a fact INDEPENDENT of the
+   * window: Codex A's week is fully used and it is still spendable.
+   */
+  it('shows credits beside a fully used window without calling the account blocked', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(card('Personal Codex')).toBeInTheDocument());
+    await userEvent.click(within(card('Personal Codex')).getByRole('button', { name: /Personal Codex/ }));
+    const detail = (await screen.findByText('Probe evidence')).closest('section');
+    expect(detail).not.toBeNull();
+    expect(within(detail!).getByText('2,048.42')).toBeInTheDocument();
+  });
+
+  it('closes the detail again', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(card('Work Codex')).toBeInTheDocument());
+    const trigger = within(card('Work Codex')).getByRole('button', { name: /Work Codex/ });
+    await userEvent.click(trigger);
+    expect(await screen.findByText('Probe evidence')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByText('Probe evidence')).not.toBeInTheDocument());
   });
 });

@@ -469,3 +469,135 @@ describe('sanitizeCommand — the client-side backstop', () => {
     expect(sanitizeCommand('ashlr resources login grok')).toBe('ashlr resources login grok');
   });
 });
+
+// ---------------------------------------------------------------------------
+// V2.1 additions — staleness, the sentinel flag, machine memory, caveats
+// ---------------------------------------------------------------------------
+
+describe('a RETAINED runtime report is projected as retained, never as fresh', () => {
+  it('carries stale and staleForMs through per runtime', () => {
+    const projected = projectLocalModels(
+      localSnapshot({
+        ollama: {
+          reachable: true,
+          baseUrl: 'http://127.0.0.1:11434',
+          models: [],
+          reason: 'ollama-tags-timeout',
+          stale: true,
+          staleForMs: 12_000,
+        },
+      }),
+    );
+    const ollama = projected?.runtimes.find((r) => r.runtime === 'ollama');
+    expect(ollama?.stale).toBe(true);
+    expect(ollama?.staleForMs).toBe(12_000);
+  });
+
+  /**
+   * A fresh report carrying a stray staleForMs must not age itself. The server
+   * only writes the field alongside `stale: true`, and honouring it without
+   * the flag would put "N seconds old" on a reading taken this instant.
+   */
+  it('ignores a staleForMs that arrives without the stale flag', () => {
+    const projected = projectLocalModels(
+      localSnapshot({
+        ollama: {
+          reachable: true,
+          baseUrl: 'http://127.0.0.1:11434',
+          models: [],
+          reason: null,
+          staleForMs: 9_000,
+        },
+      }),
+    );
+    const ollama = projected?.runtimes.find((r) => r.runtime === 'ollama');
+    expect(ollama?.stale).toBe(false);
+    expect(ollama?.staleForMs).toBeNull();
+  });
+
+  it('projects the machine free-memory figure as its own fact, beside the budget', () => {
+    const projected = projectLocalModels(localSnapshot());
+    expect(projected?.memoryBudgetBytes).toBe(128 * 1024 ** 3);
+    expect(projected?.freeMemoryBytes).toBe(40 * 1024 ** 3);
+  });
+
+  it('reports no runtimes and no staleness for a flat legacy body, rather than inventing one', () => {
+    const projected = projectLocalModels({ reachable: true, models: [], memoryBudgetBytes: 8 });
+    expect(projected?.runtimes).toEqual([]);
+    expect(projected?.freeMemoryBytes).toBeNull();
+  });
+});
+
+describe("a window's `measured` flag survives the projection", () => {
+  /**
+   * Codex writes `rateLimitReachedType` as the value 100. The server marks it
+   * `measured: false`; collapsing that back to "100% used" is the single
+   * biggest misreading this surface can produce, so the flag is pinned here.
+   */
+  it('keeps measured:false on a flagged sentinel', () => {
+    const projected = projectAccountsSnapshot(
+      snapshot({
+        accounts: [
+          claudeRecord({
+            id: 'codex-a',
+            provider: 'codex',
+            windows: [
+              {
+                id: 'codex',
+                usedPercent: 100,
+                resetsAt: null,
+                nativeReport: null,
+                limitReached: true,
+                measured: false,
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    const w = projected?.accounts[0]?.windows[0];
+    expect(w?.limitReached).toBe(true);
+    expect(w?.measured).toBe(false);
+  });
+
+  it('defaults an absent measured flag to false when the limit flag is set', () => {
+    const projected = projectAccountsSnapshot({
+      accounts: [{ id: 'x', provider: 'codex', windows: [{ id: 'codex', usedPercent: 100, limitReached: true }] }],
+    });
+    expect(projected?.accounts[0]?.windows[0]?.measured).toBe(false);
+  });
+
+  it('defaults an absent measured flag to true on an ordinary reading', () => {
+    const projected = projectAccountsSnapshot({
+      accounts: [{ id: 'x', provider: 'codex', windows: [{ id: 'codex', usedPercent: 40 }] }],
+    });
+    expect(projected?.accounts[0]?.windows[0]?.measured).toBe(true);
+  });
+});
+
+describe('the usage-series wrapper carries its own disclosure', () => {
+  it('keeps the server caveats verbatim and the estimated flag', () => {
+    const projected = projectUsageSeries(
+      {
+        window: '30d',
+        byDay: [],
+        estimated: true,
+        caveats: ['estCostUsd is estimated from a static price table, not a billed amount.'],
+      },
+      '7d',
+    );
+    expect(projected?.window).toBe('30d');
+    expect(projected?.estimated).toBe(true);
+    expect(projected?.caveats).toHaveLength(1);
+  });
+
+  /**
+   * A server too old to say `estimated` is still estimating — every cost
+   * column on this route comes from the static price table — so the
+   * disclosure defaults ON. Defaulting it off would drop the caveat exactly
+   * when the client is least sure what it is reading.
+   */
+  it('defaults estimated to true when the server did not say', () => {
+    expect(projectUsageSeries({ window: '7d', byDay: [] }, '7d')?.estimated).toBe(true);
+  });
+});

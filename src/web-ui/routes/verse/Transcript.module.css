@@ -425,3 +425,95 @@
 @media (max-width: 900px) {
   .transcript { padding: var(--space-5) var(--space-4); }
 }
+
+/* ---- turns ------------------------------------------------------------- */
+/* One exchange: the items, then the summary of what it touched. A turn is a
+   region, not a card — no border, no background, no radius. Its only visible
+   chrome appears when it is the target of a jump or a search hit. */
+.turn {
+  display: block;
+  min-width: 0;
+  scroll-margin-block: var(--space-6);
+  border-radius: var(--radius-xs);
+}
+.turn:focus-visible {
+  outline: 2px solid var(--accent-500);
+  outline-offset: var(--space-2);
+}
+.turnItems {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+/* Search hit / jump target: a 2px rule in the gutter, not a highlight wash.
+   The gutter is outside the measure, so the reading column does not move.
+
+   `--text-tertiary`, not `--border-strong`: this rule is the ONLY indication
+   that a turn matched the query, so it carries meaning and DESIGN-V2 §6's 3:1
+   floor applies. `--border-strong` is a hairline token, pinned only to a 1.1
+   "not invisible" floor and explicitly exempt from 3:1 — it measures 1.45:1
+   light / 1.66:1 dark against the transcript's `--bg-surface`. `--text-tertiary`
+   is 4.83:1 / 5.47:1 and leaves `--accent-500` free to distinguish the ACTIVE
+   hit from the rest. */
+.turn[data-match] {
+  box-shadow: -2px 0 0 0 var(--text-tertiary);
+}
+.turn[data-match='active'] {
+  box-shadow: -2px 0 0 0 var(--accent-500);
+}
+.turn[data-flash],
+[data-flash] {
+  animation: verse-flash 1.4s var(--ease-standard) 1;
+}
+
+@keyframes verse-flash {
+  0%, 60% { background: var(--bg-selected); }
+  100% { background: transparent; }
+}
+
+.turnErrorJump {
+  display: inline-flex;
+  align-items: center;
+  margin-top: var(--space-3);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-left: 2px solid var(--status-danger-solid);
+  background: transparent;
+  color: var(--status-danger-fg);
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.turnErrorJump:hover { background: var(--status-danger-bg); }
+
+/* ---- tool line: the change size, right of the argument ------------------ */
+.toolLine { grid-template-columns: 12px auto minmax(0, 1fr) auto auto; }
+.toolDelta {
+  display: inline-flex;
+  gap: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.toolAdd { color: var(--status-success-fg); }
+.toolDel { color: var(--status-danger-fg); }
+
+.toolNote {
+  margin-top: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size, 11px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .turn[data-flash],
+  :root:not([data-motion="full"]) [data-flash] { animation: none; }
+}
+:root[data-motion="reduce"] .turn[data-flash],
+:root[data-motion="reduce"] [data-flash] { animation: none; }

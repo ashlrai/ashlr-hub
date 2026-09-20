@@ -62,6 +62,92 @@ export function seatUnavailableReason(seat: VerseSeat): string | null {
   return seat.health.summary ?? 'seat unavailable';
 }
 
+// ---------------------------------------------------------------------------
+// Seat capacity — "which account can I actually use right now", at the point
+// the choice is made
+// ---------------------------------------------------------------------------
+
+/**
+ * The four answers a picker needs. Same vocabulary as the Usage section's
+ * `CapacityClass` so the two surfaces never use different words for one state.
+ */
+export type SeatCapacityClass = 'ready' | 'tight' | 'blocked' | 'unread';
+
+/** Word, never colour alone (DESIGN-V2 §6). */
+export const SEAT_CAPACITY_WORD: Record<SeatCapacityClass, string> = {
+  ready: 'usable',
+  tight: 'tight',
+  blocked: 'blocked',
+  unread: 'no reading',
+};
+
+/** Above this share of the binding window a seat is worth flagging. */
+const TIGHT_PERCENT = 85;
+
+export interface SeatCapacityNote {
+  cls: SeatCapacityClass;
+  /**
+   * The binding window's percent when it is a real measurement. Null for an
+   * unread seat AND at the 100 ceiling, where the upstream value may be the
+   * provider's "limit reached" sentinel rather than a reading
+   * (docs/VERSE-TELEMETRY-V2.md) — and "limit reached" is true under either.
+   */
+  usedPercent: number | null;
+  /** One short phrase for an option label, a pill title, a menu row. */
+  text: string;
+}
+
+/** `seven_day_fable` → `weekly (fable)`; `five_hour` → `5-hour`. */
+export function seatWindowLabel(id: string): string {
+  const known: Record<string, string> = {
+    five_hour: '5-hour window',
+    seven_day: 'weekly window',
+    codex: 'weekly window',
+  };
+  if (known[id]) return known[id];
+  const perModel = /^seven_day_(.+)$/.exec(id);
+  if (perModel) return `weekly ${perModel[1]!.replace(/_/g, ' ')} window`;
+  return `${id.replace(/_/g, ' ')} window`;
+}
+
+/**
+ * What a seat's own health says about whether a turn sent to it will land.
+ *
+ * This exists because the seat picker showed NOTHING: it annotated an option
+ * only when `health.state === 'unavailable'`, and Claude's `health` is
+ * `unknown` by construction (docs/VERSE-TELEMETRY-V2.md). So a Claude seat
+ * whose binding weekly window reads 100% used appeared as an ordinary,
+ * enabled, unannotated choice, and the exhaustion was discovered at turn time
+ * — exactly the failure the Usage section was built to prevent.
+ *
+ * A `blocked` seat is MARKED, never disabled: a used-up window can coexist
+ * with a spendable credit balance, so refusing the choice would be a stronger
+ * claim than the data supports.
+ */
+export function seatCapacity(seat: VerseSeat): SeatCapacityNote {
+  const reason = seatUnavailableReason(seat);
+  if (reason !== null) return { cls: 'blocked', usedPercent: null, text: reason };
+
+  const measured = seat.health.windows.filter(
+    (w): w is { id: string; usedPercent: number; resetsAt: string | null } =>
+      typeof w.usedPercent === 'number' && Number.isFinite(w.usedPercent),
+  );
+  // No window reported a number. That is an unanswered question, not a zero —
+  // an empty meter would read "plenty left".
+  if (measured.length === 0) return { cls: 'unread', usedPercent: null, text: 'no capacity reading' };
+
+  const binding = measured.reduce((a, b) => (b.usedPercent > a.usedPercent ? b : a));
+  const pct = Math.max(0, Math.min(100, binding.usedPercent));
+  const where = seatWindowLabel(binding.id);
+  if (pct >= 100) return { cls: 'blocked', usedPercent: null, text: `${where} limit reached` };
+  const rounded = Math.round(pct);
+  return {
+    cls: pct >= TIGHT_PERCENT ? 'tight' : 'ready',
+    usedPercent: pct,
+    text: `${rounded}% of ${where} used`,
+  };
+}
+
 /** Seats grouped in the fixed engine order; empty engines are omitted. */
 export function groupSeats(seats: readonly VerseSeat[]): Array<{ engine: VerseEngine; seats: VerseSeat[] }> {
   return ENGINE_ORDER.map((engine) => ({ engine, seats: seats.filter((s) => s.engine === engine) })).filter((g) => g.seats.length > 0);

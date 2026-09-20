@@ -10,13 +10,13 @@
  */
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
-import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { useQuery, useRefresh } from '../../../data/hooks.js';
 import { verseSafetyQuery } from './control-queries.js';
 import styles from './autonomy.module.css';
 
 export function SafetyPanel() {
   const query = useQuery(verseSafetyQuery);
-  const refetch = useRefetch(verseSafetyQuery);
+  const refetch = useRefresh(verseSafetyQuery);
   const report = query.data;
   const passed = report?.checks?.filter((c) => c.pass).length ?? 0;
   const total = report?.checks?.length ?? 0;

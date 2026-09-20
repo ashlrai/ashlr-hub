@@ -349,11 +349,44 @@ What it does on launch:
    `ashlr serve --port 7777 --allow-dispatch --json`.
 
 Closing the window hides it to the menu bar. **Quit** — ⌘Q, the Ashlr menu, or
-the menu-bar item — kills the sidecar and exits; the sidecar is reaped on every
-exit path, so no orphan server is left behind.
+the menu-bar item — kills the sidecar and exits.
+
+The sidecar is reaped on every exit path, so no orphan server is left behind:
+a normal quit kills it and its worker children, a signal (`pkill`, Ctrl-C)
+triggers a handler that does the same, and if the app is SIGKILLed or crashes,
+the **next launch** kills the sidecar it left behind before probing the port.
+After quitting, `pgrep -fl "Contents/MacOS/ashlr verse"` should print nothing.
 
 The menu-bar item has **Show** and **Quit** only. Daemon controls and the
 emergency stop live in the Autonomy section, behind a confirm step, on purpose.
+
+### Install it on this Mac
+
+There is no public installer (that policy is unchanged), but building Ashlr for
+your own Mac and keeping it in the Dock is supported:
+
+```sh
+REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
+
+# 1. Build (see "Build it" below for the prerequisites and the full steps).
+cd "$REPO/desktop" && cargo tauri build
+
+# 2. Install, replacing any previous copy.
+rm -rf /Applications/Ashlr.app
+cp -R "$REPO/desktop/src-tauri/target/release/bundle/macos/Ashlr.app" /Applications/
+```
+
+Then, **once**: the build is unsigned, so macOS refuses an ordinary
+double-click. Right-click (or Control-click) `Ashlr.app` → **Open** → **Open**.
+If no Open button appears, use System Settings → Privacy & Security →
+**Open Anyway**, or `xattr -dr com.apple.quarantine /Applications/Ashlr.app`.
+With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
+
+**To update:** quit Ashlr, repeat steps 1–2, launch again. The Gatekeeper
+exemption is remembered per app path, so a rebuild copied over the same location
+normally opens straight away. Nothing in `~/.ashlr` is touched by installing or
+replacing the bundle — config, seats, autonomy state and window geometry all
+survive.
 
 ### Build it
 
@@ -377,13 +410,18 @@ cd desktop && cargo tauri build --debug  # fast, unoptimized
 ```
 
 Output: `desktop/src-tauri/target/release/bundle/macos/Ashlr.app` and
-`.../dmg/Ashlr_<version>_aarch64.dmg`.
+`.../dmg/Ashlr_<version>_aarch64.dmg`. About 6 minutes cold, ~90 seconds when
+only the bundling has to be redone.
 
-The bundle is unsigned, so the first open needs a one-time Gatekeeper
-exemption: right-click → **Open**, or System Settings → Privacy & Security →
-**Open Anyway**, or `xattr -dr com.apple.quarantine /Applications/Ashlr.app`.
-See `desktop/README.md` for the full walkthrough and for what to do if the DMG
-step fails.
+**The `.app` is the artifact that matters**; the `.dmg` is only a wrapper for
+handing the app to someone else. The DMG step drives Finder over AppleScript to
+lay out the disk-image window, and that step is flaky — it needs a logged-in
+graphical session with Automation permission, and it leaves a mounted
+`/Volumes/dmg.XXXXXX` behind when it fails. `beforeBundleCommand` now clears
+that leftover automatically (`desktop/scripts/dmg-preflight.mjs`), and
+`CI=1 cargo tauri build` skips the Finder step entirely, producing a plain DMG
+around an identical app. A DMG failure never invalidates the `.app` that was
+already written. Full diagnosis in `desktop/README.md`.
 
 For a dev loop without bundling, `cd desktop && cargo tauri dev` — it still
 launches the staged sidecar, so run steps 1–2 first.

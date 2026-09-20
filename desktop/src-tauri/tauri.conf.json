@@ -8,7 +8,7 @@
     "beforeDevCommand": "",
     "devUrl": "http://127.0.0.1:7777/verse/",
     "beforeBuildCommand": "",
-    "beforeBundleCommand": "node scripts/assert-desktop-bundle-policy.mjs",
+    "beforeBundleCommand": "node scripts/assert-desktop-bundle-policy.mjs && node scripts/dmg-preflight.mjs",
     "frontendDist": "../dist-placeholder"
   },
 
@@ -23,7 +23,7 @@
         "minHeight": 620,
         "resizable": true,
         "fullscreen": false,
-        "center": true,
+        "center": false,
         "url": "http://127.0.0.1:7777/verse/",
         "visible": false,
         "create": false,

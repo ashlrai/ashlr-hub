@@ -1,0 +1,347 @@
+/* First-run tour — a docked card, not a dialog. No backdrop: the app behind
+   it stays visible and clickable, which is the whole design constraint.
+   Hairlines and one elevation (DESIGN-V2 §1/§2); the only colour is the
+   status tone on a glyph, never on body text. */
+
+/* Docked bottom-LEFT of the content area, not bottom-right of the viewport.
+   The composer is centred on --measure-read inside the workspace and its
+   control row — seat pill, mic, Send/Stop — sits at the bottom of that column,
+   right-aligned. A 420px card pinned to the viewport's bottom-right lands on
+   top of exactly those controls at ordinary window widths, which breaks this
+   file's own rule 1: everything behind the card stays clickable. Clearing the
+   rail and hugging the left edge keeps it out of the composer's way in both
+   the wide and the 900px layouts. */
+.card {
+  position: fixed;
+  z-index: var(--z-dialog);
+  left: calc(var(--rail-width) + var(--space-5));
+  right: auto;
+  bottom: calc(var(--space-5) + env(safe-area-inset-bottom, 0px));
+  width: min(420px, calc(100vw - var(--rail-width) - var(--space-5) * 2));
+  max-height: min(640px, calc(100vh - var(--space-8)));
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--bg-surface-raised);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dialog);
+}
+
+/* One declaration, correct in all four motion states. `--duration-base`
+   already collapses to 1ms under BOTH triggers the app honours — the OS
+   preference (unless Settings asked for full motion) and Settings' own
+   `data-motion="reduce"` — so a bare `prefers-reduced-motion` media query was
+   wrong in two of them: it ignored an operator who chose Reduce in Settings,
+   and it removed the animation from one who chose Full against an OS reduce
+   preference. This is a one-shot animation, so unlike the persistent
+   `.dictationPulse`/`.caret` cases it needs no by-name rules. */
+.card {
+  animation: onboarding-in var(--duration-base) var(--ease-decelerate);
+}
+
+@keyframes onboarding-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ------------------------------------------------------------------ head */
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-4) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.headText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.eyebrow {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display);
+  color: var(--text-primary);
+}
+
+.subtitle {
+  font-size: var(--text-xs-size);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* ------------------------------------------------------------------ body */
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.lead {
+  font-size: var(--text-sm-size);
+  line-height: 1.55;
+  color: var(--text-primary);
+}
+
+.aside,
+.caveat {
+  font-size: var(--text-xs-size);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.caveat {
+  border-left: 2px solid var(--border-strong);
+  padding-left: var(--space-3);
+}
+
+.kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  padding: 1px 5px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+/* --------------------------------------------------------- rail overview */
+
+.sections,
+.findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.sectionRow {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sectionRow:first-child {
+  border-top: none;
+}
+
+.sectionIcon,
+.localIcon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Derived from the density scale rather than a literal, so compact density
+     actually reaches it (design/control-density.test.ts). */
+  width: var(--control-h-xs);
+  height: var(--control-h-xs);
+  color: var(--text-tertiary);
+}
+
+.sectionText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.sectionName {
+  font-family: var(--font-display);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.sectionBlurb {
+  font-size: var(--text-xs-size);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+/* ----------------------------------------------------------- findings */
+
+.finding {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.finding:first-child {
+  border-top: none;
+}
+
+.findingHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.stopName {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.findingDetail {
+  font-size: var(--text-xs-size);
+  line-height: 1.55;
+  color: var(--text-secondary);
+}
+
+.findingNote {
+  font-size: var(--text-xs-size);
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+
+.findingFix {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.fixLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  flex: none;
+}
+
+.fixText {
+  font-size: var(--text-xs-size);
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+
+.code {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  padding: 2px 6px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-code, var(--bg-surface));
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+/* --------------------------------------------------------------- tone */
+
+.tone {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+
+.toneLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.tone[data-tone='ok'] {
+  color: var(--status-success-fg, var(--text-secondary));
+}
+
+.tone[data-tone='attention'] {
+  color: var(--status-warning-fg, var(--text-secondary));
+}
+
+.tone[data-tone='unknown'] {
+  color: var(--text-tertiary);
+}
+
+/* ------------------------------------------------------------------ foot */
+
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.pips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  gap: 5px;
+}
+
+.pip {
+  width: 14px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--border-default);
+}
+
+.pip[data-state='current'] {
+  background: var(--accent-500);
+}
+
+.pip[data-state='done'] {
+  background: var(--border-strong);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+@media (max-width: 900px) {
+  .card {
+    left: calc(var(--rail-width) + var(--space-3));
+    right: var(--space-3);
+    width: auto;
+  }
+}

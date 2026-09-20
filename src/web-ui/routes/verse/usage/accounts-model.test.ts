@@ -25,6 +25,7 @@ function win(over: Partial<AccountWindow> & { id: string }): AccountWindow {
     resetsAt: null,
     resetDescription: null,
     limitReached: false,
+    measured: true,
     ...over,
   };
 }
@@ -34,6 +35,7 @@ function account(over: Partial<Account> & { id: string; provider: Account['provi
     label: over.id,
     state: 'observed',
     authentication: 'signed-in',
+    health: null,
     planType: null,
     observedAt: null,
     windows: [],
@@ -97,7 +99,7 @@ describe('bindingWindow — the constraint that actually blocks work', () => {
       provider: 'claude',
       windows: CLAUDE_WINDOWS,
       binding: { id: 'seven_day_fable', label: null, usedPercent: 100, resetsAt: null,
-        resetDescription: null, limitReached: false },
+        resetDescription: null, limitReached: false, measured: true },
     });
     const binding = bindingWindow(claude);
     expect(binding?.id).toBe('seven_day_fable');
@@ -270,7 +272,11 @@ describe('buildLocalCard — the local analogue of a quota meter', () => {
     reachable: true,
     models: [],
     memoryBudgetBytes: 128 * 1024 ** 3,
+    freeMemoryBytes: null,
     reason: null,
+    runtimes: [],
+    notes: [],
+    sampledAt: null,
     ...over,
   });
 
@@ -285,6 +291,11 @@ describe('buildLocalCard — the local analogue of a quota meter', () => {
             loaded: true,
             sizeBytes: 64 * 1024 ** 3,
             sizeVramBytes: 60 * 1024 ** 3,
+            placement: 'unknown',
+            gpuPercent: null,
+            memoryPercent: null,
+            family: null,
+            arch: null,
             expiresAt: null,
             parameterSize: '79.7B',
             quantization: 'Q4_K_M',
@@ -321,6 +332,11 @@ describe('buildLocalCard — the local analogue of a quota meter', () => {
       loaded: true,
       sizeBytes,
       sizeVramBytes: null,
+      placement: 'unknown',
+      gpuPercent: null,
+      memoryPercent: null,
+      family: null,
+      arch: null,
       expiresAt: null,
       parameterSize: null,
       quantization: null,
@@ -347,6 +363,11 @@ describe('buildLocalCard — the local analogue of a quota meter', () => {
             loaded: false,
             sizeBytes: null,
             sizeVramBytes: null,
+            placement: 'unknown',
+            gpuPercent: null,
+            memoryPercent: null,
+            family: null,
+            arch: null,
             expiresAt: null,
             parameterSize: null,
             quantization: null,
