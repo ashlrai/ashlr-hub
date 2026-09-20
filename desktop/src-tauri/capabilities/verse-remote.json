@@ -1,0 +1,14 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "verse-remote-capability",
+  "description": "The ONLY IPC granted to the remote Verse page (http://127.0.0.1:7777, the local sidecar's own origin, which the CSP already pins). Three window-chrome commands and nothing else: dragging the window by its top strip, double-click-to-zoom on that strip, and emitting the `shell-theme` event so the native window background can match the UI and dark mode does not flash white on the next launch. Deliberately excluded: every shell:* permission (an XSS in the console must not become command execution), the updater, the filesystem, and app show/hide. Do not widen this list — put new native behaviour behind a window event evaluated from Rust instead (see shell_contract.rs).",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:7777", "http://127.0.0.1:7777/*"]
+  },
+  "permissions": [
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "core:event:allow-emit"
+  ]
+}

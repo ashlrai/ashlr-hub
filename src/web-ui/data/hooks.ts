@@ -19,6 +19,13 @@ import {
 } from './auth-store.js';
 import { onSseEvent, type SseEventName } from './sse.js';
 import { subscribeTheme, getTheme, setTheme, cycleTheme, type ThemePreference } from './theme-store.js';
+import {
+  getAppearance,
+  resetAppearance,
+  setAppearance,
+  subscribeAppearance,
+  type Appearance,
+} from './appearance-store.js';
 
 /**
  * Subscribe to a resource. Fetches on mount (and on `key` change), stays
@@ -99,4 +106,26 @@ export interface ThemeControl {
 export function useTheme(): ThemeControl {
   const theme = useSyncExternalStore(subscribeTheme, getTheme, getTheme);
   return { theme, set: setTheme, cycle: cycleTheme };
+}
+
+export interface AppearanceControl {
+  appearance: Appearance;
+  /** Partial change; applied to <html> and persisted immediately (no save button). */
+  set: (patch: Partial<Appearance>) => void;
+  reset: () => void;
+}
+
+/**
+ * The Settings section's appearance controls and anything that needs to READ
+ * the current density/accent (e.g. a chart sizing rows) share this hook, for
+ * the same reason useTheme exists: two readers of one external store, never
+ * a second copy of the state.
+ *
+ * Importing this module is also what applies the stored appearance before
+ * the first paint — every view imports hooks.ts, so appearance-store.ts is
+ * evaluated (and has written <html>) before React renders anything.
+ */
+export function useAppearance(): AppearanceControl {
+  const appearance = useSyncExternalStore(subscribeAppearance, getAppearance, getAppearance);
+  return { appearance, set: setAppearance, reset: resetAppearance };
 }

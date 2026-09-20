@@ -1,0 +1,94 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.label {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-medium);
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  height: var(--density-row);
+}
+
+.value {
+  flex: none;
+  min-width: 4ch;
+  text-align: right;
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+
+.input {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1;
+  min-width: 0;
+  height: 16px;
+  background: none;
+  cursor: pointer;
+}
+
+.input:focus {
+  outline: none;
+}
+
+/* The ring goes on the thumb, not the whole row. */
+.input:focus-visible {
+  box-shadow: none;
+}
+
+.input::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--slider-track-image, linear-gradient(to right, var(--accent-500) var(--slider-fill, 0%), var(--bg-active) var(--slider-fill, 0%)));
+}
+
+.input::-moz-range-track {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--slider-track-image, linear-gradient(to right, var(--accent-500) var(--slider-fill, 0%), var(--bg-active) var(--slider-fill, 0%)));
+}
+
+.input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  border: 2px solid var(--accent-500);
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+
+.input::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  border: 2px solid var(--accent-500);
+}
+
+.input:focus-visible::-webkit-slider-thumb {
+  box-shadow: var(--shadow-focus-ring);
+}
+
+.input:focus-visible::-moz-range-thumb {
+  box-shadow: var(--shadow-focus-ring);
+}
+
+.input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

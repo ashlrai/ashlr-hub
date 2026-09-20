@@ -98,6 +98,9 @@ import { readUniverseOverview } from '../universe/index.js';
 import { readUniverseGraph } from '../universe/graph-reader.js';
 import type { ProposalsReadResult } from '../inbox/store.js';
 import { handleRunEventsSse, RUN_EVENTS_PATH_RE } from './run-stream.js';
+import { handleVerseApi, isVerseApiPath, verseSessionsDigest, verseSessionsSnapshot } from '../verse/verse-api.js';
+// V2 autonomy control plane (mounted BEFORE handleVerseApi — see handleApi).
+import { handleVerseControlApi, isVerseControlPath } from '../verse/control-api.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -719,8 +722,10 @@ function parseWindow(raw: string | undefined): '1d' | '7d' | '30d' {
 /**
  * Safely read the full request body as a string (bounded to 64 KB).
  * Rejects on oversized or errored requests.
+ *
+ * Exported so src/core/verse/verse-api.ts shares the exact same body cap.
  */
-function readBody(req: IncomingMessage): Promise<string> {
+export function readBody(req: IncomingMessage): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const MAX_BYTES = 65_536;
     let buf = '';
@@ -773,8 +778,10 @@ function headerValue(req: IncomingMessage, name: string): string {
  *      depth; the token is the real control)
  * Writes the failure response itself and returns false when the request should
  * NOT proceed; returns true when both checks pass.
+ *
+ * Exported so src/core/verse/verse-api.ts's POST routes use the identical gate.
  */
-function passesMutationGate(req: IncomingMessage, res: ServerResponse, token: string): boolean {
+export function passesMutationGate(req: IncomingMessage, res: ServerResponse, token: string): boolean {
   if (!safeEqual(headerValue(req, 'x-ashlr-token'), token)) {
     sendJson(res, 401, { error: 'unauthorized: missing or invalid x-ashlr-token' });
     return false;
@@ -927,11 +934,27 @@ function handleSseEvents(
   // fleet reads. One connection gets at most one in-flight update.
   let updateInFlight = false;
 
+  // Verse: per-connection digest of the session list so `verse-sessions` is
+  // pushed only when something changed (the sidebar refreshes on it). Starts
+  // at '' (= "no engine / no sessions") so servers that never touch Verse
+  // emit nothing extra on this stream.
+  let lastVerseDigest = '';
+
   // Emit one full update (runs, swarms, inbox, daemon slices).
   async function emitUpdate(): Promise<void> {
     if (updateInFlight || backpressured) return;
     updateInFlight = true;
     try {
+      // Verse session list (src/core/verse/verse-api.ts). Metadata only —
+      // VerseSession records carry no launcher/env. Emitted first because it
+      // is synchronous and cheap; nothing below depends on it.
+      try {
+        const digest = verseSessionsDigest();
+        if (digest !== lastVerseDigest) {
+          lastVerseDigest = digest;
+          sendNamed('verse-sessions', { sessions: verseSessionsSnapshot() });
+        }
+      } catch { /* verse slice is best-effort */ }
       try {
         const history = await cachedSseHistoryProjection(projections);
         if (cleaned) return;
@@ -2091,6 +2114,35 @@ export async function handleApi(
         workspace: workspaceSection,
       });
       return true;
+    }
+
+    // ── /api/verse/{control,caps,scope,audit,daemon,safety} (V2 control) ────
+    // MUST come before the V1 verse handler below: isVerseApiPath() matches
+    // every /api/verse/* path and 404s what it does not recognize, so the
+    // control routes would never be reached if this were second. Same posture
+    // as the V1 handler — GETs behind the read-session boundary, POSTs behind
+    // ctx.allowDispatch + passesMutationGate inside handleVerseControlApi.
+    if (isVerseControlPath(path)) {
+      return handleVerseControlApi(
+        { cfg, token: ctx.token, allowDispatch: ctx.allowDispatch, readSession: ctx.readSession },
+        req,
+        res,
+        path,
+        method,
+      );
+    }
+
+    // ── /api/verse/* (Ashlr Verse — src/core/verse/verse-api.ts) ────────────
+    // GETs are already behind the read-session boundary (server.ts); POSTs
+    // apply ctx.allowDispatch + passesMutationGate inside handleVerseApi.
+    if (isVerseApiPath(path)) {
+      return handleVerseApi(
+        { cfg, token: ctx.token, allowDispatch: ctx.allowDispatch, readSession: ctx.readSession },
+        req,
+        res,
+        path,
+        method,
+      );
     }
 
     // ── Method not allowed on known /api/ routes ─────────────────────────────

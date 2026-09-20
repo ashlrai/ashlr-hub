@@ -58,6 +58,11 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-seed-batch.test.ts', // real SHA1/SHA256 seed materialization and bounded blob batches
   'test/resource-quota-scopes.test.ts', // scoped quota collection, native fixtures and console IPC
   'test/mcp-firm-resources.test.ts', // signed history via real CLI MCP processes
+  'test/verse-seats.test.ts', // real loopback HTTP server standing in for Ollama
+  'test/verse-accounts.test.ts', // real collector lease acquisition and private evidence files in a tmp root
+  'test/verse-api.test.ts', // real web server bind + SSE tails against an in-memory fake engine
+  'test/verse-control-api.test.ts', // real web server bind + real enrollment/audit/kill-switch state in a tmp HOME
+  'test/verse-daemon-pause.test.ts', // real web server bind + real git repos, pause/kill sentinels and audit in a tmp HOME
   'test/universe-control-execution.test.ts', // private signed effect and interrupted settlement records
   'test/universe-firm-resource-control-handler.test.ts', // enrolled graph dispatch to real inert transports
   'test/universe-firm-cli-integration.test.ts', // real CLI processes with test-owned provenance
@@ -431,4 +436,5 @@ export const REAL_IO_TEST_FILES = [
   'test/h8.demo.test.ts', // hermetic real temp git repo + real fs fixture — 4.2s slowest test in the quiet baseline
   'test/h8.docs.test.ts', // hermetic real temp git repo + real fs fixture — 0.0s slowest test in the quiet baseline
   'test/h8.no-new-outward.test.ts', // hermetic real temp git repo + real fs fixture — 0.0s slowest test in the quiet baseline
+  'test/verse-session-engine.test.ts', // real detached subprocesses (fake vendor CLIs) with process-group cancel/timeout kill paths
 ];

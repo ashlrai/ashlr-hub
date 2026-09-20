@@ -1,0 +1,214 @@
+/**
+ * design/tokens-contrast.test.ts — the design language's accessibility
+ * clause (docs/VERSE-DESIGN-V2.md §6) as an executable assertion:
+ *
+ *   "Contrast >= 4.5:1 for body text and >= 3:1 for borders carrying
+ *    meaning, verified in BOTH themes."
+ *
+ * Plus the two structural rules the token file's header states, which have
+ * so far only been enforced by review:
+ *   1. No token is defined ONLY inside a media query or a theme block.
+ *   2. The OS-preference dark block and the explicit-toggle dark block do
+ *      not drift apart.
+ *
+ * Everything here is derived from tokens.css itself, so a future retune that
+ * breaks readability fails the suite instead of shipping.
+ */
+import { describe, expect, it } from 'vitest';
+import { contrastRatio } from './contrast.js';
+import {
+  allDeclarations,
+  darkScope,
+  lightScope,
+  mediaDarkDecls,
+  resolveToken,
+  toggleDarkDecls,
+  type TokenScope,
+} from './token-probe.test-support.js';
+
+const light = lightScope();
+const dark = darkScope();
+
+function color(scope: TokenScope, token: string): string {
+  const value = resolveToken(scope, token);
+  expect(value, `${token} should resolve to a literal color`).not.toBeNull();
+  return value!;
+}
+
+function ratio(scope: TokenScope, fg: string, bg: string, backdropToken = '--bg-surface'): number {
+  const backdrop = color(scope, backdropToken);
+  const value = contrastRatio(color(scope, fg), color(scope, bg), backdrop);
+  expect(value, `${fg} on ${bg} should be measurable`).not.toBeNull();
+  return value!;
+}
+
+const THEMES: Array<[string, TokenScope]> = [
+  ['light', light],
+  ['dark', dark],
+];
+
+const TEXT_PAIRS: Array<[string, string]> = [
+  ['--text-primary', '--bg-canvas'],
+  ['--text-primary', '--bg-surface'],
+  ['--text-primary', '--bg-surface-raised'],
+  ['--text-primary', '--bg-input'],
+  ['--text-primary', '--bg-hover'],
+  ['--text-primary', '--bg-selected'],
+  ['--text-primary', '--bg-code'],
+  ['--text-secondary', '--bg-canvas'],
+  ['--text-secondary', '--bg-surface'],
+  ['--text-tertiary', '--bg-canvas'],
+  ['--text-tertiary', '--bg-surface'],
+  // The three grounds a row's own child lands on: --bg-hover and
+  // --bg-selected (a child that declares its own colour is NOT recoloured by
+  // the row's :hover/[aria-current] rule — only the ground under it moves) and
+  // --bg-code (the code block's language label and copy button).
+  //
+  // --text-tertiary is DELIBERATELY not paired with these three: it measures
+  // 3.95:1 on light --bg-selected, 4.40:1 on light --bg-hover and light
+  // --bg-code, and 4.40:1 on dark --bg-selected — all under the floor. The
+  // ramp itself is fixed by DESIGN-V2 §2, so the rule is not "retune the
+  // token", it is "secondary is the tertiary of a raised ground". These pairs
+  // assert that the replacement actually clears the bar in both themes.
+  ['--text-secondary', '--bg-hover'],
+  ['--text-secondary', '--bg-selected'],
+  ['--text-secondary', '--bg-code'],
+  // --bg-active is the PRESS ground. Every chrome control now steps to it on
+  // :active, so a tertiary child of a pressed row lands here: --text-tertiary
+  // measures 3.95:1 on light --bg-active, under the floor, which is why
+  // Transcript.toolLine and ResourcesPanel.runningOpen promote their tertiary
+  // children to secondary on :hover AND :active.
+  ['--text-secondary', '--bg-active'],
+  ['--text-link', '--bg-surface'],
+  ['--text-link', '--bg-canvas'],
+  ['--status-neutral-fg', '--status-neutral-bg'],
+  ['--status-info-fg', '--status-info-bg'],
+  ['--status-running-fg', '--status-running-bg'],
+  ['--status-success-fg', '--status-success-bg'],
+  ['--status-warning-fg', '--status-warning-bg'],
+  ['--status-danger-fg', '--status-danger-bg'],
+  ['--status-unknown-fg', '--status-unknown-bg'],
+  ['--text-on-accent', '--accent-600'],
+  // The readable half of the warning/danger pair, on the plain surface. The
+  // chat header's context-meter PERCENTAGE is painted with these: it used to
+  // use --status-warning-solid / --status-danger-solid, which measure 2.52:1
+  // and 3.97:1 on light --bg-surface, and at <=760px it is the only visible
+  // numeral in the strip. The solids stay on the 2px fill (SOLID_TOKENS
+  // below); these are the tokens any status TEXT must use.
+  ['--status-warning-fg', '--bg-surface'],
+  ['--status-danger-fg', '--bg-surface'],
+];
+
+/**
+ * Borders that CARRY MEANING: the 3:1 non-text floor. The focus ring is the
+ * sole indicator of keyboard focus and the accent is the sole indicator of
+ * an active/selected control, so both genuinely have to clear it.
+ *
+ * Structural hairlines (--border-subtle/default/strong) are deliberately NOT
+ * in this list: the design language separates with "1px borders at low
+ * contrast" (§1.2) and pairs every one of them with a surface change or
+ * text. They get a visibility floor instead, below.
+ */
+const NON_TEXT_PAIRS: Array<[string, string]> = [
+  ['--border-focus', '--bg-surface'],
+  ['--border-focus', '--bg-canvas'],
+  ['--accent-500', '--bg-surface'],
+  ['--accent-500', '--bg-canvas'],
+  // The dashed "unknown" rule in the Usage panel (usage.module.css
+  // .unknownRule) is the designed representation of ABSENCE — a border that
+  // carries meaning, so it owes the 3:1 floor. It is pinned separately from
+  // the structural hairlines below, which are deliberately exempt.
+  ['--text-tertiary', '--bg-surface'],
+];
+
+/** Hairlines still have to be SEEN, just not shouted. */
+const HAIRLINE_PAIRS: Array<[string, string]> = [
+  ['--border-subtle', '--bg-surface'],
+  ['--border-default', '--bg-surface'],
+  ['--border-strong', '--bg-surface'],
+  ['--border-default', '--bg-canvas'],
+];
+
+/**
+ * Status solids are dots and 2px rules, never the only carrier of state
+ * (§6: "never communicate state by color alone" — StatusBadge always pairs
+ * the dot with its label). They only have to be visible on the surface.
+ */
+const SOLID_TOKENS = [
+  '--status-neutral-solid',
+  '--status-info-solid',
+  '--status-running-solid',
+  '--status-success-solid',
+  '--status-warning-solid',
+  '--status-danger-solid',
+  '--status-unknown-solid',
+  '--engine-claude',
+  '--engine-codex',
+  '--engine-grok',
+  '--engine-local',
+];
+
+describe('design tokens — contrast', () => {
+  describe.each(THEMES)('%s theme', (_name, scope) => {
+    it.each(TEXT_PAIRS)('%s on %s clears 4.5:1', (fg, bg) => {
+      expect(ratio(scope, fg, bg, bg.startsWith('--status') ? '--bg-surface' : bg)).toBeGreaterThanOrEqual(4.5);
+    });
+
+    it.each(NON_TEXT_PAIRS)('%s on %s clears 3:1', (fg, bg) => {
+      expect(ratio(scope, fg, bg, bg)).toBeGreaterThanOrEqual(3);
+    });
+
+    // 1.10 is the "not invisible" floor, not a WCAG number: at 1.0 the
+    // hairline IS the surface and the layout loses its structure. The
+    // faintest token (--border-subtle in dark) sits at ~1.14 by design.
+    it.each(HAIRLINE_PAIRS)('%s stays visible against %s', (fg, bg) => {
+      expect(ratio(scope, fg, bg, bg)).toBeGreaterThanOrEqual(1.1);
+    });
+
+    it.each(SOLID_TOKENS)('%s is a visible marker on the surface', (token) => {
+      expect(ratio(scope, token, '--bg-surface')).toBeGreaterThanOrEqual(1.8);
+    });
+
+    it('never leaves the disabled text color indistinguishable from the surface', () => {
+      // Disabled text is exempt from 4.5:1 by WCAG, but it still has to be
+      // visible: an operator must be able to read a disabled control's label.
+      expect(ratio(scope, '--text-disabled', '--bg-surface')).toBeGreaterThanOrEqual(2.2);
+    });
+  });
+});
+
+describe('design tokens — structure', () => {
+  it('defines every token on bare :root before any theme or media block', () => {
+    const missing = allDeclarations()
+      .filter((d) => d.selector !== ':root')
+      .filter((d) => !light.has(d.prop))
+      .map((d) => `${d.prop} (only in ${d.selector})`);
+    expect(missing).toEqual([]);
+  });
+
+  it('keeps the two dark blocks byte-identical', () => {
+    const media = mediaDarkDecls();
+    const toggle = toggleDarkDecls();
+    expect([...toggle.keys()].sort()).toEqual([...media.keys()].sort());
+    for (const [prop, value] of media) {
+      expect(toggle.get(prop), `${prop} drifted between the two dark blocks`).toBe(value);
+    }
+  });
+
+  it('resolves the accent ramp from the three user-editable channels', () => {
+    // The appearance store writes only --accent-h/s/l; if a step ever stops
+    // deriving from them, dragging the hue would half-recolor the app.
+    for (const step of ['--accent-300', '--accent-500', '--accent-600', '--accent-700']) {
+      expect(light.get(step)).toMatch(/var\(--accent-h\)/);
+      expect(dark.get(step) ?? light.get(step)).toMatch(/var\(--accent-h\)/);
+    }
+  });
+
+  it('raises accent lightness in dark without overwriting the user channel', () => {
+    // --accent-l stays whatever the operator chose; the dark correction lives
+    // in --accent-l-shift so an inline style cannot defeat it.
+    expect(light.get('--accent-l-shift')).toBe('0%');
+    expect(dark.get('--accent-l-shift')).toBe('6%');
+    expect(dark.get('--accent-l')).toBe(light.get('--accent-l'));
+  });
+});

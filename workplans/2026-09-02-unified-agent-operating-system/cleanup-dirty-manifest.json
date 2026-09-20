@@ -1,0 +1,604 @@
+{
+  "schemaVersion": 1,
+  "mode": "dirty",
+  "startedAt": "2026-09-03T03:21:36.697Z",
+  "root": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub",
+  "allowedPrefix": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-",
+  "commonGitDir": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub/.git",
+  "recoveryRoot": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902",
+  "results": [
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub",
+      "head": "6d1bf2fe8a237343681049043ec50fa1b6bf307f",
+      "branch": "codex/v333-iteration",
+      "state": "skipped",
+      "reason": "canonical checkout",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/2b24/ashlr-hub",
+      "head": "759d635d093e3f83f446967e3efc88cfed370024",
+      "branch": null,
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/2b44/ashlr-hub",
+      "head": "01d55481d8896f77c1721b07bde9f53fe5c74e6e",
+      "branch": "codex/immutable-release-admission-p1-repair-v1",
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/5b56/ashlr-hub",
+      "head": "747d66381f2e1fab3ffba5993eef2514e71be690",
+      "branch": "codex/trajectory-data-quality",
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/5d18/ashlr-hub",
+      "head": "759d635d093e3f83f446967e3efc88cfed370024",
+      "branch": null,
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/65d8/ashlr-hub",
+      "head": "759d635d093e3f83f446967e3efc88cfed370024",
+      "branch": null,
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/824f/ashlr-hub",
+      "head": "fbbf5f1affee42d82954d84a3a8b169c8c666c77",
+      "branch": null,
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/b6f5/ashlr-hub",
+      "head": "03575b4fab7b188126ad9a5318129f9a5a36f54c",
+      "branch": null,
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/b9eb/ashlr-hub",
+      "head": "03575b4fab7b188126ad9a5318129f9a5a36f54c",
+      "branch": null,
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.codex/worktrees/eed5/ashlr-hub",
+      "head": "62ee34134f6a0873d61eb81244adb7f425848d17",
+      "branch": "codex/proposal-dedup-authority-fix",
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/.local/share/ashlr/releases/e3f6edde31ffe06338dc20e327d56cc9150e0962",
+      "head": "e3f6edde31ffe06338dc20e327d56cc9150e0962",
+      "branch": null,
+      "state": "skipped",
+      "reason": "outside exact Desktop ashlr-hub-* boundary",
+      "sizeKiB": null,
+      "archiveRef": null,
+      "recoveryFiles": []
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-convergence",
+      "head": "18a60269037009d20162f3339236af35221e25d2",
+      "branch": "codex/fleet-convergence-147",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 156780,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-convergence-18a602690370",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-convergence-18a602690370/metadata.json",
+          "sizeBytes": 6178,
+          "sha256": "d6b5e7f8b3871cad83116244af778378f5ff3ff7ff75f4065000fd23ab37085c"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-convergence-18a602690370/tracked.patch",
+          "sizeBytes": 2200258,
+          "sha256": "721fc47fd84f4d9b44d493acf7603662c08255ddb4e69b7ed5bfebf173c11c6e"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-daemon-crash-restart-truthfulness-v1",
+      "head": "c349c259d38338741c150f49719331ad8253712d",
+      "branch": "codex/daemon-crash-restart-truthfulness-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 137100,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-daemon-crash-restart-truthfulness-v1-c349c259d383",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-daemon-crash-restart-truthfulness-v1-c349c259d383/metadata.json",
+          "sizeBytes": 617,
+          "sha256": "f0e4a43a2fca728f437f465cd6713753bb072a4011f1aa433f4d58ca5a5c76fa"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-daemon-crash-restart-truthfulness-v1-c349c259d383/tracked.patch",
+          "sizeBytes": 30887,
+          "sha256": "bd4e37bf070983e6aedbcd0d8c9046a0769b45076ca31fd36eaf6751e9907670"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-dep-master-eval",
+      "head": "072dfb6fdb5c831e18bd9754fd7e5637e390ec3c",
+      "branch": null,
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 145132,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-dep-master-eval-072dfb6fdb5c",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-dep-master-eval-072dfb6fdb5c/metadata.json",
+          "sizeBytes": 377,
+          "sha256": "a45675a8a277aad1be5b8c36e6908b8ea11f3671479256ca78fa0a5f349a4d02"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-dep-master-eval-072dfb6fdb5c/tracked.patch",
+          "sizeBytes": 306,
+          "sha256": "f34d850c22ca8908dd7fc429dea9e8a7cf5e863420582fe6cdea2370f4fd95a3"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-dep-pr216-eval",
+      "head": "072dfb6fdb5c831e18bd9754fd7e5637e390ec3c",
+      "branch": null,
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 277748,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-dep-pr216-eval-072dfb6fdb5c",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-dep-pr216-eval-072dfb6fdb5c/metadata.json",
+          "sizeBytes": 405,
+          "sha256": "e8d8536fb98ee00e1b69743eaf3f85b2c60a7995cd20e92db96acd4a8a23522a"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-dep-pr216-eval-072dfb6fdb5c/tracked.patch",
+          "sizeBytes": 6829,
+          "sha256": "618e19fc510fbefdb6c12bd183b006e55a52c613d30809d25c30dbf1ea29691d"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-dependabot-cargo-audit-v1",
+      "head": "86a8db0991058cd14c2df84e9b352d367d2dae23",
+      "branch": "codex/dependabot-cargo-audit-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 1124192,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-dependabot-cargo-audit-v1-86a8db099105",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-dependabot-cargo-audit-v1-86a8db099105/metadata.json",
+          "sizeBytes": 580,
+          "sha256": "d0dc6b66bfb4ff943bb0317254fb4a3fdedf6cadef61022432d616abcbb13612"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-dependabot-cargo-audit-v1-86a8db099105/untracked.tar.gz",
+          "sizeBytes": 3476,
+          "sha256": "63be56b39703bbdbe24f749fa1e53bd96edbec4ec8ad57280ccef8e789825e6b"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-m515-activation-handoff-v1",
+      "head": "839e18925c0a70da5a29dbeac27ec0c332658627",
+      "branch": "codex/m515-activation-handoff-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164768,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-m515-activation-handoff-v1-839e18925c0a",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-m515-activation-handoff-v1-839e18925c0a/metadata.json",
+          "sizeBytes": 580,
+          "sha256": "7c011a03244b8482cbe44101df352a6d15d3652744393000a55b78fd8f4d9003"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-m515-activation-handoff-v1-839e18925c0a/untracked.tar.gz",
+          "sizeBytes": 2845,
+          "sha256": "6947f9cfdb2e1af02729e19a6572416ea84480eb185b3dea9fbbdd3f56e1c4fd"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-native-runtime-activation-v1",
+      "head": "7fb3aaa506f5bfd9e111a2ac0528c50edefef3a0",
+      "branch": "codex/native-runtime-activation-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164548,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-native-runtime-activation-v1-7fb3aaa506f5",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-native-runtime-activation-v1-7fb3aaa506f5/metadata.json",
+          "sizeBytes": 672,
+          "sha256": "4d61fe9fec8578ca162fe4e08a99ae7c3e42dd04f3fc5b8da058593602b391ed"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-native-runtime-activation-v1-7fb3aaa506f5/untracked.tar.gz",
+          "sizeBytes": 5096,
+          "sha256": "9b2ed23ee100de41f59382ec9f1ffe6765de45f0dd4b95e55d29a45d667fa1af"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-production-activation-v1",
+      "head": "5b857e4579733a1dcc4679501a755a29339f6b35",
+      "branch": "codex/production-activation-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 30656,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-production-activation-v1-5b857e457973",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-production-activation-v1-5b857e457973/metadata.json",
+          "sizeBytes": 594,
+          "sha256": "64f6a0e0cd16c9e48cd378ad9e79b5bd14fa6b879ab67dd9191f2589d213e2e7"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-production-activation-v1-5b857e457973/untracked.tar.gz",
+          "sizeBytes": 10079,
+          "sha256": "57d557cbb2335d0bbdd0a81baf2bef885ba0ba941f552c3e9794a248593c23a2"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-production-autonomy-v2",
+      "head": "6eb84c29d3258f3e351b550b4646af481be6e162",
+      "branch": "codex/production-autonomy-v2",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 30208,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-production-autonomy-v2-6eb84c29d325",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-production-autonomy-v2-6eb84c29d325/metadata.json",
+          "sizeBytes": 574,
+          "sha256": "c42a86de669df0d3419aae3c8e3611120890678ce8b69c3af5c6be98a95944b1"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-production-autonomy-v2-6eb84c29d325/untracked.tar.gz",
+          "sizeBytes": 4349,
+          "sha256": "85198a0876dfd1b8b82b500a1960f8c916bac52bde0b886539eac25fbfb1be00"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-proposal-production-audit-v1",
+      "head": "e3549612e6c4e28243666641e9ad8955498f62f5",
+      "branch": "codex/proposal-production-audit-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 158108,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-proposal-production-audit-v1-e3549612e6c4",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-proposal-production-audit-v1-e3549612e6c4/metadata.json",
+          "sizeBytes": 597,
+          "sha256": "0b50e2fda143bda8f740114d3b7be30ca739f7c8096f87cd2f8e8f5a5a2b4396"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-proposal-production-audit-v1-e3549612e6c4/tracked.patch",
+          "sizeBytes": 28144,
+          "sha256": "910714a773e1b72ad028274e6b741ccb70ee6257f6abd090a13d40c450de4edd"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-proposal-projection-v1",
+      "head": "0e7ba2116479b5111d0bd248da598f9e4f1e4df3",
+      "branch": "codex/proposal-projection-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 160684,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-proposal-projection-v1-0e7ba2116479",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-proposal-projection-v1-0e7ba2116479/metadata.json",
+          "sizeBytes": 832,
+          "sha256": "0e1648598c9f15a58fa2e189ec1630d8d7db9be7f0f82e1c13272e52a026c408"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-proposal-projection-v1-0e7ba2116479/tracked.patch",
+          "sizeBytes": 57747,
+          "sha256": "dd82b481154a55f23d3d5826fc34937b68476befdff280d2a32a47e25fa1dd50"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-proposal-projection-v1-0e7ba2116479/untracked.tar.gz",
+          "sizeBytes": 4455,
+          "sha256": "088506232ead78d7e9cdce9de03d3dbe0f88777905737282d9135768aa0800db"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-release-3-2-4-v1",
+      "head": "c49eafc2c715a319d1bda86b7a44bbb4c9eb19c1",
+      "branch": "codex/release-3-2-4-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164792,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-release-3-2-4-v1-c49eafc2c715",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-3-2-4-v1-c49eafc2c715/metadata.json",
+          "sizeBytes": 529,
+          "sha256": "c3093e480b8ce1b4a794911faba299ebc9d9134e7bfd3912b344ac76c7c96407"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-3-2-4-v1-c49eafc2c715/untracked.tar.gz",
+          "sizeBytes": 2001,
+          "sha256": "ca791092dc01eba7fad70dfce3ef968fbdc84fcbe1d8eeb7e84fd3584d9c8b1f"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-release-3-2-5-v1",
+      "head": "b11ee44e5cca13f60c79bdb8ef64dc68d4b6ba70",
+      "branch": "codex/release-3-2-5-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164796,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-release-3-2-5-v1-b11ee44e5cca",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-3-2-5-v1-b11ee44e5cca/metadata.json",
+          "sizeBytes": 529,
+          "sha256": "aac1ec453db7852f3a5bb034ba89c69495c6407e10b4b833ab0c973cda12ca65"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-3-2-5-v1-b11ee44e5cca/untracked.tar.gz",
+          "sizeBytes": 1451,
+          "sha256": "d4a28eb13a5d2e5cd0e68cd3198139b48348c058bcd8f0ee9ff513e336d5fae6"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-release-328-v1",
+      "head": "6849e08cd09e870ea8031083b25c68b308bb0ff9",
+      "branch": "codex/release-3.2.8-all-users-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 165900,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-release-328-v1-6849e08cd09e",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-328-v1-6849e08cd09e/metadata.json",
+          "sizeBytes": 704,
+          "sha256": "7a6cd32ade677d85a8c54162cd64eb1d499b0d2225741ea850db776529822258"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-328-v1-6849e08cd09e/tracked.patch",
+          "sizeBytes": 21054,
+          "sha256": "11a572f4e18934183f4c0b2a2d9c781592591989b0ed6a9add58a0591f6bfed8"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-328-v1-6849e08cd09e/untracked.tar.gz",
+          "sizeBytes": 8374,
+          "sha256": "87792a0213723112336f8fc51580860a847fd660c230a106918d99e24ccd6832"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-release-authority-split-v1",
+      "head": "adf23b9039c98d3aa0a67e354f35ab7b6c0ea795",
+      "branch": "codex/release-authority-split-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164624,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-release-authority-split-v1-adf23b9039c9",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-authority-split-v1-adf23b9039c9/metadata.json",
+          "sizeBytes": 599,
+          "sha256": "ab135795de8712d5796a0148f3ee8b0c05d0c418e1dcfbe383b69a70f1962429"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-authority-split-v1-adf23b9039c9/untracked.tar.gz",
+          "sizeBytes": 4331,
+          "sha256": "18824bee5377f929b34e836a117de2ea6edcbcc79644389ad780a3dd19b2c878"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-release-canary-gate-v1",
+      "head": "8e3748a8308f9e012b9bc89ce2680fe5b56230b6",
+      "branch": "codex/release-canary-gate-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164572,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-release-canary-gate-v1-8e3748a8308f",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-canary-gate-v1-8e3748a8308f/metadata.json",
+          "sizeBytes": 571,
+          "sha256": "284742fd16dad8b7051f6af17f22229d55640ebf985d2e9b6e2490499d7cb338"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-canary-gate-v1-8e3748a8308f/untracked.tar.gz",
+          "sizeBytes": 3409,
+          "sha256": "7b7f65967e5dc563cc26b14b4c729caa2fe07dc4b6fe15f9464f1b1b7f6ed3ef"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-release-pack-report-root-v1",
+      "head": "30c5dbf4382510e770810acd561898e270e27e83",
+      "branch": "codex/release-pack-report-root-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164796,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-release-pack-report-root-v1-30c5dbf43825",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-pack-report-root-v1-30c5dbf43825/metadata.json",
+          "sizeBytes": 595,
+          "sha256": "69e9a3e55d11eec051c39a814e5b6c2d0fd7689980d5f6cd7689551dea6b7139"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-pack-report-root-v1-30c5dbf43825/untracked.tar.gz",
+          "sizeBytes": 1455,
+          "sha256": "fb022c038d8785f0a339d43b5ac4091d108b6eaaabfac4d9802fea8d4f4b6a50"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-release-prepare-policy-v1",
+      "head": "a9865a3b23d7203b3ec21139fc9c997114c73b1b",
+      "branch": "codex/release-prepare-policy-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164792,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-release-prepare-policy-v1-a9865a3b23d7",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-prepare-policy-v1-a9865a3b23d7/metadata.json",
+          "sizeBytes": 583,
+          "sha256": "32bf78a531d2e7ba6e6196a5e407bbb0f4ed30b8c88af5bbee05c0a428aacd73"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-prepare-policy-v1-a9865a3b23d7/untracked.tar.gz",
+          "sizeBytes": 2645,
+          "sha256": "570d90968b8c2aca8f1ed96ed72244ff33f45787babd3daf2de5853be734172a"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-release-publication-authority-v1",
+      "head": "503c1b100d279ae4effc8d084007ca279993115b",
+      "branch": "codex/release-publication-authority-v1",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 164224,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-release-publication-authority-v1-503c1b100d27",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-publication-authority-v1-503c1b100d27/metadata.json",
+          "sizeBytes": 629,
+          "sha256": "0e690a3b2fabb213b462b98df89a5ee539c37443817018b38eb4915117416759"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-release-publication-authority-v1-503c1b100d27/untracked.tar.gz",
+          "sizeBytes": 4321,
+          "sha256": "79f07aabd59cb01706bed2d2efca7b30dfee15a2d3366f701b9b36277556b170"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-verified-runtime-install",
+      "head": "18a60269037009d20162f3339236af35221e25d2",
+      "branch": "codex/verified-runtime-install-v2",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 153004,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-verified-runtime-install-18a602690370",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-verified-runtime-install-18a602690370/metadata.json",
+          "sizeBytes": 542,
+          "sha256": "1e4cd0e0328782f024e11bcd53978870f9d6d683fd780db88befcc2456b37bed"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-verified-runtime-install-18a602690370/tracked.patch",
+          "sizeBytes": 5705,
+          "sha256": "79cf84c74a12c19029bc9e37956aaa7bc09bbcbd53913325b313d5ad4946fc2a"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-verified-runtime-install-18a602690370/untracked.tar.gz",
+          "sizeBytes": 6631,
+          "sha256": "a66a6304f8bd1a70035e1d1b72bc5d90f6e4e1de04175e84abce2196591ebcbc"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-windows-observation-verify-20260726005122",
+      "head": "7eb90575f2646c2b38de5381871a4a9b214a1b99",
+      "branch": null,
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 25500,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-windows-observation-verify-20260726005122-7eb90575f264",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-windows-observation-verify-20260726005122-7eb90575f264/metadata.json",
+          "sizeBytes": 463,
+          "sha256": "7fc80251487f38eadc874a17b3fb0a9ed88830fcdf191d81994847138dda68bb"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-windows-observation-verify-20260726005122-7eb90575f264/tracked.patch",
+          "sizeBytes": 18193,
+          "sha256": "494097ce9608f430176c55f6dff0fb157dfae1ae6a9244744cd15b9a6ca935ac"
+        }
+      ]
+    },
+    {
+      "path": "/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub-windows-service-observation",
+      "head": "7eb90575f2646c2b38de5381871a4a9b214a1b99",
+      "branch": "codex/windows-service-observation",
+      "state": "removed",
+      "reason": null,
+      "sizeKiB": 153872,
+      "archiveRef": "refs/archive/worktrees/20260903T032136/ashlr-hub-windows-service-observation-7eb90575f264",
+      "recoveryFiles": [
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-windows-service-observation-7eb90575f264/metadata.json",
+          "sizeBytes": 663,
+          "sha256": "1594d5ada24effb694367f0f569faa005462ec57ed19f98203de31222e7ec3e4"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-windows-service-observation-7eb90575f264/tracked.patch",
+          "sizeBytes": 53009,
+          "sha256": "6e4f4cbf8ef04af8eb84edd7b7179cc07332f015f3d4cd703b1db90d36210a30"
+        },
+        {
+          "path": "/Users/masonwyatt/.ashlr/recovery/ashlr-hub-worktrees-20260902/ashlr-hub-windows-service-observation-7eb90575f264/untracked.tar.gz",
+          "sizeBytes": 2638,
+          "sha256": "e85ff9aab9f48e93e5c2165f83837ac30259b23892ccec26e83f1a12873c7fdd"
+        }
+      ]
+    }
+  ],
+  "completedAt": "2026-09-03T03:21:58.823Z"
+}

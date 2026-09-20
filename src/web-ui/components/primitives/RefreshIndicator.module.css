@@ -22,8 +22,13 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .spinner {
+  :root:not([data-motion="full"]) .spinner {
     animation: none;
     border-top-color: var(--border-strong);
   }
+}
+
+:root[data-motion="reduce"] .spinner {
+  animation: none;
+  border-top-color: var(--border-strong);
 }

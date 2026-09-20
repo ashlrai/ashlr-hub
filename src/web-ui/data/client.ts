@@ -10,6 +10,13 @@ export class ApiError extends Error {
     message: string,
     public readonly status: number,
     public readonly path: string,
+    /**
+     * The server's own sentence about the refusal, when it sent one, without
+     * the "POST … failed (HTTP N)" wrapper. A surface that wants to show the
+     * operator why an action was refused should prefer this over `message`:
+     * it is the text the route author wrote for a person to read.
+     */
+    public readonly detail: string | null = null,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -72,12 +79,24 @@ export async function apiPost<T>(
   if (!res.ok) {
     let detail = '';
     try {
-      const j = (await res.json()) as { error?: string };
-      detail = j.error ? `: ${j.error}` : '';
+      // `error` is the documented refusal field, but the Verse control plane
+      // answers a refused daemon/scope action with a full result body whose
+      // plain-language sentence lives in `note` and which has NO `error` key
+      // at all (see VerseDaemonActionResult). Reading only `error` threw away
+      // sentences like "no repositories are enrolled, so the loop would do
+      // nothing" and left the caller with a bare status code to guess from.
+      const j = (await res.json()) as { error?: unknown; note?: unknown };
+      const message = typeof j.error === 'string' && j.error ? j.error : typeof j.note === 'string' ? j.note : '';
+      detail = message;
     } catch {
       /* body wasn't JSON */
     }
-    throw new ApiError(`POST ${path} failed (HTTP ${res.status})${detail}.`, res.status, path);
+    throw new ApiError(
+      `POST ${path} failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}.`,
+      res.status,
+      path,
+      detail || null,
+    );
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

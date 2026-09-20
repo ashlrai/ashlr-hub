@@ -1,0 +1,165 @@
+/**
+ * The Verse shell: a fixed --rail-width icon rail and one section beside it.
+ * Hairlines, no cards, no shadows — separation is a 1px border and space.
+ */
+.shell {
+  display: grid;
+  /* The TOKEN, not the number. Five files compute the desktop traffic-light
+     inset as calc(--app-traffic-light-inset - --rail-width); with the rail
+     hardcoded, changing the token moved the inset maths without moving the
+     rail and double-inset every header strip in the Tauri window. */
+  grid-template-columns: var(--rail-width) minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+}
+.shell > * { min-width: 0; min-height: 0; }
+
+/* ---- rail ------------------------------------------------------------- */
+.rail {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-right: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+}
+
+/* ---- desktop shell (see desktop/README.md "Desktop shell contract") -----
+ * The Tauri window uses an overlay title bar, so the OS paints the traffic
+ * lights over the window's top-left. Push the rail's own content below that
+ * strip; `--app-titlebar-height` is absent in a browser, where this is 0px
+ * and the rail is unchanged. Under [data-app-shell="desktop"] the rail's
+ * first 48px then contains no button — it is the drag handle below. */
+.rail {
+  padding-top: calc(var(--space-3) + var(--app-titlebar-height, 0px));
+}
+
+/* The cleared strip, made draggable. Zero-height (and therefore absent) in a
+ * browser, so it can never eat a click there. */
+.railDragStrip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: var(--app-titlebar-height, 0px);
+}
+
+.mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  margin-bottom: var(--space-2);
+  color: var(--accent-500);
+}
+
+.railList {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.railFoot { margin-top: auto; }
+
+.railButton {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(var(--control-h) + var(--space-1));
+  height: calc(var(--control-h) + var(--space-1));
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  transition:
+    color var(--duration-fast) var(--ease-standard),
+    background var(--duration-fast) var(--ease-standard);
+}
+.railButton:hover { color: var(--text-primary); background: var(--bg-hover); }
+.railButton:active { background: var(--bg-active); }
+.railButton[aria-current] { color: var(--text-primary); }
+
+/* Active indicator: a 2px accent bar on the left edge of the icon, never a filled pill. */
+.railButton[aria-current]::before {
+  content: '';
+  position: absolute;
+  left: -10px;
+  top: 50%;
+  height: 56%;
+  transform: translateY(-50%);
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent-500);
+}
+
+/* Pending approvals: a dot, paired with a count in the button's aria-label. */
+.railDot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-warning-solid);
+  box-shadow: 0 0 0 2px var(--bg-canvas);
+}
+
+/* ---- section slot ----------------------------------------------------- */
+.section {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-surface);
+}
+.section > * { min-height: 0; }
+
+.loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+}
+
+.missing {
+  max-width: 56ch;
+  margin: clamp(32px, 12vh, 120px) auto 0;
+  padding: 0 var(--space-6);
+  display: grid;
+  gap: var(--space-3);
+}
+.missingTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-xl-size);
+  line-height: var(--text-xl-line);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display, -0.02em);
+}
+.missingBody,
+.missingDetail {
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.missingBody code { font-size: var(--text-xs-size); color: var(--text-primary); }
+.missingDetail {
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  overflow-wrap: anywhere;
+}
+
+

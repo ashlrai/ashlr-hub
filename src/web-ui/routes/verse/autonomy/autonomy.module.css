@@ -1,0 +1,258 @@
+/**
+ * routes/verse/autonomy/autonomy.module.css — one stylesheet for the whole
+ * cockpit so the panels cannot drift apart.
+ *
+ * Design language (docs/VERSE-DESIGN-V2.md): monochrome, hairlines instead of
+ * cards, no shadows outside true overlays, tight radii, Space Grotesk on every
+ * numeral and micro-label, colour only where it carries meaning. Row heights
+ * and padding derive from --density-row/--density-pad; both carry a fallback
+ * so this renders correctly before owner A's token pass lands.
+ */
+
+.panel { border-top: 1px solid var(--border-subtle); padding-block: var(--space-6); }
+.panel:first-of-type { border-top: 0; padding-top: var(--space-4); }
+
+.panelHead { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-4); }
+.panelTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.panelHeadSpaced { margin-top: var(--space-6); }
+.panelNote { font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-tertiary); }
+.panelActions { display: flex; align-items: center; gap: var(--space-2); }
+
+/* --- status header ------------------------------------------------------ */
+.status { display: flex; flex-direction: column; gap: var(--space-4); }
+.statusTop { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3) var(--space-5); }
+.runState { display: inline-flex; align-items: center; gap: var(--space-2); font-family: var(--font-display); font-size: var(--text-xl-size); line-height: var(--text-xl-line); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-display, -0.02em); }
+.runDot { width: 8px; height: 8px; border-radius: var(--radius-full); background: var(--status-neutral-solid); flex-shrink: 0; }
+.runState[data-state="running"] .runDot { background: var(--status-running-solid); }
+.runState[data-state="stopped"] .runDot { background: var(--status-neutral-solid); }
+.runState[data-state="unknown"] .runDot { background: var(--status-unknown-solid); }
+.runState[data-state="killed"] .runDot { background: var(--status-danger-solid); }
+
+.facts { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-5); }
+.fact { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.factLabel { font-family: var(--font-display); font-size: var(--text-2xs-size, 11px); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; color: var(--text-tertiary); }
+.factValue { font-family: var(--font-display); font-size: var(--text-sm-size); line-height: var(--text-sm-line); color: var(--text-primary); white-space: nowrap; }
+.factValue[data-tone="warning"] { color: var(--status-warning-fg); }
+.factValue[data-tone="danger"] { color: var(--status-danger-fg); }
+.factValue[data-tone="success"] { color: var(--status-success-fg); }
+.factValue[data-tone="unknown"] { color: var(--status-unknown-fg); }
+
+/* Budget: one line, never a labelled progress bar. */
+.budget { display: flex; flex-direction: column; gap: var(--space-2); }
+.budgetLine { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-2); }
+.budgetLabel { font-family: var(--font-display); font-size: var(--text-sm-size); color: var(--text-primary); }
+.budgetNote { font-size: var(--text-xs-size); color: var(--text-tertiary); }
+.meter { --meter-color: var(--accent-500); height: 2px; background: var(--bg-active); overflow: hidden; }
+.meter[data-state="warn"] { --meter-color: var(--status-warning-solid); }
+.meter[data-state="over"] { --meter-color: var(--status-danger-solid); }
+.meter[data-state="stopped"] { --meter-color: var(--status-danger-solid); }
+.meter[data-state="unknown"] { --meter-color: var(--status-unknown-solid); }
+.meterFill { height: 100%; background: var(--meter-color); transition: width var(--duration-base) var(--ease-decelerate); }
+
+/* --- controls ----------------------------------------------------------- */
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.button {
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+.button:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
+.button:disabled { color: var(--text-disabled); cursor: not-allowed; }
+.buttonPrimary { border-color: var(--accent-500); color: var(--accent-600); }
+.buttonPrimary:hover:not(:disabled) { background: var(--bg-selected); }
+
+/* The emergency stop is separated by a rule, not by colour alone. */
+.emergency { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--border-default); }
+.emergencyButton {
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-4);
+  border: 1px solid var(--status-danger-solid);
+  border-radius: var(--radius-sm);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-semibold);
+  cursor: pointer;
+}
+/* Hover keeps the RESTING pair. `--accent-contrast` on `--status-danger-solid`
+   measures 3.97:1 in light (#ffffff on #e5473a) — below the 4.5:1 floor, on
+   the label of the most destructive control in the app, at the exact moment
+   the operator is reading it to confirm what they are about to do. It also
+   borrowed the accent system's foreground token for a danger ground, coupling
+   this button to a colour the operator can re-hue in Settings. The hover cue
+   is achromatic instead: the hairline thickens its contrast. */
+.emergencyButton:hover:not(:disabled) { border-color: var(--status-danger-fg); background: var(--status-danger-bg); }
+.emergencyButton:disabled { border-color: var(--border-default); background: var(--bg-surface); color: var(--text-disabled); cursor: not-allowed; }
+.emergencyNote { flex: 1; min-width: 220px; font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-secondary); }
+
+/* --- caps --------------------------------------------------------------- */
+.capGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4) var(--space-5); }
+.cap { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.capLabel { font-family: var(--font-display); font-size: var(--text-2xs-size, 11px); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; color: var(--text-tertiary); }
+.capRow { display: flex; align-items: center; gap: var(--space-2); }
+.capInput {
+  flex: 1;
+  min-width: 0;
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+}
+.capInput:focus-visible { border-color: var(--border-focus); }
+.capInput:disabled { color: var(--text-disabled); background: var(--bg-canvas); cursor: not-allowed; }
+.capInputInvalid { border-color: var(--status-danger-solid); }
+.capUnit { font-size: var(--text-xs-size); color: var(--text-tertiary); white-space: nowrap; }
+.capHelp { font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-tertiary); }
+.capUsage { font-family: var(--font-display); font-size: var(--text-xs-size); color: var(--text-secondary); }
+.capError { font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--status-danger-fg); }
+/* The server's own sentence about what the last action did. Not an error, not
+   a success toast — a statement of fact, so it reads as body copy. */
+.actionNote { margin-top: var(--space-3); font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-secondary); }
+.capApplied { display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--text-xs-size); color: var(--status-success-fg); }
+.capApplied::before { content: "✓"; }
+
+/* --- scope -------------------------------------------------------------- */
+.repoList { display: flex; flex-direction: column; }
+.repoRow { display: flex; align-items: center; gap: var(--space-3); min-height: var(--density-row, 32px); padding: var(--space-1) 0; border-bottom: 1px solid var(--border-subtle); }
+.repoName { font-family: var(--font-display); font-size: var(--text-sm-size); color: var(--text-primary); white-space: nowrap; }
+.repoPath { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--text-xs-size); color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl; text-align: left; }
+.repoMissing { display: inline-flex; align-items: center; gap: var(--space-1); font-size: var(--text-xs-size); color: var(--status-warning-fg); white-space: nowrap; }
+.addRow { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
+.addInput {
+  flex: 1;
+  min-width: 240px;
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+}
+.addInput:focus-visible { border-color: var(--border-focus); }
+
+/* --- dense tables (audit, ticks, dispatches) ---------------------------- */
+.tableScroll { max-height: 520px; overflow: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); scrollbar-gutter: stable; }
+.table { width: 100%; border-collapse: collapse; font-size: var(--text-xs-size); line-height: var(--text-xs-line); }
+.table th {
+  font-family: var(--font-display);
+  position: sticky;
+  top: 0;
+  z-index: var(--z-sticky);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border-default);
+  text-align: left;
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.table td { padding: var(--space-1) var(--space-3); border-bottom: 1px solid var(--border-subtle); vertical-align: top; }
+.table tbody tr:hover { background: var(--bg-hover); }
+.cellAction { font-family: var(--font-mono); color: var(--text-primary); white-space: nowrap; }
+.cellTime { font-family: var(--font-display); color: var(--text-tertiary); white-space: nowrap; }
+.cellSummary { color: var(--text-secondary); }
+.cellRepo { font-family: var(--font-mono); color: var(--text-tertiary); white-space: nowrap; }
+/* --text-tertiary is a direct declaration on a CHILD, so the parent's
+   :hover/[aria-current] colour change does not reach it — only the ground
+   under it moves. Measured on --bg-selected it is 3.95:1 in light and 4.40:1
+   in dark, both under the 4.5:1 floor in DESIGN-V2 §6; --text-secondary is
+   6.32:1 on the worst of them. design/tokens-contrast.test.ts now pins the
+   token pair so the gap cannot reopen. */
+.table tbody tr:hover .cellTime,
+.table tbody tr:hover .cellRepo { color: var(--text-secondary); }
+.resultTag { display: inline-flex; align-items: center; gap: var(--space-1); font-family: var(--font-display); white-space: nowrap; }
+.resultTag::before { content: "•"; }
+.resultTag[data-result="ok"] { color: var(--status-success-fg); }
+.resultTag[data-result="refused"] { color: var(--status-warning-fg); }
+.resultTag[data-result="error"] { color: var(--status-danger-fg); }
+.resultTag[data-result="ok"]::before { content: "✓"; }
+.resultTag[data-result="refused"]::before { content: "⊘"; }
+.resultTag[data-result="error"]::before { content: "✕"; }
+
+.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--space-3); margin-bottom: var(--space-3); }
+.filterField { display: flex; flex-direction: column; gap: var(--space-1); }
+.filterLabel { font-family: var(--font-display); font-size: var(--text-2xs-size, 11px); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; color: var(--text-tertiary); }
+.filterField input {
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+}
+
+/* The Select primitive renders its own <label>; restyle it to the uppercase
+   micro-label the sibling text filters use so the row still reads as one
+   group. Descendant element selector, so it stays module-scoped. */
+.filterSelect > label {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-regular, 400);
+  color: var(--text-tertiary);
+}
+
+/* WebKit paints its own clear affordance inside type=search, which is a
+   default browser control (§7). Sidebar.module.css already resets it. */
+.filterField input[type='search']::-webkit-search-cancel-button { appearance: none; }
+
+
+/* --- safety ------------------------------------------------------------- */
+.checkList { display: flex; flex-direction: column; }
+.check { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-1) var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle); }
+.checkMark { grid-row: 1 / span 2; font-family: var(--font-display); font-size: var(--text-sm-size); }
+.check[data-pass="true"] .checkMark { color: var(--status-success-fg); }
+.check[data-pass="false"] .checkMark { color: var(--status-danger-fg); }
+.checkLabel { font-size: var(--text-sm-size); line-height: var(--text-sm-line); color: var(--text-primary); }
+.checkDetail { font-family: var(--font-mono); font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-tertiary); }
+
+/* --- goals + backlog ---------------------------------------------------- */
+.summaryColumns { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--space-5); }
+.summaryList { display: flex; flex-direction: column; }
+.summaryRow { display: flex; align-items: baseline; gap: var(--space-3); min-height: var(--density-row, 32px); padding: var(--space-1) 0; border-bottom: 1px solid var(--border-subtle); }
+.summaryTitle { flex: 1; min-width: 0; font-size: var(--text-sm-size); color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.summaryMeta { font-family: var(--font-display); font-size: var(--text-xs-size); color: var(--text-tertiary); white-space: nowrap; }
+
+/* --- shared states ------------------------------------------------------ */
+.empty { padding: var(--space-4) 0; font-size: var(--text-sm-size); line-height: var(--text-base-line); color: var(--text-secondary); max-width: 62ch; }
+.emptyStrong { color: var(--text-primary); font-weight: var(--font-weight-medium); }
+.error { padding: var(--space-3); border: 1px solid var(--status-danger-solid); border-radius: var(--radius-sm); background: var(--status-danger-bg); color: var(--status-danger-fg); font-size: var(--text-sm-size); line-height: var(--text-sm-line); }
+.readOnly { padding: var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-canvas); color: var(--text-secondary); font-size: var(--text-sm-size); line-height: var(--text-base-line); }
+.readOnly code { font-family: var(--font-mono); font-size: var(--text-xs-size); }
+.skeletons { display: flex; flex-direction: column; gap: var(--space-2); }
+.srOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+/* Guarded: appearance-store.ts writes data-motion="full" so an operator can
+   opt out of the OS preference, and every other animated surface here honours
+   it. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .meterFill { transition: none; }
+}

@@ -1,0 +1,175 @@
+/**
+ * routes/verse/usage/local-model.ts — local availability, projected for
+ * display.
+ *
+ * "Can I run this locally right now" is a different question from "is it
+ * installed", and the answer has four independent parts the old surface threw
+ * away (docs/VERSE-TELEMETRY-V2.md, "Local models"):
+ *
+ *   - RESIDENT vs INSTALLED — `/api/ps` vs `/api/tags`. Only a resident model
+ *     answers without a load delay.
+ *   - GPU/CPU SPLIT — `size_vram` against `size`. A model that spilled to CPU
+ *     is usable but slow, and that is a fact the operator should see, not
+ *     discover mid-turn.
+ *   - KEEP-ALIVE — `expires_at` is when residency ends. Rendered as a
+ *     countdown because it genuinely is one (unlike Claude's reset prose,
+ *     which is not a timestamp and must stay verbatim).
+ *   - TOOLS — a model whose `capabilities` lack `tools` CANNOT drive an
+ *     agentic session at all. That is a hard gate, so it is stated up front
+ *     rather than failing at turn time. `capabilities: null` means the list
+ *     was not reported, which is NOT the same as "no tool support" and is
+ *     rendered as unknown.
+ *
+ * Pure: no React, no I/O.
+ */
+import type { LocalModel, LocalModelsSnapshot } from './usage-contract.js';
+
+export type ToolSupport = 'supported' | 'unsupported' | 'unknown';
+
+export interface LocalModelRow {
+  name: string;
+  resident: boolean;
+  sizeBytes: number | null;
+  sizeVramBytes: number | null;
+  /** Share of resident bytes held in VRAM (0–100), or null when unreported. */
+  gpuPct: number | null;
+  /** ms until keep-alive expiry; null when not resident or not reported. */
+  expiresInMs: number | null;
+  parameterSize: string | null;
+  quantization: string | null;
+  nativeContext: number | null;
+  configuredContext: number | null;
+  /** True when Ashlr runs this model at less than its native context. */
+  contextTruncated: boolean;
+  tools: ToolSupport;
+}
+
+export function toolSupport(capabilities: string[] | null): ToolSupport {
+  if (capabilities === null) return 'unknown';
+  return capabilities.includes('tools') ? 'supported' : 'unsupported';
+}
+
+/**
+ * The runtime's own `supportsTools` is AUTHORITATIVE and outranks the
+ * capability array.
+ *
+ * The server sends `capabilities: []` when a runtime reported no capability
+ * list at all, and reading that array alone renders "no tools" — a hard gate
+ * that would wrongly tell the operator a model cannot drive an agentic
+ * session. `supportsTools: null` is the honest "the runtime did not say".
+ */
+export function resolveToolSupport(
+  supportsTools: boolean | null,
+  capabilities: string[] | null,
+): ToolSupport {
+  if (supportsTools !== null) return supportsTools ? 'supported' : 'unsupported';
+  if (capabilities !== null && capabilities.length === 0) return 'unknown';
+  return toolSupport(capabilities);
+}
+
+export function buildLocalModelRow(model: LocalModel, now: number): LocalModelRow {
+  const expiresMs = model.expiresAt ? Date.parse(model.expiresAt) : Number.NaN;
+  const gpuPct =
+    model.sizeBytes !== null && model.sizeBytes > 0 && model.sizeVramBytes !== null
+      ? Math.max(0, Math.min(100, (model.sizeVramBytes / model.sizeBytes) * 100))
+      : null;
+
+  return {
+    name: model.name,
+    resident: model.loaded,
+    sizeBytes: model.sizeBytes,
+    sizeVramBytes: model.sizeVramBytes,
+    gpuPct,
+    expiresInMs: model.loaded && !Number.isNaN(expiresMs) ? expiresMs - now : null,
+    parameterSize: model.parameterSize,
+    quantization: model.quantization,
+    nativeContext: model.nativeContext,
+    configuredContext: model.configuredContext,
+    contextTruncated:
+      model.nativeContext !== null &&
+      model.configuredContext !== null &&
+      model.configuredContext < model.nativeContext,
+    tools: resolveToolSupport(model.supportsTools, model.capabilities),
+  };
+}
+
+export interface LocalModelsView {
+  reachable: boolean;
+  reason: string | null;
+  /** Resident first (they are the answer to "right now"), then by name. */
+  rows: LocalModelRow[];
+  residentBytes: number | null;
+  memoryBudgetBytes: number | null;
+  memoryUsedPct: number | null;
+}
+
+export function buildLocalModelsView(
+  snapshot: LocalModelsSnapshot | null,
+  now: number = Date.now(),
+): LocalModelsView | null {
+  if (!snapshot) return null;
+  const rows = snapshot.models
+    .map((m) => buildLocalModelRow(m, now))
+    .sort((a, b) => Number(b.resident) - Number(a.resident) || a.name.localeCompare(b.name));
+
+  const resident = rows.filter((r) => r.resident);
+  // A resident model with no reported size makes the TOTAL unknown — summing
+  // the rest would understate it, and understating a memory figure is exactly
+  // the kind of quiet lie this surface refuses.
+  const residentBytes = resident.some((r) => r.sizeBytes === null)
+    ? null
+    : resident.reduce((acc, r) => acc + (r.sizeBytes ?? 0), 0);
+
+  const budget = snapshot.memoryBudgetBytes;
+  return {
+    reachable: snapshot.reachable,
+    reason: snapshot.reason,
+    rows,
+    residentBytes,
+    memoryBudgetBytes: budget,
+    memoryUsedPct:
+      residentBytes !== null && budget !== null && budget > 0
+        ? Math.max(0, Math.min(100, (residentBytes / budget) * 100))
+        : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Formatting helpers local to this panel (chartFormat owns counts/currency;
+// bytes and countdowns are not in its vocabulary).
+// ---------------------------------------------------------------------------
+
+/** Binary-ish GB, matching how Ollama and Activity Monitor talk about models. */
+export function formatBytes(bytes: number | null): string {
+  if (bytes === null || !Number.isFinite(bytes)) return '—';
+  const gb = bytes / 1024 ** 3;
+  if (gb >= 10) return `${gb.toFixed(0)} GB`;
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  const mb = bytes / 1024 ** 2;
+  return `${Math.round(mb)} MB`;
+}
+
+/** "expires in 4m 12s" material. Past-due reads as expired, never negative. */
+export function formatCountdown(ms: number | null): string {
+  if (ms === null || !Number.isFinite(ms)) return '—';
+  if (ms <= 0) return 'expired';
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+/**
+ * Context windows are powers of two and are quoted that way everywhere the
+ * user will have seen them (262144 is "256k", not "262k"), so the divisor is
+ * 1024 rather than 1000. Getting this wrong makes the UI disagree with the
+ * model card the operator read five minutes ago.
+ */
+export function formatContext(tokens: number | null): string {
+  if (tokens === null || !Number.isFinite(tokens)) return '—';
+  if (tokens >= 1024) return `${Math.round(tokens / 1024)}k`;
+  return String(tokens);
+}

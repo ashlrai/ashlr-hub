@@ -1,0 +1,230 @@
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-canvas);
+}
+
+/* ---- head: search + new chat + collapse -------------------------------- */
+.head {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  /* DESIGN-V2 §4: header strips are --strip-height, and the token is what the
+     desktop shell's inset maths is written against. */
+  height: var(--strip-height);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.search {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+.searchIcon {
+  position: absolute;
+  left: 0;
+  display: flex;
+  color: var(--text-tertiary);
+  pointer-events: none;
+}
+.search input {
+  width: 100%;
+  height: var(--control-h-sm);
+  padding: 0 var(--space-2) 0 22px;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+}
+.search input::placeholder { color: var(--text-tertiary); }
+.search input::-webkit-search-cancel-button { appearance: none; }
+/* The global :focus-visible ring is the indicator here — the field is
+   borderless, so nothing else would show keyboard focus. */
+.search:focus-within .searchIcon { color: var(--accent-500); }
+
+.iconButton {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.iconButton:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+/* Press state, same contract as the Button primitive: the ground steps one
+   more notch, nothing moves. */
+.iconButton:active:not(:disabled) { background: var(--bg-active); }
+.iconButton:disabled { color: var(--text-disabled); cursor: not-allowed; }
+
+/* ---- list -------------------------------------------------------------- */
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--space-4);
+  scrollbar-gutter: stable;
+}
+.skeleton { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4) var(--space-3); }
+.error {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  padding: var(--space-4) var(--space-3);
+  color: var(--status-danger-fg);
+  font-size: var(--text-sm-size);
+}
+.error button {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-xs-size);
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+.error button:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.error button:active { background: var(--bg-active); }
+.empty {
+  padding: var(--space-8) var(--space-4);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.emptyTitle { color: var(--text-secondary); font-weight: var(--font-weight-medium); margin-bottom: var(--space-1); }
+
+.group { padding-top: var(--space-4); }
+.groupTitle {
+  font-family: var(--font-display);
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-1);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: 1.4;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.groupName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.enrolled { flex-shrink: 0; color: var(--text-tertiary); opacity: 0.7; font-weight: var(--font-weight-regular); }
+
+.list { display: flex; flex-direction: column; list-style: none; margin: 0; padding: 0; }
+
+/* One row: 2px engine marker · title · state · relative time. */
+.session {
+  position: relative;
+  display: grid;
+  grid-template-columns: 2px minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-3) 0 var(--space-3);
+  color: var(--text-secondary);
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.session:hover { background: var(--bg-hover); color: var(--text-primary); }
+.session:active { background: var(--bg-active); }
+.session[aria-current] { background: var(--bg-selected); color: var(--text-primary); }
+
+.marker {
+  width: 2px;
+  height: var(--engine-marker-h);
+  border-radius: 1px;
+  background: var(--verse-engine, var(--text-tertiary));
+}
+.engine-claude { --verse-engine: var(--engine-claude, #c96442); }
+.engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
+.engine-grok { --verse-engine: var(--engine-grok, #6b7280); }
+.engine-local { --verse-engine: var(--engine-local, #7c5cff); }
+
+.sessionText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+/* Running: a pulsing dot, never a spinner. */
+.running {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-running-solid);
+  animation: verse-pulse 1.8s ease-out infinite;
+}
+.errored {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 12px;
+  height: 12px;
+  color: var(--status-danger-fg);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-bold);
+  line-height: 1;
+}
+
+.time {
+  flex-shrink: 0;
+  min-width: 3ch;
+  text-align: right;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+/* --text-tertiary is a direct declaration on a CHILD, so the parent's
+   :hover/[aria-current] colour change does not reach it — only the ground
+   under it moves. Measured on --bg-selected it is 3.95:1 in light and 4.40:1
+   in dark, both under the 4.5:1 floor in DESIGN-V2 §6; --text-secondary is
+   6.32:1 on the worst of them. design/tokens-contrast.test.ts now pins the
+   token pair so the gap cannot reopen. */
+.session:hover .time,
+.session[aria-current] .time { color: var(--text-secondary); }
+
+/* ---- footer ------------------------------------------------------------ */
+.footer {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  height: var(--control-h);
+  padding: 0 var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+.footerButton {
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  margin-left: calc(-1 * var(--space-2));
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size, 11px);
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.footerButton:hover { color: var(--text-primary); background: var(--bg-hover); }
+.footerButton:active { background: var(--bg-active); }
+
+@keyframes verse-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-running-solid) 55%, transparent); }
+  100% { box-shadow: 0 0 0 5px transparent; }
+}
+/* Two triggers, the same pattern as the duration tokens in tokens.css and the
+   shimmer in global.css: the OS preference applies unless Settings explicitly
+   asked for full motion, and data-motion="reduce" forces it on for an operator
+   whose OS says nothing. A persistent `animation` has a hardcoded duration, so
+   collapsing --duration-* does NOT reach it — it needs both rules by name. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .running { animation: none; }
+}
+:root[data-motion="reduce"] .running { animation: none; }

@@ -16,7 +16,7 @@
   gap: var(--space-3);
   padding: var(--space-3) var(--space-4);
   border-radius: var(--radius-md);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--shadow-toast);
   font-size: var(--text-sm-size);
   animation: slide-in var(--duration-base) var(--ease-decelerate);
   border: 1px solid var(--border-default);
@@ -33,12 +33,20 @@
 
 .dismiss {
   color: var(--text-tertiary);
+  border-radius: var(--radius-xs);
   font-size: var(--text-lg-size);
   line-height: 1;
   padding: var(--space-1);
 }
+.dismiss {
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
 .dismiss:hover {
   color: var(--text-primary);
+  background: var(--bg-hover);
+}
+.dismiss:active {
+  background: var(--bg-active);
 }
 
 @keyframes slide-in {
@@ -49,7 +57,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .toast {
+  :root:not([data-motion="full"]) .toast {
     animation: none;
   }
+}
+
+:root[data-motion="reduce"] .toast {
+  animation: none;
 }

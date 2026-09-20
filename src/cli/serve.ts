@@ -99,9 +99,10 @@ function parseArgs(args: string[]): ServeOptions | { error: string; code: number
 
 // ---------------------------------------------------------------------------
 // Browser opener (macOS: open, Linux: xdg-open, Windows: start)
+// Exported so `ashlr verse` (src/cli/verse.ts) opens /verse/ the same way.
 // ---------------------------------------------------------------------------
 
-async function openBrowser(url: string): Promise<void> {
+export async function openBrowser(url: string): Promise<void> {
   const { spawn } = await import('child_process');
   const platform = process.platform;
   const cmd = platform === 'darwin' ? 'open'

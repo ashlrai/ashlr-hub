@@ -924,6 +924,43 @@ function currentConfigMatches(configPath: string, expected: FileStat | undefined
   }
 }
 
+// ---------------------------------------------------------------------------
+// foundry.subscriptionMaxPercent — ONE clamp, used by every reader
+// ---------------------------------------------------------------------------
+
+/**
+ * Default subscription-window throttle percentage when none is configured.
+ * A subscription engine is skipped once a KNOWN window reading reaches this.
+ */
+export const SUBSCRIPTION_MAX_PERCENT_DEFAULT = 90;
+
+/**
+ * Resolve `cfg.foundry.subscriptionMaxPercent` to an effective percentage.
+ *
+ * Clamped to [1, 100] because both ends are footguns: 0 or negative would
+ * disable the throttle entirely (everything is "under 0%") and anything above
+ * 100 could never fire. A missing or non-finite value falls back to
+ * {@link SUBSCRIPTION_MAX_PERCENT_DEFAULT}.
+ *
+ * This is the SINGLE definition of that rule. Before V2 the same expression
+ * was inlined behind an untyped cast in `daemon/loop.ts`, `fleet/router.ts`,
+ * and `fabric/gateway.ts`; those readers now call this instead so the throttle
+ * cannot mean different things in different code paths.
+ *
+ * @param source the config (or just its `foundry` block) to read, or a raw
+ *   candidate value — a per-call override, e.g. the fabric gateway's `ctx`.
+ */
+export function resolveSubscriptionMaxPercent(
+  source: { foundry?: { subscriptionMaxPercent?: number } } | number | null | undefined,
+  fallback: number = SUBSCRIPTION_MAX_PERCENT_DEFAULT,
+): number {
+  const raw = typeof source === 'number'
+    ? source
+    : source?.foundry?.subscriptionMaxPercent;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return fallback;
+  return Math.min(100, Math.max(1, raw));
+}
+
 /**
  * Persist `c` to CONFIG_PATH as pretty-printed JSON.
  * Creates CONFIG_DIR if needed, then durably replaces the config through a

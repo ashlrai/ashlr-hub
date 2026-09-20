@@ -1,0 +1,75 @@
+.group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.block {
+  display: flex;
+  width: 100%;
+}
+
+.block .option {
+  flex: 1;
+  justify-content: center;
+}
+
+.option {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+  height: calc(var(--density-row) - 6px);
+  padding: 0 var(--space-3);
+  /* Transparent rather than absent so the checked state can colour it without
+     changing the option's box — everything is border-box, so the hairline
+     costs no height and no horizontal drift when it appears. */
+  border: 1px solid transparent;
+  border-radius: calc(var(--radius-sm) - 1px);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard);
+}
+
+.sm .option {
+  height: calc(var(--density-row-sm) - 6px);
+  padding: 0 var(--space-2);
+  font-size: var(--text-2xs-size);
+}
+
+.option:hover:not(:disabled):not([aria-checked='true']) {
+  color: var(--text-primary);
+}
+
+/* No shadow. DESIGN-V2 §1.2 allows drop shadows only on true overlays
+   (dialog, menu, toast) and §2 retires every elevation token but those three;
+   a segmented control is chrome. It was not carrying its weight either: in
+   dark, --shadow-sm is rgba(0,0,0,0.4) on a near-black ground, i.e. invisible,
+   so the selected thumb read as fill-only in dark and fill+shadow in light —
+   two looks for one state. The hairline does the separating in both. */
+.option[aria-checked='true'] {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border-color: var(--border-default);
+}
+
+.option:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+.glyph {
+  display: inline-flex;
+  flex: none;
+}

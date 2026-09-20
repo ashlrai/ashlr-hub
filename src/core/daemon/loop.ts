@@ -6,7 +6,12 @@
  *    sandboxed swarms, create PENDING inbox proposals, record spend + state.
  *  - runDaemon(cfg, opts): loop ticks on an interval (or once); REFUSES when
  *    nested; marks running state; stops on kill switch; idles on budget exhaustion.
- *  - stopDaemon(): request shutdown by setting the kill switch.
+ *  - stopDaemon(): request shutdown by setting the GLOBAL kill switch. Wide:
+ *    ~/.ashlr/KILL is also read by assertMayMutate, so it refuses the agent's
+ *    own write tools too. For a narrow, reversible halt of autonomous dispatch
+ *    ONLY, use daemon/pause.ts (`~/.ashlr/daemon.paused`) — this loop honours
+ *    it in tick()'s stopRequested() and parks the continuous loop on it, and
+ *    nothing outside this file consults it.
  *
  * NON-NEGOTIABLE GUARDRAILS (enforced here, grep-provable):
  *  1. PROPOSAL-FIRST (proposal-only by default): every dispatch produces a
@@ -91,6 +96,7 @@ import {
   upgradeLegacyDaemonSpendGuard,
 } from './state.js';
 import type { DaemonLock, SaveDaemonStateResult } from './state.js';
+import { daemonPaused } from './pause.js';
 // Type-only: erased at compile time, so this does NOT eagerly load
 // self-improve.js/post-merge-credit.js at module init (those are still
 // reached only via the lazy `await import(...)` calls in
@@ -247,7 +253,7 @@ import {
   pendingProposalItemKeysForBacklog,
   workItemCoverageKey,
 } from '../fleet/proposal-matching.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, resolveSubscriptionMaxPercent } from '../config.js';
 import { hostname as osHostname } from 'node:os';
 import {
   buildResourceStrategyReport,
@@ -1038,6 +1044,17 @@ const DEFAULTS: DaemonConfig = {
   intervalMs: 5 * 60_000, // 5-minute tick interval in loop mode
 };
 const KILL_SWITCH_POLL_MS = 50;
+/**
+ * How long a PAUSED continuous loop parks before re-reading the sentinel.
+ *
+ * The kill switch is polled at 50ms because it is an emergency stop and every
+ * millisecond of latency is work that should not have happened. A pause is the
+ * opposite: the loop is already doing nothing, nothing is at risk, and the only
+ * thing waiting is a human who just clicked Resume. One second is well inside
+ * their perception of "immediate" and keeps a long park from turning into a
+ * twenty-lstat-per-second spin on the sentinel.
+ */
+const DAEMON_PAUSE_PARK_MS = 1_000;
 const pendingDaemonTickEffects = new WeakMap<DaemonTick, Set<Promise<void>>>();
 const durableAgentOsObserverTicks = new WeakSet<object>();
 
@@ -3294,9 +3311,18 @@ function resolveCfg(cfg: AshlrConfig): DaemonConfig {
     : (typeof o.concurrency?.total === 'number' && o.concurrency.total > 0
         ? Math.floor(o.concurrency.total) : 8);
   return {
-    dailyBudgetUsd: typeof o.dailyBudgetUsd === 'number' && o.dailyBudgetUsd > 0
-      ? o.dailyBudgetUsd
-      : DEFAULTS.dailyBudgetUsd,
+    // ZERO IS A CHOICE, NOT AN ABSENCE. The Verse control plane offers 0 as
+    // "stop the loop" (VERSE-CONTRACT-V2: "a budget of 0 means 'stopped', say
+    // so") and the cockpit states that as fact. Coercing 0 back to the $1/day
+    // default would authorise a dollar a day of autonomous work against a
+    // screen that says the loop is stopped. A stored 0 therefore survives into
+    // DaemonConfig, where the existing `remainingBudget <= 0` guard skips
+    // every tick as budget-exhausted — exactly what the UI promises. Negative
+    // and non-finite values are still nonsense and still fall back.
+    dailyBudgetUsd:
+      typeof o.dailyBudgetUsd === 'number' && Number.isFinite(o.dailyBudgetUsd) && o.dailyBudgetUsd >= 0
+        ? o.dailyBudgetUsd
+        : DEFAULTS.dailyBudgetUsd,
     perTickItems: typeof o.perTickItems === 'number' && o.perTickItems > 0
       ? Math.floor(o.perTickItems)
       : DEFAULTS.perTickItems,
@@ -3552,8 +3578,21 @@ export async function tick(
     opts.ownerLock
       ? saveResidentDaemonState(opts.ownerLock, nextState)
       : saveDaemonStateResult(nextState);
+  // M-PAUSE: `daemonPaused()` reads ~/.ashlr/daemon.paused FRESH on every call,
+  // exactly as `killSwitchOn()` re-reads KILL — config and both sentinels are
+  // per-tick inputs, never captured at start. It is scoped to DISPATCH only:
+  // `assertMayMutate` / mcp-native / mcp-native-engineer do not consult it, so
+  // a paused daemon leaves the agent's own write tools working.
   const stopRequested = (): boolean =>
-    opts.signal?.aborted === true || killSwitchOn() || !stillOwnsTick();
+    opts.signal?.aborted === true || killSwitchOn() || daemonPaused() || !stillOwnsTick();
+  /**
+   * Why dispatch is refused, for the tick record and the audit trail. The
+   * three causes have genuinely different blast radii and an operator reading
+   * `daemon status` must be able to tell "I paused it" from "the global kill
+   * switch is engaged" without guessing. Kill first: it is the wider fact.
+   */
+  const stopCause = (): 'kill-switch' | 'daemon-paused' | 'shutdown-requested' =>
+    killSwitchOn() ? 'kill-switch' : daemonPaused() ? 'daemon-paused' : 'shutdown-requested';
   const audit = (entry: Parameters<typeof persistAudit>[0]): void => {
     if (stillOwnsTick()) persistAudit(entry);
   };
@@ -4369,14 +4408,19 @@ export async function tick(
   };
 
   // -------------------------------------------------------------------------
-  // 1. Kill-switch check.
+  // 1. Kill-switch / daemon-pause check.
   // -------------------------------------------------------------------------
   if (stopRequested()) {
+    const cause = stopCause();
     audit({
       action: 'daemon:tick',
       repo: null,
       sandboxId: null,
-      summary: killSwitchOn() ? 'tick skipped: kill switch is ON' : 'tick skipped: shutdown requested',
+      summary: cause === 'kill-switch'
+        ? 'tick skipped: kill switch is ON'
+        : cause === 'daemon-paused'
+          ? 'tick skipped: daemon dispatch is paused (the kill switch is not engaged)'
+          : 'tick skipped: shutdown requested',
       result: 'ok',
     });
     return recordTick({
@@ -4384,7 +4428,7 @@ export async function tick(
       itemsConsidered: 0,
       proposalsCreated: 0,
       spentUsd: 0,
-      reason: killSwitchOn() ? 'kill-switch' : 'shutdown-requested',
+      reason: cause,
     });
   }
 
@@ -5597,18 +5641,22 @@ export async function tick(
     }),
   });
   const stopRequestedOutcome = (item: WorkItem, attemptId: string): ItemOutcome => {
-    const killed = killSwitchOn();
+    const cause = stopCause();
     return {
       item,
       spentUsd: 0,
       dispatched: false,
       dispatch: dispatchTrace(item, {
         assignedBy: 'preflight',
-        reason: killed ? 'kill switch is ON' : 'shutdown requested',
+        reason: cause === 'kill-switch'
+          ? 'kill switch is ON'
+          : cause === 'daemon-paused'
+            ? 'daemon dispatch is paused'
+            : 'shutdown requested',
         dispatched: false,
         runId: attemptId,
         trajectoryId: `run:${attemptId}`,
-        skipReason: killed ? 'kill-switch' : 'shutdown-requested',
+        skipReason: cause,
       }),
     };
   };
@@ -5943,18 +5991,13 @@ export async function tick(
         }
 
         // M80: subscription-window throttle — skip this item (not crash) when a
-        // KNOWN subscription window is at or above the cap (default 90%). Reads
-        // cfg.foundry.subscriptionMaxPercent defensively with a fallback default.
+        // KNOWN subscription window is at or above the cap (default 90%).
         // allowed:true when usage is unknown (claude) or under the cap.
         if (isSubscriptionEngine(backend)) {
-          // Read maxPercent from liveCfg.foundry defensively — no types.ts change.
-          // Clamp to [1,100]: a negative or zero value would disable the throttle
-          // (anything is "under 0%"), and >100 could never fire (nothing is ">100%").
-          const rawPct = (liveCfg.foundry as Record<string, unknown> | undefined
-            )?.['subscriptionMaxPercent'];
-          const maxPct: number = typeof rawPct === 'number'
-            ? Math.min(100, Math.max(1, rawPct))
-            : 90;
+          // V2: the [1,100] clamp + default 90 live in ONE place
+          // (config.ts resolveSubscriptionMaxPercent) so this reader, the fleet
+          // router, and the fabric gateway cannot drift apart.
+          const maxPct = resolveSubscriptionMaxPercent(liveCfg);
           const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
           if (!subCheck.allowed) {
             // M334: shadow the BLOCKED legacy decision — a gateway that would
@@ -6125,11 +6168,7 @@ export async function tick(
         }
       }
       if (isSubscriptionEngine(backend)) {
-        const rawPct = (routingCfg.foundry as Record<string, unknown> | undefined
-          )?.['subscriptionMaxPercent'];
-        const maxPct: number = typeof rawPct === 'number'
-          ? Math.min(100, Math.max(1, rawPct))
-          : 90;
+        const maxPct = resolveSubscriptionMaxPercent(routingCfg);
         const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
         if (!subCheck.allowed) {
           audit({
@@ -7780,7 +7819,7 @@ export async function tick(
     proposalsCreated,
     spentUsd: tickSpent,
     reason: stopRequested()
-      ? (killSwitchOn() ? 'kill-switch' : 'shutdown-requested')
+      ? stopCause()
       : workedOutcomeFailedItemIds.size > 0 ||
           repairTreatmentPublicationFailed ||
           proposalDuplicateAuthorityUnavailable ||
@@ -8396,11 +8435,45 @@ export async function runDaemon(
       // Batch mode sleeps between ticks; continuous mode loops immediately while
       // work is flowing and only sleeps on idle/no-op ticks.
       let cyclesLeft = opts.maxCycles ?? Infinity;
+      // M-PAUSE: transition tracking so a park audits once, not once per poll.
+      let parkedByPause = false;
       while (true) {
         if (shutdown.signal.aborted) break;
         if (!ownsDaemonLock()) break;
         if (cyclesLeft-- <= 0) break;
         if (killSwitchOn() || shutdown.signal.aborted) break;
+
+        // M-PAUSE: the daemon-scoped pause PARKS the loop; it does not stop it.
+        // Unlike the kill switch above (which breaks, letting the process exit
+        // and clear running/pid), a pause keeps the resident daemon alive and
+        // holding its lock so Resume takes effect without a respawn, a fresh
+        // singleton-lock acquisition, or an orphan sweep. Read fresh here — the
+        // sentinel is a per-iteration input exactly like the config below it.
+        if (daemonPaused()) {
+          if (!parkedByPause) {
+            parkedByPause = true;
+            transitionActivity('idle');
+            audit({
+              action: 'daemon:tick',
+              repo: null,
+              sandboxId: null,
+              summary: 'daemon dispatch paused; loop parked (the global kill switch is NOT engaged)',
+              result: 'ok',
+            });
+          }
+          if (!(await sleep(DAEMON_PAUSE_PARK_MS, shutdown.signal))) break;
+          continue;
+        }
+        if (parkedByPause) {
+          parkedByPause = false;
+          audit({
+            action: 'daemon:tick',
+            repo: null,
+            sandboxId: null,
+            summary: 'daemon dispatch resumed; loop unparked',
+            result: 'ok',
+          });
+        }
 
         const liveCfg = reloadLiveConfigForDaemon(cfg);
 

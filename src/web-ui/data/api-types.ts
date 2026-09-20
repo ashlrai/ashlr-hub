@@ -133,3 +133,64 @@ export interface SnapshotEventPayload {
   dispatchEnabled: boolean;
   [key: string]: unknown;
 }
+
+/**
+ * Ashlr Verse (interactive chat console, routes/verse/**). The contract is
+ * frozen in src/core/verse/types.ts — re-exported type-only so the UI can
+ * never drift from what /api/verse/* actually returns.
+ */
+export type {
+  VerseBootstrap,
+  VerseCreateSessionRequest,
+  VerseEngine,
+  VerseEvent,
+  VerseEventType,
+  VerseModelOption,
+  VerseProject,
+  VerseSeat,
+  VerseSeatHealth,
+  VerseSession,
+  VerseSessionDetail,
+  VerseSessionStatus,
+  VerseTurnRequest,
+  VerseTurnResponse,
+  VerseUsage,
+} from '../../core/verse/types.js';
+
+/**
+ * Verse V2 control plane (routes/verse/autonomy, routes/verse/approvals).
+ * `AuditEntry` is the append-only autonomous/sandbox action record behind
+ * `GET /api/verse/audit` — the "what did it do while I was asleep" table.
+ *
+ * The rest of the V2 control-plane contract lives at
+ * `src/core/verse/control-types.ts` and is re-exported below, so the cockpit
+ * and the routes that feed it are typed by the SAME declarations. The
+ * `routes/verse/autonomy/control-types.ts` module now re-exports from here
+ * rather than declaring its own transcription of the contract prose.
+ */
+export type { AuditEntry } from '../../core/types.js';
+export type {
+  VerseAuditResponse,
+  VerseAuditResult,
+  VerseCapKey,
+  VerseCaps,
+  VerseCapsConcurrency,
+  VerseCapsUpdate,
+  VerseCapsUpdateResult,
+  VerseControlError,
+  VerseControlErrorCode,
+  VerseControlSnapshot,
+  VerseDaemonAction,
+  VerseDaemonActionResult,
+  VerseDaemonStateProjection,
+  VerseFleetEssentials,
+  VerseFoundryLimit,
+  VerseKillSwitch,
+  VerseSafetyReport,
+  VerseScope,
+  VerseScopeAction,
+  VerseScopeRepo,
+  VerseScopeRequest,
+  VerseScopeResult,
+  VerseSpend,
+} from '../../core/verse/control-types.js';

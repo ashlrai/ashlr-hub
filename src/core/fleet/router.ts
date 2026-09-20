@@ -73,6 +73,8 @@ import {
 } from './generated-repair-lifecycle.js';
 import { withinLimit } from './quota.js';
 import { isSubscriptionEngine, subscriptionAllows } from './subscription-usage.js';
+// V2: ONE clamp for foundry.subscriptionMaxPercent (see core/config.ts).
+import { resolveSubscriptionMaxPercent } from '../config.js';
 
 /** The outcome of routing a WorkItem to a backend + model. */
 export interface RouteDecision {
@@ -98,10 +100,7 @@ export function generatedRepairCandidateAllowed(
   if (!generatedRepairExecutionBackendAllowed(item, backend, cfg)) return false;
   if (!withinLimit(backend, cfg)) return false;
   if (isSubscriptionEngine(backend)) {
-    const configuredMax = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
-    const maxPercent = typeof configuredMax === 'number'
-      ? Math.min(100, Math.max(1, configuredMax))
-      : 90;
+    const maxPercent = resolveSubscriptionMaxPercent(cfg);
     if (!subscriptionAllows(backend, { maxPercent }).allowed) return false;
   }
   return true;
@@ -235,10 +234,7 @@ export function inspectGeneratedRepairRouteFeasibility(
   const candidates = capacityCandidates.filter((backend) => {
     if (!withinLimit(backend, cfg)) return false;
     if (!isSubscriptionEngine(backend)) return true;
-    const configuredMax = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
-    const maxPercent = typeof configuredMax === 'number'
-      ? Math.min(100, Math.max(1, configuredMax))
-      : 90;
+    const maxPercent = resolveSubscriptionMaxPercent(cfg);
     return subscriptionAllows(backend, { maxPercent }).allowed;
   });
   const backend = candidates[0] ?? null;

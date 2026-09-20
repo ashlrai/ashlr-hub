@@ -87,8 +87,11 @@ export function serveStatic(
     if (pathname === null) return false;
 
     // "/" (or empty) -> index.html (SPA shell).
+    // "/next" and "/verse" (Ashlr Verse console, src/web-ui/routes/verse/)
+    // both resolve to the new console shell; the SPA picks the app by pathname.
     let rel = pathname === '/' ? '/index.html'
       : (pathname === '/next' || pathname === '/next/') ? '/next/index.html'
+      : (pathname === '/verse' || pathname === '/verse/') ? '/next/index.html'
       : pathname;
 
     // Reject null bytes anywhere in the relative path.

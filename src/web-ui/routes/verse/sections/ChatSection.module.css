@@ -1,0 +1,128 @@
+/**
+ * Chat section layout: sidebar · hairline handle · workspace · (handle ·
+ * resources). All three regions resize and persist; at 900px the resources
+ * panel collapses first, at 760px the sidebar becomes an overlay.
+ */
+.chat {
+  position: relative;
+  display: grid;
+  grid-template-columns:
+    var(--verse-sidebar-width, 264px)
+    1px
+    minmax(0, 1fr)
+    1px
+    var(--verse-resources-width, 320px);
+  flex: 1;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+.chat[data-resources='closed'] {
+  grid-template-columns: var(--verse-sidebar-width, 264px) 1px minmax(0, 1fr);
+}
+.chat[data-sidebar='collapsed'] { grid-template-columns: 0 0 minmax(0, 1fr) 1px var(--verse-resources-width, 320px); }
+.chat[data-sidebar='collapsed'][data-resources='closed'] { grid-template-columns: 0 0 minmax(0, 1fr); }
+.chat[data-sidebar='collapsed'] > nav { display: none; }
+.chat > * { min-width: 0; min-height: 0; }
+
+.main {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg-surface);
+}
+.main:focus { outline: none; }
+
+/* ---- banners ----------------------------------------------------------- */
+.banner,
+.bannerWarn {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-5);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.banner { background: var(--status-danger-bg); color: var(--status-danger-fg); }
+.bannerWarn { background: var(--status-warning-bg); color: var(--status-warning-fg); }
+.bannerWarn code { font-size: var(--text-xs-size); }
+.banner button {
+  flex-shrink: 0;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+}
+.banner button {
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+.banner button:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.banner button:active { background: var(--bg-active); }
+
+/* ---- resize handles ---------------------------------------------------- */
+/* A 1px column that behaves like a 9px target: the hairline is the design,
+   the hit area is the ergonomics. */
+.resize {
+  position: relative;
+  cursor: col-resize;
+  background: var(--border-subtle);
+  touch-action: none;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.resize::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  left: -4px;
+  right: -4px;
+}
+.resize:hover,
+.resize:focus-visible { background: var(--accent-500); }
+.chat[data-sidebar='collapsed'] > .resize:first-of-type { display: none; }
+
+/* ---- narrow-width sidebar overlay -------------------------------------- */
+.scrim { display: none; }
+
+@media (max-width: 900px) {
+  .chat,
+  .chat[data-resources='open'] { grid-template-columns: var(--verse-sidebar-width, 264px) 1px minmax(0, 1fr); }
+  .chat[data-sidebar='collapsed'],
+  .chat[data-sidebar='collapsed'][data-resources='open'] { grid-template-columns: 0 0 minmax(0, 1fr); }
+  .chat > aside,
+  .chat > .resize:last-of-type { display: none; }
+}
+
+@media (max-width: 760px) {
+  .chat,
+  .chat[data-sidebar='collapsed'] { grid-template-columns: minmax(0, 1fr); }
+  .chat > nav {
+    position: absolute;
+    z-index: var(--z-overlay);
+    inset-block: 0;
+    left: 0;
+    width: min(var(--verse-sidebar-width, 264px), 86vw);
+    box-shadow: var(--shadow-menu, var(--shadow-lg));
+  }
+  .chat > .resize { display: none; }
+  .scrim {
+    display: block;
+    position: absolute;
+    inset: 0;
+    z-index: calc(var(--z-overlay) - 1);
+    background: var(--bg-overlay);
+    cursor: default;
+  }
+  .chat[data-sidebar='collapsed'] .scrim { display: none; }
+}
+
+

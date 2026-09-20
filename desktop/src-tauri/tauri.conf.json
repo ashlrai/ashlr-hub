@@ -6,7 +6,7 @@
 
   "build": {
     "beforeDevCommand": "",
-    "devUrl": "http://127.0.0.1:7777",
+    "devUrl": "http://127.0.0.1:7777/verse/",
     "beforeBuildCommand": "",
     "beforeBundleCommand": "node scripts/assert-desktop-bundle-policy.mjs",
     "frontendDist": "../dist-placeholder"
@@ -15,16 +15,36 @@
   "app": {
     "windows": [
       {
-        "title": "Ashlr Mission Control",
+        "label": "main",
+        "title": "Ashlr Verse",
         "width": 1280,
-        "height": 800,
+        "height": 820,
         "minWidth": 900,
-        "minHeight": 600,
+        "minHeight": 620,
         "resizable": true,
         "fullscreen": false,
         "center": true,
-        "url": "http://127.0.0.1:7777",
-        "visible": false
+        "url": "http://127.0.0.1:7777/verse/",
+        "visible": false,
+        "create": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "acceptFirstMouse": true
+      },
+      {
+        "label": "launch",
+        "title": "Ashlr",
+        "width": 480,
+        "height": 300,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "center": true,
+        "url": "index.html",
+        "visible": false,
+        "create": false,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true
       }
     ],
     "security": {
@@ -47,8 +67,8 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "shortDescription": "Autonomous engineering fleet manager",
-    "longDescription": "Ashlr is a local-first autonomous engineering platform. This desktop app wraps the Ashlr web UI in a native window, manages the daemon lifecycle, and surfaces a system tray icon for quick access.",
+    "shortDescription": "Ashlr Verse — local operator console for Claude, Codex, Grok and Ollama seats",
+    "longDescription": "Ashlr is a local-first autonomous engineering platform. This desktop app starts the bundled ashlr sidecar in Verse mode, hands the window its per-process read and mutation tokens, and shows the Verse operator console at http://127.0.0.1:7777/verse/ with a system tray icon for quick access.",
     "copyright": "Copyright © 2024 Mason Wyatt / Evero Consulting",
     "category": "DeveloperTool",
     "macOS": {
@@ -72,13 +92,15 @@
     },
     "externalBin": [
       "binaries/ashlr"
-    ]
+    ],
+    "resources": {
+      "resources/public": "public"
+    }
   },
 
   "plugins": {
     "shell": {
-      "open": false,
-      "sidecar": true
+      "open": false
     },
     "updater": {
       "active": true,

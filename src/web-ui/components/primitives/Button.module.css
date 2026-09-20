@@ -1,0 +1,116 @@
+.button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  height: var(--density-row);
+  padding: 0 var(--density-pad);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm-size);
+  line-height: 1;
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard),
+    opacity var(--duration-fast) var(--ease-standard);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.glyph {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+}
+
+.sm {
+  height: var(--density-row-sm);
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs-size);
+}
+
+.block {
+  width: 100%;
+}
+
+/* Square: width tracks the same density token as the height. */
+.iconOnly {
+  width: var(--density-row);
+  padding: 0;
+}
+
+.sm.iconOnly {
+  width: var(--density-row-sm);
+}
+
+/* --------------------------------------------------------------------------
+ * Variants
+ * ------------------------------------------------------------------------ */
+.ghost {
+  color: var(--text-secondary);
+}
+.ghost:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.ghost:active:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.subtle {
+  border-color: var(--border-default);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+}
+.subtle:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+.subtle:active:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.primary {
+  background: var(--accent-600);
+  border-color: var(--accent-600);
+  color: var(--text-on-accent);
+}
+.primary:hover:not(:disabled) {
+  background: var(--accent-700);
+  border-color: var(--accent-700);
+}
+.primary:active:not(:disabled) {
+  background: var(--accent-700);
+}
+
+/* Destructive: outlined, never filled — a red block reads as an error state,
+   and the design language reserves fills for the one primary action. */
+.danger {
+  border-color: var(--border-default);
+  color: var(--status-danger-fg);
+}
+.danger:hover:not(:disabled) {
+  background: var(--status-danger-bg);
+  border-color: var(--status-danger-solid);
+}
+.danger:active:not(:disabled) {
+  background: var(--status-danger-bg);
+}
+
+/* Pressed/selected state for toggle buttons built on this primitive. */
+.button[aria-pressed='true'],
+.button[aria-expanded='true'] {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}

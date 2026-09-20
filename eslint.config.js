@@ -13,6 +13,10 @@ export default tseslint.config(
       '.m262-wip/**',
       'desktop/src-tauri/gen/**',
       'desktop/src-tauri/target/**',
+      // Staged by desktop/scripts/prepare-sidecar.mjs from dist-bin/ and dist/
+      // (gitignored via desktop/.gitignore); built output, not authored code.
+      'desktop/src-tauri/binaries/**',
+      'desktop/src-tauri/resources/**',
       'dist/**',
       'dist-bin/**',
       'node_modules/**',
@@ -20,6 +24,9 @@ export default tseslint.config(
       // Independently locked public showcase owns its authored-code lint command.
       'examples/universe-site/**',
       'undefined/**',
+      // Workplan notes and one-off local helper scripts; not shipped, not
+      // part of the lint surface.
+      'workplans/**',
     ],
   },
   js.configs.recommended,
@@ -150,11 +157,13 @@ export default tseslint.config(
     },
   },
   {
-    // The M14 web dashboard SPA (src/core/web/public/*.js) is browser code
-    // shipped as a static asset — it runs in the browser, not Node. Lint it
-    // with browser globals. Empty catch blocks are an intentional best-effort
+    // The M14 web dashboard SPA (src/core/web/public/*.js) and the desktop
+    // shell contract (desktop/src-tauri/src/shell_contract.js, include_str!'d
+    // into the Tauri binary and injected into the webview) are browser code
+    // shipped as assets — they run in the browser, not Node. Lint them with
+    // browser globals. Empty catch blocks are an intentional best-effort
     // pattern in the live-update code; unused locals are surfaced as warnings.
-    files: ['src/core/web/public/**/*.js'],
+    files: ['src/core/web/public/**/*.js', 'desktop/src-tauri/src/**/*.js'],
     languageOptions: {
       ecmaVersion: 2022,
       sourceType: 'script',
@@ -175,6 +184,12 @@ export default tseslint.config(
         sessionStorage: 'readonly',
         localStorage: 'readonly',
         URLSearchParams: 'readonly',
+        MutationObserver: 'readonly',
+        CustomEvent: 'readonly',
+        // Emitted as a `var` prelude by shell_contract.rs immediately before
+        // shell_contract.js is concatenated onto it; undeclared in this file
+        // by design, so the Rust side owns the serialized shape.
+        __ASHLR_SHELL_CONFIG: 'readonly',
       },
     },
     rules: {

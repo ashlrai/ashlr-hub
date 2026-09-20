@@ -1,0 +1,285 @@
+.workspace {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg-surface);
+}
+
+/* ---- header strip: 48px, hairline, ghost controls only ------------------ */
+.header {
+  position: relative; /* containing block for the 2px context line */
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  /* DESIGN-V2 §4: header strips are --strip-height, and the token is what the
+     desktop shell's inset maths is written against. */
+  height: var(--strip-height);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.headerSpacer { flex: 1; min-width: var(--space-2); }
+
+.title {
+  min-width: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  line-height: 1.2;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display, -0.02em);
+}
+.titleButton {
+  display: block;
+  max-width: 100%;
+  padding: 2px var(--space-2);
+  margin-left: calc(-1 * var(--space-2));
+  border-radius: var(--radius-xs);
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.titleButton:hover:not(:disabled) { background: var(--bg-hover); }
+.titleButton:active:not(:disabled) { background: var(--bg-active); }
+.titleButton:disabled { cursor: default; }
+.titleInput {
+  width: 100%;
+  max-width: 48ch;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--accent-500);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display, -0.02em);
+}
+.titleSkeleton {
+  height: calc(var(--text-md-size) * 1.2);
+  width: 22ch;
+  max-width: 40%;
+  border-radius: var(--radius-xs);
+}
+
+/* Seat pill: an engine-tinted dot and the seat name. The tint is identity,
+   never status — status is text or a glyph everywhere in this app. */
+.seatPill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+  max-width: 34ch;
+  min-width: 0;
+  padding: 0 var(--space-2);
+  height: var(--control-h-xs);
+  border-radius: var(--radius-xs);
+  background: color-mix(in srgb, var(--verse-engine, var(--text-tertiary)) 10%, transparent);
+  color: var(--text-secondary);
+  font-size: var(--text-2xs-size, 11px);
+}
+.engineDot {
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full);
+  background: var(--verse-engine, var(--text-tertiary));
+}
+.seatText {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+}
+.projectName {
+  flex-shrink: 0;
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--border-default);
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.engine-claude { --verse-engine: var(--engine-claude, #c96442); }
+.engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
+.engine-grok { --verse-engine: var(--engine-grok, #6b7280); }
+.engine-local { --verse-engine: var(--engine-local, #7c5cff); }
+
+.streamState { flex-shrink: 0; font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
+
+.ghost,
+.ghostIcon,
+.danger {
+  flex-shrink: 0;
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.ghostIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+}
+.ghost { min-height: var(--control-h-xs); padding: 0 var(--space-2); }
+.ghostIcon:hover:not(:disabled),
+.ghost:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.ghostIcon:active:not(:disabled),
+.ghost:active:not(:disabled) { background: var(--bg-active); }
+.ghostIcon:disabled,
+.ghost:disabled { opacity: 0.4; cursor: not-allowed; }
+.ghostIcon[aria-pressed='true'] { color: var(--text-primary); }
+.danger { min-height: var(--control-h-xs); padding: 0 var(--space-2); color: var(--status-danger-fg); }
+.danger:hover:not(:disabled) { background: var(--status-danger-bg); }
+.danger:active:not(:disabled) { background: var(--status-danger-bg); border-color: var(--status-danger-solid); }
+.confirm { display: inline-flex; align-items: center; gap: var(--space-1); }
+.confirmText { font-size: var(--text-xs-size); color: var(--text-secondary); }
+
+/* ---- context meter: a 2px line under the header, numbers alongside ------ */
+/* Two channels on purpose. --meter-color paints the 2px FILL, where a status
+   solid is exactly right; --meter-text paints the percentage, where a status
+   solid is text at 2.52:1 (warning, light) and 3.97:1 (danger, light), and
+   where even the DEFAULT accent measures 3.99:1 on dark --bg-surface. The
+   -fg tokens are the readable pair for the same states: 7.21 / 7.50 light and
+   9.08 / 8.35 dark. See design/tokens-contrast.test.ts, where the solids are
+   given only a 1.8:1 "visible marker" floor precisely because they are dots
+   and 2px rules, never type. */
+.meter {
+  --meter-color: var(--accent-500);
+  --meter-text: var(--text-secondary);
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+.meter-warn { --meter-color: var(--status-warning-solid); --meter-text: var(--status-warning-fg); }
+.meter-danger { --meter-color: var(--status-danger-solid); --meter-text: var(--status-danger-fg); }
+.meter-unknown { --meter-color: var(--border-strong); --meter-text: var(--text-tertiary); }
+
+/* Pinned to the header's bottom edge: full width, exactly 2px, no label. */
+.meterTrack {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: transparent;
+}
+.meterFill {
+  height: 100%;
+  background: var(--meter-color);
+  transition: width var(--duration-slow) var(--ease-decelerate), background var(--duration-base) var(--ease-standard);
+}
+.meterInline .meterTrack {
+  position: static;
+  width: 64px;
+  background: var(--bg-active);
+  border-radius: var(--radius-full);
+  overflow: hidden;
+}
+
+.meterText {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+.meterTokens { white-space: nowrap; }
+/* Both halves of the pair are tabular (the wrapper sets it) — but the percent
+   also needs a reserved width, or the strip's right edge shifts as it crosses
+   9 -> 10 -> 100 while a turn streams. */
+.meterPercent { min-width: 4ch; text-align: right; }
+.meterPercent { color: var(--meter-text); font-weight: var(--font-weight-medium); }
+
+/* ---- empty state ------------------------------------------------------- */
+.emptyState {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--space-3);
+  max-width: 52ch;
+  margin: 0 auto;
+  padding: var(--space-8) var(--space-6);
+}
+.emptyMark { color: var(--accent-500); }
+.emptyTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-2xl-size);
+  line-height: var(--text-2xl-line);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display, -0.02em);
+}
+.emptyBody { color: var(--text-secondary); font-size: var(--text-md-size); line-height: var(--text-md-line); }
+.emptyButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  transition: border-color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.emptyButton:hover { border-color: var(--accent-500); }
+.emptyButton:active { background: var(--bg-active); }
+.emptyButton kbd { font-family: var(--font-mono); font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
+.emptyWarn {
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--status-warning-solid);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.emptyWarn code { font-size: var(--text-xs-size); color: var(--text-primary); }
+
+@media (max-width: 900px) {
+  .projectName { display: none; }
+}
+@media (max-width: 760px) {
+  /* Only the token pair goes; the PERCENT stays. Hiding .meterText left the
+     2px line as the sole carrier of ok/warn/danger, i.e. state by colour
+     alone (§6) — and 760px is a touch viewport, where the title tooltip that
+     covers mouse users never fires. .meterPercent is 11px tabular and costs
+     about 4ch, and it is tinted with --meter-text, which pairs the status
+     colour with text (§6) AND clears the 4.5:1 body-text floor in the same
+     section — the status SOLIDS do not, which is why they stay on the fill. */
+  .meterTokens { display: none; }
+  .seatPill { max-width: 18ch; }
+}
+/* Guarded like every other animated surface here (tokens.css, global.css,
+   Transcript, Sidebar, Composer, ResourcesPanel): appearance-store.ts writes
+   data-motion="full" precisely so an operator can opt out of the OS
+   preference, and an unguarded media query ignores that choice. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .meterFill { transition: none; }
+}
+
+/* ---- desktop shell (see desktop/README.md "Desktop shell contract") -----
+ * In the Tauri window the OS title bar overlays the top 48px and the macOS
+ * traffic lights float over the top-LEFT 92px of the WINDOW. This strip does
+ * not start at the window's left edge — the 56px rail does — so the inset it
+ * owes is the overlap, never the full 92px. Both vars are absent in a
+ * browser, where the expression floors to 0px and the layout is unchanged. */
+.header {
+  padding-left: max(
+    var(--space-3),
+    calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px))
+  );
+}

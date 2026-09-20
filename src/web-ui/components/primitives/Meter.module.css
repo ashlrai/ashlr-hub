@@ -1,0 +1,83 @@
+.wrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.lineWrap {
+  width: 100%;
+}
+
+.head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.label {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.value {
+  flex: none;
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs-size);
+  letter-spacing: var(--tracking-display);
+  color: var(--text-secondary);
+}
+
+.unknown {
+  font-family: var(--font-ui);
+  font-style: italic;
+  color: var(--status-unknown-fg);
+}
+
+.track {
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg-active);
+}
+
+.bar {
+  height: 4px;
+  border-radius: var(--radius-full);
+}
+
+/* The 2px rule that sits under a header strip — square, full-bleed. */
+.line {
+  height: 2px;
+  border-radius: 0;
+  background: var(--border-subtle);
+}
+
+.fill {
+  height: 100%;
+  transition: width var(--duration-base) var(--ease-standard);
+}
+
+.accent {
+  background: var(--accent-500);
+}
+.neutral {
+  background: var(--status-neutral-solid);
+}
+.running {
+  background: var(--status-running-solid);
+}
+.warning {
+  background: var(--status-warning-solid);
+}
+.danger {
+  background: var(--status-danger-solid);
+}
+.engine {
+  background: var(--status-neutral-solid);
+}

@@ -159,15 +159,20 @@ function activityMatches(activity: ActivityRecord, previous: ReturnType<typeof r
 }
 
 /** Signal zero is observation only: a recycled/present group or any non-ESRCH error blocks recovery. */
-function activityRecoveryBlocker(activity: ActivityRecord): ResourceCollectorRecoveryDiagnosis['reasonCode'] | null {
-  if (activity.schemaVersion === 1) return activity.reservations.length === 0 ? null : 'legacy-active-work-unverifiable';
-  for (const reservation of activity.reservations) {
+function reservationRecoveryBlocker(
+  entries: readonly ActivityReservation[],
+): ResourceCollectorRecoveryDiagnosis['reasonCode'] | null {
+  for (const reservation of entries) {
     if (reservation.phase === 'preparing') return 'command-registration-incomplete';
     if (reservation.phase === 'ready') continue;
     try { process.kill(-reservation.pgid!, 0); return 'process-group-not-confirmed-absent'; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return 'process-group-not-confirmed-absent'; }
   }
   return null;
+}
+function activityRecoveryBlocker(activity: ActivityRecord): ResourceCollectorRecoveryDiagnosis['reasonCode'] | null {
+  if (activity.schemaVersion === 1) return activity.reservations.length === 0 ? null : 'legacy-active-work-unverifiable';
+  return reservationRecoveryBlocker(activity.reservations);
 }
 
 export interface ResourceNativeProcessGroupLifecycle {
@@ -178,6 +183,20 @@ export interface ResourceNativeActivity {
   processGroupLifecycle: ResourceNativeProcessGroupLifecycle;
 }
 
+/**
+ * Outcome of `reclaimNativeActivity()`.
+ *
+ * `idle` — nothing is outstanding. `reclaimed` — every outstanding reservation
+ * was confirmed by the kernel to own no surviving process group and has been
+ * durably released. `blocked` — at least one reservation could NOT be confirmed
+ * absent; the durable fence is untouched and the caller must keep treating this
+ * owner's native cleanup as unwitnessed.
+ */
+export type ResourceNativeActivityReclamation =
+  | { state: 'idle' }
+  | { state: 'reclaimed'; released: number }
+  | { state: 'blocked'; reasonCode: ResourceCollectorRecoveryDiagnosis['reasonCode'] };
+
 export interface ResourceQuotaRefreshLease {
   assertOwnership(): void;
   /** Private, verified identity. Available only after durable contact fencing. */
@@ -186,6 +205,14 @@ export interface ResourceQuotaRefreshLease {
   markPending(): void;
   /** Reserve durably before invocation; settle only after verified native teardown. */
   beginNativeActivity(): ResourceNativeActivity;
+  /**
+   * Finish, later, a settlement witness that a bounded in-band drain could not
+   * complete. Releases an outstanding reservation ONLY when the kernel reports
+   * its process group absent — the same evidence `activityRecoveryBlocker`
+   * demands of a dead owner's durable record, applied here to a live one.
+   * Observation only: it never signals, spawns, or assumes.
+   */
+  reclaimNativeActivity(): ResourceNativeActivityReclamation;
   /** The caller must await native teardown before requesting marker removal. */
   close(preservePending?: boolean): void;
 }
@@ -474,6 +501,40 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       } catch { poisoned = true; throw new ResourceQuotaRefreshLeaseError('cleanup-unconfirmed', 'Native activity settlement unavailable'); }
     } });
   }
+  /**
+   * WHY THIS IS NOT A WEAKENING OF THE FENCE.
+   *
+   * `requireProcessGroupExit` publishes `group-exit-confirmed` only when
+   * `kill(-pgid, 0)` reports ESRCH within the runner's fixed post-close drain.
+   * Missing that window yields `unconfirmed` — which is honest ("not witnessed
+   * YET"), not a verdict that the group is immortal. Treating it as permanent
+   * strands the reservation forever and, with it, the whole collector.
+   *
+   * This re-runs the IDENTICAL kernel check at a later moment and releases the
+   * reservation only on ESRCH. A present group, a recycled group, or any
+   * non-ESRCH errno all keep the reservation and the durable fence exactly as
+   * they were. `preparing` stays unrecoverable for the same reason the dead
+   * owner's path refuses it: no PGID was ever published, so absence is
+   * unprovable. Nothing is signalled and no process is started here.
+   */
+  function reclaimNativeActivity(): ResourceNativeActivityReclamation {
+    if (!options.trackNativeActivity) return { state: 'blocked', reasonCode: 'activity-evidence-unavailable' };
+    try { assertOwnership(); }
+    catch { return { state: 'blocked', reasonCode: 'activity-evidence-unavailable' }; }
+    if (reservations.size === 0) return { state: 'idle' };
+    const outstanding = [...reservations.values()];
+    const blocker = reservationRecoveryBlocker(outstanding);
+    if (blocker) return { state: 'blocked', reasonCode: blocker };
+    try {
+      writeReservations([]);
+      reservations.clear();
+    } catch {
+      // A failed durable release leaves the fence intact and this owner fenced.
+      poisoned = true;
+      return { state: 'blocked', reasonCode: 'recovery-confirmation-failed' };
+    }
+    return { state: 'reclaimed', released: outstanding.length };
+  }
   function identity(): ResourceQuotaRefreshOwner {
     assertOwnership();
     if (!pending) throw new Error('Resource quota collector identity unavailable');
@@ -501,5 +562,5 @@ export async function acquireResourceQuotaRefreshLease(root: string,
     }
     if (closeError) throw closeError;
   }
-  return Object.freeze({ assertOwnership, identity, markPending, beginNativeActivity, close });
+  return Object.freeze({ assertOwnership, identity, markPending, beginNativeActivity, reclaimNativeActivity, close });
 }

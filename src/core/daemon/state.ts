@@ -73,6 +73,19 @@ export function daemonLockPath(): string {
   return join(ashlrDir(), 'daemon.lock');
 }
 
+/**
+ * Absolute path to the DAEMON-SCOPED pause sentinel (see daemon/pause.ts).
+ *
+ * Deliberately NOT `~/.ashlr/KILL`. That sentinel is the global emergency stop
+ * and is also read by `assertMayMutate`, so it disables the agent's own write
+ * tools; this one is read by the daemon loop and by nothing else. The two live
+ * side by side so an operator can halt autonomous dispatch without disarming
+ * their own editor.
+ */
+export function daemonPausePath(): string {
+  return join(ashlrDir(), 'daemon.paused');
+}
+
 export interface DaemonLockOwner {
   pid: number;
   token: string;

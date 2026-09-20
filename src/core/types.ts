@@ -754,6 +754,19 @@ export interface AshlrConfig {
      */
     limits?: Partial<Record<EngineId, { window: string; max: number }>>;
     /**
+     * M80: subscription-window throttle. A subscription-billed engine is
+     * skipped for the rest of its window once a KNOWN window reading reaches
+     * this percentage. Unknown usage (e.g. Claude, which has no local signal)
+     * is never throttled by it.
+     *
+     * Valid range 1–100; absent ⇒ 90. Read ONLY through
+     * `resolveSubscriptionMaxPercent()` in `core/config.ts` — that helper owns
+     * the clamp so the daemon loop, the fleet router, and the fabric gateway
+     * cannot drift apart. Before V2 this key was read through an untyped cast
+     * in five places; this declaration is its typed home.
+     */
+    subscriptionMaxPercent?: number;
+    /**
      * M50 (v5): declarative engine roster. Each entry overrides a builtin
      * engine spec or adds a new backend (cli-agent or OpenAI-compatible
      * api-model), keyed by engine id. Merged over BUILTIN_ENGINE_REGISTRY by

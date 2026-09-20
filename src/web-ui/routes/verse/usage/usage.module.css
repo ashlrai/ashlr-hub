@@ -1,0 +1,641 @@
+/**
+ * routes/verse/usage/usage.module.css — Usage section styling.
+ *
+ * Follows docs/VERSE-DESIGN-V2.md: monochrome ground, separation by 1px
+ * hairlines and whitespace (no shadows, no nested rounded boxes), engine hue
+ * used ONLY for a 2px marker and a window bar, numerals in the display face.
+ * Density comes from --density-pad with a fallback so the section is correct
+ * before owner A lands the density tokens.
+ */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-canvas);
+}
+
+/* 48px header strip, hairline bottom border, ghost controls only. */
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  /* DESIGN-V2 §4: header strips are --strip-height, and the token is what the
+     desktop shell's inset maths is written against. */
+  height: var(--strip-height);
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.headerTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+}
+
+.headerMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.ghostButton {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.ghostButton:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-5) var(--space-5) var(--space-12);
+  scrollbar-gutter: stable;
+}
+
+.panel {
+  padding-block: var(--space-5);
+}
+
+.panel + .panel {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.panelHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+/* Display face, like every other uppercase micro-label: appearance-store.ts
+   implements the Display-font setting by writing --font-display on <html>, so
+   a label that names --font-ui explicitly opts OUT of the operator's choice
+   and the Usage panel titles stopped moving while the Settings ones did. */
+.panelTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.panelNote {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+  max-width: 48ch;
+  text-align: right;
+}
+
+.muted {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-tertiary);
+  max-width: 72ch;
+}
+
+/*
+ * The server's own caveats about how to read the meters below. They sit on the
+ * panel surface (not a hover or press ground), where --text-tertiary measures
+ * 4.83:1 light / 5.47:1 dark — above the body floor. The 2px left rule is the
+ * language's marker for an aside, reused here rather than a bordered box.
+ */
+.noteList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: 0 0 0 var(--space-3);
+  border-left: 2px solid var(--border-subtle);
+  list-style: none;
+}
+
+/* Numerals: display face, tabular so meters and columns line up. */
+.num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+
+/* ── Account cards ─────────────────────────────────────────────────────── */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+
+.card {
+  position: relative;
+  padding: var(--density-pad, var(--space-3)) var(--space-4);
+  padding-left: calc(var(--space-4) + 2px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+/* The 2px engine marker — the only place an engine hue is allowed. */
+.card::before {
+  content: '';
+  position: absolute;
+  inset-block: -1px;
+  inset-inline-start: -1px;
+  width: 2px;
+  border-start-start-radius: var(--radius-md);
+  border-end-start-radius: var(--radius-md);
+  background: var(--engine-color, var(--border-strong));
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.cardLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.cardFigures {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.figure {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.figureLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.figureValue {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+
+/* ── Window meters ─────────────────────────────────────────────────────── */
+
+.windows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.windowHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+
+.windowPct {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.windowReset {
+  margin-top: var(--space-1);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+.track {
+  position: relative;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--bg-active);
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--engine-color, var(--accent-500));
+  transition: width var(--duration-base, 180ms) var(--ease-decelerate);
+}
+
+.track[data-tone='warn'] .fill {
+  background: var(--status-warning-solid);
+}
+
+.track[data-tone='danger'] .fill {
+  background: var(--status-danger-solid);
+}
+
+/*
+ * Unknown is NOT a track. A filled track at 0% reads "plenty left" and a
+ * track at 100% reads "exhausted"; both are lies when there is no signal. A
+ * dashed rule reads as absence, and it is paired with the Epistemic pill and
+ * a one-line reason so the state is never carried by styling alone.
+ */
+/* --text-tertiary, not --border-strong at 0.8 opacity. This dashed rule is
+   the designed representation of ABSENCE (see above), which makes it a border
+   carrying meaning under DESIGN-V2 §6's 3:1 floor; composited it measured
+   1.34:1 light / 1.47:1 dark. --border-strong is deliberately held to the
+   1.1:1 hairline floor in tokens-contrast.test.ts, which is right for a
+   structural divider and wrong for this. --text-tertiary measures 4.83:1
+   light / 5.47:1 dark and reads as "absent" rather than "structural". */
+.unknownRule {
+  height: 0;
+  margin-block: var(--space-1) 0;
+  border: 0;
+  border-top: 2px dashed var(--text-tertiary);
+}
+
+.signalRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.reason {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+  max-width: 60ch;
+}
+
+.sourceLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  font-size: var(--text-2xs-size, 11px);
+  color: var(--text-tertiary);
+}
+
+/* ── Split / limits ────────────────────────────────────────────────────── */
+
+.split {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.splitRow {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+
+.splitBar {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--bg-active);
+  overflow: hidden;
+}
+
+.splitFill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--split-color, var(--accent-500));
+}
+
+.limitList {
+  display: flex;
+  flex-direction: column;
+}
+
+.limitRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding-block: var(--space-2);
+  min-height: var(--density-row, 32px);
+}
+
+.limitRow + .limitRow {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.limitName {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+
+.limitWindow {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.limitValue {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ── Verdict + binding constraint ──────────────────────────────────────── */
+
+/*
+ * The verdict sentence is the card's argument in one line, so it sits directly
+ * under the identity row at body weight — not as a caption. It is always
+ * paired with the StatusBadge above it (glyph + text), never carried by color.
+ */
+.verdictDetail {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  max-width: 60ch;
+}
+
+.bindingLabel {
+  font-family: var(--font-display);
+  display: block;
+  margin-top: var(--space-3);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.windowBlock {
+  min-width: 0;
+}
+
+.windowBlock + .windowBlock {
+  margin-top: var(--space-3);
+}
+
+/* The binding window gets the weight; the others stay deliberately quieter. */
+.windowBlockLead {
+  margin-top: var(--space-2);
+}
+
+.windowBlockLead .windowHead {
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+
+.windowBlockLead .track {
+  height: 6px;
+}
+
+.windowFlag {
+  font-family: var(--font-display);
+  font-size: var(--text-xs-size);
+  color: var(--status-danger-fg, var(--text-primary));
+}
+
+/* ── Credits + actions ─────────────────────────────────────────────────── */
+
+.creditsRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.creditsRow > .reason {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+.actionBlock {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.command,
+.commandInline {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-primary);
+  background: var(--bg-code, var(--bg-active));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  padding: 1px 6px;
+}
+
+.command {
+  display: inline-block;
+  margin-top: var(--space-1);
+}
+
+.negative {
+  color: var(--status-danger-fg, var(--text-primary));
+}
+
+/* ── Series panel ──────────────────────────────────────────────────────── */
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.segment {
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-3);
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+
+.segment + .segment {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.segment:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.segment[aria-pressed='true'] {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+
+/* The one place an INSET ring is right: .segmented clips with
+   `overflow: hidden`, so the global outward --shadow-focus-ring would be cut
+   off. It is silenced here so exactly one ring paints. */
+.segment:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+.charts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  margin-top: var(--space-4);
+}
+
+/*
+ * The local-model table is genuinely wide (eight independent facts per model).
+ * Per the responsive rule, a table may exceed the measure only inside its own
+ * horizontal scroll container, so the page body never scrolls sideways.
+ */
+.tableScroll {
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+/* ── States ────────────────────────────────────────────────────────────── */
+
+
+.stateBlock {
+  padding: var(--space-6) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  max-width: 72ch;
+}
+
+.stateTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.stateBody {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-secondary);
+}
+
+.stateActions {
+  margin-top: var(--space-4);
+}
+
+.skeletonGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+
+/* Guarded: appearance-store.ts writes data-motion="full" so an operator can
+   opt out of the OS preference, and every other animated surface here honours
+   it. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .fill {
+    transition: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .cards,
+  .skeletonGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .limitRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .limitRow > .track {
+    display: none;
+  }
+
+  .panelNote {
+    text-align: left;
+  }
+}
+
+/* ---- desktop shell (see desktop/README.md "Desktop shell contract") -----
+ * In the Tauri window the OS title bar overlays the top 48px and the macOS
+ * traffic lights float over the top-LEFT 92px of the WINDOW. This strip does
+ * not start at the window's left edge — the 56px rail does — so the inset it
+ * owes is the overlap, never the full 92px. Both vars are absent in a
+ * browser, where the expression floors to 0px and the layout is unchanged. */
+.header {
+  padding-left: max(
+    var(--space-5),
+    calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px))
+  );
+}

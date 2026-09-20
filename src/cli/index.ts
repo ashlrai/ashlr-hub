@@ -31,6 +31,7 @@
  *   swarms [--json]            List past swarm runs.
  *   tui [--once]               Interactive terminal dashboard (alias: dash).
  *   serve [--port N] [--open]  Local web dashboard + JSON API on 127.0.0.1 (default port 7777).
+ *   verse [--port N] [--no-open]  Ashlr Verse console (serve with dispatch on) at /verse/.
  *   gh <pr|issue|ci>           Read GitHub PRs / issues / CI status (read-only via gh CLI).
  *   gh pr create               Create a PR (explicit + confirm-gated mutation).
  *   vercel <ls|logs>           Read Vercel deployments / latest logs (read-only via vercel CLI).
@@ -366,6 +367,14 @@ const loadServeCmd = lazyCmd(
   () => import('./serve.js' as unknown as string),
   (m) => m.cmdServe as Cmd,
   'serve command requires src/cli/serve.ts (M14 module not yet built).',
+);
+
+// ─── Verse command loader (serve with dispatch on, opens /verse/) ────────────
+
+const loadVerseCmd = lazyCmd(
+  () => import('./verse.js' as unknown as string),
+  (m) => m.cmdVerse as Cmd,
+  'verse command requires src/cli/verse.ts (Verse module not yet built).',
 );
 
 const loadModelsCmd = lazyCmd(
@@ -1825,6 +1834,13 @@ async function main(): Promise<void> {
       case 'serve': {
         const cmdServe = await loadServeCmd();
         process.exitCode = await cmdServe(rest);
+        break;
+      }
+
+      case 'verse': {
+        // Ashlr Verse: serve with dispatch forced on, opens /verse/.
+        const cmdVerse = await loadVerseCmd();
+        process.exitCode = await cmdVerse(rest);
         break;
       }
 

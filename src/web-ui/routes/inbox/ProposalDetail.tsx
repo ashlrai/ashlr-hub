@@ -62,6 +62,26 @@ function formatRelative(iso: string | undefined): string {
 
 type PendingAction = 'approve' | 'reject' | null;
 
+/**
+ * What approving actually does, in one sentence, shown BEFORE the click.
+ *
+ * Deliberately a local function rather than an import from
+ * `routes/verse/approvals/approvals-model.ts`: that module belongs to the V2
+ * surface and this is the legacy console. Duplicating four lines of copy is
+ * cheaper than coupling the old view to the new one's model, and the two are
+ * free to diverge when the legacy view is retired.
+ */
+function approveConsequence(kind: string, repo: string | null | undefined): string {
+  const where = repo && repo.length > 0 ? repo : 'the target repository';
+  if (kind === 'pr') {
+    return `Approving pushes a branch to ${where}'s remote and opens a real pull request. Other people can see it immediately, and it cannot be undone from here.`;
+  }
+  if (kind === 'patch') {
+    return `Approving writes this diff to ${where} on disk now. Nothing is pushed, but the working tree changes.`;
+  }
+  return `Approving applies this ${kind} proposal to ${where} now.`;
+}
+
 export function ProposalDetail({ id, onDispatchDisabled }: { id: string; onDispatchDisabled: () => void }) {
   const query = useQuery(proposalDetailQuery(id));
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
@@ -232,6 +252,16 @@ export function ProposalDetail({ id, onDispatchDisabled }: { id: string; onDispa
               {actionError}
             </p>
           ) : null}
+          {/* APPROVE IS THE DESTRUCTIVE ONE. A `pr` proposal pushes a branch
+              and opens a real pull request other people can see; a `patch`
+              writes the diff to disk. Reject only marks a row rejected and is
+              fully recoverable. This footer used to give Reject the danger
+              border and Approve the quiet accent fill, which trains the exact
+              wrong reflex — that the red button is the risky one — on the only
+              irreversible click in this view. The weights are the Verse
+              approvals surface's: Reject neutral, Approve carrying the accent,
+              and the consequence spelled out before the click. */}
+          <p className={styles.actionConsequence}>{approveConsequence(p.kind, p.repo)}</p>
           <button type="button" className={styles.rejectButton} onClick={() => requestAction('reject')}>
             Reject
           </button>
@@ -266,18 +296,25 @@ export function ProposalDetail({ id, onDispatchDisabled }: { id: string; onDispa
         body={
           pendingAction === 'approve' ? (
             <>
-              This applies <strong>{p.title}</strong> to <code>{p.repo}</code> now — it writes the diff to disk and
-              cannot be undone from this dialog. Review the diff above before confirming.
+              This applies <strong>{p.title}</strong> to <code>{p.repo}</code> now.{' '}
+              {approveConsequence(p.kind, p.repo)} Review the diff above before confirming.
             </>
           ) : (
             <>
               This rejects <strong>{p.title}</strong> and discards it. It stays visible in history (status:
-              rejected) but will never be applied.
+              rejected) but will never be applied. Nothing is written to <code>{p.repo}</code>.
             </>
           )
         }
-        confirmLabel={pendingAction === 'approve' ? 'Approve and apply' : 'Reject'}
-        destructive={pendingAction === 'reject'}
+        confirmLabel={
+          pendingAction === 'approve'
+            ? (p.kind === 'pr' ? 'Approve and open the pull request' : 'Approve and apply')
+            : 'Reject'
+        }
+        // Approve is the irreversible one; reject is a recoverable bookkeeping
+        // change. This was inverted, which made the loud red confirm appear on
+        // the SAFE action and the quiet one on the action that pushes a branch.
+        destructive={pendingAction === 'approve'}
         busy={busy}
         error={actionError}
         onConfirm={() => void confirmPendingAction()}

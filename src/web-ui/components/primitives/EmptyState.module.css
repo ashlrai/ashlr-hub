@@ -1,0 +1,68 @@
+/**
+ * The designed dead-end. DESIGN-V2 §1.2 allows no cards and no nested boxes,
+ * and §5 asks an empty state to read as "a single quiet line, one action" —
+ * so this is NOT a dashed box on a filled ground. It was one, which meant
+ * every empty panel grew a second border inside the panel's own hairline and
+ * announced the absence of data louder than the data would have been.
+ *
+ * What carries it instead: a 2px left rule (the same device the transcript
+ * uses for a user turn, a blockquote and a failed tool call), left-aligned
+ * text on the surface it already sits on, and one action. Tone moves the rule
+ * and the glyph only — never a fill, never a border box.
+ */
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-6) 0 var(--space-6) var(--space-4);
+  border-left: 2px solid var(--border-strong);
+  text-align: left;
+}
+
+.compact {
+  padding: var(--space-4) 0 var(--space-4) var(--space-3);
+  gap: var(--space-1);
+}
+
+.icon {
+  display: inline-flex;
+  color: var(--text-tertiary);
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display);
+  color: var(--text-primary);
+}
+
+.body {
+  max-width: 52ch;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+.action {
+  margin-top: var(--space-1);
+}
+
+/* Tone is carried by the rule and the glyph. The text stays neutral so the
+   state never reads as a filled alert banner (§1.1: one accent per screen,
+   colour only where it carries meaning). */
+.error {
+  border-left-color: var(--status-danger-solid);
+}
+.error .icon {
+  color: var(--status-danger-fg);
+}
+
+.unauthorized {
+  border-left-color: var(--status-warning-solid);
+}
+.unauthorized .icon {
+  color: var(--status-warning-fg);
+}

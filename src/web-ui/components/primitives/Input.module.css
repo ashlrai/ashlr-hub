@@ -1,0 +1,101 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.label {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-medium);
+}
+
+.shell {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--density-row);
+  padding: 0 var(--space-2);
+  background: var(--bg-input);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  transition:
+    border-color var(--duration-fast) var(--ease-standard),
+    box-shadow var(--duration-fast) var(--ease-standard);
+}
+
+.sm {
+  height: var(--density-row-sm);
+}
+
+.shell:hover:not(:has(.input:disabled)) {
+  border-color: var(--border-strong);
+}
+
+/* The field's own focus ring: the inner <input> has no visible outline, so
+   the shell carries it (and :focus-visible keeps it keyboard-only). */
+/* The system ring, not an --accent-100 wash: that token is pinned at 92%
+   lightness in light and 22% in dark (tokens.css), so hue and saturation
+   follow the operator's accent but LIGHTNESS never does — every preset and
+   every slider position produced the same 1.34:1 / 1.15:1 near-invisible
+   ring. --shadow-focus-ring is already the 2px-gap + 2px-accent shape
+   DESIGN-V2 §6 asks for, and --border-focus is contrast-tested. */
+.shell:has(.input:focus-visible) {
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-focus-ring);
+}
+
+.invalid {
+  border-color: var(--status-danger-solid);
+}
+
+.input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  background: none;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm-size);
+}
+
+.input:focus,
+.input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.input:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+}
+
+.prefix {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  white-space: nowrap;
+}
+
+.hint {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+.error {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--status-danger-fg);
+}

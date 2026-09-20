@@ -110,11 +110,24 @@
 
 .actions {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
   padding-top: var(--space-2);
   border-top: 1px solid var(--border-subtle);
+}
+
+/* What Approve will do, stated before the click. Takes the free space on the
+   left so the two buttons stay right-aligned; wraps to its own line when the
+   pane is narrow rather than squeezing them. */
+.actionConsequence {
+  flex: 1 1 260px;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
 }
 
 .actionError {
@@ -123,17 +136,32 @@
   font-size: var(--text-xs-size);
 }
 
+/* Reject is RECOVERABLE — it marks a row rejected and writes nothing to the
+   repo. It used to carry the danger border while Approve (which pushes a
+   branch and opens a real PR) carried the calm accent fill, teaching the
+   reflex that red means risky here when the opposite is true. Neutral at
+   rest, danger only on hover, matching routes/verse/approvals. */
 .rejectButton {
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-sm);
-  border: 1px solid var(--status-danger-solid);
+  border: 1px solid var(--border-default);
   background: var(--bg-surface);
-  color: var(--status-danger-fg);
+  color: var(--text-primary);
   font-size: var(--text-sm-size);
   font-weight: var(--font-weight-medium);
   cursor: pointer;
 }
 
+.rejectButton:hover:not(:disabled) {
+  border-color: var(--status-danger-solid);
+  color: var(--status-danger-fg);
+}
+
+/* Approve is the DESTRUCTIVE action — it applies the diff, and for a `pr`
+   proposal it pushes a branch and opens a pull request. It keeps the accent
+   fill (it is the primary action of this view) but now reads as the weighty
+   one: semibold label, and the confirm dialog behind it is the destructive
+   variant. */
 .approveButton {
   padding: var(--space-2) var(--space-4);
   border-radius: var(--radius-sm);
@@ -141,7 +169,7 @@
   background: var(--accent-600);
   color: var(--text-on-accent);
   font-size: var(--text-sm-size);
-  font-weight: var(--font-weight-medium);
+  font-weight: var(--font-weight-semibold);
   cursor: pointer;
 }
 
