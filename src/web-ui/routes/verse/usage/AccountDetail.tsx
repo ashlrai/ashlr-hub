@@ -20,7 +20,7 @@
  * breakdown — so the panel says that in one line instead of drawing a
  * one-point "trend" or back-filling a shape nobody measured.
  */
-import type { ReactNode } from 'react';
+import { useEffect, useRef, type ReactNode } from 'react';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { ENGINE_LABEL } from '../verse-model.js';
 import type { AccountCardModel, AccountVerdictState } from './accounts-model.js';
@@ -77,11 +77,30 @@ export function AccountDetail({
   const { evidence } = card;
   const credits = card.credits;
 
+  // Move focus to the heading when this opens, and again when the selection
+  // moves to a different account.
+  //
+  // The trigger is a card in a wrapping grid, so the panel it reveals is never
+  // the next thing in reading order and is often off-screen entirely. Leaving
+  // focus on the card meant a keyboard or screen-reader operator pressed Enter,
+  // was told "expanded", and then had to tab through the rest of the grid to
+  // reach what they opened. `aria-controls` alone does not move anyone; only a
+  // small minority of assistive tech offers to follow it.
+  //
+  // Keyed on `card.id`, not on every render: the 30s poll rebuilds this model
+  // in place, and re-focusing on each one would yank focus out from under
+  // whatever the operator was reading inside the panel.
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, [card.id]);
+
   return (
     <section className={styles.detail} aria-labelledby={headingId}>
       <div className={styles.detailHead}>
         <div>
-          <h4 id={headingId} className={styles.detailTitle}>
+          {/* tabIndex -1: a focus target for the effect above, not a tab stop. */}
+          <h4 id={headingId} ref={headingRef} tabIndex={-1} className={styles.detailTitle}>
             {card.label}
           </h4>
           <div className={styles.cardMeta}>

@@ -112,7 +112,7 @@
   color: var(--text-tertiary);
 }
 .reset { color: var(--text-tertiary); }
-.windowTrack { margin-top: 3px; height: 2px; background: var(--bg-active); overflow: hidden; }
+.windowTrack { margin-top: 3px; height: 2px; background: var(--meter-track); overflow: hidden; }
 .windowFill { height: 100%; background: var(--accent-500); transition: width var(--duration-slow) var(--ease-decelerate); }
 .windowTrack[data-tone='warn'] .windowFill { background: var(--status-warning-solid); }
 .windowTrack[data-tone='danger'] .windowFill { background: var(--status-danger-solid); }
@@ -222,6 +222,10 @@
    collapsing --duration-* does NOT reach it — it needs both rules by name. */
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion="full"]) .runningDot { animation: none; }
-  .windowFill { transition: none; }
+  /* Guarded like every other motion rule in the app: an operator who chose
+     Full motion in Settings against an OS reduce preference keeps it. (The
+     transition reads --duration-slow, which the token file already collapses
+     under both triggers, so this rule is belt-and-braces either way.) */
+  :root:not([data-motion="full"]) .windowFill { transition: none; }
 }
 :root[data-motion="reduce"] .runningDot { animation: none; }

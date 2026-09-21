@@ -133,6 +133,52 @@ describe('countDiffLines', () => {
     const diff = '--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n context';
     expect(countDiffLines(diff)).toEqual({ additions: 1, deletions: 1 });
   });
+
+  it('counts content lines that themselves begin with --- or +++', () => {
+    // A diff OF a diff: every changed line carries a diff marker of its own.
+    // The old flat scan skipped all four as if they were file headers and
+    // reported 0/0 for a call that rewrote the whole hunk.
+    const diff = [
+      '--- a/fixture.patch',
+      '+++ b/fixture.patch',
+      '@@ -1,4 +1,4 @@',
+      '---- a/old/path.ts',
+      '-+++ b/old/path.ts',
+      '+--- a/new/path.ts',
+      '++++ b/new/path.ts',
+    ].join('\n');
+    expect(countDiffLines(diff)).toEqual({ additions: 2, deletions: 2 });
+  });
+
+  it('counts a deleted Markdown rule, which is a bare ---- once marked', () => {
+    const diff = '--- a/README.md\n+++ b/README.md\n@@ -1,2 +1,1 @@\n----\n title';
+    expect(countDiffLines(diff)).toEqual({ additions: 0, deletions: 1 });
+  });
+
+  it('sums every file of a multi-file patch', () => {
+    const diff = [
+      'diff --git a/one.ts b/one.ts',
+      '--- a/one.ts',
+      '+++ b/one.ts',
+      '@@ -1,1 +1,2 @@',
+      ' keep',
+      '+added',
+      'diff --git a/two.ts b/two.ts',
+      '--- a/two.ts',
+      '+++ b/two.ts',
+      '@@ -1,2 +1,1 @@',
+      ' keep',
+      '-gone',
+    ].join('\n');
+    expect(countDiffLines(diff)).toEqual({ additions: 1, deletions: 1 });
+  });
+
+  it('reports nothing for text that is not a diff at all', () => {
+    expect(countDiffLines('just some tool output\nwith two lines')).toEqual({
+      additions: 0,
+      deletions: 0,
+    });
+  });
 });
 
 describe('searchTurns', () => {

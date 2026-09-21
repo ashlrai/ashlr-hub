@@ -353,7 +353,7 @@ export function ChatSection() {
       {/* At phone width the sidebar floats over the transcript; the scrim dismisses it. */}
       <button type="button" className={styles.scrim} aria-label="Close chat list" tabIndex={-1}
         onClick={() => setVerseSidebarCollapsed(true)} />
-      <main id="main-content" tabIndex={-1} className={styles.main}>
+      <div className={styles.main}>
         {bootstrap.status === 'error' && !bootstrap.data ? (
           <div role="alert" className={styles.banner}>
             <span>{bootstrap.error?.message ?? 'Could not load Verse.'}</span>
@@ -369,7 +369,7 @@ export function ChatSection() {
           onSeatChange={changeSeat} onNew={() => openNewChat()} onRetry={() => setReload((n) => n + 1)}
           sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setVerseSidebarCollapsed(!sidebarCollapsed)}
           resourcesOpen={resourcesOpen} onToggleResources={() => setVerseResourcesOpen(!resourcesOpen)} />
-      </main>
+      </div>
       {resourcesOpen ? (
         <>
           {separator('resources')}

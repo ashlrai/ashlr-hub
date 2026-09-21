@@ -87,7 +87,7 @@
 
 .subtitle {
   font-size: var(--text-xs-size);
-  line-height: 1.5;
+  line-height: var(--text-xs-line-relaxed);
   color: var(--text-secondary);
 }
 
@@ -106,14 +106,14 @@
 
 .lead {
   font-size: var(--text-sm-size);
-  line-height: 1.55;
+  line-height: var(--text-sm-line-relaxed);
   color: var(--text-primary);
 }
 
 .aside,
 .caveat {
   font-size: var(--text-xs-size);
-  line-height: 1.5;
+  line-height: var(--text-xs-line-relaxed);
   color: var(--text-tertiary);
 }
 
@@ -189,7 +189,7 @@
 
 .sectionBlurb {
   font-size: var(--text-xs-size);
-  line-height: 1.5;
+  line-height: var(--text-xs-line-relaxed);
   color: var(--text-secondary);
 }
 
@@ -224,13 +224,13 @@
 
 .findingDetail {
   font-size: var(--text-xs-size);
-  line-height: 1.55;
+  line-height: var(--text-xs-line-relaxed);
   color: var(--text-secondary);
 }
 
 .findingNote {
   font-size: var(--text-xs-size);
-  line-height: 1.5;
+  line-height: var(--text-xs-line-relaxed);
   color: var(--text-tertiary);
 }
 
@@ -253,13 +253,16 @@
 
 .fixText {
   font-size: var(--text-xs-size);
-  line-height: 1.5;
+  line-height: var(--text-xs-line-relaxed);
   color: var(--text-secondary);
 }
 
 .code {
   font-family: var(--font-mono);
-  font-size: var(--text-2xs-size);
+  /* A command an operator is meant to READ and retype, not a micro-label:
+     tokens.css reserves --text-2xs for uppercase labels and keyboard hints
+     and sets the body floor at 12px. */
+  font-size: var(--text-xs-size);
   padding: 2px 6px;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-xs);
@@ -338,10 +341,15 @@
   gap: var(--space-2);
 }
 
+/* Narrow layouts keep the SAME left anchor and the same cap. Stretching the
+   card to `right: var(--space-3)` put it back over the composer's right end —
+   which is exactly where Send and Stop sit — so the wide layout's fix stopped
+   holding at the width where the window is tightest and the overlap matters
+   most. Only the gutter tightens; the card still ends well left of Send. */
 @media (max-width: 900px) {
   .card {
     left: calc(var(--rail-width) + var(--space-3));
-    right: var(--space-3);
-    width: auto;
+    right: auto;
+    width: min(420px, calc(100vw - var(--rail-width) - var(--space-3) * 2));
   }
 }

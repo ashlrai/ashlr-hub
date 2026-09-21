@@ -368,10 +368,16 @@ your own Mac and keeping it in the Dock is supported:
 ```sh
 REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
 
-# 1. Build (see "Build it" below for the prerequisites and the full steps).
-cd "$REPO/desktop" && cargo tauri build
+# 1. Build. Run the WHOLE sequence in "Build it" below, not just the last step:
+#    npm run build:binary → prepare-sidecar.mjs → CI=true cargo tauri build.
+#    A bare `cargo tauri build` rebuilds the Rust shell around whatever web
+#    assets were already staged, which is how a stale UI gets installed.
+cd "$REPO/desktop" && CI=true cargo tauri build
 
-# 2. Install, replacing any previous copy.
+# 2. Verify the bundle carries this build's assets (see "Verify the bundle"
+#    below) BEFORE replacing a copy you are relying on.
+
+# 3. Install, replacing any previous copy.
 rm -rf /Applications/Ashlr.app
 cp -R "$REPO/desktop/src-tauri/target/release/bundle/macos/Ashlr.app" /Applications/
 ```
@@ -382,7 +388,7 @@ If no Open button appears, use System Settings → Privacy & Security →
 **Open Anyway**, or `xattr -dr com.apple.quarantine /Applications/Ashlr.app`.
 With Ashlr running, right-click its Dock icon → **Options → Keep in Dock**.
 
-**To update:** quit Ashlr, repeat steps 1–2, launch again. The Gatekeeper
+**To update:** quit Ashlr, repeat steps 1–3, launch again. The Gatekeeper
 exemption is remembered per app path, so a rebuild copied over the same location
 normally opens straight away. Nothing in `~/.ashlr` is touched by installing or
 replacing the bundle — config, seats, autonomy state and window geometry all
@@ -400,12 +406,13 @@ npm run build:binary                     # → dist-bin/ashlr + dist-bin/public/
 
 # 2. Stage it as the Tauri sidecar for the host triple
 node desktop/scripts/prepare-sidecar.mjs # → desktop/src-tauri/binaries/ashlr-aarch64-apple-darwin
+                                         # → desktop/src-tauri/resources/public/
 
 # 3. Generate the app icons (once, or after changing icons/icon.svg)
 cd desktop && npm run icons
 
-# 4. Build
-cd desktop && cargo tauri build          # release .app + .dmg
+# 4. Bundle
+cd desktop && CI=true cargo tauri build  # release .app + .dmg
 cd desktop && cargo tauri build --debug  # fast, unoptimized
 ```
 
@@ -413,15 +420,113 @@ Output: `desktop/src-tauri/target/release/bundle/macos/Ashlr.app` and
 `.../dmg/Ashlr_<version>_aarch64.dmg`. About 6 minutes cold, ~90 seconds when
 only the bundling has to be redone.
 
+**The order is the whole trick.** The `.app` bundles a *copy* of the web
+assets, staged three times on the way in — `vite build` writes
+`dist/core/web/public`, `build:binary` copies that to `dist-bin/public`,
+`prepare-sidecar.mjs` copies that to `desktop/src-tauri/resources/public`, and
+only then does `cargo tauri build` copy that last directory into
+`Ashlr.app/Contents/Resources/public`. `beforeBuildCommand` is deliberately
+empty, so Tauri rebuilds **nothing**: skip step 1 or step 2 and you get a
+freshly compiled Rust shell wrapped around whatever assets a previous run left
+in `resources/`. That has shipped a stale UI more than once. Run steps 1, 2 and
+4 in that order every time, even when only the web changed.
+
+#### Two gotchas
+
+**1. `npm run build` cannot pass on this machine, and `build:binary` calls it.**
+Its `scripts/build-release-dependency-inventory.mjs` step refuses to run when
+the npm on `PATH` resolves through symlinks — here it exits with `npm runtime
+closure contains a symbolic link`. `scripts/build-sea.mjs` shells out to
+`npm run build`, so `npm run build:binary` inherits the failure. Work around it
+with a `PATH` shim that intercepts exactly `npm run build`, runs the remaining
+steps individually, and delegates every other npm invocation untouched:
+
+```sh
+REPO=/Users/masonwyatt/Desktop/github/dev-tools/ashlr-hub
+SHIM=$(mktemp -d); REAL_NPM=$(which npm)
+cat > "$SHIM/npm" <<EOF
+#!/bin/sh
+REAL_NPM="$REAL_NPM"
+if [ "\$1" = "run" ] && [ "\$2" = "build" ] && [ \$# -eq 2 ]; then
+  set -e; cd "$REPO"
+  "\$REAL_NPM" exec -- tsc -p tsconfig.json
+  node scripts/copy-assets.mjs
+  node scripts/build-preparation-builtin.mjs
+  "\$REAL_NPM" exec -- vite build --config vite.config.web.ts
+  node scripts/build-identity.mjs
+  exit 0
+fi
+exec "\$REAL_NPM" "\$@"
+EOF
+chmod +x "$SHIM/npm"
+cd "$REPO" && PATH="$SHIM:$PATH" npm run build:binary
+```
+
+The omitted step only writes a release dependency inventory; nothing the `.app`
+needs at runtime comes from it. Keep the shim out of `PATH` for everything else
+— it is a build workaround, not a fix.
+
+**2. `CI=1` is rejected by the Tauri CLI. Use `CI=true`.** The CLI parses the
+variable as a boolean and treats `1` as malformed, so the build exits before it
+bundles anything. `CI=true` is what skips the Finder-driven DMG layout (see
+below).
+
+#### Verify the bundle actually carries the new assets
+
+Do not trust the build log for this — it reports that it copied a directory,
+not which directory. Check the bundle itself:
+
+```sh
+APP=desktop/src-tauri/target/release/bundle/macos/Ashlr.app
+
+# a. the current native↔web shell contract is present
+grep -rl 'ashlr:desktop-command' "$APP/Contents/Resources/public/next/assets/"
+
+# b. …and it is THIS build's copy, not an older one that also had it
+diff <(cd dist/core/web/public/next/assets && ls | sort) \
+     <(cd "$APP/Contents/Resources/public/next/assets" && ls | sort)
+```
+
+(a) on its own proves nothing: the listener has been in every build for a
+while, so a months-old bundle passes it. (b) is the real test — Vite filenames
+are content hashes, so an identical file list means byte-identical assets.
+
+Then launch it and read the sockets rather than the screen:
+
+```sh
+open "$APP"
+
+lsof -nP -iTCP:7777
+#  LISTEN from Ashlr.app/Contents/MacOS/ashlr  → the sidecar booted
+#  a second ESTABLISHED line from com.apple.WebKit.Networking → the window
+#  loaded the page AND the injected tokens were accepted (that connection is
+#  the SSE stream, which a 401 would never have opened)
+
+ls -a ~/.ashlr/account-connections/ledger | grep -E 'lock|pending'
+#  .resource-quota-refresh.lock and .resource-quota-refresh-pending.json exist
+#  WHILE it runs — that is the collector lease, and it means the app is
+#  gathering live account telemetry rather than serving an empty Usage view
+
+osascript -e 'tell application "Ashlr" to quit'
+lsof -nP -iTCP:7777                        # silent → port released
+pgrep -fl 'Contents/MacOS/ashlr verse'     # silent → sidecar reaped
+ls -a ~/.ashlr/account-connections/ledger | grep -E 'lock|pending'
+                                           # silent → lease released
+```
+
+A lock or pending file surviving the quit means the lease was stranded and the
+next launch will fall back to read-only evidence; delete neither by hand
+without checking that no collector is running.
+
 **The `.app` is the artifact that matters**; the `.dmg` is only a wrapper for
 handing the app to someone else. The DMG step drives Finder over AppleScript to
 lay out the disk-image window, and that step is flaky — it needs a logged-in
 graphical session with Automation permission, and it leaves a mounted
 `/Volumes/dmg.XXXXXX` behind when it fails. `beforeBundleCommand` now clears
 that leftover automatically (`desktop/scripts/dmg-preflight.mjs`), and
-`CI=1 cargo tauri build` skips the Finder step entirely, producing a plain DMG
-around an identical app. A DMG failure never invalidates the `.app` that was
-already written. Full diagnosis in `desktop/README.md`.
+`CI=true cargo tauri build` skips the Finder step entirely, producing a plain
+DMG around an identical app. A DMG failure never invalidates the `.app` that
+was already written. Full diagnosis in `desktop/README.md`.
 
 For a dev loop without bundling, `cd desktop && cargo tauri dev` — it still
 launches the staged sidecar, so run steps 1–2 first.

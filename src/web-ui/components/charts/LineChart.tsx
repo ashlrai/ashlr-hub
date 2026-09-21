@@ -18,6 +18,23 @@ const PAD_R = 12;
 const PAD_T = 12;
 const PAD_B = 24;
 const TICKS_Y = 4;
+/* Direct end-of-line labels need a gutter of their own. They are drawn in USER
+   units — the viewBox scales the font along with the geometry, so a reserve
+   measured in user units holds at every rendered width — and `--text-xs-size`
+   resolves to 12 user units here, where the UI sans averages a shade over 6
+   units per character at medium weight. 6.4 rounds that up so the reserve errs
+   wide rather than clipping. Without the reserve the label was drawn at
+   `VBOX_W - PAD_R + 4` with only PAD_R (12u) of room and the svg's own
+   `overflow: hidden` cropped it to its first glyph — "Estimated spend"
+   rendered as a lone "E". */
+const END_LABEL_CH = 6.4;
+const END_LABEL_GAP = 4;
+/* Past this the gutter would cost more plot than the label is worth, so the
+   label is dropped rather than shrinking the chart around it. Nothing is lost:
+   Legend.tsx deliberately renders nothing below two series because the panel
+   heading already names a lone series, and two-plus series always have the
+   legend regardless. */
+const END_LABEL_MAX = 150;
 
 interface Run {
   x: number;
@@ -76,7 +93,17 @@ export function LineChart({
   const xRange = xMax - xMin || 1;
   const yRange = yMax - yMin || 1;
 
-  const plotW = VBOX_W - PAD_L - PAD_R;
+  /* Decided before the scales, because the reserved gutter is what plotW is
+     measured against — and the gridlines and x-axis stop at the same edge. */
+  const wantEndLabels = series.length >= 1 && series.length <= 4;
+  const endLabelW = wantEndLabels
+    ? Math.max(...series.map((s) => s.label.length)) * END_LABEL_CH
+    : 0;
+  const showEndLabels = wantEndLabels && endLabelW <= END_LABEL_MAX;
+  const padR = PAD_R + (showEndLabels ? END_LABEL_GAP + endLabelW : 0);
+  const showLegend = series.length >= 2;
+
+  const plotW = VBOX_W - PAD_L - padR;
   const plotH = height - PAD_T - PAD_B;
   const xScale = (x: number) => PAD_L + ((x - xMin) / xRange) * plotW;
   const yScale = (y: number) => PAD_T + plotH - ((y - yMin) / yRange) * plotH;
@@ -117,9 +144,6 @@ export function LineChart({
     }
   }
 
-  const showLegend = series.length >= 2;
-  const showEndLabels = series.length >= 1 && series.length <= 4;
-
   const hoverPoints =
     hoverX !== null
       ? series.map((s) => ({
@@ -143,7 +167,7 @@ export function LineChart({
           <g key={i}>
             <line
               x1={PAD_L}
-              x2={VBOX_W - PAD_R}
+              x2={VBOX_W - padR}
               y1={yScale(t)}
               y2={yScale(t)}
               className={styles.gridline}
@@ -156,7 +180,7 @@ export function LineChart({
         ))}
         <line
           x1={PAD_L}
-          x2={VBOX_W - PAD_R}
+          x2={VBOX_W - padR}
           y1={height - PAD_B}
           y2={height - PAD_B}
           className={styles.axis}
@@ -203,7 +227,7 @@ export function LineChart({
                   const last = lastRun[lastRun.length - 1];
                   return (
                     <text
-                      x={xScale(last.x) + 4}
+                      x={xScale(last.x) + END_LABEL_GAP}
                       y={yScale(last.y)}
                       dy="0.32em"
                       className={styles.endLabel}

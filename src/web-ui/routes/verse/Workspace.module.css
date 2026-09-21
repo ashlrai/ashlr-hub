@@ -24,6 +24,16 @@
 
 .title {
   min-width: 0;
+  /* The hover/press target is inset by --space-2 so the chip reads as a target,
+     but the TEXT must still line up with the header's padding edge. The pull-back
+     lives here, on the flex item, rather than on .titleButton: a negative margin on
+     the button shrinks the h1's max-content (the h1 sizes to its child's OUTER
+     width), and `.titleButton { max-width: 100% }` then re-clamps the button to that
+     reduced box — so the title lost exactly --space-2 of text to the ellipsis at
+     every width, even with 350px of empty header beside it ("New chat" → "New c…").
+     On the h1 the margin only shifts the item and its free-space contribution; the
+     button keeps its full content width. Optical alignment is identical. */
+  margin-left: calc(-1 * var(--space-2));
   font-family: var(--font-display);
   font-size: var(--text-md-size);
   line-height: 1.2;
@@ -34,7 +44,6 @@
   display: block;
   max-width: 100%;
   padding: 2px var(--space-2);
-  margin-left: calc(-1 * var(--space-2));
   border-radius: var(--radius-xs);
   color: inherit;
   font: inherit;
@@ -182,7 +191,7 @@
 .meterInline .meterTrack {
   position: static;
   width: 64px;
-  background: var(--bg-active);
+  background: var(--meter-track);
   border-radius: var(--radius-full);
   overflow: hidden;
 }

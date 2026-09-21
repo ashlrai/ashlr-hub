@@ -28,10 +28,12 @@
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  /* Matches the 1.7 line-height of .markdown body copy (14px * 1.7 = 23.8,
-     less the 14px bar SkeletonLine draws) so the placeholder occupies the
-     same vertical rhythm as the text that replaces it. */
-  gap: calc(var(--text-base-size) * 1.7 - var(--text-base-line));
+  /* The leading of .markdown body copy less the bar SkeletonLine draws, so
+     the placeholder keeps the vertical rhythm of the text that replaces it.
+     Derived from the SAME ramp pair as .markdown — it used to restate that
+     leading as the literal 1.7, which meant retuning prose silently knocked
+     the skeleton out of rhythm with it. */
+  gap: calc(var(--text-base-line-relaxed) - var(--text-base-line));
 }
 .skeletonUser { margin-block: var(--space-2); padding-left: var(--space-4); }
 .loadError {
@@ -78,7 +80,7 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   font-size: var(--text-base-size);
-  line-height: 1.65;
+  line-height: var(--text-base-line-relaxed);
 }
 
 /* ---- assistant turn: plain primary text at full measure ----------------- */
@@ -86,7 +88,7 @@
 .markdown {
   color: var(--text-primary);
   font-size: var(--text-base-size);
-  line-height: 1.7;
+  line-height: var(--text-base-line-relaxed);
   overflow-wrap: anywhere;
 }
 .markdown > * + * { margin-top: var(--space-4); }
@@ -173,7 +175,7 @@
   background: var(--bg-code);
   overflow-x: auto;
   font-size: var(--text-sm-size);
-  line-height: 1.6;
+  line-height: var(--text-sm-line-relaxed);
   tab-size: 2;
 }
 .markdown pre code { background: none; padding: 0; font-size: inherit; white-space: pre; }
@@ -252,7 +254,7 @@
   border-left: 2px solid var(--border-subtle);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  line-height: 1.6;
+  line-height: var(--text-sm-line-relaxed);
   color: var(--text-secondary);
 }
 
@@ -355,7 +357,7 @@
   background: var(--bg-code);
   font-family: var(--font-mono);
   font-size: var(--text-xs-size);
-  line-height: 1.6;
+  line-height: var(--text-xs-line-relaxed);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   color: var(--text-primary);
@@ -415,7 +417,7 @@
    whose OS says nothing. A persistent `animation` has a hardcoded duration, so
    collapsing --duration-* does NOT reach it — it needs both rules by name. */
 @media (prefers-reduced-motion: reduce) {
-  .transcript { scroll-behavior: auto; }
+  :root:not([data-motion="full"]) .transcript { scroll-behavior: auto; }
   :root:not([data-motion="full"]) .caret,
   :root:not([data-motion="full"]) .streaming > :last-child::after { animation: none; }
 }
@@ -436,9 +438,21 @@
   scroll-margin-block: var(--space-6);
   border-radius: var(--radius-xs);
 }
+/* `box-shadow: none` resets the GLOBAL focus ring. global.css gives every
+   :focus-visible element `--shadow-focus-ring` (a 2px surface gap plus a 2px
+   accent ring drawn with box-shadow); adding an accent outline on top of it
+   without that reset is what drew two concentric accent rings around a
+   focused turn, 8px apart. The outline is the right shape here — the turn is
+   a region, and an 8px offset keeps the ring off the text — so the outline
+   stays and the shadow goes.
+
+   The reset is safe for a SEARCH HIT: `.turn[data-match]` below paints its
+   gutter rule with box-shadow too, and at equal specificity the later rule
+   wins, so a focused hit keeps its marker and an unfocused one is unchanged. */
 .turn:focus-visible {
   outline: 2px solid var(--accent-500);
   outline-offset: var(--space-2);
+  box-shadow: none;
 }
 .turnItems {
   display: flex;
@@ -508,7 +522,10 @@
 .toolNote {
   margin-top: var(--space-2);
   color: var(--text-tertiary);
-  font-size: var(--text-2xs-size, 11px);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
 }
 
 @media (prefers-reduced-motion: reduce) {

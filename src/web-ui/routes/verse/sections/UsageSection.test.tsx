@@ -706,4 +706,44 @@ describe('UsageSection — per-account depth on demand', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByText('Probe evidence')).not.toBeInTheDocument());
   });
+
+  /**
+   * The panel is revealed by a card in a wrapping grid, so it is never the next
+   * thing in reading order. Leaving focus on the trigger meant a keyboard
+   * operator was told "expanded" and then had to tab through the rest of the
+   * grid to reach what they opened.
+   */
+  it('moves focus into the detail when a card opens it', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(card('Work Codex')).toBeInTheDocument());
+    await userEvent.click(within(card('Work Codex')).getByRole('button', { name: /Work Codex/ }));
+    const heading = await screen.findByRole('heading', { name: 'Work Codex', level: 4 });
+    await waitFor(() => expect(heading).toHaveFocus());
+  });
+
+  /** A disclosure must hand focus back to its trigger, not drop it on <body>. */
+  it('returns focus to the card when the detail is closed', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(card('Work Codex')).toBeInTheDocument());
+    const trigger = within(card('Work Codex')).getByRole('button', { name: /Work Codex/ });
+    await userEvent.click(trigger);
+    expect(await screen.findByText('Probe evidence')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(trigger).toHaveFocus());
+  });
+
+  /**
+   * Placement, not just focus: the panel renders inside the card grid, so it
+   * lands under the card it explains rather than below every card on screen.
+   */
+  it('renders the detail inside the card grid, beside its own card', async () => {
+    render(<UsageSection />);
+    await waitFor(() => expect(card('Work Codex')).toBeInTheDocument());
+    await userEvent.click(within(card('Work Codex')).getByRole('button', { name: /Work Codex/ }));
+    const detail = (await screen.findByText('Probe evidence')).closest('section');
+    expect(detail).not.toBeNull();
+    const grid = card('Work Codex').parentElement;
+    expect(grid).not.toBeNull();
+    expect(grid!.contains(detail!)).toBe(true);
+  });
 });

@@ -166,6 +166,18 @@
   --bg-selected: var(--gray-200);
   --bg-code: var(--gray-100);
 
+  /* The EMPTY half of a meter. Four surfaces drew it with --bg-active, a
+     press ground: 1.22:1 against a light card and 1.20:1 against a dark one,
+     i.e. the track vanished and the fill floated on nothing — an operator
+     with low vision could see how much was used but not what it was a
+     fraction OF. It is not a hairline (it is a filled shape carrying the
+     scale), so it takes a share of --text-tertiary rather than a border
+     token, and it is alpha rather than a mix against one ground so it
+     composites correctly on --bg-surface, --bg-canvas and inside a card
+     alike. 45% lands at 1.83:1 light / 2.06:1 dark — the same floor
+     design/tokens-contrast.test.ts already holds the status solids to. */
+  --meter-track: color-mix(in srgb, var(--text-tertiary) 45%, transparent);
+
   --text-primary: var(--gray-950);
   --text-secondary: var(--gray-600);
   --text-tertiary: var(--gray-500);
@@ -209,6 +221,18 @@
   --text-2xl-line: 32px;
   --text-3xl-size: 30px;
   --text-3xl-line: 38px;
+
+  /* RELAXED leading, paired to the same three sizes. The ramp above is the
+     CHROME leading: 14/20 is right for a one-line list row, a control label
+     or a table cell, and too tight for a paragraph read across the 720px
+     measure. Everything that wraps — transcript prose, the composer, code
+     blocks, onboarding copy — used to carry a unitless literal instead
+     (1.5, 1.55, 1.6, 1.65, 1.7, one per file), which put the most-read text
+     in the app outside the type system and let it drift. These are the pair
+     to reach for whenever text wraps. */
+  --text-xs-line-relaxed: 18px;
+  --text-sm-line-relaxed: 20px;
+  --text-base-line-relaxed: 24px;
 
   --tracking-display: -0.02em;
   --tracking-label: 0.06em;

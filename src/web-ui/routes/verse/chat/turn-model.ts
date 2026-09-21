@@ -12,6 +12,7 @@
  * fetching — so the numbers in the summary can be tested directly against an
  * event log.
  */
+import { parseUnifiedDiff } from '../../inbox/diff-parser.js';
 import type { ToolGroupItem, TranscriptItem, TranscriptRenderItem } from '../verse-store.js';
 import { readToolFacts, type ToolAction, type ToolFacts } from './tool-semantics.js';
 
@@ -124,14 +125,32 @@ export function turnAnchorId(key: string): string {
 
 const STRENGTH: Record<TurnFileEntry['action'], number> = { read: 0, edit: 1, create: 2, delete: 3 };
 
-/** Additions/deletions straight off the diff text — no second parse pass. */
+/**
+ * Additions/deletions for a unified diff, summed across every file in it.
+ *
+ * This was a flat scan that skipped any line starting with `---` or `+++` as a
+ * file header. Inside a hunk those prefixes are CONTENT, not structure: a
+ * deleted line reading `-- a/x` is emitted as `--- a/x`, a Markdown `---` rule
+ * deleted is `----`, and a diff of a diff — what editing a `.patch` fixture or
+ * running `git diff` over one produces — is made almost entirely of them. Every
+ * such line was dropped, so the `+N −M` on the collapsed tool card undercounted
+ * exactly the changes that are hardest to eyeball.
+ *
+ * Delegating to the shared parser (`routes/inbox/diff-parser.ts`) fixes that
+ * and retires the second diff dialect: `DiffBlock` renders `file.additions` /
+ * `file.deletions` out of this same parse, so the badge on the summary line and
+ * the stats in the expanded block are now the same numbers by construction
+ * rather than by two implementations happening to agree.
+ *
+ * Cost is real but bounded and paid once: `cachedDiffCounts` memoizes by
+ * `toolUseId`, and the text is capped at `MAX_FACT_TEXT_CHARS` upstream.
+ */
 export function countDiffLines(text: string): { additions: number; deletions: number } {
   let additions = 0;
   let deletions = 0;
-  for (const line of text.split('\n')) {
-    if (line.startsWith('+++') || line.startsWith('---')) continue;
-    if (line.startsWith('+')) additions++;
-    else if (line.startsWith('-')) deletions++;
+  for (const file of parseUnifiedDiff(text).files) {
+    additions += file.additions;
+    deletions += file.deletions;
   }
   return { additions, deletions };
 }

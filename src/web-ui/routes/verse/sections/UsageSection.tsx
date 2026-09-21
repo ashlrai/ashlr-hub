@@ -26,8 +26,8 @@
  *
  * Every honesty decision lives in the model modules, not here.
  */
-import type { ReactNode } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiError } from '../../../data/client.js';
 import { useQuery, useRefetch, useRefresh } from '../../../data/hooks.js';
 import { controlSnapshotQuery } from '../../../data/queries.js';
@@ -104,6 +104,17 @@ function StateBlock({
  * tokens, zero paid quota — see docs/VERSE-TELEMETRY-V2.md).
  */
 const USAGE_POLL_MS = 30_000;
+
+/**
+ * The account detail spans the whole card row it sits in.
+ *
+ * Module scope so it is one frozen object rather than a fresh literal per
+ * render, and inline rather than a new class because `usage.module.css` is not
+ * this change's to edit — `.cards` is already
+ * `repeat(auto-fit, minmax(280px, 1fr))`, and `1 / -1` spans it at every width
+ * with no stylesheet rule to keep in sync.
+ */
+const DETAIL_ROW: CSSProperties = { gridColumn: '1 / -1' };
 
 /**
  * Re-read on an interval, but only while the document is actually visible.
@@ -246,18 +257,34 @@ export function UsageSection(): ReactNode {
 
   const localStale = useMemo(() => localStaleness(localView?.runtimes ?? []), [localView]);
 
-  // Resolve the selection against the CURRENT cards rather than holding a card
-  // object in state: a refresh rebuilds every model, and a stale captured card
-  // would keep rendering readings the next poll already replaced. A selection
-  // whose account has disappeared resolves to null and the detail closes.
-  const selectedCard = useMemo(
-    () => (selectedAccountId === null ? null : (cards.find((c) => c.id === selectedAccountId) ?? null)),
-    [cards, selectedAccountId],
-  );
-
+  // The selection is held as an ID, never as a card object: a refresh rebuilds
+  // every model, and a captured card would keep rendering readings the next
+  // poll already replaced. The detail renders from the card the grid is holding
+  // at that moment, so an account that disappears simply takes its panel with
+  // it.
   const toggleAccount = (id: string): void => {
     setSelectedAccountId((current) => (current === id ? null : id));
   };
+
+  /**
+   * Close the detail and hand focus back to the card that opened it.
+   *
+   * Without this, dismissing the panel from its own Close button dropped focus
+   * onto `<body>` — the element under the cursor ceases to exist — and the next
+   * Tab restarted at the top of the document. A disclosure must return focus to
+   * its trigger; closing by clicking the card again already does, because the
+   * trigger is what was clicked.
+   */
+  const closeAccount = useCallback((): void => {
+    // Read the id from the closure, not inside the updater: a state updater
+    // must stay pure (StrictMode calls it twice), and the trigger is still
+    // mounted at this point either way.
+    const id = selectedAccountId;
+    setSelectedAccountId(null);
+    if (id !== null && typeof document !== 'undefined') {
+      document.getElementById(`verse-account-trigger-${id}`)?.focus();
+    }
+  }, [selectedAccountId]);
 
   const split = useMemo(() => buildLocalCloudSplit(control.data?.usage), [control.data]);
   const limitRows = useMemo(
@@ -406,31 +433,44 @@ export function UsageSection(): ReactNode {
               ) : (
                 <>
                   <div className={styles.cards}>
-                    {gridCards.map((entry) =>
-                      entry.kind === 'account' ? (
-                        <AccountCard
-                          key={entry.key}
-                          card={entry.card}
-                          onOpen={toggleAccount}
-                          expanded={selectedAccountId === entry.key}
-                          triggerId={`verse-account-trigger-${entry.key}`}
-                          detailId={`verse-account-detail-${entry.key}`}
-                        />
-                      ) : (
-                        <LocalCard key={entry.key} card={entry.card} staleness={localStale} />
-                      ),
-                    )}
+                    {gridCards.map((entry) => {
+                      if (entry.kind !== 'account') {
+                        return <LocalCard key={entry.key} card={entry.card} staleness={localStale} />;
+                      }
+                      const open = selectedAccountId === entry.key;
+                      return (
+                        <Fragment key={entry.key}>
+                          <AccountCard
+                            card={entry.card}
+                            onOpen={toggleAccount}
+                            expanded={open}
+                            triggerId={`verse-account-trigger-${entry.key}`}
+                            detailId={`verse-account-detail-${entry.key}`}
+                          />
+                          {/*
+                            The detail belongs BESIDE the card it explains.
+                            Rendered after the whole grid it opened up to four
+                            rows below the thing clicked, frequently off-screen,
+                            with nothing connecting the two on the page — the
+                            grid is `auto-fit minmax(280px, 1fr)`, so at a wide
+                            window the card that was clicked and the panel that
+                            answered could be a screen apart. Spanning the full
+                            row in place keeps it under its own card at every
+                            width, and needs no new rule in the stylesheet.
+                          */}
+                          {open ? (
+                            <div id={`verse-account-detail-${entry.key}`} style={DETAIL_ROW}>
+                              <AccountDetail
+                                card={entry.card}
+                                headingId={`verse-account-heading-${entry.key}`}
+                                onClose={closeAccount}
+                              />
+                            </div>
+                          ) : null}
+                        </Fragment>
+                      );
+                    })}
                   </div>
-
-                  {selectedCard ? (
-                    <div id={`verse-account-detail-${selectedCard.id}`}>
-                      <AccountDetail
-                        card={selectedCard}
-                        headingId={`verse-account-heading-${selectedCard.id}`}
-                        onClose={() => setSelectedAccountId(null)}
-                      />
-                    </div>
-                  ) : null}
                 </>
               )}
             </section>

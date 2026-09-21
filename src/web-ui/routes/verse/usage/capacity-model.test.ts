@@ -300,6 +300,50 @@ describe('buildCapacityOverview', () => {
     expect(tight.noCapacity).toBe(false);
   });
 
+  it('does not flag no-capacity over a roster that is entirely unread', () => {
+    // Every seat came back `unknown`, which is the shape of a collector that
+    // never ran — not of a set of exhausted accounts. Tinting the headline as a
+    // warning here asserts something about seats nobody measured.
+    const unread = buildCapacityOverview({
+      cards: [
+        card({
+          id: 'a',
+          verdict: { state: 'unknown', headline: 'No reading', detail: 'x', code: null },
+        }),
+        card({
+          id: 'b',
+          verdict: { state: 'unknown', headline: 'No reading', detail: 'x', code: null },
+        }),
+      ],
+      localCard: null,
+      localView: null,
+      nowMs: NOW,
+    });
+    expect(unread.unread).toBe(2);
+    expect(unread.noCapacity).toBe(false);
+  });
+
+  it('still flags no-capacity when a roster is only PARTLY unread', () => {
+    // One seat is measured and blocked. That is a real constraint, and the
+    // unread one alongside it does not soften it.
+    const mixed = buildCapacityOverview({
+      cards: [
+        card({
+          id: 'a',
+          verdict: { state: 'exhausted', headline: 'Window exhausted', detail: 'x', code: null },
+        }),
+        card({
+          id: 'b',
+          verdict: { state: 'unknown', headline: 'No reading', detail: 'x', code: null },
+        }),
+      ],
+      localCard: null,
+      localView: null,
+      nowMs: NOW,
+    });
+    expect(mixed.noCapacity).toBe(true);
+  });
+
   it('sorts the local seat into the same roster the cloud seats are counted in', () => {
     const overview = buildCapacityOverview({
       cards: [card({ id: 'codex-a' })],

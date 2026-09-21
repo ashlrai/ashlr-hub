@@ -15,13 +15,22 @@
 /*
  * The add/delete tints are the diff's OWN, not the badge `--status-*-bg`
  * tokens they used to borrow. Those are ~14% alpha and composite to
- * near-isoluminant pairs over `--bg-code` — 1.06:1 apart in dark, 1.01:1 in
- * light — so the only thing separating an addition from a deletion was a
+ * near-isoluminant pairs over `--bg-code` — 1.01:1 apart in light, 1.05:1 in
+ * dark — so the only thing separating an addition from a deletion was a
  * red/green hue difference, the exact pair that collapses under
- * protanopia/deuteranopia. Mixing against `--bg-code` at a heavier ratio keeps
- * each row readable against context AND pushes the two apart in luminance, so
- * the distinction survives with hue removed. The `+`/`−` glyph in
- * `.diffMarker` is the second channel and is set at body contrast below.
+ * protanopia/deuteranopia.
+ *
+ * Mixing against `--bg-code` at 22% makes each row legible against the
+ * surrounding context (1.24:1 / 1.32:1 light, 1.45:1 / 1.32:1 dark, where
+ * before they were ~1.03:1 washes). It does NOT meaningfully separate the two
+ * from EACH OTHER: measured, they are 1.06:1 apart in light and 1.10:1 in
+ * dark. That is deliberate and it is the honest statement of the design —
+ * weighting deletions heavier than additions to buy luminance would say
+ * something about the change that is not true. The tint is a supporting cue;
+ * the CARRIER is the `+`/`−` glyph in `.diffMarker`, which is why that column
+ * is pinned to `--text-secondary` (body contrast on both tints) rather than
+ * left at tertiary. design/tokens-contrast.test.ts asserts exactly that pair,
+ * so the glyph cannot quietly recede back into the tint.
  */
 .diff {
   --diff-add: color-mix(in srgb, var(--status-success-solid) 22%, var(--bg-code));
@@ -130,7 +139,7 @@
   table-layout: fixed;
   font-family: var(--font-mono);
   font-size: var(--text-xs-size);
-  line-height: 1.55;
+  line-height: var(--text-xs-line-relaxed);
 }
 .diffNo {
   width: 42px;
@@ -214,7 +223,10 @@
   padding: var(--space-2) var(--space-3);
   border-top: 1px solid var(--border-subtle);
   color: var(--text-tertiary);
-  font-size: var(--text-2xs-size, 11px);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
 }
 
 .tok_plain { color: var(--text-primary); }
@@ -253,7 +265,7 @@
   min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--text-xs-size);
-  line-height: 1.55;
+  line-height: var(--text-xs-line-relaxed);
   color: var(--text-primary);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
@@ -289,7 +301,7 @@
   padding: var(--space-3);
   font-family: var(--font-mono);
   font-size: var(--text-xs-size);
-  line-height: 1.55;
+  line-height: var(--text-xs-line-relaxed);
   white-space: pre;
   color: var(--text-primary);
   tab-size: 8;
@@ -486,7 +498,17 @@
   background: var(--bg-input);
   transition: border-color var(--duration-fast) var(--ease-standard);
 }
-.navSearch:focus-within { border-color: var(--accent-500); }
+/* The wrapper is the visual control — the <input> inside it has no border,
+   no ground and no padding of its own — so the standard ring belongs on the
+   wrapper. It used to be a 1px border-colour change, which is not a focus
+   indicator under DESIGN-V2 §6 ("a visible :focus-visible ring, 2px accent,
+   2px offset"); the global ring meanwhile landed on the bare input, inset
+   inside the box the operator can actually see. Hoist one, suppress the
+   other, and keep the border tint as the second channel. */
+.navSearch:focus-within {
+  border-color: var(--accent-500);
+  box-shadow: var(--shadow-focus-ring);
+}
 .navSearchIcon { display: inline-flex; color: var(--text-tertiary); }
 .navSearch input {
   min-width: 0;
@@ -498,7 +520,7 @@
   font-size: var(--text-xs-size);
 }
 .navSearch input::-webkit-search-cancel-button { display: none; }
-.navSearch input:focus-visible { outline: none; }
+.navSearch input:focus-visible { outline: none; box-shadow: none; }
 
 .navMatches {
   font-family: var(--font-display);
@@ -594,7 +616,9 @@
 }
 .outlineSnippet {
   font-family: var(--font-mono);
-  font-size: var(--text-2xs-size, 11px);
+  /* A quotation from the transcript — content the operator reads to pick a
+     turn, not a label. Body floor, per tokens.css. */
+  font-size: var(--text-xs-size);
   color: var(--text-secondary);
   overflow: hidden;
   text-overflow: ellipsis;

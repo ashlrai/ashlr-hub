@@ -21,6 +21,8 @@ import {
   darkScope,
   lightScope,
   mediaDarkDecls,
+  moduleColor,
+  moduleDeclaration,
   resolveToken,
   toggleDarkDecls,
   type TokenScope,
@@ -188,6 +190,108 @@ describe('design tokens — contrast', () => {
       // visible: an operator must be able to read a disabled control's label.
       expect(ratio(scope, '--text-disabled', '--bg-surface')).toBeGreaterThanOrEqual(2.2);
     });
+  });
+});
+
+/**
+ * The palette an operator actually sees is not only tokens.css. A component
+ * may override a chart token locally, paint a meter with a `color-mix`, or
+ * pick the token a gutter rule uses — and every contrast defect the four-lens
+ * review found in Verse lived in exactly those declarations, under comments
+ * asserting floors that nothing measured. `--chart-grid` is the case in
+ * point: it was retuned to a 45% share of a token pinned at 4.83:1 and
+ * shipped at 1.83:1, because the suite could only see the token.
+ *
+ * These read the declaration out of the CSS module and resolve it against
+ * each theme, so the number in the comment and the number in the file cannot
+ * drift apart again.
+ */
+const USAGE = 'routes/verse/usage/usage.module.css';
+const CHAT = 'routes/verse/chat/chat.module.css';
+const TRANSCRIPT = 'routes/verse/Transcript.module.css';
+
+function moduleRatio(
+  scope: TokenScope,
+  path: string,
+  selector: string,
+  prop: string,
+  groundToken: string,
+): number {
+  const fg = moduleColor(scope, path, selector, prop);
+  expect(fg, `${path} ${selector} { ${prop} } should resolve to a literal color`).not.toBeNull();
+  const ground = color(scope, groundToken);
+  const value = contrastRatio(fg!, ground, ground);
+  expect(value, `${selector} { ${prop} } on ${groundToken} should be measurable`).not.toBeNull();
+  return value!;
+}
+
+describe('component colour overrides — contrast', () => {
+  describe.each(THEMES)('%s theme', (_name, scope) => {
+    // A gridline is what an eye reads a value against: DESIGN-V2 §6's 3:1
+    // non-text floor, the same argument .unknownRule and the search-hit rule
+    // make. The axis is the full token; the grid is a share of it, and the
+    // share is what has to be asserted.
+    it('draws chart gridlines at or above the 3:1 non-text floor', () => {
+      expect(moduleRatio(scope, USAGE, '.charts', '--chart-grid', '--bg-surface')).toBeGreaterThanOrEqual(3);
+    });
+
+    it('draws chart axes at or above the 3:1 non-text floor', () => {
+      expect(moduleRatio(scope, USAGE, '.charts', '--chart-axis', '--bg-surface')).toBeGreaterThanOrEqual(3);
+    });
+
+    // The EMPTY half of a meter is a filled shape carrying the scale, not a
+    // hairline: at --bg-active it measured 1.22:1 / 1.20:1 and the remaining
+    // capacity simply was not there. 1.8 is the same floor the status solids
+    // are held to above. Both grounds, because Usage draws meters on a card
+    // (--bg-surface) and the resources panel draws them on --bg-canvas.
+    it.each(['--bg-surface', '--bg-canvas'])('keeps the meter track visible on %s', (ground) => {
+      expect(ratio(scope, '--meter-track', ground, ground)).toBeGreaterThanOrEqual(1.8);
+    });
+
+    it('keeps the window meter track on the shared token', () => {
+      expect(moduleDeclaration(USAGE, '.track', 'background')).toBe('var(--meter-track)');
+    });
+
+    // The diff's +/− column is the NON-COLOUR channel distinguishing an
+    // addition from a deletion — the tints themselves are only 1.06:1 apart in
+    // light and 1.10:1 in dark, which is by design (see chat.module.css). So
+    // the glyph owes the body floor on BOTH tinted rows, not just on the
+    // untinted context row.
+    it.each(['--diff-add', '--diff-del'])('reads the diff +/- glyph against %s', (tint) => {
+      const glyph = moduleColor(scope, CHAT, '.diffMarker', 'color');
+      const row = moduleColor(scope, CHAT, '.diff', tint);
+      expect(glyph, '.diffMarker should declare a colour').not.toBeNull();
+      expect(row, `${tint} should resolve`).not.toBeNull();
+      expect(contrastRatio(glyph!, row!, color(scope, '--bg-code'))!).toBeGreaterThanOrEqual(4.5);
+    });
+
+    // Line numbers are content an operator reads to find a change in their
+    // editor, on the code ground — not a disabled-control label, so they
+    // cannot borrow WCAG's disabled-text exemption. --text-disabled measured
+    // 2.33:1 / 2.48:1 here.
+    it('reads diff line numbers against the code ground', () => {
+      expect(moduleRatio(scope, CHAT, '.diffNo', 'color', '--bg-code')).toBeGreaterThanOrEqual(4.5);
+    });
+
+    // Selection has to be visible in BOTH themes. The previous treatment set
+    // background to --bg-surface-raised, which IS --bg-surface in light, so
+    // half the cue was a literal no-op there.
+    it('marks a selected account card with a border above the 3:1 floor', () => {
+      expect(moduleRatio(scope, USAGE, ".card[data-selected='true']", 'border-color', '--bg-surface')).toBeGreaterThanOrEqual(3);
+    });
+
+    it('gives a selected account card a ground that differs from an unselected one', () => {
+      expect(moduleRatio(scope, USAGE, ".card[data-selected='true']", 'background', '--bg-surface')).toBeGreaterThanOrEqual(1.1);
+    });
+  });
+
+  // Structural, not per-theme: the search-hit rule is drawn with box-shadow,
+  // so what matters is WHICH token it spends. --border-strong is a hairline,
+  // exempt from 3:1 and measured at 1.45:1 / 1.66:1 — invisible for the one
+  // mark telling an operator that a turn matched their query.
+  it('draws the in-chat search-hit marker with a meaning-carrying token', () => {
+    expect(moduleDeclaration(TRANSCRIPT, '.turn[data-match]', 'box-shadow')).toContain('var(--text-tertiary)');
+    expect(moduleDeclaration(TRANSCRIPT, ".turn[data-match='active']", 'box-shadow')).toContain('var(--accent-500)');
   });
 });
 

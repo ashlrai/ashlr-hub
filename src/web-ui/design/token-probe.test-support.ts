@@ -33,14 +33,15 @@ interface Rule {
  */
 const TOKENS_CSS = resolve(process.cwd(), 'src/web-ui/design/tokens.css');
 
-function declarationsOf(body: string): Array<[string, string]> {
+function declarationsOf(body: string, customPropsOnly = true): Array<[string, string]> {
   const decls: Array<[string, string]> = [];
   for (const raw of body.split(';')) {
     const idx = raw.indexOf(':');
     if (idx === -1) continue;
     const prop = raw.slice(0, idx).trim();
     const value = raw.slice(idx + 1).trim();
-    if (!prop.startsWith('--')) continue;
+    if (customPropsOnly && !prop.startsWith('--')) continue;
+    if (prop.length === 0 || value.length === 0) continue;
     decls.push([prop, value]);
   }
   return decls;
@@ -52,7 +53,7 @@ function declarationsOf(body: string): Array<[string, string]> {
  * regex cannot: the innermost-block trick silently drops the wrapper, which
  * is exactly the distinction the two-dark-blocks drift check needs.)
  */
-function parseRules(css: string): Rule[] {
+function parseRules(css: string, customPropsOnly = true): Rule[] {
   const src = css.replace(/\/\*[\s\S]*?\*\//g, '');
   const rules: Rule[] = [];
   const stack: string[] = [];
@@ -68,7 +69,7 @@ function parseRules(css: string): Rule[] {
     if (ch === '}') {
       const selector = stack.pop();
       if (selector !== undefined && !selector.startsWith('@')) {
-        const decls = declarationsOf(body);
+        const decls = declarationsOf(body, customPropsOnly);
         if (decls.length > 0) rules.push({ selector, atRules: [...stack], decls });
       }
       body = '';
@@ -123,6 +124,43 @@ export function toggleDarkDecls(css?: string): Map<string, string> {
     for (const [prop, value] of rule.decls) out.set(prop, value);
   }
   return out;
+}
+
+/**
+ * One declaration read straight out of a CSS MODULE, resolved through a theme
+ * scope — e.g. `.charts { --chart-grid: ... }` in the Usage stylesheet, or
+ * `.track { background: ... }`.
+ *
+ * tokens.css is not the whole palette an operator sees: a component may
+ * override a token locally or paint a mark with a `color-mix`, and those
+ * values are exactly where the contrast regressions hide (a gridline shipped
+ * at 45% alpha under a comment claiming it cleared 3:1, because nothing could
+ * measure the mix). `path` is relative to `src/web-ui`.
+ *
+ * Deliberately last-declaration-wins across the whole file and ignorant of
+ * at-rules and specificity: a module that needs a media-query-specific value
+ * guarded should be given a token in tokens.css instead.
+ */
+export function moduleDeclaration(path: string, selector: string, prop: string): string | null {
+  const css = readFileSync(resolve(process.cwd(), 'src/web-ui', path), 'utf8');
+  let found: string | null = null;
+  for (const rule of parseRules(css, false)) {
+    const selectors = rule.selector.split(',').map((s) => s.trim());
+    if (!selectors.includes(selector)) continue;
+    for (const [name, value] of rule.decls) if (name === prop) found = value;
+  }
+  return found;
+}
+
+/**
+ * The same, resolved to a literal color against a theme's token scope.
+ * Returns null when the declaration is absent or references a token that does
+ * not exist — both of which are findings, not "unknown".
+ */
+export function moduleColor(scope: TokenScope, path: string, selector: string, prop: string): string | null {
+  const raw = moduleDeclaration(path, selector, prop);
+  if (raw === null) return null;
+  return resolveValue(scope, raw);
 }
 
 /** Every custom property declared anywhere in the file, with its selector. */

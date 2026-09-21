@@ -72,6 +72,29 @@ describe('VerseApp shell', () => {
     await screen.findByRole('navigation', { name: 'Chats' });
   });
 
+  it('gives every section the one <main id="main-content"> the skip link targets', async () => {
+    // Regression: the landmark used to live inside ChatSection, so SkipToContent
+    // (which imperatively focuses #main-content) worked in Chat and silently did
+    // nothing in the other four — a keyboard user was left on <body> with the
+    // whole rail still ahead of them. The shell owns it now.
+    const view = mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+
+    const sections: Array<[string, string]> = [
+      ['1', 'chat'], ['2', 'autonomy'], ['3', 'approvals'], ['4', 'usage'], ['5', 'settings'],
+    ];
+    for (const [key, id] of sections) {
+      act(() => { fireEvent.keyDown(document, { key, metaKey: true }); });
+      const mains = view.container.querySelectorAll('main');
+      expect(mains, `section ${id} should have exactly one <main>`).toHaveLength(1);
+      const main = mains[0]!;
+      expect(main).toHaveAttribute('id', 'main-content');
+      expect(main).toHaveAttribute('data-section', id);
+      // Focusable, or main?.focus() from SkipToContent is a no-op.
+      expect(main.tabIndex).toBe(-1);
+    }
+  });
+
   it('explains a rail slot whose module has not landed instead of going blank', () => {
     // Rendered directly: which sections exist changes as the other owners land
     // theirs, so the state is tested on its own rather than through whichever

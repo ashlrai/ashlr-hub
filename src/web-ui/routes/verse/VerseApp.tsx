@@ -207,13 +207,22 @@ export function VerseApp() {
           </button>
         </div>
       </nav>
-      <div className={styles.section} data-section={ui.section}>
+      {/*
+        The ONE <main id="main-content"> for the whole Verse shell. SkipToContent
+        imperatively focuses that id, and it used to live inside ChatSection — so
+        "Skip to content" worked in Chat and silently did nothing in Autonomy,
+        Approvals, Usage and Settings, leaving the keyboard user on <body> with the
+        rail still ahead of them. Owning it here makes the landmark section-
+        independent: every lazy-mounted section inherits a real skip target, and
+        there is exactly one <main> on the page instead of zero or one.
+      */}
+      <main className={styles.section} data-section={ui.section} id="main-content" tabIndex={-1}>
         <RouteErrorBoundary resetKey={ui.section}>
           <Suspense fallback={<SectionFallback />}>
             <Section />
           </Suspense>
         </RouteErrorBoundary>
-      </div>
+      </main>
       {/*
         First run only, and OUTSIDE the error boundary's subtree on purpose:
         it is a docked card, not a modal — no backdrop, no focus trap — so the

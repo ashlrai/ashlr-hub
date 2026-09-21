@@ -10,10 +10,17 @@
  *     themes (design doc §6: >= 4.5:1 body text, >= 3:1 meaningful borders).
  *
  * Deliberately dependency-free and DOM-free: parse -> linearize -> ratio.
- * Supports the subset of CSS color syntax tokens.css actually uses —
+ * Supports the subset of CSS color syntax the stylesheets actually use —
  * #rgb / #rrggbb / #rrggbbaa, rgb()/rgba(), hsl()/hsla(), both the legacy
- * comma form and the modern space form. Anything else returns null rather
- * than guessing a color.
+ * comma form and the modern space form, plus `color-mix(in srgb, ...)`.
+ * Anything else returns null rather than guessing a color.
+ *
+ * `color-mix` is in that list because the meaning-carrying marks that the
+ * contrast suite has to guard are not all plain tokens: the chart gridline,
+ * the empty half of a window meter and the diff row tints are all declared as
+ * a mix in a CSS module. Without this the suite could only assert the token a
+ * mix is DERIVED from, which is precisely the gap that let a 45%-alpha
+ * gridline ship under a comment claiming it cleared 3:1.
  */
 
 export interface Rgba {
@@ -60,10 +67,87 @@ function hslToRgb(h: number, s: number, l: number): { r: number; g: number; b: n
   };
 }
 
+/**
+ * Split a function's argument list on top-level commas, so a nested
+ * `rgb(...)`/`color-mix(...)` argument survives intact.
+ */
+function splitTopLevel(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of text) {
+    if (ch === '(') depth += 1;
+    else if (ch === ')') depth -= 1;
+    if (ch === ',' && depth === 0) {
+      parts.push(current);
+      current = '';
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/** `#abc 40%` -> ['#abc', 40]; a missing percentage comes back as null. */
+function colorWithPercent(raw: string): { color: string; pct: number | null } | null {
+  const text = raw.trim();
+  const m = /\s(\d*\.?\d+)%$/.exec(text);
+  if (m) return { color: text.slice(0, m.index).trim(), pct: Number.parseFloat(m[1]!) };
+  const lead = /^(\d*\.?\d+)%\s/.exec(text);
+  if (lead) return { color: text.slice(lead[0].length).trim(), pct: Number.parseFloat(lead[1]!) };
+  return { color: text, pct: null };
+}
+
+/**
+ * `color-mix(in srgb, <color> [p%], <color> [p%])`, per CSS Color 5: the two
+ * percentages are normalized to sum to 100, the result's alpha is their
+ * alpha-weighted sum, and the channels are mixed PREMULTIPLIED — which is why
+ * mixing against `transparent` yields the first color at that alpha rather
+ * than a color darkened toward black.
+ *
+ * Only the `srgb` color space is accepted. Every other space would need its
+ * own transfer function, and silently treating `oklab` as srgb would report a
+ * contrast ratio the browser does not agree with.
+ */
+function parseColorMix(text: string): Rgba | null {
+  const body = /^color-mix\((.*)\)$/is.exec(text.trim());
+  if (!body) return null;
+  const args = splitTopLevel(body[1]!);
+  if (args.length !== 3) return null;
+  if (args[0]!.replace(/\s+/g, ' ').trim() !== 'in srgb') return null;
+
+  const first = colorWithPercent(args[1]!);
+  const second = colorWithPercent(args[2]!);
+  if (!first || !second) return null;
+  const c1 = parseColor(first.color);
+  const c2 = parseColor(second.color);
+  if (!c1 || !c2) return null;
+
+  let p1 = first.pct;
+  let p2 = second.pct;
+  if (p1 === null && p2 === null) {
+    p1 = 50;
+    p2 = 50;
+  } else if (p1 === null) p1 = 100 - p2!;
+  else if (p2 === null) p2 = 100 - p1;
+  const total = p1 + p2!;
+  if (total <= 0) return null;
+  const w1 = p1 / total;
+  const w2 = p2! / total;
+
+  const alpha = c1.a * w1 + c2.a * w2;
+  if (alpha <= 0) return { r: 0, g: 0, b: 0, a: 0 };
+  const channel = (k: 'r' | 'g' | 'b'): number =>
+    clamp(Math.round((c1[k] * c1.a * w1 + c2[k] * c2.a * w2) / alpha), 0, 255);
+  return { r: channel('r'), g: channel('g'), b: channel('b'), a: clamp(alpha, 0, 1) };
+}
+
 /** Parse a CSS color string. Returns null for anything unrecognized. */
 export function parseColor(input: string): Rgba | null {
   const text = input.trim().toLowerCase();
   if (text === 'transparent') return { r: 0, g: 0, b: 0, a: 0 };
+  if (text.startsWith('color-mix(')) return parseColorMix(text);
 
   const hex = HEX_RE.exec(text);
   if (hex) {

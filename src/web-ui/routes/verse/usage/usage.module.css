@@ -261,16 +261,22 @@
 
 .windowReset {
   margin-top: var(--space-1);
-  font-size: var(--text-2xs-size, 11px);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
   line-height: var(--text-xs-line);
   color: var(--text-tertiary);
 }
 
+/* The unfilled half is --meter-track, not --bg-active: see the token's note
+   in tokens.css. At --bg-active this track was 1.22:1 against the card in
+   light and 1.20:1 in dark, so the remaining capacity — the whole point of a
+   window meter — was invisible and only the fill could be read. */
 .track {
   position: relative;
   height: 4px;
   border-radius: var(--radius-full);
-  background: var(--bg-active);
+  background: var(--meter-track);
   overflow: hidden;
 }
 
@@ -330,7 +336,10 @@
   align-items: center;
   gap: var(--space-1);
   margin-top: var(--space-1);
-  font-size: var(--text-2xs-size, 11px);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
   color: var(--text-tertiary);
 }
 
@@ -818,9 +827,22 @@ button.chip[aria-pressed='true'] {
   margin-left: var(--space-2);
 }
 
+/*
+ * Selection, in both themes. `--bg-surface-raised` IS `--bg-surface` in light
+ * (#ffffff both), so the previous treatment's background half was a literal
+ * no-op there and the only cue was a hairline stepping from `--border-subtle`
+ * to `--border-strong`: 1.18:1 → 1.45:1, a change an operator with low vision
+ * cannot see at all. Two channels now, both of which move in light AND dark:
+ * the accent border (6.24:1 light / 3.99:1 dark on the card ground, already
+ * pinned above 3:1 by the token suite) and `--bg-selected`, the system's own
+ * selected ground (1.22:1 / 1.24:1 — symmetric, unlike raised).
+ *
+ * Colour is not the only carrier: `.cardTrigger` is a real button and reports
+ * the same state through `aria-expanded`.
+ */
 .card[data-selected='true'] {
-  border-color: var(--border-strong);
-  background: var(--bg-surface-raised, var(--bg-surface));
+  border-color: var(--accent-500);
+  background: var(--bg-selected);
 }
 
 .detail {
@@ -902,7 +924,9 @@ button.chip[aria-pressed='true'] {
 }
 
 .figureCaption {
-  font-size: var(--text-2xs-size, 11px);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
   line-height: var(--text-xs-line);
   color: var(--text-tertiary);
 }
@@ -945,7 +969,9 @@ button.chip[aria-pressed='true'] {
 }
 
 .placementText {
-  font-size: var(--text-2xs-size, 11px);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
   color: var(--text-tertiary);
   white-space: nowrap;
 }
@@ -991,11 +1017,19 @@ button.chip[aria-pressed='true'] {
  *
  * `--text-tertiary` is the right source: tokens-contrast.test.ts already pins
  * it as a meaning-carrying non-text token at 4.83:1 light / 5.47:1 dark on
- * `--bg-surface` — the same argument `.unknownRule` above makes. The grid is a
- * mix of it so a full-strength rule per gridline does not overpower the series.
+ * `--bg-surface` — the same argument `.unknownRule` above makes.
+ *
+ * The grid is a SHARE of that token so a rule per gridline does not overpower
+ * the series — but the share has to stay above the floor it is claiming, and
+ * 45% did not: it measured 1.83:1 light / 2.06:1 dark, barely better than the
+ * `--border-default` it replaced, under a comment asserting it cleared 3:1.
+ * Nothing caught that because the suite could only measure the TOKEN, not the
+ * mix. 80% measures 3.29:1 / 3.92:1, still visibly recessive against the
+ * full-strength axis, and `design/contrast.ts` now parses `color-mix` so the
+ * two values below are asserted from this file rather than argued for here.
  */
 .charts {
-  --chart-grid: color-mix(in srgb, var(--text-tertiary) 45%, transparent);
+  --chart-grid: color-mix(in srgb, var(--text-tertiary) 80%, transparent);
   --chart-axis: var(--text-tertiary);
   --chart-tooltip-border: var(--border-strong);
 }

@@ -51,7 +51,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -91,11 +91,46 @@ function attachedImages() {
   return images;
 }
 
+/**
+ * True when `candidate` really lives inside the target tree.
+ *
+ * `resolve()` alone is LEXICAL — it normalises `..` and makes the path
+ * absolute, and that is all. It does not read the filesystem, so it cannot
+ * defeat a symlink: with `target/` (or anything under it) linked elsewhere, a
+ * path that resolves inside the tree can name a file that is not, and the
+ * reverse. Since the whole safety claim of this script is "it only ever touches
+ * images under THIS repo's target/", the check has to resolve links for real.
+ *
+ * `realpathSync` throws on a path that no longer exists — a race with the build
+ * that is detaching things itself. That is not containment, it is absence, and
+ * absent means nothing to detach, so it is reported as "outside".
+ */
+function insideTargetDir(candidate) {
+  let real;
+  try {
+    real = realpathSync(resolve(candidate));
+  } catch {
+    return false;
+  }
+  return real === TARGET_REAL || real.startsWith(`${TARGET_REAL}/`);
+}
+
+/**
+ * The target tree's own realpath, resolved once. Falls back to the lexical path
+ * when `target/` does not exist yet (a clean checkout), where there is nothing
+ * mounted to match it anyway.
+ */
+const TARGET_REAL = (() => {
+  try {
+    return realpathSync(TARGET_DIR);
+  } catch {
+    return TARGET_DIR;
+  }
+})();
+
 let detached = 0;
 for (const image of attachedImages()) {
-  // resolve() so a path containing `..` or a symlink cannot escape the check.
-  const path = resolve(image.imagePath);
-  if (path !== TARGET_DIR && !path.startsWith(`${TARGET_DIR}/`)) continue;
+  if (!insideTargetDir(image.imagePath)) continue;
 
   for (const dev of new Set(image.devEntries)) {
     try {

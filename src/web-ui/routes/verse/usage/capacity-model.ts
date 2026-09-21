@@ -130,7 +130,16 @@ export interface CapacityOverview {
   local: LocalCapacity | null;
   /** The one-line answer. Never claims anything about an unread seat. */
   headline: string;
-  /** True when nothing is ready and nothing is merely tight. */
+  /**
+   * True when the roster WAS read and nothing in it is usable.
+   *
+   * An entirely unread roster is deliberately excluded. `noCapacity` is what
+   * tints the headline as a warning, and "you have no capacity" over seats
+   * nobody managed to probe is an assertion about an unobserved state — the
+   * same lie `capacityHeadline` is written case-by-case to avoid, and the same
+   * one the `unread` chip word exists to prevent. A PARTLY unread roster still
+   * counts: a seat known to be blocked is a measured constraint.
+   */
   noCapacity: boolean;
 }
 
@@ -343,7 +352,9 @@ export function buildCapacityOverview(input: {
     proseResets: prose,
     local,
     headline: capacityHeadline({ ready, tight, blocked, unread, total: seats.length, local }),
-    noCapacity: seats.length > 0 && ready === 0 && tight === 0,
+    // `unread < seats.length` is the whole guard: a roster where every seat
+    // came back unread is unobserved, not exhausted.
+    noCapacity: seats.length > 0 && ready === 0 && tight === 0 && unread < seats.length,
   };
 }
 
