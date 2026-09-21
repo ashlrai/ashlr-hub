@@ -19,7 +19,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
-import { insideSingleFileBinaryRoot } from '../resources/probe-helper-invocation.js';
+import { bundledIntoSingleFileBinary, insideSingleFileBinaryRoot } from '../resources/probe-helper-invocation.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { readCutoffObservationCheckpointsSnapshot } from '../fleet/cutoff-observation-checkpoints.js';
@@ -498,12 +498,31 @@ function childRuntimeArgs(): string[] {
 
 export function cutoffCaptureCliInvocation(flag: string, args: readonly string[]): { command: string; args: string[] } {
   const entry = process.argv[1];
-  // Inside a single-file binary argv[1] is a virtual path like
-  // `/$bunfs/root/_entry.js`, which is neither on disk nor equal to execPath.
-  // Without this branch the child is spawned as `<binary> /$bunfs/root/_entry.js
-  // --_cutoff-checkpoint-supervisor …`, which the CLI rejects as an unknown
-  // command. Same defect class as the account-probe helper spawn.
-  const compiled = !entry || insideSingleFileBinaryRoot(entry) || resolve(entry) === resolve(process.execPath);
+  // "Compiled" means: re-invoking execPath alone re-enters this program, so the
+  // entry script must NOT be passed as the command word.
+  //
+  // Two independent signals, because each covers a case the other misses:
+  //
+  //  1. `bundledIntoSingleFileBinary(import.meta.url)` — intrinsic. Inside a Bun
+  //     single-file binary every bundled module's URL collapses to the virtual
+  //     root, and that is true regardless of how the process was invoked. This
+  //     is the signal that cannot be fooled by argv.
+  //  2. argv[1] — covers a Node SEA, where argv[1] IS execPath and import.meta
+  //     .url is an ordinary path, and the virtual-root spelling, which is what
+  //     a unit test can actually simulate (import.meta.url cannot be stubbed).
+  //
+  // The original test was `resolve(entry) === resolve(execPath)` alone. In a Bun
+  // binary argv[1] is `/$bunfs/root/_entry.js` while execPath is the real file,
+  // so it answered false in precisely the case it existed to detect: the child
+  // was spawned as `<binary> /$bunfs/root/_entry.js --_cutoff-checkpoint-… `,
+  // which the CLI parses as an unknown command and rejects with exit 2. Cutoff
+  // capture was dead in the shipping app while working from source — the same
+  // defect class that broke the Codex and Grok account probes.
+  const compiled =
+    bundledIntoSingleFileBinary(import.meta.url) ||
+    !entry ||
+    insideSingleFileBinaryRoot(entry) ||
+    resolve(entry) === resolve(process.execPath);
   return {
     command: process.execPath,
     args: compiled ? [flag, ...args] : [...childRuntimeArgs(), entry, flag, ...args],
