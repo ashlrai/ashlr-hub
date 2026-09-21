@@ -39,5 +39,5 @@ function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatL
 
 export const grokAdapter: VerseAdapter = {
   buildLaunch: buildGrokLaunch,
-  createParser: createAnthropicStreamParser,
+  createParser: (turnId: string) => createAnthropicStreamParser(turnId, 'grok'),
 };

@@ -72,8 +72,12 @@ export const VERSE_NATIVE_MODELS: Readonly<Record<NativeEngine, readonly VerseMo
     { id: 'gpt-5.5-mini', label: 'GPT-5.5 Mini', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['codex'] ?? null },
   ],
   grok: [
-    { id: 'grok-4', label: 'Grok 4', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
-    { id: 'grok-4-fast', label: 'Grok 4 Fast', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
+    // Verified against `grok models` on this machine. These ids were previously
+    // guessed ('grok-4', 'grok-4-fast') and BOTH are rejected by the CLI with
+    // `unknown model id`, so every Grok turn failed before inference. Never
+    // invent a provider's model ids — the CLI is the authority.
+    { id: 'grok-4.6', label: 'Grok 4.6', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
+    { id: 'grok-4.5', label: 'Grok 4.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
   ],
 };
 

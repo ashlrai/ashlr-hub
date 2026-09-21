@@ -114,7 +114,16 @@ interface OpenBlock {
  * content_block_* events and again inside an `assistant` envelope — so block
  * events are deduplicated by content within a turn.
  */
-export function createAnthropicStreamParser(turnId: string): VerseTurnParser {
+/**
+ * Shared by the claude/local and grok adapters — both speak the Anthropic wire
+ * format. `engineLabel` exists because the error text was previously hardcoded
+ * to 'claude', so a failing Grok turn reported `claude: error_during_execution`
+ * and sent me looking at the wrong adapter.
+ */
+export function createAnthropicStreamParser(
+  turnId: string,
+  engineLabel = 'claude',
+): VerseTurnParser {
   let nativeId: string | null = null;
   const open = new Map<number, OpenBlock>();
   const emittedText = new Set<string>();
@@ -322,9 +331,9 @@ export function createAnthropicStreamParser(turnId: string): VerseTurnParser {
         const subtype = str(ev['subtype']);
         if (subtype && subtype !== 'success') {
           const detail = str(ev['error']) || str(ev['result']) || subtype;
-          out.push({ type: 'error', turnId, message: `claude: ${detail}` });
+          out.push({ type: 'error', turnId, message: `${engineLabel}: ${detail}` });
         } else if (ev['is_error'] === true) {
-          out.push({ type: 'error', turnId, message: `claude: ${str(ev['result']) || 'result reported an error'}` });
+          out.push({ type: 'error', turnId, message: `${engineLabel}: ${str(ev['result']) || 'result reported an error'}` });
         }
         emitUsage(out);
         return true;
