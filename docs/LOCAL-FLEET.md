@@ -188,3 +188,23 @@ runner that speaks the OpenAI tool-call shape directly, which llama-server alrea
 and which the hub's own `llama-server` engine uses — that engine is wired and tested, so autonomous
 fleet dispatch does not have this problem. It is specifically the Claude CLI as the agent runner
 that does.
+
+### Why the template patch did not work (and what it ruled out)
+
+I patched Qwen3.8's own template to accept a *leading run* of system messages instead of only one,
+on the theory that Claude Code's multi-block system prompt arrives as consecutive system messages.
+The assertion still fired — and because it was now guarded by the new flag, that failure is itself
+the finding: **the system message arrives after a user message has already been rendered.**
+
+So this is not a message-ordering problem that a template edit can fix. The system content is placed
+mid-conversation, and the template's system branch emits nothing (the system prompt is assembled
+before the loop), so simply deleting the assertion would silently DROP the agent's instructions —
+strictly worse than the 500, because it would fail quietly.
+
+Ruled out: `--chat-template chatml` (accepts the ordering, loses tool calls), and patching the
+system-position assertion (does not address the real placement).
+
+Still open, and the right next step: inspect what `/v1/messages` actually forwards for a Claude Code
+request — llama-server logs the rendered prompt at higher verbosity — and decide whether the fix
+belongs in llama-server's Anthropic-to-chat conversion or in a small normalising shim in front of it.
+Do not delete the assertion.
