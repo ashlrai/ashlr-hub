@@ -72,10 +72,17 @@ export const VERSE_NATIVE_MODELS: Readonly<Record<NativeEngine, readonly VerseMo
     { id: 'gpt-5.5-mini', label: 'GPT-5.5 Mini', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['codex'] ?? null },
   ],
   grok: [
-    // Verified against `grok models` on this machine. These ids were previously
-    // guessed ('grok-4', 'grok-4-fast') and BOTH are rejected by the CLI with
-    // `unknown model id`, so every Grok turn failed before inference. Never
-    // invent a provider's model ids — the CLI is the authority.
+    // Verified against `grok models` run with GROK_HOME pinned to the seat's own
+    // native profile. Two things this list has been wrong about before:
+    //   - ids were once guessed ('grok-4', 'grok-4-fast'); the CLI rejects both
+    //     with `unknown model id`, so every Grok turn failed before inference.
+    //   - the list then went stale, offering only 4.6/4.5 after the CLI had
+    //     moved its default to 4.7. Verse could not select the default model.
+    // Never invent or assume a provider's ids, and re-read them from the CLI
+    // rather than from a bare `grok models`, which reads the UNPINNED home and
+    // reports "not authenticated" even while the seat's profile is signed in.
+    { id: 'grok-4.7', label: 'Grok 4.7', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
+    { id: 'grok-4.7-build-fast', label: 'Grok 4.7 Build Fast', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
     { id: 'grok-4.6', label: 'Grok 4.6', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
     { id: 'grok-4.5', label: 'Grok 4.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
   ],
