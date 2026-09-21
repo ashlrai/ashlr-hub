@@ -38,6 +38,7 @@ import {
   type JudgeTrace,
 } from './judge-trace.js';
 import type { JudgeProposalOptions, ManagerVerdict } from './manager.js';
+import { cohenKappa as sharedCohenKappa } from './agreement.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -180,67 +181,19 @@ export interface JudgeHealthReport {
 /**
  * Compute Cohen's kappa for a set of rater pairs.
  *
- * kappa = (p_o - p_e) / (1 - p_e)
- *   p_o = observed agreement
- *   p_e = expected agreement by chance (product of marginals)
+ * Thin adapter over the shared implementation in ./agreement.js — this module
+ * and counterfactual.ts each used to carry their own copy. It stays exported
+ * here, in the RaterPair shape, because prompt-optimizer.ts and this module's
+ * own calibrate() import it from this path.
  *
- * Returns 1.0 for perfect agreement, ~0 for chance-level agreement,
- * and negative values for systematic disagreement.
- * Returns null when the pairs array is empty.
- * Pure function. Never throws.
+ * kappa = (p_o - p_e) / (1 - p_e). Returns 1.0 for perfect agreement, ~0 for
+ * chance-level agreement, negative for systematic disagreement, and null when
+ * there are fewer than MIN_KAPPA_PAIRS observations (kappa is undefined on a
+ * single observation). Pure. Never throws.
  */
 export function cohenKappa(pairs: RaterPair[]): number | null {
-  try {
-    if (pairs.length === 0) return null;
-
-    const n = pairs.length;
-    // Gather all categories
-    const categorySet = new Set<string>();
-    for (const p of pairs) {
-      categorySet.add(p.raterA);
-      categorySet.add(p.raterB);
-    }
-    const categories = Array.from(categorySet);
-
-    // Build confusion matrix and marginals
-    const confusionMatrix: Record<string, Record<string, number>> = {};
-    const marginalA: Record<string, number> = {};
-    const marginalB: Record<string, number> = {};
-
-    for (const cat of categories) {
-      confusionMatrix[cat] = {};
-      marginalA[cat] = 0;
-      marginalB[cat] = 0;
-      for (const cat2 of categories) {
-        confusionMatrix[cat]![cat2] = 0;
-      }
-    }
-
-    for (const p of pairs) {
-      confusionMatrix[p.raterA]![p.raterB]! += 1;
-      marginalA[p.raterA]! += 1;
-      marginalB[p.raterB]! += 1;
-    }
-
-    // p_o: observed agreement (diagonal)
-    let observedAgreement = 0;
-    for (const cat of categories) {
-      observedAgreement += (confusionMatrix[cat]?.[cat] ?? 0);
-    }
-    const p_o = observedAgreement / n;
-
-    // p_e: expected agreement by chance
-    let expectedAgreement = 0;
-    for (const cat of categories) {
-      expectedAgreement += (marginalA[cat]! / n) * (marginalB[cat]! / n);
-    }
-    const p_e = expectedAgreement;
-
-    if (p_e >= 1.0) return 1.0; // degenerate: all predictions same category
-    return (p_o - p_e) / (1 - p_e);
-  } catch {
-    return null;
-  }
+  if (!pairs) return null;
+  return sharedCohenKappa(pairs.map((p) => ({ a: p.raterA, b: p.raterB })));
 }
 
 // ---------------------------------------------------------------------------
@@ -381,7 +334,8 @@ function corruptDiff(diff: string): string {
  * NOTE: scope is NOT inverted here. This is intentional — avgScore is used
  * only for a relative corrupted-vs-original delta (isCaught), so both sides
  * are computed the same way and the sign still reflects quality degradation.
- * Contrast with best-of-n's scoreVerdict(), which inverts scope for absolute ranking.
+ * Contrast with scoreVerdict() in ./verdict-score.js, which inverts scope for
+ * absolute ranking.
  */
 function avgScore(v: ManagerVerdict): number {
   return (v.value + v.correctness + v.scope + v.alignment) / 4;

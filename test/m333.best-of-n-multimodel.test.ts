@@ -942,7 +942,10 @@ describe('M333 — candidate specs', () => {
     expect(result.candidates[1]).toMatchObject({
       shadow: true,
       shadowIdentityStatus: 'verified',
-      score: 19,
+      // Perfect verdict (5/5/scope 1/5) → 5 + 5 + (6 - 1) + 5 = 20, the top of
+      // the documented 0-20 scale. Was 19 while best-of-n carried its own
+      // off-by-one copy of scoreVerdict (`5 - scope`).
+      score: 20,
       shadowWouldHaveWon: true,
     });
     expect(result.winner).toMatchObject({ index: 0, engine: 'claude' });
@@ -976,7 +979,9 @@ describe('M333 — candidate specs', () => {
           shadowParticipated: true,
           shadowJudged: true,
           shadowTestPassed: true,
-          shadowScore: 19,
+          // Perfect verdict → 20 on the shared scoreVerdict scale (was 19
+          // under best-of-n's former `5 - scope` copy).
+          shadowScore: 20,
           shadowWouldHaveWon: true,
           selectionWon: false,
           proposalId: null,
@@ -2101,7 +2106,9 @@ describe('M333 — file-once proposal capture', () => {
     expect(h.recordBestOfN).toHaveBeenCalledWith(expect.objectContaining({
       winnerIndex: -1,
       totalCostUsd: 0.4,
-      candidates: [expect.objectContaining({ score: 19, testsPassed: true, costUsd: 0.4 })],
+      // Perfect verdict → 20 on the shared scoreVerdict scale (was 19 under
+      // best-of-n's former `5 - scope` copy).
+      candidates: [expect.objectContaining({ score: 20, testsPassed: true, costUsd: 0.4 })],
     }));
   });
 });

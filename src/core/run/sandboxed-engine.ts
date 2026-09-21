@@ -72,11 +72,8 @@ import {
 } from '../integrations/locus.js';
 import { iterateToGreen } from './verify-to-green.js';
 import type { TerminationReason } from './run-monitor.js';
-import {
-  classifyAgentDiagnosticError,
-  measureAgentDiagnosticText,
-  recordAgentDiagnostic,
-} from './agent-diagnostics.js';
+import { measureAgentDiagnosticText, recordAgentDiagnostic } from './agent-diagnostics.js';
+import { classifyEngineError, toAgentDiagnosticErrorClass } from '../classify/engine-errors.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
 import { runTask, type ReserveModelStep } from './agent-loop.js';
@@ -1784,7 +1781,21 @@ export async function runEngineSandboxed(
         engine,
         ok: res.ok,
         ...(res.terminationReason ? { terminationReason: res.terminationReason } : {}),
-        errorClass: classifyAgentDiagnosticError(res.error),
+        // Unified classification, collapsed back onto the existing
+        // AgentDiagnosticErrorClass union, so this persisted audit row keeps
+        // its exact schema and every stored value keeps its meaning.
+        //
+        // The win this buys, measured live: `model "…" not found, try pulling
+        // it first` was classified `command-missing` by the regex table, i.e.
+        // "the binary is not installed", so the run gave up instead of
+        // recovering. The classifier calls it a model failure (0.81), which
+        // collapses to `execution` and stays recoverable.
+        //
+        // Falls back to the regex answer when the classifier is unkeyed,
+        // unreachable, or below its confidence gate — this is a diagnostic
+        // record, never a gate, so a wrong answer costs accuracy and never
+        // availability.
+        errorClass: toAgentDiagnosticErrorClass((await classifyEngineError(res.error, cfg)).kind),
         durationMs: invocationDurationMs,
         attempt,
         maxAttempts,

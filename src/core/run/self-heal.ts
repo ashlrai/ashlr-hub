@@ -20,62 +20,45 @@
 
 import type { HealPolicy, HealEvent, RetryPolicy } from '../types.js';
 import { withRetry } from './retry.js';
+import {
+  isMcpDownstreamText,
+  isModelFailureText,
+  isRateLimitText,
+} from '../classify/engine-errors.js';
 
 // ---------------------------------------------------------------------------
 // Error classification
+//
+// The PREDICATES below now live in `classify/engine-errors.ts` — the single
+// source of truth shared with `run/agent-diagnostics.ts`'s classification. They
+// used to be private copies here, which is how this module and the diagnostics
+// table came to disagree about what a rate limit is ("quota exceeded" and
+// "overloaded" backed off here and were recorded as unclassified `execution`
+// failures there). The definitions are unchanged; only their home moved.
+//
+// The PRIORITY ORDER below is deliberately still this module's own
+// (mcp-restart > model-downgrade > rate-backoff), because these are heal
+// STRATEGIES, not error labels: an MCP downstream that also mentions a quota is
+// still fixed by restarting the downstream, and the heal loop's documented
+// behaviour must not shift underneath its callers.
 // ---------------------------------------------------------------------------
 
 /** True for errors that look like an MCP downstream crash or spawn failure. */
 function isMcpRestartable(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  if (msg.includes('unsafe mcp argv refused')) return false;
-  return (
-    msg.includes('spawn') ||
-    msg.includes('econnrefused') ||
-    msg.includes('econnreset') ||
-    msg.includes('socket hang up') ||
-    msg.includes('connect failed') ||
-    msg.includes('downstream') ||
-    msg.includes('mcp') ||
-    // process exit codes surfaced as error messages
-    msg.includes('exited with code') ||
-    msg.includes('process exited')
-  );
+  return isMcpDownstreamText(err.message);
 }
 
 /** True for errors that look like a local model OOM or model-layer failure. */
 function isModelError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return (
-    msg.includes('oom') ||
-    msg.includes('out of memory') ||
-    msg.includes('cuda out of memory') ||
-    msg.includes('model error') ||
-    msg.includes('model failed') ||
-    msg.includes('context length') ||
-    msg.includes('context window') ||
-    // ollama / lm-studio error patterns
-    msg.includes('model not loaded') ||
-    msg.includes('llm error') ||
-    msg.includes('inference error')
-  );
+  return isModelFailureText(err.message);
 }
 
 /** True for errors that look like a cloud rate-limit or quota exceeded. */
 function isRateLimit(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
-  const msg = err.message.toLowerCase();
-  return (
-    msg.includes('rate limit') ||
-    msg.includes('rate_limit') ||
-    msg.includes('429') ||
-    msg.includes('too many requests') ||
-    msg.includes('quota exceeded') ||
-    msg.includes('overloaded') ||
-    msg.includes('throttl')
-  );
+  return isRateLimitText(err.message);
 }
 
 // ---------------------------------------------------------------------------

@@ -355,37 +355,51 @@ describe('M106 BUG2 — milestone-not-found resolved, no permanent in-progress',
 // ===========================================================================
 
 describe('M106 BUG3 — subscriptionMaxPercent clamped to [1, 100]', () => {
-  it('negative subscriptionMaxPercent does NOT disable the throttle (clamped to 1)', async () => {
-    // With maxPercent=1 the throttle fires whenever usage is ≥ 1% (i.e. almost
-    // always). With the bug (negative passes through), subscriptionAllows would
-    // see maxPercent < 0 and treat everything as under the cap.
-    // We verify the fix by confirming the clamped value is visible: import
-    // subscriptionAllows directly and confirm behavior is consistent with
-    // maxPercent being clamped to 1, not the raw negative.
-    const { subscriptionAllows } = await import('../src/core/fleet/subscription-usage.js');
+  // These used to assert the literal `Math.min(100, Math.max(1,` inside
+  // loop.ts. That clamp was deliberately extracted into ONE helper
+  // (`resolveSubscriptionMaxPercent` in core/config.ts) because the value was
+  // previously read through an untyped cast in five places with INCONSISTENT
+  // clamping — gateway.ts clamped, loop.ts did not. Pinning the old inline
+  // spelling made the refactor look like a regression when the guarantee had
+  // actually been strengthened.
+  //
+  // So these now assert the guarantee itself, plus the one structural fact
+  // that keeps it true: no reader re-inlines its own clamp.
 
-    // subscriptionAllows with maxPercent=1 should report NOT allowed when usage
-    // is known and ≥ 1%. subscriptionAllows with maxPercent=-50 (pre-fix)
-    // would have treated it as "cap is -50%" — allowing everything.
-    // Since we cannot force a real usage reading in unit tests, we verify the
-    // clamp logic directly by reading the loop source for the clamped value.
-    const loopSrc = fs.readFileSync(
-      path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../src/core/daemon/loop.ts'),
-      'utf8',
-    );
-    // The fix introduces Math.min(100, Math.max(1, rawPct)) — confirm it's there.
-    expect(loopSrc).toMatch(/Math\.min\(100,\s*Math\.max\(1,/);
-    // And confirm the old unclamped pattern is gone.
-    expect(loopSrc).not.toMatch(/\?\?\s*90;\s*\n.*const subCheck/s);
+  it('clamps a negative percent up to 1 rather than disabling the throttle', async () => {
+    const { resolveSubscriptionMaxPercent } = await import('../src/core/config.js');
+    // The bug being guarded: a negative cap read as "-50%" means every usage
+    // level is under the cap, so the throttle never fires.
+    expect(resolveSubscriptionMaxPercent({ foundry: { subscriptionMaxPercent: -50 } })).toBe(1);
+    expect(resolveSubscriptionMaxPercent(-1)).toBe(1);
+    expect(resolveSubscriptionMaxPercent(0)).toBe(1);
   });
 
-  it('subscriptionMaxPercent > 100 is clamped to 100 (not a runaway cap)', () => {
-    // Verify the source-level guard for the upper bound.
-    const loopSrc = fs.readFileSync(
-      path.resolve(import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname), '../src/core/daemon/loop.ts'),
-      'utf8',
-    );
-    expect(loopSrc).toMatch(/Math\.min\(100,/);
+  it('clamps above 100 down to 100 rather than allowing a runaway cap', async () => {
+    const { resolveSubscriptionMaxPercent } = await import('../src/core/config.js');
+    expect(resolveSubscriptionMaxPercent({ foundry: { subscriptionMaxPercent: 5_000 } })).toBe(100);
+    expect(resolveSubscriptionMaxPercent(101)).toBe(100);
+  });
+
+  it('passes a sane percent through untouched and falls back when absent', async () => {
+    const { resolveSubscriptionMaxPercent } = await import('../src/core/config.js');
+    expect(resolveSubscriptionMaxPercent({ foundry: { subscriptionMaxPercent: 75 } })).toBe(75);
+    expect(resolveSubscriptionMaxPercent({})).toBe(90);
+    expect(resolveSubscriptionMaxPercent(undefined)).toBe(90);
+    // A non-finite value must not propagate as NaN into a comparison, which
+    // would make every `usage >= cap` test false and silently disable the cap.
+    expect(resolveSubscriptionMaxPercent(Number.NaN)).toBe(90);
+    expect(resolveSubscriptionMaxPercent(Number.POSITIVE_INFINITY)).toBe(90);
+  });
+
+  it('keeps every reader on the shared helper instead of re-inlining a clamp', () => {
+    const dir = import.meta.dirname ?? path.dirname(new URL(import.meta.url).pathname);
+    for (const rel of ['../src/core/daemon/loop.ts', '../src/core/fabric/gateway.ts']) {
+      const src = fs.readFileSync(path.resolve(dir, rel), 'utf8');
+      expect(src).toMatch(/resolveSubscriptionMaxPercent/);
+      // A re-inlined clamp is how the five readers drifted apart the first time.
+      expect(src).not.toMatch(/Math\.min\(100,\s*Math\.max\(1,/);
+    }
   });
 });
 

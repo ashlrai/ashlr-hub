@@ -17,6 +17,7 @@ import type { Backlog, Proposal, ScannerDescriptor, ScannerObservation, WorkItem
 import { canonicalEnrollmentPath, listEnrolled } from '../sandbox/policy.js';
 import { audit } from '../sandbox/audit.js';
 import { isTrivialItem } from './value-filter.js';
+import { scoreItem, sourceTierMultiplier } from './scoring.js';
 import { computeOutcomePriors, scoreAdjustment } from '../fleet/feedback.js';
 import { strategicRepoMultiplier } from '../ecosystem/focus.js';
 import {
@@ -71,54 +72,14 @@ export function backlogPath(): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Priority score; higher = do first.
- * Heuristic: value / effort (effort clamped >= 1; both clamped to 1..5).
- * Deterministic, pure.
+ * The value/effort heuristic and the source-tier weighting live in
+ * ./scoring.js — a leaf module shared with scanners.ts, which used to
+ * re-inline the same formula behind a comment promising the two stayed in
+ * sync. Re-exported from this path so existing importers are unaffected.
  */
-export function scoreItem(value: number, effort: number): number {
-  const v = Math.max(1, Math.min(5, value));
-  const e = Math.max(1, Math.min(5, effort));
-  return v / e;
-}
-
-// ---------------------------------------------------------------------------
-// M161: Source-tier weighting
-// ---------------------------------------------------------------------------
-
-/**
- * Source priority tiers. Higher tier = more substantive work.
- *
- * Tier 3 (highest) — goal, issue: directive goals and tracked bugs drive real
- *   feature/fix work; the fleet should always prefer these.
- * Tier 2 (high)    — security, test: security vulnerabilities and failing tests
- *   are urgent and produce concrete diffs.
- * Tier 1 (normal)  — self, plugin, doc: useful but not fleet-critical.
- * Tier 0 (low)     — dep, lint, hygiene, todo: often noisy / low yield; should
- *   rank below substantive work when both are present.
- *
- * Multipliers are chosen so that a tier-3 item with value=2 outranks a tier-0
- * item with value=5 (2 * 1.8 = 3.6 > 5/5 * 0.6 = 0.6, even at effort=1).
- */
-const SOURCE_TIER_MULTIPLIER: Record<string, number> = {
-  goal:     1.8,
-  issue:    1.8,
-  security: 1.4,
-  test:     1.4,
-  self:     1.0,
-  plugin:   1.0,
-  doc:      1.0,
-  todo:     0.6,
-  dep:      0.6,
-  lint:     0.6,
-  hygiene:  0.6,
-};
+export { scoreItem, sourceTierMultiplier } from './scoring.js';
 
 const LOW_VALUE_MAINTENANCE_SOURCES = new Set(['dep', 'lint', 'hygiene', 'todo']);
-
-/** Returns the source-tier multiplier for an item's source. Unknown sources → 1.0. */
-export function sourceTierMultiplier(source: string): number {
-  return SOURCE_TIER_MULTIPLIER[source] ?? 1.0;
-}
 
 // ---------------------------------------------------------------------------
 // Persistence
