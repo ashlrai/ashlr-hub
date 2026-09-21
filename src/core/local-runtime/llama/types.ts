@@ -135,6 +135,67 @@ export interface LlamaOwnershipRecord {
   owner: LlamaRuntimeOwner;
 }
 
+/**
+ * Crash-safe ownership record for the DETACHED Anthropic proxy host.
+ *
+ * Same discipline as {@link LlamaOwnershipRecord} and for the same reason: a
+ * pid is not an identity, so the record also carries what the proxy's argv must
+ * still say before anything is terminated. It is a separate file
+ * (`anthropic-proxy.json`) because it describes a separate process with its own
+ * lifetime — see {@link import('./paths.js').anthropicProxyRecordPath}.
+ *
+ * There is no `args` field. The host process's whole argv is two integers and a
+ * fixed internal flag, all reconstructible from the fields below, and a stored
+ * argv nobody re-derives is just another thing that can go stale.
+ */
+export interface AnthropicProxyOwnershipRecord {
+  schemaVersion: 1;
+  /** Pid of the proxy host process. */
+  pid: number;
+  /** The port the PROXY listens on — not llama-server's. */
+  port: number;
+  host: string;
+  /**
+   * Absolute path of the executable hosting the proxy (`process.execPath` of
+   * the spawner: `node`, or the packaged `ashlr` binary). This is the proxy's
+   * equivalent of {@link LlamaOwnershipRecord.binPath} — argv[0] has to still
+   * be this before the pid is signalled.
+   */
+  execPath: string;
+  /** llama-server's port, as handed to the host process. */
+  upstreamPort: number;
+  /** `http://host:port` the proxy forwards every request to. */
+  upstreamOrigin: string;
+  startedAt: string;
+  owner: LlamaRuntimeOwner;
+}
+
+/**
+ * Outcome of a proxy lifecycle command.
+ *
+ * Mirrors {@link LlamaLifecycleResult} minus the snapshot: the proxy has no
+ * `/props` to read, and inventing a health surface for it would be a second
+ * source of truth about a runtime that already has one.
+ */
+export interface AnthropicProxyLifecycleResult {
+  ok: boolean;
+  action:
+    | 'started'
+    | 'already-running'
+    | 'adopted'
+    | 'restarted'
+    | 'stopped'
+    | 'not-running'
+    | 'refused'
+    | 'failed';
+  /** One-line human explanation. Never carries a token or a secret. */
+  detail: string;
+  /** The record in force after the command, or null when there is none. */
+  record: AnthropicProxyOwnershipRecord | null;
+  /** `http://host:port/v1` an Anthropic client should use, when one is up. */
+  baseUrl: string | null;
+}
+
 /** Facts about the world that {@link shouldReclaim} needs, gathered separately. */
 export interface LlamaLivenessFacts {
   /** The recorded pid is a live, non-zombie process. */

@@ -578,6 +578,43 @@ describe('anthropic proxy — shutdown', () => {
     expect(listeners() - afterUpstream).toBe(0);
     // ...while genuinely listening.
     expect(await portAccepts(proxy.host, proxy.port)).toBe(true);
+    expect(proxy.holdsProcessOpen).toBe(false);
+  });
+
+  it('holds the loop open ONLY for the dedicated host process', async () => {
+    // The one documented exception to the unref rule above, and the pair has to
+    // be tested together or the next person reads the two comments and picks
+    // whichever they like.
+    //
+    // proxy-host.ts is a process whose entire reason to exist IS this listener:
+    // there, an unref'd socket means Node sees an empty event loop and exits
+    // before serving a single request — the exact inverse of the bug unref was
+    // added to fix. Everywhere else the default must stay, so that a one-shot
+    // CLI still returns to the shell.
+    const listeners = (): number =>
+      process.getActiveResourcesInfo().filter((kind) => kind === 'TCPServerWrap').length;
+
+    const upstream = await startUpstream();
+    started.upstream = upstream;
+    const before = listeners();
+
+    const proxy = await startAnthropicProxy({
+      host: '127.0.0.1',
+      port: 0,
+      upstreamOrigin: upstream.origin,
+      holdProcessOpen: true,
+    });
+    started.proxy = proxy;
+
+    expect(proxy.holdsProcessOpen).toBe(true);
+    expect(listeners() - before).toBe(1);
+    expect(await portAccepts(proxy.host, proxy.port)).toBe(true);
+
+    // And it still lets go on close, or the host process could never exit on
+    // SIGTERM and `stop` would have to escalate to SIGKILL every time.
+    await proxy.close();
+    expect(listeners() - before).toBe(0);
+    expect(await portAccepts(proxy.host, proxy.port)).toBe(false);
   });
 
   it('releases the port and is idempotent', async () => {

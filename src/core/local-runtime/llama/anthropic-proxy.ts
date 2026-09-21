@@ -113,6 +113,12 @@ export interface AnthropicProxyHandle {
   upstreamOrigin: string;
   /** Set when a non-loopback bind was requested and refused. */
   hostDowngradedFrom: string | null;
+  /**
+   * True when this listener is ref'd and therefore keeps its host process
+   * alive. False — the default — for the unref'd in-process listener a
+   * one-shot CLI hosts. See {@link AnthropicProxyOptions.holdProcessOpen}.
+   */
+  holdsProcessOpen: boolean;
   /** Idempotent. Resolves once the listener and every live socket are gone. */
   close(): Promise<void>;
 }
@@ -134,6 +140,20 @@ export interface AnthropicProxyOptions {
    * knows is broken until the day it runs.
    */
   maxNormalisedBodyBytes?: number;
+  /**
+   * Keep the host process alive for as long as this listener is open.
+   *
+   * Default FALSE, and that default is load-bearing — see the `server.unref()`
+   * comment below. It exists for exactly one caller: proxy-host.ts, the
+   * dedicated child process whose entire reason to exist IS this listener.
+   * There, an unref'd socket would let Node decide the event loop is empty and
+   * exit immediately, which is the opposite of the bug unref was added to fix.
+   *
+   * In every other host — a one-shot CLI, the Verse web server — leave it
+   * alone: the process has its own reasons to live or die, and the proxy must
+   * not be one of them.
+   */
+  holdProcessOpen?: boolean;
 }
 
 /** Copy headers minus this hop's own, so framing is re-decided downstream. */
@@ -438,7 +458,14 @@ export async function startAnthropicProxy(
   // a one-shot CLI exits promptly and takes the proxy with it. Accepted
   // connections are ref'd separately, so an in-flight request still holds the
   // process open rather than being cut mid-stream.
-  server.unref();
+  //
+  // `holdProcessOpen` is the ONE documented exception, and it is not a
+  // loosening of the rule above but an instance of it: proxy-host.ts is a
+  // process whose own reason to be alive IS this listener. Nothing else may
+  // pass it — the 24/7 story is "a detached host process owns the socket", not
+  // "every caller re-refs the socket and hopes".
+  const holdProcessOpen = options.holdProcessOpen === true;
+  if (!holdProcessOpen) server.unref();
 
   const address = server.address();
   if (address === null || typeof address === 'string') {
@@ -454,6 +481,7 @@ export async function startAnthropicProxy(
     baseUrl: `${origin}/v1`,
     upstreamOrigin,
     hostDowngradedFrom: downgradedFrom,
+    holdsProcessOpen: holdProcessOpen,
     close(): Promise<void> {
       if (closing !== null) return closing;
       closing = new Promise<void>((done) => {

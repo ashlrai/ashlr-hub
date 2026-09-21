@@ -186,6 +186,39 @@ export function isLlamaServerArgv(argv: string): boolean {
   return base === 'llama-server' || base === 'llama-server.exe';
 }
 
+/** One row of the process table: a pid and its full, untruncated argv. */
+export interface ProcessTableEntry {
+  pid: number;
+  argv: string;
+}
+
+/**
+ * Every live process as (pid, argv) pairs. Empty when the table is unreadable.
+ *
+ * Shared by both supervisors' discovery scans (llama-server here,
+ * the Anthropic proxy host in proxy-process.ts) so there is one spelling of
+ * "read the process table" rather than two that can drift on `ps` flags —
+ * `-ww` in particular, without which macOS truncates argv at the terminal
+ * width and an ownership check silently fails on a long path.
+ */
+export function processTable(): ProcessTableEntry[] {
+  const out = runPs(['-axww', '-o', 'pid=,args=']);
+  if (out === null) return [];
+
+  const rows: ProcessTableEntry[] = [];
+  for (const line of out.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const split = /^(\d+)\s+(.*)$/.exec(trimmed);
+    if (!split) continue;
+    const pid = Number.parseInt(split[1] as string, 10);
+    const argv = (split[2] as string).trim();
+    if (!Number.isInteger(pid) || pid <= 1 || argv.length === 0) continue;
+    rows.push({ pid, argv });
+  }
+  return rows;
+}
+
 /**
  * Find every live llama-server bound to `port`.
  *
@@ -196,18 +229,8 @@ export function isLlamaServerArgv(argv: string): boolean {
  * not health.
  */
 export function findLlamaServersOnPort(port: number): DiscoveredLlamaServer[] {
-  const out = runPs(['-axww', '-o', 'pid=,args=']);
-  if (out === null) return [];
-
   const found: DiscoveredLlamaServer[] = [];
-  for (const line of out.split('\n')) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const split = /^(\d+)\s+(.*)$/.exec(trimmed);
-    if (!split) continue;
-    const pid = Number.parseInt(split[1] as string, 10);
-    const argv = (split[2] as string).trim();
-    if (!Number.isInteger(pid) || pid <= 1) continue;
+  for (const { pid, argv } of processTable()) {
     if (!isLlamaServerArgv(argv)) continue;
     if (!argvBindsPort(argv, port)) continue;
     const binPath = argv.split(/\s+/)[0] as string;

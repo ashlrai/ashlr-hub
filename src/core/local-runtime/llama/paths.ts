@@ -27,6 +27,31 @@ export function ownershipRecordPath(): string {
 }
 
 /**
+ * `~/.ashlr/local-runtime/anthropic-proxy.json` — the PROXY's ownership record.
+ *
+ * Deliberately a SECOND file rather than another field on the llama-server
+ * record. They are two processes with independent lifetimes: the proxy can be
+ * restarted to repoint its upstream while llama-server keeps its loaded
+ * weights, and a crashed proxy must not cast doubt on a record that is still
+ * telling the truth about a 27 GB server. One file per supervised process also
+ * keeps {@link import('./record.js').parseOwnershipRecord}'s shape check —
+ * the security boundary — free of optional halves.
+ */
+export function anthropicProxyRecordPath(): string {
+  return join(localRuntimeDir(), 'anthropic-proxy.json');
+}
+
+/** Absolute stdout log path for the detached Anthropic proxy host. */
+export function anthropicProxyStdoutLogPath(): string {
+  return join(logsDir(), 'anthropic-proxy.out.log');
+}
+
+/** Absolute stderr log path for the detached Anthropic proxy host. */
+export function anthropicProxyStderrLogPath(): string {
+  return join(logsDir(), 'anthropic-proxy.err.log');
+}
+
+/**
  * `~/.ashlr/local-runtime/llama-server-launch.sh` — the launch agent's shim.
  *
  * launchd runs THIS rather than llama-server directly. See

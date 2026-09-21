@@ -13,7 +13,6 @@
  */
 
 import { spawn } from 'node:child_process';
-import { createServer } from 'node:net';
 import { mkdirSync, openSync, closeSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import {
@@ -23,11 +22,16 @@ import {
   originFor,
   resolveLlamaRuntimeConfig,
 } from './config.js';
-import { ensureAnthropicProxy, stopAnthropicProxy } from './anthropic-proxy.js';
+import { anthropicProxyHandle, stopAnthropicProxy } from './anthropic-proxy.js';
 import { probeLlamaRuntime } from './health.js';
 import { bootoutLaunchAgent, launchAgentLoaded } from './launchd.js';
 import { resolveOllamaModelBlob, resolveOllamaRefForBlobPath } from './ollama-blob.js';
 import { logsDir, stderrLogPath, stdoutLogPath } from './paths.js';
+import { isPortFree } from './port.js';
+import {
+  ensureDetachedAnthropicProxy,
+  stopDetachedAnthropicProxy,
+} from './proxy-supervisor.js';
 import {
   findLlamaServersOnPort,
   livenessFactsFor,
@@ -114,10 +118,17 @@ function hostDowngradeNote(runtime: LlamaRuntimeConfig): string {
  * adopted as for one we spawned. It is idempotent, so the repeat calls a
  * `status`-then-`start` loop produces cost nothing.
  *
+ * The proxy is a DETACHED CHILD with its own ownership record, not an
+ * in-process listener. That is the whole point of proxy-supervisor.ts: an
+ * in-process listener died with the one-shot CLI that started it, leaving
+ * llama-server (which is detached) serving a lane Claude Code could not reach.
+ *
  * The upstream is pinned to the runtime THIS call started, not to the globally
  * resolved base URL: `--port` makes those differ, and a proxy forwarding to a
  * different llama-server than the one just launched is the two-endpoints
- * failure config.ts exists to prevent.
+ * failure config.ts exists to prevent. Unlike before, a proxy of ours found
+ * pointing the wrong way is now REPOINTED rather than merely reported — we own
+ * the process, so we can fix it.
  *
  * Always returns a sentence to append to the lifecycle detail. It never throws
  * and never fails the lifecycle result: llama-server serving correctly is
@@ -128,33 +139,38 @@ async function attachAnthropicProxy(
   options: LifecycleOptions,
 ): Promise<string> {
   const upstreamOrigin = originFor(runtime.host, runtime.port);
-  const started = await ensureAnthropicProxy({
+
+  // A long-lived host (the Verse web server) may already be hosting an
+  // IN-PROCESS proxy on this port from before this change, or by calling
+  // `ensureAnthropicProxy` directly. Spawning a detached child would then find
+  // the port held by a listener with no process of its own to identify, and
+  // refuse. Saying so is more useful than a refusal nobody can act on.
+  const hosted = anthropicProxyHandle();
+  if (hosted !== null && hosted.port === runtime.anthropicPort) {
+    return hosted.upstreamOrigin === upstreamOrigin
+      ? ` — Anthropic clients: ${hosted.baseUrl} (hosted in this process)`
+      : ` — NOTE: this process is hosting an Anthropic proxy on ${hosted.origin} that forwards` +
+          ` to ${hosted.upstreamOrigin}, not ${upstreamOrigin}; restart it to repoint it.`;
+  }
+
+  const started = await ensureDetachedAnthropicProxy({
     cfg: options.cfg,
-    host: runtime.host,
     port: runtime.anthropicPort,
-    upstreamOrigin,
+    upstreamPort: runtime.port,
   });
-  if ('error' in started) {
+  if (!started.ok || started.baseUrl === null) {
     return (
-      ` — NOTE: the Anthropic proxy could not bind ${runtime.host}:${runtime.anthropicPort}` +
-      ` (${started.error}), so Claude Code cannot reach this runtime; the OpenAI-compatible` +
-      ' lane is unaffected.'
+      ` — NOTE: the Anthropic proxy could not be brought up on ${runtime.host}:` +
+      `${runtime.anthropicPort} (${started.detail}), so Claude Code cannot reach this runtime;` +
+      ' the OpenAI-compatible lane is unaffected.'
     );
   }
-  if (started.handle.upstreamOrigin !== upstreamOrigin) {
-    // `ensure` is idempotent, which means it returns the proxy this process is
-    // ALREADY hosting and ignores the options — correct for the repeat calls
-    // it exists for, wrong to leave unsaid after `start --port` moved
-    // llama-server. Saying it is the whole job here: a proxy quietly
-    // forwarding to a runtime nobody is using is the two-endpoints failure
-    // this module family is built to make impossible.
-    return (
-      ` — NOTE: the Anthropic proxy on ${started.handle.origin} is still forwarding to` +
-      ` ${started.handle.upstreamOrigin}, not ${upstreamOrigin}; restart this process to` +
-      ' repoint it.'
-    );
-  }
-  return ` — Anthropic clients: ${started.handle.baseUrl}`;
+  const how =
+    started.action === 'adopted' ? ' (adopted)'
+      : started.action === 'restarted' ? ' (repointed)'
+        : started.action === 'already-running' ? ' (already up)'
+          : '';
+  return ` — Anthropic clients: ${started.baseUrl}${how}`;
 }
 
 /** Probe a specific host/port pair rather than the globally-resolved one. */
@@ -174,38 +190,12 @@ export async function statusLocalRuntime(
 }
 
 /**
- * Can we bind this port right now?
- *
- * A dead process is not the same as a released port: a socket in TIME_WAIT, or
- * a descendant still holding the listener, both keep the port busy while the
- * pid we killed is gone. `stop` reports the port free only when this says so.
+ * Re-exported, not defined here. `isPortFree` moved to port.ts when the
+ * Anthropic proxy grew a supervisor that needs the same answer: this module
+ * imports that one, so defining it here would make the two import each other.
+ * The name and behaviour are unchanged for every caller.
  */
-export function isPortFree(host: string, port: number, timeoutMs = 1_000): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = createServer();
-    let settled = false;
-    const finish = (free: boolean): void => {
-      if (settled) return;
-      settled = true;
-      try {
-        server.close();
-      } catch {
-        // Already closed.
-      }
-      resolve(free);
-    };
-    const timer = setTimeout(() => finish(false), timeoutMs);
-    if (typeof timer.unref === 'function') timer.unref();
-    server.once('error', () => {
-      clearTimeout(timer);
-      finish(false);
-    });
-    server.listen({ host, port, exclusive: true }, () => {
-      clearTimeout(timer);
-      finish(true);
-    });
-  });
-}
+export { isPortFree } from './port.js';
 
 /** Last few KB of the stderr log, so a launch failure explains itself. */
 function stderrTail(path = stderrLogPath()): string {
@@ -594,9 +584,23 @@ export async function stopLocalRuntime(
   // changed nothing about the runtime, so it must not have quietly taken the
   // Anthropic lane down either. Past this line the stop is going through, and
   // a proxy still listening would be a port that accepts Claude Code's
-  // requests and 502s every one of them. Idempotent — a no-op in the common
-  // case where this process was not hosting one.
-  if (await stopAnthropicProxy()) notes.push('the Anthropic proxy was released');
+  // requests and 502s every one of them.
+  //
+  // BOTH lanes are released, in this order, and both are idempotent. The
+  // in-process singleton is the legacy shape a long-lived host may still be
+  // using; the detached host is what `start` spawns now. A `stop` that only
+  // knew about one of them would leave the other listening.
+  if (await stopAnthropicProxy()) notes.push('the in-process Anthropic proxy was released');
+  const proxyStop = await stopDetachedAnthropicProxy({
+    cfg: options.cfg,
+    port: runtime.anthropicPort,
+    upstreamPort: runtime.port,
+    force: options.force === true,
+  });
+  if (proxyStop.action === 'stopped') notes.push('the Anthropic proxy was stopped');
+  else if (proxyStop.action === 'refused' || proxyStop.action === 'failed') {
+    notes.push(`the Anthropic proxy was left alone: ${proxyStop.detail}`);
+  }
 
   const snapshot = await snapshotFor(runtime, null);
   const portFree = await isPortFree(runtime.host, runtime.port);

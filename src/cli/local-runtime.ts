@@ -17,6 +17,14 @@
  *   ashlr local-runtime uninstall
  *   ashlr local-runtime logs    [--lines N]
  *   ashlr local-runtime resolve-model [--model REF]
+ *   ashlr local-runtime proxy   <start|stop|status> [--anthropic-port N] [--port N]
+ *
+ * THE ANTHROPIC LANE IS A SECOND PROCESS. `start` brings up llama-server AND a
+ * detached normalising proxy in front of it, because Claude Code cannot talk to
+ * llama-server directly (Qwen3.8's template rejects its request shape). Both
+ * outlive this command: the proxy used to be an in-process listener that died
+ * with the CLI, which left a serving runtime nobody could reach. `proxy` is the
+ * same lifecycle addressed on its own, for when the runtime is already up.
  *
  * SAFETY INVARIANTS enforced at this layer:
  *
@@ -47,7 +55,9 @@ import { isAbsolute } from 'node:path';
 import { loadConfigReadOnly } from '../core/config.js';
 import { readKillSwitch } from '../core/sandbox/policy.js';
 import {
+  ANTHROPIC_PROXY_HOST_FLAG,
   buildLlamaServerArgs,
+  ensureDetachedAnthropicProxy,
   installLaunchAgent,
   isLoopbackHost,
   launchAgentInstalled,
@@ -57,12 +67,17 @@ import {
   resolveLlamaRuntimeConfig,
   resolveOllamaModelBlob,
   restartLocalRuntime,
+  runAnthropicProxyHost,
   startLocalRuntime,
+  statusDetachedAnthropicProxy,
   statusLocalRuntime,
+  stopDetachedAnthropicProxy,
   stopLocalRuntime,
   uninstallLaunchAgent,
 } from '../core/local-runtime/llama/index.js';
 import type {
+  AnthropicProxyLifecycleResult,
+  DetachedProxyOptions,
   LifecycleOptions,
   LlamaRuntimeConfig,
   LlamaRuntimeSnapshot,
@@ -81,9 +96,14 @@ const USAGE = `usage: ashlr local-runtime <status|start|stop|restart|install|uni
   resolve-model          Print the current GGUF blob path for a model reference.
                          Used by the launch agent's shim, so a re-pulled model
                          does not leave a 24/7 job pointed at a collected blob.
+  proxy <start|stop|status>
+                         The Anthropic lane on its own — the detached listener
+                         Claude Code points at. \`start\` brings it up too; this
+                         is for when llama-server is already running.
 
 options:
   --port N               TCP port (default 8080)
+  --anthropic-port N     Port for the Anthropic normalising proxy (default 8081)
   --slots N              Concurrent slots to request (default 4)
   --ctx N                Total context shared across slots (default 65536)
   --model REF            Ollama model reference to serve (default: the hub's local model)
@@ -98,6 +118,7 @@ interface ParsedFlags {
   json: boolean;
   force: boolean;
   port?: number;
+  anthropicPort?: number;
   slots?: number;
   ctx?: number;
   model?: string;
@@ -125,6 +146,9 @@ function parseFlags(args: string[]): ParsedFlags {
       case '--json': out.json = true; break;
       case '--force': out.force = true; break;
       case '--port': out.port = num(args[++i], '--port', 1, 65_535); break;
+      case '--anthropic-port':
+        out.anthropicPort = num(args[++i], '--anthropic-port', 1, 65_535);
+        break;
       case '--slots': out.slots = num(args[++i], '--slots', 1, 64); break;
       case '--ctx': out.ctx = num(args[++i], '--ctx', 512, 4_194_304); break;
       case '--wait-ms': out.waitMs = num(args[++i], '--wait-ms', 1_000, 3_600_000); break;
@@ -153,6 +177,7 @@ function parseFlags(args: string[]): ParsedFlags {
 function runtimeOverrides(flags: ParsedFlags): Partial<LlamaRuntimeConfig> {
   const overrides: Partial<LlamaRuntimeConfig> = {};
   if (flags.port !== undefined) overrides.port = flags.port;
+  if (flags.anthropicPort !== undefined) overrides.anthropicPort = flags.anthropicPort;
   if (flags.slots !== undefined) overrides.slots = flags.slots;
   if (flags.ctx !== undefined) overrides.context = flags.ctx;
   if (flags.model !== undefined) overrides.modelRef = flags.model;
@@ -409,6 +434,51 @@ function cmdResolveModel(flags: ParsedFlags, runtime: LlamaRuntimeConfig): numbe
   return 0;
 }
 
+/**
+ * `proxy start|stop|status` — the Anthropic lane, addressed on its own.
+ *
+ * `local-runtime start` already brings the proxy up alongside llama-server, so
+ * this verb is not how the lane normally gets going. It exists because the two
+ * are genuinely separate processes with separate failure modes: llama-server
+ * can be healthy while the listener in front of it is not, and a 27 GB model
+ * reload is far too expensive a way to restart a socket.
+ *
+ * Every outcome is a value, never a throw — the same bargain the rest of this
+ * command family makes.
+ */
+async function cmdProxy(
+  verb: string | undefined,
+  flags: ParsedFlags,
+  options: DetachedProxyOptions,
+): Promise<number> {
+  const run = async (): Promise<AnthropicProxyLifecycleResult | null> => {
+    switch (verb) {
+      case 'start': return ensureDetachedAnthropicProxy(options);
+      case 'stop': return stopDetachedAnthropicProxy(options);
+      case 'status': return statusDetachedAnthropicProxy(options);
+      default: return null;
+    }
+  };
+
+  const result = await run();
+  if (result === null) {
+    console.error(`usage: ashlr local-runtime proxy <start|stop|status>\n\n${USAGE}`);
+    return 2;
+  }
+
+  if (flags.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return result.ok ? 0 : 1;
+  }
+
+  const c = makeColors(isTty());
+  console.log(`${result.ok ? c.green('ok') : c.red(result.action)}  ${result.detail}`);
+  if (result.ok && result.baseUrl && verb !== 'stop') {
+    console.log(c.dim(`  point an Anthropic client at ${result.baseUrl}`));
+  }
+  return result.ok ? 0 : 1;
+}
+
 /** `uninstall` — boot the job out and delete the plist. */
 function cmdUninstall(flags: ParsedFlags): number {
   const mutation = uninstallLaunchAgent();
@@ -449,12 +519,31 @@ function cmdLogs(flags: ParsedFlags): number {
 export async function cmdLocalRuntime(args: string[]): Promise<number> {
   const [subcommand, ...rest] = args;
 
+  // ── Internal proxy-host re-entry ────────────────────────────────────────
+  // Matched FIRST, before help and before any flag parsing, because this is
+  // not a user-facing verb: it is how `ensureDetachedAnthropicProxy` spawns the
+  // process that hosts the Anthropic listener, by re-executing this CLI. The
+  // flag is undocumented, absent from USAGE and completions, and carries no
+  // path, module specifier or command — only two integers, both range-checked
+  // by `parseProxyHostArgs`. It notably CANNOT carry a bind host: the host is
+  // re-derived from the persisted config inside the child and re-gated there,
+  // so no argv anywhere can move the listener off loopback.
+  //
+  // This process does not return promptly. It is the proxy — it serves until it
+  // is signalled, which is the entire point of the change that added it.
+  if (subcommand === ANTHROPIC_PROXY_HOST_FLAG) {
+    return runAnthropicProxyHost(rest);
+  }
+
   if (!subcommand || subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
     console.log(USAGE);
     return subcommand ? 0 : 2;
   }
 
-  const flags = parseFlags(rest);
+  // `proxy` takes a verb of its own before its flags; peel it off so the shared
+  // flag parser never sees a bare word it would reject as an unknown option.
+  const proxyVerb = subcommand === 'proxy' ? rest[0] : undefined;
+  const flags = parseFlags(subcommand === 'proxy' ? rest.slice(1) : rest);
   if (flags.error) {
     console.error(`${flags.error}\n\n${USAGE}`);
     return 2;
@@ -480,6 +569,12 @@ export async function cmdLocalRuntime(args: string[]): Promise<number> {
       case 'uninstall': return cmdUninstall(flags);
       case 'logs': return cmdLogs(flags);
       case 'resolve-model': return cmdResolveModel(flags, runtime);
+      case 'proxy': return await cmdProxy(proxyVerb, flags, {
+        cfg,
+        force: flags.force,
+        ...(flags.anthropicPort !== undefined ? { port: flags.anthropicPort } : {}),
+        ...(flags.port !== undefined ? { upstreamPort: flags.port } : {}),
+      });
       default:
         console.error(`unknown subcommand "${subcommand}"\n\n${USAGE}`);
         return 2;

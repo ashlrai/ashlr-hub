@@ -22,6 +22,8 @@
  */
 
 export type {
+  AnthropicProxyLifecycleResult,
+  AnthropicProxyOwnershipRecord,
   LlamaLifecycleResult,
   LlamaLivenessFacts,
   LlamaOwnershipRecord,
@@ -74,6 +76,49 @@ export {
 } from './anthropic-proxy.js';
 export type { AnthropicProxyHandle, AnthropicProxyOptions } from './anthropic-proxy.js';
 
+/**
+ * The DETACHED Anthropic lane — a child process with its own ownership record,
+ * which is what makes `ashlr local-runtime start` leave a working endpoint
+ * behind instead of taking the listener with it when the CLI exits. The
+ * in-process `ensureAnthropicProxy` above remains for a long-lived host that
+ * genuinely wants the listener inside itself.
+ */
+export {
+  DEFAULT_PROXY_START_TIMEOUT_MS,
+  anthropicProxyAccepts,
+  anthropicProxyResponds,
+  ensureDetachedAnthropicProxy,
+  statusDetachedAnthropicProxy,
+  stopDetachedAnthropicProxy,
+  upstreamPortFromArgv,
+} from './proxy-supervisor.js';
+export type { DetachedProxyOptions } from './proxy-supervisor.js';
+
+export {
+  ANTHROPIC_PROXY_COMMAND,
+  ANTHROPIC_PROXY_HOST_FLAG,
+  ANTHROPIC_PROXY_PORT_FLAG,
+  ANTHROPIC_PROXY_UPSTREAM_PORT_FLAG,
+  anthropicProxyHostArgs,
+  anthropicProxyHostInvocation,
+  argvBindsAnthropicPort,
+  argvMatchesProxyRecord,
+  currentHostInvocationContext,
+  findAnthropicProxiesOnPort,
+  isAnthropicProxyHostArgv,
+} from './proxy-process.js';
+export type { DiscoveredAnthropicProxy, HostInvocationContext } from './proxy-process.js';
+
+export {
+  clearAnthropicProxyRecord,
+  parseAnthropicProxyRecord,
+  quarantineAnthropicProxyRecord,
+  readAnthropicProxyRecord,
+  writeAnthropicProxyRecord,
+} from './proxy-record.js';
+
+export { parseProxyHostArgs, runAnthropicProxyHost } from './proxy-host.js';
+
 export { anthropicContentText, normaliseAnthropicRequest } from './anthropic-shim.js';
 export type { AnthropicTextBlock } from './anthropic-shim.js';
 
@@ -125,8 +170,10 @@ export {
   findLlamaServersOnPort,
   modelPathFromArgv,
   processAlive,
+  processTable,
   shouldReclaim,
 } from './process.js';
+export type { ProcessTableEntry } from './process.js';
 
 export {
   clearOwnershipRecord,
@@ -137,6 +184,9 @@ export {
 
 export {
   LAUNCH_AGENT_LABEL,
+  anthropicProxyRecordPath,
+  anthropicProxyStderrLogPath,
+  anthropicProxyStdoutLogPath,
   launchAgentPlistPath,
   launchAgentShimPath,
   localRuntimeDir,
