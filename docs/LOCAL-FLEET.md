@@ -156,3 +156,35 @@ A launchd `KeepAlive` restart gives the runtime a new pid that nothing rewrites 
 record, so `probeLlamaRuntime` re-adopts it read-only when exactly one llama-server on the port was
 launched from the binary the record names. Without that, the job we installed ourselves reported
 `managed: false`, the cockpit hid its own controls, and `stop` refused.
+
+## The Claude-CLI-to-llama-server gap (measured, unresolved)
+
+The interactive path is not blocked by the mutation fence — Verse sessions take no fence, no sandbox
+and no global lock, only a per-session busy guard. Many concurrent chats are architecturally fine.
+
+llama-server does serve the Anthropic Messages API at `/v1/messages`, so pointing the Claude CLI at
+it is possible in principle, and three concurrent agents did run genuinely in parallel: 176s, 181s,
+183s against a 183s wall.
+
+But all three failed their task, for a reason worth recording:
+
+- **With Qwen3.8's native chat template**, the CLI's request is rejected before inference:
+  `Jinja Exception: System message must be at the beginning`. The CLI supplies its system prompt via
+  Anthropic's top-level `system` field, and the conversion does not place it where the template
+  demands. Every turn returns `API Error: 500`.
+- **With `--chat-template chatml`**, the ordering is accepted and the 500 disappears, but tool
+  calling breaks: the model *narrates* using the Read tool instead of emitting a tool call, and raw
+  `<think>` tags leak into the text. One turn, no edits, no tools invoked.
+
+So today the choice is correct-but-serial (Ollama, whose template handles Qwen3.8's tool calls
+properly — the benchmark's 8-turn agent runs prove it) or parallel-but-tool-less (llama-server).
+Neither is "many working local coding agents", and claiming otherwise from the parallelism number
+alone would be wrong.
+
+What would close it, in rough order of cost: a chat template that keeps Qwen3.8's tool-call and
+reasoning blocks while tolerating a trailing system message; or a small Anthropic-shaped shim that
+normalises message order before forwarding to llama-server's native-template endpoint; or an agent
+runner that speaks the OpenAI tool-call shape directly, which llama-server already serves correctly
+and which the hub's own `llama-server` engine uses — that engine is wired and tested, so autonomous
+fleet dispatch does not have this problem. It is specifically the Claude CLI as the agent runner
+that does.
