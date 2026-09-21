@@ -47,6 +47,7 @@
 .section + .section { margin-top: var(--space-4); padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
 .sectionTitle {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: var(--space-2);
   margin-bottom: var(--space-3);
@@ -57,6 +58,34 @@
   text-transform: uppercase;
   color: var(--text-tertiary);
 }
+/* When the reading was taken, and the control that takes a new one. Both sit
+   on the section heading so the freshness claim can never drift away from the
+   numbers it qualifies. */
+.asOf {
+  margin-left: auto;
+  font-family: var(--font-display);
+  font-weight: var(--font-weight-regular, 400);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-tertiary);
+}
+.refresh {
+  flex: none;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-secondary);
+  transition: border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.refresh:hover { border-color: var(--border-strong); color: var(--text-primary); background: var(--bg-hover); }
+.refresh:active { background: var(--bg-active); }
 .count { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
 .skeleton { display: flex; flex-direction: column; gap: var(--space-2); }
 .muted { color: var(--text-tertiary); font-size: var(--text-xs-size); line-height: var(--text-xs-line); }
@@ -99,24 +128,62 @@
   color: var(--text-tertiary);
 }
 .seatSummary { margin-top: var(--space-1); font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-secondary); }
-
-.windows { margin-top: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2); }
-.windowHead {
+/* The provider's own plan tier, and any figure that must line up down the
+   column. Numerals are tabular everywhere they can be compared. */
+.plan { font-family: var(--font-display); text-transform: uppercase; letter-spacing: var(--tracking-label, 0.06em); color: var(--text-secondary); }
+.num { font-family: var(--font-display); font-variant-numeric: tabular-nums; }
+/* The provider's own plain-language facts, plus where the reading came from.
+   Secondary to the meter and hanging off it, because they explain the number
+   rather than competing with it. */
+.notes {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
   display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-2);
-  font-family: var(--font-display);
-  font-size: var(--text-2xs-size, 11px);
-  font-variant-numeric: tabular-nums;
-  color: var(--text-tertiary);
+  flex-direction: column;
+  gap: var(--space-1);
 }
-.reset { color: var(--text-tertiary); }
-.windowTrack { margin-top: 3px; height: 2px; background: var(--meter-track); overflow: hidden; }
-.windowFill { height: 100%; background: var(--accent-500); transition: width var(--duration-slow) var(--ease-decelerate); }
-.windowTrack[data-tone='warn'] .windowFill { background: var(--status-warning-solid); }
-.windowTrack[data-tone='danger'] .windowFill { background: var(--status-danger-solid); }
-.windowTrack[data-tone='unknown'] .windowFill { background: var(--border-strong); }
+.notes li {
+  padding-left: var(--space-2);
+  border-left: 1px solid var(--border-default);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.seatWindows { margin-top: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2); }
+.windows { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
+.credits { margin: 0; font-size: var(--text-2xs-size, 11px); line-height: var(--text-2xs-line, 14px); color: var(--text-tertiary); }
+
+/* Claude has three windows and the per-model one is usually the binding one.
+   The other two stay one disclosure away — reachable without leaving the
+   screen, and silent until asked for. */
+.more { min-width: 0; }
+.moreSummary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-xs);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  color: var(--text-tertiary);
+  cursor: pointer;
+  list-style: none;
+}
+.moreSummary::-webkit-details-marker { display: none; }
+.moreSummary::before {
+  content: '';
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+.more[open] > .moreSummary::before { transform: rotate(90deg); }
+.moreSummary:hover { color: var(--text-secondary); }
+.moreSummary:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; border-radius: var(--radius-xs); }
 
 /* ---- local runtime ----------------------------------------------------- */
 .local { display: flex; flex-direction: column; gap: var(--space-1); }
@@ -223,9 +290,10 @@
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion="full"]) .runningDot { animation: none; }
   /* Guarded like every other motion rule in the app: an operator who chose
-     Full motion in Settings against an OS reduce preference keeps it. (The
-     transition reads --duration-slow, which the token file already collapses
-     under both triggers, so this rule is belt-and-braces either way.) */
-  :root:not([data-motion="full"]) .windowFill { transition: none; }
+     Full motion in Settings against an OS reduce preference keeps it. The
+     meter fills themselves are the Meter primitive's, whose transition reads
+     --duration-base — already collapsed by the token file under both
+     triggers — so only the disclosure marker needs naming here. */
+  :root:not([data-motion="full"]) .moreSummary::before { transition: none; }
 }
 :root[data-motion="reduce"] .runningDot { animation: none; }

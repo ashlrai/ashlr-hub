@@ -14,9 +14,17 @@
  *   - `launches`: a Map<seatId, VerseSeatLaunch> the engine consumes when a
  *     session is created. It stays inside the server process.
  *
+ * SEAT HEALTH comes from the LIVE connection monitor — the same projection
+ * `GET /api/verse/accounts` serves (`buildVerseAccountsSnapshot`). It used to
+ * come from the shared quota evidence file, whose scope is
+ * `codex-native-metadata` and which therefore structurally cannot carry Claude
+ * or Grok; those two seats could never be anything but "unknown". That file is
+ * now strictly the fallback for when no collector is running.
+ *
  * Nothing here throws. A missing/corrupt connections.json yields no native
  * seats; an unreachable Ollama yields no local seats and
- * `localRuntime.ollama.reachable === false`.
+ * `localRuntime.ollama.reachable === false`; unreadable account telemetry
+ * yields "unknown" health, which is never rendered as zero.
  */
 
 import { existsSync, readFileSync } from 'node:fs';
@@ -25,7 +33,13 @@ import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { readClaudeUsage, type ClaudeUsageResult } from '../fabric/claude-usage.js';
 import type { VerseSeatLaunch } from './session-engine.js';
-import { readVerseAccountEvidence, type VerseAccountObservation } from './accounts.js';
+import {
+  buildVerseAccountsSnapshot,
+  getVerseAccountCollector,
+  type VerseAccountCollector,
+  type VerseAccountRecord,
+  type VerseAccountWindow,
+} from './accounts.js';
 import { probeOllamaModelDetail, type VerseOllamaModelDetail } from './local-models.js';
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
@@ -33,7 +47,11 @@ import {
   type VerseEngine,
   type VerseModelOption,
   type VerseSeat,
+  type VerseSeatCapacity,
+  type VerseSeatEvidenceSource,
   type VerseSeatHealth,
+  type VerseSeatUsability,
+  type VerseSeatWindow,
 } from './types.js';
 
 // ---------------------------------------------------------------------------
@@ -78,7 +96,7 @@ const MAX_LOCAL_TAGS = 64;
 // ---------------------------------------------------------------------------
 
 export interface VerseSeatDiscoveryOptions {
-  /** Directory holding connections.json + observations.json. */
+  /** Directory holding connections.json and the account ledger. */
   accountsRoot?: string;
   /** Ollama base URL (no trailing slash, no /v1). */
   ollamaBaseUrl?: string;
@@ -86,6 +104,13 @@ export interface VerseSeatDiscoveryOptions {
   fetchImpl?: typeof fetch;
   /** Injectable claude usage reader for tests. */
   claudeUsage?: () => ClaudeUsageResult;
+  /**
+   * Live account collector override.
+   *   `undefined` ⇒ use the collector this process registered at startup.
+   *   `null`      ⇒ no collector; degrade to the evidence file / baseline.
+   * Tests pass it explicitly; the server never does.
+   */
+  collector?: VerseAccountCollector | null;
 }
 
 export interface VerseSeatDiscovery {
@@ -102,7 +127,7 @@ interface VerseConfigCarrier {
 }
 
 // ---------------------------------------------------------------------------
-// connections.json / observations.json
+// connections.json — the account roster (and the private launcher)
 // ---------------------------------------------------------------------------
 
 interface ConnectionAccount {
@@ -111,8 +136,6 @@ interface ConnectionAccount {
   provider: NativeEngine;
   command: string[];
 }
-
-type ObservationWindow = VerseAccountObservation['windows'][number];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -179,32 +202,168 @@ function readConnections(accountsRoot: string): ConnectionAccount[] {
   return out;
 }
 
+// ---------------------------------------------------------------------------
+// Seat telemetry — the LIVE connection monitor, not the Codex-only evidence file
+// ---------------------------------------------------------------------------
+
 /**
- * Per-account health evidence.
+ * THE V2.1 BUG THIS SECTION EXISTS TO FIX.
  *
- * THE V1 BUG: this used to read `<accountsRoot>/observations.json` directly.
- * That file is an operator-seeded BASELINE that nothing in this repo ever
- * writes (Mason's is `[]`), so every seat always rendered "unknown". The live
- * readings are at `<accountsRoot>/ledger/.resource-quota-shared-evidence.json`.
- * `readVerseAccountEvidence` reads the in-process collector first, then that
- * ledger evidence, then the seed baseline — and merges live readings ON TOP OF
- * the baseline, never the other way round.
+ * Seat health used to be derived from `readVerseAccountEvidence`, whose best
+ * available source is
+ * `<accountsRoot>/ledger/.resource-quota-shared-evidence.json`. That file's
+ * scope is literally `codex-native-metadata`: it structurally CANNOT carry
+ * Claude or Grok, so those two seats could never be anything but "unknown".
+ * Measured against a live server, `GET /api/verse/accounts` reported claude
+ * `observed` with three windows and grok `observed` with one, while the very
+ * same server's `bootstrap.seats[].health` reported `unknown` for both,
+ * permanently.
+ *
+ * The live rows were already in the process: the connection monitor has all
+ * four providers and `buildVerseAccountsSnapshot` already projects them with
+ * every honesty rule applied. Seats now read THAT — one derivation, one set of
+ * rules, one place to fix. The Codex-only evidence file survives strictly as
+ * the fallback for when no collector is running, which
+ * `buildVerseAccountsSnapshot` applies itself through
+ * `deriveVerseAccountRecordFromEvidence`.
  */
-function readObservations(accountsRoot: string): Map<string, VerseAccountObservation> {
-  return readVerseAccountEvidence(accountsRoot).byAccount;
+export interface VerseSeatTelemetry {
+  health: VerseSeatHealth;
+  capacity: VerseSeatCapacity;
+}
+
+/** At or above this percent the binding window is reported as `tight`. */
+export const VERSE_SEAT_TIGHT_PERCENT = 90;
+
+function seatWindow(window: VerseAccountWindow): VerseSeatWindow {
+  return {
+    id: window.id,
+    usedPercent: window.usedPercent,
+    // Already forced to null for Claude upstream; the sentence below is that
+    // provider's ONLY reset signal and is never turned into a countdown.
+    resetsAt: window.resetsAt,
+    resetDescription: window.nativeReport?.resetDescription ?? null,
+    limitReached: window.limitReached,
+    measured: window.measured,
+  };
+}
+
+/**
+ * The coarse "can I use this seat right now" verdict.
+ *
+ * TWO TRAPS THIS RULE EXISTS TO AVOID.
+ *
+ * 1. A SPENT WINDOW IS NOT A SPENT ACCOUNT. Claude publishes a per-model
+ *    weekly window alongside its account-wide ones, and on this machine
+ *    `seven_day_fable` reads 100% while `five_hour` reads 15%. `bindingWindow`
+ *    correctly names the fable window as the highest — but Fable is not even a
+ *    model this seat can select, so calling the seat `exhausted` because of it
+ *    would be false about the seat Mason works in all day. So `exhausted` is
+ *    reserved for the case where EVERY window that carried a reading is spent;
+ *    a mix is `tight`, which says "something is at its limit" without claiming
+ *    the account is.
+ * 2. CODEX CREDITS ARE INDEPENDENT OF THE WINDOW. A fully used weekly window
+ *    with a spendable balance is not blocked, so it never reads `exhausted`.
+ *
+ * A flagged denial and a measured 100 collapse to the same verdict because the
+ * consequence is the same. They stay DISTINGUISHABLE in
+ * `windows[].limitReached` / `measured`, which is where the provenance belongs;
+ * the verdict does not claim one.
+ */
+export function seatUsability(
+  record: Pick<VerseAccountRecord, 'state' | 'binding' | 'credits' | 'windows'>,
+): VerseSeatUsability {
+  if (record.state === 'signed-out') return 'signed-out';
+  const binding = record.binding;
+  // No window carried a percent: no signal. Not zero, not healthy.
+  if (binding === null) return 'unknown';
+  // Windows with no reading are excluded entirely — a null percent says
+  // nothing about headroom in either direction.
+  const read = record.windows.filter((w) => w.usedPercent !== null);
+  const spent = read.filter((w) => w.limitReached || (w.usedPercent ?? 0) >= 100);
+  if (spent.length === read.length) return record.credits?.hasCredits === true ? 'tight' : 'exhausted';
+  if (spent.length > 0) return 'tight';
+  return binding.usedPercent >= VERSE_SEAT_TIGHT_PERCENT ? 'tight' : 'ready';
+}
+
+/**
+ * REACHABILITY ONLY — usage never demotes this.
+ *
+ * Claude's per-model weekly window sits at 100% while its five-hour window is
+ * at 15%; calling that seat "unavailable" would be false, and it is exactly the
+ * seat Mason uses all day. The usage story lives in `capacity.usability`;
+ * `health.state` answers only "did we get a reading at all".
+ */
+export function seatHealthState(
+  record: Pick<VerseAccountRecord, 'state' | 'windows' | 'observedAt'>,
+): VerseSeatHealth['state'] {
+  if (record.state === 'observed') return 'ready';
+  // The one account state worth a red dot, because it has a remedy.
+  if (record.state === 'signed-out') return 'unavailable';
+  if (record.state === 'checking') return 'unknown';
+  // `unavailable`: a probe that failed while a prior reading is still in hand
+  // is degraded; one that never produced a reading is unknown — not zero.
+  return record.windows.length > 0 || record.observedAt !== null ? 'degraded' : 'unknown';
+}
+
+function telemetryOf(record: VerseAccountRecord, evidenceSource: VerseSeatEvidenceSource): VerseSeatTelemetry {
+  const windows = record.windows.map(seatWindow);
+  const bindingId = record.binding?.id ?? null;
+  const binding = bindingId === null ? null : windows.find((w) => w.id === bindingId) ?? null;
+  return {
+    health: {
+      state: seatHealthState(record),
+      summary: windowsSummary(windows),
+      // `VerseSeatHealth.windows` is a FROZEN V1 shape — the richer per-window
+      // facts (reset wording, sentinel provenance) go on `capacity.windows`.
+      windows: windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent, resetsAt: w.resetsAt })),
+      observedAt: record.observedAt,
+    },
+    capacity: {
+      planType: record.planType,
+      binding,
+      windows,
+      // Structurally identical to `VerseCodexCredits`; this assignment is the
+      // compile-time drift guard between core and the browser-safe contract.
+      credits: record.credits,
+      usability: seatUsability(record),
+      observedAt: record.observedAt,
+      evidenceSource,
+      notes: [...record.notes],
+    },
+  };
+}
+
+/**
+ * Per-account telemetry keyed by account id, from the same projection
+ * `GET /api/verse/accounts` serves. Never throws: telemetry is colour on the
+ * seat list and must never stop a seat from appearing.
+ */
+export function buildSeatTelemetry(
+  accountsRoot: string,
+  opts: { collector?: VerseAccountCollector | null } = {},
+): Map<string, VerseSeatTelemetry> {
+  const out = new Map<string, VerseSeatTelemetry>();
+  try {
+    const collector = opts.collector === undefined ? getVerseAccountCollector() : opts.collector;
+    const snapshot = buildVerseAccountsSnapshot({ accountsRoot, collector });
+    // `snapshot.evidenceSource` describes the EVIDENCE MAP, which is only what
+    // the degraded records were built from. A record the live monitor answered
+    // for did not come from that map, so it is labelled for what it is —
+    // otherwise a live Claude reading would claim to be a stale seed.
+    const liveIds = new Set((collector?.connections()?.accounts ?? []).map((a) => a.id));
+    for (const record of snapshot.accounts) {
+      out.set(record.id, telemetryOf(record, liveIds.has(record.id) ? 'collector' : snapshot.evidenceSource));
+    }
+  } catch {
+    // Missing/corrupt account files: every seat degrades to unknown health.
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
-// Health mapping
+// Health rendering
 // ---------------------------------------------------------------------------
-
-function healthStateOf(raw: string): VerseSeatHealth['state'] {
-  const h = raw.toLowerCase();
-  if (h === 'ready' || h === 'healthy' || h === 'ok' || h === 'available') return 'ready';
-  if (h === 'degraded' || h === 'throttled' || h === 'warning' || h === 'limited') return 'degraded';
-  if (h === 'unavailable' || h === 'exhausted' || h === 'down' || h === 'error' || h === 'failed') return 'unavailable';
-  return 'unknown';
-}
 
 function shortClock(iso: string): string {
   const d = new Date(iso);
@@ -214,18 +373,24 @@ function shortClock(iso: string): string {
   return `${hh}:${mm}`;
 }
 
-function windowsSummary(windows: ObservationWindow[]): string | null {
+function windowsSummary(windows: VerseSeatWindow[]): string | null {
   const parts: string[] = [];
   for (const w of windows) {
+    // A null percent is NO SIGNAL. Rendering it as 0% would be a lie, so the
+    // window is simply absent from the summary.
     if (w.usedPercent === null) continue;
     // Claude supplies NO machine-readable reset — only the provider's own
     // wording, which is rendered verbatim and never turned into a countdown.
     const reset = w.resetsAt
       ? `, resets ${shortClock(w.resetsAt)}`
-      : w.nativeReport?.resetDescription
-        ? `, resets ${w.nativeReport.resetDescription}`
+      : w.resetDescription
+        ? `, resets ${w.resetDescription}`
         : '';
-    parts.push(`${w.id} window ${Math.round(w.usedPercent)}% used${reset}`);
+    const used = w.limitReached
+      // A flagged sentinel is a denial, not a measurement.
+      ? 'limit reached'
+      : `${Math.round(w.usedPercent)}% used`;
+    parts.push(`${w.id} window ${used}${reset}`);
   }
   return parts.length > 0 ? parts.join(' · ') : null;
 }
@@ -240,22 +405,22 @@ function unknownHealth(): VerseSeatHealth {
   return { state: 'unknown', summary: null, windows: [], observedAt: null };
 }
 
-function nativeHealth(
-  account: ConnectionAccount,
-  observations: Map<string, VerseAccountObservation>,
+/**
+ * One native seat's public health + capacity. Every returned object is fresh,
+ * so the shared telemetry map is never mutated by a per-seat augmentation.
+ */
+function nativeSeatFacets(
+  accountId: string,
+  provider: NativeEngine,
+  telemetry: ReadonlyMap<string, VerseSeatTelemetry>,
   claudeUsage: () => ClaudeUsageResult,
-): VerseSeatHealth {
-  const obs = observations.get(account.id);
-  const health: VerseSeatHealth = obs
-    ? {
-      state: healthStateOf(obs.health),
-      summary: windowsSummary(obs.windows),
-      windows: obs.windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent, resetsAt: w.resetsAt })),
-      observedAt: obs.observedAt,
-    }
+): { health: VerseSeatHealth; capacity: VerseSeatCapacity | null } {
+  const found = telemetry.get(accountId) ?? null;
+  const health: VerseSeatHealth = found
+    ? { ...found.health, windows: found.health.windows.map((w) => ({ ...w })) }
     : unknownHealth();
 
-  if (account.provider === 'claude') {
+  if (provider === 'claude') {
     try {
       const usage = claudeUsage();
       if (usage.messages5h > 0 || usage.messages7d > 0) {
@@ -267,7 +432,7 @@ function nativeHealth(
       // Usage is best-effort colour; never block seat discovery.
     }
   }
-  return health;
+  return { health, capacity: found?.capacity ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -403,9 +568,13 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
 
   try {
     const accounts = readConnections(accountsRoot);
-    const observations = readObservations(accountsRoot);
+    // `undefined` here means "the collector this process registered", which is
+    // the whole point: seat health comes from the LIVE monitor, not from the
+    // Codex-only evidence file.
+    const telemetry = buildSeatTelemetry(accountsRoot, { collector: opts.collector });
     for (const account of accounts) {
       const models = VERSE_NATIVE_MODELS[account.provider].map((m) => ({ ...m }));
+      const facets = nativeSeatFacets(account.id, account.provider, telemetry, claudeUsage);
       const seat: VerseSeat = {
         id: account.id,
         engine: account.provider,
@@ -413,8 +582,9 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
         accountId: account.id,
         models,
         contextWindow: models[0]?.contextWindow ?? null,
-        health: nativeHealth(account, observations, claudeUsage),
+        health: facets.health,
       };
+      if (facets.capacity) seat.capacity = facets.capacity;
       seats.push(seat);
       // The launcher command stays here — it is the account's identity.
       launches.set(seat.id, { seat, launcher: account.command, ollamaBaseUrl });
@@ -440,4 +610,53 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
   }
 
   return { seats, launches, localRuntime };
+}
+
+// ---------------------------------------------------------------------------
+// Re-read telemetry without re-probing Ollama
+// ---------------------------------------------------------------------------
+
+/**
+ * Return `discovery` with every NATIVE seat's health and capacity recomputed
+ * from the collector's CURRENT state.
+ *
+ * THE STALENESS BUG THIS FIXES: `GET /api/verse/bootstrap` is a mount-time
+ * snapshot behind a short discovery cache. A client that opened the app before
+ * the collector's first cycle finished kept an "unknown" seat list for the life
+ * of the page. Seat *identity* (which accounts exist, which Ollama tags are
+ * installed) is what is expensive to discover and it changes rarely; seat
+ * *telemetry* is cheap and changes every poll cycle. So this splits them: the
+ * caller may cache the discovery and still hand every reader a live reading.
+ *
+ * Pure: `discovery` is not mutated. Local seats are returned unchanged — an
+ * Ollama tag has no subscription window.
+ */
+export function refreshSeatTelemetry(
+  cfg: AshlrConfig,
+  discovery: VerseSeatDiscovery,
+  opts: VerseSeatDiscoveryOptions = {},
+): VerseSeatDiscovery {
+  const accountsRoot = resolveAccountsRoot(cfg, opts.accountsRoot);
+  const claudeUsage = opts.claudeUsage ?? readClaudeUsage;
+  const telemetry = buildSeatTelemetry(accountsRoot, { collector: opts.collector });
+
+  const seats = discovery.seats.map((seat) => {
+    if (seat.engine === 'local') return seat;
+    const facets = nativeSeatFacets(seat.accountId, seat.engine, telemetry, claudeUsage);
+    const next: VerseSeat = { ...seat, health: facets.health };
+    if (facets.capacity) next.capacity = facets.capacity;
+    else delete next.capacity;
+    return next;
+  });
+
+  // Keep the private launch map pointing at the seat objects that were just
+  // returned, so the engine and the wire never disagree about a seat.
+  const bySeatId = new Map(seats.map((seat) => [seat.id, seat]));
+  const launches = new Map<string, VerseSeatLaunch>();
+  for (const [id, launch] of discovery.launches) {
+    const seat = bySeatId.get(id);
+    launches.set(id, seat && seat !== launch.seat ? { ...launch, seat } : launch);
+  }
+
+  return { seats, launches, localRuntime: discovery.localRuntime };
 }

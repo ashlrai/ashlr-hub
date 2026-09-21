@@ -11,6 +11,7 @@
  *
  * Routes (see docs/VERSE-CONTRACT-V1.md):
  *   GET  /api/verse/bootstrap                → VerseBootstrap
+ *   GET  /api/verse/seats                    → VerseSeatsResponse (pollable)
  *   GET  /api/verse/sessions                 → VerseSession[]
  *   POST /api/verse/sessions                 → VerseSession (201)
  *   GET  /api/verse/sessions/:id             → VerseSessionDetail
@@ -40,12 +41,13 @@ import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { discoverProjects } from './projects.js';
-import { discoverSeats, type VerseSeatDiscovery } from './seats.js';
+import { discoverSeats, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
 import type { VerseEngineHandle } from './session-engine.js';
 import {
   VERSE_MAX_TURN_TEXT_BYTES,
   type VerseBootstrap,
   type VerseCreateSessionRequest,
+  type VerseSeatsResponse,
   type VerseSession,
   type VerseSessionDetail,
   type VerseTurnResponse,
@@ -137,6 +139,21 @@ async function cachedSeats(cfg: AshlrConfig): Promise<VerseSeatDiscovery> {
 /** Drop the cached seat discovery (after account changes, or in tests). */
 export function invalidateVerseSeatCache(): void {
   seatCache = null;
+}
+
+/**
+ * Seats with LIVE telemetry, for every read that a human looks at.
+ *
+ * `cachedSeats` caches seat IDENTITY — which accounts exist, which Ollama tags
+ * are installed — because discovering it costs one HTTP round trip per model.
+ * Account TELEMETRY is cheap and changes every collector cycle, so it is
+ * recomputed here on every read. Without this split a bootstrap served from a
+ * warm cache could hand back the "unknown" health that was captured before the
+ * collector's first cycle finished, which is exactly the bug the Resources
+ * panel showed all day.
+ */
+async function liveSeats(cfg: AshlrConfig): Promise<VerseSeatDiscovery> {
+  return refreshSeatTelemetry(cfg, await cachedSeats(cfg));
 }
 
 // ---------------------------------------------------------------------------
@@ -303,13 +320,29 @@ export async function handleVerseApi(
     // ── GET /api/verse/bootstrap ─────────────────────────────────────────
     if (path === `${VERSE_API_PREFIX}/bootstrap` && method === 'GET') {
       const engine = await getVerseEngine();
-      const discovery = await cachedSeats(ctx.cfg);
+      const discovery = await liveSeats(ctx.cfg);
       const sessions = engine.listSessions();
       const body: VerseBootstrap = {
         seats: discovery.seats,
         projects: discoverProjects({ sessions }),
         sessions,
         dispatchEnabled: ctx.allowDispatch,
+        localRuntime: discovery.localRuntime,
+      };
+      sendJson(res, 200, body);
+      return true;
+    }
+
+    // ── GET /api/verse/seats ─────────────────────────────────────────────
+    // The seat half of bootstrap, on its own so a client can POLL it. Bootstrap
+    // is read once at mount; a user who opened the app before the account
+    // collector's first cycle finished would otherwise keep a seat list that
+    // says "unknown" forever, with no way to learn otherwise short of a reload.
+    if (path === `${VERSE_API_PREFIX}/seats` && method === 'GET') {
+      const discovery = await liveSeats(ctx.cfg);
+      const body: VerseSeatsResponse = {
+        sampledAt: new Date().toISOString(),
+        seats: discovery.seats,
         localRuntime: discovery.localRuntime,
       };
       sendJson(res, 200, body);

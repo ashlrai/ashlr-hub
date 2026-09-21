@@ -1,13 +1,47 @@
 /**
  * routes/verse/ResourcesPanel.tsx — the right column: every seat with its
- * health and usage windows, the local Ollama runtime, running sessions with
- * elapsed time + Stop, and the current session's cumulative token usage.
+ * subscription and how much of it is left, the local Ollama runtime, running
+ * sessions with elapsed time + Stop, and the current session's cumulative
+ * token usage.
+ *
+ * WHAT CHANGED AND WHY (docs/VERSE-TELEMETRY-V2.md).
+ *
+ * This list is the most-looked-at surface in the app and it showed a bare
+ * "unknown" pill for every account — the health state, and nothing else. Two
+ * separate faults produced that, and both are answered here:
+ *
+ *  1. THE WRONG FACT WAS BEING SHOWN. `health.state` is `unknown` for Claude
+ *     BY CONSTRUCTION, and the shared-evidence file behind it is scoped
+ *     `codex-native-metadata`, so it structurally cannot carry Claude or Grok
+ *     at all. Meanwhile the windows underneath it were rendered as raw ids
+ *     ("seven_day_fable") with a homemade 2px bar, all three of Claude's
+ *     windows given equal weight, and a reset collapsed to a bare clock time
+ *     even though Claude publishes a SENTENCE and no timestamp. So every row
+ *     now leads with the seat's plan and its BINDING window — the one that
+ *     actually blocks work — as a labelled <Meter>, with the reset rendered
+ *     verbatim and the other windows one disclosure away rather than a
+ *     navigation away.
+ *  2. THE DATA NEVER REFRESHED. `bootstrap` is a mount-time snapshot with no
+ *     SSE invalidation, and the collector needs ~75s to warm. Opening the app
+ *     cold guaranteed "unknown" forever. The chat surfaces now poll
+ *     (useSeatsRefresh), and this panel additionally says WHEN the reading
+ *     was taken and offers an explicit Refresh — because a number with no
+ *     timestamp is a claim about the present that nobody checked.
+ *
+ * Local seats are deliberately NOT given this treatment: they have no
+ * subscription, no quota and no bill. They get their readiness and their
+ * model, and nothing that implies a meter exists.
  */
 import { useEffect, useState } from 'react';
 import type { VerseBootstrap, VerseSeat, VerseSession } from '../../data/api-types.js';
-import { StatusBadge } from '../../components/primitives/StatusBadge.js';
+import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
-import { ENGINE_LABEL, formatElapsed, groupSeats, healthTone, projectName } from './verse-model.js';
+import { StatusBadge } from '../../components/primitives/StatusBadge.js';
+import { useQuery, useRefresh } from '../../data/hooks.js';
+import { CapacityChip, SeatWindowMeter } from './SeatCapacity.js';
+import { evidenceNote, seatSubscription, seatSubscriptionSentence } from './seat-subscription.js';
+import { ENGINE_LABEL, formatClock, formatElapsed, groupSeats, projectName } from './verse-model.js';
+import { verseBootstrapQuery } from './verse-queries.js';
 import { formatTokens } from './verse-store.js';
 import styles from './ResourcesPanel.module.css';
 
@@ -30,48 +64,96 @@ function useNow(active: boolean): number {
   return now;
 }
 
-function formatReset(iso: string | null): string {
-  if (!iso) return '';
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return `resets ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+/**
+ * The newest instant any seat was actually observed at. NOT the time of the
+ * last HTTP read: a successful request for a stale collector reading would
+ * otherwise stamp old numbers as fresh, which is the one thing a freshness
+ * line exists to prevent.
+ */
+function newestObservation(seats: readonly VerseSeat[]): string | null {
+  let newest: string | null = null;
+  for (const seat of seats) {
+    const at = seatSubscription(seat).observedAt;
+    if (at === null) continue;
+    if (newest === null || at > newest) newest = at;
+  }
+  return newest;
 }
 
 function SeatRow({ seat }: { seat: VerseSeat }) {
+  const view = seatSubscription(seat);
+  const sentence = seatSubscriptionSentence(seat, view);
+  const ctx = seat.contextWindow === null ? 'ctx n/a' : `${formatTokens(seat.contextWindow)} ctx`;
+  const models = `${seat.models.length} model${seat.models.length === 1 ? '' : 's'}`;
+  // Provenance is a note too: a reading served from another process's shared
+  // file is not a live probe and must not be presented as one.
+  const provenance = evidenceNote(view.evidenceSource);
+  const notes = provenance === null ? view.notes : [...view.notes, provenance];
+
   return (
-    <li className={`${styles.seat} ${styles[`engine-${seat.engine}`] ?? ''}`} data-engine={seat.engine}>
+    <li className={`${styles.seat} ${styles[`engine-${seat.engine}`] ?? ''}`} data-engine={seat.engine}
+      data-capacity={view.cls}>
       <div className={styles.seatHead}>
-        <span className={styles.seatLabel}>{seat.label}</span>
-        <StatusBadge status={seat.health.state} tone={healthTone(seat.health.state)} />
+        <span className={styles.seatLabel} title={sentence}>{seat.label}</span>
+        {view.kind === 'local'
+          ? <StatusBadge status={seat.health.state} tone={seat.health.state === 'ready' ? 'success' : seat.health.state === 'unavailable' ? 'danger' : 'unknown'} />
+          : <CapacityChip view={view} title={sentence} />}
       </div>
+
       <div className={styles.seatMeta}>
         <span>{ENGINE_LABEL[seat.engine]}</span>
-        <span>·</span>
-        <span>{seat.models.length} model{seat.models.length === 1 ? '' : 's'}</span>
-        <span>·</span>
-        <span>{seat.contextWindow ? `${formatTokens(seat.contextWindow)} ctx` : 'ctx n/a'}</span>
+        {view.plan === null ? null : <><span aria-hidden="true">·</span><span className={styles.plan}>{view.plan}</span></>}
+        <span aria-hidden="true">·</span>
+        <span>{models}</span>
+        <span aria-hidden="true">·</span>
+        <span className={styles.num}>{ctx}</span>
       </div>
-      {seat.health.summary ? <p className={styles.seatSummary}>{seat.health.summary}</p> : null}
-      {seat.health.windows.length > 0 ? (
-        <ul className={styles.windows}>
-          {seat.health.windows.map((w) => {
-            const pct = w.usedPercent === null ? null : Math.max(0, Math.min(100, Math.round(w.usedPercent)));
-            const tone = pct === null ? 'unknown' : pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : 'ok';
-            return (
-              <li key={w.id} className={styles.window}>
-                <div className={styles.windowHead}>
-                  <span>{w.id}</span>
-                  <span>{pct === null ? 'n/a' : `${pct}%`} {formatReset(w.resetsAt) ? <span className={styles.reset}>· {formatReset(w.resetsAt)}</span> : null}</span>
-                </div>
-                <div className={styles.windowTrack} role="meter" aria-label={`${seat.label} ${w.id} window`}
-                  aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct ?? undefined} data-tone={tone}>
-                  <div className={styles.windowFill} style={{ width: `${pct ?? 0}%` }} />
-                </div>
-              </li>
-            );
-          })}
+
+      {view.kind === 'local' ? (
+        // No subscription, no quota, no bill — say that, rather than leaving
+        // a gap where a meter would be on every other row.
+        <p className={styles.seatSummary}>{view.summary}</p>
+      ) : view.binding === null ? (
+        // Nothing to meter. Say so, and hand over whatever the provider DID
+        // say, rather than drawing an empty bar that would read "plenty left".
+        <>
+          <p className={styles.seatSummary}>{view.summary}</p>
+          {seat.health.summary === null || seat.health.summary === view.summary
+            ? null
+            : <p className={styles.seatSummary}>{seat.health.summary}</p>}
+        </>
+      ) : (
+        <div className={styles.seatWindows}>
+          <SeatWindowMeter windowView={view.binding} ariaPrefix={seat.label} prominent />
+          {view.others.length === 0 ? null : (
+            <details className={styles.more}>
+              <summary className={styles.moreSummary}>
+                {view.others.length} more window{view.others.length === 1 ? '' : 's'}
+              </summary>
+              <ul className={styles.windows}>
+                {view.others.map((w) => (
+                  <li key={w.id}><SeatWindowMeter windowView={w} ariaPrefix={seat.label} /></li>
+                ))}
+              </ul>
+            </details>
+          )}
+          {view.credits === null ? null : (
+            // Two distinct facts: a spent window with a spendable balance is
+            // not a blocked account (docs/VERSE-TELEMETRY-V2.md, Codex).
+            <p className={styles.credits} title={view.creditsTitle ?? undefined}>{view.credits}</p>
+          )}
+        </div>
+      )}
+
+      {/* The provider's own plain-language facts. Owner S's contract requires
+          these be SHOWN — a version-pinned probe or a paused collector is an
+          explanation, and swallowing it is what made every row read "unknown"
+          with no way to find out why. */}
+      {notes.length === 0 ? null : (
+        <ul className={styles.notes}>
+          {notes.map((note) => <li key={note}>{note}</li>)}
         </ul>
-      ) : null}
+      )}
     </li>
   );
 }
@@ -81,6 +163,14 @@ export function ResourcesPanel({ bootstrap, sessions, current, onStop, onOpen, o
   const now = useNow(running.length > 0);
   const groups = bootstrap ? groupSeats(bootstrap.seats) : [];
   const local = bootstrap?.localRuntime.ollama;
+
+  // Subscribed only for the refreshing/settled signal — ChatSection owns the
+  // data and passes it in. Same cache key, so this costs no extra request.
+  const live = useQuery(verseBootstrapQuery);
+  const refresh = useRefresh(verseBootstrapQuery);
+  const observedAt = bootstrap ? newestObservation(bootstrap.seats) : null;
+  const observedClock = observedAt === null ? null : formatClock(observedAt);
+
   return (
     <aside className={styles.panel} aria-label="Resources">
       <header className={styles.head}>
@@ -89,7 +179,16 @@ export function ResourcesPanel({ bootstrap, sessions, current, onStop, onOpen, o
       </header>
       <div className={styles.scroll}>
         <section className={styles.section} aria-labelledby="verse-res-seats">
-          <h3 id="verse-res-seats" className={styles.sectionTitle}>Seats</h3>
+          <h3 id="verse-res-seats" className={styles.sectionTitle}>
+            <span>Seats</span>
+            {/* A reading with no timestamp is a claim about the present that
+                nobody checked. Say when, or say that nothing was read. */}
+            <span className={styles.asOf}>
+              {observedClock === null ? 'no reading yet' : `as of ${observedClock}`}
+            </span>
+            {live.status === 'refreshing' ? <RefreshIndicator label="Refreshing seats" /> : null}
+            <button type="button" className={styles.refresh} onClick={refresh}>Refresh</button>
+          </h3>
           {!bootstrap ? <div className={styles.skeleton}><SkeletonLine width="70%" /><SkeletonLine width="50%" /><SkeletonLine width="64%" /></div>
             : groups.length === 0 ? <p className={styles.muted}>No seats discovered. Connect an account with <code>ashlr accounts</code> or start Ollama.</p>
               : groups.map((group) => (

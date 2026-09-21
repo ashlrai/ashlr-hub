@@ -5,6 +5,17 @@
  * at the bottom on the same measure.
  *
  * With nothing selected it renders the empty state ("No chats yet — ⌘N").
+ *
+ * Two capacity responsibilities live here because this component is mounted
+ * for the whole life of the Chat section, selected chat or not:
+ *
+ *  - IT OWNS THE SEAT POLL. `/api/verse/bootstrap` carries the seats and has
+ *    no SSE invalidation, while the account collector needs ~75s to warm; a
+ *    mount-time snapshot is therefore guaranteed to be the COLD one. See
+ *    useSeatsRefresh for the full reasoning.
+ *  - The header's seat pill carries the seat's capacity when it is tight or
+ *    spent. Quietly: a healthy seat adds nothing to the strip, because a
+ *    badge that is always there is a badge nobody reads.
  */
 import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
 import type { VerseProject, VerseSeat } from '../../data/api-types.js';
@@ -13,7 +24,10 @@ import { ContextMeter } from './ContextMeter.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { Transcript } from './Transcript.js';
 import { PanelIcon, SidebarIcon, TrashIcon, VerseMark } from './verse-icons.js';
-import { contextWindowFor, projectName, seatPillLabel } from './verse-model.js';
+import { CapacityChip } from './SeatCapacity.js';
+import { seatSubscription, seatSubscriptionSentence, worthFlagging } from './seat-subscription.js';
+import { contextWindowFor, projectName, seatById, seatPillLabel } from './verse-model.js';
+import { useSeatsRefresh } from './useSeatsRefresh.js';
 import type { VerseSessionView } from './useVerseSession.js';
 import styles from './Workspace.module.css';
 
@@ -47,6 +61,10 @@ export function Workspace(props: WorkspaceProps) {
   const [busy, setBusy] = useState(false);
   const titleInput = useRef<HTMLInputElement>(null);
   const headingId = useId();
+
+  // Mounted for the whole life of the section, so the roster stays live even
+  // with the resources panel hidden.
+  useSeatsRefresh();
 
   useEffect(() => {
     setEditing(false);
@@ -116,6 +134,15 @@ export function Workspace(props: WorkspaceProps) {
 
   const running = session?.status === 'running';
   const contextWindow = session ? contextWindowFor(seats, session) : null;
+  const activeSeat = session ? seatById(seats, session.seatId) ?? null : null;
+  const capacity = activeSeat === null ? null : seatSubscription(activeSeat);
+  // The pill's tooltip is the whole story — seat, plan, verdict, evidence,
+  // reset, credits — so the strip itself can stay to one short chip.
+  const seatTitle = session === null
+    ? ''
+    : `${activeSeat === null || capacity === null
+      ? seatPillLabel(seats, session)
+      : seatSubscriptionSentence(activeSeat, capacity)} · ${session.projectPath}`;
   const disabledReason = !dispatchEnabled ? 'Sending is disabled: this server was started without dispatch.' : null;
 
   return (
@@ -139,10 +166,15 @@ export function Workspace(props: WorkspaceProps) {
 
         {session ? (
           <span className={`${styles.seatPill} ${styles[`engine-${session.engine}`] ?? ''}`} data-engine={session.engine}
-            title={`${seatPillLabel(seats, session)} · ${session.projectPath}`}>
+            data-seat-capacity={capacity !== null && worthFlagging(capacity.cls) ? capacity.cls : undefined}
+            title={seatTitle}>
             <span className={styles.engineDot} aria-hidden="true" />
             <span className={styles.seatText}>{seatPillLabel(seats, session)}</span>
             <span className={styles.projectName}>{projectName(session.projectPath, projects)}</span>
+            {/* Only when it changes the decision. A chip on every chat is noise. */}
+            {capacity !== null && worthFlagging(capacity.cls)
+              ? <CapacityChip view={capacity} />
+              : null}
           </span>
         ) : null}
 

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT } from './fixtures.test-support.js';
+import { CLAUDE_TIGHT_SEAT, CODEX_CREDITS_SEAT, UNREAD_SEAT } from './seat-fixtures.test-support.js';
 import { decodeSeatChoice, defaultSeatChoice, encodeSeatChoice, SeatSelector } from './SeatSelector.js';
 
 const SEATS = [LOCAL_SEAT, CODEX_SEAT, CLAUDE_SEAT];
@@ -97,6 +98,35 @@ describe('SeatSelector — capacity at the point of choice', () => {
     const option = screen.getByRole('option', { name: /Claude Max — Opus 5/ }) as HTMLOptionElement;
     // An absent figure already says "unread"; "no reading" on every row is noise.
     expect(option.textContent).not.toContain('no reading');
+    expect(option).not.toBeDisabled();
+  });
+});
+
+/**
+ * Owner S's `VerseSeat.capacity` carries the PLAN too — the provider's own
+ * tier, and only when it published one. "Which account can I use" is half a
+ * question without "on what plan".
+ */
+describe('SeatSelector — plan and binding window from the capacity record', () => {
+  it('reads plan, binding window and credits off the capacity record', () => {
+    render(<SeatSelector seats={[CODEX_CREDITS_SEAT]} value={null} onChange={() => {}} />);
+    const option = screen.getByRole('option', { name: /Personal Codex/ }) as HTMLOptionElement;
+    expect(option.textContent).toContain('pro · tight · primary window limit reached · credits still spendable');
+    // Spent window, spendable balance: marked, never refused.
+    expect(option).not.toBeDisabled();
+  });
+
+  it('leads with the binding window on a seat whose reachability is merely "ready"', () => {
+    render(<SeatSelector seats={[CLAUDE_TIGHT_SEAT]} value={null} onChange={() => {}} />);
+    const option = screen.getByRole('option', { name: /Claude Max — Opus 5/ }) as HTMLOptionElement;
+    expect(option.textContent).toContain('max · tight · 92% of weekly fable window used');
+  });
+
+  it('says nothing about a seat nothing was read from', () => {
+    render(<SeatSelector seats={[UNREAD_SEAT]} value={null} onChange={() => {}} />);
+    const option = screen.getByRole('option', { name: /Claude Max — Opus 5/ }) as HTMLOptionElement;
+    // An absent figure already says "unread"; "no reading" on every row is noise.
+    expect(option.textContent).not.toContain('no capacity reading');
     expect(option).not.toBeDisabled();
   });
 });

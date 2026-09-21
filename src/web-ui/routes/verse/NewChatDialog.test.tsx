@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { bootstrap } from './fixtures.test-support.js';
+import { CLAUDE_TIGHT_SEAT, CODEX_CREDITS_SEAT, UNREAD_SEAT } from './seat-fixtures.test-support.js';
 import { NewChatDialog } from './NewChatDialog.js';
 
 describe('NewChatDialog', () => {
@@ -42,5 +43,33 @@ describe('NewChatDialog', () => {
     view.rerender(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={boot.seats} onCreate={() => {}} initialProjectPath="/Users/mason/dev/hub" />);
     expect(screen.getByLabelText(/^Title/)).toHaveValue('');
     expect(screen.getByLabelText('Project')).toHaveValue('/Users/mason/dev/hub');
+  });
+});
+
+/**
+ * The seat list is where the choice actually gets made, so the cost of making
+ * it belongs here — not one section away in Usage, discovered at turn time.
+ */
+describe('NewChatDialog — capacity at the point of choice', () => {
+  const boot = bootstrap();
+
+  it('shows the chosen seat\u2019s plan, binding meter and verbatim reset', () => {
+    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[CLAUDE_TIGHT_SEAT]} onCreate={() => {}} />);
+    expect(screen.getByText('max')).toBeInTheDocument();
+    expect(screen.getByRole('meter', { name: 'Claude Max weekly fable window used' })).toHaveAttribute('aria-valuenow', '92');
+    expect(screen.getByText('resets Sep 25 at 7pm (America/New_York)')).toBeInTheDocument();
+    expect(screen.getByText('tight')).toBeInTheDocument();
+  });
+
+  it('names the credits that outlive a spent window', () => {
+    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[CODEX_CREDITS_SEAT]} onCreate={() => {}} />);
+    expect(screen.getByText('limit reached')).toBeInTheDocument();
+    expect(screen.getByText(/2048\.42 credits left/)).toBeInTheDocument();
+  });
+
+  it('draws no meter for a seat nothing was read from', () => {
+    render(<NewChatDialog open onClose={() => {}} projects={boot.projects} seats={[UNREAD_SEAT]} onCreate={() => {}} />);
+    expect(screen.queryByRole('meter')).not.toBeInTheDocument();
+    expect(screen.getByText('no capacity reading')).toBeInTheDocument();
   });
 });

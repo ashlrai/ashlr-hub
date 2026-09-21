@@ -183,8 +183,10 @@ describe('verse seats — native accounts', () => {
     expect(wire).not.toContain('command');
     expect(wire).not.toContain('launcher');
     for (const part of [...CLAUDE_COMMAND, ...CODEX_COMMAND]) expect(wire).not.toContain(part);
+    // V2.1 adds exactly one key: `capacity`, the subscription meter the seat
+    // list renders without a second request. Nothing else may appear here.
     for (const seat of discovery.seats) expect(Object.keys(seat).sort()).toEqual(
-      ['accountId', 'contextWindow', 'engine', 'health', 'id', 'label', 'models'],
+      ['accountId', 'capacity', 'contextWindow', 'engine', 'health', 'id', 'label', 'models'],
     );
 
     // …but the private launch map does, for the engine only.
@@ -195,19 +197,33 @@ describe('verse seats — native accounts', () => {
 
   it('maps observations.json into seat health, unknown when absent', async () => {
     writeAccounts(tmpRoot);
-    const discovery = await discoverSeats(makeConfig(), { accountsRoot: tmpRoot, claudeUsage: zeroUsage });
+    const discovery = await discoverSeats(makeConfig(), {
+      accountsRoot: tmpRoot, claudeUsage: zeroUsage, collector: null,
+    });
     const claude = discovery.seats.find((s) => s.id === 'claude')!;
     expect(claude.health.state).toBe('ready');
+    // V2.1: Claude's `resetsAt` is STRUCTURALLY always null — the provider
+    // publishes a sentence, never an instant. The seed file in this fixture
+    // carries one anyway (it is operator-authored and predates the rule), and
+    // the account derivation drops it rather than passing a fabricated
+    // timestamp the UI would turn into a countdown.
     expect(claude.health.windows).toEqual([
-      { id: '5h', usedPercent: 72, resetsAt: '2026-09-19T14:00:00.000Z' },
+      { id: '5h', usedPercent: 72, resetsAt: null },
       { id: '7d', usedPercent: 31, resetsAt: null },
     ]);
     expect(claude.health.summary).toContain('5h window 72% used');
     expect(claude.health.summary).toContain('7d window 31% used');
     expect(claude.health.observedAt).toBe('2026-09-19T10:00:00.000Z');
+    // …and the capacity rides along, so the seat list needs no second request.
+    expect(claude.capacity?.binding).toMatchObject({ id: '5h', usedPercent: 72, measured: true });
+    expect(claude.capacity?.usability).toBe('ready');
+    expect(claude.capacity?.evidenceSource).toBe('baseline');
 
     const codex = discovery.seats.find((s) => s.id === 'codex-personal')!;
     expect(codex.health).toEqual({ state: 'unknown', summary: null, windows: [], observedAt: null });
+    // No reading at all is NOT zero: the meter has no value to draw.
+    expect(codex.capacity?.binding).toBeNull();
+    expect(codex.capacity?.usability).toBe('unknown');
   });
 
   it('adds claude rolling-window usage to the summary when available', async () => {
@@ -219,6 +235,8 @@ describe('verse seats — native accounts', () => {
     const claude = discovery.seats.find((s) => s.id === 'claude')!;
     expect(claude.health.state).toBe('unknown');
     expect(claude.health.summary).toBe('5h: 1.3M tokens · 7d: 30.4M tokens');
+    // Token counts are not a quota reading: the capacity verdict stays unknown.
+    expect(claude.capacity?.usability).toBe('unknown');
     const codex = discovery.seats.find((s) => s.id === 'codex-personal')!;
     expect(codex.health.summary).toBeNull();
   });
@@ -274,6 +292,10 @@ describe('verse seats — local Ollama', () => {
     expect(qwen.models).toEqual([{ id: 'qwen3-coder-next:ctx64k', label: 'Qwen3-Coder-Next ctx64k', contextWindow: 65_536 }]);
     expect(qwen.contextWindow).toBe(65_536); // :ctx64k suffix (show returned no context_length)
     expect(qwen.health.state).toBe('ready');
+    // A local tag has NO subscription window. Reporting an empty meter would
+    // imply a quota it does not have, so the key is simply absent.
+    expect(qwen.capacity).toBeUndefined();
+    expect('capacity' in qwen).toBe(false);
 
     const llama = discovery.seats.find((s) => s.id === 'local:llama3.2:3b')!;
     expect(llama.contextWindow).toBe(8192); // /api/show parameters.num_ctx wins over model_info context_length

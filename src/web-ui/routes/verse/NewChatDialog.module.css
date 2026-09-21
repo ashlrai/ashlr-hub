@@ -64,3 +64,12 @@
 .create:hover:not(:disabled) { background: var(--accent-700); }
 .create:active:not(:disabled) { background: var(--accent-700); }
 .create:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* The chosen seat's capacity, directly under the picker: this is where the
+   choice is made, so the cost of making it belongs here and not one section
+   away. Indented on the engine-neutral hairline the error state also uses, so
+   it reads as commentary on the field above rather than a new field. */
+.capacity {
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border-default);
+}

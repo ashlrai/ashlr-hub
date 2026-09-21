@@ -92,6 +92,11 @@
   color: var(--text-secondary);
   font-size: var(--text-2xs-size, 11px);
 }
+/* A capacity chip only appears when the seat is tight or spent, so the pill
+   is allowed a few more characters exactly then — rather than reserving room
+   on every chat for a word that is usually absent. The seat name still
+   ellipsises first; the chip is the part worth keeping. */
+.seatPill[data-seat-capacity] { max-width: 46ch; }
 .engineDot {
   flex-shrink: 0;
   width: 5px;

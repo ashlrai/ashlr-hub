@@ -7,6 +7,12 @@
  *
  * Seat health and the local runtime live in the resources panel, and the
  * theme toggle lives in the shell rail, so nothing competes with the list.
+ *
+ * ONE exception, added deliberately: a chat that is RUNNING on a seat whose
+ * binding window is spent gets a small marker. That combination is worth
+ * interrupting for — the turn in flight is the one about to fail — and it is
+ * rare enough that the list stays quiet. Every other row says nothing new;
+ * the capacity rides in the row's `title` where it costs no pixels.
  */
 import { useId } from 'react';
 import type { VerseProject, VerseSeat, VerseSession } from '../../data/api-types.js';
@@ -14,7 +20,8 @@ import type { QueryStatus } from '../../data/cache.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { PlusIcon, SearchIcon, SidebarIcon } from './verse-icons.js';
-import { formatRelative, groupSessions, seatPillLabel } from './verse-model.js';
+import { seatSubscription } from './seat-subscription.js';
+import { formatRelative, groupSessions, seatById, seatPillLabel } from './verse-model.js';
 import styles from './Sidebar.module.css';
 
 export interface SidebarProps {
@@ -85,23 +92,38 @@ export function Sidebar(props: SidebarProps) {
               {group.enrolled ? <span className={styles.enrolled} title="Enrolled repo">enrolled</span> : null}
             </h2>
             <ul className={styles.list}>
-              {group.sessions.map((session) => (
-                <li key={session.id}>
-                  <button type="button" className={`${styles.session} ${styles[`engine-${session.engine}`] ?? ''}`}
-                    aria-current={session.id === selectedId ? 'true' : undefined}
-                    data-focus-key={`verse-session:${session.id}`} data-engine={session.engine}
-                    onClick={() => onSelect(session.id)} title={`${session.title} · ${seatPillLabel(seats, session)}`}>
-                    <span className={styles.marker} aria-hidden="true" />
-                    <span className={styles.sessionText}>{session.title || 'Untitled chat'}</span>
-                    {session.status === 'running' ? (
-                      <span className={styles.running} role="img" aria-label="Running" />
-                    ) : session.status === 'error' ? (
-                      <span className={styles.errored} role="img" aria-label="Last turn failed">!</span>
-                    ) : null}
-                    <time className={styles.time} dateTime={session.updatedAt}>{formatRelative(session.updatedAt)}</time>
-                  </button>
-                </li>
-              ))}
+              {group.sessions.map((session) => {
+                const seat = seatById(seats, session.seatId);
+                const capacity = seat === undefined ? null : seatSubscription(seat);
+                // Quiet by default: the marker appears only where it changes
+                // what the operator would do — a turn in flight on a seat
+                // whose binding window is spent.
+                const spentWhileRunning = session.status === 'running' && capacity?.cls === 'blocked';
+                const title = capacity === null || capacity.cls === 'ready' || capacity.cls === 'unread'
+                  ? `${session.title} · ${seatPillLabel(seats, session)}`
+                  : `${session.title} · ${seatPillLabel(seats, session)} · ${capacity.summary}`;
+                return (
+                  <li key={session.id}>
+                    <button type="button" className={`${styles.session} ${styles[`engine-${session.engine}`] ?? ''}`}
+                      aria-current={session.id === selectedId ? 'true' : undefined}
+                      data-focus-key={`verse-session:${session.id}`} data-engine={session.engine}
+                      onClick={() => onSelect(session.id)} title={title}>
+                      <span className={styles.marker} aria-hidden="true" />
+                      <span className={styles.sessionText}>{session.title || 'Untitled chat'}</span>
+                      {spentWhileRunning && capacity !== null ? (
+                        <span className={styles.seatSpent} role="img"
+                          aria-label={`Seat limit reached: ${capacity.summary}`}>▮</span>
+                      ) : null}
+                      {session.status === 'running' ? (
+                        <span className={styles.running} role="img" aria-label="Running" />
+                      ) : session.status === 'error' ? (
+                        <span className={styles.errored} role="img" aria-label="Last turn failed">!</span>
+                      ) : null}
+                      <time className={styles.time} dateTime={session.updatedAt}>{formatRelative(session.updatedAt)}</time>
+                    </button>
+                  </li>
+                );
+              })}
             </ul>
           </section>
         ))}

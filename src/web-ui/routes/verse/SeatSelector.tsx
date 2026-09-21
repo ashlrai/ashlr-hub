@@ -6,7 +6,7 @@
  * why rather than just a greyed row. Value is `[seatId, modelId]` JSON so
  * ids containing ':' or '/' can never collide.
  *
- * Every option also carries its seat's CAPACITY (`verse-model.seatCapacity`).
+ * Every option also carries its seat's CAPACITY (`seat-subscription.ts`).
  * Without it an exhausted seat was indistinguishable from a fresh one here:
  * the only annotation was `seatUnavailableReason`, which fires solely on
  * `health.state === 'unavailable'`, and Claude's health is `unknown` BY
@@ -15,13 +15,18 @@
  * unannotated choice, and the exhaustion was discovered at turn time — the
  * exact failure the Usage section exists to prevent.
  *
+ * The annotation reads `plan · word · binding phrase` — the plan tier only
+ * when the provider published one, so nothing is invented for a seat whose
+ * subscription was never read.
+ *
  * A `blocked` seat is MARKED but stays selectable: a used-up window can
  * coexist with a spendable credit balance, so refusing the choice would be a
  * stronger claim than the data supports.
  */
 import { useId } from 'react';
 import type { VerseSeat } from '../../data/api-types.js';
-import { ENGINE_LABEL, groupSeats, seatCapacity, SEAT_CAPACITY_WORD, seatUnavailableReason } from './verse-model.js';
+import { seatSubscription } from './seat-subscription.js';
+import { ENGINE_LABEL, groupSeats, seatUnavailableReason } from './verse-model.js';
 import styles from './Composer.module.css';
 
 export interface SeatChoice {
@@ -86,15 +91,17 @@ export function SeatSelector({ seats, value, onChange, disabled = false, label =
           <optgroup key={group.engine} label={ENGINE_LABEL[group.engine]}>
             {group.seats.flatMap((seat) => {
               const reason = seatUnavailableReason(seat);
-              const capacity = seatCapacity(seat);
+              const capacity = seatSubscription(seat);
               // `unread` is left unsaid: "no reading" on every Claude row
-              // would be noise, and the absent figure already says it.
+              // would be noise, and the absent figure already says it. A local
+              // seat is left unsaid too — it has no subscription to report,
+              // and its readiness is already carried by the disabled state.
               const note =
                 reason !== null
                   ? `unavailable: ${reason}`
-                  : capacity.cls === 'unread'
+                  : capacity.cls === 'unread' || capacity.kind === 'local'
                     ? null
-                    : `${SEAT_CAPACITY_WORD[capacity.cls]} · ${capacity.text}`;
+                    : `${capacity.plan === null ? '' : `${capacity.plan} · `}${capacity.word} · ${capacity.summary}`;
               // The label reads inline after the model name, so it stays
               // lowercase; the tooltip stands alone, so it is sentence case.
               const title = note === null ? undefined : note.charAt(0).toUpperCase() + note.slice(1);

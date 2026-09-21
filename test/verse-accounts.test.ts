@@ -57,8 +57,9 @@ import {
   VERSE_CLAUDE_USAGE_PINNED_VERSION,
   VERSE_CLAUDE_VERSION_REASON,
   type VerseAccountCollector,
+  type VerseCodexCredits,
 } from '../src/core/verse/accounts.js';
-import { discoverSeats } from '../src/core/verse/seats.js';
+import { discoverSeats, refreshSeatTelemetry, seatUsability } from '../src/core/verse/seats.js';
 
 // ---------------------------------------------------------------------------
 // Fixture root
@@ -913,4 +914,326 @@ describe('verse accounts — stranded native cleanup recovery', () => {
       fs.rmSync(base, { recursive: true, force: true });
     }
   }, 90_000);
+});
+
+// ---------------------------------------------------------------------------
+// Seat health comes from the LIVE collector (V2.1 regression)
+// ---------------------------------------------------------------------------
+//
+// MEASURED ROOT CAUSE. Seat health was derived from `readVerseAccountEvidence`,
+// whose best source is the shared quota evidence file. That file's scope is
+// literally `codex-native-metadata`: it structurally CANNOT carry Claude or
+// Grok. Against a live server, warmed for 75 seconds:
+//
+//   source                        codex-*      claude                grok
+//   GET /api/verse/accounts       observed     observed, 3 windows   observed
+//   bootstrap.seats[].health      ready        UNKNOWN (forever)     UNKNOWN
+//
+// Both halves were served by the same process from the same monitor. These
+// tests pin the seat half to the live rows.
+
+const LIVE_AT = '2026-09-20T05:31:00.000Z';
+
+/** The four accounts exactly as measured on this machine, 2026-09-20. */
+function liveConnections(): ResourceAccountConnection[] {
+  const codex = (id: string, label: string, resetsAt: string): ResourceAccountConnection => ({
+    id, label, provider: 'codex', state: 'observed', authentication: 'signed-in',
+    health: 'reachable', planType: 'pro', observedAt: LIVE_AT, expiresAt: null,
+    windows: [{ id: 'codex_codex_primary', usedPercent: 100, resetsAt }],
+    reason: 'probe-observed', onDemandEnabled: null, executionSupported: true,
+  });
+  const claudeWindow = (id: string, usedPercent: number, resetDescription: string) => ({
+    // Claude's machine-readable reset is STRUCTURALLY null; the sentence is all
+    // the provider publishes and it is carried verbatim.
+    id, usedPercent, resetsAt: null,
+    nativeReport: { source: 'claude-usage' as const, resetDescription },
+  });
+  return [
+    codex('codex-personal', 'Personal Codex', '2026-09-25T18:25:44.000Z'),
+    codex('codex-cmp', 'CMP Codex', '2026-09-26T03:46:56.000Z'),
+    {
+      id: 'claude', label: 'Claude Code', provider: 'claude', state: 'observed',
+      authentication: 'signed-in',
+      // Always `unknown` for Claude BY CONSTRUCTION — not a fault, and it must
+      // not be allowed to demote the seat.
+      health: 'unknown', planType: 'max', observedAt: LIVE_AT, expiresAt: null,
+      windows: [
+        claudeWindow('five_hour', 15, 'Sep 21 at 1:40am (America/New_York)'),
+        claudeWindow('seven_day', 85, 'Sep 25 at 7pm (America/New_York)'),
+        claudeWindow('seven_day_fable', 100, 'Sep 25 at 7pm (America/New_York)'),
+      ],
+      reason: 'probe-observed', onDemandEnabled: null, executionSupported: true,
+    },
+    {
+      id: 'grok', label: 'Grok', provider: 'grok', state: 'observed', authentication: 'signed-in',
+      health: 'reachable', planType: 'SuperGrok', observedAt: LIVE_AT, expiresAt: null,
+      windows: [{ id: 'grok_unified_weekly', usedPercent: 1, resetsAt: '2026-09-26T12:43:50.000Z' }],
+      reason: 'probe-observed', onDemandEnabled: null, executionSupported: true,
+    },
+  ];
+}
+
+/** A collector that owns the lease and is already warm. Spawns nothing. */
+function warmCollector(
+  accountsRoot: string,
+  accounts: ResourceAccountConnection[],
+  credits: Record<string, VerseCodexCredits | null> = {},
+): VerseAccountCollector {
+  return {
+    accountsRoot,
+    status: () => ({
+      mode: 'owned', state: 'running', owner: 'this-server', reasonCode: null,
+      pollIntervalMs: 30_000, idleSuspendMs: 300_000,
+      lastPolledAt: LIVE_AT, lastRequestAt: LIVE_AT, note: 'Readings are live.',
+    }),
+    touch: () => {},
+    connections: () => ({ sampledAt: LIVE_AT, refreshing: false, accounts }),
+    // Deliberately EMPTY: the Codex-only evidence path must not be what makes
+    // these seats work, or the Claude/Grok bug comes straight back.
+    observations: () => [],
+    credits: (id: string) => credits[id] ?? null,
+    close: async () => {},
+  };
+}
+
+/** An accounts root whose connections.json names the four live accounts. */
+function makeLiveRoot(): string {
+  const base = fs.realpathSync(fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'ashlr-verse-live-')));
+  fs.chmodSync(base, 0o700);
+  writePrivate(path.join(base, 'connections.json'), {
+    schemaVersion: 1,
+    intervalMs: 30_000,
+    accounts: [
+      { id: 'codex-personal', label: 'Personal Codex', provider: 'codex', command: [FAKE_NODE, launcherFor('codex-a')] },
+      { id: 'codex-cmp', label: 'CMP Codex', provider: 'codex', command: [FAKE_NODE, launcherFor('codex-b')] },
+      { id: 'claude', label: 'Claude Code', provider: 'claude', command: [FAKE_NODE, launcherFor('claude-a')] },
+      { id: 'grok', label: 'Grok', provider: 'grok', command: [FAKE_NODE, launcherFor('grok-a')] },
+    ],
+  });
+  // Present on purpose: the live-bearer-token file must never be read.
+  writePrivate(path.join(base, 'console-startup.json'), { readToken: FAKE_BEARER, controlToken: FAKE_BEARER });
+  return base;
+}
+
+describe('verse seats — live collector is the source of seat health', () => {
+  let liveRoot: string;
+
+  beforeEach(() => { liveRoot = makeLiveRoot(); });
+  afterEach(() => { fs.rmSync(liveRoot, { recursive: true, force: true }); });
+
+  it('shows ALL FOUR providers with their real windows — not just the two the evidence file can carry', async () => {
+    const collector = warmCollector(liveRoot, liveConnections(), {
+      'codex-personal': { hasCredits: true, unlimited: false, balance: '2048.4196250000' },
+      'codex-cmp': { hasCredits: true, unlimited: false, balance: '2048.4196250000' },
+    });
+    const discovery = await discoverSeats(makeConfig(liveRoot), {
+      accountsRoot: liveRoot, claudeUsage: zeroUsage, collector,
+    });
+    const byId = new Map(discovery.seats.map((seat) => [seat.id, seat]));
+    expect([...byId.keys()]).toEqual(['codex-personal', 'codex-cmp', 'claude', 'grok']);
+
+    // THE REGRESSION: every one of the four reaches `ready`, Claude and Grok
+    // included. Before this fix those two were `unknown` forever.
+    for (const id of ['codex-personal', 'codex-cmp', 'claude', 'grok']) {
+      const seat = byId.get(id)!;
+      expect(seat.health.state).toBe('ready');
+      expect(seat.health.windows.length).toBeGreaterThan(0);
+      expect(seat.capacity?.evidenceSource).toBe('collector');
+      expect(seat.capacity?.observedAt).toBe(LIVE_AT);
+    }
+
+    const claude = byId.get('claude')!;
+    expect(claude.capacity?.planType).toBe('max');
+    expect(claude.capacity?.windows.map((w) => w.id))
+      .toEqual(['five_hour', 'seven_day', 'seven_day_fable']);
+    expect(claude.capacity?.binding?.id).toBe('seven_day_fable');
+    expect(claude.capacity?.binding?.usedPercent).toBe(100);
+    // A per-model window at its limit does NOT make the account exhausted:
+    // five_hour still has 85 points of headroom.
+    expect(claude.capacity?.usability).toBe('tight');
+
+    const grok = byId.get('grok')!;
+    expect(grok.capacity?.planType).toBe('SuperGrok');
+    expect(grok.capacity?.binding).toMatchObject({
+      id: 'grok_unified_weekly', usedPercent: 1, resetsAt: '2026-09-26T12:43:50.000Z', measured: true,
+    });
+    expect(grok.capacity?.usability).toBe('ready');
+
+    const codex = byId.get('codex-personal')!;
+    expect(codex.capacity?.planType).toBe('pro');
+    expect(codex.capacity?.credits).toEqual({ hasCredits: true, unlimited: false, balance: '2048.4196250000' });
+    // Its only window is spent — but credits remain spendable, so it is not
+    // "blocked", which is what `exhausted` would have claimed.
+    expect(codex.capacity?.usability).toBe('tight');
+    expect(codex.capacity?.notes.some((n) => n.includes('independent of the window'))).toBe(true);
+  });
+
+  it('CLAUDE: the null resetsAt and the verbatim reset sentence both survive onto the seat', async () => {
+    const collector = warmCollector(liveRoot, liveConnections());
+    const discovery = await discoverSeats(makeConfig(liveRoot), {
+      accountsRoot: liveRoot, claudeUsage: zeroUsage, collector,
+    });
+    const claude = discovery.seats.find((seat) => seat.id === 'claude')!;
+
+    for (const window of claude.capacity!.windows) expect(window.resetsAt).toBeNull();
+    for (const window of claude.health.windows) expect(window.resetsAt).toBeNull();
+    expect(claude.capacity?.windows.map((w) => w.resetDescription)).toEqual([
+      'Sep 21 at 1:40am (America/New_York)',
+      'Sep 25 at 7pm (America/New_York)',
+      'Sep 25 at 7pm (America/New_York)',
+    ]);
+    // Rendered verbatim into the summary — never converted into a countdown.
+    expect(claude.health.summary).toContain('five_hour window 15% used, resets Sep 21 at 1:40am (America/New_York)');
+    expect(claude.capacity?.notes.some((n) => n.includes('no machine-readable reset'))).toBe(true);
+    // Claude's health is `unknown` by construction; that must not read as a fault.
+    expect(claude.health.state).toBe('ready');
+  });
+
+  it('CODEX: a flagged sentinel 100 stays a denial on the seat, not a measurement', async () => {
+    const flagged = liveConnections().map((account) => account.id !== 'codex-cmp' ? account : {
+      ...account,
+      windows: [{ id: 'codex_codex_primary', usedPercent: 100, resetsAt: null, limitReached: true } as
+        ResourceAccountConnection['windows'][number] & { limitReached: true }],
+    });
+    // No credits for this account: nothing is left to spend.
+    const collector = warmCollector(liveRoot, flagged, { 'codex-cmp': null });
+    const discovery = await discoverSeats(makeConfig(liveRoot), {
+      accountsRoot: liveRoot, claudeUsage: zeroUsage, collector,
+    });
+    const seat = discovery.seats.find((s) => s.id === 'codex-cmp')!;
+
+    expect(seat.capacity?.windows[0]).toMatchObject({ limitReached: true, measured: false, usedPercent: 100 });
+    expect(seat.capacity?.binding).toMatchObject({ limitReached: true, measured: false });
+    expect(seat.capacity?.usability).toBe('exhausted');
+    // "limit reached", never "100% used" — the number was never measured.
+    expect(seat.health.summary).toContain('codex_codex_primary window limit reached');
+    expect(seat.health.summary).not.toContain('100% used');
+    expect(seat.capacity?.notes.some((n) => n.includes('a denial, not a measurement'))).toBe(true);
+  });
+
+  it('GROK: an unauthenticated probe makes the seat unavailable with a reconnect note, not a shrug', async () => {
+    const signedOut = liveConnections().map((account) => account.id !== 'grok' ? account : {
+      ...account,
+      state: 'unavailable' as const, authentication: 'unknown' as const, health: 'unknown' as const,
+      windows: [], reason: 'probe-account-unavailable',
+    });
+    const collector = warmCollector(liveRoot, signedOut);
+    const discovery = await discoverSeats(makeConfig(liveRoot), {
+      accountsRoot: liveRoot, claudeUsage: zeroUsage, collector,
+    });
+    const grok = discovery.seats.find((seat) => seat.id === 'grok')!;
+
+    expect(grok.health.state).toBe('unavailable');
+    expect(grok.capacity?.usability).toBe('signed-out');
+    expect(grok.capacity?.binding).toBeNull();
+    expect(grok.capacity?.notes.some((n) => n.includes('Re-authenticate'))).toBe(true);
+    // The remedy is named without naming the pinned profile.
+    expect(JSON.stringify(grok)).not.toContain('native-profiles');
+  });
+
+  it('falls back to the Codex-only evidence file when no collector is running, and says so', async () => {
+    // This root has the pool/quota config the evidence reader needs.
+    held = await acquireResourceQuotaRefreshLease(accountsLedgerRoot(root), { trackNativeActivity: true });
+    held.markPending();
+    publishSharedQuotaEvidence({
+      root: accountsLedgerRoot(root),
+      pool: POOL as never,
+      bindings: BINDINGS as never,
+      config: QUOTA_CONFIG as never,
+      lease: held,
+      state: 'running',
+      evidence: { observations: [freshObservation(73)] as never, unavailableWorkerIds: [] },
+    });
+
+    const discovery = await discoverSeats(makeConfig(root), {
+      accountsRoot: root, claudeUsage: zeroUsage, collector: null,
+    });
+    const codex = discovery.seats.find((seat) => seat.id === 'codex-a')!;
+    expect(codex.health.state).toBe('ready');
+    expect(codex.capacity?.binding).toMatchObject({ id: 'codex_primary', usedPercent: 73, measured: true });
+    expect(codex.capacity?.evidenceSource).toBe('shared-evidence');
+    // The evidence file structurally cannot carry credits or a plan tier —
+    // both read as "no signal", never as zero or a guess.
+    expect(codex.capacity?.credits).toBeNull();
+    expect(codex.capacity?.planType).toBeNull();
+    expect(codex.capacity?.notes.some((n) => n.includes('unknown, not zero'))).toBe(true);
+
+    // Grok is in connections.json but the evidence file cannot describe it, so
+    // it degrades to "no reading" rather than to a zero meter.
+    const grok = discovery.seats.find((seat) => seat.id === 'grok')!;
+    expect(grok.health.state).toBe('unknown');
+    expect(grok.capacity?.usability).toBe('unknown');
+    expect(grok.capacity?.binding).toBeNull();
+    expect(grok.capacity?.windows).toEqual([]);
+  });
+
+  it('a seat read taken after the collector warms shows the warm data, not the mount-time snapshot', async () => {
+    // Cold: the app opened before the collector's first cycle finished. This is
+    // exactly what Mason's screenshot showed — every account "unknown".
+    const cold = await discoverSeats(makeConfig(liveRoot), {
+      accountsRoot: liveRoot, claudeUsage: zeroUsage, collector: null,
+    });
+    for (const seat of cold.seats) {
+      expect(seat.health.state).toBe('unknown');
+      expect(seat.capacity?.usability).toBe('unknown');
+    }
+
+    // …one collector cycle later, the SAME discovery re-reads live telemetry
+    // without re-probing Ollama or re-reading connections.json.
+    const warm = refreshSeatTelemetry(makeConfig(liveRoot), cold, {
+      accountsRoot: liveRoot,
+      claudeUsage: zeroUsage,
+      collector: warmCollector(liveRoot, liveConnections()),
+    });
+    expect(warm.seats.map((seat) => seat.health.state)).toEqual(['ready', 'ready', 'ready', 'ready']);
+    expect(warm.seats.find((seat) => seat.id === 'claude')?.capacity?.windows).toHaveLength(3);
+
+    // The cold snapshot is not mutated, and the private launch map still points
+    // at the seats that were just returned.
+    expect(cold.seats[0]!.health.state).toBe('unknown');
+    for (const seat of warm.seats) expect(warm.launches.get(seat.id)!.seat).toBe(seat);
+    expect(warm.launches.get('claude')!.launcher).toEqual([FAKE_NODE, launcherFor('claude-a')]);
+    expect(warm.localRuntime).toBe(cold.localRuntime);
+  });
+
+  it('keeps every launcher argv and bearer token out of the live seat payload', async () => {
+    const collector = warmCollector(liveRoot, liveConnections(), {
+      'codex-personal': { hasCredits: true, unlimited: false, balance: '2048.4196250000' },
+    });
+    const discovery = await discoverSeats(makeConfig(liveRoot), {
+      accountsRoot: liveRoot, claudeUsage: zeroUsage, collector,
+    });
+    const wire = JSON.stringify(discovery.seats);
+
+    expect(wire).not.toContain(FAKE_BEARER);
+    expect(wire).not.toContain(FAKE_NODE);
+    expect(wire).not.toContain('native-profiles');
+    expect(wire).not.toContain('launcher.mjs');
+    expect(wire).not.toContain('console-startup');
+    expect(wire).not.toContain(liveRoot);
+    expect(wire).not.toContain(os.homedir());
+    // No absolute path of any kind: this body names accounts, not the filesystem.
+    expect(/"[^"]*\/(?:Users|opt|home)\//.test(wire)).toBe(false);
+    // …while still answering the question the panel exists to answer.
+    expect(wire).toContain('grok_unified_weekly');
+  });
+
+  it('seatUsability: no reading is unknown, and a null percent never counts as headroom', () => {
+    const base = { state: 'observed' as const, credits: null };
+    expect(seatUsability({ ...base, binding: null, windows: [] })).toBe('unknown');
+    expect(seatUsability({
+      ...base,
+      binding: { id: 'a', usedPercent: 100, limitReached: false },
+      windows: [
+        { id: 'a', usedPercent: 100, resetsAt: null, nativeReport: null, limitReached: false, measured: true },
+        // No signal — it must not be read as 0% of headroom left over.
+        { id: 'b', usedPercent: null, resetsAt: null, nativeReport: null, limitReached: false, measured: true },
+      ],
+    })).toBe('exhausted');
+    expect(seatUsability({
+      ...base,
+      binding: { id: 'a', usedPercent: 94, limitReached: false },
+      windows: [{ id: 'a', usedPercent: 94, resetsAt: null, nativeReport: null, limitReached: false, measured: true }],
+    })).toBe('tight');
+  });
 });
