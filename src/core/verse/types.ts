@@ -198,6 +198,42 @@ export type VerseEvent =
 
 export type VerseEventType = VerseEvent['type'];
 
+/**
+ * Which endpoint a LOCAL seat sends its turns to.
+ *
+ *  - `ollama`       — the historical lane: the plain `claude` binary with
+ *                     ANTHROPIC_BASE_URL pointed straight at Ollama's
+ *                     Anthropic-compatible endpoint on :11434. Ollama
+ *                     serialises this model architecture, so a fleet of local
+ *                     agents on this lane is a queue (docs/LOCAL-FLEET.md).
+ *  - `llama-server` — the same binary pointed at the local Anthropic
+ *                     normalising proxy that fronts llama-server. That proxy
+ *                     is the ONLY way to reach llama-server's parallel slots
+ *                     and the prompt-cache fix, because Qwen3.8's chat
+ *                     template rejects Claude Code's request shape unless the
+ *                     proxy rewrites it on the way through.
+ *
+ * DISPATCH ONLY. Model DISCOVERY stays on Ollama in both lanes — llama-server
+ * implements neither `/api/tags` nor `/api/show`, which is where every local
+ * seat's identity, context window and `tools` capability comes from.
+ */
+export type VerseLocalDispatch = 'ollama' | 'llama-server';
+
+/** What a client is told about this machine's local serving situation. */
+export interface VerseLocalRuntimeSummary {
+  /** Ollama reachable? Drives the local seats and an inline hint when false. */
+  ollama: { reachable: boolean; baseUrl: string; models: string[] };
+  /**
+   * Where local seats DISPATCH turns, reported only when that is NOT the
+   * default Ollama lane.
+   *
+   * Absent means `ollama`, i.e. exactly what every existing client already
+   * assumes — so opting in is visible on the wire and NOT opting in changes no
+   * payload at all.
+   */
+  dispatch?: { lane: VerseLocalDispatch; baseUrl: string };
+}
+
 /** GET /api/verse/bootstrap */
 export interface VerseBootstrap {
   seats: VerseSeat[];
@@ -205,8 +241,7 @@ export interface VerseBootstrap {
   sessions: VerseSession[];
   /** Whether POST routes are enabled on this server (`ashlr serve --allow-dispatch` / `ashlr verse`). */
   dispatchEnabled: boolean;
-  /** Ollama reachable? Drives the local seats and an inline hint when false. */
-  localRuntime: { ollama: { reachable: boolean; baseUrl: string; models: string[] } };
+  localRuntime: VerseLocalRuntimeSummary;
 }
 
 /**

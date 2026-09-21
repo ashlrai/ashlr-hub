@@ -48,6 +48,7 @@ import {
   type VerseEngine,
   type VerseModelOption,
   type VerseSeat,
+  type VerseLocalDispatch,
   type VerseSeatCapacity,
   type VerseSeatEvidenceSource,
   type VerseSeatHealth,
@@ -110,8 +111,13 @@ const MAX_LOCAL_TAGS = 64;
 export interface VerseSeatDiscoveryOptions {
   /** Directory holding connections.json and the account ledger. */
   accountsRoot?: string;
-  /** Ollama base URL (no trailing slash, no /v1). */
+  /** Ollama base URL (no trailing slash, no /v1). DISCOVERY and, by default, dispatch. */
   ollamaBaseUrl?: string;
+  /**
+   * Override the lane local seats DISPATCH turns down. Tests pass it
+   * explicitly; the server lets {@link resolveVerseLocalDispatch} read config.
+   */
+  localDispatch?: VerseLocalDispatch;
   /** Injectable fetch for tests. Defaults to the global fetch. */
   fetchImpl?: typeof fetch;
   /** Injectable claude usage reader for tests. */
@@ -135,7 +141,7 @@ export interface VerseSeatDiscovery {
 
 /** Optional top-level `verse` block in config.json (not part of AshlrConfig yet). */
 interface VerseConfigCarrier {
-  verse?: { accountsRoot?: unknown };
+  verse?: { accountsRoot?: unknown; localDispatch?: unknown };
 }
 
 // ---------------------------------------------------------------------------
@@ -192,6 +198,73 @@ export function resolveOllamaBaseUrl(cfg: AshlrConfig, explicit?: string): strin
   out = out.replace(/\/+$/, '');
   if (out.endsWith('/v1')) out = out.slice(0, -3);
   return out;
+}
+
+/**
+ * Which lane local seats DISPATCH turns down: `ollama` (the default) or
+ * `llama-server`.
+ *
+ * THIS IS AN EXPLICIT CHOICE AND MUST STAY ONE. The tempting alternative —
+ * "use llama-server whenever something answers on its port" — is wrong twice
+ * over. A llama-server that is up is not necessarily the one this hub
+ * supervises. And the thing a local seat actually has to reach is not
+ * llama-server at all but the Anthropic normalising proxy in front of it
+ * (local-runtime/llama/anthropic-proxy.ts), a SEPARATE listener that exists
+ * only while some process is hosting it — in practice, only while this process
+ * has run `startLocalRuntime`. Inferring the lane from a probe therefore turns
+ * "the fast runtime happens not to be running" into "the Ollama lane that
+ * works today is broken", which is the one outcome worth engineering against.
+ *
+ * Precedence: explicit argument > `ASHLR_VERSE_LOCAL_DISPATCH` >
+ * `cfg.verse.localDispatch` > `ollama`. A value that is neither lane is not a
+ * choice, so it is skipped rather than honoured, and an unrecognised value
+ * everywhere lands back on the working default.
+ */
+export function resolveVerseLocalDispatch(
+  cfg: AshlrConfig,
+  explicit?: VerseLocalDispatch,
+): VerseLocalDispatch {
+  if (explicit === 'ollama' || explicit === 'llama-server') return explicit;
+  const candidates = [
+    process.env['ASHLR_VERSE_LOCAL_DISPATCH'],
+    (cfg as AshlrConfig & VerseConfigCarrier).verse?.localDispatch,
+  ];
+  for (const raw of candidates) {
+    if (typeof raw !== 'string') continue;
+    const value = raw.trim().toLowerCase();
+    if (value === 'llama-server' || value === 'llama' || value === 'llamaserver') return 'llama-server';
+    if (value === 'ollama') return 'ollama';
+  }
+  return 'ollama';
+}
+
+/**
+ * The base URL a local seat's Anthropic client is pointed at, for a lane.
+ *
+ * The llama-server answer comes from `resolveLocalAnthropicBaseUrl`, which is
+ * the single place that knows where the proxy listens — deriving it here from
+ * a port number would be exactly the endpoint drift that module exists to
+ * prevent.
+ *
+ * The import is LAZY because `local-runtime/llama/config` reaches for
+ * `node:child_process` (it locates llama-server's binary with `which`), and a
+ * server whose operator never opted in must not pay for that on boot. If it
+ * cannot be resolved at all the seats fall back to the Ollama lane: a seat
+ * list is not worth losing over an address lookup.
+ */
+async function resolveLocalDispatchBaseUrl(
+  cfg: AshlrConfig,
+  lane: VerseLocalDispatch,
+  ollamaBaseUrl: string,
+): Promise<string> {
+  if (lane !== 'llama-server') return ollamaBaseUrl;
+  try {
+    const { resolveLocalAnthropicBaseUrl } = await import('../local-runtime/llama/config.js');
+    const resolved = resolveLocalAnthropicBaseUrl(cfg);
+    return typeof resolved === 'string' && resolved.trim().length > 0 ? resolved.trim() : ollamaBaseUrl;
+  } catch {
+    return ollamaBaseUrl;
+  }
 }
 
 function readConnections(accountsRoot: string): ConnectionAccount[] {
@@ -573,10 +646,18 @@ async function discoverLocalSeats(
   fetchImpl: typeof fetch,
   baseUrl: string,
   preferred: readonly string[],
+  dispatch: { lane: VerseLocalDispatch; baseUrl: string },
 ): Promise<{ seats: VerseSeat[]; launches: Map<string, VerseSeatLaunch>; localRuntime: VerseBootstrap['localRuntime'] }> {
+  // DISCOVERY IS OLLAMA'S, ALWAYS. `/api/tags` names the installed models and
+  // `/api/show` carries the context window and the `tools` capability that
+  // decides whether a tag can be a seat at all; llama-server implements
+  // neither. `dispatch` only changes where the resulting seats SEND turns.
   const probe = await probeOllamaTags(fetchImpl, baseUrl);
   const localRuntime: VerseBootstrap['localRuntime'] = {
     ollama: { reachable: probe.reachable, baseUrl, models: probe.tags },
+    ...(dispatch.lane === 'llama-server'
+      ? { dispatch: { lane: dispatch.lane, baseUrl: dispatch.baseUrl } }
+      : {}),
   };
   const seats: VerseSeat[] = [];
   const launches = new Map<string, VerseSeatLaunch>();
@@ -617,7 +698,14 @@ async function discoverLocalSeats(
       health: { state: 'ready', summary: null, windows: [], observedAt: new Date().toISOString() },
     };
     seats.push(seat);
-    launches.set(seat.id, { seat, launcher: null, ollamaBaseUrl: baseUrl });
+    launches.set(seat.id, {
+      seat,
+      launcher: null,
+      ollamaBaseUrl: baseUrl,
+      // Only on the opted-in lane. Leaving it absent on the default lane keeps
+      // a launch record byte-identical to the ones already on disk.
+      ...(dispatch.lane === 'llama-server' ? { anthropicBaseUrl: dispatch.baseUrl } : {}),
+    });
   });
   return { seats, launches, localRuntime };
 }
@@ -633,6 +721,7 @@ async function discoverLocalSeats(
 export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOptions = {}): Promise<VerseSeatDiscovery> {
   const accountsRoot = resolveAccountsRoot(cfg, opts.accountsRoot);
   const ollamaBaseUrl = resolveOllamaBaseUrl(cfg, opts.ollamaBaseUrl);
+  const dispatchLane = resolveVerseLocalDispatch(cfg, opts.localDispatch);
   const fetchImpl = opts.fetchImpl ?? fetch;
   const claudeUsage = opts.claudeUsage ?? readClaudeUsage;
 
@@ -670,7 +759,11 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
     ollama: { reachable: false, baseUrl: ollamaBaseUrl, models: [] },
   };
   try {
-    const local = await discoverLocalSeats(fetchImpl, ollamaBaseUrl, preferredLocalTags(cfg));
+    const dispatchBaseUrl = await resolveLocalDispatchBaseUrl(cfg, dispatchLane, ollamaBaseUrl);
+    const local = await discoverLocalSeats(fetchImpl, ollamaBaseUrl, preferredLocalTags(cfg), {
+      lane: dispatchLane,
+      baseUrl: dispatchBaseUrl,
+    });
     localRuntime = local.localRuntime;
     for (const seat of local.seats) {
       if (launches.has(seat.id)) continue;

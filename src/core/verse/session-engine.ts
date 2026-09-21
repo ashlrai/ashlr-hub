@@ -73,8 +73,20 @@ export interface VerseSeatLaunch {
   seat: VerseSeat;
   /** Native-profile launcher argv prefix (node + launcher path) for claude/codex/grok; null for local. */
   launcher: string[] | null;
-  /** e.g. http://127.0.0.1:11434 */
+  /**
+   * e.g. http://127.0.0.1:11434 — the Ollama endpoint this seat was
+   * DISCOVERED from, and the dispatch endpoint on the default lane.
+   */
   ollamaBaseUrl: string;
+  /**
+   * Where a LOCAL seat's Anthropic client is pointed for DISPATCH, when that
+   * is not `ollamaBaseUrl` — i.e. the llama-server lane's normalising proxy.
+   *
+   * OPTIONAL on purpose. Launch records are persisted per session, so every
+   * record written before this field existed has to keep validating; absent
+   * means "the Ollama lane", which is what those sessions were created on.
+   */
+  anthropicBaseUrl?: string;
 }
 
 export interface VerseEngineHandle {
@@ -197,7 +209,10 @@ function isSeatLaunch(value: unknown): value is VerseSeatLaunch {
     && typeof seat['engine'] === 'string'
     && Array.isArray(seat['models'])
     && (value['launcher'] === null || isStringArray(value['launcher']))
-    && typeof value['ollamaBaseUrl'] === 'string';
+    && typeof value['ollamaBaseUrl'] === 'string'
+    // Absent is valid: that is every launch record written before the
+    // llama-server lane existed, and it means the Ollama lane.
+    && (value['anthropicBaseUrl'] === undefined || typeof value['anthropicBaseUrl'] === 'string');
 }
 
 function cloneSession(session: VerseSession): VerseSession {
@@ -747,6 +762,12 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         seat: launch.seat,
         launcher: launch.launcher ? [...launch.launcher] : null,
         ollamaBaseUrl: launch.ollamaBaseUrl,
+        // Pinned at CREATION time, deliberately: a session that started on one
+        // lane keeps resuming on it, rather than silently changing endpoint
+        // mid-conversation because config moved underneath it.
+        ...(typeof launch.anthropicBaseUrl === 'string' && launch.anthropicBaseUrl.length > 0
+          ? { anthropicBaseUrl: launch.anthropicBaseUrl }
+          : {}),
       } satisfies VerseSeatLaunch);
       return cloneSession(session);
     },

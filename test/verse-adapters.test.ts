@@ -6,7 +6,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { adapterFor } from '../src/core/verse/adapters/index.js';
-import { createAnthropicStreamParser, ollamaAnthropicBaseUrl } from '../src/core/verse/adapters/claude.js';
+import { createAnthropicStreamParser, anthropicEnvBaseUrl } from '../src/core/verse/adapters/claude.js';
 import { createCodexParser } from '../src/core/verse/adapters/codex.js';
 import type { VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import type { VerseEvent, VerseSeat, VerseSession } from '../src/core/verse/types.js';
@@ -107,9 +107,9 @@ describe('claude adapter — buildLaunch', () => {
   });
 
   it('strips /v1 from the ollama base', () => {
-    expect(ollamaAnthropicBaseUrl('http://127.0.0.1:11434/v1')).toBe('http://127.0.0.1:11434');
-    expect(ollamaAnthropicBaseUrl('http://127.0.0.1:11434/')).toBe('http://127.0.0.1:11434');
-    expect(ollamaAnthropicBaseUrl('http://127.0.0.1:11434')).toBe('http://127.0.0.1:11434');
+    expect(anthropicEnvBaseUrl('http://127.0.0.1:11434/v1')).toBe('http://127.0.0.1:11434');
+    expect(anthropicEnvBaseUrl('http://127.0.0.1:11434/')).toBe('http://127.0.0.1:11434');
+    expect(anthropicEnvBaseUrl('http://127.0.0.1:11434')).toBe('http://127.0.0.1:11434');
   });
 });
 

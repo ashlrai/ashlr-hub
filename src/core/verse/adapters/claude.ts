@@ -5,8 +5,11 @@
  * --include-partial-messages ... -- <text>` process per turn (`-p` is
  * boolean; the prompt is positional and goes last, behind `--`). Turn 1 mints the
  * conversation with `--session-id <uuid>`; later turns `--resume <uuid>`.
- * For engine=local the plain `claude` binary is pointed at Ollama's
- * Anthropic-compatible endpoint via ANTHROPIC_BASE_URL.
+ * For engine=local the plain `claude` binary is pointed via ANTHROPIC_BASE_URL
+ * at whichever local Anthropic-compatible endpoint the seat's launch record
+ * names: Ollama's by default, or — when the operator opted into the
+ * llama-server lane — the normalising proxy in front of llama-server. The
+ * adapter does not choose; it forwards the choice `seats.ts` already made.
  *
  * Parse: claude's stream-json is JSONL where streaming deltas are wrapped as
  * `{type:'stream_event', event:{...Anthropic Messages wire event}}` and whole
@@ -368,8 +371,15 @@ export function createAnthropicStreamParser(
   };
 }
 
-/** Strip a trailing `/v1` (and slashes) so ANTHROPIC_BASE_URL points at the Ollama root. */
-export function ollamaAnthropicBaseUrl(baseUrl: string): string {
+/**
+ * Strip a trailing `/v1` (and slashes) so ANTHROPIC_BASE_URL names an ORIGIN.
+ *
+ * Claude Code appends `/v1/messages` itself, so a base URL that already ends
+ * in `/v1` would ask for `/v1/v1/messages`. Both lanes hand us their address
+ * spelled that way — `resolveLocalAnthropicBaseUrl` returns `.../v1` exactly
+ * like a configured Ollama URL might — so the same normalisation covers both.
+ */
+export function anthropicEnvBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '').replace(/\/v1$/, '');
 }
 
@@ -397,7 +407,9 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
   ];
   const env: Record<string, string> = session.engine === 'local'
     ? {
-      ANTHROPIC_BASE_URL: ollamaAnthropicBaseUrl(launch.ollamaBaseUrl),
+      // The launch record's dispatch address wins; `ollamaBaseUrl` is the
+      // default lane and the fallback for records written before lanes existed.
+      ANTHROPIC_BASE_URL: anthropicEnvBaseUrl(launch.anthropicBaseUrl ?? launch.ollamaBaseUrl),
       ANTHROPIC_AUTH_TOKEN: 'ollama',
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     }

@@ -344,6 +344,41 @@ describe('sendTurn — local via plain claude on PATH', () => {
     const usage = events.find((e) => e.type === 'usage');
     expect(usage).toMatchObject({ usage: { contextWindow: 32_000 } });
   });
+
+  it('dispatches to the launch record\u2019s Anthropic address when the llama-server lane is on', async () => {
+    // The llama-server lane. The address is PINNED into the launch record at
+    // creation time and read back off disk by sendTurn, so this also proves
+    // the record survives the round trip that `isSeatLaunch` validates.
+    const created = engine.createSession(
+      { projectPath: project, seatId: 'local:qwen3-coder' },
+      { seat: LOCAL_SEAT, launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434', anthropicBaseUrl: 'http://127.0.0.1:8081/v1' },
+    );
+    const record = JSON.parse(readFileSync(join(root, 'sessions', `${created.id}.launch.json`), 'utf8')) as Record<string, unknown>;
+    expect(record['anthropicBaseUrl']).toBe('http://127.0.0.1:8081/v1');
+    expect(record['ollamaBaseUrl']).toBe('http://127.0.0.1:11434');
+
+    engine.sendTurn(created.id, 'local hello');
+    const events = await untilTurnDone(engine, created.id);
+    expect(events[events.length - 1]).toMatchObject({ type: 'turn-done', ok: true });
+    const [call] = readCalls(side);
+    // The proxy ORIGIN: Claude Code appends `/v1/messages` itself.
+    expect(call.env.ANTHROPIC_BASE_URL).toBe('http://127.0.0.1:8081');
+    // Ollama must not be dispatched to on this lane, in any spelling.
+    expect(Object.values(call.env)).not.toContain('http://127.0.0.1:11434');
+  });
+
+  it('keeps dispatching to Ollama for a launch record written before lanes existed', () => {
+    // No `anthropicBaseUrl` key at all — every record already on disk. The
+    // validator must accept it and the adapter must fall back to Ollama.
+    const created = engine.createSession(
+      { projectPath: project, seatId: 'local:qwen3-coder' },
+      { seat: LOCAL_SEAT, launcher: null, ollamaBaseUrl: 'http://127.0.0.1:11434' },
+    );
+    const record = JSON.parse(readFileSync(join(root, 'sessions', `${created.id}.launch.json`), 'utf8')) as Record<string, unknown>;
+    expect('anthropicBaseUrl' in record).toBe(false);
+    expect(() => engine.sendTurn(created.id, 'local hello')).not.toThrow();
+    engine.cancelTurn(created.id);
+  });
 });
 
 describe('sendTurn — codex', () => {
