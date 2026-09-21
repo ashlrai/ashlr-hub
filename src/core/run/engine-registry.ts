@@ -28,6 +28,7 @@ import type {
   EngineSpec,
   EngineTier,
 } from '../types.js';
+import { DEFAULT_LOCAL_MODEL_TAG } from './model-catalog.js';
 
 // ---------------------------------------------------------------------------
 // Built-in roster — encodes the five v1–v4 engines (parity-locked) plus the two
@@ -246,9 +247,11 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
   // endpoint at http://localhost:11434/v1/models (engineInstalled in engines.ts
   // returns true when the probe succeeds; false when Ollama is not running).
   //
-  // Default model: qwen2.5:72b-instruct-q4_K_M (best available on this machine).
-  // Upgrade path: `ollama pull qwen2.5-coder:32b` for a dedicated coder model —
-  // then set cfg.foundry.models['local-coder'] = 'qwen2.5-coder:32b'.
+  // Default model: DEFAULT_LOCAL_MODEL_TAG (run/model-catalog.ts) — currently
+  // qwen3.8:27b-ctx64k. It replaced qwen2.5:72b-instruct-q4_K_M, which was a
+  // 44 GB model that hit the turn cap on 2 of 3 runs of the fixture Qwen3.8
+  // passed 2/2; see that constant's doc comment for the measurement.
+  // Override with cfg.foundry.models['local-coder'] = '<ollama tag>'.
   //
   // BUILTIN but NOT in default allowedBackends — activated by adding 'local-coder'
   // to cfg.foundry.allowedBackends (or the machine-local defaultConfig override).
@@ -263,7 +266,7 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
       envKey: '',
       baseUrlEnv: 'OLLAMA_BASE_URL',
       defaultBaseUrl: 'http://localhost:11434/v1',
-      defaultModel: 'qwen2.5:72b-instruct-q4_K_M',
+      defaultModel: DEFAULT_LOCAL_MODEL_TAG,
       protocol: 'openai' as const,
     },
     capabilities: ['agent', 'edit', 'tools'],

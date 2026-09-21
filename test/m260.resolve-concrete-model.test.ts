@@ -26,6 +26,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import type { AshlrConfig, Proposal } from '../src/core/types.js';
 import { resolveConcreteModel } from '../src/core/run/sandboxed-engine.js';
+import { DEFAULT_LOCAL_MODEL_TAG } from '../src/core/run/model-catalog.js';
 import { evaluateMergeAuthority } from '../src/core/inbox/merge.js';
 
 // ---------------------------------------------------------------------------
@@ -106,8 +107,10 @@ describe('M260 resolveConcreteModel — registry defaultModel fallback', () => {
 
   it('local-coder uses api.defaultModel (priority 5) when no override', () => {
     const cfg = makeCfg([]);
-    // local-coder registry api.defaultModel = 'qwen2.5:72b-instruct-q4_K_M'
-    expect(resolveConcreteModel('local-coder', cfg)).toBe('qwen2.5:72b-instruct-q4_K_M');
+    // local-coder registry api.defaultModel = DEFAULT_LOCAL_MODEL_TAG, which
+    // moved off qwen2.5:72b-instruct-q4_K_M to Qwen3.8-27B (num_ctx 65536).
+    expect(DEFAULT_LOCAL_MODEL_TAG).toBe('qwen3.8:27b-ctx64k');
+    expect(resolveConcreteModel('local-coder', cfg)).toBe(DEFAULT_LOCAL_MODEL_TAG);
   });
 });
 

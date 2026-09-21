@@ -32,7 +32,7 @@ import { computeQualityMetrics } from './quality-metrics.js';
 import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 import { peekBackendAvailability } from '../fabric/resource-monitor.js';
-import { CLAUDE5_FABLE_API_ID, fableEnabled } from '../run/model-catalog.js';
+import { CLAUDE5_FABLE_API_ID, DEFAULT_LOCAL_MODEL_TAG, fableEnabled } from '../run/model-catalog.js';
 import {
   agentSemanticSubjectRef,
   agentSemanticModelFamily,
@@ -1242,9 +1242,18 @@ export function resolveFrontierJudgeClient(
   cfg: AshlrConfig,
   opts: FrontierJudgeResolutionOptions = {},
 ): FrontierJudgeClient | null {
+  // The LOCAL judge fallback follows the local default (DEFAULT_LOCAL_MODEL_TAG)
+  // rather than staying pinned to qwen2.5:72b-instruct-q4_K_M. This is the same
+  // Ollama runtime the coder default dispatches to, so a tag the machine no
+  // longer has would simply fail the judge call — and of the two, the judge is
+  // the one that most wants a thinking model, which the 72b is not and Qwen3.8
+  // is. `cfg.foundry.managerJudgeModel` still overrides. Judge independence is
+  // unaffected: `requireIndependent` only ever accepts a claude/openai-family
+  // reviewer, so a local model is reachable solely on the correlated path,
+  // exactly as before.
   const judgeModel =
     ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ||
-    'qwen2.5:72b-instruct-q4_K_M';
+    DEFAULT_LOCAL_MODEL_TAG;
   const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
   const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
   const resolve = (candidate: AshlrConfig): FrontierJudgeClient | null => {

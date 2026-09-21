@@ -19,6 +19,8 @@ import {
   contextWindowFromTagSuffix,
   discoverSeats,
   localSeatLabel,
+  localSeatPreferenceRank,
+  preferredLocalTags,
   resolveAccountsRoot,
   resolveOllamaBaseUrl,
   VERSE_NATIVE_MODELS,
@@ -112,6 +114,52 @@ function startFakeOllama(): Promise<FakeOllama> {
         } else {
           res.end(JSON.stringify({ model_info: {} }));
         }
+      });
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const addr = server.address();
+      const port = addr && typeof addr === 'object' ? addr.port : 0;
+      resolve({
+        baseUrl: `http://127.0.0.1:${port}`,
+        showCalls,
+        close: () => new Promise<void>((r) => { server.closeAllConnections?.(); server.close(() => r()); }),
+      });
+    });
+  });
+}
+
+/**
+ * A fake Ollama whose tag list AND per-tag `capabilities` are given by the
+ * caller — the modern runtime shape, where `/api/show` reports whether a model
+ * supports `tools`. `startFakeOllama` above deliberately omits `capabilities`
+ * to exercise the legacy-name-heuristic fallback; this one exercises the real
+ * path, and lets a test control the order `/api/tags` reports.
+ */
+function startFakeOllamaWith(models: ReadonlyArray<{ name: string; capabilities: string[] }>): Promise<FakeOllama> {
+  const showCalls: string[] = [];
+  const byName = new Map(models.map((m) => [m.name, m.capabilities]));
+  const server = http.createServer((req, res) => {
+    const url = req.url ?? '/';
+    if (req.method === 'GET' && url === '/api/tags') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ models: models.map((m) => ({ name: m.name })) }));
+      return;
+    }
+    if (req.method === 'POST' && url === '/api/show') {
+      let raw = '';
+      req.on('data', (c: Buffer) => { raw += c.toString('utf8'); });
+      req.on('end', () => {
+        let name = '';
+        try { name = String((JSON.parse(raw) as { name?: string }).name ?? ''); } catch { /* ignore */ }
+        showCalls.push(name);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ capabilities: byName.get(name) ?? [], model_info: {} }));
       });
       return;
     }
@@ -324,6 +372,70 @@ describe('verse seats — local Ollama', () => {
     expect(discovery.localRuntime.ollama.reachable).toBe(false);
     expect(discovery.localRuntime.ollama.models).toEqual([]);
     expect(discovery.seats.filter((s) => s.engine === 'local')).toEqual([]);
+  });
+
+  it('surfaces the preferred local model first, whatever order /api/tags reports', async () => {
+    // Ollama lists by mtime, so the model the operator actually uses sinks
+    // below whatever was pulled most recently. Here the preferred tag is
+    // reported LAST, and a non-tool model is reported first.
+    ollama = await startFakeOllamaWith([
+      { name: 'bge-m3:latest', capabilities: ['completion', 'embedding'] },
+      { name: 'qwen3.8:27b-q8_0', capabilities: ['completion', 'vision', 'tools', 'thinking'] },
+      { name: 'qwen3.8:27b-ctx64k', capabilities: ['completion', 'vision', 'tools', 'thinking'] },
+    ]);
+    const discovery = await discoverSeats(makeConfig(), {
+      accountsRoot: tmpRoot,
+      ollamaBaseUrl: ollama.baseUrl,
+      claudeUsage: zeroUsage,
+    });
+
+    // ctx64k (exact match on the default) first, then its q8_0 sibling (same
+    // family, different variant). bge-m3 is absent: no `tools`, so it cannot
+    // drive an agentic session — the capability filter still owns membership.
+    expect(discovery.seats.map((s) => s.id)).toEqual([
+      'local:qwen3.8:27b-ctx64k',
+      'local:qwen3.8:27b-q8_0',
+    ]);
+    // localRuntime reports what the runtime said, unreordered and unfiltered.
+    expect(discovery.localRuntime.ollama.models).toEqual([
+      'bge-m3:latest',
+      'qwen3.8:27b-q8_0',
+      'qwen3.8:27b-ctx64k',
+    ]);
+  });
+
+  it('cfg.foundry.models[local-coder] outranks the built-in default for seat order', async () => {
+    ollama = await startFakeOllamaWith([
+      { name: 'qwen3.8:27b-ctx64k', capabilities: ['completion', 'tools', 'thinking'] },
+      { name: 'devstral:24b', capabilities: ['completion', 'tools'] },
+    ]);
+    const cfg = makeConfig({ foundry: { models: { 'local-coder': 'devstral:24b' } } } as Partial<AshlrConfig>);
+    const discovery = await discoverSeats(cfg, {
+      accountsRoot: tmpRoot,
+      ollamaBaseUrl: ollama.baseUrl,
+      claudeUsage: zeroUsage,
+    });
+    expect(discovery.seats.map((s) => s.id)).toEqual(['local:devstral:24b', 'local:qwen3.8:27b-ctx64k']);
+  });
+
+  it('helpers: preferred tags + preference rank', () => {
+    // No override: the built-in default is the sole preference.
+    expect(preferredLocalTags(makeConfig())).toEqual(['qwen3.8:27b-ctx64k']);
+    // An override leads; the default still backs it up rather than vanishing.
+    expect(preferredLocalTags(makeConfig({ foundry: { models: { 'local-coder': 'devstral:24b' } } } as Partial<AshlrConfig>)))
+      .toEqual(['devstral:24b', 'qwen3.8:27b-ctx64k']);
+    // An override that IS the default is not duplicated.
+    expect(preferredLocalTags(makeConfig({ foundry: { models: { 'local-coder': 'qwen3.8:27b-ctx64k' } } } as Partial<AshlrConfig>)))
+      .toEqual(['qwen3.8:27b-ctx64k']);
+
+    const preferred = ['qwen3.8:27b-ctx64k', 'devstral:24b'];
+    expect(localSeatPreferenceRank('qwen3.8:27b-ctx64k', preferred)).toBe(0);
+    expect(localSeatPreferenceRank('QWEN3.8:27B-CTX64K', preferred)).toBe(0); // case-insensitive
+    expect(localSeatPreferenceRank('devstral:24b', preferred)).toBe(1);
+    expect(localSeatPreferenceRank('qwen3.8:27b-q8_0', preferred)).toBe(2); // same family
+    expect(localSeatPreferenceRank('devstral:latest', preferred)).toBe(3);  // same family
+    expect(localSeatPreferenceRank('llama3.2:3b', preferred)).toBe(4);      // unrelated
+    expect(localSeatPreferenceRank('llama3.2:3b', [])).toBe(0);             // no preference: all equal
   });
 
   it('helpers: tag suffix + label', () => {

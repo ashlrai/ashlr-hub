@@ -23,6 +23,45 @@ export type ModelCapability =
   | 'coder'         // code generation, refactoring, lint fixes
   | 'reasoning'     // chain-of-thought, architecture, security analysis
   | 'long-context'; // >=100k token context window
+//
+// NOTE — VISION IS DELIBERATELY NOT MODELLED HERE.
+//
+// Qwen3.8-27B reports `capabilities: ['completion','vision','tools','thinking']`
+// from `ollama show`, so the capability is real. It is still absent from this
+// union on purpose: `pickModel({capability})` answers "which model in the WHOLE
+// catalog is best at X", and the cloud entries below carry no vision tag either
+// even though Claude and GPT-5.5 are multimodal. Adding 'vision' and tagging
+// only the one entry we can verify would make
+// `pickModel({ capability: 'vision' })` answer "the local model is the only
+// multimodal model in the fleet" — false, and worse than silence. Tagging the
+// cloud entries too would mean asserting multimodality for provider ids this
+// module cannot probe. Model it when a caller actually needs to route on it,
+// and audit every entry in the same change.
+
+// ---------------------------------------------------------------------------
+// Local (Ollama) default — ONE tag, three consumers
+// ---------------------------------------------------------------------------
+
+/**
+ * The preferred local Ollama tag: `run/engine-registry.ts`'s `local-coder`
+ * `api.defaultModel`, the `fleet/manager.ts` local-judge fallback, and the
+ * `vision/strategist.ts` local-strategist fallback all read THIS — the same
+ * "end the triple-maintained constant" move `defaultStrategistModel()` made
+ * for the frontier side.
+ *
+ * Qwen3.8-27B (Apache 2.0, Aug 2026) at `num_ctx 65536`. Chosen over the
+ * previous `qwen2.5:72b-instruct-q4_K_M` on measured evidence: on an identical
+ * two-bug fixture Qwen3.8 passed 2/2 in 8 turns each, while the incumbent
+ * generation hit the 30-turn cap on 2 of 3 runs (thrashing, not merely slow).
+ * It is slower per task but consistent, reports native `tools` support — the
+ * hard requirement for driving an agentic session — and is 29 GB against the
+ * 72b's 44 GB.
+ *
+ * `cfg.foundry.models['local-coder']` (dispatch) and
+ * `cfg.foundry.managerJudgeModel` (judge/strategist) still override at every
+ * call site; this is only the default when neither is set.
+ */
+export const DEFAULT_LOCAL_MODEL_TAG = 'qwen3.8:27b-ctx64k';
 
 // ---------------------------------------------------------------------------
 // Catalog entry
@@ -189,6 +228,47 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
     costPerMTokIn: 0,
     costPerMTokOut: 0,
     capabilities: ['reasoning'],
+    minEffort: 2,
+  },
+
+  // -- Local -- qwen3.8:27b (2026 primary local model) ----------------------
+  // Qwen3.8-27B, Apache 2.0, released Aug 2026. `ollama show` reports
+  // `capabilities: ['completion','vision','tools','thinking']` with 262144
+  // native context; this tag pins `num_ctx 65536`.
+  //
+  // CAPABILITIES ARE THE HONEST SET, NOT THE PARTITIONED ONE. The three
+  // entries above partition local capabilities one-model-each (M132), which
+  // was only ever true because no single local model covered more than one.
+  // This one genuinely does: `coder` (2/2 on the fixture the incumbent failed
+  // 2/3 of), `reasoning` (it is a thinking model — the first local entry that
+  // is), and `long-context` (256k native). `vision` is real too but the
+  // ModelCapability union deliberately does not model it — see the note there.
+  // `general` is NOT claimed: nothing has measured it on general chat, and
+  // claiming it would silently move `capability:'general'` routing off the 72b
+  // for no evidence.
+  //
+  // TIER 'mid' AND POSITION AFTER THE OTHER LOCAL ENTRIES ARE DELIBERATE.
+  // 27B sits squarely in the documented 8-40B 'mid' band, and pickModel breaks
+  // cost+tier ties by catalog order, so placing it here leaves every existing
+  // pickModel winner byte-identical: coder -> qwen2.5-coder:32b, reasoning ->
+  // deepseek-r1:32b, no-filter -> qwen2.5:72b. Fleet routing to this model is
+  // NOT meant to come from the capability sort — it comes from
+  // `cfg.foundry.models['local-coder']` / the registry defaultModel, both of
+  // which name it (DEFAULT_LOCAL_MODEL_TAG), and both of which outrank
+  // pickModel in `resolveConcreteModel`. To make it win the sort instead,
+  // raise this to 'large' and move the entry up — and expect
+  // test/m132.coder-model.test.ts to need five assertions rewritten.
+  //
+  // minEffort 2: measured ~590 s/task against 53-381 s for the previous
+  // generation. Consistent, but too slow to be the pick for trivial work —
+  // `maxEffort: 1` queries keep falling through to the lighter entries.
+  {
+    id: `local-coder:${DEFAULT_LOCAL_MODEL_TAG}`,
+    engine: 'local-coder' as EngineId,
+    tier: 'mid',
+    costPerMTokIn: 0,
+    costPerMTokOut: 0,
+    capabilities: ['coder', 'reasoning', 'long-context'],
     minEffort: 2,
   },
 

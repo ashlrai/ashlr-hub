@@ -40,6 +40,7 @@ import {
   type VerseAccountRecord,
   type VerseAccountWindow,
 } from './accounts.js';
+import { DEFAULT_LOCAL_MODEL_TAG } from '../run/model-catalog.js';
 import { probeOllamaModelDetail, type VerseOllamaModelDetail } from './local-models.js';
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
@@ -482,6 +483,60 @@ export function localSeatIsSelectable(detail: VerseOllamaModelDetail | null, tag
   return detail.supportsTools;
 }
 
+/**
+ * The local tags this machine prefers, strongest first.
+ *
+ * `cfg.foundry.models['local-coder']` is the operator's own answer to "which
+ * local model do I actually use", so it leads. `DEFAULT_LOCAL_MODEL_TAG` (the
+ * same constant `local-coder`'s registry `api.defaultModel` resolves to) backs
+ * it up, so a machine with no override still surfaces the model the rest of
+ * the codebase would have dispatched to.
+ */
+export function preferredLocalTags(cfg: AshlrConfig): string[] {
+  const out: string[] = [];
+  const configured = cfg.foundry?.models?.['local-coder'];
+  if (typeof configured === 'string' && configured.trim().length > 0) out.push(configured.trim());
+  if (!out.some((t) => t.toLowerCase() === DEFAULT_LOCAL_MODEL_TAG.toLowerCase())) {
+    out.push(DEFAULT_LOCAL_MODEL_TAG);
+  }
+  return out;
+}
+
+/** The model family of an Ollama tag: `qwen3.8:27b-ctx64k` → `qwen3.8`. */
+function tagBase(tag: string): string {
+  return (tag.split(':')[0] ?? tag).trim().toLowerCase();
+}
+
+/**
+ * Sort key for one local tag against `preferred` — LOWER SORTS FIRST.
+ *
+ * Three bands, so a near-miss still beats an unrelated model:
+ *   0 .. n-1    exact tag match, in preference order.
+ *   n .. 2n-1   same model family, different variant — `qwen3.8:27b-q8_0`
+ *               when `qwen3.8:27b-ctx64k` is preferred. The right model at
+ *               the wrong context size is still the right model.
+ *   2n          everything else, which keeps its discovery order because the
+ *               sort is stable.
+ *
+ * This replaces relying on Ollama's `/api/tags` ordering, which is by mtime:
+ * the preferred model sank below whatever was pulled most recently. Ranking is
+ * ORDER ONLY — `localSeatIsSelectable` still decides membership, so a model
+ * without tool support stays hidden no matter how preferred its tag is.
+ */
+export function localSeatPreferenceRank(tag: string, preferred: readonly string[]): number {
+  const normalized = tag.trim().toLowerCase();
+  for (let i = 0; i < preferred.length; i += 1) {
+    if (normalized === preferred[i]!.trim().toLowerCase()) return i;
+  }
+  const base = tagBase(normalized);
+  if (base.length > 0) {
+    for (let i = 0; i < preferred.length; i += 1) {
+      if (base === tagBase(preferred[i]!)) return preferred.length + i;
+    }
+  }
+  return preferred.length * 2;
+}
+
 /** `qwen3-coder-next:ctx64k` → 65536; null when no such suffix. */
 export function contextWindowFromTagSuffix(tag: string): number | null {
   const m = /:ctx(\d+)k$/i.exec(tag);
@@ -506,6 +561,7 @@ export function localSeatLabel(tag: string): string {
 async function discoverLocalSeats(
   fetchImpl: typeof fetch,
   baseUrl: string,
+  preferred: readonly string[],
 ): Promise<{ seats: VerseSeat[]; launches: Map<string, VerseSeatLaunch>; localRuntime: VerseBootstrap['localRuntime'] }> {
   const probe = await probeOllamaTags(fetchImpl, baseUrl);
   const localRuntime: VerseBootstrap['localRuntime'] = {
@@ -532,6 +588,12 @@ async function discoverLocalSeats(
         ?? 65_536,
     });
   });
+
+  // Preferred model first, then discovery order. `sort` is stable, so every
+  // tag that is not preferred keeps the order `/api/tags` reported it in.
+  selectable.sort(
+    (a, b) => localSeatPreferenceRank(a.tag, preferred) - localSeatPreferenceRank(b.tag, preferred),
+  );
 
   selectable.forEach(({ tag, contextWindow }) => {
     const seat: VerseSeat = {
@@ -597,7 +659,7 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
     ollama: { reachable: false, baseUrl: ollamaBaseUrl, models: [] },
   };
   try {
-    const local = await discoverLocalSeats(fetchImpl, ollamaBaseUrl);
+    const local = await discoverLocalSeats(fetchImpl, ollamaBaseUrl, preferredLocalTags(cfg));
     localRuntime = local.localRuntime;
     for (const seat of local.seats) {
       if (launches.has(seat.id)) continue;
