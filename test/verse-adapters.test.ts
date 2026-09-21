@@ -335,7 +335,10 @@ describe('grok adapter — buildLaunch', () => {
       '--include-partial-messages',
       '--cwd', '/tmp/proj',
       '--model', 'grok-4',
-      '--permission-mode', 'acceptEdits',
+      // dontAsk, not acceptEdits: Grok's acceptEdits leaves
+      // `run_terminal_command` needing an approver that a seat does not have,
+      // and the turn is cancelled mid-run. Measured against the real CLI.
+      '--permission-mode', 'dontAsk',
       '--session-id', 'g-uuid',
       '--single=yo',
     ]);
