@@ -208,3 +208,39 @@ Still open, and the right next step: inspect what `/v1/messages` actually forwar
 request — llama-server logs the rendered prompt at higher verbosity — and decide whether the fix
 belongs in llama-server's Anthropic-to-chat conversion or in a small normalising shim in front of it.
 Do not delete the assertion.
+
+## RESOLVED: Claude Code now drives llama-server
+
+Two fixes, and the second only surfaced once the first was gone.
+
+**1. The message shape.** Captured from a real Claude Code request through a logging proxy: the CLI
+sends a top-level `system` field AND a system-role turn sitting SECOND in `messages`, after a user
+turn. Qwen3.8's template refuses any system role that is not first, hence the 500 on every turn.
+
+`src/core/local-runtime/llama/anthropic-shim.ts` lifts system-role turns into the top-level `system`
+block, which the template consumes before its loop. Nothing is dropped and every other turn keeps
+its order. Deleting the template assertion instead would have been WORSE: that branch renders
+nothing, so a late system turn would vanish silently and the agent would lose its instructions with
+no error at all.
+
+**2. Context is divided by slots, not shared.** With the template fixed the next error was honest:
+`request (23310 tokens) exceeds the available context size (16384 tokens)`. `--parallel 4` splits
+`-c` four ways, so 64k became four 16k slots, and Claude Code's system prompt alone is ~23k. Running
+`-c 131072 --parallel 4` gives each slot 32k and clears it.
+
+**Slots and per-agent context compete for the same memory.** Choosing a slot count is choosing how
+much context each agent gets; a fleet sized without accounting for the agent runner's own system
+prompt will fail at dispatch rather than degrade.
+
+Verified: a single Claude Code agent completes the full loop on Qwen3.8 through llama-server — three
+turns, real tool calls, correct edit on disk.
+
+### The throughput/latency trade, measured
+
+Four concurrent agents saturate all four slots, but each agent's share of the model shrinks
+accordingly. A task a single agent finishes in roughly three minutes takes well over fifteen when
+four run together. Parallelism here buys THROUGHPUT, not speed.
+
+That makes it right for unattended or background fleet work, and poor for a human waiting on one
+interactive answer. Size the fleet for the job: fewer slots with more context each for interactive
+use, more slots for batch work.
