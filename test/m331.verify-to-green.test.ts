@@ -40,7 +40,8 @@ vi.mock('../src/core/inbox/store.js', () => ({
   loadProposal: vi.fn(() => fixtureProposal),
 }));
 
-vi.mock('../src/core/sandbox/worktree.js', () => ({
+vi.mock('../src/core/sandbox/worktree.js', () => {
+    const double = {
   createSandbox: vi.fn((sourceRepo: string) => {
     const dir = mkdtempSync(join(tmpdir(), 'ashlr-m331-clone-'));
     execFileSync('git', ['clone', '--quiet', sourceRepo, dir], { stdio: 'pipe' });
@@ -48,7 +49,16 @@ vi.mock('../src/core/sandbox/worktree.js', () => ({
     return { id: `m331-${clones.length}`, sourceRepo, worktreePath: dir, branch: 'x' };
   }),
   removeSandbox: vi.fn((sandbox: { id: string }) => { removedSandboxes.push(sandbox.id); }),
-}));
+};
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
 import {
   runTests,

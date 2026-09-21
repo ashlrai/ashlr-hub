@@ -769,13 +769,23 @@ describe('pre-mutate gate call sites (LOCUS_ENFORCE)', () => {
         }),
       };
     });
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: () => {
         throw new Error('no git repo here');
       },
       removeSandbox: () => {},
       sandboxDiff: () => ({ files: 0, patch: '', insertions: 0, deletions: 0 }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
     vi.doMock('../src/core/fleet/agent-action-ledger.js', async (importOriginal) => {
       const actual = await importOriginal<
         typeof import('../src/core/fleet/agent-action-ledger.js')

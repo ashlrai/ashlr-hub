@@ -194,3 +194,32 @@ export type {
   VerseScopeResult,
   VerseSpend,
 } from '../../core/verse/control-types.js';
+
+/**
+ * Verse V2.2 local fleet (routes/verse/autonomy — the runtime, local-only and
+ * fleet panels). Same discipline as the control plane above: the contract is
+ * declared once, in `src/core/verse/fleet-types.ts`, by the module that also
+ * projects the routes' bodies — so the cockpit cannot drift from what
+ * `/api/verse/{runtime,fleet,local-only}` actually returns.
+ *
+ * `FleetAgent` and `FleetSnapshot` are declared further in, by
+ * `src/core/daemon/local-fleet.ts` (the producer), and re-exported through
+ * fleet-types so there is exactly one declaration of an in-flight agent in
+ * the codebase rather than one per layer.
+ */
+export type {
+  FleetAgent,
+  FleetAgentState,
+  FleetSnapshot,
+  LocalOnlyPolicy,
+  LocalOnlyRefusal,
+  LocalOnlySource,
+  LocalOnlyUpdate,
+  LocalOnlyUpdateResult,
+  RuntimeAction,
+  RuntimeActionResult,
+  ServingRuntimeKind,
+  ServingRuntimeParallelism,
+  ServingRuntimeSnapshot,
+  ServingRuntimeState,
+} from '../../core/verse/fleet-types.js';

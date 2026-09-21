@@ -256,3 +256,98 @@
 @media (prefers-reduced-motion: reduce) {
   :root:not([data-motion="full"]) .meterFill { transition: none; }
 }
+
+/* --- local fleet: serving runtime, local-only, agents in flight ---------- */
+/* Owner U. Same rules as the rest of this sheet: hairlines not cards, tone
+   always paired with a word, every numeral in the display face with tabular
+   figures so a column of elapsed times does not shimmer as it ticks. Reads at
+   900px — every grid here collapses to one column before that. */
+
+.runtimeTop { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-4); }
+.runtimeState { display: inline-flex; align-items: center; gap: var(--space-2); font-family: var(--font-display); font-size: var(--text-base-size); line-height: var(--text-base-line); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-display, -0.02em); }
+.runtimeStateText { white-space: nowrap; }
+.runtimeState[data-state="running"] .runDot { background: var(--status-success-solid); }
+.runtimeState[data-state="starting"] .runDot,
+.runtimeState[data-state="stopping"] .runDot { background: var(--status-running-solid); }
+.runtimeState[data-state="stopped"] .runDot { background: var(--status-neutral-solid); }
+.runtimeState[data-state="unknown"] .runDot { background: var(--status-unknown-solid); }
+
+.factWide { flex: 1 1 260px; min-width: 0; }
+.factMono { font-family: var(--font-mono); font-size: var(--text-xs-size); overflow: hidden; text-overflow: ellipsis; }
+
+/* The capacity block. The big numeral is the EFFECTIVE concurrency; the
+   verdict word beside it carries the state so colour is never alone. */
+.capacityBlock { margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
+.capacityHead { display: flex; align-items: flex-start; gap: var(--space-4); }
+.capacityBig {
+  flex: none;
+  min-width: 2ch;
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-3xl-size, 30px);
+  line-height: 1;
+  letter-spacing: var(--tracking-display, -0.02em);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+.capacityBlock[data-verdict="serialized"] .capacityBig { color: var(--status-danger-fg); }
+.capacityBlock[data-verdict="unknown"] .capacityBig,
+.capacityBlock[data-verdict="offline"] .capacityBig { color: var(--text-tertiary); }
+.capacityWords { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.capacityHeadline { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); font-family: var(--font-display); font-size: var(--text-sm-size); line-height: var(--text-sm-line); color: var(--text-primary); }
+.capacityDetail { font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-secondary); max-width: 68ch; }
+
+/* The measurement, shown only when the configured number is not the real one. */
+.evidence { margin-top: var(--space-4); padding: var(--space-3); border: 1px solid var(--border-default); border-radius: var(--radius-sm); background: var(--bg-canvas); }
+.evidenceLead { font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-secondary); margin-bottom: var(--space-3); max-width: 68ch; }
+.evidenceScroll { overflow-x: auto; }
+.evidenceTable { width: 100%; min-width: 380px; border-collapse: collapse; font-size: var(--text-xs-size); line-height: var(--text-xs-line); }
+.evidenceTable th, .evidenceTable td { padding: var(--space-1) var(--space-2); text-align: left; border-bottom: 1px solid var(--border-subtle); }
+.evidenceTable thead th { font-family: var(--font-display); font-size: var(--text-2xs-size, 11px); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; color: var(--text-tertiary); font-weight: var(--font-weight-medium); }
+.evidenceTable tbody th { font-family: var(--font-display); color: var(--text-primary); font-weight: var(--font-weight-medium); white-space: nowrap; }
+.evidenceTable tbody tr:last-child th, .evidenceTable tbody tr:last-child td { border-bottom: 0; }
+.evidenceNums { font-family: var(--font-display); font-variant-numeric: tabular-nums; color: var(--text-secondary); white-space: nowrap; }
+.evidenceCode { font-family: var(--font-mono); font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); overflow-wrap: anywhere; }
+
+.utilisation { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-5); }
+
+/* --- local only --------------------------------------------------------- */
+.toggleRow { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-3); }
+.toggleState { display: inline-flex; align-items: center; gap: var(--space-2); }
+.policyExplain { margin-top: var(--space-3); font-size: var(--text-sm-size); line-height: var(--text-base-line); color: var(--text-secondary); max-width: 68ch; }
+.policyExplain strong { color: var(--text-primary); font-weight: var(--font-weight-semibold); }
+
+.impact { margin-top: var(--space-5); padding-top: var(--space-4); border-top: 1px solid var(--border-subtle); }
+.impactTitle { font-family: var(--font-display); font-size: var(--text-2xs-size, 11px); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; color: var(--text-tertiary); margin-bottom: var(--space-2); }
+.impactSummary { font-size: var(--text-sm-size); line-height: var(--text-base-line); color: var(--text-primary); max-width: 68ch; }
+.seatList { display: flex; flex-direction: column; margin-top: var(--space-3); }
+.seatRow { display: grid; grid-template-columns: minmax(64px, auto) minmax(0, 1fr); gap: var(--space-1) var(--space-3); align-items: baseline; padding: var(--space-2) 0; border-bottom: 1px solid var(--border-subtle); }
+.seatEngine {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  /* A 2px engine marker, per the design language: identity, never state. */
+  border-left: 2px solid var(--engine-color, var(--border-strong));
+  padding-left: var(--space-2);
+  white-space: nowrap;
+}
+.seatEngine[data-engine="claude"] { --engine-color: var(--engine-claude); }
+.seatEngine[data-engine="codex"] { --engine-color: var(--engine-codex); }
+.seatEngine[data-engine="grok"] { --engine-color: var(--engine-grok); }
+.seatEngine[data-engine="local"] { --engine-color: var(--engine-local); }
+.seatLabel { font-size: var(--text-sm-size); line-height: var(--text-sm-line); color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
+.seatRefusal { grid-column: 2; font-family: var(--font-mono); font-size: var(--text-2xs-size, 11px); line-height: var(--text-xs-line); color: var(--text-tertiary); overflow-wrap: anywhere; }
+
+/* --- fleet -------------------------------------------------------------- */
+.pressure { display: flex; flex-direction: column; gap: var(--space-1); }
+.pressureHead { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.pressureHeadline { font-family: var(--font-display); font-size: var(--text-lg-size); line-height: var(--text-lg-line); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-display, -0.02em); color: var(--text-primary); }
+.pressure[data-state="queued"] .pressureHeadline { color: var(--status-warning-fg); }
+.pressure[data-state="unknown"] .pressureHeadline { color: var(--status-unknown-fg); }
+.pressureDetail { font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-secondary); max-width: 68ch; }
+
+.fleetMeters { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; gap: var(--space-3) var(--space-5); margin: var(--space-4) 0; }
+.elapsedQualifier { color: var(--text-tertiary); font-family: var(--font-ui); font-style: italic; }
+.noteList { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-3); list-style: none; }

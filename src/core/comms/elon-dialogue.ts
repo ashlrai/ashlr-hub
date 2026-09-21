@@ -27,6 +27,7 @@ import { defaultStrategistModel } from '../run/model-catalog.js';
 import { loadLatestBriefing } from '../vision/strategist.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { loadPauseState, savePauseState } from './pause.js';
+import { assertPermitted, endpointPermitted } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Internal: resolve the Opus complete function (mirrors resolveStrategistClient
@@ -94,6 +95,14 @@ async function buildComplete(
   return async (system: string, user: string): Promise<string> => {
     try {
       const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+      // LOCAL-ONLY GATE. This path builds its own request instead of going
+      // through provider-client's transport — it needs a far longer timeout
+      // than that path allows — which means it also bypasses the refusal that
+      // lives there. The base URL is loopback by default, so nothing reaches a
+      // paid provider as configured; the gate is here so that an operator who
+      // repoints it at a remote inference host does not end up with a
+      // local-only mode that has a hole in it.
+      assertPermitted(endpointPermitted(url, cfg));
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 120_000);
       try {

@@ -25,6 +25,7 @@
  *   genome                     Genome status/health: entry count, projects, staleness.
  *   update [--check] [--json]  Safe self-update: git pull --ff-only + rebuild; --check reports only.
  *   runtime <install|status|rollback|run>  Pinned local candidate installation and foreground Universe commands.
+ *   local-runtime <start|stop|status|restart|install>  Supervised llama-server: the parallel local fleet.
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
@@ -641,6 +642,14 @@ const loadRuntimeCmd = lazyCmd(
   () => import('./runtime.js'),
   (m) => m.cmdRuntime as Cmd,
   'runtime command requires a current build of src/cli/runtime.ts.',
+);
+
+// The supervised llama-server serving runtime — the parallel local fleet's
+// engine. See docs/LOCAL-FLEET.md for why it is a separate runtime from Ollama.
+const loadLocalRuntimeCmd = lazyCmd(
+  () => import('./local-runtime.js'),
+  (m) => m.cmdLocalRuntime as Cmd,
+  'local-runtime command requires a current build of src/cli/local-runtime.ts.',
 );
 
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
@@ -2146,6 +2155,14 @@ async function main(): Promise<void> {
       case 'runtime': {
         const cmdRuntime = await loadRuntimeCmd();
         process.exitCode = await cmdRuntime(rest);
+        break;
+      }
+
+      case 'local-runtime': {
+        // Supervised llama-server: start/stop/status/restart, plus the opt-in
+        // launch agent that makes it survive logout and crashes.
+        const cmdLocalRuntime = await loadLocalRuntimeCmd();
+        process.exitCode = await cmdLocalRuntime(rest);
         break;
       }
 

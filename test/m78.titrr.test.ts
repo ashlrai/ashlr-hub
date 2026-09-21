@@ -197,11 +197,21 @@ describe('TITRR loop — sandboxed-engine path (doMock + resetModules)', () => {
       buildContainedEnv: vi.fn(() => ({})),
     }));
 
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: createSandboxMockFn,
       removeSandbox: removeSandboxMockFn,
       sandboxDiff: vi.fn(() => ({ files: 0, patch: '', insertions: 0, deletions: 0 })),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
     vi.doMock('../src/core/run/verify-commands.js', () => ({
       detectVerifyCommands: detectVCMockFn,

@@ -5,6 +5,20 @@
  * relevant API key is present). Supports Ollama (/api/chat native) and LM
  * Studio (/v1/chat/completions OpenAI shape). Detects tool-call capability and
  * degrades to plain chat when unsupported.
+ *
+ * LOCAL-ONLY (policy/local-only.ts): local-first is a DEFAULT; local-only is a
+ * REFUSAL. When the mode is on, `--allow-cloud` plus a present key is no longer
+ * sufficient — this module refuses the cloud provider outright and names both
+ * the provider and the mode. Two seams enforce it:
+ *
+ *   getActiveClient()              — the cloud-provider guard and the cloud-tier
+ *                                    plugin-provider guard, BEFORE the allowCloud
+ *                                    check so the refusal reason is the accurate one.
+ *   buildOpenAICompatibleClient()  — the last gate before bytes leave the machine.
+ *                                    Every OpenAI-compatible dispatch in the hub
+ *                                    (including callers outside this file) builds
+ *                                    its client here, so a non-loopback endpoint
+ *                                    cannot be constructed while local-only is on.
  */
 
 import type {
@@ -14,11 +28,22 @@ import type {
   ModelCallLimits,
   ProviderClient,
 } from '../types.js';
-import { getProviderRegistry } from '../providers.js';
+import { LLAMA_SERVER_PROVIDER_ID, getProviderRegistry } from '../providers.js';
+import {
+  resolveLlamaServerBaseUrl,
+  resolveLlamaServerDefaultModel,
+} from '../local-runtime/llama/config.js';
 import { resolveProviderKey } from '../integrations/secrets.js';
 import { resolveModelProfile, adaptivePromptsEnabled } from './model-profile.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { ENFORCED_PROVIDER_AUTHORITY } from './model-call-authority.js';
+import {
+  assertPermitted,
+  cloudSubjectPermitted,
+  endpointPermitted,
+  providerPermitted,
+  resolveLocalOnlyMode,
+} from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Known cloud provider identifiers
@@ -905,8 +930,27 @@ export function buildOpenAICompatibleClient(
     maxResponseBytes?: number;
     maxOutputTokens?: number;
     onRequestStart?: () => void;
+    /**
+     * Optional config for the local-only gate below. Callers that hold an
+     * AshlrConfig should pass it so a PERSISTED local-only is honoured exactly;
+     * callers that do not fall back to the ambient (env + latch) mode.
+     */
+    cfg?: AshlrConfig;
   },
 ): ProviderClient {
+  // LOCAL-ONLY, last gate before the wire. This builder is the single
+  // constructor for every OpenAI-compatible request in the hub — including the
+  // api-model fleet path in sandboxed-engine.ts and callers in modules that do
+  // not consult the router at all — so refusing a non-loopback endpoint here
+  // closes the class of bypass rather than one path.
+  //
+  // It is a pure builder with no AshlrConfig in hand, so it reads the AMBIENT
+  // mode (env + the process latch that cfg-aware callers warm). `transport.cfg`
+  // lets a caller that does hold a config supply it for an exact answer.
+  {
+    const verdict = endpointPermitted(baseUrl, transport?.cfg, process.env);
+    assertPermitted(verdict);
+  }
   const chatUrl = baseUrl.replace(/\/+$/, '') + '/chat/completions';
 
   function buildHeaders(): Record<string, string> {
@@ -1348,13 +1392,25 @@ export async function getActiveClient(
   const activeId = opts.provider ?? registry.activeProvider;
 
   if (activeId === null) {
+    // Honest reporting: under local-only, "pass --allow-cloud" is advice that
+    // cannot work. Say what would actually fix it.
+    const mode = resolveLocalOnlyMode(cfg);
     throw new Error(
-      'local-first: no provider is reachable. Start Ollama or LM Studio, or pass --allow-cloud to use a cloud provider.',
+      mode.enabled
+        ? `local-only: no LOCAL provider is reachable. ${mode.detail} ` +
+          'Start Ollama (`ollama serve`), LM Studio, or llama-server. Cloud providers are refused in this mode.'
+        : 'local-first: no provider is reachable. Start Ollama or LM Studio, or pass --allow-cloud to use a cloud provider.',
     );
   }
 
   // ---- Cloud-provider guard ----
   if (isCloudProvider(activeId)) {
+    // LOCAL-ONLY comes FIRST and outranks --allow-cloud. When the mode is on,
+    // "the operator passed --allow-cloud and a key is present" is no longer a
+    // reason to proceed; the refusal must name the provider and the mode rather
+    // than the generic local-first message below, which would read as a missing
+    // flag and send the operator to set one.
+    assertPermitted(providerPermitted(activeId, cfg));
     if (!opts.allowCloud) {
       throw new Error(
         `local-first: no local model available; the active provider is '${activeId}' (cloud). ` +
@@ -1434,6 +1490,43 @@ export async function getActiveClient(
     return buildLmStudioClient(baseUrl, model, supportsTools, adaptiveTemperature(cfg, model));
   }
 
+  // ---- Local provider: llama-server (the local FLEET runtime) ----
+  //
+  // `getProviderRegistry` probes this endpoint unconditionally, and the
+  // failover fallback can therefore select it whenever lmstudio and ollama are
+  // down and no cloud key is present — which is the STEADY STATE of a
+  // local-only 24/7 box. Without this branch every in-process provider chat
+  // (judge, manager, strategist, director, playbook, dialogue) threw
+  // "unknown provider 'llama-server'" precisely BECAUSE the fleet runtime was
+  // healthy. It speaks the OpenAI-compatible surface at /v1 and needs no key;
+  // `buildOpenAICompatibleClient`'s endpoint gate covers it exactly as it
+  // covers every other dispatch in the hub.
+  if (activeId === LLAMA_SERVER_PROVIDER_ID) {
+    const endpoint = registry.providers.find((p) => p.id === LLAMA_SERVER_PROVIDER_ID);
+    const baseUrl = resolveLlamaServerBaseUrl(cfg);
+    if (!endpoint?.up) {
+      throw new Error(
+        `local-first: llama-server was selected as the active provider but is not reachable at ${baseUrl}. ` +
+          'Start it with `ashlr local-runtime start`.',
+      );
+    }
+    // llama-server serves ONE model and ignores the request's `model` field, so
+    // an explicit opts.model only changes what run records and telemetry say.
+    // Getting that right still matters: a fleet whose telemetry names a model
+    // it is not running is a fleet nobody can debug.
+    const model = opts.model?.trim() || resolveLlamaServerDefaultModel(cfg);
+    const client = buildOpenAICompatibleClient(
+      baseUrl,
+      '',
+      model,
+      true,
+      adaptiveTemperature(cfg, model),
+      undefined,
+      { cfg },
+    );
+    return { ...client, id: LLAMA_SERVER_PROVIDER_ID };
+  }
+
   // ---- M33: plugin-contributed provider ----
   // Strictly additive: this branch is reachable ONLY when the resolved id
   // matches an enabled plugin provider — builtin routing above is untouched.
@@ -1445,6 +1538,9 @@ export async function getActiveClient(
     const spec = pluginProviders.find((p) => p.id === activeId);
     if (spec) {
       if (spec.tier === 'cloud') {
+        // The plugin registry is the only thing that knows this id is cloud —
+        // no id heuristic could. Hand that classification to the ONE predicate.
+        assertPermitted(cloudSubjectPermitted('provider', activeId, cfg));
         if (!opts.allowCloud) {
           throw new Error(
             `local-first: provider '${activeId}' is a cloud-tier plugin provider. Pass --allow-cloud to use it.`,

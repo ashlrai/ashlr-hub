@@ -25,7 +25,8 @@ describe('M470 - proposal capture candidate identity', () => {
     agentActions = [];
     onProposalLoad = undefined;
 
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: (sourceRepo: string) => ({
         id: 'sb-m470',
         worktreePath: repo,
@@ -49,7 +50,16 @@ describe('M470 - proposal capture candidate identity', () => {
         insertions: 1,
         deletions: 0,
       }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
     vi.doMock('../src/core/sandbox/policy.js', async (importOriginal) => ({
       ...await importOriginal<typeof import('../src/core/sandbox/policy.js')>(),
@@ -59,6 +69,10 @@ describe('M470 - proposal capture candidate identity', () => {
 
     vi.doMock('../src/core/sandbox/mutation-fence.js', () => ({
       acquireOutwardMutationFence: () => ({}),
+      // The async acquirer is what a RUN uses to retake the fence after
+      // inference. A double must provide it or the run throws where the
+      // real module would simply have waited off the event loop.
+      acquireOutwardMutationFenceAsync: async () => (() => ({}))(),
       ownsOutwardMutationFence: (fence: unknown) => fence !== null,
       releaseOutwardMutationFence: () => {},
     }));

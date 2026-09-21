@@ -628,7 +628,12 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'fleetMcp', 'generative', 'goalFocusActiveThreshold', 'goalFocusMode',
   'goalPlanning', 'grok', 'intelligence', 'inventPerCycle', 'judgeAllowedBackends',
   'judgePerPass', 'killSwitch', 'kimi', 'learnedRouting', 'limits', 'local',
-  'localContext', 'localModel', 'localization', 'managerJudgeEngine',
+  // `localOnly` is the enforced local-only mode (src/core/policy/local-only.ts
+  // and types.ts's FoundryConfig). It must appear in BOTH key sets: this one
+  // warns on every config load, effective-config.ts's only on an explicit
+  // `ashlr config effective`. Registering it in one and not the other is why a
+  // correctly-configured local-only fleet printed a typo warning on boot.
+  'localContext', 'localModel', 'localOnly', 'localization', 'managerJudgeEngine',
   'managerJudgeModel', 'mergeAuthority', 'minItemValue', 'modelGranularRouting',
   'modelRacing', 'models', 'nim', 'ollamaBaseUrl', 'outcomeWatcher',
   'productionVelocity', 'proposalRepair', 'proposalTtlDays', 'pulseEmit',

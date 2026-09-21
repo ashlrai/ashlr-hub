@@ -315,7 +315,10 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'eventBus', 'fabric', 'feedbackEnabled', 'fleetMcp', 'generative',
   'goalFocusActiveThreshold', 'goalFocusMode', 'goalPlanning', 'grok', 'intelligence', 'inventPerCycle',
   'judgeAllowedBackends', 'judgePerPass', 'killSwitch', 'kimi',
-  'learnedRouting', 'limits', 'local', 'localContext', 'localModel',
+  // OWNER-L: 'localOnly' is read via a loose cast in src/core/policy/local-only.ts
+  // (the enforced local-only mode). Listed here so setting it in a real operator
+  // config does not raise a false "unrecognized foundry key" warning.
+  'learnedRouting', 'limits', 'local', 'localContext', 'localModel', 'localOnly',
   'managerJudgeEngine', 'managerJudgeModel', 'mergeAuthority', 'minItemValue',
   'modelGranularRouting', 'modelRacing', 'models', 'nim', 'ollamaBaseUrl',
   // M340b: four typed foundry fields the M340a sweep missed. All four are

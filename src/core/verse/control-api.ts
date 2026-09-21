@@ -90,6 +90,19 @@ import { buildRollup } from '../observability/rollup.js';
 import { expandHomePrefix } from './verse-api.js';
 import { buildVerseAccountsSnapshot, getVerseAccountCollector } from './accounts.js';
 import { collectVerseLocalModels } from './local-models.js';
+import {
+  emptyFleetSnapshot,
+  projectLocalOnlyPolicy,
+  projectServingRuntime,
+  withLiveSlots,
+  type LocalOnlyPolicy,
+  type LocalOnlyUpdateResult,
+  type RuntimeAction,
+  type RuntimeActionResult,
+  type ServingRuntimeSnapshot,
+} from './fleet-types.js';
+import { localOnlyPolicySnapshot } from '../policy/local-only.js';
+import { projectFleetSnapshot, readLocalFleetSnapshot } from '../daemon/local-fleet.js';
 import { resolveAccountsRoot, resolveOllamaBaseUrl } from './seats.js';
 import {
   VERSE_AUDIT_DEFAULT_LIMIT,
@@ -134,6 +147,11 @@ const CONTROL_ROUTES = new Set([
   `${CONTROL_PREFIX}/accounts`,
   `${CONTROL_PREFIX}/usage-series`,
   `${CONTROL_PREFIX}/local-models`,
+  // V2.2 local fleet — the serving runtime, the refusal policy, and who is
+  // in flight on it. See src/core/verse/fleet-types.ts for the wire contract.
+  `${CONTROL_PREFIX}/runtime`,
+  `${CONTROL_PREFIX}/fleet`,
+  `${CONTROL_PREFIX}/local-only`,
 ]);
 
 /**
@@ -1519,6 +1537,237 @@ export async function handleVerseControlApi(
           ? { lmStudioBaseUrl: ctx.cfg.models.lmstudio }
           : {}),
       }));
+      return true;
+    }
+
+    // ── /api/verse/runtime ───────────────────────────────────────────────
+    //
+    // The serving runtime the fleet dispatches to — is it up, across how many
+    // slots, and can this server supervise it.
+    //
+    // Distinct from /api/verse/local-models on purpose: that route answers
+    // "what is installed and resident", this one answers "what will actually
+    // answer /v1/chat/completions for several agents at once". A machine can
+    // have Ollama up with twelve models and still have no runtime capable of
+    // serving a fleet, because Ollama refuses to run this architecture in
+    // parallel at all (docs/LOCAL-FLEET.md).
+    //
+    // The supervisor is imported lazily — same reason as /safety — so the web
+    // server does not pay for node:child_process and the process-table probe
+    // on every boot.
+    if (path === `${CONTROL_PREFIX}/runtime`) {
+      if (method === 'GET') {
+        const { statusLocalRuntime } = await import('../local-runtime/llama/index.js');
+        const snapshot = await statusLocalRuntime({ cfg: freshConfig(ctx.cfg) });
+        sendJson(res, 200, projectServingRuntime(snapshot));
+        return true;
+      }
+      if (method === 'POST') {
+        if (!passesPostGate(ctx, req, res)) return true;
+        const body = await readJsonBody(req, res);
+        if (!body) return true;
+        for (const key of Object.keys(body)) {
+          if (key !== 'action') {
+            sendInvalid(res, `unknown key: ${key}`);
+            return true;
+          }
+        }
+        const action = body['action'];
+        if (action !== 'start' && action !== 'stop' && action !== 'restart') {
+          sendInvalid(res, "action must be 'start', 'stop' or 'restart'");
+          return true;
+        }
+        const verb: RuntimeAction = action;
+        const runtimeCfg = { cfg: freshConfig(ctx.cfg) };
+        const llama = await import('../local-runtime/llama/index.js');
+        const lifecycle =
+          verb === 'start'
+            ? await llama.startLocalRuntime(runtimeCfg)
+            : verb === 'stop'
+              ? await llama.stopLocalRuntime(runtimeCfg)
+              : await llama.restartLocalRuntime(runtimeCfg);
+
+        // Audited like every other state-changing control on this plane. The
+        // detail is the supervisor's own sentence; it never carries the argv,
+        // a model path, or anything else machine-identifying beyond the port.
+        try {
+          audit({
+            action: `verse.runtime.${verb}`,
+            repo: null,
+            sandboxId: null,
+            summary: lifecycle.detail,
+            result: lifecycle.ok ? 'ok' : lifecycle.action === 'refused' ? 'refused' : 'error',
+          });
+        } catch {
+          // An unwritable audit log must not turn a completed lifecycle action
+          // into a 500 the operator cannot interpret.
+        }
+
+        const result: RuntimeActionResult = {
+          ok: lifecycle.ok,
+          action: lifecycle.action,
+          note: lifecycle.detail,
+          runtime: projectServingRuntime(lifecycle.snapshot),
+        };
+        // A refusal is a 409, not a 500: "we do not own the server on this
+        // port" is a correct, actionable answer, and the body carries it.
+        sendJson(res, lifecycle.ok ? 200 : lifecycle.action === 'refused' ? 409 : 503, result);
+        return true;
+      }
+      sendJson(res, 404, { error: `not found: ${method} ${path}` });
+      return true;
+    }
+
+    // ── GET /api/verse/fleet ─────────────────────────────────────────────
+    //
+    // Who is in flight right now. The daemon writes the durable snapshot as it
+    // ticks; this route reads it and folds in a LIVE runtime probe.
+    //
+    // Two honesty rules, both of which the projector already encodes and this
+    // route must not undo:
+    //  - a STALE snapshot is served with its content AND its staleness note,
+    //    because "the daemon died twenty minutes ago mid-task" is precisely
+    //    what an operator needs told, and a naive read of that file shows four
+    //    busy agents;
+    //  - the live slot numbers win over the snapshot's aged ones, so the fleet
+    //    panel and the runtime panel can never show two different slot counts
+    //    for the same server.
+    if (path === `${CONTROL_PREFIX}/fleet`) {
+      if (method !== 'GET') {
+        sendJson(res, 404, { error: `not found: ${method} ${path}` });
+        return true;
+      }
+      const sampledAt = new Date().toISOString();
+
+      let runtime: ServingRuntimeSnapshot | null = null;
+      try {
+        const { statusLocalRuntime } = await import('../local-runtime/llama/index.js');
+        runtime = projectServingRuntime(await statusLocalRuntime({ cfg: freshConfig(ctx.cfg) }));
+      } catch {
+        // A runtime probe that cannot even be attempted leaves the snapshot's
+        // own numbers in place rather than blanking the panel.
+        runtime = null;
+      }
+
+      const read = readLocalFleetSnapshot();
+      if (read.snapshot === null) {
+        const note =
+          read.freshness === 'unreadable'
+            ? 'the local-fleet snapshot exists but could not be read, so nothing is shown rather than guessed'
+            : 'the local fleet has not written a snapshot yet — it writes one when the daemon ticks with local-only armed';
+        sendJson(res, 200, withLiveSlots(emptyFleetSnapshot(note, sampledAt), runtime));
+        return true;
+      }
+      const projected = projectFleetSnapshot(read.snapshot, {
+        freshness: read.freshness,
+        ageMs: read.ageMs,
+      });
+      sendJson(res, 200, withLiveSlots(projected, runtime));
+      return true;
+    }
+
+    // ── /api/verse/local-only ────────────────────────────────────────────
+    //
+    // The refusal policy. Local-only is NOT a preference for local models — it
+    // makes cloud engines unreachable, so an accidental frontier dispatch
+    // cannot spend money the operator has deliberately forgone. The GET
+    // therefore ships the actual refusal each engine would receive, quoted
+    // from the dispatcher rather than paraphrased here.
+    if (path === `${CONTROL_PREFIX}/local-only`) {
+      if (method === 'GET') {
+        sendJson(
+          res,
+          200,
+          projectLocalOnlyPolicy(
+            localOnlyPolicySnapshot(freshConfig(ctx.cfg)),
+            new Date().toISOString(),
+          ),
+        );
+        return true;
+      }
+      if (method === 'POST') {
+        if (!passesPostGate(ctx, req, res)) return true;
+        const body = await readJsonBody(req, res);
+        if (!body) return true;
+        for (const key of Object.keys(body)) {
+          if (key !== 'enabled') {
+            sendInvalid(res, `unknown key: ${key}`);
+            return true;
+          }
+        }
+        const enabled = body['enabled'];
+        if (typeof enabled !== 'boolean') {
+          sendInvalid(res, 'enabled must be a boolean');
+          return true;
+        }
+
+        const current = freshConfig(ctx.cfg);
+        const before: LocalOnlyPolicy = projectLocalOnlyPolicy(
+          localOnlyPolicySnapshot(current),
+          new Date().toISOString(),
+        );
+
+        // An env-pinned or latched policy cannot be edited away by writing the
+        // config: the next read would resolve back to the pinned value and the
+        // switch would appear to have silently failed. Refuse out loud, and
+        // hand back the policy's OWN explanation of why.
+        if (!before.mutable) {
+          const refusal: LocalOnlyUpdateResult = {
+            ok: false,
+            policy: before,
+            note:
+              `local-only is pinned by ${before.source} and cannot be changed from here. ` +
+              (before.detail ?? 'The resolver gave no further detail.'),
+          };
+          sendJson(res, 409, refusal);
+          return true;
+        }
+
+        const next: AshlrConfig = {
+          ...current,
+          foundry: { ...(current.foundry ?? {}), localOnly: enabled },
+        };
+        try {
+          saveConfig(next);
+        } catch (err) {
+          sendError(
+            res,
+            'VERSE_UNAVAILABLE',
+            `could not persist config: ${err instanceof Error ? err.message : 'unknown error'}`,
+          );
+          return true;
+        }
+        try {
+          audit({
+            action: 'verse.local-only',
+            repo: null,
+            sandboxId: null,
+            summary: `local-only ${enabled ? 'enabled' : 'disabled'} from the cockpit`,
+            result: 'ok',
+          });
+        } catch {
+          // See the runtime route: an unwritable audit log is not a failed write.
+        }
+
+        // Re-read from disk so the client sees exactly what was persisted, and
+        // re-resolve so a latch or env var that still overrides it is visible
+        // immediately rather than on the next poll.
+        const after = projectLocalOnlyPolicy(
+          localOnlyPolicySnapshot(freshConfig(next)),
+          new Date().toISOString(),
+        );
+        const result: LocalOnlyUpdateResult = {
+          ok: true,
+          policy: after,
+          note:
+            after.enabled === enabled
+              ? `local-only is now ${enabled ? 'ON — cloud engines are refused, not deprioritised' : 'OFF'}.`
+              : `the setting was saved as ${enabled}, but the resolved mode is ${after.enabled}: ${after.detail ?? 'something else is pinning it'}`,
+        };
+        sendJson(res, 200, result);
+        return true;
+      }
+      sendJson(res, 404, { error: `not found: ${method} ${path}` });
       return true;
     }
 

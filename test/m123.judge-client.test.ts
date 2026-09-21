@@ -71,6 +71,38 @@ describe('getProviderRegistry with sparse config', () => {
   });
 
   it('still works when both lmstudio and ollama are absent', async () => {
+    // The original regression: this threw "Cannot read properties of undefined
+    // (reading 'replace')" inside ensurePath. It must not throw.
+    //
+    // It no longer resolves to NO provider, and that is correct rather than a
+    // regression. llama-server — the local fleet's serving runtime — is always
+    // probed at its resolved endpoint whether or not anyone wrote one into the
+    // config, because a fleet runtime that is silently missing from this
+    // registry is exactly the failure the registry exists to surface. `fetch`
+    // is stubbed healthy above, so the probe succeeds and a real, free, local
+    // provider is reported as active.
+    const emptyCfg = {
+      user: { id: 'test', name: 'Test' },
+      models: { providerChain: [] },
+    } as unknown as AshlrConfig;
+
+    const { getProviderRegistry } = await import('../src/core/providers.js');
+    const registry = await getProviderRegistry(emptyCfg);
+    expect(registry).toBeDefined();
+    expect(registry.activeProvider).toBe('llama-server');
+    // The two that genuinely were not configured still say so.
+    for (const id of ['lmstudio', 'ollama']) {
+      const p = registry.providers.find((x) => x.id === id);
+      expect(p?.up).toBe(false);
+      expect(p?.error).toBe('not configured');
+    }
+  });
+
+  it('reports no active provider when nothing local is reachable', async () => {
+    // The other half of the pair: with the serving runtime DOWN, an empty
+    // config really does leave nothing active. Without this case the suite
+    // could no longer tell "llama-server is up" from "the probe always passes".
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('ECONNREFUSED')));
     const emptyCfg = {
       user: { id: 'test', name: 'Test' },
       models: { providerChain: [] },

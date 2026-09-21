@@ -617,6 +617,24 @@ export interface AshlrConfig {
     /** Backends the fleet may use. Absent ⇒ ['builtin'] only. */
     allowedBackends?: EngineId[];
     /**
+     * LOCAL-ONLY: make cloud engines UNREACHABLE, not merely deprioritised.
+     *
+     * This is a refusal, not a preference. While it is true, every dispatch
+     * path (`getActiveClient`, `buildOpenAICompatibleClient`, `spawnEngine`,
+     * and both sandboxed runners) refuses any engine whose RESOLVED ENDPOINT
+     * is not loopback, with a named reason — so an accidental frontier
+     * dispatch cannot spend money the operator has deliberately forgone.
+     *
+     * Locality is decided by endpoint, not by tier: `local-coder` and `nim`
+     * are both tier 'mid', but one is free and one bills NVIDIA. An engine
+     * whose locality cannot be determined is treated as CLOUD.
+     *
+     * Also honoured at `cfg.models.localOnly`, and forced on for the process
+     * by `ASHLR_LOCAL_ONLY`. See src/core/policy/local-only.ts and
+     * docs/LOCAL-FLEET.md ("What 'local only' has to mean").
+     */
+    localOnly?: boolean;
+    /**
      * M308: executable autonomy control loop. When Foundry is configured, each
      * daemon tick consumes the resource-aware direction report before dispatching:
      * pause/verify-only modes skip new proposal generation, local-only constrains

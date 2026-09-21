@@ -1,0 +1,158 @@
+# Running a local agent fleet on Qwen3.8
+
+Goal: many local coding agents at once, 24/7, with no cloud dependency — the same way Claude Code or
+Codex would be used, but on this machine.
+
+## The finding that determines the architecture
+
+**Ollama cannot run Qwen3.8 agents concurrently.** Measured on this machine, four concurrent
+requests to `qwen3.8:27b-ctx64k` on Ollama 0.33.3:
+
+```
+wall 15.2s   per-request 3.7, 7.6, 11.4, 15.2
+```
+
+That four-second stagger is queueing, not parallelism. The server log says why, and it is a hard
+constraint rather than a tuning problem:
+
+```
+WARN source=sched.go:509 msg="model architecture does not currently support parallel requests"
+     architecture=qwen35
+```
+
+`OLLAMA_NUM_PARALLEL` does not help — the scheduler refuses before it is consulted, and resident
+memory stays at a single KV slot. Note also that the qwen35 hybrid/sliding-window attention defeats
+Ollama's prompt cache (`forcing full prompt re-processing due to lack of cache data`, four times in
+a sixteen-second test), which matters for agent loops that resend a growing transcript each turn.
+
+**llama-server does run them concurrently.** Same model file, same machine:
+
+```
+wall  9.1s   per-request 8.6, 8.9, 9.0, 9.0
+```
+
+All four finish together — continuous batching across four slots sharing ONE copy of the weights.
+That is 1.7x the throughput at four agents, and unlike running four Ollama instances it costs 27 GB
+once rather than 27 GB per agent.
+
+## The resulting setup
+
+Two runtimes, each doing what it is good at:
+
+| Runtime | Port | Role |
+|---|---|---|
+| Ollama | 11434 | model discovery (`/api/tags`, `/api/ps`), embeddings (`bge-m3`), single interactive Verse chats |
+| llama-server | 8080 | the parallel agent fleet — many concurrent coding agents |
+
+Both resident is ~58 GB of 128 GB, which leaves room for KV cache and the rest of the machine.
+
+llama-server is launched against the GGUF blob Ollama already downloaded, so there is no second copy
+on disk:
+
+```
+llama-server -m ~/.ollama/models/blobs/sha256-<qwen3.8-model-layer> \
+  --port 8080 --parallel 4 -c 65536 --host 127.0.0.1
+```
+
+The manifest at `~/.ollama/models/manifests/registry.ollama.ai/library/qwen3.8/27b-ctx64k` names the
+model layer's digest; the blob is that digest with `:` replaced by `-`.
+
+The hub already has a `llama-server` engine (`src/core/run/engines.ts`, M144) that speaks the
+OpenAI-compatible surface at `/v1`, with the base URL resolved from `cfg.models.llamaServer.baseUrl`,
+then `LLAMA_SERVER_BASE_URL`, then `http://localhost:8080/v1`.
+
+## What "local only" has to mean
+
+Local-only is not just a preferred model — it is a refusal. Cloud engines must be unreachable, not
+merely deprioritised, so an accidental frontier dispatch cannot spend money the operator has
+deliberately forgone. The hub already has the seam: `provider-client.ts` throws on a cloud provider
+without `--allow-cloud`, and `router.ts` checks `cloudKeyAvailable`.
+
+## Concurrency is bounded by slots, not by ambition
+
+Four slots is what this configuration was measured at. Raising `--parallel` raises KV cache memory
+linearly, and past the point where the cache no longer fits, throughput collapses rather than
+degrading gracefully. Any fleet-level concurrency cap must be derived from the serving runtime's
+actual slot count, not set independently — two different numbers is how a queue becomes invisible.
+
+That derivation is only worth anything if it reaches the dispatcher, which took three fixes:
+
+* **Use the derived answer, don't re-clamp it.** `resolveCfg` always populates
+  `daemon.concurrency.local` with a default of 2, so intersecting the derived number with it
+  pinned an unconfigured four-slot machine at two agents while every surface reported four.
+  `resolveLocalPoolCap` (`src/core/daemon/loop.ts`) is now the single rule, and a test pins it.
+* **Tier by locality, not by trust tier.** The fleet's engine is registered `tier: 'mid'` because it
+  is branch-eligible after verification, and the pool maps everything that is not tier `'local'`
+  into the cloud bucket — so the slot ceiling, which only ever applies to `TieredPool.local`,
+  bounded nothing the fleet dispatched. `poolTierForBackend` tiers by `LOCAL_ONLY_BACKENDS`.
+* **Follow the path the tick actually takes.** With `fabric.concurrentDispatch` on, the tiered pool
+  is never consulted. The measured slot count is handed to that planner as a per-backend override
+  (`ConcurrentDispatchCfg.slotsByBackend`), and when `fabric.maxSlotsPerBackend` is the tighter
+  number the reported limiter says `config` rather than `serving-slots`.
+
+## The fence was the real ceiling, and it is not any more
+
+Before any of the above mattered, one agent ran at a time regardless of slots.
+`runApiModelSandboxed` acquired the process-wide, cross-process **outward mutation fence** at the
+top of a run and released it at the end — spanning the entire model loop, which is ~99% of wall
+time and performs no outward mutation. Every agent past the first blocked on it.
+
+The fence still means exactly what it meant — at most one agent positioned to make outward
+mutations — but it is now held only for the sections that make them: the policy gate before the
+run, and proposal filing plus sandbox cleanup after it. It is released across inference and
+re-acquired before filing, and re-acquiring re-mints the cleanup authority, which re-checks
+`~/.ashlr/KILL`. A kill armed mid-inference therefore refuses the filing rather than being outrun
+by a fence taken twenty minutes earlier, and `pause` reaches quiescence without waiting behind a
+model.
+
+Sandbox *creation* genuinely does mutate the source repo's `.git`, so it keeps the fence — but
+through `createSandboxAsync`, which waits off the event loop. The synchronous
+`acquireOutwardMutationFence` spins on `Atomics.wait`: raising its timeout does not make a waiter
+more likely to win (the holder is in the same process and holds across awaits), it just freezes the
+hang watchdog, the queue-lease renewer, the shutdown handler and the control plane for the duration.
+
+Measured after the change, four concurrent agents on four real repos:
+
+```
+per-agent 50.3 / 41.2 / 50.9 / 41.7 s      wall 50.9 s
+peak busy 4/4 slots        321 of 328 samples had >= 2 slots busy
+```
+
+## What actually bounds a free fleet
+
+A local dispatch costs $0, so a USD budget cap can never fire for it. The bounds that do:
+
+| Bound | Where |
+|---|---|
+| serving slots | `/props.total_slots`, read back from the live server |
+| `daemon.perTickItems` | how many items one tick may claim |
+| `daemon.localFleet.maxDispatchesPerDay` | an explicit non-monetary daily ceiling, **default 400** |
+| the outward mutation fence | still one-at-a-time for engines that hold it across a run (`builtin` via `runSwarm`) |
+
+The daily ceiling is reserved *before* a turn runs and released if the turn never dispatched, so a
+long-running agent is visible to it for its whole duration. Writing `null` is an explicit opt-out
+and is reported as one; junk falls back to the default, because "we could not parse your ceiling"
+must never mean "run unbounded".
+
+## Running it 24/7
+
+`ashlr local-runtime install` writes a launchd agent. Two things make that safe rather than merely
+convenient:
+
+* **It is refused while `~/.ashlr/KILL` is engaged,** and while the bind host is not loopback.
+  llama-server has no authentication of any kind — whoever reaches the port can run inference and
+  read every slot's prompt through `/slots` — so a permanently installed, LAN-exposed inference
+  server needs more than an environment variable. `ASHLR_LOCAL_RUNTIME_HOST` alone is downgraded
+  back to loopback and the downgrade is reported; `models.llamaServer.allowNonLoopback: true` is
+  the only way out, and `install` still refuses.
+* **The plist runs a shim, not a frozen blob path.** Ollama's store is content-addressed, so the
+  `sha256-…` path resolved at install time is garbage-collected by the next `ollama pull` — at
+  which point `KeepAlive` would respawn llama-server against a missing file every ten seconds
+  forever while every surface reported only `state: 'down'`. The shim checks the frozen path, falls
+  back to `ashlr local-runtime resolve-model` to re-read the manifest, and `exec`s — so launchd
+  still supervises llama-server's own pid.
+
+A launchd `KeepAlive` restart gives the runtime a new pid that nothing rewrites into the ownership
+record, so `probeLlamaRuntime` re-adopts it read-only when exactly one llama-server on the port was
+launched from the binary the record names. Without that, the job we installed ourselves reported
+`managed: false`, the cockpit hid its own controls, and `stop` refused.

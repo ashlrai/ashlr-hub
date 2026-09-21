@@ -53,6 +53,25 @@
  *  The judge/manager/strategist always get a STRONG model (opus/sonnet or the
  *  72b) — this is handled by callers setting the engine override; the router
  *  does not regress managerJudgeModel behavior.
+ *
+ * LOCAL-ONLY (policy/local-only.ts):
+ *  A cloud backend must be UNREACHABLE, not merely deprioritised. Three seams
+ *  enforce that here, all consulting the same `enginePermitted()` predicate:
+ *
+ *   availableFrom()                    — the single funnel for frontier + mid
+ *                                        candidate lists, so neither tier can
+ *                                        offer a cloud backend.
+ *   generatedRepairCandidateAllowed()  — the repair lanes pick from
+ *                                        REPAIR_PREFERENCE directly, bypassing
+ *                                        availableFrom; gated here.
+ *   routeBackend()                     — a result backstop. The function has a
+ *                                        dozen early returns; only checking the
+ *                                        RESULT proves none of them escapes.
+ *
+ *  Backend TIER ('local'|'mid'|'frontier') is a TRUST tier and says nothing
+ *  about locality: local-coder is tier 'mid' but runs on this machine, while nim
+ *  is tier 'mid' and bills NVIDIA. The predicate classifies by resolved endpoint,
+ *  never by tier.
  */
 
 import type { AshlrConfig, EngineId, EngineTier, WorkItem } from '../types.js';
@@ -75,6 +94,16 @@ import { withinLimit } from './quota.js';
 import { isSubscriptionEngine, subscriptionAllows } from './subscription-usage.js';
 // V2: ONE clamp for foundry.subscriptionMaxPercent (see core/config.ts).
 import { resolveSubscriptionMaxPercent } from '../config.js';
+// LOCAL-ONLY: the ONE predicate. No parallel mechanism lives in this file.
+import {
+  ALWAYS_PERMITTED_ENGINE,
+  enginePermitted,
+  localOnlyEnabled,
+  localOnlyReasonTag,
+} from '../policy/local-only.js';
+// The fleet lane owns which engine the local fleet dispatches through; this
+// file only needs its id, so the two cannot drift apart.
+import { LOCAL_FLEET_ENGINE } from '../daemon/local-fleet.js';
 
 /** The outcome of routing a WorkItem to a backend + model. */
 export interface RouteDecision {
@@ -97,6 +126,9 @@ export function generatedRepairCandidateAllowed(
   backend: EngineId,
   cfg: AshlrConfig,
 ): boolean {
+  // LOCAL-ONLY: the repair lanes select straight from REPAIR_PREFERENCE and
+  // never pass through availableFrom, so the predicate is consulted here too.
+  if (!enginePermitted(backend, cfg).permitted) return false;
   if (!generatedRepairExecutionBackendAllowed(item, backend, cfg)) return false;
   if (!withinLimit(backend, cfg)) return false;
   if (isSubscriptionEngine(backend)) {
@@ -204,7 +236,10 @@ export function inspectGeneratedRepairRouteFeasibility(
   if (exactTierRepairRoute) {
     const allowed = new Set<EngineId>(cfg.foundry?.allowedBackends ?? ['builtin']);
     const installed = REPAIR_PREFERENCE.filter((backend) =>
-      allowed.has(backend) && engineInstalled(backend, cfg));
+      allowed.has(backend) &&
+      // LOCAL-ONLY: same funnel as availableFrom for this direct selection.
+      enginePermitted(backend, cfg).permitted &&
+      engineInstalled(backend, cfg));
     if (installed.length === 0) return unavailable('editing-backend-unavailable');
     routeCandidates = requiredTier === null
       ? installed
@@ -297,7 +332,13 @@ function allowedSet(cfg: AshlrConfig): ReadonlySet<EngineId> {
 function availableFrom(preference: readonly string[], cfg: AshlrConfig): EngineId[] {
   const allowed = allowedSet(cfg);
   return preference.filter(
-    (e) => allowed.has(e as EngineId) && engineInstalled(e as EngineId, cfg),
+    (e) =>
+      allowed.has(e as EngineId) &&
+      // LOCAL-ONLY: refusal, not deprioritisation — a cloud backend is not a
+      // lower-ranked candidate here, it is absent from the candidate list.
+      // No-op when the mode is off.
+      enginePermitted(e, cfg).permitted &&
+      engineInstalled(e as EngineId, cfg),
   ) as EngineId[];
 }
 
@@ -316,12 +357,37 @@ function availableFrontier(cfg: AshlrConfig): EngineId[] {
 }
 
 /**
+ * Mid-tier preference, with the local fleet's engine at the head when local-only
+ * is on.
+ *
+ * WHY THE ORDER CHANGES. 'local-coder' reaches Ollama and 'llama-server' reaches
+ * llama.cpp; both run on this machine, so locality does not separate them. What
+ * separates them is measured (docs/LOCAL-FLEET.md): Ollama REFUSES to serve
+ * Qwen3.8 concurrently — `model architecture does not currently support parallel
+ * requests, architecture=qwen35`, a refusal rather than a tuning knob — so four
+ * agents routed there return at 3.7 / 7.6 / 11.4 / 15.2s. The same GGUF on
+ * llama-server returns at 8.6 / 8.9 / 9.0 / 9.0s: the agents finish together,
+ * out of one 27 GB copy of the weights. A FLEET routed to Ollama is a queue.
+ *
+ * WHY IT IS GATED. Off local-only the engine is appended rather than promoted,
+ * so ranking is unchanged for every existing configuration. Appending is not a
+ * silent change either: `availableFrom` filters by `foundry.allowedBackends`,
+ * which defaults to `['builtin']`, so the entry can only ever be selected on a
+ * machine whose operator named `llama-server` in that allowlist themselves. A
+ * reachable llama-server nobody asked for still routes nowhere.
+ */
+function midPreferenceFor(cfg: AshlrConfig): readonly string[] {
+  if (!localOnlyEnabled(cfg)) return [...MID_PREFERENCE, LOCAL_FLEET_ENGINE];
+  return [LOCAL_FLEET_ENGINE, ...MID_PREFERENCE];
+}
+
+/**
  * M195: mid candidates = MID_PREFERENCE entries that are allowed + installed,
  * EXCLUDING any that resolved to frontier (e.g. a frontier-promoted 'nim' must
  * not be double-counted as a mid backend — it belongs to the frontier rotation).
  */
 function availableMid(cfg: AshlrConfig): EngineId[] {
-  return availableFrom(MID_PREFERENCE, cfg).filter(
+  return availableFrom(midPreferenceFor(cfg), cfg).filter(
     (e) => engineTierOf(e, cfg) !== 'frontier',
   );
 }
@@ -398,6 +464,36 @@ function buildRoutingContext(
  *  4. Neither → builtin (0-diff, better than nothing).
  */
 export function routeBackend(item: WorkItem, cfg: AshlrConfig): RouteDecision {
+  return enforceLocalOnlyRouteDecision(routeBackendUnenforced(item, cfg), cfg);
+}
+
+/**
+ * LOCAL-ONLY result backstop.
+ *
+ * `routeBackendUnenforced` has more than a dozen early returns — capture-repair
+ * lanes, no-diff repair lanes, the frontier fast-path, the mid path, the
+ * frontier fallback. Narrowing the candidate lists steers all of them, but only
+ * checking the RESULT proves that none escapes. A decision naming a
+ * non-permitted backend is rewritten to 'builtin' with the refusal in `reason`,
+ * so the operator sees which backend was refused and why.
+ */
+function enforceLocalOnlyRouteDecision(
+  decision: RouteDecision,
+  cfg: AshlrConfig,
+): RouteDecision {
+  const verdict = enginePermitted(decision.backend, cfg);
+  if (verdict.permitted) return decision;
+  return {
+    ...decide(
+      ALWAYS_PERMITTED_ENGINE,
+      `${localOnlyReasonTag(verdict)} → builtin. Refused route was: ${decision.reason}. ${verdict.mode.detail}`,
+      cfg,
+    ),
+    model: null,
+  };
+}
+
+function routeBackendUnenforced(item: WorkItem, cfg: AshlrConfig): RouteDecision {
   const frontiers = availableFrontier(cfg);
   const mids = availableMid(cfg);
   const ctx = buildRoutingContext(frontiers, mids);

@@ -138,6 +138,21 @@ export function concurrentAssignedRouteReason(fields: {
 export interface ConcurrentDispatchCfg {
   /** Default slot cap per backend (default 3). */
   maxSlotsPerBackend?: number;
+  /**
+   * Per-backend override of {@link ConcurrentDispatchCfg.maxSlotsPerBackend}.
+   *
+   * Exists for the local serving runtime, whose width is MEASURED rather than
+   * configured: `/props.total_slots` is the real ceiling, and a single global
+   * number cannot express "3 for every subscription backend, and exactly what
+   * llama-server reports for llama-server". Without it a 4-slot runtime was
+   * silently capped at the global 3 while the cockpit reported concurrency 4
+   * and limiter 'serving-slots' — two numbers for one runtime, which is how
+   * they drift apart.
+   *
+   * Still an upper bound only: `slotsForBackendState` continues to intersect
+   * it with live availability and the backend's own reported cap.
+   */
+  slotsByBackend?: Readonly<Partial<Record<EngineId, number>>>;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,18 +265,25 @@ export function planConcurrentDispatch(
   resolveTier: (backend: EngineId) => ReturnType<typeof engineTierOf> = engineTierOf,
 ): DispatchPlan {
   const maxSlots = Math.max(1, cfg.maxSlotsPerBackend ?? 3);
+  const perBackend = cfg.slotsByBackend ?? {};
+  const slotsFor = (backend: EngineId): number => {
+    const override = perBackend[backend];
+    return typeof override === 'number' && Number.isFinite(override) && override > 0
+      ? Math.max(1, Math.floor(override))
+      : maxSlots;
+  };
 
   // Build slot budget map from snapshot.
   const slotsMap = new Map<EngineId, number>();
   for (const state of snapshot.backends) {
-    slotsMap.set(state.backend, slotsForBackendState(state, maxSlots));
+    slotsMap.set(state.backend, slotsForBackendState(state, slotsFor(state.backend)));
   }
 
   // Ensure builtin is present as a fallback if not in snapshot.
   // Only add if absent — if the snapshot marks builtin exhausted/throttled,
   // slotsForBackendState will return 0 for it, and it won't get eligible.
   if (!slotsMap.has('builtin')) {
-    slotsMap.set('builtin', maxSlots);
+    slotsMap.set('builtin', slotsFor('builtin'));
   }
 
   // Eligible backends: stable order from snapshot, then builtin if added.

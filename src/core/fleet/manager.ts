@@ -45,6 +45,7 @@ import {
   reviewModelFamily,
   type ReviewModelFamily,
 } from './reviewer-independence.js';
+import { assertPermitted, endpointPermitted } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -896,6 +897,14 @@ async function ollamaDirectComplete(
 ): Promise<string> {
   throwIfJudgeCancelled(signal);
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+  // LOCAL-ONLY GATE. This path builds its own request instead of going
+  // through provider-client's transport — it needs a far longer timeout
+  // than that path allows — which means it also bypasses the refusal that
+  // lives there. The base URL is loopback by default, so nothing reaches a
+  // paid provider as configured; the gate is here so that an operator who
+  // repoints it at a remote inference host does not end up with a
+  // local-only mode that has a hole in it.
+  assertPermitted(endpointPermitted(url));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180_000); // 3 min
   const onAbort = () => controller.abort(signal?.reason);

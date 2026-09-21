@@ -12,6 +12,7 @@ import { extname } from 'node:path';
 
 import type { AshlrConfig, VisualGroundingEvidence } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { assertPermitted, endpointPermitted } from '../policy/local-only.js';
 export type { VisualGroundingEvidence } from '../types.js';
 
 export type VisualGroundingProviderId = 'locateanything-http' | 'generic-openai-vision';
@@ -27,6 +28,19 @@ export interface ResolvedVisualGroundingConfig {
   licenseAccepted: boolean;
   allowRemoteEndpoint: boolean;
   blockedReason?: string;
+  /**
+   * The slice of the AshlrConfig the local-only gate needs, carried ALONGSIDE
+   * the resolved values rather than left behind.
+   *
+   * `callOpenAiCompatibleGrounder` is the one raw-transport site in this module
+   * that attaches a bearer token, so it is the one that can actually bill. Its
+   * gate must answer from the PERSISTED `foundry.localOnly`, not from the
+   * ambient env-plus-latch mode — in a fresh process where nothing cfg-aware
+   * has run yet (a standalone grounding invocation, or any entry point that
+   * reaches grounding before the daemon's first tick) the latch is cold and a
+   * persisted local-only would not have been enforced here at all.
+   */
+  localOnlyCfg: Pick<AshlrConfig, 'foundry'>;
 }
 
 export interface VisualGroundingBox {
@@ -119,6 +133,7 @@ export function resolveVisualGroundingConfig(cfg: Pick<AshlrConfig, 'foundry'>):
     licenseAccepted,
     allowRemoteEndpoint,
     ...(blockedReason ? { blockedReason } : {}),
+    localOnlyCfg: cfg,
   };
 }
 
@@ -465,6 +480,15 @@ async function callOpenAiCompatibleGrounder(
     ].filter(Boolean).join('\n');
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
     if (cfg.apiKeyEnv && process.env[cfg.apiKeyEnv]) headers['Authorization'] = `Bearer ${process.env[cfg.apiKeyEnv]}`;
+    // LOCAL-ONLY GATE. This is the one raw-transport site in the audited
+    // residual that can carry a bearer token (`cfg.apiKeyEnv`) to a
+    // non-loopback endpoint, so it is the one where an ungated fetch could
+    // actually bill someone. The module's own `allowRemoteEndpoint` opt-in
+    // governs whether a remote vision endpoint may be used AT ALL; this gate
+    // is narrower and answers a different question — whether cloud egress is
+    // permitted right now — and local-only overrides the opt-in rather than
+    // deferring to it.
+    assertPermitted(endpointPermitted(completionsUrl(endpoint), cfg.localOnlyCfg as AshlrConfig));
     const response = await fetchImpl(completionsUrl(endpoint), {
       method: 'POST',
       headers,

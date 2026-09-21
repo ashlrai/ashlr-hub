@@ -63,6 +63,7 @@ import {
 import { audit } from './audit.js';
 import {
   acquireOutwardMutationFence,
+  acquireOutwardMutationFenceAsync,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
   type OutwardMutationFence,
@@ -1421,21 +1422,111 @@ function removePinnedSandboxReservation(identity: PinnedSandboxDestinationIdenti
  * `git worktree add -b <branch> <path> <baseHead>` run in sourceRepo — this
  * MUST NOT modify the source working tree, index, HEAD, or any user branch.
  */
+/**
+ * How long sandbox creation waits for the global outward-mutation fence.
+ *
+ * `createSandbox` holds the fence across `git worktree add`, which runs INSIDE
+ * the source repository and mutates its `.git`. That is a genuine critical
+ * section and the fence must stay.
+ *
+ * ── WHY THIS IS SHORT AGAIN ───────────────────────────────────────────────
+ *
+ * It was briefly raised to 20s so concurrent agents would queue rather than
+ * fail. That made things worse, because this wait is SYNCHRONOUS: the lock
+ * spins on `Atomics.wait` (src/core/fleet/local-store-lock.ts) and
+ * `createSandbox` is a synchronous function, so for the whole wait the Node
+ * event loop runs NOTHING — not the hang watchdog, not the queue-lease
+ * renewer (whose missed fence lets another machine steal the claim), not the
+ * shutdown handler, not the operator's control plane. And the contending
+ * holder is in the same process and holds the fence across awaits, so the
+ * waiter could never win: it burned 20s of frozen loop per agent and failed
+ * anyway. Four dispatched items meant up to a minute of dead loop per tick.
+ *
+ * So the synchronous path keeps a short wait and fails fast, and callers that
+ * genuinely need to QUEUE use {@link createSandboxAsync}, which waits off the
+ * event loop.
+ */
+const SANDBOX_FENCE_WAIT_MS = 2_000;
+
+/**
+ * How long {@link createSandboxAsync} waits. Generous, because this wait costs
+ * nothing but the caller's own turn: the loop keeps running throughout.
+ */
+const SANDBOX_ASYNC_FENCE_WAIT_MS = 60_000;
+
+/**
+ * FIFO queue for in-process sandbox creation.
+ *
+ * The file lock alone is correct but not fair: N agents polling for it can
+ * starve one another arbitrarily. Chaining creations in the order they were
+ * requested makes the queue deterministic, and means the lock is contended by
+ * at most one waiter from this process at a time.
+ */
+let sandboxCreationChain: Promise<unknown> = Promise.resolve();
+
+/**
+ * Create a sandbox, waiting for the fence WITHOUT blocking the event loop.
+ *
+ * Same critical section, same policy gates, same audit — the only difference
+ * is that agents 2..N of a concurrent dispatch await a promise instead of
+ * freezing the process. This is the entry point the daemon's fleet path uses;
+ * `createSandbox` remains for synchronous callers.
+ */
+export async function createSandboxAsync(
+  sourceRepo: string,
+  opts?: { allowAnyRepo?: boolean; fenceWaitMs?: number; signal?: AbortSignal },
+): Promise<Sandbox> {
+  const waitMs = opts?.fenceWaitMs ?? SANDBOX_ASYNC_FENCE_WAIT_MS;
+  const run = async (): Promise<Sandbox> => {
+    const outwardFence = await acquireOutwardMutationFenceAsync(waitMs, {
+      ...(opts?.signal ? { signal: opts.signal } : {}),
+    });
+    if (!ownsOutwardMutationFence(outwardFence)) {
+      releaseOutwardMutationFence(outwardFence);
+      audit({
+        action: 'sandbox:create',
+        repo: sourceRepo,
+        sandboxId: null,
+        summary: `refused: outward mutation fence unavailable after ${waitMs}ms`,
+        result: 'refused',
+      });
+      throw new Error(
+        `outward mutation fence unavailable after waiting ${waitMs}ms; sandbox creation did not start`,
+      );
+    }
+    try {
+      return createSandboxWhileFenced(sourceRepo, outwardFence, opts);
+    } finally {
+      releaseOutwardMutationFence(outwardFence);
+    }
+  };
+  // Join the queue, and keep the chain alive whatever this creation does.
+  const queued = sandboxCreationChain.then(run, run);
+  sandboxCreationChain = queued.then(
+    () => undefined,
+    () => undefined,
+  );
+  return queued;
+}
+
 export function createSandbox(
   sourceRepo: string,
-  opts?: { allowAnyRepo?: boolean },
+  opts?: { allowAnyRepo?: boolean; fenceWaitMs?: number },
 ): Sandbox {
-  const outwardFence = acquireOutwardMutationFence();
+  const waitMs = opts?.fenceWaitMs ?? SANDBOX_FENCE_WAIT_MS;
+  const outwardFence = acquireOutwardMutationFence(waitMs);
   if (!ownsOutwardMutationFence(outwardFence)) {
     releaseOutwardMutationFence(outwardFence);
     audit({
       action: 'sandbox:create',
       repo: sourceRepo,
       sandboxId: null,
-      summary: 'refused: outward mutation fence unavailable',
+      summary: `refused: outward mutation fence unavailable after ${waitMs}ms`,
       result: 'refused',
     });
-    throw new Error('outward mutation fence unavailable; sandbox creation did not start');
+    throw new Error(
+      `outward mutation fence unavailable after waiting ${waitMs}ms; sandbox creation did not start`,
+    );
   }
   try {
     return createSandboxWhileFenced(sourceRepo, outwardFence, opts);

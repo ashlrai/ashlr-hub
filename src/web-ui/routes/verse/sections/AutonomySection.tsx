@@ -18,7 +18,21 @@
  * detected two ways — the bootstrap's `dispatchEnabled` up front, and a
  * `DispatchDisabledError` from any attempted write — and is rendered as an
  * explained session mode, never as an error.
+ *
+ * LOCAL FLEET (owner U). Three panels sit directly under the controls, above
+ * budget and scope, because on a local-only machine they are the answer to
+ * "is it working": the serving runtime that makes local agents possible at
+ * all, the local-only refusal, and the agents in flight. They read
+ * `/api/verse/{runtime,local-only,fleet}` through `fleet-queries.ts`, which
+ * treats an absent route as a degraded panel rather than a dead section — the
+ * three routes are landing in parallel with this surface.
+ *
+ * They also poll. The runtime and the fleet are the only things on this screen
+ * that change while nobody clicks anything, and neither has an SSE event yet,
+ * so `useFleetPolling` re-reads them while the tab is visible. Everything else
+ * here still refreshes on the existing cache rules.
  */
+import { useMemo } from 'react';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine, SkeletonRow } from '../../../components/primitives/Skeleton.js';
@@ -26,11 +40,21 @@ import { useQuery, useRefresh } from '../../../data/hooks.js';
 import { ActivityPanel } from '../autonomy/ActivityPanel.js';
 import { CapsPanel } from '../autonomy/CapsPanel.js';
 import { DaemonControls } from '../autonomy/DaemonControls.js';
+import { FleetPanel } from '../autonomy/FleetPanel.js';
 import { GoalsBacklogPanel } from '../autonomy/GoalsBacklogPanel.js';
+import { LocalOnlyPanel } from '../autonomy/LocalOnlyPanel.js';
+import { LocalRuntimePanel } from '../autonomy/LocalRuntimePanel.js';
 import { SafetyPanel } from '../autonomy/SafetyPanel.js';
 import { ScopePanel } from '../autonomy/ScopePanel.js';
 import { StatusHeader } from '../autonomy/StatusHeader.js';
 import { verseCapsQuery, verseControlQuery } from '../autonomy/control-queries.js';
+import {
+  fleetQuery,
+  localOnlyQuery,
+  servingRuntimeQuery,
+  useFleetPolling,
+} from '../autonomy/fleet-queries.js';
+import type { SeatLike } from '../autonomy/fleet-model.js';
 import { useGuardedAction } from '../autonomy/use-guarded-action.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import autonomy from '../autonomy/autonomy.module.css';
@@ -40,11 +64,23 @@ export function AutonomySection() {
   const control = useQuery(verseControlQuery);
   const caps = useQuery(verseCapsQuery);
   const bootstrap = useQuery(verseBootstrapQuery);
+  const runtime = useQuery(servingRuntimeQuery);
+  const fleet = useQuery(fleetQuery);
+  const localOnly = useQuery(localOnlyQuery);
   const refetchControl = useRefresh(verseControlQuery);
   const guard = useGuardedAction();
+  useFleetPolling();
 
   const dispatchEnabled = (bootstrap.data?.dispatchEnabled ?? true) && !guard.readOnly;
   const snapshot = control.data;
+
+  // The live seat roster, narrowed to what the local-only blast radius needs.
+  // Bootstrap is the roster every other Verse surface reads, so this panel's
+  // "3 of your 5 seats" cannot disagree with the seat picker.
+  const seats: SeatLike[] = useMemo(
+    () => (bootstrap.data?.seats ?? []).map((s) => ({ id: s.id, engine: s.engine, label: s.label })),
+    [bootstrap.data],
+  );
 
   return (
     <section className={styles.section} aria-label="Autonomy">
@@ -90,6 +126,26 @@ export function AutonomySection() {
             <>
               <StatusHeader snapshot={snapshot} />
               <DaemonControls snapshot={snapshot} guard={guard} dispatchEnabled={dispatchEnabled} />
+              {/* The local fleet, in the order the questions arrive: can it
+                  run, what is it allowed to reach, and what is it doing. */}
+              <LocalRuntimePanel
+                read={runtime.data ?? null}
+                guard={guard}
+                dispatchEnabled={dispatchEnabled}
+                loading={runtime.status === 'loading'}
+              />
+              <LocalOnlyPanel
+                read={localOnly.data ?? null}
+                seats={seats}
+                guard={guard}
+                dispatchEnabled={dispatchEnabled}
+                loading={localOnly.status === 'loading'}
+              />
+              <FleetPanel
+                read={fleet.data ?? null}
+                runtime={runtime.data?.value ?? null}
+                loading={fleet.status === 'loading'}
+              />
               {caps.status === 'loading' ? (
                 <div className={autonomy.panel}>
                   <SkeletonRow />

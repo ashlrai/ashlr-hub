@@ -197,11 +197,21 @@ describe('M117 — runApiModelSandboxed rejects cli-agent', () => {
 describe('M117 — runApiModelSandboxed sandbox failure', () => {
   it('returns status:failed when sandbox creation throws', async () => {
     // We need a real worktree module mock — use doMock so it applies before import
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: () => { throw new Error('no git repo here'); },
       removeSandbox: () => {},
       sandboxDiff: () => ({ files: 0, patch: '', insertions: 0, deletions: 0 }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
     const mod = await import('../src/core/run/sandboxed-engine.js?bust=' + randomUUID());
     const result = await (mod as typeof import('../src/core/run/sandboxed-engine.js'))
@@ -234,6 +244,10 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
 
     vi.doMock('../src/core/sandbox/mutation-fence.js', () => ({
       acquireOutwardMutationFence: () => ({}),
+      // The async acquirer is what a RUN uses to retake the fence after
+      // inference. A double must provide it or the run throws where the
+      // real module would simply have waited off the event loop.
+      acquireOutwardMutationFenceAsync: async () => (() => ({}))(),
       ownsOutwardMutationFence: (fence: unknown) => fence !== null,
       releaseOutwardMutationFence: () => {},
     }));
@@ -254,7 +268,8 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     const capturedProposalArgs: unknown[] = [];
     const capturedGateArgs: unknown[] = [];
 
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: (repo: string) => ({
         id: 'sb-test',
         worktreePath: tmpRepo,
@@ -270,7 +285,16 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         insertions: 1,
         deletions: 1,
       }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
     vi.doMock('../src/core/run/provider-client.js', () => ({
       buildOpenAICompatibleClient: (...args: unknown[]) => {
@@ -421,7 +445,8 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
   it('fails closed when a failed api-model producer capture dependency throws', async () => {
     const agentActions: Array<Record<string, unknown>> = [];
 
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: (repo: string) => ({
         id: 'sb-failed-capture',
         worktreePath: tmpRepo,
@@ -437,7 +462,16 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         insertions: 3,
         deletions: 1,
       }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
     vi.doMock('../src/core/run/provider-client.js', () => ({
       buildOpenAICompatibleClient: () => ({ id: 'openai-compat', model: 'local', supportsTools: true }),
     }));
@@ -500,7 +534,8 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     const capturedProposalArgs: unknown[] = [];
     const capturedGateArgs: unknown[] = [];
 
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: (repo: string) => ({
         id: 'sb-test',
         worktreePath: tmpRepo,
@@ -516,7 +551,16 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         insertions: 1,
         deletions: 1,
       }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
     vi.doMock('../src/core/run/provider-client.js', () => ({
       buildOpenAICompatibleClient: () => ({ id: 'openai-compat', model: 'local', supportsTools: true }),
@@ -604,14 +648,24 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     let throwOnLoad = false;
     let lastCreated: Record<string, unknown> | null = null;
 
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       sandboxDiff: () => ({
         files: 1,
         patch: '--- a/hello.ts\n+++ b/hello.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n',
         insertions: 1,
         deletions: 1,
       }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
     vi.doMock('../src/core/seams/inbox.js', () => ({
       selectInboxStore: () => ({
@@ -753,7 +807,8 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
     const capturedProposalArgs: unknown[] = [];
     const capturedGateArgs: unknown[] = [];
 
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: (repo: string) => ({
         id: 'sb-test',
         worktreePath: tmpRepo,
@@ -776,7 +831,16 @@ describe('M117 — runApiModelSandboxed full round-trip (mocked)', () => {
         insertions: 2,
         deletions: 0,
       }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
     vi.doMock('../src/core/run/provider-client.js', () => ({
       buildOpenAICompatibleClient: () => ({ id: 'openai-compat', model: 'local', supportsTools: true }),
@@ -977,6 +1041,10 @@ describe('M117 — durable CLI-engine claim lifecycle', () => {
     vi.doMock('../src/core/sandbox/mutation-fence.js', async (importOriginal) => ({
       ...await importOriginal<typeof import('../src/core/sandbox/mutation-fence.js')>(),
       acquireOutwardMutationFence: () => ({}),
+      // The async acquirer is what a RUN uses to retake the fence after
+      // inference. A double must provide it or the run throws where the
+      // real module would simply have waited off the event loop.
+      acquireOutwardMutationFenceAsync: async () => (() => ({}))(),
       ownsOutwardMutationFence: () => refusal !== 'mutation-fence-failure',
       releaseOutwardMutationFence: () => {},
     }));
@@ -1035,10 +1103,15 @@ describe('M117 — durable api-model output policy', () => {
     }));
     vi.doMock('../src/core/sandbox/mutation-fence.js', () => ({
       acquireOutwardMutationFence: () => ({}),
+      // The async acquirer is what a RUN uses to retake the fence after
+      // inference. A double must provide it or the run throws where the
+      // real module would simply have waited off the event loop.
+      acquireOutwardMutationFenceAsync: async () => (() => ({}))(),
       ownsOutwardMutationFence: () => true,
       releaseOutwardMutationFence: () => {},
     }));
-    vi.doMock('../src/core/sandbox/worktree.js', () => ({
+    vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
       createSandbox: (repo: string) => ({
         id: 'sb-stream', worktreePath: tmpRepo, sourceRepo: repo, branch: 'stream-test',
       }),
@@ -1046,7 +1119,16 @@ describe('M117 — durable api-model output policy', () => {
       removeSandbox: () => {},
       removeSandboxWithBorrowedAuthority: () => {},
       sandboxDiff: () => ({ files: 0, patch: '', insertions: 0, deletions: 0 }),
-    }));
+    };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
     vi.doMock('../src/core/run/provider-client.js', () => ({
       buildOpenAICompatibleClient: () => ({ id: 'local', model: 'qwen', supportsTools: true }),
     }));

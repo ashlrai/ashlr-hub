@@ -39,6 +39,8 @@ import {
   seriesColor,
   type TableColumn,
 } from '../../../components/charts/index.js';
+import type { ServingRuntimeSnapshot } from '../autonomy/fleet-contract.js';
+import { runtimeCapacity } from '../autonomy/fleet-model.js';
 import type { AccountVerdictState, LocalCardModel } from './accounts-model.js';
 import {
   formatAge,
@@ -329,7 +331,52 @@ export function LocalCard({
   );
 }
 
-export function LocalModelsPanel({ view }: { view: LocalModelsView | null }): ReactNode {
+/**
+ * The concurrency note.
+ *
+ * Residency and concurrency are different questions, and this panel answers
+ * only the first. A model can be resident, fit entirely in VRAM, advertise
+ * tools — and still be servable to exactly one agent at a time, because that
+ * is a property of the RUNTIME, not the model. Measured on this machine
+ * (docs/LOCAL-FLEET.md), four concurrent Qwen3.8 requests to Ollama returned
+ * staggered four seconds apart while the same weights on llama-server returned
+ * together.
+ *
+ * So the panel states the boundary rather than letting a full "Resident now"
+ * tile imply a fleet. When the caller hands it the serving runtime it prints
+ * the real figure; when it does not, it says where the answer lives instead of
+ * quoting a number it has no source for.
+ */
+function ConcurrencyNote({ serving }: { serving: ServingRuntimeSnapshot | null | undefined }): ReactNode {
+  if (serving === undefined) {
+    return (
+      <p className={styles.sourceLine}>
+        Residency is not concurrency. How many local agents can run at once is decided by the serving
+        runtime, not by these models — a resident model can still be served to one agent at a time.
+        The serving runtime and its real slot count are in Autonomy.
+      </p>
+    );
+  }
+  const capacity = runtimeCapacity(serving);
+  return (
+    <p className={styles.sourceLine}>
+      <strong>{capacity.headline}.</strong> {capacity.detail}
+    </p>
+  );
+}
+
+export function LocalModelsPanel({
+  view,
+  serving,
+}: {
+  view: LocalModelsView | null;
+  /**
+   * The serving runtime, when the host has it. `undefined` means this caller
+   * does not supply one — which is rendered as "the answer is in Autonomy",
+   * never as a concurrency of zero or one.
+   */
+  serving?: ServingRuntimeSnapshot | null;
+}): ReactNode {
   const [agenticOnly, setAgenticOnly] = useState(false);
   // The keep-alive countdown subscribes to the clock in its own cell
   // (`KeepAliveCell`), where the value is actually derived — re-rendering the
@@ -358,6 +405,8 @@ export function LocalModelsPanel({ view }: { view: LocalModelsView | null }): Re
           session at all, however much memory is free.
         </p>
       </div>
+
+      <ConcurrencyNote serving={serving} />
 
       <StaleNotice staleness={staleness} />
 

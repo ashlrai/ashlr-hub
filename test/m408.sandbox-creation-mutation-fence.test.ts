@@ -302,7 +302,14 @@ describe('M408 createSandbox outward mutation fence', () => {
     const metadataBefore = metadataSnapshot();
     expect(listSandboxes()).toEqual([]);
 
-    expect(() => createSandbox(repo.dir)).toThrow(/outward mutation fence unavailable/i);
+    // `fenceWaitMs` is passed because this case is deliberately unwinnable:
+    // the holder never releases, so every millisecond of the default wait is
+    // spent proving nothing. The default is long on purpose — agents starting
+    // together must QUEUE on this fence rather than fail (see
+    // SANDBOX_FENCE_WAIT_MS) — and this assertion is about what createSandbox
+    // does when it gives up, not about how long it is willing to wait.
+    expect(() => createSandbox(repo.dir, { fenceWaitMs: 250 }))
+      .toThrow(/outward mutation fence unavailable/i);
 
     expect(sourceSnapshot(repo)).toEqual(sourceBefore);
     expect(metadataSnapshot()).toEqual(metadataBefore);

@@ -1176,6 +1176,166 @@ function ollamaPs(baseUrl: string): Promise<{ models: unknown[] } | null> {
   });
 }
 
+/**
+ * Capacity for the llama-server serving runtime — the local FLEET runtime.
+ *
+ * This is deliberately NOT `senseOllamaState`. The two local runtimes have
+ * opposite capacity models and sharing one sense function would flatten the
+ * only difference that matters:
+ *
+ *  - Ollama refuses to run this model architecture in parallel at all
+ *    (`architecture=qwen35`), so `foundry.local.maxConcurrent ?? 1` is a
+ *    correct cap there and raising it only builds an invisible queue.
+ *  - llama-server does continuous batching across its slots, so its cap is
+ *    whatever the LIVE SERVER reports it was started with — never a number
+ *    from config, and never the `--parallel` flag we asked for.
+ *
+ * A slot count we cannot verify yields `cap: null` and `availability:
+ * 'unknown'`, which the documented consumption rule above turns into zero
+ * trusted slots. Failing closed is right: dispatching four agents at a runtime
+ * whose width we could not read is how the queue becomes invisible
+ * (docs/LOCAL-FLEET.md, "Concurrency is bounded by slots, not by ambition").
+ */
+/**
+ * Short on purpose: this probe sits in the dispatcher's hot path, and a slow
+ * answer about capacity is worth less than a fast "unknown" that fails closed.
+ */
+const LLAMA_PROBE_TIMEOUT_MS = 1_500;
+
+/** Registry-only backend id for the serving runtime. Not a member of EngineId. */
+const LLAMA_SERVER_BACKEND = 'llama-server';
+
+async function senseLlamaServerState(
+  backend: EngineId,
+  cfg: unknown,
+): Promise<BackendResourceState> {
+  const now = new Date().toISOString();
+  const backoff = backoffStore.get(backend);
+  if (backoff && backoff.until > Date.now()) {
+    return {
+      backend,
+      availability: 'throttled',
+      usedPct: null,
+      cap: null,
+      capUnit: null,
+      capWindow: null,
+      resetsAt: Math.floor(backoff.until / 1000),
+      backoffUntilMs: backoff.until,
+      costPerMTokenOut: 0,
+      p50LatencyMs: null,
+      snapshotAt: now,
+      reason: 'llama-server: backing off after a recent failure',
+    };
+  }
+
+  try {
+    const { probeLlamaRuntime } = await import('../local-runtime/llama/health.js');
+    const { resolveLlamaServerBaseUrl } = await import('../local-runtime/llama/config.js');
+    // The base URL MUST come from the same resolver the dispatcher uses.
+    // Probing the default while agents dispatch to `cfg.models.llamaServer.
+    // baseUrl` is two answers to one question: an operator who moved the
+    // runtime in config would get `unreachable` and `cap: null` for a runtime
+    // that is serving fine, and the backend demoted for it.
+    const snapshot = await probeLlamaRuntime({
+      baseUrl: resolveLlamaServerBaseUrl(cfg as Parameters<typeof resolveLlamaServerBaseUrl>[0]),
+      timeoutMs: LLAMA_PROBE_TIMEOUT_MS,
+    });
+
+    if (snapshot.state !== 'up') {
+      return {
+        backend,
+        // `loading` is NOT available: a runtime still mapping its weights
+        // answers /health before it can answer a completion.
+        availability: snapshot.state === 'loading' ? 'unknown' : 'unreachable',
+        usedPct: null,
+        cap: null,
+        capUnit: null,
+        capWindow: null,
+        resetsAt: null,
+      backoffUntilMs: null,
+        costPerMTokenOut: 0,
+        p50LatencyMs: null,
+        snapshotAt: now,
+          reason: `llama-server ${snapshot.state}${snapshot.lastError ? `: ${snapshot.lastError}` : ''}`,
+      };
+    }
+
+    const slots = snapshot.slots.source === 'unknown' ? null : snapshot.slots.configured;
+    if (slots === null || slots <= 0) {
+      return {
+        backend,
+        availability: 'unknown',
+        usedPct: null,
+        cap: null,
+        capUnit: null,
+        capWindow: null,
+        resetsAt: null,
+      backoffUntilMs: null,
+        costPerMTokenOut: 0,
+        p50LatencyMs: null,
+        snapshotAt: now,
+          reason: 'llama-server is up but did not report a slot count we can trust; claiming no capacity rather than guessing one',
+      };
+    }
+
+    // OCCUPANCY IS NOT ZERO WHEN IT IS UNKNOWN. `/slots` can be unreadable or
+    // disabled, in which case `busy` is null while `/props` still yields a
+    // trusted slot count. Coercing that to 0 reported a runtime of unknown
+    // occupancy to the resource-aware router as fully idle — in a sentence
+    // ("0/4 slots busy") that reads like a measurement. The slot count is
+    // still trustworthy, so the cap stands; only the utilisation goes unknown.
+    const busy = snapshot.slots.busy;
+    if (busy === null) {
+      return {
+        backend,
+        availability: 'open',
+        usedPct: null,
+        cap: slots,
+        capUnit: 'concurrent',
+        capWindow: null,
+        resetsAt: null,
+        backoffUntilMs: null,
+        costPerMTokenOut: 0,
+        p50LatencyMs: null,
+        snapshotAt: now,
+        reason: `llama-server up with ${slots} slot(s); occupancy not reported`,
+      };
+    }
+    const usedPct = Math.min(100, Math.round((busy / slots) * 100));
+    return {
+      backend,
+      availability: busy >= slots ? 'near' : 'open',
+      usedPct,
+      cap: slots,
+      capUnit: 'concurrent',
+      capWindow: null,
+      resetsAt: null,
+      backoffUntilMs: null,
+      // A local turn costs electricity, not money. Reporting 0 here is what
+      // lets the router prefer it without a budget check that can never fire.
+      costPerMTokenOut: 0,
+      p50LatencyMs: null,
+      snapshotAt: now,
+      reason: `llama-server ${busy >= slots ? 'saturated' : 'serving'}: ${busy}/${slots} slots busy`,
+    };
+  } catch {
+    return {
+      backend,
+      availability: 'unknown',
+      usedPct: null,
+      cap: null,
+      capUnit: null,
+      capWindow: null,
+      resetsAt: null,
+      backoffUntilMs: null,
+      costPerMTokenOut: 0,
+      p50LatencyMs: null,
+      snapshotAt: now,
+      reason: 'llama-server could not be probed',
+    };
+  }
+}
+
 async function senseOllamaState(backend: EngineId, rcfg: ResourceCfgShape): Promise<BackendResourceState> {
   const now = new Date().toISOString();
   const backoff = backoffStore.get(backend);
@@ -1298,6 +1458,13 @@ export async function getBackendResourceState(
     const override = overrideState(backend, rcfg.overrides?.[backend]);
     if (override) return override;
 
+    // Checked before the switch because `EngineId` deliberately does not carry
+    // 'llama-server' — it is registry-only, the same way 'openai-compat' is —
+    // so it cannot appear as a case in a switch over that union.
+    if ((backend as string) === LLAMA_SERVER_BACKEND) {
+      return await senseLlamaServerState(backend, cfg);
+    }
+
     switch (backend) {
       case 'claude':    return await senseClaudeState(rcfg);
       case 'codex':     return senseCodexState();
@@ -1335,6 +1502,11 @@ export async function getBackendResourceState(
  * `foundry.fabric.maxSlotsPerBackend`; local Ollama capacity uses
  * `foundry.local.maxConcurrent` and is reported as capUnit='concurrent'.
  *
+ * llama-server is the exception, and deliberately so: its cap is read back
+ * from the LIVE SERVER's slot count, never from config. Config may not raise
+ * it (the extra agents would queue invisibly) and must not restate it (two
+ * numbers for one runtime is how they drift apart).
+ *
  *   const snap = await getResourceSnapshot(cfg);
  *   const slotsPerBackend = new Map<EngineId, number>();
  *   for (const b of snap.backends) {
@@ -1352,7 +1524,7 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
     const now = Date.now();
 
     // Determine which backends to sense (based on allowedBackends config)
-    const backendsToSense: EngineId[] = ['claude', 'codex', 'nim', 'kimi', 'local-coder', 'builtin'];
+    const backendsToSense: EngineId[] = ['claude', 'codex', 'nim', 'kimi', 'local-coder', 'llama-server' as EngineId, 'builtin'];
     try {
       if (typeof cfg === 'object' && cfg !== null) {
         const foundry = (cfg as Record<string, unknown>)['foundry'];
@@ -1362,13 +1534,13 @@ export async function getResourceSnapshot(cfg: unknown): Promise<ResourceSnapsho
             // Sense only configured backends + builtin (always)
             const configuredSet = new Set<EngineId>(
               (allowed as string[]).filter((b): b is EngineId =>
-                ['builtin', 'local-coder', 'claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'aw', 'hermes', 'opencode'].includes(b)
+                ['builtin', 'local-coder', 'llama-server', 'claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'aw', 'hermes', 'opencode'].includes(b)
               )
             );
             configuredSet.add('builtin');
             // Replace with configured set but keep all unique
             backendsToSense.splice(0, backendsToSense.length,
-              ...(['claude', 'codex', 'nim', 'kimi', 'local-coder', 'builtin'] as EngineId[]).filter(b => configuredSet.has(b))
+              ...(['claude', 'codex', 'nim', 'kimi', 'local-coder', 'llama-server', 'builtin'] as EngineId[]).filter(b => configuredSet.has(b))
             );
           }
         }

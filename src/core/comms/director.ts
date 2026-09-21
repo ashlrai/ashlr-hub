@@ -33,6 +33,8 @@ import {
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
+import { assertPermitted, endpointPermitted, isLocalOnlyRefusal } from '../policy/local-only.js';
+import { audit } from '../sandbox/audit.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -102,6 +104,12 @@ async function buildComplete(
             const cmd = buildEngineCommand('claude', combined, cfg, { model });
             if (!cmd) return '';
             const result = await spawnEngine(cmd, cfg, { timeoutMs: 120_000, signal });
+            // `spawnEngine` never throws: a local-only refusal arrives as
+            // `{ ok: false, error: '<the reason>' }`. Discarding it silently
+            // would make a refused director turn read exactly like a model
+            // that returned nothing, which is the failure the policy module
+            // exists to prevent — so it is reported before the empty return.
+            if (!result.ok && result.error) reportDirectorRefusal(result.error);
             if (!result.ok || !result.output) return '';
             try {
               const parsed = JSON.parse(result.output) as Record<string, unknown>;
@@ -136,6 +144,14 @@ async function buildComplete(
   return async (system: string, user: string): Promise<string> => {
     try {
       const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+      // LOCAL-ONLY GATE. This path builds its own request instead of going
+      // through provider-client's transport — it needs a far longer timeout
+      // than that path allows — which means it also bypasses the refusal that
+      // lives there. The base URL is loopback by default, so nothing reaches a
+      // paid provider as configured; the gate is here so that an operator who
+      // repoints it at a remote inference host does not end up with a
+      // local-only mode that has a hole in it.
+      assertPermitted(endpointPermitted(url, cfg));
       const timeoutSignal = AbortSignal.timeout(120_000);
       const requestSignal = signal
         ? AbortSignal.any([signal, timeoutSignal])
@@ -160,10 +176,45 @@ async function buildComplete(
         choices?: Array<{ message?: { content?: string } }>;
       };
       return data.choices?.[0]?.message?.content ?? '';
-    } catch {
+    } catch (err) {
+      // A LOCAL-ONLY REFUSAL IS NOT AN EMPTY COMPLETION. Swallowing it here
+      // made the two indistinguishable: `parseDecision('')` returns null, the
+      // caller sees no digest and no escalations, and nothing anywhere names
+      // the refusal — so an operator reading a silent 3am digest cannot tell a
+      // policy refusal from a dead model. It is named, then re-thrown so the
+      // cycle's own handler can record it too.
+      if (isLocalOnlyRefusal(err)) {
+        reportDirectorRefusal(err.message);
+        throw err;
+      }
       return '';
     }
   };
+}
+
+/**
+ * Record a refusal that would otherwise vanish into an empty completion.
+ *
+ * Best-effort and idempotent per reason: the director runs on a timer, and a
+ * persisted local-only setting refuses every cycle, so writing the same line
+ * every few minutes would bury the audit trail it is meant to serve.
+ */
+let lastReportedDirectorRefusal = '';
+function reportDirectorRefusal(reason: string): void {
+  const detail = reason.slice(0, 240);
+  if (detail === lastReportedDirectorRefusal) return;
+  lastReportedDirectorRefusal = detail;
+  try {
+    audit({
+      action: 'comms:director',
+      repo: null,
+      sandboxId: null,
+      summary: `director turn refused: ${detail}`,
+      result: 'refused',
+    });
+  } catch {
+    // The audit trail is best-effort; it must never take the cycle down.
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -435,8 +486,11 @@ export async function runDirectorCycle(
     } finally {
       releaseOutwardMutationFence(outwardFence);
     }
-  } catch {
-    // Fire-and-forget — errors must never propagate
+  } catch (err) {
+    // Fire-and-forget — errors must never propagate. A refusal is still
+    // recorded on its way past, so "the director produced nothing" has a
+    // reason an operator can read.
+    if (isLocalOnlyRefusal(err)) reportDirectorRefusal(err.message);
   }
 }
 
