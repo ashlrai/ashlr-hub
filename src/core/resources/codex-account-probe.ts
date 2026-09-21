@@ -1,14 +1,13 @@
 /** Explicit native metadata sampling, not login, account attestation or a model request. */
 import { lstatSync, mkdtempSync, realpathSync, rmdirSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, parse, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isVerifyProcessGroupLifecycle, runVerifySubprocessAsync, type VerifyProcessGroupLifecycle } from '../run/verify-commands.js';
 import { canonical, digest } from '../universe/artifacts.js';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { validateResourceBindings, workerEnvironment, type ResourceBinding } from './worker.js';
+import { probeHelperArgv } from './probe-helper-invocation.js';
 
 export interface CodexResourceProbeOptions {
   pool: ResourcePool;
@@ -134,14 +133,9 @@ function configuration(options: CodexResourceProbeOptions) {
     poolDigest: digest(canonical({ pool, bindings })) };
 }
 
+/** Fixed package-owned helper for this runtime; never an arbitrary entrypoint. */
 function helperArgv(): string[] {
-  if (import.meta.url.endsWith('/codex-account-probe.ts')) {
-    const loader = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm/api')).href;
-    const source = new URL('./codex-account-probe-process.ts', import.meta.url).href;
-    return [process.execPath, '--input-type=module', '--eval',
-      `import { register } from ${JSON.stringify(loader)}; register(); await import(${JSON.stringify(source)});`];
-  }
-  return [process.execPath, fileURLToPath(new URL('./codex-account-probe-process.js', import.meta.url))];
+  return probeHelperArgv('codex', import.meta.url);
 }
 
 function checkedOutput(output: string, pool: ResourcePool, workerId: string, startedAt: string,

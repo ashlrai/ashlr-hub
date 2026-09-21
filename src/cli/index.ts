@@ -47,6 +47,7 @@ import { existsSync } from 'node:fs';
 import { loadConfig, saveConfig, CONFIG_PATH } from '../core/config.js';
 import type { EffectiveConfigSnapshot, EffectiveConfigValue } from '../core/effective-config.js';
 import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
+import { PROBE_HELPER_FLAGS } from '../core/resources/probe-helper-invocation.js';
 import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
@@ -1632,6 +1633,25 @@ async function cmdHelp(rest: string[] = []): Promise<void> {
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
+
+  // ── Internal account-probe helper re-entry ──────────────────────────────
+  // Fixed effectful probe helpers; never an arbitrary entrypoint. Inside a
+  // Bun single-file binary the helpers have no on-disk path to spawn (every
+  // bundled module's import.meta.url lives in the virtual /$bunfs root), so
+  // the probe re-executes this binary instead. Each flag is operand-free,
+  // must be the entire argv, and maps to exactly one hard-coded import — argv
+  // selects which of two package-owned helpers runs and nothing else. It is
+  // matched before any parsing and is absent from help and completions.
+  if (argv.length === 1) {
+    if (argv[0] === PROBE_HELPER_FLAGS.codex) {
+      await import('../core/resources/codex-account-probe-process.js');
+      return;
+    }
+    if (argv[0] === PROBE_HELPER_FLAGS.grok) {
+      await import('../core/resources/grok-account-probe-process.js');
+      return;
+    }
+  }
 
   if (argv[0] === '--_cutoff-checkpoint-supervisor') {
     const { runCutoffCheckpointSupervisor } = await import('../core/daemon/cutoff-checkpoint-child.js');

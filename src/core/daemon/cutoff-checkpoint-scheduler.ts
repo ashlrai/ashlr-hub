@@ -19,6 +19,7 @@ import {
 } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, resolve } from 'node:path';
+import { insideSingleFileBinaryRoot } from '../resources/probe-helper-invocation.js';
 import { fsyncDirectory } from '../util/durability.js';
 import { acquireLocalStoreLock, releaseLocalStoreLock } from '../fleet/local-store-lock.js';
 import { readCutoffObservationCheckpointsSnapshot } from '../fleet/cutoff-observation-checkpoints.js';
@@ -497,7 +498,12 @@ function childRuntimeArgs(): string[] {
 
 export function cutoffCaptureCliInvocation(flag: string, args: readonly string[]): { command: string; args: string[] } {
   const entry = process.argv[1];
-  const compiled = !entry || resolve(entry) === resolve(process.execPath);
+  // Inside a single-file binary argv[1] is a virtual path like
+  // `/$bunfs/root/_entry.js`, which is neither on disk nor equal to execPath.
+  // Without this branch the child is spawned as `<binary> /$bunfs/root/_entry.js
+  // --_cutoff-checkpoint-supervisor …`, which the CLI rejects as an unknown
+  // command. Same defect class as the account-probe helper spawn.
+  const compiled = !entry || insideSingleFileBinaryRoot(entry) || resolve(entry) === resolve(process.execPath);
   return {
     command: process.execPath,
     args: compiled ? [flag, ...args] : [...childRuntimeArgs(), entry, flag, ...args],
