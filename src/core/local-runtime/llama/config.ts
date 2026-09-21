@@ -34,16 +34,31 @@ export const DEFAULT_LLAMA_SLOTS = 4;
 /** Total context shared across slots (65536 / 4 slots = 16384 per agent). */
 export const DEFAULT_LLAMA_CONTEXT = 65_536;
 
+/**
+ * Default port for the Anthropic normalising proxy (anthropic-proxy.ts).
+ *
+ * One above llama-server's own default, so the pair is obvious at a glance in
+ * `lsof`. It is a SEPARATE listener rather than a path on llama-server because
+ * llama-server is a foreign binary we do not patch, and because the OpenAI
+ * lane must keep reaching it byte-for-byte — see `resolveLlamaServerBaseUrl`
+ * (unchanged, still llama-server) versus `resolveLocalAnthropicBaseUrl`.
+ */
+export const DEFAULT_ANTHROPIC_PROXY_PORT = 8081;
+
 /** The historical base URL, pinned by test/m144.llama-server.test.ts. */
 export const LEGACY_DEFAULT_BASE_URL = `http://localhost:${DEFAULT_LLAMA_PORT}/v1`;
 
 /** Loose read of `cfg.models.llamaServer` without widening the config type. */
 interface LlamaServerConfigSection {
   baseUrl?: unknown;
+  /** Operator override for the Anthropic lane's base URL. Always wins. */
+  anthropicBaseUrl?: unknown;
   host?: unknown;
   /** Persisted opt-in required before `host` may leave loopback. */
   allowNonLoopback?: unknown;
   port?: unknown;
+  /** Port for the Anthropic normalising proxy. */
+  anthropicPort?: unknown;
   slots?: unknown;
   context?: unknown;
   model?: unknown;
@@ -76,6 +91,39 @@ function int(value: unknown, min: number, max: number): number | undefined {
 export function isLoopbackHost(host: string): boolean {
   const normalised = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
   return normalised === 'localhost' || normalised === '127.0.0.1' || normalised === '::1';
+}
+
+/** A bind host after the loopback gate, plus what was refused (or null). */
+export interface GatedBindHost {
+  host: string;
+  /** The requested host when it was refused, so the refusal can be reported. */
+  downgradedFrom: string | null;
+}
+
+/**
+ * THE bind-host rule, in one place.
+ *
+ * Neither llama-server nor the Anthropic proxy in front of it has any
+ * authentication: whoever reaches the port can run inference, read `/props`,
+ * and read every slot's prompt via `/slots`. Leaving loopback therefore
+ * requires the PERSISTED opt-in `models.llamaServer.allowNonLoopback: true` —
+ * an environment variable, a CLI flag or a function argument must never be
+ * able to do it on its own, because `local-runtime install` freezes the
+ * resolved argv into a `KeepAlive` launchd job that returns at every login.
+ *
+ * Anything else is silently downgraded back to loopback, and the downgrade is
+ * RETURNED rather than swallowed so callers can say so out loud.
+ */
+export function gateBindHost(requested: string, allowNonLoopback: boolean): GatedBindHost {
+  if (isLoopbackHost(requested) || allowNonLoopback) {
+    return { host: requested, downgradedFrom: null };
+  }
+  return { host: DEFAULT_LLAMA_HOST, downgradedFrom: requested };
+}
+
+/** Is `models.llamaServer.allowNonLoopback` genuinely set to `true`? */
+export function allowsNonLoopback(cfg?: AshlrConfig): boolean {
+  return readSection(cfg).allowNonLoopback === true;
 }
 
 /**
@@ -128,14 +176,18 @@ export function resolveLlamaRuntimeConfig(cfg?: AshlrConfig): LlamaRuntimeConfig
   // to loopback and the downgrade is reported rather than swallowed.
   const requestedHost =
     str(process.env['ASHLR_LOCAL_RUNTIME_HOST']) ?? str(section.host) ?? DEFAULT_LLAMA_HOST;
-  const allowNonLoopback = section.allowNonLoopback === true;
-  const hostPermitted = isLoopbackHost(requestedHost) || allowNonLoopback;
-  const host = hostPermitted ? requestedHost : DEFAULT_LLAMA_HOST;
-  const hostDowngradedFrom = hostPermitted ? null : requestedHost;
+  const { host, downgradedFrom: hostDowngradedFrom } = gateBindHost(
+    requestedHost,
+    section.allowNonLoopback === true,
+  );
   const port =
     int(process.env['ASHLR_LOCAL_RUNTIME_PORT'], 1, 65_535) ??
     int(section.port, 1, 65_535) ??
     DEFAULT_LLAMA_PORT;
+  const anthropicPort =
+    int(process.env['ASHLR_LOCAL_RUNTIME_ANTHROPIC_PORT'], 1, 65_535) ??
+    int(section.anthropicPort, 1, 65_535) ??
+    DEFAULT_ANTHROPIC_PROXY_PORT;
   const slots =
     int(process.env['ASHLR_LOCAL_RUNTIME_SLOTS'], 1, 64) ??
     int(section.slots, 1, 64) ??
@@ -159,6 +211,7 @@ export function resolveLlamaRuntimeConfig(cfg?: AshlrConfig): LlamaRuntimeConfig
     host,
     hostDowngradedFrom,
     port,
+    anthropicPort,
     slots,
     context,
     modelRef,
@@ -241,6 +294,40 @@ export function resolveLlamaServerBaseUrl(cfg?: AshlrConfig): string {
   if (fromEnv) return fromEnv;
 
   return baseUrlFromRecord(readOwnershipRecord()) ?? LEGACY_DEFAULT_BASE_URL;
+}
+
+/**
+ * Resolve the base URL for LOCAL **Anthropic** (`/v1/messages`) traffic.
+ *
+ * This is deliberately NOT {@link resolveLlamaServerBaseUrl}. Claude Code
+ * cannot talk to llama-server directly: the CLI sends a system-role turn
+ * second in `messages`, and Qwen3.8's template answers
+ * `Jinja Exception: System message must be at the beginning` before inference.
+ * `anthropic-proxy.ts` is the listener that fixes that on the way through, so
+ * the Anthropic lane must point at the PROXY while the OpenAI-compatible lane
+ * keeps pointing straight at llama-server. Two resolvers, because they are two
+ * different endpoints — collapsing them is how one lane silently loses its
+ * normalisation.
+ *
+ * Precedence mirrors {@link resolveLlamaServerBaseUrl} exactly:
+ *   1. `cfg.models.llamaServer.anthropicBaseUrl` — operator override, always wins
+ *   2. `LLAMA_SERVER_ANTHROPIC_BASE_URL`         — per-process override
+ *   3. the resolved proxy host/port
+ *
+ * Note what is absent: there is no ownership-record step. The record describes
+ * llama-server, not the proxy, and inferring one endpoint from the other is
+ * precisely the drift this module exists to prevent.
+ */
+export function resolveLocalAnthropicBaseUrl(cfg?: AshlrConfig): string {
+  const section = readSection(cfg);
+  const fromCfg = str(section.anthropicBaseUrl);
+  if (fromCfg) return fromCfg;
+
+  const fromEnv = str(process.env['LLAMA_SERVER_ANTHROPIC_BASE_URL']);
+  if (fromEnv) return fromEnv;
+
+  const runtime = resolveLlamaRuntimeConfig(cfg);
+  return `${originFor(runtime.host, runtime.anthropicPort)}/v1`;
 }
 
 /** Scheme + authority of the resolved base URL, with `/v1` stripped. */

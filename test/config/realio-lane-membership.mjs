@@ -58,6 +58,7 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-seed-batch.test.ts', // real SHA1/SHA256 seed materialization and bounded blob batches
   'test/resource-quota-scopes.test.ts', // scoped quota collection, native fixtures and console IPC
   'test/mcp-firm-resources.test.ts', // signed history via real CLI MCP processes
+  'test/local-runtime-anthropic-proxy.test.ts', // two real loopback HTTP servers: a llama-server stub and the proxy in front of it
   'test/verse-seats.test.ts', // real loopback HTTP server standing in for Ollama
   'test/verse-accounts.test.ts', // real collector lease acquisition and private evidence files in a tmp root
   'test/verse-api.test.ts', // real web server bind + SSE tails against an in-memory fake engine

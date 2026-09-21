@@ -23,6 +23,7 @@ import {
   originFor,
   resolveLlamaRuntimeConfig,
 } from './config.js';
+import { ensureAnthropicProxy, stopAnthropicProxy } from './anthropic-proxy.js';
 import { probeLlamaRuntime } from './health.js';
 import { bootoutLaunchAgent, launchAgentLoaded } from './launchd.js';
 import { resolveOllamaModelBlob, resolveOllamaRefForBlobPath } from './ollama-blob.js';
@@ -102,6 +103,58 @@ function hostDowngradeNote(runtime: LlamaRuntimeConfig): string {
     ` Set models.llamaServer.allowNonLoopback=true in your config if you genuinely want it on` +
     ' the network.'
   );
+}
+
+/**
+ * Bring the Anthropic normalising proxy up alongside llama-server.
+ *
+ * This runs on EVERY successful `start` outcome — started, adopted, already
+ * running — because the thing that has to be true afterwards is "an Anthropic
+ * client can reach this runtime", and that is equally untrue for a runtime we
+ * adopted as for one we spawned. It is idempotent, so the repeat calls a
+ * `status`-then-`start` loop produces cost nothing.
+ *
+ * The upstream is pinned to the runtime THIS call started, not to the globally
+ * resolved base URL: `--port` makes those differ, and a proxy forwarding to a
+ * different llama-server than the one just launched is the two-endpoints
+ * failure config.ts exists to prevent.
+ *
+ * Always returns a sentence to append to the lifecycle detail. It never throws
+ * and never fails the lifecycle result: llama-server serving correctly is
+ * still a success even when the Anthropic lane in front of it could not bind.
+ */
+async function attachAnthropicProxy(
+  runtime: LlamaRuntimeConfig,
+  options: LifecycleOptions,
+): Promise<string> {
+  const upstreamOrigin = originFor(runtime.host, runtime.port);
+  const started = await ensureAnthropicProxy({
+    cfg: options.cfg,
+    host: runtime.host,
+    port: runtime.anthropicPort,
+    upstreamOrigin,
+  });
+  if ('error' in started) {
+    return (
+      ` — NOTE: the Anthropic proxy could not bind ${runtime.host}:${runtime.anthropicPort}` +
+      ` (${started.error}), so Claude Code cannot reach this runtime; the OpenAI-compatible` +
+      ' lane is unaffected.'
+    );
+  }
+  if (started.handle.upstreamOrigin !== upstreamOrigin) {
+    // `ensure` is idempotent, which means it returns the proxy this process is
+    // ALREADY hosting and ignores the options — correct for the repeat calls
+    // it exists for, wrong to leave unsaid after `start --port` moved
+    // llama-server. Saying it is the whole job here: a proxy quietly
+    // forwarding to a runtime nobody is using is the two-endpoints failure
+    // this module family is built to make impossible.
+    return (
+      ` — NOTE: the Anthropic proxy on ${started.handle.origin} is still forwarding to` +
+      ` ${started.handle.upstreamOrigin}, not ${upstreamOrigin}; restart this process to` +
+      ' repoint it.'
+    );
+  }
+  return ` — Anthropic clients: ${started.handle.baseUrl}`;
 }
 
 /** Probe a specific host/port pair rather than the globally-resolved one. */
@@ -269,7 +322,8 @@ export async function startLocalRuntime(
         action: 'already-running',
         detail:
           `llama-server is already serving on ${existing.origin} ` +
-          `(pid ${existing.pid ?? '?'}, ${existing.slots.configured ?? '?'} slots)`,
+          `(pid ${existing.pid ?? '?'}, ${existing.slots.configured ?? '?'} slots)` +
+          (await attachAnthropicProxy(runtime, options)),
         snapshot: existing,
         logs,
       };
@@ -293,7 +347,8 @@ export async function startLocalRuntime(
       action: 'adopted',
       detail:
         `adopted the llama-server already running on ${after.origin} ` +
-        `(pid ${adopted.pid}, ${after.slots.configured ?? '?'} slots) — it is now managed`,
+        `(pid ${adopted.pid}, ${after.slots.configured ?? '?'} slots) — it is now managed` +
+        (await attachAnthropicProxy(runtime, options)),
       snapshot: after,
       logs,
     };
@@ -430,7 +485,8 @@ export async function startLocalRuntime(
           `${snapshot.slots.configured ?? '?'} slots, ` +
           `${snapshot.contextPerSlot ?? '?'} ctx/slot)` +
           (recorded ? '' : ' — WARNING: the ownership record could not be written') +
-          hostDowngradeNote(runtime),
+          hostDowngradeNote(runtime) +
+          (await attachAnthropicProxy(runtime, options)),
         snapshot,
         logs,
       };
@@ -533,6 +589,14 @@ export async function stopLocalRuntime(
   }
 
   if (recordIsSpent) clearOwnershipRecord();
+
+  // Released here, past every refusal return above: a `stop` that REFUSED
+  // changed nothing about the runtime, so it must not have quietly taken the
+  // Anthropic lane down either. Past this line the stop is going through, and
+  // a proxy still listening would be a port that accepts Claude Code's
+  // requests and 502s every one of them. Idempotent — a no-op in the common
+  // case where this process was not hosting one.
+  if (await stopAnthropicProxy()) notes.push('the Anthropic proxy was released');
 
   const snapshot = await snapshotFor(runtime, null);
   const portFree = await isPortFree(runtime.host, runtime.port);

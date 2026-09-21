@@ -223,6 +223,28 @@ its order. Deleting the template assertion instead would have been WORSE: that b
 nothing, so a late system turn would vanish silently and the agent would lose its instructions with
 no error at all.
 
+**The shim now ships as a listener, not just a function.**
+`src/core/local-runtime/llama/anthropic-proxy.ts` is the loopback HTTP proxy that applies it on the
+wire. It normalises POST bodies on `/v1/messages` and pipes literally everything else — other paths,
+other methods, all response bodies — byte-for-byte, so the OpenAI-compatible lane and the
+`/health`, `/props` and `/slots` probes are untouched. Responses are streamed rather than buffered,
+because Claude Code reads SSE and a buffering proxy turns a live token stream into one long silence.
+
+It starts and stops with llama-server (`startLocalRuntime` / `stopLocalRuntime`), binds the same
+loopback-gated host on `models.llamaServer.anthropicPort` (default 8081), and the URL to point an
+Anthropic client at comes from `resolveLocalAnthropicBaseUrl(cfg)` — deliberately a different
+function from `resolveLlamaServerBaseUrl(cfg)`, which still answers for the OpenAI lane and still
+points straight at llama-server.
+
+One scope limit worth knowing before you rely on it: the listener lives in the process that called
+`start`. A long-lived host (the Verse control API's web server) keeps it up; a one-shot
+`ashlr local-runtime start` exits and takes it with it, while llama-server itself, being detached,
+stays up either way.
+
+Verified against the live 27B runtime: the exact request body above returns
+`500 Jinja Exception: System message must be at the beginning` sent straight to `:8080`, and `200`
+with a real completion when sent through the proxy.
+
 **2. Context is divided by slots, not shared.** With the template fixed the next error was honest:
 `request (23310 tokens) exceeds the available context size (16384 tokens)`. `--parallel 4` splits
 `-c` four ways, so 64k became four 16k slots, and Claude Code's system prompt alone is ~23k. Running

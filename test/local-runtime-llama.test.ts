@@ -45,6 +45,7 @@ import {
   originFor,
   resolveLlamaRuntimeConfig,
   resolveLlamaServerBaseUrl,
+  resolveLocalAnthropicBaseUrl,
 } from '../src/core/local-runtime/llama/config.js';
 import {
   composeSnapshot,
@@ -383,6 +384,29 @@ describe('endpoint resolution', () => {
   it('uses the environment when there is no config override', () => {
     process.env[ENV] = 'http://env-host:9090/v1';
     expect(resolveLlamaServerBaseUrl(undefined)).toBe('http://env-host:9090/v1');
+  });
+
+  it('keeps the Anthropic lane on its own precedence chain', () => {
+    const ANTHROPIC_ENV = 'LLAMA_SERVER_ANTHROPIC_BASE_URL';
+    try {
+      // The OpenAI env var must not steer the Anthropic lane, and vice versa:
+      // they are two different endpoints (llama-server, and the normalising
+      // proxy in front of it), and one variable moving both is how a lane
+      // silently loses its normalisation.
+      process.env[ENV] = 'http://env-host:9090/v1';
+      expect(resolveLocalAnthropicBaseUrl(undefined)).toBe('http://127.0.0.1:8081/v1');
+
+      process.env[ANTHROPIC_ENV] = 'http://env-host:7000/v1';
+      expect(resolveLocalAnthropicBaseUrl(undefined)).toBe('http://env-host:7000/v1');
+      expect(resolveLlamaServerBaseUrl(undefined)).toBe('http://env-host:9090/v1');
+
+      // Config still beats the environment, exactly as it does for the
+      // OpenAI lane.
+      const cfg = { models: { llamaServer: { anthropicBaseUrl: 'http://cfg:6000/v1' } } } as never;
+      expect(resolveLocalAnthropicBaseUrl(cfg)).toBe('http://cfg:6000/v1');
+    } finally {
+      delete process.env[ANTHROPIC_ENV];
+    }
   });
 
   it('defers to a record only when the default would miss it', () => {

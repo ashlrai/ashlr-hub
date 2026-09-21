@@ -160,6 +160,14 @@ export interface LlamaRuntimeConfig {
    */
   hostDowngradedFrom: string | null;
   port: number;
+  /**
+   * Port for the Anthropic normalising proxy (anthropic-proxy.ts), which
+   * binds the SAME already-gated `host` as llama-server. It is never passed to
+   * llama-server's argv — `buildLlamaServerArgs` takes a `Pick` that excludes
+   * it — it lives here so one resolver answers "which ports does this runtime
+   * own?" rather than two that can drift apart.
+   */
+  anthropicPort: number;
   /** Slots to request via --parallel. */
   slots: number;
   /** Total context to request via -c, shared across slots. */
