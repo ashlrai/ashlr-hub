@@ -57,12 +57,15 @@ import type {
 import {
   DEFAULT_LLAMA_HOST,
   DEFAULT_LLAMA_PORT,
+  NO_LOCAL_AGENT_DEFAULTS,
   allowsNonLoopback,
   gateBindHost,
   originFor,
   resolveLlamaRuntimeConfig,
+  resolveLocalAgentDefaults,
 } from './config.js';
-import { normaliseAnthropicRequest } from './anthropic-shim.js';
+import type { LocalAgentRequestDefaults } from './config.js';
+import { applyLocalAgentDefaults, normaliseAnthropicRequest } from './anthropic-shim.js';
 import type { AshlrConfig } from '../../types.js';
 
 /** The one path whose POST bodies are normalised. Everything else is a pipe. */
@@ -178,7 +181,10 @@ export function isMessagesPost(method: string | undefined, url: string | undefin
  * function is the only place in the request path that runs arbitrary parsing,
  * so it is the only place that could take the lane down.
  */
-export function normaliseMessagesBody(raw: Buffer): Buffer {
+export function normaliseMessagesBody(
+  raw: Buffer,
+  defaults: LocalAgentRequestDefaults = NO_LOCAL_AGENT_DEFAULTS,
+): Buffer {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw.toString('utf8')) as unknown;
@@ -189,11 +195,15 @@ export function normaliseMessagesBody(raw: Buffer): Buffer {
 
   try {
     const normalised = normaliseAnthropicRequest(parsed as Record<string, unknown>);
+    // Defaults are applied AFTER the system-turn fold, and both are
+    // identity-preserving when they add nothing, so an unconfigured runtime
+    // still forwards the client's original bytes untouched.
+    const withDefaults = applyLocalAgentDefaults(normalised, defaults);
     // The shim returns the same object reference when there was nothing to
     // move. Re-serialising then would rewrite key order and whitespace for no
     // reason, so identity is the signal to forward the original bytes.
-    if (normalised === parsed) return raw;
-    return Buffer.from(JSON.stringify(normalised), 'utf8');
+    if (withDefaults === parsed) return raw;
+    return Buffer.from(JSON.stringify(withDefaults), 'utf8');
   } catch {
     return raw;
   }
@@ -237,6 +247,11 @@ export async function startAnthropicProxy(
    * shutdown has to be able to cut the upstream side too — the same reason
    * web/server.ts drains its own SSE registry before closing.
    */
+  // Resolved ONCE at start, not per request: these come from the operator's
+  // config file, and re-reading it on every turn would make the lane's
+  // behaviour depend on a file that can change mid-conversation.
+  const agentDefaults = resolveLocalAgentDefaults(options.cfg);
+
   const inFlight = new Set<ClientRequest>();
   let closing: Promise<void> | null = null;
 
@@ -360,7 +375,7 @@ export async function startAnthropicProxy(
         passthrough.end();
         return;
       }
-      const body = normaliseMessagesBody(Buffer.concat(chunks));
+      const body = normaliseMessagesBody(Buffer.concat(chunks), agentDefaults);
       // Re-frame from what we are ACTUALLY sending. The shim can change the
       // body's length in either direction, and a stale content-length is a
       // truncated prompt or a hung request rather than a visible error.

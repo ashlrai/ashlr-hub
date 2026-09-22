@@ -99,6 +99,119 @@ interface LlamaServerConfigSection {
   modelPath?: unknown;
   bin?: unknown;
   extraArgs?: unknown;
+  /** Per-request defaults for the local AGENT lane. See {@link resolveLocalAgentDefaults}. */
+  agentDefaults?: unknown;
+}
+
+/**
+ * The reasoning efforts Qwen3.8's chat template will actually accept.
+ *
+ * MEASURED against the live template, with a deliberately bogus value as a
+ * control (both behave identically, which is how we know the check is real):
+ *
+ *   reasoning_effort=xhigh   -> 200, and it is the template's OWN default
+ *   reasoning_effort=medium  -> 200
+ *   reasoning_effort=low     -> 200
+ *   reasoning_effort=high    -> 500  raise_exception('Unexpected reasoning effort high')
+ *   reasoning_effort=bogus   -> 500  (the control)
+ *
+ * `high` is the trap: it is the spelling every other vendor uses, it is what
+ * Claude Code itself puts in `output_config.effort`, and it is fatal here —
+ * a template exception fires BEFORE inference, so the turn dies with no
+ * partial output. Hence a closed list rather than a string passthrough.
+ */
+export const LOCAL_AGENT_REASONING_EFFORTS = ['low', 'medium', 'xhigh'] as const;
+export type LocalAgentReasoningEffort = (typeof LOCAL_AGENT_REASONING_EFFORTS)[number];
+
+/**
+ * Per-request defaults the Anthropic lane applies when the CLIENT DID NOT.
+ *
+ * `null` everywhere means "send what the client sent", which is today's
+ * behaviour exactly. Nothing here is defaulted to a non-null value on
+ * purpose — see the note on {@link resolveLocalAgentDefaults}.
+ */
+export interface LocalAgentRequestDefaults {
+  readonly reasoningEffort: LocalAgentReasoningEffort | null;
+  readonly temperature: number | null;
+  readonly topP: number | null;
+  readonly topK: number | null;
+}
+
+/** Every field null — "change nothing", the shipping default. */
+export const NO_LOCAL_AGENT_DEFAULTS: LocalAgentRequestDefaults = {
+  reasoningEffort: null, temperature: null, topP: null, topK: null,
+};
+
+/** A finite number in range, or undefined. Never throws on junk. */
+function num(value: unknown, min: number, max: number): number | undefined {
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''));
+  if (!Number.isFinite(parsed) || parsed < min || parsed > max) return undefined;
+  return parsed;
+}
+
+/**
+ * Resolve the local agent lane's per-request defaults.
+ *
+ * WHY THESE ARE ALL OFF BY DEFAULT — the measurements, so the next person
+ * does not have to re-derive them.
+ *
+ * REASONING EFFORT is the largest lever measured on this runtime, and it is
+ * currently unreachable. The template defaults to `xhigh`; Claude Code's own
+ * `output_config.effort` is dropped on the floor by llama-server (verified:
+ * sending it changes nothing), so no caller can ask for less. Holding
+ * sampling at greedy and varying only the effort, on identical tool-calling
+ * prompts, the DECODE TOKEN COUNT for the same correct answer was:
+ *
+ *   task              xhigh   medium   low   thinking-off
+ *   verbatim_sha       536      218    141        64
+ *   verbatim_oddpath    78       59     59        48
+ *
+ * Decode, not prompt processing, is what a warm agent turn spends its time
+ * on: a measured hard-tool-call turn was 69.7s wall of which 65s was decode
+ * and ~1s was prompt (473 tokens against a warm prefix cache). So `low` is
+ * worth roughly 3.8x on the decode-bound part of a turn.
+ *
+ * It is still NOT the default here. Every task in that battery is a SINGLE
+ * tool call, and single-call accuracy is not evidence about multi-step
+ * debugging — which is the work the local lane actually has to do. Shipping a
+ * global reduction in a reasoning model's thinking on single-call evidence is
+ * the kind of over-claim this module's history is made of. The mechanism is
+ * here, the numbers are here, and the operator chooses:
+ *
+ *   "models": { "llamaServer": { "agentDefaults": { "reasoningEffort": "low" } } }
+ *
+ * SAMPLING is off for a different reason: it was measured and REJECTED. The
+ * hypothesis was that llama-server's chat-tuned defaults (temperature 1.0,
+ * top_k 20, top_p 0.95, min_p 0.05 — taken from the GGUF's own metadata)
+ * corrupt tool calls. Across the batteries run against the live runtime the
+ * shipping default did not drop a single call that greedy decoding kept. The
+ * knob exists for an operator with a different model; it is not a fix,
+ * because no defect was found to fix.
+ *
+ * `min_p` is deliberately absent even though the server honours it: it is not
+ * part of the Anthropic request schema, and this lane's carrier is
+ * `/v1/messages`. Offering a field that would be dropped in transit is worse
+ * than not offering it — see the reasoning-effort note in anthropic-shim.ts
+ * for the measurement that made that failure mode concrete.
+ */
+export function resolveLocalAgentDefaults(cfg?: AshlrConfig): LocalAgentRequestDefaults {
+  const raw = readSection(cfg).agentDefaults;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return NO_LOCAL_AGENT_DEFAULTS;
+  const section = raw as Record<string, unknown>;
+
+  const effortRaw = str(section['reasoningEffort']);
+  const reasoningEffort =
+    effortRaw !== undefined
+    && (LOCAL_AGENT_REASONING_EFFORTS as readonly string[]).includes(effortRaw)
+      ? (effortRaw as LocalAgentReasoningEffort)
+      : null;
+
+  return {
+    reasoningEffort,
+    temperature: num(section['temperature'], 0, 2) ?? null,
+    topP: num(section['topP'], 0, 1) ?? null,
+    topK: int(section['topK'], 1, 1_000) ?? null,
+  };
 }
 
 function readSection(cfg?: AshlrConfig): LlamaServerConfigSection {
@@ -281,6 +394,25 @@ export function buildLlamaServerArgs(
     // growing transcript every turn.
     '--cont-batching',
     '--cache-prompt',
+    // MEASURED, not assumed: without this flag `GET /metrics` answers
+    //
+    //   501 {"error":{"code":501,"message":"This server does not support
+    //        metrics endpoint. Start it with `--metrics`", ...}}
+    //
+    // — llama-server's own instruction. `/props` and `/slots` answer fine, so
+    // a runbook that says "read /metrics" looks correct until someone
+    // actually does it, which is the worst kind of gap. It is the only
+    // endpoint that reports CUMULATIVE prompt/decode token counts and
+    // per-request timing histograms; `/slots` is a point-in-time view and
+    // cannot answer "how much of this session went into reprocessed prompt",
+    // which is exactly the question the prefix-cache bug turned on.
+    //
+    // The endpoint is read-only counters and inherits the same loopback gate
+    // as everything else here. NOTE the deliberate asymmetry with `--props`,
+    // which is NOT passed: that one enables POST /props, i.e. mutating global
+    // sampling on a live launchd-managed server from anything that can reach
+    // the port. Observability yes, remote mutation no.
+    '--metrics',
     ...runtime.extraArgs,
   ];
 }
