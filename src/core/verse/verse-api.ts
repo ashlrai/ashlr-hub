@@ -40,17 +40,35 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
+import { checkWorkspaceRootPath, expandHomePrefix } from './path-guard.js';
 import { discoverProjects } from './projects.js';
 import { discoverSeats, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
+import {
+  buildAutonomyScopeView,
+  createVerseWorkspaceStore,
+  describeRoots,
+  rootNotes,
+  VerseWorkspaceError,
+  type VerseWorkspaceStore,
+} from './workspaces.js';
 import type { VerseEngineHandle } from './session-engine.js';
 import {
   VERSE_MAX_TURN_TEXT_BYTES,
+  VERSE_MAX_WORKSPACE_ROOTS,
+  VERSE_ROOT_PRIORITIES,
+  type VerseAutonomyScopeView,
   type VerseBootstrap,
   type VerseCreateSessionRequest,
+  type VerseRootPriority,
+  type VerseRootStatus,
   type VerseSeatsResponse,
   type VerseSession,
   type VerseSessionDetail,
+  type VerseSessionRootsResponse,
   type VerseTurnResponse,
+  type VerseWorkspace,
+  type VerseWorkspacesResponse,
+  verseSessionRoots,
 } from './types.js';
 import { handleVerseEventsSse, VERSE_EVENTS_PATH_RE, VERSE_SESSION_ID_RE } from './verse-stream.js';
 
@@ -139,6 +157,30 @@ async function cachedSeats(cfg: AshlrConfig): Promise<VerseSeatDiscovery> {
 /** Drop the cached seat discovery (after account changes, or in tests). */
 export function invalidateVerseSeatCache(): void {
   seatCache = null;
+}
+
+// ---------------------------------------------------------------------------
+// Workspace registry singleton
+// ---------------------------------------------------------------------------
+
+let workspaceStore: VerseWorkspaceStore | null = null;
+
+/**
+ * The workspace registry, rooted next to the session store so the two share
+ * one 0700 directory and one relocation story. Resolved at FIRST USE, not at
+ * module load, so a relocated HOME is honored exactly as `getVerseEngine()`
+ * does it.
+ */
+export function getVerseWorkspaceStore(): VerseWorkspaceStore {
+  if (!workspaceStore) {
+    workspaceStore = createVerseWorkspaceStore({ root: join(homedir(), '.ashlr', 'verse') });
+  }
+  return workspaceStore;
+}
+
+/** Test hook: drop the memoized store so the next call re-reads under a new HOME. */
+export function resetVerseWorkspaceStore(next: VerseWorkspaceStore | null = null): void {
+  workspaceStore = next;
 }
 
 /**
@@ -271,15 +313,17 @@ const MAX_PATH_CHARS = 4096;
  */
 export { expandHomePrefix };
 
-function parseCreateRequest(body: Record<string, unknown>, res: ServerResponse): VerseCreateSessionRequest | null {
-  const projectPath = body['projectPath'];
+/**
+ * Validate the shared half of a create request (seat, model, title).
+ * Returns null after responding.
+ */
+function parseSeatFields(
+  body: Record<string, unknown>,
+  res: ServerResponse,
+): { seatId: string; model?: string; title?: string } | null {
   const seatId = body['seatId'];
   const model = body['model'];
   const title = body['title'];
-  if (typeof projectPath !== 'string' || projectPath.trim().length === 0 || projectPath.length > MAX_PATH_CHARS) {
-    sendInvalid(res, 'projectPath is required');
-    return null;
-  }
   if (typeof seatId !== 'string' || seatId.trim().length === 0) {
     sendInvalid(res, 'seatId is required');
     return null;
@@ -292,10 +336,279 @@ function parseCreateRequest(body: Record<string, unknown>, res: ServerResponse):
     sendInvalid(res, `title must be a string of at most ${MAX_TITLE_CHARS} characters`);
     return null;
   }
-  const out: VerseCreateSessionRequest = { projectPath: expandHomePrefix(projectPath.trim()), seatId: seatId.trim() };
+  const out: { seatId: string; model?: string; title?: string } = { seatId: seatId.trim() };
   if (typeof model === 'string') out.model = model;
   if (typeof title === 'string' && title.trim().length > 0) out.title = title.trim();
   return out;
+}
+
+/**
+ * Parse a create request in either of its two spellings.
+ *
+ * `workspaceId` and the path spelling are MUTUALLY EXCLUSIVE and the mix is
+ * rejected rather than resolved: silently preferring one would mean the
+ * operator's stated roots and the session's actual roots could differ, and
+ * that difference is exactly what a workspace exists to make legible.
+ *
+ * Every path — primary and extra alike — goes through the same deny-root
+ * guard the enrollment registry uses, so `~/.ashlr` (provider tokens, the
+ * KILL sentinel, the 0600 launcher records) can never become a session root.
+ */
+function parseCreateRequest(
+  body: Record<string, unknown>,
+  res: ServerResponse,
+  store: VerseWorkspaceStore,
+): VerseCreateSessionRequest | null {
+  const seatFields = parseSeatFields(body, res);
+  if (!seatFields) return null;
+
+  const workspaceId = body['workspaceId'];
+  const projectPath = body['projectPath'];
+  const extraRoots = body['extraRoots'];
+
+  if (workspaceId !== undefined) {
+    if (typeof workspaceId !== 'string' || workspaceId.trim().length === 0) {
+      sendInvalid(res, 'workspaceId must be a non-empty string');
+      return null;
+    }
+    if (projectPath !== undefined || extraRoots !== undefined) {
+      sendInvalid(res, 'send workspaceId or projectPath/extraRoots, not both');
+      return null;
+    }
+    const workspace = store.get(workspaceId.trim());
+    if (!workspace) {
+      sendInvalid(res, `unknown workspace: ${workspaceId.trim()}`);
+      return null;
+    }
+    const primary = workspace.roots.find((r) => r.primary) ?? workspace.roots[0];
+    if (!primary) {
+      sendInvalid(res, `workspace ${workspace.name} has no roots`);
+      return null;
+    }
+    const rest = workspace.roots.filter((r) => r.path !== primary.path).map((r) => r.path);
+    return {
+      projectPath: primary.path,
+      ...(rest.length > 0 ? { extraRoots: rest } : {}),
+      workspaceId: workspace.id,
+      // Read from the registry, never from the body.
+      workspaceName: workspace.name,
+      ...seatFields,
+    };
+  }
+
+  if (typeof projectPath !== 'string' || projectPath.trim().length === 0 || projectPath.length > MAX_PATH_CHARS) {
+    sendInvalid(res, 'projectPath is required');
+    return null;
+  }
+  const primaryCheck = checkWorkspaceRootPath(projectPath.trim());
+  if (!primaryCheck.ok) {
+    sendInvalid(res, primaryCheck.error);
+    return null;
+  }
+
+  const resolvedExtras: string[] = [];
+  if (extraRoots !== undefined) {
+    if (!Array.isArray(extraRoots)) {
+      sendInvalid(res, 'extraRoots must be an array of absolute paths');
+      return null;
+    }
+    if (extraRoots.length > VERSE_MAX_WORKSPACE_ROOTS - 1) {
+      sendInvalid(res, `a session may have at most ${VERSE_MAX_WORKSPACE_ROOTS} roots`);
+      return null;
+    }
+    for (const raw of extraRoots) {
+      if (typeof raw !== 'string' || raw.length > MAX_PATH_CHARS) {
+        sendInvalid(res, 'every extra root must be an absolute path');
+        return null;
+      }
+      const check = checkWorkspaceRootPath(raw.trim());
+      if (!check.ok) {
+        sendInvalid(res, check.error);
+        return null;
+      }
+      if (check.path !== primaryCheck.path && !resolvedExtras.includes(check.path)) {
+        resolvedExtras.push(check.path);
+      }
+    }
+  }
+
+  return {
+    projectPath: primaryCheck.path,
+    ...(resolvedExtras.length > 0 ? { extraRoots: resolvedExtras } : {}),
+    ...seatFields,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Workspace routes
+// ---------------------------------------------------------------------------
+
+/** A `VerseWorkspaceError` carries the contract's 400; anything else rethrows. */
+function sendWorkspaceError(res: ServerResponse, err: unknown): boolean {
+  if (err instanceof VerseWorkspaceError) {
+    sendJson(res, 400, { code: 'VERSE_INVALID', error: err.message });
+    return true;
+  }
+  throw err;
+}
+
+function parseRootsField(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  if (value.length > VERSE_MAX_WORKSPACE_ROOTS) return null;
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string' || entry.trim().length === 0 || entry.length > MAX_PATH_CHARS) return null;
+    out.push(entry.trim());
+  }
+  return out;
+}
+
+function isRootPriority(value: unknown): value is VerseRootPriority {
+  return typeof value === 'string' && (VERSE_ROOT_PRIORITIES as readonly string[]).includes(value);
+}
+
+/** Workspaces + their live per-root facts + priorities, in one read. */
+function workspacesResponse(store: VerseWorkspaceStore): VerseWorkspacesResponse {
+  const workspaces: VerseWorkspace[] = store.list();
+  const status: Record<string, VerseRootStatus[]> = {};
+  for (const workspace of workspaces) {
+    status[workspace.id] = describeRoots(workspace.roots.map((r) => r.path));
+  }
+  return {
+    workspaces,
+    status,
+    priorities: store.priorities(),
+    focusSectionId: store.focusSectionId(),
+  };
+}
+
+/**
+ * `/api/verse/workspaces[...]`.
+ *
+ * GETs are readable like every other Verse GET. Every mutation is a POST
+ * behind `allowDispatch` + `passesMutationGate`, the same gate the session
+ * routes use — a workspace decides what an agent can write to, so it is a
+ * control-plane change, not a preference.
+ */
+async function handleWorkspaces(
+  ctx: VerseApiContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  method: string,
+): Promise<boolean> {
+  const store = getVerseWorkspaceStore();
+  const prefix = `${VERSE_API_PREFIX}/workspaces`;
+
+  if (path === prefix && method === 'GET') {
+    sendJson(res, 200, workspacesResponse(store));
+    return true;
+  }
+
+  if (method !== 'POST') {
+    sendJson(res, 404, { error: `not found: ${method} ${path}` });
+    return true;
+  }
+  if (!ctx.allowDispatch) {
+    sendJson(res, 404, { error: 'not found' });
+    return true;
+  }
+  if (!passesMutationGate(req, res, ctx.token)) return true;
+  const body = await readJsonBody(req, res);
+  if (!body) return true;
+
+  try {
+    // POST /api/verse/workspaces — create
+    if (path === prefix) {
+      const roots = parseRootsField(body['roots']);
+      if (!roots) {
+        sendInvalid(res, `roots must be 1-${VERSE_MAX_WORKSPACE_ROOTS} absolute paths`);
+        return true;
+      }
+      const created = store.create(String(body['name'] ?? ''), roots, body['section'] === true);
+      sendJson(res, 201, created);
+      return true;
+    }
+
+    const rest = path.slice(`${prefix}/`.length).split('/');
+
+    // POST /api/verse/workspaces/priority — rank one repo
+    if (rest.length === 1 && rest[0] === 'priority') {
+      const target = body['path'];
+      const priority = body['priority'];
+      if (typeof target !== 'string' || target.trim().length === 0 || target.length > MAX_PATH_CHARS) {
+        sendInvalid(res, 'path is required');
+        return true;
+      }
+      if (!isRootPriority(priority)) {
+        sendInvalid(res, `priority must be one of ${VERSE_ROOT_PRIORITIES.join(', ')}`);
+        return true;
+      }
+      const priorities = store.setPriority(target.trim(), priority);
+      // Echo the ranked scope so the caller sees the ORDER it just changed,
+      // and sees that ranking did not widen it.
+      sendJson(res, 200, { ok: true, priorities, scope: buildAutonomyScopeView(store) });
+      return true;
+    }
+
+    // POST /api/verse/workspaces/focus — focus one section, or clear it
+    if (rest.length === 1 && rest[0] === 'focus') {
+      const sectionId = body['sectionId'];
+      if (sectionId !== null && (typeof sectionId !== 'string' || sectionId.trim().length === 0)) {
+        sendInvalid(res, 'sectionId must be a workspace id or null');
+        return true;
+      }
+      const focusSectionId = store.setFocusSection(sectionId === null ? null : sectionId.trim());
+      sendJson(res, 200, { ok: true, focusSectionId, scope: buildAutonomyScopeView(store) });
+      return true;
+    }
+
+    // POST /api/verse/workspaces/:id/(update|delete)
+    const id = rest[0] ?? '';
+    const action = rest[1] ?? '';
+    if (!id || rest.length !== 2) {
+      sendJson(res, 404, { error: `not found: ${method} ${path}` });
+      return true;
+    }
+
+    if (action === 'delete') {
+      if (!store.remove(id)) {
+        sendJson(res, 404, { code: 'VERSE_SESSION_NOT_FOUND', error: `workspace not found: ${id}` });
+        return true;
+      }
+      // Sessions already created from this workspace keep their PINNED roots
+      // — deleting the definition never narrows or widens a live chat.
+      sendJson(res, 200, { ok: true });
+      return true;
+    }
+
+    if (action !== 'update') {
+      sendJson(res, 404, { error: `not found: ${method} ${path}` });
+      return true;
+    }
+
+    const patch: { name?: string; roots?: string[]; section?: boolean } = {};
+    if (body['name'] !== undefined) {
+      if (typeof body['name'] !== 'string') {
+        sendInvalid(res, 'name must be a string');
+        return true;
+      }
+      patch.name = body['name'];
+    }
+    if (body['roots'] !== undefined) {
+      const roots = parseRootsField(body['roots']);
+      if (!roots) {
+        sendInvalid(res, `roots must be 1-${VERSE_MAX_WORKSPACE_ROOTS} absolute paths`);
+        return true;
+      }
+      patch.roots = roots;
+    }
+    if (body['section'] !== undefined) patch.section = body['section'] === true;
+    sendJson(res, 200, store.update(id, patch));
+    return true;
+  } catch (err) {
+    return sendWorkspaceError(res, err);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -326,6 +639,7 @@ export async function handleVerseApi(
         seats: discovery.seats,
         projects: discoverProjects({ sessions }),
         sessions,
+        workspaces: getVerseWorkspaceStore().list(),
         dispatchEnabled: ctx.allowDispatch,
         localRuntime: discovery.localRuntime,
       };
@@ -349,6 +663,24 @@ export async function handleVerseApi(
       return true;
     }
 
+    // ── /api/verse/workspaces ────────────────────────────────────────────
+    // A workspace is NOT enrollment and cannot become it: nothing under this
+    // prefix touches ~/.ashlr/enrollment.json. Mutations sit behind the same
+    // dispatch gate as every other POST here.
+    if (path === `${VERSE_API_PREFIX}/workspaces` || path.startsWith(`${VERSE_API_PREFIX}/workspaces/`)) {
+      return handleWorkspaces(ctx, req, res, path, method);
+    }
+
+    // ── /api/verse/autonomy-scope ────────────────────────────────────────
+    // Enrolled repos, ORDERED by section focus and priority. Read-only, and
+    // derived by intersecting sections with the enrollment registry — so it
+    // is always a subset of what the autonomous lane already reaches.
+    if (path === `${VERSE_API_PREFIX}/autonomy-scope` && method === 'GET') {
+      const view: VerseAutonomyScopeView = buildAutonomyScopeView(getVerseWorkspaceStore());
+      sendJson(res, 200, view);
+      return true;
+    }
+
     // ── /api/verse/sessions ──────────────────────────────────────────────
     if (path === `${VERSE_API_PREFIX}/sessions`) {
       if (method === 'GET') {
@@ -364,7 +696,7 @@ export async function handleVerseApi(
         if (!passesMutationGate(req, res, ctx.token)) return true;
         const body = await readJsonBody(req, res);
         if (!body) return true;
-        const create = parseCreateRequest(body, res);
+        const create = parseCreateRequest(body, res, getVerseWorkspaceStore());
         if (!create) return true;
         const discovery = await cachedSeats(ctx.cfg);
         const launch = discovery.launches.get(create.seatId);
@@ -405,6 +737,31 @@ export async function handleVerseApi(
       }
       if (!VERSE_SESSION_ID_RE.test(id)) {
         sendInvalid(res, 'invalid session id');
+        return true;
+      }
+
+      // GET /api/verse/sessions/:id/roots
+      //
+      // Per-root identity for the session: branch, dirty state and remote for
+      // each root, whether the engine can actually reach it, and whether the
+      // autonomous lane would. Computed live rather than stored, because a
+      // branch recorded at session creation would be wrong by the next commit.
+      if (method === 'GET' && action === 'roots') {
+        const engine = await getVerseEngine();
+        const session = engine.getSession(id);
+        if (!session) {
+          sendJson(res, 404, { code: 'VERSE_SESSION_NOT_FOUND', error: `session not found: ${id}` });
+          return true;
+        }
+        const roots: VerseRootStatus[] = describeRoots(verseSessionRoots(session), { engine: session.engine });
+        const body: VerseSessionRootsResponse = {
+          sessionId: session.id,
+          workspaceId: session.workspaceId ?? null,
+          workspaceName: session.workspaceName ?? null,
+          roots,
+          notes: rootNotes(roots, session.engine),
+        };
+        sendJson(res, 200, body);
         return true;
       }
 

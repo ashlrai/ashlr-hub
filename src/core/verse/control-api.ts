@@ -60,9 +60,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { existsSync, realpathSync, statSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { basename, isAbsolute, join, resolve as resolvePath, sep } from 'node:path';
+import { basename } from 'node:path';
 
 import type { AshlrConfig, AuditEntry, DaemonConfig } from '../types.js';
 import { loadConfigReadOnly, resolveSubscriptionMaxPercent, saveConfig } from '../config.js';

@@ -25,6 +25,7 @@ import { createVerseSessionStore, type VerseSessionStore } from './session-store
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
   VERSE_MAX_TURN_TEXT_BYTES,
+  VERSE_MAX_WORKSPACE_ROOTS,
   VERSE_TURN_TIMEOUT_MS,
   type VerseCreateSessionRequest,
   type VerseEngine,
@@ -784,6 +785,16 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         id: randomUUID(),
         title: title || DEFAULT_TITLE,
         projectPath,
+        // Spread-only-when-present, so a single-root chat writes a record that
+        // is byte-identical to what it would have written before workspaces
+        // existed. Nothing has to migrate because nothing changed shape.
+        ...(extraRoots.length > 0 ? { extraRoots } : {}),
+        ...(typeof req.workspaceId === 'string' && req.workspaceId.length > 0
+          ? { workspaceId: req.workspaceId }
+          : {}),
+        ...(typeof req.workspaceName === 'string' && req.workspaceName.length > 0
+          ? { workspaceName: req.workspaceName }
+          : {}),
         engine,
         accountId: seat.accountId,
         seatId: seat.id,
