@@ -491,13 +491,6 @@ export interface VerseBootstrap {
   seats: VerseSeat[];
   projects: VerseProject[];
   sessions: VerseSession[];
-  /**
-   * V2.2 ADDITIVE. Named workspaces, so the new-chat dialog can offer them
-   * without a second round trip. An older client ignores the key; a newer
-   * client against an older server sees `undefined` and falls back to the
-   * single-project picker.
-   */
-  workspaces?: VerseWorkspace[];
   /** Whether POST routes are enabled on this server (`ashlr serve --allow-dispatch` / `ashlr verse`). */
   dispatchEnabled: boolean;
   localRuntime: VerseLocalRuntimeSummary;

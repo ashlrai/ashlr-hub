@@ -400,11 +400,20 @@ function parseCreateRequest(
     sendInvalid(res, 'projectPath is required');
     return null;
   }
+  // GUARD ONLY — the checked value is deliberately discarded.
+  //
+  // `checkWorkspaceRootPath` returns the PHYSICAL path, and substituting it
+  // here would change what the engine receives (`/var/…` → `/private/var/…`
+  // on macOS) for every single-root chat that has ever worked. The engine
+  // already realpaths in `resolveProjectDir`, so the stored record is
+  // identical either way; what this call adds is the deny-root refusal, and
+  // that is all it should add.
   const primaryCheck = checkWorkspaceRootPath(projectPath.trim());
   if (!primaryCheck.ok) {
     sendInvalid(res, primaryCheck.error);
     return null;
   }
+  const primary = expandHomePrefix(projectPath.trim());
 
   const resolvedExtras: string[] = [];
   if (extraRoots !== undefined) {
@@ -426,14 +435,17 @@ function parseCreateRequest(
         sendInvalid(res, check.error);
         return null;
       }
-      if (check.path !== primaryCheck.path && !resolvedExtras.includes(check.path)) {
-        resolvedExtras.push(check.path);
-      }
+      // Same rule as the primary: guard here, canonicalise in the engine.
+      // `resolveExtraRoots` realpaths every entry, drops the one equal to the
+      // primary and deduplicates — so a symlink and its target collapse to
+      // one root there rather than being granted twice.
+      const expanded = expandHomePrefix(raw.trim());
+      if (!resolvedExtras.includes(expanded)) resolvedExtras.push(expanded);
     }
   }
 
   return {
-    projectPath: primaryCheck.path,
+    projectPath: primary,
     ...(resolvedExtras.length > 0 ? { extraRoots: resolvedExtras } : {}),
     ...seatFields,
   };
@@ -639,7 +651,11 @@ export async function handleVerseApi(
         seats: discovery.seats,
         projects: discoverProjects({ sessions }),
         sessions,
-        workspaces: getVerseWorkspaceStore().list(),
+        // NOT `workspaces`. Bootstrap's key set is asserted exactly by
+        // test/verse-api.test.ts (the no-launcher-leak shape guard), and the
+        // dialog wants `status` and `priorities` alongside the list anyway —
+        // which only GET /api/verse/workspaces carries. Adding a key here
+        // would have bought a round trip at the price of the frozen shape.
         dispatchEnabled: ctx.allowDispatch,
         localRuntime: discovery.localRuntime,
       };
