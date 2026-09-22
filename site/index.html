@@ -20,6 +20,8 @@
 </style>
 <title>Ashlr Verse</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
+<title>Ashlr Verse</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 
@@ -226,6 +228,7 @@
     <nav>
       <a href="#measured">Measured</a>
       <a href="#seats">Seats</a>
+      <a href="#scale">Scale</a>
       <a href="#lanes">Lanes</a>
       <a href="#autonomy">Autonomy</a>
       <a href="#platforms">Platforms</a>
@@ -239,9 +242,9 @@
     <p class="eyebrow">Operator console for coding agents</p>
     <h1>Run your whole agent fleet from one place.</h1>
     <p class="lede">
-      Every coding agent you own behind one console: your frontier subscriptions and a local model
-      that keeps working after the quota runs out. <strong>Four agents at once on one machine</strong>,
-      each in its own folder, none of them a terminal tab you have to babysit.
+      Every account you own behind one console, working at the same time: each subscription, each
+      local model, each machine. <strong>Add a seat and you add a worker</strong> &mdash; there is no
+      cap in the product, only the accounts you connect and the hardware you point it at.
     </p>
 
     <div class="cta-row">
@@ -276,8 +279,8 @@
 
     <section class="run" aria-label="Measured parallel run" style="border-top:0;padding-block:0">
       <div class="run-head">
-        <h2>Four local agents, one GPU</h2>
-        <span class="meta">Qwen3.8 27B &middot; 4 slots &middot; driven through the console's own dispatch path</span>
+        <h2>One machine, one GPU, four local slots</h2>
+        <span class="meta">Qwen3.8 27B &middot; one measured configuration, not a ceiling &middot; driven through the console's own dispatch path</span>
       </div>
       <div class="run-body">
         <div class="lane"><span class="name">agent 1</span><span class="track"><span class="fill" style="width:93.1%;animation-delay:.05s"></span></span><span class="val">485s <span class="ok">&check;</span></span></div>
@@ -358,9 +361,14 @@
       </div>
 
       <p style="color:var(--muted);max-width:64ch;margin-top:26px">
-        Worth saying plainly, because most tools will not: on one GPU, parallelism buys throughput,
-        not speed. Four agents finish about 1.1&times; more work per minute than one at a time. The
-        large win above was the cache fix, and it helps a single agent just as much.
+        Worth saying plainly, because most tools will not: <em>on a single GPU</em>, local
+        parallelism buys throughput rather than speed &mdash; about 1.1&times; more work per minute
+        than running the same agents one after another. That is a property of one piece of silicon,
+        not a limit of the console. Seats on different accounts, and seats on different machines, run
+        genuinely in parallel because they do not share a bottleneck.
+      </p>
+      <p style="color:var(--muted);max-width:64ch;margin-top:18px">
+        The large win above was the cache fix, and it helps a single agent just as much.
       </p>
     </div>
   </section>
@@ -398,6 +406,50 @@
           <p>Several Codex accounts enrolled at once, each pinned to its own home directory so a turn can never land on the wrong one.</p>
         </div>
       </div>
+    </div>
+  </section>
+
+  <section id="scale">
+    <div class="wrap">
+      <div class="sec-head">
+        <p class="eyebrow">Scale</p>
+        <h2>Nothing in the product caps how many agents you run.</h2>
+        <p>
+          A seat is an account plus the CLI that drives it. Connect two Codex accounts and you have
+          two Codex seats. Connect five and you have five. The ceiling is your subscriptions and your
+          hardware, not a number chosen by this software.
+        </p>
+      </div>
+
+      <div class="seats">
+        <div class="seat">
+          <span class="tag">Accounts</span><h3>One seat per account</h3>
+          <p>Each is pinned to its own profile directory, so a turn can never land on the wrong
+          account. Add a subscription, get a worker. Run out on one and move to the next without
+          changing tools.</p>
+        </div>
+        <div class="seat">
+          <span class="tag local">Local</span><h3>Slots follow your hardware</h3>
+          <p>Local concurrency is set by how you start the runtime, not by the console. More memory
+          and more GPU mean more slots, or a larger window for each. A second model can serve its
+          own seats alongside the first.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Machines</span><h3>More machines, more throughput</h3>
+          <p>Seats on different machines share no bottleneck, so they scale close to linearly —
+          unlike local slots on one GPU. A spare laptop is another set of workers.</p>
+        </div>
+        <div class="seat">
+          <span class="tag">Tooling</span><h3>MCP servers and CLIs per seat</h3>
+          <p>Each seat loads the servers scoped to its own account, so a tool configured for one
+          client does not silently follow you into another.</p>
+        </div>
+      </div>
+
+      <p style="color:var(--muted);max-width:64ch;margin-top:26px">
+        The measured figures on this page come from one machine with four local slots, because that
+        is what was in front of us. They describe a configuration, not a maximum.
+      </p>
     </div>
   </section>
 
