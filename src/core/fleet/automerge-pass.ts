@@ -1201,6 +1201,36 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
       if (shouldSkip) continue;
     }
 
+    // Claim integrity — does the agent's own report match what its diff did?
+    //
+    // Measured three times in one afternoon on the local seat: a turn reported
+    // "Fixed `mul` in n.js:11" against a one-line file, another replied "DONE"
+    // having called no edit tool, and all of them exited zero. A proposal that
+    // reports a change while changing nothing is the worst shape of failure for
+    // an unattended fleet, because it merges clean and nobody looks again.
+    //
+    // Off unless `foundry.claimIntegrity` is true, so enabling it is a decision.
+    if ((foundry as Record<string, unknown> | undefined)?.['claimIntegrity'] === true) {
+      let shouldSkip = false;
+      try {
+        const {
+          classifyCompletionClaim, changedFileCountFromDiff, turnIntegrity, describeTurnIntegrity,
+        } = await import('../classify/completion-claims.js');
+        // The classifier judges the CLAIM only. The file count is read from the
+        // diff we already hold — never inferred, and never asked of a model.
+        const assessment = await classifyCompletionClaim(p.summary, cfg as unknown as import('../types.js').AshlrConfig);
+        const verdict = turnIntegrity(assessment.claim, changedFileCountFromDiff(p.diff));
+        if (verdict === 'unsupported-claim' || verdict === 'silent-change') {
+          shouldSkip = true;
+          recordSafetySkip(out, p.id, 'claim-integrity', describeTurnIntegrity(verdict));
+        }
+      } catch (err) {
+        shouldSkip = true;
+        recordSafetySkip(out, p.id, 'claim-integrity', `claim-integrity check failed closed: ${errorDetail(err)}`);
+      }
+      if (shouldSkip) continue;
+    }
+
     // M190 — Spec-contract
     if ((foundry as Record<string, unknown> | undefined)?.['specContract'] === true) {
       const specId = (p as unknown as Record<string, unknown>)['specId'];
