@@ -1,0 +1,111 @@
+{
+  "configuration": {
+    "model": "qwen3.8:27b-ctx64k",
+    "modelPath": "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+    "quantization": "Q8_0",
+    "slots": 4,
+    "contextPerSlot": 65536,
+    "contextTotal": 262144,
+    "samplingParams": {
+      "temperature": 1,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "typical_p": 1,
+      "repeat_penalty": 1,
+      "repeat_last_n": 64,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "mirostat": 0,
+      "seed": 4294967295
+    },
+    "baseUrl": "http://127.0.0.1:8090",
+    "proxy": "on",
+    "proxyImplementation": "node /private/tmp/claude-501/-Users-masonwyatt-Desktop/9d28bdb1-37c3-419d-a2bc-f7e3fd7b72ef/scratchpad/shim.mjs",
+    "agentCli": "claude 2.1.280 (Claude Code)",
+    "llamaServerArgv": [
+      "/opt/homebrew/bin/llama-server",
+      "-m",
+      "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8080",
+      "--parallel",
+      "4",
+      "-c",
+      "262144",
+      "--cont-batching",
+      "--cache-prompt"
+    ],
+    "capturedAt": "2026-09-22T22:56:59.530Z"
+  },
+  "trialsPerTask": 2,
+  "concurrency": 1,
+  "outcomes": [
+    {
+      "taskId": "api-migration",
+      "why": "Added after the first baseline returned 12/12, which proved the set had no headroom: a suite everything passes can detect a regression but never an improvement. This one compounds the earlier shapes instead of repeating them — the target signature must be READ from a file the prompt does not name, then applied across three call sites, one of which passes its arguments in a deliberately surprising order. Getting the rename right while transposing that call is the near-miss it exists to catch.",
+      "expectation": "edit",
+      "trials": [
+        {
+          "taskId": "api-migration",
+          "trial": 1,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 713834,
+          "tokens": {
+            "input": 5757,
+            "output": 6542,
+            "cacheRead": 25510,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "claims-change",
+          "integrity": "consistent",
+          "turns": 9,
+          "note": ""
+        },
+        {
+          "taskId": "api-migration",
+          "trial": 2,
+          "mode": "timeout",
+          "passed": false,
+          "wallMs": 900024,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0
+          },
+          "agentExit": null,
+          "verifyExit": null,
+          "changedFiles": 0,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": null,
+          "note": "killed at the wall-clock budget"
+        }
+      ],
+      "passes": 1,
+      "total": 2,
+      "passRate": 0.5,
+      "medianWallMs": 806929,
+      "meanWallMs": 806929,
+      "modes": [
+        {
+          "mode": "timeout",
+          "count": 1
+        }
+      ]
+    }
+  ],
+  "overallPassRate": 0.5,
+  "totalPasses": 1,
+  "totalTrials": 2,
+  "startedAt": "2026-09-22T22:56:59.531Z",
+  "finishedAt": "2026-09-22T23:23:53.463Z",
+  "wallMs": 1613932
+}
