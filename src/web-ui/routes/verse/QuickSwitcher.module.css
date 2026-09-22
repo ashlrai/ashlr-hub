@@ -1,0 +1,76 @@
+.width { width: min(560px, calc(100vw - 32px)); }
+
+.input {
+  width: 100%;
+  min-height: calc(var(--control-h) + var(--space-1));
+  padding: 0 var(--space-3);
+  margin-bottom: var(--space-2);
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-md-size);
+}
+.input::placeholder { color: var(--text-tertiary); }
+/* Replaces the global ring: a 2px accent underline on the search line. */
+.input:focus-visible { outline: none; box-shadow: inset 0 -1px 0 var(--accent-500); border-bottom-color: var(--accent-500); }
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: min(60vh, 440px);
+  overflow-y: auto;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 2px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: calc(var(--density-row) + var(--space-2));
+  padding: var(--space-1) var(--space-3);
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+/* The list had no pointer hover at all — only the keyboard-selected row was
+   ever tinted, so a mouse user got no feedback crossing the results. Hover
+   stops one step short of the selected ground so the two stay distinct. */
+.row:hover:not(.rowActive) { background: var(--bg-hover); color: var(--text-primary); }
+.rowActive { background: var(--bg-selected); color: var(--text-primary); }
+
+.marker { width: 2px; height: var(--engine-marker-h); border-radius: 1px; background: var(--verse-engine, var(--text-tertiary)); }
+.engine-claude { --verse-engine: var(--engine-claude, #c96442); }
+.engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
+.engine-grok { --verse-engine: var(--engine-grok, #6b7280); }
+.engine-local { --verse-engine: var(--engine-local, #7c5cff); }
+
+.rowText { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.rowPrimary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+.rowSecondary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-2xs-size, 11px);
+  color: var(--text-tertiary);
+}
+.rowActive .rowSecondary,
+.row:hover .rowSecondary,
+.rowActive .rowTrailing,
+.row:hover .rowTrailing { color: var(--text-secondary); }
+.rowTrailing {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.emptyRow { padding: var(--space-4) var(--space-3); color: var(--text-tertiary); font-size: var(--text-sm-size); }

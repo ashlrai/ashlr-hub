@@ -8,6 +8,7 @@ import { validateResourceBindings, type ResourceBinding } from './worker.js';
 export interface ResourceCapacityEvidence {
   observations: ResourceObservation[];
   unavailableWorkerIds: string[];
+  quotaUnavailableWorkerIds?: string[];
 }
 export interface ResourceCapacityWaitOptions {
   root: string;
@@ -66,9 +67,11 @@ export async function waitForResourceCapacity(options: ResourceCapacityWaitOptio
     const source = readEvidence();
     const observations = validateResourceObservations(source.observations, pool);
     const unavailableWorkerIds = validateUnavailableResourceWorkerIds(source.unavailableWorkerIds, pool);
-    const evidence = { observations, unavailableWorkerIds };
+    const quotaUnavailableWorkerIds = validateUnavailableResourceWorkerIds(source.quotaUnavailableWorkerIds === undefined ? [] : source.quotaUnavailableWorkerIds, pool);
+    const evidence = { observations, unavailableWorkerIds,
+      ...(source.quotaUnavailableWorkerIds === undefined ? {} : { quotaUnavailableWorkerIds }) };
     cancelled(signal);
-    const status = resourcePoolStatus(root, pool, bindings, observations, unavailableWorkerIds);
+    const status = resourcePoolStatus(root, pool, bindings, observations, unavailableWorkerIds, quotaUnavailableWorkerIds);
     cancelled(signal);
     if (status.attempts.some((receipt) => receipt.id === task.id)) return { ready: true, ...evidence };
     // A zero budget still performs one useful check. Later samples cannot turn

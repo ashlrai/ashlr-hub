@@ -292,6 +292,9 @@ describe('Read-only campaign delivery provenance', () => {
       '../src/core/universe/campaign-delivery-recovery.js');
     const campaign = { sourceState: 'healthy', state: 'completed', definition: { id: 'a', universeId: 'universe-a' },
       definitionDigest: HASH, manifestDigest: HASH, comparatorDigest: HASH, steps: [{ runId: 'run', ordinal: 1 }] } as UniverseCampaignSummary;
+    // Recovery now checks the caller's summary against the current durable read.
+    // Keep this synthetic reader independent of later caller mutations.
+    hooks.campaign.mockReturnValue(structuredClone(campaign));
     const target = { branch: 'codex/a', baseCommit: 'a'.repeat(40) };
     const receipt = { ...target, status: 'delivered', universeId: 'universe-a', runId: 'run', trialId: 'trial', artifactDigest: 'changed' };
     const trial = { id: 'trial', selected: true, status: 'passed', score: 2, delta: 1, parentTrialId: 'parent', artifact: { digest: 'changed' } };
@@ -302,6 +305,7 @@ describe('Read-only campaign delivery provenance', () => {
     hooks.deliveries.mockReturnValue({ sourceState: 'healthy', deliveries: [receipt] });
     const options = { root: '/synthetic/root' };
     expect(readCompletedCampaignDelivery(campaign, target, options)).toEqual(receipt);
+    expect(readCompletedCampaignDelivery({ ...campaign, reason: 'altered caller summary' }, target, options)).toBeNull();
     run.campaign.id = 'different'; expect(readCompletedCampaignDelivery(campaign, target, options)).toBeNull(); run.campaign.id = 'a';
     trial.delta = 0; expect(readCompletedCampaignDelivery(campaign, target, options)).toBeNull(); trial.delta = 1;
     trial.artifact.digest = 'seed'; expect(readCompletedCampaignDelivery(campaign, target, options)).toBeNull(); trial.artifact.digest = 'changed';

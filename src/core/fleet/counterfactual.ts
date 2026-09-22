@@ -50,6 +50,7 @@ import {
 } from './judge-trace.js';
 import type { JudgeProposalOptions, ManagerVerdict } from './manager.js';
 import { scrubSecrets } from '../util/scrub.js';
+import { cohenKappa } from './agreement.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -183,57 +184,21 @@ function outcomeToIntent(outcome: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// Cohen's kappa (self-contained, pure, never-throws)
+// Cohen's kappa (shared implementation, re-exported from this path)
 // ---------------------------------------------------------------------------
 
 /**
  * Cohen's kappa between two categorical raters.
- *   kappa = (p_o - p_e) / (1 - p_e)
- * Returns null for < 2 pairs (kappa is undefined on a single observation),
- * 1.0 for a degenerate all-one-category set. Pure. Never throws.
+ *
+ * Re-export of the shared implementation in ./agreement.js — this module and
+ * judge-calibration.ts each used to carry their own copy. Kept exported from
+ * this path because m187's suite and this module's own analysis import it here.
+ *
+ * Returns null for fewer than MIN_KAPPA_PAIRS pairs (kappa is undefined on a
+ * single observation) and 1.0 for a degenerate all-one-category set, where the
+ * denominator would otherwise be zero. Pure. Never throws.
  */
-export function cohenKappa(pairs: Array<{ a: string; b: string }>): number | null {
-  try {
-    const n = pairs.length;
-    if (n < 2) return null;
-
-    const cats = new Set<string>();
-    for (const p of pairs) {
-      cats.add(p.a);
-      cats.add(p.b);
-    }
-    const categories = Array.from(cats);
-
-    const matrix: Record<string, Record<string, number>> = {};
-    const marginalA: Record<string, number> = {};
-    const marginalB: Record<string, number> = {};
-    for (const c of categories) {
-      matrix[c] = {};
-      marginalA[c] = 0;
-      marginalB[c] = 0;
-      for (const c2 of categories) matrix[c]![c2] = 0;
-    }
-
-    for (const p of pairs) {
-      matrix[p.a]![p.b]! += 1;
-      marginalA[p.a]! += 1;
-      marginalB[p.b]! += 1;
-    }
-
-    let observed = 0;
-    for (const c of categories) observed += matrix[c]?.[c] ?? 0;
-    const p_o = observed / n;
-
-    let expected = 0;
-    for (const c of categories) expected += (marginalA[c]! / n) * (marginalB[c]! / n);
-    const p_e = expected;
-
-    if (p_e >= 1.0) return 1.0; // every observation in one category
-    return (p_o - p_e) / (1 - p_e);
-  } catch {
-    return null;
-  }
-}
+export { cohenKappa };
 
 // ---------------------------------------------------------------------------
 // Work-source attribution

@@ -1,0 +1,75 @@
+.width { width: min(520px, calc(100vw - 32px)); }
+
+.form { display: grid; gap: var(--space-4); }
+.field { display: grid; gap: var(--space-1); min-width: 0; }
+.label {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.optional { font-weight: var(--font-weight-regular); letter-spacing: 0; text-transform: none; opacity: 0.8; }
+
+.select,
+.input {
+  width: 100%;
+  min-height: var(--control-h);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  text-overflow: ellipsis;
+}
+.input::placeholder { color: var(--text-tertiary); }
+.select,
+.input {
+  transition: border-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
+}
+.select:hover:not(:disabled),
+.input:hover:not(:disabled) { border-color: var(--border-strong); }
+/* Same focus treatment as the Input/Select primitives: accent edge plus the
+   system ring, so a field in this dialog and a field in Settings read
+   identically — and both are actually visible (see Input.module.css). */
+.select:focus-visible,
+.input:focus-visible { border-color: var(--border-focus); box-shadow: var(--shadow-focus-ring); }
+
+.hint { font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-tertiary); }
+.error {
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--status-danger-solid);
+  color: var(--status-danger-fg);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+.actions { display: flex; justify-content: flex-end; gap: var(--space-2); }
+.cancel,
+.create {
+  min-height: var(--control-h);
+  padding: 0 var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.cancel { color: var(--text-secondary); }
+.cancel:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cancel:active { background: var(--bg-active); }
+.create { background: var(--accent-600); color: var(--accent-contrast); }
+.create:hover:not(:disabled) { background: var(--accent-700); }
+.create:active:not(:disabled) { background: var(--accent-700); }
+.create:disabled { opacity: 0.4; cursor: not-allowed; }
+
+/* The chosen seat's capacity, directly under the picker: this is where the
+   choice is made, so the cost of making it belongs here and not one section
+   away. Indented on the engine-neutral hairline the error state also uses, so
+   it reads as commentary on the field above rather than a new field. */
+.capacity {
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border-default);
+}

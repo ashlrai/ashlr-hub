@@ -4,6 +4,7 @@ import type { ResourceTaskReceipt } from './pool-runtime.js';
 import type { ResourcePerformanceReport } from './performance.js';
 import type { ResourceQuotaRefreshSnapshot } from './quota-refresh.js';
 import type { ResourceConnectionsSnapshot } from './connection-types.js';
+import type { ResourceQuotaScopeAccess } from './quota-scope-access.js';
 
 export interface ResourceConsoleScope {
   schemaVersion: 1;
@@ -18,7 +19,29 @@ export interface ResourceConsoleScope {
   quotaRefreshEnabled?: boolean;
   connectionsEnabled?: boolean;
   allocationWritable?: boolean;
+  /** Explicit capability to retain opt-in task text in the private local store. */
+  historySupported?: boolean;
+  followUpSupported?: boolean;
+  projects?: ResourceConsoleProject[];
+  defaultProjectId?: 'default';
+  /** Control-unlocked, project-pinned local file inspection; never read-session authority. */
+  workspaceFilesSupported?: true;
+  /** Explicit host-enrolled evaluated engineering; separate from ordinary task completion. */
+  engineeringSupported?: true;
+  /** Read-only evaluation and shared-ledger attribution; never routing authority. */
+  engineeringOutcomesSupported?: true;
+  /** Host-pinned objective preparation and durable same-console enrollment. */
+  engineeringPreparationSupported?: true;
+  /** Host policy automatically admits prepared plans to the existing bounded queue. */
+  engineeringPreparationAutoAdmission?: true;
+  /** Explicit automatic queue in this console lifetime; not an OS service. */
+  engineeringSupervisionSupported?: true;
+  /** Metadata-only observation of host-configured successor planning. */
+  engineeringSuccessorsSupported?: true;
 }
+
+export interface ResourceConsoleProjectInput { id: string; label: string; workspace: string }
+export interface ResourceConsoleProject extends ResourceConsoleProjectInput { enabled: boolean }
 
 export interface ResourceConsoleGroup {
   capacityKey: string;
@@ -39,6 +62,8 @@ export interface ResourceConsoleEvidence {
   sampledAt: string;
   sourceState: 'missing' | 'healthy' | 'degraded';
   reasons: string[];
+  /** Present only for a verified evolved ledger. Digests, never private binding locators. */
+  configurationDigests?: string[];
   pool: { id: string; workers: Array<ResourceWorker & { capacityKey: string }> };
   groups: ResourceConsoleGroup[];
   plan: ResourceAssignmentPlan | null;
@@ -62,6 +87,18 @@ export interface ResourceConsoleTaskInput {
   mode: 'read-only' | 'workspace-write';
   timeoutMs: number;
   maxOutputTokens: number;
+  /** Consent is immutable for this task ID; omission and false are equivalent. */
+  retainHistory?: boolean;
+  parent?: ResourceConsoleParent;
+  projectId?: string;
+}
+
+export interface ResourceConsoleParent { taskId: string; expectedTranscriptDigest: string }
+export interface ResourceConsoleContextTurn {
+  taskId: string;
+  prompt: string;
+  output: { text: string; truncated: boolean } | null;
+  outcome: ResourceTaskReceipt['status'] | null;
 }
 
 export interface ResourceSupervisorJob {
@@ -76,6 +113,9 @@ export interface ResourceSupervisorJob {
   reason: string | null;
   cancellable: boolean;
   outputAvailable: boolean;
+  historyAvailable?: true;
+  parent?: ResourceConsoleParent;
+  projectId?: string;
 }
 
 export interface ResourceSupervisorSnapshot {
@@ -101,6 +141,15 @@ export interface ResourceCollectorRecoveryDiagnosis {
   reasonCode: typeof RESOURCE_COLLECTOR_RECOVERY_REASONS[number];
   markerVersion: 1 | 2 | 3 | 4 | null;
 }
+/** Sampled local marker facts only; no ownership, process or recovery assessment. */
+export interface ResourceCollectorInspection {
+  scope: 'local-record-inspection';
+  sampledAt: string;
+  state: 'absent' | 'pending' | 'unavailable';
+  markerVersion: 1 | 2 | 3 | 4 | null;
+  reasonCode: 'no-pending-record' | 'legacy-owner-evidence-missing' | 'recovery-not-evaluated' | 'pending-evidence-unavailable';
+  recoveryAttempted: false;
+}
 /** Versions supported by each diagnosis; prevents contradictory recovery advice. */
 export const RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS = {
   'legacy-owner-evidence-missing': [1],
@@ -119,6 +168,8 @@ export const RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS = {
 
 export interface ResourceConsoleSnapshot extends ResourceConsoleEvidence {
   supervisor: ResourceSupervisorSnapshot | null;
+  /** Independent read-only local record inspection, not collector activity or quota. */
+  collectorInspection?: ResourceCollectorInspection;
   /** Local collector lifecycle, not a provider health or quota observation. */
   metadataCollector?: {
     state: 'running' | 'blocked';
@@ -130,6 +181,8 @@ export interface ResourceConsoleSnapshot extends ResourceConsoleEvidence {
   connections?: ResourceConnectionsSnapshot | null;
   allocation?: { ceilingPercent: number | null; revision: number; updatedAt: string | null };
   workerAccess?: { pausedWorkerIds: string[]; revision: number; updatedAt: string | null };
+  /** Independent operator reservations; not provider health or available quota. */
+  quotaScopeAccess?: ResourceQuotaScopeAccess;
 }
 
 export interface ResourceConsoleOutput {
@@ -137,4 +190,16 @@ export interface ResourceConsoleOutput {
   text: string;
   truncated: boolean;
   retention: 'this-console-session';
+}
+
+/** Private task text, returned only by a dedicated authenticated read. */
+export interface ResourceConsoleTranscript {
+  id: string;
+  prompt: string;
+  output: { text: string; truncated: boolean } | null;
+  retention: 'local-until-deleted';
+  transcriptDigest?: string;
+  context?: ResourceConsoleContextTurn[];
+  parent?: ResourceConsoleParent;
+  projectId?: string;
 }

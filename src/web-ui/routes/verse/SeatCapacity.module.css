@@ -1,0 +1,142 @@
+/* Shared capacity rendering: the verdict chip, one quota window, and the
+   single-seat note. Hairlines and whitespace only — no nested boxes.
+
+   Every colour here is paired with a word and a glyph (DESIGN-V2 §6), and
+   every `--status-*-fg` token is defined on bare :root AND retuned for dark,
+   so both themes hold the 4.5:1 floor without a rule of their own. */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--status-unknown-fg);
+  white-space: nowrap;
+}
+.chipGlyph {
+  font-family: var(--font-ui);
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0;
+}
+.chip[data-capacity='ready'] { color: var(--status-success-fg); }
+.chip[data-capacity='tight'] { color: var(--status-warning-fg); }
+.chip[data-capacity='blocked'] { color: var(--status-danger-fg); }
+.chip[data-capacity='unread'] { color: var(--status-unknown-fg); }
+
+/* ---- one quota window -------------------------------------------------- */
+
+.window,
+.windowLead {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+/* The binding constraint leads: same meter, one step more present. */
+.windowLead .windowLabel { color: var(--text-primary); }
+.windowLead .pct { color: var(--text-primary); }
+
+.windowLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  color: var(--text-secondary);
+}
+.pct {
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  color: var(--text-secondary);
+}
+.flag {
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  font-weight: var(--font-weight-medium);
+  color: var(--status-danger-fg);
+  white-space: nowrap;
+}
+
+.unknownHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.unknownValue {
+  flex: none;
+  font-family: var(--font-ui);
+  font-style: italic;
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  color: var(--status-unknown-fg);
+}
+/* Absence drawn as absence — a dashed rule, never a 0% bar. */
+.unknownRule {
+  width: 100%;
+  height: 0;
+  margin: 3px 0 0;
+  border: 0;
+  border-top: 1px dashed var(--border-strong);
+}
+
+.reset {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  color: var(--text-tertiary);
+}
+
+/* ---- single-seat note -------------------------------------------------- */
+
+.note {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.noteHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+  min-width: 0;
+}
+.plan {
+  flex: none;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.noteSummary {
+  flex: 1 1 100%;
+  min-width: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+.credits {
+  margin: 0;
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  color: var(--text-tertiary);
+}

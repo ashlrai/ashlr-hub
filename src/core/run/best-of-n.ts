@@ -34,6 +34,7 @@ import type {
   BestOfNCandidateSpec,
 } from '../types.js';
 import type { ManagerVerdict, FrontierJudgeClient } from '../fleet/manager.js';
+import { scoreVerdict } from '../fleet/verdict-score.js';
 import type { TasteScore } from '../fleet/taste-critic.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import {
@@ -383,15 +384,6 @@ async function mapWithConcurrency<T, R>(
  */
 function goalFor(item: WorkItem): string {
   return item.detail?.trim() ? `${item.title}\n\n${item.detail}` : item.title;
-}
-
-/**
- * Derive a numeric score from a ManagerVerdict.
- * value + correctness + (5 - scope) + alignment → max 20.
- * Scope is inverted because lower blast radius is better.
- */
-function scoreVerdict(v: ManagerVerdict): number {
-  return v.value + v.correctness + (5 - Math.min(5, Math.max(1, v.scope))) + v.alignment;
 }
 
 /**

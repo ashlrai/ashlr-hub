@@ -16,6 +16,7 @@
 
 import type { AshlrConfig, Playbook, RecallHit } from '../types.js';
 import { recall } from './recall.js';
+import { assertPermitted, endpointPermitted } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -216,6 +217,14 @@ async function tryLmStudioSynthesis(
     const lmBase = (cfg.models?.lmstudio ?? 'http://localhost:1234').replace(/\/+$/, '');
     const modelsUrl = `${lmBase}/v1/models`;
     const chatUrl = `${lmBase}/v1/chat/completions`;
+    // LOCAL-ONLY GATE. This path builds its own request instead of going
+    // through provider-client's transport — it needs a far longer timeout
+    // than that path allows — which means it also bypasses the refusal that
+    // lives there. The base URL is loopback by default, so nothing reaches a
+    // paid provider as configured; the gate is here so that an operator who
+    // repoints it at a remote inference host does not end up with a
+    // local-only mode that has a hole in it.
+    assertPermitted(endpointPermitted(chatUrl, cfg));
 
     // Probe for available models.
     const probeController = new AbortController();

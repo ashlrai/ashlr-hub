@@ -1,4 +1,4 @@
-import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput,
+import type { ResourceConsoleOutput, ResourceConsoleScope, ResourceConsoleSnapshot, ResourceConsoleTaskInput, ResourceConsoleTranscript,
   ResourceSupervisorJob, ResourceSupervisorSnapshot } from '../../core/resources/console-types.js';
 import { RESOURCE_COLLECTOR_RECOVERY_REASONS, RESOURCE_COLLECTOR_RECOVERY_MARKER_VERSIONS } from '../../core/resources/console-types.js';
 import { validResourceNativeProcessForReceipt } from '../../core/resources/native-diagnostics.js';
@@ -13,6 +13,18 @@ function absolutePath(value: unknown): value is string {
 }
 
 const QUOTA_STATES = new Set(['pending', 'refreshing', 'observed', 'failed', 'timed-out', 'cancelled', 'uncertain', 'expired', 'closed']);
+/** Passive local evidence, deliberately separate from an owning collector's lifecycle. */
+export function validResourceCollectorInspection(value: unknown): value is NonNullable<ResourceConsoleSnapshot['collectorInspection']> {
+  if (!record(value) || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const keys = ['scope', 'sampledAt', 'state', 'markerVersion', 'reasonCode', 'recoveryAttempted'];
+  if (Reflect.ownKeys(value).length !== keys.length || !Reflect.ownKeys(value).every(key => typeof key === 'string' &&
+    keys.includes(key) && 'value' in Object.getOwnPropertyDescriptor(value, key)!) ||
+    value.scope !== 'local-record-inspection' || !timestamp(value.sampledAt) || value.recoveryAttempted !== false) return false;
+  return value.state === 'absent' && value.markerVersion === null && value.reasonCode === 'no-pending-record' ||
+    value.state === 'pending' && (value.markerVersion === 1 && value.reasonCode === 'legacy-owner-evidence-missing' ||
+      [2, 3, 4].some(version => version === value.markerVersion) && value.reasonCode === 'recovery-not-evaluated') ||
+    value.state === 'unavailable' && value.markerVersion === null && value.reasonCode === 'pending-evidence-unavailable';
+}
 function validMetadataCollector(value: unknown): boolean {
   if (value === undefined) return true;
   if (!record(value) || !exact(value, ['state', 'reasonCode', 'sampledAt', ...(Object.hasOwn(value, 'recovery') ? ['recovery'] : [])])) return false;
@@ -35,6 +47,20 @@ function validWorkerAccess(value: unknown): value is NonNullable<ResourceConsole
     value.pausedWorkerIds.some((id) => typeof id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) ||
     new Set(value.pausedWorkerIds).size !== value.pausedWorkerIds.length || !Number.isSafeInteger(value.revision) || Number(value.revision) < 0) return false;
   return value.revision === 0 ? value.updatedAt === null && value.pausedWorkerIds.length === 0 : timestamp(value.updatedAt);
+}
+type ScopeExclusion = NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']>['exclusions'][number];
+const scopeKey = (row: ScopeExclusion) => `${row.capacityKey}/${row.quotaScope}`;
+function validScopeExclusions(value: unknown): value is ScopeExclusion[] {
+  return Array.isArray(value) && value.length <= 64 && Object.keys(value).length === value.length &&
+    Array.from(value).every((row) => record(row) && exact(row, ['capacityKey', 'quotaScope']) &&
+      typeof row.capacityKey === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(row.capacityKey) &&
+      (row.quotaScope === 'codex-general-v1' || row.quotaScope === 'codex-spark-v1')) &&
+    new Set((value as ScopeExclusion[]).map(scopeKey)).size === value.length;
+}
+function validQuotaScopeAccess(value: unknown): value is NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']> {
+  if (!record(value) || !exact(value, ['exclusions', 'revision', 'updatedAt']) || !validScopeExclusions(value.exclusions) ||
+    !Number.isSafeInteger(value.revision) || Number(value.revision) < 0) return false;
+  return value.revision === 0 ? value.updatedAt === null && value.exclusions.length === 0 : timestamp(value.updatedAt);
 }
 const QUOTA_REASONS = new Set(['managed-allocation-unavailable', ...['pending', 'refreshing', 'observed', 'failed', 'timed-out', 'cancelled', 'uncertain',
   'expired', 'closed', 'future', 'unavailable', 'unknown', 'reserve-reached'].map((reason) => `managed-quota-${reason}`)]);
@@ -140,6 +166,23 @@ function validQuotaRefresh(value: unknown, workers: ResourceConsoleSnapshot['poo
   return true;
 }
 
+function validProjects(scope: ResourceConsoleScope): boolean {
+  if (scope.projects === undefined && scope.defaultProjectId === undefined) return true;
+  if (scope.readOnly || scope.defaultProjectId !== 'default' || !Array.isArray(scope.projects) ||
+    scope.projects.length < 1 || scope.projects.length > 32) return false;
+  const ids = new Set<string>(); const workspaces = new Set<string>();
+  for (const project of scope.projects) {
+    if (!record(project) || !exact(project, ['id', 'label', 'workspace', 'enabled']) ||
+      typeof project.id !== 'string' || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(project.id) || ids.has(project.id) ||
+      typeof project.label !== 'string' || !project.label.trim() || project.label !== project.label.trim() || new TextEncoder().encode(project.label).byteLength > 128 ||
+      [...project.label].some((character) => character.charCodeAt(0) < 32 ||
+        character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159) || !absolutePath(project.workspace) ||
+      workspaces.has(project.workspace) || typeof project.enabled !== 'boolean') return false;
+    ids.add(project.id); workspaces.add(project.workspace);
+  }
+  return scope.projects.find((project) => project.id === 'default')?.workspace === scope.workspace;
+}
+
 export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
   key: 'resource-console-scope',
   async fetch(signal) {
@@ -151,7 +194,20 @@ export const resourceConsoleScopeQuery: QueryDef<ResourceConsoleScope> = {
       !Number.isSafeInteger(scope.maxQueued) || scope.maxQueued < (scope.readOnly ? 0 : 1) || scope.maxQueued > 64 ||
       scope.quotaRefreshEnabled !== undefined && typeof scope.quotaRefreshEnabled !== 'boolean' ||
       scope.connectionsEnabled !== undefined && typeof scope.connectionsEnabled !== 'boolean' ||
-      scope.allocationWritable !== undefined && typeof scope.allocationWritable !== 'boolean') {
+      scope.allocationWritable !== undefined && typeof scope.allocationWritable !== 'boolean' ||
+      scope.historySupported !== undefined && (typeof scope.historySupported !== 'boolean' || scope.historySupported && scope.readOnly) ||
+      scope.followUpSupported !== undefined && (typeof scope.followUpSupported !== 'boolean' ||
+        scope.followUpSupported && (scope.readOnly || scope.historySupported !== true)) || !validProjects(scope) ||
+      scope.workspaceFilesSupported !== undefined && (typeof scope.workspaceFilesSupported !== 'boolean' ||
+        scope.workspaceFilesSupported && (scope.readOnly || !scope.projects)) ||
+      scope.engineeringSupported !== undefined && (scope.engineeringSupported !== true || scope.readOnly || !scope.projects) ||
+      scope.engineeringPreparationSupported !== undefined && (scope.engineeringPreparationSupported !== true || scope.engineeringSupported !== true) ||
+      scope.engineeringPreparationAutoAdmission !== undefined && (scope.engineeringPreparationAutoAdmission !== true ||
+        scope.engineeringPreparationSupported !== true || scope.engineeringSupervisionSupported !== true) ||
+      scope.engineeringSuccessorsSupported !== undefined && (scope.engineeringSuccessorsSupported !== true ||
+        scope.engineeringSupported !== true || scope.engineeringPreparationSupported !== true || scope.engineeringSupervisionSupported !== true) ||
+      scope.engineeringOutcomesSupported !== undefined && (scope.engineeringOutcomesSupported !== true || scope.engineeringSupported !== true) ||
+      scope.engineeringSupervisionSupported !== undefined && (scope.engineeringSupervisionSupported !== true || scope.engineeringSupported !== true)) {
       throw new Error('The server did not establish an explicit resource-pool scope.');
     }
     return scope;
@@ -169,9 +225,13 @@ export function resourceConsoleSnapshotQuery(poolId: string): QueryDef<ResourceC
         !validNativeDiagnostics(snapshot.activeAttempts, snapshot.pool.workers) ||
         !validNativeDiagnostics(snapshot.recentAttempts, snapshot.pool.workers) ||
         !validQuotaRefresh(snapshot.quotaRefresh, snapshot.pool.workers) || !validConnections(snapshot.connections) || !validMetadataCollector(snapshot.metadataCollector) ||
+        snapshot.collectorInspection !== undefined && !validResourceCollectorInspection(snapshot.collectorInspection) ||
         snapshot.allocation !== undefined && !validAllocation(snapshot.allocation) ||
         snapshot.workerAccess !== undefined && (!validWorkerAccess(snapshot.workerAccess) ||
-          snapshot.workerAccess.pausedWorkerIds.some((id) => !snapshot.pool.workers.some((worker) => worker.id === id)))) {
+          snapshot.workerAccess.pausedWorkerIds.some((id) => !snapshot.pool.workers.some((worker) => worker.id === id))) ||
+        snapshot.quotaScopeAccess !== undefined && (!validQuotaScopeAccess(snapshot.quotaScopeAccess) ||
+          snapshot.quotaScopeAccess.exclusions.some((row) => !snapshot.pool.workers.some((worker) =>
+            worker.capacityKey === row.capacityKey && worker.quotaScope === row.quotaScope)))) {
         throw new Error('The resource response did not match the selected pool.');
       }
       return snapshot;
@@ -245,6 +305,31 @@ export async function setResourceWorkerAccessControl(pausedWorkerIds: string[], 
   return response;
 }
 
+export async function setResourceQuotaScopeAccess(exclusions: ScopeExclusion[], expectedRevision: number): Promise<{
+  quotaScopeAccess: NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']>;
+}> {
+  if (!validScopeExclusions(exclusions) || !Number.isSafeInteger(expectedRevision) || expectedRevision < 0 ||
+    expectedRevision >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid quota reservation change.');
+  // Capture the operator's selection before awaiting a response; never mutate caller state.
+  const requested = exclusions.map((row) => ({ ...row }));
+  let response: { quotaScopeAccess: NonNullable<ResourceConsoleSnapshot['quotaScopeAccess']> };
+  try {
+    response = await control('/api/resources/quota-scope-access', { exclusions: requested, expectedRevision }, 'Quota reservation changes are disabled for this console.');
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 409) throw new ApiError('Quota reservations changed elsewhere. Refresh before saving again.', 409, '/api/resources/quota-scope-access');
+    if (error instanceof Error && ['Unlock controls with this console’s control token first.',
+      'Control token rejected. Unlock with the token printed by this console.',
+      'Quota reservation changes are disabled for this console.'].includes(error.message)) throw error;
+    throw new Error('Quota reservations could not be saved. Refresh before trying again.');
+  }
+  if (!record(response) || !exact(response, ['quotaScopeAccess']) || !validQuotaScopeAccess(response.quotaScopeAccess) ||
+    response.quotaScopeAccess.revision !== expectedRevision + 1 ||
+    response.quotaScopeAccess.exclusions.map(scopeKey).sort().join('\n') !== requested.map(scopeKey).sort().join('\n')) {
+    throw new Error('Quota reservation response could not be verified. Refresh before trying again.');
+  }
+  return response;
+}
+
 export async function readResourceTaskOutput(id: string, signal?: AbortSignal): Promise<ResourceConsoleOutput> {
   const output = await apiGet<ResourceConsoleOutput>(`/api/resources/tasks/${encodeURIComponent(id)}/output`, signal);
   if (output?.id !== id || typeof output.text !== 'string' || new TextEncoder().encode(output.text).byteLength > 262_144 ||
@@ -252,4 +337,47 @@ export async function readResourceTaskOutput(id: string, signal?: AbortSignal): 
     throw new Error('Task output is unavailable in this console session.');
   }
   return output;
+}
+
+/** Private text is read on demand, never through the polling query cache. */
+export async function readResourceTaskHistory(id: string, signal?: AbortSignal, expectedProjectId?: string): Promise<ResourceConsoleTranscript> {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new Error('Invalid task identity.');
+  const value = await apiGet<unknown>(`/api/resources/tasks/${encodeURIComponent(id)}/history`, signal);
+  const bytes = (text: string) => new TextEncoder().encode(text).byteLength;
+  const validId = (candidate: unknown) => typeof candidate === 'string' && /^[a-z0-9][a-z0-9_-]{0,63}$/.test(candidate);
+  const digest = (candidate: unknown) => typeof candidate === 'string' && /^[a-f0-9]{64}$/.test(candidate);
+  const validOutput = (candidate: unknown) => candidate === null || record(candidate) && exact(candidate, ['text', 'truncated']) &&
+    typeof candidate.text === 'string' && bytes(candidate.text) <= 64 * 1024 && typeof candidate.truncated === 'boolean';
+  const optional = ['transcriptDigest', 'parent', 'context', 'projectId'].filter((key) => record(value) && Object.hasOwn(value, key));
+  if (!record(value) || !exact(value, ['id', 'prompt', 'output', 'retention', ...optional]) || value.id !== id ||
+    typeof value.prompt !== 'string' || bytes(value.prompt) > 32 * 1024 || value.retention !== 'local-until-deleted' ||
+    !validOutput(value.output) || Object.hasOwn(value, 'transcriptDigest') && !digest(value.transcriptDigest) ||
+    Object.hasOwn(value, 'projectId') && !validId(value.projectId) ||
+    expectedProjectId !== undefined && (value.projectId ?? 'default') !== expectedProjectId ||
+    Object.hasOwn(value, 'parent') && (!record(value.parent) || !exact(value.parent, ['taskId', 'expectedTranscriptDigest']) ||
+      !validId(value.parent.taskId) || value.parent.taskId === id || !digest(value.parent.expectedTranscriptDigest)) ||
+    Object.hasOwn(value, 'context') && (!Array.isArray(value.context) || value.context.length > 256 || value.context.some((turn) =>
+      !record(turn) || !exact(turn, ['taskId', 'prompt', 'output', 'outcome']) || !validId(turn.taskId) || turn.taskId === id ||
+      typeof turn.prompt !== 'string' || bytes(turn.prompt) > 32 * 1024 || !validOutput(turn.output) ||
+      turn.outcome !== null && !['reserved', 'completed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(String(turn.outcome)))) ||
+    bytes(JSON.stringify(value)) > 1024 * 1024) {
+    throw new Error('The retained task transcript could not be verified.');
+  }
+  if (value.parent !== undefined || value.context !== undefined) {
+    const context = value.context as Array<{ taskId: string }> | undefined;
+    if (!digest(value.transcriptDigest) || !record(value.parent) || !context?.length ||
+      context.at(-1)?.taskId !== value.parent.taskId || new Set(context.map((turn) => turn.taskId)).size !== context.length) {
+      throw new Error('The retained task transcript could not be verified.');
+    }
+  }
+  return value as unknown as ResourceConsoleTranscript;
+}
+
+export async function deleteResourceTaskHistory(id: string): Promise<void> {
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) throw new Error('Invalid task identity.');
+  const response = await control<{ job: ResourceSupervisorJob }>(`/api/resources/tasks/${encodeURIComponent(id)}/history/delete`, {});
+  if (response?.job?.id !== id || response.job.historyAvailable !== undefined ||
+    !['settled', 'cancelled'].includes(response.job.state)) {
+    throw new Error('Transcript deletion could not be verified. Refresh before trying again.');
+  }
 }

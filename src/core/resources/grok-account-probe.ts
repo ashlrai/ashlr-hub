@@ -1,12 +1,11 @@
 /** Explicit native metadata sampling. No login, session, prompt, or credential export. */
 import { lstatSync, mkdtempSync, realpathSync, rmdirSync } from 'node:fs';
-import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join, parse, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { isVerifyProcessGroupLifecycle, runVerifySubprocessAsync, type VerifyProcessGroupLifecycle } from '../run/verify-commands.js';
 import { workerEnvironment } from './worker.js';
+import { probeHelperArgv } from './probe-helper-invocation.js';
 
 export interface GrokAccountProbeOptions {
   /** Explicit native profile launcher; account/environment isolation belongs to that launcher. */
@@ -86,14 +85,9 @@ function configuration(options: GrokAccountProbeOptions) {
   return { command: [...options.command], timeoutMs, expectedAccountHint: options.expectedAccountHint ?? null,
     signal: options.signal, processGroupLifecycle: lifecycle };
 }
+/** Fixed package-owned helper for this runtime; never an arbitrary entrypoint. */
 function helperArgv(): string[] {
-  if (import.meta.url.endsWith('/grok-account-probe.ts')) {
-    const loader = pathToFileURL(createRequire(import.meta.url).resolve('tsx/esm/api')).href;
-    const source = new URL('./grok-account-probe-process.ts', import.meta.url).href;
-    return [process.execPath, '--input-type=module', '--eval',
-      `import { register } from ${JSON.stringify(loader)}; register(); await import(${JSON.stringify(source)});`];
-  }
-  return [process.execPath, fileURLToPath(new URL('./grok-account-probe-process.js', import.meta.url))];
+  return probeHelperArgv('grok', import.meta.url);
 }
 function checkedOutput(raw: string, startedAt: string, expectedAccountHint: string | null): GrokProbeProcessOutput | null {
   try {

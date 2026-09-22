@@ -6,8 +6,10 @@ import { readImmutablePrivateRecords, writeImmutablePrivateRecord,
 import { canonical, defaultUniverseRoot, digest, inspectPrivateDirectory } from './artifacts.js';
 import { validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
 import { validateUniversePortfolioDefinition } from './portfolio-plan.js';
-import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin,
-  UniversePortfolioControllerOutcome, UniversePortfolioControllerControl, UniversePortfolioControllerControlReceipt } from './portfolio-controller-types.js';
+import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin, PortfolioControllerGraphDispatch,
+  UniversePortfolioControllerOutcome, UniversePortfolioControllerControl, UniversePortfolioControllerControlReceipt,
+  UniversePortfolioControllerDiagnostic } from './portfolio-controller-types.js';
+import { PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES } from './portfolio-controller-types.js';
 import type { UniverseStoreOptions } from './types.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -32,6 +34,18 @@ function iso(value: unknown): value is string {
 function reason(value: unknown): value is string { return typeof value === 'string' && /^[a-z][a-z0-9-]{0,79}$/.test(value); }
 function sequence(value: unknown): value is number { return Number.isSafeInteger(value) && Number(value) >= 0 && Number(value) < MAX_EVENTS; }
 
+/** Strict detached linkage. Graph IDs intentionally share the graph's mixed-case grammar. */
+export function validatePortfolioControllerGraphDispatch(value: unknown): PortfolioControllerGraphDispatch {
+  if (!object(value) || !exact(value, ['schemaVersion', 'graphRootDigest', 'graphId', 'definitionDigest', 'nodeId', 'intentDigest']) ||
+    value.schemaVersion !== 1 || !hash(value.graphRootDigest) || !hash(value.definitionDigest) || !hash(value.intentDigest) ||
+    typeof value.graphId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value.graphId) ||
+    typeof value.nodeId !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(value.nodeId)) {
+    throw new Error('Invalid controller graph dispatch linkage');
+  }
+  return { schemaVersion: 1, graphRootDigest: value.graphRootDigest, graphId: value.graphId,
+    definitionDigest: value.definitionDigest, nodeId: value.nodeId, intentDigest: value.intentDigest };
+}
+
 function pin(value: unknown): value is PortfolioControllerPin {
   return object(value) && exact(value, ['campaignId', 'universeId', 'definitionDigest', 'manifestDigest', 'comparatorDigest',
     'campaignDigest', 'recordsDigest', 'initialState', 'dispatch', 'reasonCode']) && id(value.campaignId) && id(value.universeId) &&
@@ -41,9 +55,11 @@ function pin(value: unknown): value is PortfolioControllerPin {
 }
 
 function enrollment(value: unknown): value is PortfolioControllerEnrollment {
-  if (!object(value) || !exact(value, ['definition', 'deliveryPlan', 'definitionDigest', 'pins', 'deadlineAt']) ||
+  if (!object(value) || !exact(value, ['definition', 'deliveryPlan', 'definitionDigest', 'pins', 'deadlineAt',
+    ...(Object.hasOwn(value, 'graphDispatch') ? ['graphDispatch'] : [])]) ||
       !Array.isArray(value.pins) || !value.pins.every(pin) || !iso(value.deadlineAt)) return false;
   try {
+    if (Object.hasOwn(value, 'graphDispatch')) validatePortfolioControllerGraphDispatch(value.graphDispatch);
     const definition = validateUniversePortfolioDefinition(value.definition);
     const ids = definition.tasks.map((task) => task.campaignId);
     if (value.definitionDigest !== digest(canonical(definition)) || value.pins.length !== ids.length ||
@@ -62,8 +78,16 @@ function outcome(value: unknown): value is UniversePortfolioControllerOutcome {
     reason(value.reasonCode) && hash(value.campaignDigest) && (value.deliveryDigest === null || hash(value.deliveryDigest));
 }
 
+function diagnostic(value: Record<string, unknown>): boolean {
+  if (!id(value.campaignId) || !hash(value.intentDigest) || typeof value.phase !== 'string' ||
+      !Object.hasOwn(PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES, value.phase) || typeof value.code !== 'string') return false;
+  const codes: readonly string[] = PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES[value.phase as keyof typeof PORTFOLIO_CONTROLLER_DIAGNOSTIC_CODES];
+  return codes.includes(value.code);
+}
+
 function parse(value: unknown): PortfolioControllerEvent | null {
-  if (!object(value) || !Number.isSafeInteger(value.sequence) || Number(value.sequence) < 0 || Number(value.sequence) >= MAX_EVENTS ||
+  if (!object(value) || Reflect.ownKeys(value).some(key => !Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value')) ||
+      !Number.isSafeInteger(value.sequence) || Number(value.sequence) < 0 || Number(value.sequence) >= MAX_EVENTS ||
       value.id !== String(value.sequence).padStart(8, '0') || !iso(value.at)) return null;
   const shared = ['id', 'sequence', 'at', 'kind'];
   if (value.kind === 'created') {
@@ -83,6 +107,8 @@ function parse(value: unknown): PortfolioControllerEvent | null {
         hasDispatch && (typeof value.dispatchId !== 'string' || !DISPATCH_ID.test(value.dispatchId))) return null;
   } else if (value.kind === 'settled') {
     if (!exact(value, [...shared, 'outcome', 'recordsDigest']) || !outcome(value.outcome) || !hash(value.recordsDigest)) return null;
+  } else if (value.kind === 'dispatch-diagnostic') {
+    if (!exact(value, [...shared, 'campaignId', 'intentDigest', 'phase', 'code']) || !diagnostic(value)) return null;
   } else return null;
   if (Buffer.byteLength(canonical(value)) > (value.kind === 'created' ? 128 * 1024 : EVENT_BYTES - 1)) return null;
   return value as unknown as PortfolioControllerEvent;
@@ -131,6 +157,7 @@ export function foldPortfolioController(records: PortfolioControllerEvent[]) {
   const dispatchIds = new Set<string>();
   const intentEvents = new Map<string, Extract<PortfolioControllerEvent, { kind: 'intent' }>>();
   const settlements = new Map<string, Extract<PortfolioControllerEvent, { kind: 'settled' }>>();
+  const diagnostics = new Map<string, UniversePortfolioControllerDiagnostic>();
   for (const item of pins.values()) states.set(item.campaignId, { campaignId: item.campaignId, state: item.initialState,
     attempted: false, reasonCode: item.reasonCode, campaignDigest: item.campaignDigest, deliveryDigest: null });
   let highWaterAt = first.at;
@@ -159,10 +186,21 @@ export function foldPortfolioController(records: PortfolioControllerEvent[]) {
       control = { ...control, acknowledgedAt: event.at };
       continue;
     }
-    const campaignId = event.kind === 'intent' ? event.campaignId : event.outcome.campaignId;
+    const campaignId = event.kind === 'intent' || event.kind === 'dispatch-diagnostic' ? event.campaignId : event.outcome.campaignId;
     const current = states.get(campaignId);
     const pinned = pins.get(campaignId);
     if (!current || !pinned) throw new Error('Controller event names an unenrolled campaign');
+    if (event.kind === 'dispatch-diagnostic') {
+      const intent = intentEvents.get(campaignId);
+      if (current.state !== 'in-flight' || !intent || diagnostics.has(campaignId) ||
+          event.intentDigest !== digest(canonical(intent)) ||
+          event.phase === 'campaign-execution' && pinned.dispatch !== 'campaign' ||
+          event.phase.startsWith('delivery-') && !first.enrollment.deliveryPlan?.deliveries.some(row => row.campaignId === campaignId)) {
+        throw new Error('Controller diagnostic does not match an unresolved dispatch intent');
+      }
+      diagnostics.set(campaignId, { campaignId, intentDigest: event.intentDigest, phase: event.phase, code: event.code, at: event.at });
+      continue; // Evidence only: preserve in-flight state, intent and all settlement gates.
+    }
     if (event.kind === 'intent') {
       if (control?.mode === 'drain') throw new Error('Controller history admits work after drain');
       if (current.state !== 'pending' || intents.has(campaignId) || event.at >= first.enrollment.deadlineAt ||
@@ -184,7 +222,7 @@ export function foldPortfolioController(records: PortfolioControllerEvent[]) {
       settlements.set(campaignId, event); states.set(campaignId, event.outcome);
     }
   }
-  return { first, highWaterAt, pins, intents, intentEvents, settlements, states, ...(control ? { control } : {}) };
+  return { first, highWaterAt, pins, intents, intentEvents, settlements, diagnostics, states, ...(control ? { control } : {}) };
 }
 
 export function readPortfolioControllerEvents(directory: string): PortfolioControllerEvent[] {
@@ -245,7 +283,7 @@ export function refreshPortfolioControllerEvents(directory: string, expected: Po
 
 type EventInput<T = PortfolioControllerEvent> = T extends PortfolioControllerEvent ? Omit<T, 'id' | 'sequence'> : never;
 
-function runPublicationCheck(label: 'intent' | 'settlement', validKind: boolean,
+function runPublicationCheck(label: 'intent' | 'settlement' | 'diagnostic', validKind: boolean,
   check: ((records: readonly PortfolioControllerEvent[]) => void) | undefined, records: PortfolioControllerEvent[]): void {
   if (check === undefined) return;
   if (!validKind || typeof check !== 'function') throw new Error(`Controller ${label} check is invalid`);
@@ -259,7 +297,8 @@ function runPublicationCheck(label: 'intent' | 'settlement', validKind: boolean,
 
 function appendUnlocked(directory: string, records: PortfolioControllerEvent[], input: EventInput,
   beforeIntent?: (records: readonly PortfolioControllerEvent[]) => void,
-  beforeSettlement?: (records: readonly PortfolioControllerEvent[]) => void): PortfolioControllerEvent[] {
+  beforeSettlement?: (records: readonly PortfolioControllerEvent[]) => void,
+  beforeDiagnostic?: (records: readonly PortfolioControllerEvent[]) => void): PortfolioControllerEvent[] {
   // Only refusal of a new admission is a drain outcome. An already-invalid
   // history remains an evidence failure, never a successfully observed drain.
   if (input.kind === 'intent' && records.length && foldPortfolioController(records).control?.mode === 'drain') {
@@ -267,6 +306,7 @@ function appendUnlocked(directory: string, records: PortfolioControllerEvent[], 
   }
   runPublicationCheck('intent', input.kind === 'intent', beforeIntent, records);
   runPublicationCheck('settlement', input.kind === 'settled', beforeSettlement, records);
+  runPublicationCheck('diagnostic', input.kind === 'dispatch-diagnostic', beforeDiagnostic, records);
   const event = { ...input, sequence: records.length, id: String(records.length).padStart(8, '0') } as PortfolioControllerEvent;
   const next = [...records, event];
   const folded = foldPortfolioController(next);
@@ -275,15 +315,26 @@ function appendUnlocked(directory: string, records: PortfolioControllerEvent[], 
   const controlReserve = folded.control?.mode === 'drain' ? folded.control.acknowledgedAt === null ? 1 : 0 : 2;
   const settlementReserve = [...folded.states.values()].reduce((count, item) =>
     count + (item.state === 'pending' ? 2 : item.state === 'in-flight' ? 1 : 0), 0);
+  const diagnosticReserve = [...folded.states.values()].filter(item =>
+    (item.state === 'pending' || item.state === 'in-flight') && !folded.diagnostics.has(item.campaignId)).length;
   const bytes = next.reduce((count, row) => count + Buffer.byteLength(codec.serialize(row)), 0);
   const fits = (reserve: number): boolean => next.length + reserve <= MAX_EVENTS && bytes + reserve * EVENT_BYTES <= MAX_BYTES;
   // Legacy histories did not reserve control headroom. Never strand their
   // already-admitted settlement; this exception cannot admit any new work.
   const legacySettlement = input.kind === 'settled' && folded.control === undefined;
-  if (!fits(settlementReserve + controlReserve) && !(legacySettlement && fits(settlementReserve))) {
+  const cleanup = input.kind === 'settled' || input.kind === 'drained' || input.kind === 'control' && input.action === 'drain';
+  // Older enrolled controllers reserved settlement/control capacity without
+  // optional diagnostics. Preserve that cleanup allowance; never apply this
+  // exception to an intent, resume, observation or diagnostic publication.
+  if (!fits(settlementReserve + diagnosticReserve + controlReserve) &&
+      !(cleanup && fits(settlementReserve + controlReserve)) && !(legacySettlement && fits(settlementReserve))) {
     throw new Error('Controller evidence capacity exhausted');
   }
-  const disposition = writeImmutablePrivateRecord(config(directory), event);
+  const disposition = writeImmutablePrivateRecord(config(directory), event,
+    beforeDiagnostic || beforeSettlement ? { prepublish: () => {
+      runPublicationCheck('diagnostic', input.kind === 'dispatch-diagnostic', beforeDiagnostic, records);
+      runPublicationCheck('settlement', input.kind === 'settled', beforeSettlement, records); return true;
+    } } : {});
   if (disposition !== 'recorded' && disposition !== 'replayed') throw new Error('Controller event could not be durably recorded');
   return next;
 }
@@ -294,8 +345,10 @@ export function appendPortfolioControllerEvent(directory: string, input: EventIn
   options: { expectedRecords?: PortfolioControllerEvent[];
     /** Internal synchronous evidence check under the short lock, after drain refusal. */
     beforeIntent?: (records: readonly PortfolioControllerEvent[]) => void;
-    /** Optional same-invocation settlement proof, rerun after transaction contention. */
-    beforeSettlement?: (records: readonly PortfolioControllerEvent[]) => void } = {}): PortfolioControllerEvent[] {
+    /** Optional same-invocation proof, rerun after contention and at immutable publication. Must not reread this ledger. */
+    beforeSettlement?: (records: readonly PortfolioControllerEvent[]) => void;
+    /** Pure owner/link check; runs under the short lock and again at immutable publication. */
+    beforeDiagnostic?: (records: readonly PortfolioControllerEvent[]) => void } = {}): PortfolioControllerEvent[] {
   return withPortfolioControllerTransaction(directory, () => {
     let records: PortfolioControllerEvent[];
     // Only creation may initialize an absent ledger. A missing nested directory
@@ -308,7 +361,7 @@ export function appendPortfolioControllerEvent(directory: string, input: EventIn
       records = [];
     } else records = readPortfolioControllerEvents(directory);
     if (options.expectedRecords) assertExpectedRecords(records, options.expectedRecords);
-    return appendUnlocked(directory, records, input, options.beforeIntent, options.beforeSettlement);
+    return appendUnlocked(directory, records, input, options.beforeIntent, options.beforeSettlement, options.beforeDiagnostic);
   });
 }
 

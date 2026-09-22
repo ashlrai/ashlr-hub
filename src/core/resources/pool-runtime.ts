@@ -1,5 +1,9 @@
 /** Foreground, explicitly enrolled resource tasks. No daemon or Universe authority is inferred. */
 import { randomUUID } from 'node:crypto';
+import { expandResourceQuotaDenials, sharesResourceQuota } from './quota-scope.js';
+import { excludedResourceQuotaScopeWorkerIds, validateResourceQuotaScopeExclusions,
+  type ResourceQuotaScopeAccess, type ResourceQuotaScopeExclusion } from './quota-scope-access.js';
+export type { ResourceQuotaScopeAccess, ResourceQuotaScopeExclusion } from './quota-scope-access.js';
 import { closeSync, constants, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync,
   readSync, realpathSync, renameSync, unlinkSync, writeSync } from 'node:fs';
 import { dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
@@ -10,9 +14,13 @@ import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import { MAX_RESOURCE_OBSERVATION_WINDOWS, RESOURCE_OBSERVATION_OVERFLOW, planResourceAssignment, validateResourceObservations, validateResourcePool,
   type ResourceAssignmentPlan, type ResourceObservation, type ResourcePool } from './pool-policy.js';
-import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask } from './worker.js';
+import { executeResourceWorker, validateResourceBindings, type ResourceBinding, type ResourceWorkerTask, type ResourceWorkerResult } from './worker.js';
 import { resourceUsageScopeForProvider, validResourceExecutionDuration, validResourceExecutionMeasurement, type ResourceExecutionMeasurement } from './performance.js';
 import { RESOURCE_NATIVE_PROCESS_SIGNALS, validResourceNativeProcessForReceipt, type ResourceNativeProcessDiagnostic } from './native-diagnostics.js';
+import { resourcePoolConfigSnapshot, validateResourcePoolConfigHistory } from './pool-evolution-policy.js';
+import { canonicalEvidencePackJsonV3 } from '../foundry/provenance.js';
+import type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
+export type { ResourcePoolConfigSnapshot } from './pool-evolution-types.js';
 
 const MAX_STATE_BYTES = 4 * 1024 * 1024;
 const MAX_ATTEMPTS = 4_096;
@@ -45,14 +53,20 @@ export interface ResourceTaskReceipt {
   /** Optional native invocation facts. Legacy receipts are never reconstructed from current host state. */
   nativeProcess?: ResourceNativeProcessDiagnostic;
 }
-interface PoolState {
-  schemaVersion: 1;
+export interface ResourcePoolState {
+  schemaVersion: 1 | 2;
   poolDigest: string;
   observations: ResourceObservation[];
   attempts: ResourceTaskReceipt[];
   allocation?: ResourcePoolAllocation;
   workerAccess?: ResourceWorkerAccess;
+  quotaScopeAccess?: ResourceQuotaScopeAccess;
+  /** Exact historical configurations; active configuration is the final snapshot. */
+  configurationHistory?: ResourcePoolConfigSnapshot[];
+  /** Explicit migration barrier: ordinary readers and writers must refuse it. */
+  pendingEvolution?: { planDigest: string };
 }
+type PoolState = ResourcePoolState;
 
 export interface ResourceWorkerAccess {
   /** Explicit task-admission pauses, not account health or provider quota. */
@@ -69,6 +83,14 @@ function checkedWorkerAccess(value: unknown, pool: ResourcePool): value is Resou
 function workerAccess(state: Pick<PoolState, 'workerAccess'>): ResourceWorkerAccess {
   return state.workerAccess ? { ...state.workerAccess, pausedWorkerIds: [...state.workerAccess.pausedWorkerIds] }
     : { pausedWorkerIds: [], revision: 0, updatedAt: null };
+}
+function checkedQuotaScopeAccess(value: unknown, pool: ResourcePool, bindings: ResourceBinding[]): value is ResourceQuotaScopeAccess {
+  if (!object(value) || !exact(value, ['exclusions', 'revision', 'updatedAt']) || !count(value.revision) || value.revision < 1 || !iso(value.updatedAt)) return false;
+  try { validateResourceQuotaScopeExclusions(value.exclusions, pool, bindings); return true; } catch { return false; }
+}
+function quotaScopeAccess(state: Pick<PoolState, 'quotaScopeAccess'>): ResourceQuotaScopeAccess {
+  return state.quotaScopeAccess ? { ...state.quotaScopeAccess, exclusions: state.quotaScopeAccess.exclusions.map(row => ({ ...row })) }
+    : { exclusions: [], revision: 0, updatedAt: null };
 }
 
 export interface ResourcePoolAllocation {
@@ -203,22 +225,54 @@ function checkedReceipt(value: unknown, stateDigest: string, bindings: ResourceB
   return value.finishedAt !== null && (value.status !== 'completed' || value.outputDigest !== null);
 }
 
+/** Pure strict epoch-aware decoder. Only the explicit offline migrator reads a pending barrier. */
+export function decodeResourcePoolState(value: unknown, pool: ResourcePool, bindings: ResourceBinding[], allowPendingEvolution = false): ResourcePoolState {
+  const serialized = canonicalEvidencePackJsonV3(value);
+  if (serialized === null || Buffer.byteLength(serialized) + 1 > MAX_STATE_BYTES) throw new Error('Invalid bounded resource ledger');
+  value = JSON.parse(serialized) as unknown;
+  const active = resourcePoolConfigSnapshot(pool, bindings); const poolDigest = active.poolDigest;
+  let history: ResourcePoolConfigSnapshot[] = [active];
+  if (object(value) && value.schemaVersion === 2) {
+    history = validateResourcePoolConfigHistory(value.configurationHistory);
+    if (history.at(-1)!.poolDigest !== poolDigest) throw new Error('Resource ledger active configuration changed');
+  }
+  if (!object(value) || !exact(value, ['schemaVersion', 'poolDigest', 'observations', 'attempts',
+    ...(Object.hasOwn(value, 'allocation') ? ['allocation'] : []),
+    ...(Object.hasOwn(value, 'workerAccess') ? ['workerAccess'] : []),
+    ...(Object.hasOwn(value, 'quotaScopeAccess') ? ['quotaScopeAccess'] : []),
+    ...(value.schemaVersion === 2 ? ['configurationHistory'] : []),
+    ...(value.schemaVersion === 2 && Object.hasOwn(value, 'pendingEvolution') ? ['pendingEvolution'] : [])]) ||
+    value.schemaVersion !== 1 && value.schemaVersion !== 2 || value.poolDigest !== poolDigest || !Array.isArray(value.attempts) ||
+    Object.hasOwn(value, 'allocation') && !checkedAllocation(value.allocation) ||
+    Object.hasOwn(value, 'workerAccess') && !checkedWorkerAccess(value.workerAccess, pool) ||
+    Object.hasOwn(value, 'quotaScopeAccess') && !checkedQuotaScopeAccess(value.quotaScopeAccess, pool, bindings) ||
+    value.attempts.length > MAX_ATTEMPTS || !value.attempts.every((row) => {
+      const origin = object(row) ? history.find(snapshot => snapshot.poolDigest === row.poolDigest) : undefined;
+      return origin !== undefined && checkedReceipt(row, origin.poolDigest, origin.bindings, origin.pool);
+    }) ||
+    new Set(value.attempts.map((row) => row.id)).size !== value.attempts.length) throw new Error('Resource ledger invalid or configuration changed');
+  if (Object.hasOwn(value, 'pendingEvolution') && (!object(value.pendingEvolution) || !exact(value.pendingEvolution, ['planDigest']) ||
+    typeof value.pendingEvolution.planDigest !== 'string' || !HASH.test(value.pendingEvolution.planDigest))) throw new Error('Resource migration barrier invalid');
+  if (value.pendingEvolution !== undefined && !allowPendingEvolution) throw new Error('Resource pool evolution is pending; explicit resume required');
+  return { schemaVersion: value.schemaVersion as 1 | 2, poolDigest, observations: validateResourceObservations(value.observations, pool),
+    attempts: value.attempts as ResourceTaskReceipt[],
+    ...(Object.hasOwn(value, 'allocation') ? { allocation: value.allocation as ResourcePoolAllocation } : {}),
+    ...(Object.hasOwn(value, 'workerAccess') ? { workerAccess: value.workerAccess as ResourceWorkerAccess } : {}),
+    ...(Object.hasOwn(value, 'quotaScopeAccess') ? { quotaScopeAccess: value.quotaScopeAccess as ResourceQuotaScopeAccess } : {}),
+    ...(value.schemaVersion === 2 ? { configurationHistory: history } : {}),
+    ...(value.pendingEvolution === undefined ? {} : { pendingEvolution: value.pendingEvolution as { planDigest: string } }) };
+}
 function loadState(root: string, pool: ResourcePool, bindings: ResourceBinding[], poolDigest: string): PoolState {
   const file = join(root, 'pool-state.json');
   if (!existsSync(file)) return { schemaVersion: 1, poolDigest, observations: [], attempts: [] };
-  const value = readResourceJson(file, MAX_STATE_BYTES);
-  if (!object(value) || !exact(value, ['schemaVersion', 'poolDigest', 'observations', 'attempts',
-    ...(Object.hasOwn(value, 'allocation') ? ['allocation'] : []),
-    ...(Object.hasOwn(value, 'workerAccess') ? ['workerAccess'] : [])]) ||
-    value.schemaVersion !== 1 || value.poolDigest !== poolDigest || !Array.isArray(value.attempts) ||
-    Object.hasOwn(value, 'allocation') && !checkedAllocation(value.allocation) ||
-    Object.hasOwn(value, 'workerAccess') && !checkedWorkerAccess(value.workerAccess, pool) ||
-    value.attempts.length > MAX_ATTEMPTS || !value.attempts.every((row) => checkedReceipt(row, poolDigest, bindings, pool)) ||
-    new Set(value.attempts.map((row) => row.id)).size !== value.attempts.length) throw new Error('Resource ledger invalid or configuration changed');
-  return { schemaVersion: 1, poolDigest, observations: validateResourceObservations(value.observations, pool),
-    attempts: value.attempts as ResourceTaskReceipt[],
-    ...(Object.hasOwn(value, 'allocation') ? { allocation: value.allocation as ResourcePoolAllocation } : {}),
-    ...(Object.hasOwn(value, 'workerAccess') ? { workerAccess: value.workerAccess as ResourceWorkerAccess } : {}) };
+  return decodeResourcePoolState(readResourceJson(file, MAX_STATE_BYTES), pool, bindings);
+}
+/** Read-only verified snapshots; never returns execution authority or repairs an interrupted upgrade. */
+export function readResourcePoolHistory(root: string, pool: ResourcePool, bindings: ResourceBinding[]): ResourcePoolConfigSnapshot[] {
+  const active = resourcePoolConfigSnapshot(pool, bindings);
+  if (!inspectRoot(root, false)) return [active];
+  const state = loadState(root, active.pool, active.bindings, active.poolDigest);
+  return structuredClone(state.configurationHistory ?? [active]);
 }
 
 function writeState(root: string, state: PoolState): void {
@@ -245,7 +299,7 @@ function writeState(root: string, state: PoolState): void {
 }
 
 /** Budget future evidence before contact; never turn settlement into another admission gate. */
-function requireSettlementHeadroom(state: PoolState, pool: ResourcePool): void {
+export function requireResourcePoolSettlementHeadroom(state: ResourcePoolState, pool: ResourcePool): void {
   // A nonnegative IEEE-754 value can need 17 significant digits plus the seven
   // characters preceding them at the smallest non-exponential decimal scale.
   // This actual valid sample has that maximal JSON width (24 characters).
@@ -324,7 +378,7 @@ export function mergeResourceObservations(previous: ResourceObservation[], incom
 }
 
 function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[], allowedWorkerIds: string[], nowMs: number,
-  unavailableWorkerIds: string[]): ResourceAssignmentPlan {
+  unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[] = []): ResourceAssignmentPlan {
   const ceiling = allocation(state).ceilingPercent;
   // Policy is an admission-only projection, never the identity used for receipts,
   // native probes or immutable enrollment. Zero is vetoed without reserve=100.
@@ -334,8 +388,8 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
   }) };
   const activeCounts: Record<string, number> = {};
   const taskReservationCounts: Record<string, { count: number; nextEligibleAt: string | null }> = {};
-  // Aliases share all hard denials conservatively until per-model account scope
-  // has been proven. Missing an alias observation must never erase a refusal.
+  // Account health and retry denials remain shared. Quota denial narrows only
+  // when both aliases have explicit catalog-pinned model scopes.
   const observations = state.observations.map((row) => ({ ...row, windows: row.windows.map((window) => ({ ...window })) }));
   for (const binding of bindings) {
     const worker = pool.workers.find((row) => row.id === binding.workerId)!;
@@ -346,16 +400,21 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
     taskReservationCounts[worker.id] = { count: recent.length,
       nextEligibleAt: recent.length ? new Date(Math.min(...recent.map((row) => Date.parse(row.startedAt))) + worker.taskWindowMs).toISOString() : null };
     const shared = state.observations.filter((row) => aliases.has(row.workerId));
-    const hard = shared.find((row) => row.health === 'unavailable' || row.windows.some((window) =>
-      window.usedPercent !== null && window.usedPercent >= 100 - worker.reservePercent));
+    const hard = shared.find((row) => row.health === 'unavailable' ||
+      sharesResourceQuota(worker, pool.workers.find((source) => source.id === row.workerId)!) && row.windows.some((window) =>
+        window.usedPercent !== null && window.usedPercent >= 100 - worker.reservePercent));
     const retryAfter = shared.flatMap((row) => row.retryAfter ? [row.retryAfter] : []).sort().at(-1);
-    const failures = attempts.filter((row) => row.status === 'failed' || row.status === 'timed-out');
+    // A host precondition veto consumed a reservation, but never invoked this
+    // worker. Keep task-cap accounting without inferring a provider cooldown.
+    const failures = attempts.filter((row) => (row.status === 'failed' || row.status === 'timed-out') &&
+      !(row.status === 'failed' && row.reason === 'worker-dispatch-precondition-failed' && row.execution === undefined &&
+        row.nativeProcess === undefined && row.outputDigest === null && row.inputTokens === null && row.outputTokens === null));
     const latestFailure = failures.map((row) => Date.parse(row.finishedAt!)).sort((a, b) => b - a)[0];
     const cooldown = latestFailure === undefined ? undefined : new Date(latestFailure + 60_000).toISOString();
     const retry = [retryAfter, cooldown].filter((value): value is string => value !== undefined).sort().at(-1);
     const current = observations.find((row) => row.workerId === worker.id);
     if (hard) {
-      const blocked = { ...hard, workerId: worker.id, health: 'unavailable' as const,
+      const blocked = { ...(current ?? hard), workerId: worker.id, windows: current?.windows ?? [], health: 'unavailable' as const,
         retryAfter: retry ?? hard.retryAfter };
       if (current) Object.assign(current, blocked); else observations.push(blocked);
     } else if (retry && Date.parse(retry) > nowMs) {
@@ -365,6 +424,7 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
     }
   }
   const unavailable = new Set([...unavailableWorkerIds, ...workerAccess(state).pausedWorkerIds]);
+  const quotaUnavailable = new Set(quotaUnavailableWorkerIds);
   if (ceiling === 0) for (const worker of pool.workers) if (worker.provider !== 'local') unavailable.add(worker.id);
   if (ceiling !== null && ceiling < 100) {
     // Every enrolled alias can reveal a stricter account window; an unknown or
@@ -374,12 +434,13 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
       const row = state.observations.find((item) => item.workerId === worker.id);
       if (!row || Date.parse(row.observedAt) > nowMs || row.updatedAt !== undefined && Date.parse(row.updatedAt) > nowMs ||
         Date.parse(row.expiresAt) <= nowMs || !row.windows.length || row.windows.some((window) =>
-          window.usedPercent === null || window.resetsAt === null || Date.parse(window.resetsAt) <= nowMs)) unavailable.add(worker.id);
+          window.usedPercent === null || window.resetsAt === null || Date.parse(window.resetsAt) <= nowMs)) quotaUnavailable.add(worker.id);
     }
   }
   const unavailableCapacities = new Set(bindings.filter((binding) => unavailable.has(binding.workerId)).map((binding) => binding.capacityKey));
+  const deniedQuotaWorkers = new Set(expandResourceQuotaDenials(pool, bindings, [...quotaUnavailable]));
   for (const binding of bindings) {
-    if (!unavailableCapacities.has(binding.capacityKey)) continue;
+    if (!unavailableCapacities.has(binding.capacityKey) && !deniedQuotaWorkers.has(binding.workerId)) continue;
     const current = observations.find((row) => row.workerId === binding.workerId);
     if (current) current.health = 'unavailable';
     else observations.push({ workerId: binding.workerId, observedAt: new Date(nowMs).toISOString(),
@@ -387,7 +448,8 @@ function plan(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[],
   }
   // The synthetic health veto exists only in this planning clone. The returned
   // evidence and persisted ledger retain the actual captured observations.
-  return planResourceAssignment({ pool, observations, allowedWorkerIds, activeCounts, taskReservationCounts, nowMs });
+  return planResourceAssignment({ pool, observations, allowedWorkerIds, activeCounts, taskReservationCounts, nowMs,
+    quotaScopeExcludedWorkerIds: excludedResourceQuotaScopeWorkerIds(pool, bindings, quotaScopeAccess(state).exclusions) });
 }
 
 function scope(poolValue: ResourcePool, bindingsValue: ResourceBinding[]): { pool: ResourcePool; bindings: ResourceBinding[]; poolDigest: string } {
@@ -395,18 +457,78 @@ function scope(poolValue: ResourcePool, bindingsValue: ResourceBinding[]): { poo
   return { pool, bindings, poolDigest: digest(canonical({ pool, bindings })) };
 }
 
+/** Apply fresh invocation evidence to an owned or read-only in-memory state. */
+function freshAdmission(state: PoolState, pool: ResourcePool, bindings: ResourceBinding[], allowedWorkerIds: string[],
+  current: unknown, unavailableWorkerIds: string[], quotaUnavailableWorkerIds: string[]) {
+  if (!object(current) || !exact(current, ['observations', 'unavailableWorkerIds',
+    ...(Object.hasOwn(current, 'quotaUnavailableWorkerIds') ? ['quotaUnavailableWorkerIds'] : [])])) {
+    throw new Error('Invalid synchronous resource admission evidence');
+  }
+  const observations = validateResourceObservations(current.observations, pool);
+  const currentGates = validateUnavailableResourceWorkerIds(current.unavailableWorkerIds, pool);
+  const currentQuotaGates = validateUnavailableResourceWorkerIds(current.quotaUnavailableWorkerIds === undefined ? [] : current.quotaUnavailableWorkerIds, pool);
+  const unavailable = new Set([...unavailableWorkerIds, ...currentGates]);
+  const quotaUnavailable = new Set([...quotaUnavailableWorkerIds, ...currentQuotaGates]);
+  // A current collector refusal must survive a newer external zero reading.
+  // Occupancy/task caps remain waitable in the final plan, not converted into
+  // an invocation-only health refusal. Both admission paths use this policy.
+  const currentPlan = plan({ ...state, observations }, pool, bindings, allowedWorkerIds, Date.now(), currentGates, currentQuotaGates);
+  for (const exclusion of currentPlan.exclusions) {
+    if (exclusion.reasons.some((reason) => !['worker-not-allowed', 'concurrency-exhausted',
+      'operator-task-cap-reached', 'operator-quota-scope-excluded'].includes(reason))) quotaUnavailable.add(exclusion.workerId);
+  }
+  state.observations = mergeResourceObservations(state.observations, observations);
+  return { unavailableWorkerIds: [...unavailable], quotaUnavailableWorkerIds: [...quotaUnavailable] };
+}
+
+/** Read-only eligibility sample, not a reservation. Final transaction admission
+ * must still recheck current evidence; no directory, lock or observation is written. */
+export function resourceAdmissionPreflight(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[],
+  allowedWorkerIds: string[], evidence: unknown): ResourceAssignmentPlan {
+  const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
+  const allowed = validateUnavailableResourceWorkerIds(allowedWorkerIds, pool);
+  if (!allowed.length) throw new Error('Invalid resource admission workers');
+  const state = inspectRoot(root, false) ? loadState(root, pool, bindings, poolDigest)
+    : { schemaVersion: 1 as const, poolDigest, observations: [], attempts: [] };
+  const gates = freshAdmission(state, pool, bindings, allowed, evidence, [], []);
+  return plan(state, pool, bindings, allowed, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds);
+}
+
 /** Read-only: no directory, lock, observation, or assignment is published. */
 export function resourcePoolStatus(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[], incoming: ResourceObservation[],
-  unavailableWorkerIds: string[] = []) {
+  unavailableWorkerIds: string[] = [], quotaUnavailableWorkerIds: string[] = []) {
   const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
   const unavailable = validateUnavailableResourceWorkerIds(unavailableWorkerIds, pool);
+  const quotaUnavailable = validateUnavailableResourceWorkerIds(quotaUnavailableWorkerIds, pool);
   const observed = validateResourceObservations(incoming, pool);
   const exists = inspectRoot(root, false);
   const state = exists ? loadState(root, pool, bindings, poolDigest) : { schemaVersion: 1 as const, poolDigest, observations: [], attempts: [] };
   state.observations = mergeResourceObservations(state.observations, observed);
   return { schemaVersion: 1 as const, sourceState: exists ? 'healthy' as const : 'missing' as const,
-    poolId: pool.id, plan: plan(state, pool, bindings, pool.workers.map((row) => row.id), Date.now(), unavailable),
-    observations: state.observations, attempts: state.attempts, allocation: allocation(state), workerAccess: workerAccess(state) };
+    poolId: pool.id, plan: plan(state, pool, bindings, pool.workers.map((row) => row.id), Date.now(), unavailable, quotaUnavailable),
+    ...(state.schemaVersion === 2 ? { configurationDigests: state.configurationHistory!.map(row => row.poolDigest) } : {}),
+    observations: state.observations, attempts: state.attempts, allocation: allocation(state), workerAccess: workerAccess(state),
+    quotaScopeAccess: quotaScopeAccess(state) };
+}
+
+/** Missing policy is not permission to bypass account-wide health, pauses, or reserves. */
+export function readResourceQuotaScopeAccess(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[]): ResourceQuotaScopeAccess {
+  const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
+  return inspectRoot(root, false) ? quotaScopeAccess(loadState(root, pool, bindings, poolDigest)) : quotaScopeAccess({});
+}
+
+/** Restrict future reservations under the existing account ledger lock; never cancel accepted work. */
+export function setResourceQuotaScopeAccess(root: string, poolValue: ResourcePool, bindingsValue: ResourceBinding[],
+  exclusions: ResourceQuotaScopeExclusion[], expectedRevision: number): ResourceQuotaScopeAccess {
+  if (!count(expectedRevision) || expectedRevision >= Number.MAX_SAFE_INTEGER) throw new Error('Invalid resource quota scope access policy');
+  const { pool, bindings, poolDigest } = scope(poolValue, bindingsValue);
+  const checked = validateResourceQuotaScopeExclusions(exclusions, pool, bindings);
+  return transaction(root, pool, bindings, poolDigest, (state) => {
+    if (quotaScopeAccess(state).revision !== expectedRevision) throw new Error('Resource quota scope access revision conflict');
+    state.quotaScopeAccess = { exclusions: checked, revision: expectedRevision + 1, updatedAt: new Date().toISOString() };
+    requireResourcePoolSettlementHeadroom(state, pool);
+    return quotaScopeAccess(state);
+  });
 }
 
 /** Read-only: a missing policy means no explicit pauses, not permission to skip other admission gates. */
@@ -427,7 +549,7 @@ export function setResourceWorkerAccess(root: string, poolValue: ResourcePool, b
     const before = workerAccess(state);
     if (before.revision !== expectedRevision) throw new Error('Resource worker access revision conflict');
     state.workerAccess = { pausedWorkerIds: paused, revision: before.revision + 1, updatedAt: new Date().toISOString() };
-    requireSettlementHeadroom(state, pool);
+    requireResourcePoolSettlementHeadroom(state, pool);
     return workerAccess(state);
   });
 }
@@ -477,16 +599,22 @@ function transaction<T>(root: string, pool: ResourcePool, bindings: ResourceBind
 
 export async function runResourceTask(options: { root: string; pool: ResourcePool; bindings: ResourceBinding[];
   observations: ResourceObservation[]; task: ResourceTask; signal?: AbortSignal; unavailableWorkerIds?: string[];
+  quotaUnavailableWorkerIds?: string[];
+  /** Last synchronous host precondition after reservation, before any worker invocation. */
+  beforeWorkerDispatch?: () => boolean;
   /** Synchronous, read-only evidence recheck under the admission lock; exact receipts bypass it. */
-  readAdmissionEvidence?: () => { observations: ResourceObservation[]; unavailableWorkerIds: string[] } }): Promise<{
+  readAdmissionEvidence?: () => { observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] } }): Promise<{
     receipt: ResourceTaskReceipt | null; plan: ResourceAssignmentPlan | null; replayed: boolean; output: string | null;
   }> {
   const { root, signal } = options;
+  const beforeWorkerDispatch = options.beforeWorkerDispatch;
   const { pool, bindings, poolDigest } = scope(options.pool, options.bindings);
   const unavailable = validateUnavailableResourceWorkerIds(options.unavailableWorkerIds === undefined ? [] : options.unavailableWorkerIds, pool);
+  const quotaUnavailable = validateUnavailableResourceWorkerIds(options.quotaUnavailableWorkerIds === undefined ? [] : options.quotaUnavailableWorkerIds, pool);
   if (options.readAdmissionEvidence !== undefined && typeof options.readAdmissionEvidence !== 'function') {
     throw new Error('Invalid resource admission evidence reader');
   }
+  if (beforeWorkerDispatch !== undefined && typeof beforeWorkerDispatch !== 'function') throw new Error('Invalid worker dispatch precondition');
   const task = validateResourceTask(options.task);
   if (task.allowedWorkerIds.some((id) => !pool.workers.some((worker) => worker.id === id))) throw new Error('Resource task references an unknown worker');
   if (!path(root)) throw new Error('Invalid resource store');
@@ -506,28 +634,12 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
       if (previous.taskDigest !== taskDigest) throw new Error('Resource task identity conflict');
       return { receipt: previous, plan: null, replayed: true };
     }
-    const currentUnavailable = new Set(unavailable);
+    let gates = { unavailableWorkerIds: unavailable, quotaUnavailableWorkerIds: quotaUnavailable };
     if (options.readAdmissionEvidence) {
-      const current: unknown = options.readAdmissionEvidence();
-      if (!object(current) || !exact(current, ['observations', 'unavailableWorkerIds'])) {
-        throw new Error('Invalid synchronous resource admission evidence');
-      }
-      const observations = validateResourceObservations(current.observations, pool);
-      const currentGates = validateUnavailableResourceWorkerIds(current.unavailableWorkerIds, pool);
-      for (const id of currentGates) currentUnavailable.add(id);
-      // A current collector refusal must survive a newer external zero reading.
-      // Reuse the same planner (including allocation and capacity aliases) rather
-      // than duplicating quota math. Occupancy/task caps remain waitable in the
-      // final plan, not converted into an invocation-only health refusal.
-      const currentPlan = plan({ ...state, observations }, pool, bindings, task.allowedWorkerIds, Date.now(), currentGates);
-      for (const exclusion of currentPlan.exclusions) {
-        if (exclusion.reasons.some((reason) => !['worker-not-allowed', 'concurrency-exhausted',
-          'operator-task-cap-reached'].includes(reason))) currentUnavailable.add(exclusion.workerId);
-      }
-      state.observations = mergeResourceObservations(state.observations, observations);
+      gates = freshAdmission(state, pool, bindings, task.allowedWorkerIds, options.readAdmissionEvidence(), unavailable, quotaUnavailable);
       if (signal?.aborted) throw new Error('Resource task cancelled before reservation');
     }
-    const assignment = plan(state, pool, bindings, task.allowedWorkerIds, Date.now(), [...currentUnavailable]);
+    const assignment = plan(state, pool, bindings, task.allowedWorkerIds, Date.now(), gates.unavailableWorkerIds, gates.quotaUnavailableWorkerIds);
     if (!assignment.selectedWorkerId) return { receipt: null, plan: assignment, replayed: false };
     if (state.attempts.length >= MAX_ATTEMPTS) throw new Error('Resource ledger capacity reached');
     const binding = bindings.find((row) => row.workerId === assignment.selectedWorkerId)!;
@@ -535,18 +647,25 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
       workerId: binding.workerId, capacityKey: binding.capacityKey, status: 'reserved', startedAt: new Date().toISOString(),
       finishedAt: null, outputDigest: null, inputTokens: null, outputTokens: null, reason: 'task-reserved', verifiedAccepted: false };
     state.attempts.push(receipt);
-    requireSettlementHeadroom(state, pool);
+    requireResourcePoolSettlementHeadroom(state, pool);
     return { receipt, plan: assignment, replayed: false };
   });
   if (!admission.receipt || admission.replayed) return { ...admission, output: null };
   const reserved = admission.receipt;
   const worker = pool.workers.find((row) => row.id === reserved.workerId)!;
   const binding = bindings.find((row) => row.workerId === reserved.workerId)!;
+  let dispatchAllowed = true;
+  if (beforeWorkerDispatch) {
+    try { dispatchAllowed = beforeWorkerDispatch() === true; }
+    catch { dispatchAllowed = false; }
+  }
   // This interval excludes both durable-store transactions and any supervisor queue.
   // Adapter preparation, execution and cleanup are included; it is not provider latency.
   const executionStarted = performance.now();
-  const result = await executeResourceWorker(worker, binding, { prompt: task.prompt, cwd: task.cwd,
-    timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, mode: task.mode }, signal);
+  const result: ResourceWorkerResult = dispatchAllowed
+    ? await executeResourceWorker(worker, binding, { prompt: task.prompt, cwd: task.cwd,
+      timeoutMs: task.timeoutMs, maxOutputTokens: task.maxOutputTokens, mode: task.mode }, signal)
+    : { status: 'failed', output: '', inputTokens: null, outputTokens: null, reason: 'worker-dispatch-precondition-failed' };
   const elapsed = performance.now() - executionStarted;
   const finishedAt = new Date(Math.max(Date.now(), Date.parse(reserved.startedAt))).toISOString();
   const knownUsage = count(result.inputTokens) && count(result.outputTokens) && count(result.inputTokens + result.outputTokens);
@@ -554,8 +673,8 @@ export async function runResourceTask(options: { root: string; pool: ResourcePoo
     outputDigest: result.output ? digest(result.output) : null, inputTokens: knownUsage ? result.inputTokens : null,
     outputTokens: knownUsage ? result.outputTokens : null,
     reason: result.reason, ...(result.nativeProcess === undefined ? {} : { nativeProcess: { ...result.nativeProcess } }),
-    execution: { schemaVersion: 1, scope: 'worker-execution',
-      durationMs: validResourceExecutionDuration(elapsed) ? elapsed : null, usageScope: result.usageScope ?? null } };
+    ...(dispatchAllowed ? { execution: { schemaVersion: 1 as const, scope: 'worker-execution' as const,
+      durationMs: validResourceExecutionDuration(elapsed) ? elapsed : null, usageScope: result.usageScope ?? null } } : {}) };
   if (!checkedReceipt(receipt, poolDigest, bindings, pool)) throw new Error('Resource worker returned invalid settlement evidence');
   transaction(root, pool, bindings, poolDigest, (state) => {
     const index = state.attempts.findIndex((row) => row.id === reserved.id);

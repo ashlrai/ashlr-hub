@@ -133,3 +133,93 @@ export interface SnapshotEventPayload {
   dispatchEnabled: boolean;
   [key: string]: unknown;
 }
+
+/**
+ * Ashlr Verse (interactive chat console, routes/verse/**). The contract is
+ * frozen in src/core/verse/types.ts — re-exported type-only so the UI can
+ * never drift from what /api/verse/* actually returns.
+ */
+export type {
+  VerseBootstrap,
+  VerseCreateSessionRequest,
+  VerseEngine,
+  VerseEvent,
+  VerseEventType,
+  VerseModelOption,
+  VerseProject,
+  VerseSeat,
+  VerseSeatHealth,
+  VerseSession,
+  VerseSessionDetail,
+  VerseSessionStatus,
+  VerseTurnRequest,
+  VerseTurnResponse,
+  VerseUsage,
+} from '../../core/verse/types.js';
+
+/**
+ * Verse V2 control plane (routes/verse/autonomy, routes/verse/approvals).
+ * `AuditEntry` is the append-only autonomous/sandbox action record behind
+ * `GET /api/verse/audit` — the "what did it do while I was asleep" table.
+ *
+ * The rest of the V2 control-plane contract lives at
+ * `src/core/verse/control-types.ts` and is re-exported below, so the cockpit
+ * and the routes that feed it are typed by the SAME declarations. The
+ * `routes/verse/autonomy/control-types.ts` module now re-exports from here
+ * rather than declaring its own transcription of the contract prose.
+ */
+export type { AuditEntry } from '../../core/types.js';
+export type {
+  VerseAuditResponse,
+  VerseAuditResult,
+  VerseCapKey,
+  VerseCaps,
+  VerseCapsConcurrency,
+  VerseCapsUpdate,
+  VerseCapsUpdateResult,
+  VerseControlError,
+  VerseControlErrorCode,
+  VerseControlSnapshot,
+  VerseDaemonAction,
+  VerseDaemonActionResult,
+  VerseDaemonStateProjection,
+  VerseFleetEssentials,
+  VerseFoundryLimit,
+  VerseKillSwitch,
+  VerseSafetyReport,
+  VerseScope,
+  VerseScopeAction,
+  VerseScopeRepo,
+  VerseScopeRequest,
+  VerseScopeResult,
+  VerseSpend,
+} from '../../core/verse/control-types.js';
+
+/**
+ * Verse V2.2 local fleet (routes/verse/autonomy — the runtime, local-only and
+ * fleet panels). Same discipline as the control plane above: the contract is
+ * declared once, in `src/core/verse/fleet-types.ts`, by the module that also
+ * projects the routes' bodies — so the cockpit cannot drift from what
+ * `/api/verse/{runtime,fleet,local-only}` actually returns.
+ *
+ * `FleetAgent` and `FleetSnapshot` are declared further in, by
+ * `src/core/daemon/local-fleet.ts` (the producer), and re-exported through
+ * fleet-types so there is exactly one declaration of an in-flight agent in
+ * the codebase rather than one per layer.
+ */
+export type {
+  FleetAgent,
+  FleetAgentState,
+  FleetSnapshot,
+  LocalOnlyPolicy,
+  LocalOnlyRefusal,
+  LocalOnlySource,
+  LocalOnlyUpdate,
+  LocalOnlyUpdateResult,
+  RuntimeAction,
+  RuntimeActionResult,
+  ServingRuntimeKind,
+  ServingRuntimeParallelism,
+  ServingRuntimeSnapshot,
+  ServingRuntimeState,
+} from '../../core/verse/fleet-types.js';

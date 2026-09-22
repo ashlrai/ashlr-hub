@@ -15,12 +15,12 @@ export type ResourceGenerationCheckStage = 'runtime' | 'boundaries' | 'workspace
 export type ResourceGenerationCheckWarning = 'execution-and-account-identity-unverified' | 'campaign-boundaries-unchecked' |
   'duplicate-native-command-across-capacities' | 'quota-refresh-not-configured' | 'local-model-refresh-not-configured' |
   'unknown-quota-opt-in' | 'resource-store-missing';
-export type ResourceGenerationPolicyHold = 'owner-paused' | 'subscription-allocation-disabled';
+export type ResourceGenerationPolicyHold = 'owner-paused' | 'subscription-allocation-disabled' | 'quota-scope-reserved';
 /** Suggested inspection only: never authority to change reserves, resume or dispatch. */
 export type ResourceGenerationNextCheck = 'review-owner-pause' | 'review-subscription-allocation' |
   'refresh-quota-evidence' | 'refresh-local-evidence' | 'recheck-after-hint' | 'inspect-capacity-ownership' |
   'wait-for-active-work' | 'review-task-window' | 'review-reserve-evidence' | 'review-worker-availability' |
-  'review-worker-scope';
+  'review-worker-scope' | 'review-quota-scope-reservation';
 export interface ResourceGenerationRuntimeWorkerCheck {
   workerId: string;
   provider: ResourceWorker['provider'];
@@ -71,6 +71,7 @@ function nextChecksFor(worker: ResourceWorker, reasons: ResourceExclusionReason[
   for (const reason of reasons) {
     switch (reason) {
       case 'worker-not-allowed': checks.add('review-worker-scope'); break;
+      case 'operator-quota-scope-excluded': checks.add('review-quota-scope-reservation'); break;
       case 'worker-unavailable': if (!holds.length) checks.add('review-worker-availability'); break;
       case 'provider-retry-after': break; // The planner's timestamp supplies the recheck below.
       case 'concurrency-exhausted':
@@ -91,7 +92,7 @@ function nextChecksFor(worker: ResourceWorker, reasons: ResourceExclusionReason[
  * A campaign and candidate are deliberately absent, so their boundary/digest
  * checks remain execution-time requirements, not implied by this report.
  */
-export function checkResourceGenerationRuntime(options: { resourceRuntime: string }): ResourceGenerationRuntimeCheck {
+export function checkResourceGenerationRuntime(options: { resourceRuntime: string; expectedRuntimeDigest?: string }): ResourceGenerationRuntimeCheck {
   const result: ResourceGenerationRuntimeCheck = { schemaVersion: 1, status: 'invalid', evidenceScope: 'local-configuration-only',
     providerContacted: false, poolId: null, poolDigest: null, sourceState: null, sampledAt: null,
     counts: null, allocationCeilingPercent: null, nextEligibleAt: null,
@@ -105,7 +106,15 @@ export function checkResourceGenerationRuntime(options: { resourceRuntime: strin
     return value;
   };
   try {
-    const runtime = check('runtime', () => validateResourceGenerationRuntime(readResourceJson(options.resourceRuntime)));
+    const runtime = check('runtime', () => {
+      const value = validateResourceGenerationRuntime(readResourceJson(options.resourceRuntime));
+      if (options.expectedRuntimeDigest !== undefined &&
+          (typeof options.expectedRuntimeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(options.expectedRuntimeDigest) ||
+            digest(canonical(value)) !== options.expectedRuntimeDigest)) {
+        throw new Error('Resource runtime pin changed');
+      }
+      return value;
+    });
     check('boundaries', () => {
       if (contains(runtime.workspace, runtime.root) || contains(runtime.root, runtime.workspace) ||
         realpathSync(dirname(runtime.root)) !== dirname(runtime.root)) throw new Error();
@@ -155,6 +164,7 @@ export function checkResourceGenerationRuntime(options: { resourceRuntime: strin
       // Pauses apply to capacity aliases, not just the named model. These labels
       // explain explicit controls only; the planner remains admission authority.
       if (pausedCapacities.has(binding.capacityKey)) policyHolds.push('owner-paused');
+      if (exclusionReasons.includes('operator-quota-scope-excluded')) policyHolds.push('quota-scope-reserved');
       if (worker.provider !== 'local' && snapshot.allocation.ceilingPercent === 0) policyHolds.push('subscription-allocation-disabled');
       const attempts = snapshot.attempts.filter((row) => row.capacityKey === binding.capacityKey);
       const ownership = attempts.some((row) => row.status === 'uncertain') ? 'uncertain'

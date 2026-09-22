@@ -24,6 +24,7 @@ import {
 } from 'node:fs';
 import type { AshlrConfig, WorkItem, Proposal } from '../types.js';
 import { judgeProposal, type ManagerVerdict } from './manager.js';
+import { scoreVerdict } from './verdict-score.js';
 import { recordDecision } from './decisions-ledger.js';
 import { causalMetadataFromProposal } from '../learning/causal.js';
 import { runApiModelSandboxed } from '../run/sandboxed-engine.js';
@@ -100,27 +101,6 @@ function ensureDir(): void {
   } catch {
     // best-effort
   }
-}
-
-/**
- * Score a ManagerVerdict into a single number (0–20).
- * Mirrors the scoreVerdict logic in best-of-n.ts: sum of 4 dimensions (each
- * 1–5), minus scope (inverted — higher scope = more invasive, lower is better).
- * Returns 0 on null/undefined verdict.
- */
-function scoreVerdict(v: {
-  value?: number;
-  correctness?: number;
-  scope?: number;
-  alignment?: number;
-} | null | undefined): number {
-  if (!v) return 0;
-  const val = v.value ?? 1;
-  const corr = v.correctness ?? 1;
-  const scope = v.scope ?? 3;
-  const align = v.alignment ?? 1;
-  // scope is inverted: 1=tiny (good), 5=huge (bad)
-  return val + corr + (6 - scope) + align;
 }
 
 /**

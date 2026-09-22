@@ -74,6 +74,8 @@ export async function runUniversePortfolio(input: unknown, options: UniversePort
   // Snapshot the invocation-only locator separately: planning and durable
   // observations receive only the store root, never private runtime bindings.
   const resourceRuntime = options.resourceRuntime;
+  const expectedResourceRuntimeDigest = options.expectedResourceRuntimeDigest;
+  const isExecutionStopped = options.isExecutionStopped;
   const callerSignal = options.signal;
   // Capture all handoff intent before source reads or asynchronous work can
   // mutate caller-owned rows. No plan keeps legacy ordering-only semantics.
@@ -169,7 +171,7 @@ export async function runUniversePortfolio(input: unknown, options: UniversePort
     }
     try {
       const result = await deliverCompletedUniverseCampaign(node.campaignId, { ...store, signal: controller.signal,
-        delivery: deliveryTargets.get(node.campaignId)!, deadlineMonotonicMs,
+        delivery: deliveryTargets.get(node.campaignId)!, deadlineMonotonicMs, isExecutionStopped,
         expectedIdentity: { universeId: node.universeId!, definitionDigest: node.definitionDigest!,
           manifestDigest: node.manifestDigest!, comparatorDigest: node.comparatorDigest!, summaryDigest: digest(canonical(campaign)) } });
       stopping();
@@ -201,6 +203,8 @@ export async function runUniversePortfolio(input: unknown, options: UniversePort
         }
         const campaign = await runUniverseCampaign(node.campaignId, { ...store, signal: controller.signal,
           ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
+          ...(expectedResourceRuntimeDigest === undefined ? {} : { expectedResourceRuntimeDigest }),
+          ...(isExecutionStopped === undefined ? {} : { isExecutionStopped }),
           expectedIdentity: { universeId: node.universeId!, definitionDigest: node.definitionDigest!,
             manifestDigest: node.manifestDigest!, comparatorDigest: node.comparatorDigest!, summaryDigest: digest(canonical(admitted)) } });
         checkPin(node, campaign);

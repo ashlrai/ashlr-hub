@@ -27,6 +27,7 @@ import { createReadProjectionWorker, type ReadProjectionReader } from './read-pr
 import { createReadSessionBoundary, headerValue, isAllowedHost, requestUrl, safeEqual, sendJson } from './read-session.js';
 import { serveStatic } from './static.js';
 import { gcRunStreams } from '../run/streaming.js';
+import { resetVerseEngine } from '../verse/verse-api.js';
 
 // ---------------------------------------------------------------------------
 // Host-header allowlist (anti DNS-rebinding)
@@ -204,6 +205,12 @@ export async function startServer(
     token,
     url,
     async close(): Promise<void> {
+      // Settle the Verse engine first: SIGKILL every running turn's process
+      // group and finalize each (cancelled + turn-done, record saved) so no
+      // agent child outlives the server and no session is left `running` on
+      // disk. Dropping the singleton also means a server created later in
+      // this process never reuses a closed engine.
+      resetVerseEngine(null);
       await Promise.all([readProjections?.close(), new Promise<void>((resolve) => {
         // Drain all open SSE response streams registered by handleApi, then
         // close the HTTP server (stops accepting new connections).

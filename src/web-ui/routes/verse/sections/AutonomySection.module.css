@@ -1,0 +1,99 @@
+/**
+ * routes/verse/sections/AutonomySection.module.css — the section shell only.
+ * Panel-level styling lives in ../autonomy/autonomy.module.css so the cockpit
+ * reads as one object; this file owns the 48px header strip, the scroll
+ * region, and the wide (non-720px) measure a dense control plane needs.
+ */
+
+.section { display: flex; flex-direction: column; min-height: 0; height: 100%; background: var(--bg-canvas); }
+
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  /* DESIGN-V2 §4: header strips are --strip-height, and the token is what the
+     desktop shell's inset maths is written against. */
+  height: var(--strip-height);
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+.title {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+}
+.headerActions { display: flex; align-items: center; gap: var(--space-2); }
+.ghost {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+.ghost:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.measure { max-width: 1040px; margin: 0 auto; padding: var(--space-5) var(--space-5) var(--space-16); }
+
+.banner {
+  margin-bottom: var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-base-line);
+}
+.banner code { font-family: var(--font-mono); font-size: var(--text-xs-size); }
+.bannerTitle { display: block; color: var(--text-primary); font-weight: var(--font-weight-medium); }
+
+.failure {
+  padding: var(--space-4);
+  border: 1px solid var(--status-danger-solid);
+  border-radius: var(--radius-sm);
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-base-line);
+}
+.retry {
+  margin-top: var(--space-3);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+.loading { display: flex; flex-direction: column; gap: var(--space-3); }
+
+@media (max-width: 900px) {
+  .measure { padding: var(--space-4) var(--space-4) var(--space-12); }
+}
+
+/* ---- desktop shell (see desktop/README.md "Desktop shell contract") -----
+ * In the Tauri window the OS title bar overlays the top 48px and the macOS
+ * traffic lights float over the top-LEFT 92px of the WINDOW. This strip does
+ * not start at the window's left edge — the 56px rail does — so the inset it
+ * owes is the overlap, never the full 92px. Both vars are absent in a
+ * browser, where the expression floors to 0px and the layout is unchanged. */
+.header {
+  padding-left: max(
+    var(--space-5),
+    calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px))
+  );
+}

@@ -28,6 +28,13 @@ import type {
   EngineSpec,
   EngineTier,
 } from '../types.js';
+import { DEFAULT_LOCAL_MODEL_TAG } from './model-catalog.js';
+// The serving runtime owns where llama-server actually is; resolving it here
+// as well would let dispatch and supervision disagree about the endpoint.
+import {
+  LEGACY_DEFAULT_BASE_URL,
+  resolveLlamaServerBaseUrl,
+} from '../local-runtime/llama/config.js';
 
 // ---------------------------------------------------------------------------
 // Built-in roster — encodes the five v1–v4 engines (parity-locked) plus the two
@@ -246,9 +253,11 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
   // endpoint at http://localhost:11434/v1/models (engineInstalled in engines.ts
   // returns true when the probe succeeds; false when Ollama is not running).
   //
-  // Default model: qwen2.5:72b-instruct-q4_K_M (best available on this machine).
-  // Upgrade path: `ollama pull qwen2.5-coder:32b` for a dedicated coder model —
-  // then set cfg.foundry.models['local-coder'] = 'qwen2.5-coder:32b'.
+  // Default model: DEFAULT_LOCAL_MODEL_TAG (run/model-catalog.ts) — currently
+  // qwen3.8:27b-ctx64k. It replaced qwen2.5:72b-instruct-q4_K_M, which was a
+  // 44 GB model that hit the turn cap on 2 of 3 runs of the fixture Qwen3.8
+  // passed 2/2; see that constant's doc comment for the measurement.
+  // Override with cfg.foundry.models['local-coder'] = '<ollama tag>'.
   //
   // BUILTIN but NOT in default allowedBackends — activated by adding 'local-coder'
   // to cfg.foundry.allowedBackends (or the machine-local defaultConfig override).
@@ -263,7 +272,46 @@ export const BUILTIN_ENGINE_REGISTRY: Readonly<Record<string, EngineSpec>> = Obj
       envKey: '',
       baseUrlEnv: 'OLLAMA_BASE_URL',
       defaultBaseUrl: 'http://localhost:11434/v1',
-      defaultModel: 'qwen2.5:72b-instruct-q4_K_M',
+      defaultModel: DEFAULT_LOCAL_MODEL_TAG,
+      protocol: 'openai' as const,
+    },
+    capabilities: ['agent', 'edit', 'tools'],
+  },
+
+  // ---------------------------------------------------------------------------
+  // llama-server — the PARALLEL local fleet engine (docs/LOCAL-FLEET.md).
+  //
+  // 'local-coder' above and this entry serve the same weights and differ in
+  // exactly one property, which is the only one that matters for a fleet:
+  // Ollama refuses to run this model architecture concurrently
+  // (`model architecture does not currently support parallel requests,
+  // architecture=qwen35`), so four agents queue — measured 3.7 / 7.6 / 11.4 /
+  // 15.2s. llama-server serves the same GGUF across N continuous-batching
+  // slots sharing ONE 27 GB copy of the weights — measured 8.6 / 8.9 / 9.0 /
+  // 9.0s, all four finishing together.
+  //
+  // So: 'local-coder' for a single interactive turn, 'llama-server' for the
+  // fleet. Both are local, free and unmetered.
+  //
+  // No envKey: local, no API key. `engineInstalled` probes <baseUrl>/models.
+  // `defaultBaseUrl` is REPLACED below by applyLlamaServerConfig with the
+  // runtime's actually-resolved endpoint, so dispatch follows a runtime that
+  // was started on a non-default port instead of talking to nothing.
+  //
+  // Supervise it with `ashlr local-runtime start|status|stop`.
+  //
+  // BUILTIN but NOT in default allowedBackends — activated by adding
+  // 'llama-server' to cfg.foundry.allowedBackends.
+  // ---------------------------------------------------------------------------
+  'llama-server': {
+    id: 'llama-server',
+    kind: 'api-model',
+    tier: 'mid',
+    api: {
+      envKey: '',
+      baseUrlEnv: 'LLAMA_SERVER_BASE_URL',
+      defaultBaseUrl: LEGACY_DEFAULT_BASE_URL,
+      defaultModel: DEFAULT_LOCAL_MODEL_TAG,
       protocol: 'openai' as const,
     },
     capabilities: ['agent', 'edit', 'tools'],
@@ -483,6 +531,21 @@ export function applyGrokConfig(spec: EngineSpec, cfg?: AshlrConfig): EngineSpec
  * letting NIM be promoted to frontier (Kimi K2 ammo) without touching the
  * builtin roster. `cfg.foundry.engines.nim` still wins (already merged above).
  */
+/**
+ * Point the llama-server spec at the runtime that is actually serving.
+ *
+ * Pure: takes a spec and a config, returns a new spec. The base URL comes from
+ * the local-runtime resolver (config override > env > ownership record >
+ * default), so `ashlr local-runtime start --port 8081` is enough to move the
+ * whole fleet without editing an engine spec by hand.
+ */
+export function applyLlamaServerConfig(spec: EngineSpec, cfg?: AshlrConfig): EngineSpec {
+  if (!spec.api) return spec;
+  const defaultBaseUrl = resolveLlamaServerBaseUrl(cfg);
+  if (defaultBaseUrl === spec.api.defaultBaseUrl) return spec;
+  return { ...spec, api: { ...spec.api, defaultBaseUrl } };
+}
+
 export function resolveEngineRegistry(cfg?: AshlrConfig): Record<string, EngineSpec> {
   const merged: Record<string, EngineSpec> = { ...BUILTIN_ENGINE_REGISTRY };
   const added = cfg?.foundry?.engines;
@@ -510,6 +573,12 @@ export function resolveEngineRegistry(cfg?: AshlrConfig): Record<string, EngineS
   // SAFETY: grok is NOT in cfg.foundry.mergeAuthority by default.
   if (merged['grok']) {
     merged['grok'] = applyGrokConfig(merged['grok'], cfg);
+  }
+  // The llama-server endpoint is resolved, not fixed: the supervised runtime
+  // may be on another port, and a spec still naming :8080 would dispatch into
+  // silence. Same fold shape as the nim/kimi/grok overrides above.
+  if (merged['llama-server']) {
+    merged['llama-server'] = applyLlamaServerConfig(merged['llama-server'], cfg);
   }
   return merged;
 }

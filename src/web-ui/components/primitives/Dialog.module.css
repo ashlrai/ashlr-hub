@@ -16,17 +16,28 @@
   overflow: auto;
   background: var(--bg-surface-raised);
   border: 1px solid var(--border-default);
-  border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-xl);
-  padding: var(--space-6);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-dialog);
+  padding: var(--space-5);
   animation: rise var(--duration-base) var(--ease-decelerate);
 }
 
 .title {
   margin: 0 0 var(--space-4);
-  font-size: var(--text-lg-size);
-  line-height: var(--text-lg-line);
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
   font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display);
+}
+
+/* Sits between title and body: the title's bottom margin collapses into
+   this one's top, so give the pair the same rhythm as a title alone. */
+.description {
+  margin: calc(var(--space-4) * -1 + var(--space-1)) 0 var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
 }
 
 @keyframes fade {
@@ -38,13 +49,18 @@
 @keyframes rise {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.98);
+    transform: translateY(4px);
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .backdrop,
-  .dialog {
+  :root:not([data-motion="full"]) .backdrop,
+  :root:not([data-motion="full"]) .dialog {
     animation: none;
   }
+}
+
+:root[data-motion="reduce"] .backdrop,
+:root[data-motion="reduce"] .dialog {
+  animation: none;
 }

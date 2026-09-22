@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P04",
+  "kind": "unsigned-review-stub",
+  "action": "expose-read-only-signed-firm-graph-mcp-resources",
+  "integratedCommit": "8f86b2f9",
+  "provenanceSig": null,
+  "authority": "none",
+  "productionEvidence": false,
+  "verifiedAccepted": false,
+  "verification": {
+    "focusedTestsPassed": 33,
+    "integratedSuiteFiles": 8,
+    "integratedSuiteTestsPassed": 201,
+    "source": "parent-integration-report"
+  },
+  "note": "Unsigned local implementation stub only; not DecisionTraceV1, runtime provenance, an effect permit, activation authority or independent acceptance."
+}

@@ -1,0 +1,536 @@
+/**
+ * One reading column (DESIGN §1.3): 720px, centred, never full-bleed.
+ * No bubbles, no cards — a 2px rule and whitespace carry the structure.
+ */
+.transcriptWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.transcript {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-8) var(--space-6) var(--space-6);
+  scrollbar-gutter: stable;
+  scroll-behavior: smooth;
+}
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  width: 100%;
+  max-width: var(--measure-read);
+  margin: 0 auto;
+  list-style: none;
+  padding: 0;
+}
+.item { min-width: 0; }
+
+.skeleton {
+  max-width: var(--measure-read);
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  /* The leading of .markdown body copy less the bar SkeletonLine draws, so
+     the placeholder keeps the vertical rhythm of the text that replaces it.
+     Derived from the SAME ramp pair as .markdown — it used to restate that
+     leading as the literal 1.7, which meant retuning prose silently knocked
+     the skeleton out of rhythm with it. */
+  gap: calc(var(--text-base-line-relaxed) - var(--text-base-line));
+}
+.skeletonUser { margin-block: var(--space-2); padding-left: var(--space-4); }
+.loadError {
+  display: grid;
+  gap: var(--space-3);
+  justify-items: start;
+  max-width: var(--measure-read);
+  margin: var(--space-8) auto 0;
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--status-danger-solid);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+}
+.loadError button {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-xs-size);
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+.loadError button:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.loadError button:active { background: var(--bg-active); }
+
+.empty { max-width: var(--measure-read); margin: clamp(24px, 12vh, 120px) auto 0; color: var(--text-secondary); }
+.emptyTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-xl-size);
+  line-height: var(--text-xl-line);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+}
+.emptyBody { font-size: var(--text-sm-size); line-height: var(--text-sm-line); max-width: 52ch; }
+
+/* ---- user turn: indented behind a 2px rule, secondary text -------------- */
+.user { display: block; }
+.userText {
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: var(--text-base-size);
+  line-height: var(--text-base-line-relaxed);
+}
+
+/* ---- assistant turn: plain primary text at full measure ----------------- */
+.assistant { display: block; }
+.markdown {
+  color: var(--text-primary);
+  font-size: var(--text-base-size);
+  line-height: var(--text-base-line-relaxed);
+  overflow-wrap: anywhere;
+}
+.markdown > * + * { margin-top: var(--space-4); }
+.markdown p { margin: 0; }
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  font-family: var(--font-display);
+  letter-spacing: var(--tracking-display, -0.02em);
+  font-weight: var(--font-weight-semibold);
+  margin-top: var(--space-6);
+  margin-bottom: calc(-1 * var(--space-1));
+}
+.markdown h1 { font-size: var(--text-xl-size); line-height: var(--text-xl-line); }
+.markdown h2 { font-size: var(--text-lg-size); line-height: var(--text-lg-line); }
+.markdown h3 { font-size: var(--text-md-size); line-height: var(--text-md-line); }
+.markdown h4 { font-size: var(--text-base-size); font-weight: var(--font-weight-medium); }
+
+/* Hanging indents: the marker sits in the gutter, the text keeps one edge. */
+.markdown ul,
+.markdown ol { padding-left: 1.5em; margin-block: 0; }
+.markdown ul { list-style: disc; }
+.markdown ol { list-style: decimal; }
+.markdown ul ul { list-style: circle; }
+.markdown li { padding-left: 0.15em; }
+.markdown li::marker { color: var(--text-tertiary); }
+.markdown li + li { margin-top: var(--space-2); }
+.markdown li > ul,
+.markdown li > ol { margin-top: var(--space-2); }
+
+.markdown a { color: var(--text-link); text-decoration: underline; text-underline-offset: 2px; }
+.markdown blockquote {
+  margin: 0;
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border-strong);
+  color: var(--text-secondary);
+}
+.markdown hr { border: 0; border-top: 1px solid var(--border-subtle); margin-block: var(--space-6); }
+
+/* Hairline tables: rules, not boxes. */
+.markdown table {
+  border-collapse: collapse;
+  font-size: var(--text-sm-size);
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+.markdown th,
+.markdown td {
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  vertical-align: top;
+}
+.markdown th {
+  border-bottom-color: var(--border-default);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.markdown tr:last-child td { border-bottom: 0; }
+.markdown img { border-radius: var(--radius-xs); }
+
+.markdown code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  background: var(--bg-code);
+  border-radius: var(--radius-xs);
+  padding: 0.1em 0.3em;
+}
+
+/* Code block: a language label and a copy button on hover, nothing else. */
+.markdown pre {
+  position: relative;
+  margin: 0;
+  padding: var(--space-4);
+  padding-top: var(--control-h-xs);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+  overflow-x: auto;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line-relaxed);
+  tab-size: 2;
+}
+.markdown pre code { background: none; padding: 0; font-size: inherit; white-space: pre; }
+.codeHead {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  height: var(--control-h-xs);
+  padding: 0 var(--space-2) 0 var(--space-4);
+  pointer-events: none;
+}
+/* --text-secondary, not tertiary: these sit on --bg-code, which resolves to
+   --gray-100 in light, where --text-tertiary measures 4.40:1 — under the
+   4.5:1 floor, at 11px, on the only thing identifying the block's language.
+   --text-secondary is 7.03:1 there. .copy:hover already goes to primary. */
+.codeLang {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.copy {
+  pointer-events: auto;
+  min-height: calc(var(--control-h-xs) - var(--space-1));
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-medium);
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.markdown pre:hover .copy,
+.copy:focus-visible { opacity: 1; }
+.copy:hover { color: var(--text-primary); background: var(--bg-hover); }
+.copy:active { background: var(--bg-active); }
+
+/* Streaming: a 2px × 1em accent caret trailing the text. */
+.caret,
+.streaming > :last-child::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  background: var(--accent-500);
+  animation: verse-caret 1.2s var(--ease-standard) infinite;
+}
+.caret { vertical-align: middle; }
+
+/* ---- thinking ---------------------------------------------------------- */
+.thinking { color: var(--text-tertiary); font-size: var(--text-sm-size); }
+.thinkingSummary {
+  cursor: pointer;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--density-row, 32px);
+  font-style: italic;
+}
+.thinkingSummary::-webkit-details-marker { display: none; }
+.thinkingSummary::before { content: '›'; font-style: normal; transition: transform var(--duration-fast) var(--ease-standard); }
+.thinking[open] .thinkingSummary::before { transform: rotate(90deg); }
+.thinkingBody {
+  margin-top: var(--space-2);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border-subtle);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: var(--text-sm-line-relaxed);
+  color: var(--text-secondary);
+}
+
+/* ---- tool calls: one dense line, no card ------------------------------- */
+.tool,
+.toolRun { font-size: var(--text-sm-size); }
+
+.toolLine {
+  display: grid;
+  grid-template-columns: 12px auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--density-row-sm);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-subtle);
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-tertiary);
+}
+.toolLine::-webkit-details-marker { display: none; }
+.toolLine {
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.toolLine:hover { color: var(--text-secondary); background: var(--bg-hover); }
+.toolLine:active { background: var(--bg-active); }
+/* .toolArg and .toolState declare --text-tertiary themselves, so the row's
+   :hover colour change does not reach them — only the ground under them moves.
+   Measured, --text-tertiary is 4.40:1 on light --bg-hover and 3.95:1 on light
+   --bg-active, both under the 4.5:1 floor in DESIGN-V2 §6. --text-secondary is
+   7.03:1 and 6.32:1 on the same two grounds. Same correction Sidebar.time
+   already carries; design/tokens-contrast.test.ts pins both token pairs. */
+.toolLine:hover .toolArg,
+.toolLine:hover .toolState,
+.toolLine:active .toolArg,
+.toolLine:active .toolState { color: var(--text-secondary); }
+
+.toolGlyph {
+  width: 12px;
+  height: 12px;
+  border: 1px solid currentColor;
+  border-radius: 2px;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+.tool[open] > .toolLine > .toolGlyph,
+.toolRun[open] > .toolLine > .toolGlyph { background: currentColor; }
+
+.toolName {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.toolArg {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+.toolState {
+  justify-self: end;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+/* A failure tints the left rule and nothing else. */
+.toolFailed > .toolLine { border-left-color: var(--status-danger-solid); }
+.toolFailed > .toolLine > .toolState { color: var(--status-danger-fg); }
+
+.toolBody,
+.toolRunBody {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-subtle);
+}
+.toolRunList { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-2); }
+.toolRunList > li { min-width: 0; }
+.toolLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-1);
+}
+.toolPre {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-code);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-primary);
+}
+.toolPending { color: var(--text-tertiary); font-size: var(--text-xs-size); }
+
+/* ---- notes / meta ------------------------------------------------------ */
+.note {
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+}
+.noteError { border-left-color: var(--status-danger-solid); color: var(--status-danger-fg); }
+.meta { padding-left: var(--space-4); }
+.noteDuration {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+}
+.metaText {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+}
+
+.jump {
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-4);
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface-raised);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  box-shadow: var(--shadow-menu, var(--shadow-md));
+}
+.jump {
+  transition: color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.jump:hover { color: var(--text-primary); border-color: var(--border-strong); }
+.jump:active { background: var(--bg-active); }
+.jumpUnseen { border-color: var(--accent-500); color: var(--text-primary); }
+
+@keyframes verse-caret { 50% { opacity: 0.15; } }
+
+/* Two triggers, the same pattern as the duration tokens in tokens.css and the
+   shimmer in global.css: the OS preference applies unless Settings explicitly
+   asked for full motion, and data-motion="reduce" forces it on for an operator
+   whose OS says nothing. A persistent `animation` has a hardcoded duration, so
+   collapsing --duration-* does NOT reach it — it needs both rules by name. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .transcript { scroll-behavior: auto; }
+  :root:not([data-motion="full"]) .caret,
+  :root:not([data-motion="full"]) .streaming > :last-child::after { animation: none; }
+}
+:root[data-motion="reduce"] .caret,
+:root[data-motion="reduce"] .streaming > :last-child::after { animation: none; }
+:root[data-motion="reduce"] .transcript { scroll-behavior: auto; }
+@media (max-width: 900px) {
+  .transcript { padding: var(--space-5) var(--space-4); }
+}
+
+/* ---- turns ------------------------------------------------------------- */
+/* One exchange: the items, then the summary of what it touched. A turn is a
+   region, not a card — no border, no background, no radius. Its only visible
+   chrome appears when it is the target of a jump or a search hit. */
+.turn {
+  display: block;
+  min-width: 0;
+  scroll-margin-block: var(--space-6);
+  border-radius: var(--radius-xs);
+}
+/* `box-shadow: none` resets the GLOBAL focus ring. global.css gives every
+   :focus-visible element `--shadow-focus-ring` (a 2px surface gap plus a 2px
+   accent ring drawn with box-shadow); adding an accent outline on top of it
+   without that reset is what drew two concentric accent rings around a
+   focused turn, 8px apart. The outline is the right shape here — the turn is
+   a region, and an 8px offset keeps the ring off the text — so the outline
+   stays and the shadow goes.
+
+   The reset is safe for a SEARCH HIT: `.turn[data-match]` below paints its
+   gutter rule with box-shadow too, and at equal specificity the later rule
+   wins, so a focused hit keeps its marker and an unfocused one is unchanged. */
+.turn:focus-visible {
+  outline: 2px solid var(--accent-500);
+  outline-offset: var(--space-2);
+  box-shadow: none;
+}
+.turnItems {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+
+/* Search hit / jump target: a 2px rule in the gutter, not a highlight wash.
+   The gutter is outside the measure, so the reading column does not move.
+
+   `--text-tertiary`, not `--border-strong`: this rule is the ONLY indication
+   that a turn matched the query, so it carries meaning and DESIGN-V2 §6's 3:1
+   floor applies. `--border-strong` is a hairline token, pinned only to a 1.1
+   "not invisible" floor and explicitly exempt from 3:1 — it measures 1.45:1
+   light / 1.66:1 dark against the transcript's `--bg-surface`. `--text-tertiary`
+   is 4.83:1 / 5.47:1 and leaves `--accent-500` free to distinguish the ACTIVE
+   hit from the rest. */
+.turn[data-match] {
+  box-shadow: -2px 0 0 0 var(--text-tertiary);
+}
+.turn[data-match='active'] {
+  box-shadow: -2px 0 0 0 var(--accent-500);
+}
+.turn[data-flash],
+[data-flash] {
+  animation: verse-flash 1.4s var(--ease-standard) 1;
+}
+
+@keyframes verse-flash {
+  0%, 60% { background: var(--bg-selected); }
+  100% { background: transparent; }
+}
+
+.turnErrorJump {
+  display: inline-flex;
+  align-items: center;
+  margin-top: var(--space-3);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-left: 2px solid var(--status-danger-solid);
+  background: transparent;
+  color: var(--status-danger-fg);
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.turnErrorJump:hover { background: var(--status-danger-bg); }
+
+/* ---- tool line: the change size, right of the argument ------------------ */
+.toolLine { grid-template-columns: 12px auto minmax(0, 1fr) auto auto; }
+.toolDelta {
+  display: inline-flex;
+  gap: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.toolAdd { color: var(--status-success-fg); }
+.toolDel { color: var(--status-danger-fg); }
+
+.toolNote {
+  margin-top: var(--space-2);
+  color: var(--text-tertiary);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .turn[data-flash],
+  :root:not([data-motion="full"]) [data-flash] { animation: none; }
+}
+:root[data-motion="reduce"] .turn[data-flash],
+:root[data-motion="reduce"] [data-flash] { animation: none; }

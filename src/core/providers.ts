@@ -10,10 +10,24 @@
  */
 
 import type { AshlrConfig, ProviderEndpoint, ProviderRegistry } from './types.js';
+// llama-server's endpoint is resolved by the local-runtime lane (config >
+// env > the supervised runtime's ownership record > default), so a runtime
+// started on a non-default port is reported as up here without the operator
+// having to restate the URL in a second place.
+import { resolveLlamaServerOrigin } from './local-runtime/llama/config.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Provider id for the supervised llama-server serving runtime.
+ *
+ * Deliberately the same string as the engine id in engine-registry.ts: a
+ * status surface that calls it one thing and the dispatch path that calls it
+ * another is a surface nobody can correlate.
+ */
+export const LLAMA_SERVER_PROVIDER_ID = 'llama-server';
 
 /**
  * Ensure a base URL has the expected path suffix.
@@ -126,6 +140,9 @@ export async function probeEndpoint(id: string, url: string): Promise<ProviderEn
     probeUrl = ensurePath(url, '/v1/models');
   } else if (id === 'ollama') {
     probeUrl = ensurePath(url, '/api/tags');
+  } else if (id === LLAMA_SERVER_PROVIDER_ID) {
+    // llama-server serves the OpenAI shape, same as LM Studio.
+    probeUrl = ensurePath(url, '/v1/models');
   } else {
     probeUrl = url;
   }
@@ -201,15 +218,21 @@ export async function getProviderRegistry(cfg: AshlrConfig): Promise<ProviderReg
   // than passing undefined to probeEndpoint (which calls base.replace() and
   // would throw "Cannot read properties of undefined (reading 'replace')").
   const skipped = (id: string): ProviderEndpoint => ({ id, url: '', up: false, models: [], error: 'not configured' });
-  const [lmResult, ollamaResult] = await Promise.all([
+  const [lmResult, ollamaResult, llamaResult] = await Promise.all([
     cfg.models.lmstudio ? probeEndpoint('lmstudio', cfg.models.lmstudio) : Promise.resolve(skipped('lmstudio')),
     cfg.models.ollama   ? probeEndpoint('ollama',   cfg.models.ollama)   : Promise.resolve(skipped('ollama')),
+    // Always probed, never "not configured": the local fleet's serving runtime
+    // has a resolvable endpoint whether or not anyone wrote one down, and a
+    // fleet runtime that is silently absent from this registry is precisely
+    // the failure this surface exists to make visible.
+    probeEndpoint(LLAMA_SERVER_PROVIDER_ID, resolveLlamaServerOrigin(cfg)),
   ]);
 
   // Build a lookup map for the probed local endpoints
   const localEndpoints: Record<string, ProviderEndpoint> = {
     lmstudio: lmResult,
     ollama: ollamaResult,
+    [LLAMA_SERVER_PROVIDER_ID]: llamaResult,
   };
 
   // Assemble the providers list in chain order where possible,

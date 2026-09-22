@@ -46,6 +46,13 @@ vi.mock('../src/core/sandbox/worktree.js', async (importOriginal) => {
   return {
     ...actual,
     createSandbox: mocks.createSandbox,
+    // The async creator is what production calls: it waits for the
+    // process-wide worktree fence off the event loop. The real one is
+    // spread in from importOriginal above, so it must be overridden too —
+    // otherwise this suite would take a real fence and run a real
+    // `git worktree add`, which is exactly what the double avoids.
+    createSandboxAsync: async (...args: Parameters<typeof mocks.createSandbox>) =>
+      mocks.createSandbox(...args),
     sandboxDiff: mocks.sandboxDiff,
     removeSandbox: mocks.removeSandbox,
     removeSandboxWithBorrowedAuthority: mocks.removeSandboxWithBorrowedAuthority,

@@ -33,6 +33,7 @@ export function preflightTrialEvidenceBudget(trial: UniverseTrial, planned: {
   changedFiles: string[];
   feedback?: NonNullable<UniverseGenerationReceipt['feedback']>;
   search?: NonNullable<UniverseGenerationReceipt['search']>;
+  seedContext?: NonNullable<UniverseGenerationReceipt['seedContext']>;
   fileOperations?: NonNullable<UniverseGenerationReceipt['fileOperations']>;
 }): void {
   const hash = 'f'.repeat(64);
@@ -45,6 +46,7 @@ export function preflightTrialEvidenceBudget(trial: UniverseTrial, planned: {
       usage: { state: 'reported', inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER },
       changedFiles: [...planned.changedFiles], ...(planned.feedback ? { feedback: planned.feedback } : {}),
       ...(planned.search ? { search: planned.search } : {}),
+      ...(planned.seedContext ? { seedContext: planned.seedContext } : {}),
       ...(trial.generation.resource ? { resource: { ...trial.generation.resource,
         taskId: `u-${hash.slice(0, 30)}-${hash.slice(30, 60)}`, taskDigest: hash, workerId: 'x'.repeat(64), workerProvider: 'claude',
         // A permitted lone surrogate can require six JSON bytes per code unit.

@@ -25,12 +25,14 @@
  *   genome                     Genome status/health: entry count, projects, staleness.
  *   update [--check] [--json]  Safe self-update: git pull --ff-only + rebuild; --check reports only.
  *   runtime <install|status|rollback|run>  Pinned local candidate installation and foreground Universe commands.
+ *   local-runtime <start|stop|status|restart|install>  Supervised llama-server: the parallel local fleet.
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
  *   swarms [--json]            List past swarm runs.
  *   tui [--once]               Interactive terminal dashboard (alias: dash).
  *   serve [--port N] [--open]  Local web dashboard + JSON API on 127.0.0.1 (default port 7777).
+ *   verse [--port N] [--no-open]  Ashlr Verse console (serve with dispatch on) at /verse/.
  *   gh <pr|issue|ci>           Read GitHub PRs / issues / CI status (read-only via gh CLI).
  *   gh pr create               Create a PR (explicit + confirm-gated mutation).
  *   vercel <ls|logs>           Read Vercel deployments / latest logs (read-only via vercel CLI).
@@ -46,6 +48,7 @@ import { existsSync } from 'node:fs';
 import { loadConfig, saveConfig, CONFIG_PATH } from '../core/config.js';
 import type { EffectiveConfigSnapshot, EffectiveConfigValue } from '../core/effective-config.js';
 import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
+import { PROBE_HELPER_FLAGS } from '../core/resources/probe-helper-invocation.js';
 import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
@@ -368,6 +371,14 @@ const loadServeCmd = lazyCmd(
   'serve command requires src/cli/serve.ts (M14 module not yet built).',
 );
 
+// ─── Verse command loader (serve with dispatch on, opens /verse/) ────────────
+
+const loadVerseCmd = lazyCmd(
+  () => import('./verse.js' as unknown as string),
+  (m) => m.cmdVerse as Cmd,
+  'verse command requires src/cli/verse.ts (Verse module not yet built).',
+);
+
 const loadModelsCmd = lazyCmd(
   () => import('./models.js' as unknown as string),
   (m) => m.cmdModels as Cmd,
@@ -631,6 +642,14 @@ const loadRuntimeCmd = lazyCmd(
   () => import('./runtime.js'),
   (m) => m.cmdRuntime as Cmd,
   'runtime command requires a current build of src/cli/runtime.ts.',
+);
+
+// The supervised llama-server serving runtime — the parallel local fleet's
+// engine. See docs/LOCAL-FLEET.md for why it is a separate runtime from Ollama.
+const loadLocalRuntimeCmd = lazyCmd(
+  () => import('./local-runtime.js'),
+  (m) => m.cmdLocalRuntime as Cmd,
+  'local-runtime command requires a current build of src/cli/local-runtime.ts.',
 );
 
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
@@ -1624,6 +1643,25 @@ async function cmdHelp(rest: string[] = []): Promise<void> {
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
 
+  // ── Internal account-probe helper re-entry ──────────────────────────────
+  // Fixed effectful probe helpers; never an arbitrary entrypoint. Inside a
+  // Bun single-file binary the helpers have no on-disk path to spawn (every
+  // bundled module's import.meta.url lives in the virtual /$bunfs root), so
+  // the probe re-executes this binary instead. Each flag is operand-free,
+  // must be the entire argv, and maps to exactly one hard-coded import — argv
+  // selects which of two package-owned helpers runs and nothing else. It is
+  // matched before any parsing and is absent from help and completions.
+  if (argv.length === 1) {
+    if (argv[0] === PROBE_HELPER_FLAGS.codex) {
+      await import('../core/resources/codex-account-probe-process.js');
+      return;
+    }
+    if (argv[0] === PROBE_HELPER_FLAGS.grok) {
+      await import('../core/resources/grok-account-probe-process.js');
+      return;
+    }
+  }
+
   if (argv[0] === '--_cutoff-checkpoint-supervisor') {
     const { runCutoffCheckpointSupervisor } = await import('../core/daemon/cutoff-checkpoint-child.js');
     process.exitCode = await runCutoffCheckpointSupervisor(argv[1], argv[2]);
@@ -1825,6 +1863,13 @@ async function main(): Promise<void> {
       case 'serve': {
         const cmdServe = await loadServeCmd();
         process.exitCode = await cmdServe(rest);
+        break;
+      }
+
+      case 'verse': {
+        // Ashlr Verse: serve with dispatch forced on, opens /verse/.
+        const cmdVerse = await loadVerseCmd();
+        process.exitCode = await cmdVerse(rest);
         break;
       }
 
@@ -2110,6 +2155,14 @@ async function main(): Promise<void> {
       case 'runtime': {
         const cmdRuntime = await loadRuntimeCmd();
         process.exitCode = await cmdRuntime(rest);
+        break;
+      }
+
+      case 'local-runtime': {
+        // Supervised llama-server: start/stop/status/restart, plus the opt-in
+        // launch agent that makes it survive logout and crashes.
+        const cmdLocalRuntime = await loadLocalRuntimeCmd();
+        process.exitCode = await cmdLocalRuntime(rest);
         break;
       }
 

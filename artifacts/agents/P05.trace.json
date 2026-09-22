@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "packageId": "P05",
+  "kind": "unsigned-review-stub",
+  "action": "bind-enrolled-resource-generation-to-explore-graph-nodes",
+  "integratedCommit": "f98ddaf0",
+  "supportingKernelCommit": "94a0e7a7",
+  "provenanceSig": null,
+  "authority": "none",
+  "productionEvidence": false,
+  "verifiedAccepted": false,
+  "verification": {
+    "focusedTestsPassed": 28,
+    "supportingKernelTestsPassed": 18,
+    "integratedSuiteFiles": 8,
+    "integratedSuiteTestsPassed": 201,
+    "source": "local-adapter-checks-and-parent-integration-report"
+  },
+  "note": "Resource-generation graph adapter only, not all sandbox engines or independent acceptance. This unsigned stub is not DecisionTraceV1, runtime provenance, an effect permit or activation authority."
+}

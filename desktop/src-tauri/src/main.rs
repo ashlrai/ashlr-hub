@@ -1,19 +1,43 @@
 // Prevents an additional console window on Windows in release builds.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+//! Ashlr desktop — the native shell around Ashlr Verse.
+//!
+//! Launch sequence:
+//!   1. A small designed **launch window** opens immediately, so the app is
+//!      never an invisible process while the server boots.
+//!   2. Port 7777 is probed. If something else already holds it, the launch
+//!      window says so and offers to adopt the running server, retry, or quit —
+//!      it never spins forever.
+//!   3. `ashlr verse --port 7777 --no-open --json` is spawned as a sidecar. Its
+//!      single startup JSON line carries the read and mutation tokens; that line
+//!      is consumed here and never forwarded, logged, or shown.
+//!   4. The **Verse window** is built with the saved geometry, a theme-matched
+//!      background (no white flash in dark mode), an overlay title bar with the
+//!      traffic lights inset into the 48px header strip, and the shell-contract
+//!      initialization script (see `shell_contract.rs`). The launch window then
+//!      closes.
+//!   5. The sidecar is killed on every exit path, not just the tray's Quit —
+//!      including signals and a previous run's crash (see `sidecar_guard`).
+
 use std::{
     net::TcpStream,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
 
+use serde::Deserialize;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItemBuilder, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager,
+    AppHandle, Emitter, Listener, LogicalPosition, LogicalSize, Manager, RunEvent,
+    WebviewWindow, WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_shell::{
     process::{CommandChild, CommandEvent},
@@ -21,21 +45,173 @@ use tauri_plugin_shell::{
 };
 use tauri_plugin_updater::UpdaterExt;
 
+mod app_menu;
+mod launch_state;
+mod shell_contract;
+mod sidecar_guard;
+mod window_state;
+
+use launch_state::{LaunchFailure, LaunchPayload, LaunchPhase};
+use window_state::{MonitorRect, ShellTheme, WindowState};
+
 // ── constants ────────────────────────────────────────────────────────────────
 
 const SERVE_HOST: &str = "127.0.0.1";
 const SERVE_PORT: u16 = 7777;
-const SERVE_URL: &str = "http://127.0.0.1:7777";
-/// How long to poll before giving up while waiting for the server to be ready.
+/// Origin the sidecar server listens on. The window only ever loads this origin
+/// (see the CSP in tauri.conf.json) and the shell-contract script only runs on it.
+const SERVE_ORIGIN: &str = "http://127.0.0.1:7777";
+/// The Verse console the main window opens (tauri.conf.json `app.windows[0].url`).
+const VERSE_URL: &str = "http://127.0.0.1:7777/verse/";
+/// Label of the Verse window declared in tauri.conf.json (`create: false`,
+/// built here once the sidecar has printed its tokens).
+const MAIN_WINDOW_LABEL: &str = "main";
+/// Label of the launch window, also declared with `create: false`.
+const LAUNCH_WINDOW_LABEL: &str = "launch";
+/// How long to wait for the sidecar to report readiness before the launch
+/// window switches to its failure state.
 const HEALTH_TIMEOUT_SECS: u64 = 30;
 /// Interval between health-check probes.
 const HEALTH_POLL_MS: u64 = 250;
+/// Timeout for the "is the port already taken?" probe.
+const PORT_PROBE_MS: u64 = 300;
+/// Minimum gap between window-state writes while the user drags or resizes.
+const STATE_FLUSH_THROTTLE_MS: u64 = 400;
+/// Event the launch page emits when one of its buttons is pressed.
+const LAUNCH_ACTION_EVENT: &str = "splash-action";
+/// Event the launch page listens for to render its state.
+const LAUNCH_STATE_EVENT: &str = "launch-state";
 
 // ── shared state ─────────────────────────────────────────────────────────────
 
-struct ServeProcess(Option<CommandChild>);
+/// Everything the app owns across threads. One managed struct rather than
+/// several, so the exit path can reap all of it in one place.
+#[derive(Default)]
+struct AppState {
+    /// The running sidecar, if any. Taken and killed on exit.
+    sidecar: Mutex<Option<CommandChild>>,
+    /// Latest known window geometry + theme, flushed to disk on a throttle.
+    window: Mutex<WindowState>,
+    /// Epoch millis of the last window-state write.
+    last_flush_ms: AtomicU64,
+    /// Redacted sidecar diagnostics for the launch window's failure state.
+    diagnostics: Mutex<Vec<String>>,
+    /// True once a Verse window exists (or is being built).
+    opened: AtomicBool,
+    /// Incremented on every start attempt so a stale watcher cannot report a
+    /// failure for a sequence the user has already retried past.
+    attempt: AtomicU64,
+}
+
+/// Which sidecar command is backing the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SidecarMode {
+    /// `ashlr verse --port 7777 --no-open --json` — serve with dispatch enabled,
+    /// prints `{readToken, token}` once the server is listening (preferred).
+    Verse,
+    /// `ashlr serve --port 7777 --allow-dispatch --json` — same token record,
+    /// used only when the bundled CLI predates the `verse` command.
+    Serve,
+}
+
+impl SidecarMode {
+    fn args(self) -> &'static [&'static str] {
+        match self {
+            SidecarMode::Verse => &["verse", "--port", "7777", "--no-open", "--json"],
+            SidecarMode::Serve => &["serve", "--port", "7777", "--allow-dispatch", "--json"],
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            SidecarMode::Verse => "ashlr verse",
+            SidecarMode::Serve => "ashlr serve --allow-dispatch",
+        }
+    }
+}
+
+/// The machine-readable startup record both `ashlr verse --json` and
+/// `ashlr serve --json` print on stdout as a single line once listening.
+/// Only the fields the window needs are read; the values are never logged
+/// (deliberately no `Debug` derive so the struct cannot be printed by accident).
+#[derive(Deserialize)]
+struct SidecarStartup {
+    #[serde(rename = "readToken")]
+    read_token: String,
+    /// Mutation token — present when dispatch is enabled.
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+}
+
+impl SidecarStartup {
+    fn as_shell_tokens(&self) -> shell_contract::ShellTokens<'_> {
+        shell_contract::ShellTokens {
+            read_token: &self.read_token,
+            token: self.token.as_deref(),
+        }
+    }
+}
+
+// ── sidecar stdout routing ───────────────────────────────────────────────────
+
+/// Where one sidecar stdout line goes: a startup record is consumed here
+/// (`first` says whether this call flipped `ready`, i.e. no window exists yet);
+/// anything else is forwarded on the `sidecar-stdout` event bus.
+///
+/// Every line is checked regardless of `ready`. If the user adopted an
+/// already-running server before a slow first boot printed its record, the
+/// record must still be routed to the window (and never emitted).
+enum StdoutRoute {
+    Startup { startup: SidecarStartup, first: bool },
+    Forward,
+}
+
+fn route_stdout_line(text: &str, ready: &AtomicBool) -> StdoutRoute {
+    match parse_startup_line(text) {
+        Some(startup) => StdoutRoute::Startup {
+            startup,
+            first: !ready.swap(true, Ordering::SeqCst),
+        },
+        None => StdoutRoute::Forward,
+    }
+}
+
+fn parse_startup_line(line: &str) -> Option<SidecarStartup> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let parsed: SidecarStartup = serde_json::from_str(trimmed).ok()?;
+    if parsed.read_token.trim().is_empty() {
+        return None;
+    }
+    if let Some(port) = parsed.port {
+        if port != SERVE_PORT {
+            eprintln!(
+                "[ashlr-desktop] sidecar reported port {port}, expected {SERVE_PORT} — ignoring record"
+            );
+            return None;
+        }
+    }
+    Some(parsed)
+}
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+/// One non-blocking probe: is anything accepting connections on 7777?
+fn port_is_open() -> bool {
+    let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(SERVE_HOST, SERVE_PORT)) else {
+        return false;
+    };
+    for addr in addrs {
+        if TcpStream::connect_timeout(&addr, Duration::from_millis(PORT_PROBE_MS)).is_ok() {
+            return true;
+        }
+    }
+    false
+}
 
 /// Block until 127.0.0.1:7777 accepts a TCP connection or the timeout expires.
 fn wait_for_server() -> bool {
@@ -47,6 +223,36 @@ fn wait_for_server() -> bool {
         thread::sleep(Duration::from_millis(HEALTH_POLL_MS));
     }
     false
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Locate the SPA assets the sidecar server should serve (`index.html`,
+/// `app.js`, `styles.css`, `next/`).
+///
+/// `prepare-sidecar.mjs` stages them at `src-tauri/resources/public/` and
+/// `bundle.resources` ships them as `<Resources>/public`; the compiled binary's
+/// own default (`<exe dir>/public`) does not exist inside the bundle, so the
+/// directory is handed over explicitly via `ASHLR_WEB_PUBLIC`.
+fn web_public_dir(handle: &AppHandle) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(dir) = handle.path().resource_dir() {
+        candidates.push(dir.join("public"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("public"));
+            candidates.push(dir.join("resources").join("public"));
+        }
+    }
+    candidates
+        .into_iter()
+        .find(|dir| dir.join("index.html").is_file())
 }
 
 /// Return `~/.ashlr/.desktop-initialized` — the first-run marker path.
@@ -73,32 +279,341 @@ fn mark_initialized() {
     let _ = std::fs::write(&marker, b"");
 }
 
-/// Return the path to `~/.ashlr/KILL`.
-fn kill_switch_path() -> PathBuf {
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".ashlr").join("KILL")
-}
+// ── theme ────────────────────────────────────────────────────────────────────
 
-/// Read whether the kill-switch file currently exists.
-fn kill_switch_active() -> bool {
-    kill_switch_path().exists()
-}
-
-/// Toggle the kill-switch file on/off.  Returns the new state (true = active).
-fn toggle_kill_switch() -> bool {
-    let p = kill_switch_path();
-    if p.exists() {
-        let _ = std::fs::remove_file(&p);
-        false
-    } else {
-        if let Some(parent) = p.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&p, b"");
-        true
+/// The theme the window background should use before the page has painted.
+///
+/// Preference order: the theme the UI last reported (persisted next to the
+/// geometry), then the OS appearance, then dark. Guessing from the OS alone is
+/// wrong whenever the user has forced a theme inside Verse, which is exactly the
+/// case where a white flash is most jarring.
+fn startup_theme(saved: Option<ShellTheme>, os_theme: Option<tauri::Theme>) -> ShellTheme {
+    if let Some(theme) = saved {
+        return theme;
     }
+    match os_theme {
+        Some(tauri::Theme::Light) => ShellTheme::Light,
+        _ => ShellTheme::Dark,
+    }
+}
+
+fn tauri_color(theme: ShellTheme) -> tauri::window::Color {
+    let (r, g, b, a) = theme.canvas_rgba();
+    tauri::window::Color(r, g, b, a)
+}
+
+// ── window state ─────────────────────────────────────────────────────────────
+
+/// The monitors attached right now, as logical rects.
+///
+/// Read from the `AppHandle` rather than from a window: the only window alive
+/// when the geometry is restored is the launch window, and it is on its way out
+/// (or already gone on the crash-recovery path). An empty list makes
+/// `WindowState::clamped_to` drop the saved position and centre instead — which
+/// is correct when there really is no display information, and silently loses
+/// the user's window position when it is merely unavailable.
+fn monitor_rects(handle: &AppHandle) -> Vec<MonitorRect> {
+    let Ok(monitors) = handle.available_monitors() else {
+        return Vec::new();
+    };
+    monitors
+        .into_iter()
+        .map(|m| {
+            let scale = m.scale_factor();
+            let pos = m.position().to_logical::<f64>(scale);
+            let size = m.size().to_logical::<f64>(scale);
+            MonitorRect {
+                x: pos.x,
+                y: pos.y,
+                width: size.width,
+                height: size.height,
+            }
+        })
+        .collect()
+}
+
+/// Read the live geometry of `window` into `state`, leaving the theme alone.
+fn capture_geometry(window: &WebviewWindow, state: &mut WindowState) {
+    // A minimised window reports a meaningless rect; keep the last good one.
+    if window.is_minimized().unwrap_or(false) {
+        return;
+    }
+    let maximized = window.is_maximized().unwrap_or(false);
+    state.maximized = maximized;
+    if maximized {
+        // Keep the restore-size from before maximising, so un-maximising later
+        // lands somewhere sensible.
+        return;
+    }
+    let Ok(scale) = window.scale_factor() else {
+        return;
+    };
+    if let Ok(size) = window.outer_size() {
+        let logical = size.to_logical::<f64>(scale);
+        if logical.width > 0.0 && logical.height > 0.0 {
+            state.width = logical.width;
+            state.height = logical.height;
+        }
+    }
+    if let Ok(pos) = window.outer_position() {
+        let logical = pos.to_logical::<f64>(scale);
+        state.x = Some(logical.x);
+        state.y = Some(logical.y);
+    }
+}
+
+/// Persist the window state, at most once every `STATE_FLUSH_THROTTLE_MS`
+/// unless `force` (used on exit, where the last position matters).
+fn flush_window_state(state: &AppState, force: bool) {
+    let now = now_ms();
+    if !force {
+        let last = state.last_flush_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last) < STATE_FLUSH_THROTTLE_MS {
+            return;
+        }
+    }
+    state.last_flush_ms.store(now, Ordering::Relaxed);
+    let snapshot = match state.window.lock() {
+        Ok(guard) => *guard,
+        Err(poisoned) => *poisoned.into_inner(),
+    };
+    window_state::store(&snapshot);
+}
+
+// ── launch window ────────────────────────────────────────────────────────────
+
+fn build_window_from_config<'a>(
+    handle: &'a AppHandle,
+    label: &str,
+) -> Option<WebviewWindowBuilder<'a, tauri::Wry, AppHandle>> {
+    let config = handle
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == label)
+        .cloned()?;
+    WebviewWindowBuilder::from_config(handle, &config).ok()
+}
+
+/// Open the launch window.
+///
+/// `saved` is the theme the UI last reported, if any. When it is `None` the
+/// window background and the page are both left to follow the OS appearance —
+/// the native default and `prefers-color-scheme` already agree with each other,
+/// and forcing a guess here is how a light-mode Mac ends up with a dark launch
+/// window on its very first run.
+fn create_launch_window(handle: &AppHandle, saved: Option<ShellTheme>) -> Option<WebviewWindow> {
+    let mut builder = build_window_from_config(handle, LAUNCH_WINDOW_LABEL)?;
+    if let Some(theme) = saved {
+        builder = builder
+            .background_color(tauri_color(theme))
+            .initialization_script(format!(
+                "window.__ASHLR_LAUNCH_THEME__ = {};",
+                match theme {
+                    ShellTheme::Dark => "\"dark\"",
+                    ShellTheme::Light => "\"light\"",
+                }
+            ));
+    }
+    let built = builder.build();
+    match built {
+        Ok(window) => {
+            let _ = window.show();
+            let _ = window.set_focus();
+            Some(window)
+        }
+        Err(e) => {
+            eprintln!("[ashlr-desktop] could not create the launch window: {e}");
+            None
+        }
+    }
+}
+
+/// Push a phase into the launch window. Safe to call before the page has
+/// finished loading: the payload is also emitted as a Tauri event, and the page
+/// asks for the current state once it is ready.
+fn set_launch_phase(handle: &AppHandle, phase: &LaunchPhase) {
+    let diagnostics = match handle.try_state::<AppState>() {
+        Some(state) => match state.diagnostics.lock() {
+            Ok(guard) => guard.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        },
+        None => Vec::new(),
+    };
+    let payload = phase.payload(&diagnostics);
+    let _ = handle.emit(LAUNCH_STATE_EVENT, &payload);
+    if let Some(window) = handle.get_webview_window(LAUNCH_WINDOW_LABEL) {
+        if let Ok(json) = serde_json::to_string(&payload) {
+            let _ = window.eval(format!(
+                "window.__ASHLR_LAUNCH_STATE__ = {json}; if (typeof window.__ashlrRenderLaunch === 'function') window.__ashlrRenderLaunch(window.__ASHLR_LAUNCH_STATE__);"
+            ));
+        }
+        // The failure state carries a hint, diagnostics and buttons; the window
+        // is not resizable by the user, so it is grown here rather than making
+        // the starting state a mostly-empty box.
+        let (w, h) = launch_window_size(&payload);
+        let _ = window.set_size(LogicalSize::new(w, h));
+        let _ = window.center();
+        let _ = window.show();
+    }
+}
+
+/// Launch-window size for a payload.
+///
+/// Sized from the payload rather than the phase because the failure states are
+/// not all the same height: "port is already in use" is diagnosed from the
+/// probe and carries no sidecar output, so the tall window it used to get left
+/// a dead band of empty canvas above the buttons.
+fn launch_window_size(payload: &LaunchPayload) -> (f64, f64) {
+    match payload.phase {
+        "failed" if payload.detail.is_empty() => (540.0, 330.0),
+        "failed" => (540.0, 460.0),
+        _ => (480.0, 300.0),
+    }
+}
+
+fn close_launch_window(handle: &AppHandle) {
+    if let Some(window) = handle.get_webview_window(LAUNCH_WINDOW_LABEL) {
+        let _ = window.close();
+    }
+}
+
+fn record_diagnostic(handle: &AppHandle, line: &str) {
+    let Some(state) = handle.try_state::<AppState>() else {
+        return;
+    };
+    let mut guard = match state.diagnostics.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    launch_state::push_diagnostic(&mut guard, line);
+}
+
+fn clear_diagnostics(handle: &AppHandle) {
+    let Some(state) = handle.try_state::<AppState>() else {
+        return;
+    };
+    let mut guard = match state.diagnostics.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    guard.clear();
+}
+
+// ── the Verse window ─────────────────────────────────────────────────────────
+
+/// Create the Verse window with saved geometry, theme-matched background, the
+/// overlay title bar, and the shell-contract script.
+///
+/// If the window already exists (the user adopted a running server and the
+/// sidecar reported its tokens afterwards), the token script is evaluated into
+/// the live page instead so `window.__ASHLR_TOKENS__` still appears there.
+fn create_main_window(handle: &AppHandle, startup: Option<&SidecarStartup>) {
+    let script = shell_contract::init_script(
+        SERVE_ORIGIN,
+        startup.map(|startup| startup.as_shell_tokens()),
+    );
+
+    let saved = handle
+        .try_state::<AppState>()
+        .map(|state| match state.window.lock() {
+            Ok(guard) => *guard,
+            Err(poisoned) => *poisoned.into_inner(),
+        })
+        .unwrap_or_default();
+    let theme = startup_theme(saved.theme, handle.get_webview_window(LAUNCH_WINDOW_LABEL).and_then(|w| w.theme().ok()));
+
+    let handle2 = handle.clone();
+    let result = handle.run_on_main_thread(move || {
+        if let Some(existing) = handle2.get_webview_window(MAIN_WINDOW_LABEL) {
+            if let Err(e) = existing.eval(&script) {
+                eprintln!("[ashlr-desktop] could not hand tokens to the open window: {e}");
+            }
+            let _ = existing.show();
+            let _ = existing.set_focus();
+            close_launch_window(&handle2);
+            return;
+        }
+
+        let Some(builder) = build_window_from_config(&handle2, MAIN_WINDOW_LABEL) else {
+            eprintln!("[ashlr-desktop] window '{MAIN_WINDOW_LABEL}' is missing from tauri.conf.json");
+            return;
+        };
+
+        // Restore geometry against the monitors that exist right now.
+        //
+        // `app.windows[0].center` in tauri.conf.json is deliberately `false`:
+        // a config-level `center: true` is applied *after* the builder's
+        // `.position()` and silently discards the restored position. Centring
+        // is done here instead, only when there is no position to restore.
+        let monitors = monitor_rects(&handle2);
+        if monitors.is_empty() {
+            eprintln!(
+                "[ashlr-desktop] no monitor information available — centring instead of restoring the saved position"
+            );
+        }
+        let restored = saved.clamped_to(&monitors);
+
+        let mut builder = builder
+            .initialization_script(script)
+            .background_color(tauri_color(theme))
+            .inner_size(restored.width, restored.height);
+        builder = match (restored.x, restored.y) {
+            (Some(x), Some(y)) => builder.position(x, y),
+            _ => builder.center(),
+        };
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.traffic_light_position(LogicalPosition::new(
+                shell_contract::TRAFFIC_LIGHT_X,
+                shell_contract::TRAFFIC_LIGHT_Y,
+            ));
+        }
+
+        match builder.build() {
+            Ok(win) => {
+                if restored.maximized {
+                    let _ = win.maximize();
+                }
+                let _ = win.show();
+                let _ = win.set_focus();
+                if let Some(state) = handle2.try_state::<AppState>() {
+                    if let Ok(mut guard) = state.window.lock() {
+                        guard.width = restored.width;
+                        guard.height = restored.height;
+                        guard.x = restored.x;
+                        guard.y = restored.y;
+                        guard.maximized = restored.maximized;
+                    }
+                }
+                close_launch_window(&handle2);
+            }
+            Err(e) => {
+                eprintln!("[ashlr-desktop] could not create the Verse window: {e}");
+                set_launch_phase(
+                    &handle2,
+                    &LaunchPhase::Failed(LaunchFailure::SpawnFailed {
+                        reason: "the application window could not be created".to_string(),
+                    }),
+                );
+            }
+        }
+    });
+    if let Err(e) = result {
+        eprintln!("[ashlr-desktop] could not schedule window creation: {e}");
+    }
+}
+
+/// Open the Verse window without tokens, against a server we did not start.
+fn adopt_running_server(handle: &AppHandle) {
+    if let Some(state) = handle.try_state::<AppState>() {
+        state.opened.store(true, Ordering::SeqCst);
+    }
+    eprintln!(
+        "[ashlr-desktop] adopting the server already listening on {SERVE_ORIGIN} — opening {VERSE_URL} without tokens"
+    );
+    create_main_window(handle, None);
 }
 
 // ── first-run setup ──────────────────────────────────────────────────────────
@@ -106,8 +621,7 @@ fn toggle_kill_switch() -> bool {
 /// Run `ashlr setup --yes` via the sidecar (non-blocking, fire-and-forget).
 ///
 /// On completion (success or error) the marker is written so the next launch
-/// skips this entirely.  If setup fails the app continues normally — the user
-/// will land on the dashboard and can run setup manually.
+/// skips this entirely. If setup fails the app continues normally.
 fn run_first_time_setup(app: &tauri::App) {
     eprintln!("[ashlr-desktop] First launch detected — running `ashlr setup --yes`");
 
@@ -157,8 +671,6 @@ fn run_first_time_setup(app: &tauri::App) {
             });
         }
         Err(e) => {
-            // Sidecar could not be launched (e.g. binary missing in dev).
-            // Log, mark, and continue — the app is still usable.
             eprintln!(
                 "[ashlr-desktop] could not spawn setup sidecar: {e} — skipping first-run setup"
             );
@@ -168,24 +680,322 @@ fn run_first_time_setup(app: &tauri::App) {
     }
 }
 
+// ── sidecar server ───────────────────────────────────────────────────────────
+
+/// Kill the running sidecar, if any.
+fn reap_sidecar(handle: &AppHandle) {
+    let Some(state) = handle.try_state::<AppState>() else {
+        return;
+    };
+    let mut guard = match state.sidecar.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let Some(child) = guard.take() else {
+        // No child of ours to reap. Crucially, do NOT clear the ownership
+        // record here: on startup this runs *before* `reclaim_orphan`, and
+        // clearing it would delete the only evidence that a previous run
+        // crashed while its sidecar is still holding the port.
+        return;
+    };
+    // `CommandChild::kill` signals only the immediate process. The Bun sidecar
+    // runs its projection/background workers as separate children, so the tree
+    // is stopped as well — otherwise those keep file locks in `~/.ashlr` after
+    // the window is gone.
+    //
+    // ORDER MATTERS. This used to be `child.kill(); kill_tree(pid);`, which
+    // achieved nothing: `child.kill()` is SIGKILL, so by the time `kill_tree`
+    // shelled out to `pgrep -P <pid>` the workers had already been reparented
+    // to pid 1 and the enumeration came back empty. The only pid ever signalled
+    // was one that was already dead, and the workers leaked on the ordinary ⌘Q
+    // path — the exact failure the extra call was added to prevent.
+    //
+    // `terminate_tree` walks the tree while the parent is still alive and gives
+    // it a bounded SIGTERM grace first, so `ashlr verse` gets to run the
+    // shutdown that releases its resource-quota lease.
+    let pid = child.pid() as i32;
+    sidecar_guard::terminate_tree(pid);
+    // Now let Tauri reap its own handle; the process is already gone.
+    let _ = child.kill();
+    drop(guard);
+    sidecar_guard::clear();
+}
+
+/// Start (or restart) the whole boot sequence: probe the port, spawn the
+/// sidecar, and watch for readiness.
+fn start_sequence(handle: AppHandle) {
+    let attempt = match handle.try_state::<AppState>() {
+        Some(state) => {
+            state.attempt.fetch_add(1, Ordering::SeqCst) + 1
+        }
+        None => 1,
+    };
+    clear_diagnostics(&handle);
+    set_launch_phase(&handle, &LaunchPhase::Starting);
+
+    reap_sidecar(&handle);
+
+    // A previous run that was SIGKILLed (or crashed) never got to reap its
+    // sidecar, which is then still holding the port. Without this the app is
+    // permanently stuck on the "port is already in use" screen after one crash.
+    match sidecar_guard::reclaim_orphan(SERVE_PORT) {
+        sidecar_guard::Reclaim::Killed(pid) => {
+            eprintln!(
+                "[ashlr-desktop] reclaimed the sidecar (pid {pid}) orphaned by a previous run"
+            );
+            // Give the kernel a moment to release the listening socket, or the
+            // probe below still sees the port as taken.
+            thread::sleep(Duration::from_millis(PORT_PROBE_MS));
+        }
+        sidecar_guard::Reclaim::OwnedByLiveApp => eprintln!(
+            "[ashlr-desktop] another Ashlr window already owns the sidecar on {SERVE_PORT}"
+        ),
+        sidecar_guard::Reclaim::StaleRecordCleared | sidecar_guard::Reclaim::NothingRecorded => {}
+    }
+
+    // A port that is already open means our own bind will fail. Say so now
+    // rather than after a 30s spinner.
+    if port_is_open() {
+        eprintln!("[ashlr-desktop] {SERVE_HOST}:{SERVE_PORT} is already in use");
+        set_launch_phase(
+            &handle,
+            &LaunchPhase::Failed(LaunchFailure::PortInUse { port: SERVE_PORT }),
+        );
+        return;
+    }
+
+    spawn_server_sidecar(handle, SidecarMode::Verse, attempt);
+}
+
+/// True when `attempt` is still the live boot attempt (the user has not
+/// pressed "Try again" since it started) and no window is open yet.
+fn attempt_is_current(handle: &AppHandle, attempt: u64) -> bool {
+    match handle.try_state::<AppState>() {
+        Some(state) => {
+            state.attempt.load(Ordering::SeqCst) == attempt
+                && !state.opened.load(Ordering::SeqCst)
+        }
+        None => false,
+    }
+}
+
+/// Spawn the sidecar server in `mode`, watch its stdout for the startup JSON,
+/// and create the Verse window once it arrives.
+///
+/// Token handoff:
+///   1. `ashlr verse --port 7777 --no-open --json` starts the server with
+///      dispatch enabled and prints ONE JSON line `{readToken, token, ...}`.
+///   2. That line is parsed here and never forwarded to the event bus, to
+///      stderr, or to the launch window. Every other stdout/stderr line is
+///      forwarded as before (and redacted before it can reach the launch
+///      window — see `launch_state::redact_diagnostic`).
+///   3. The Verse window is then built with the shell-contract initialization
+///      script, which sets `window.__ASHLR_TOKENS__`; SessionGate reads it and
+///      exchanges the read token for its cookie without a paste prompt.
+///
+/// If the sidecar exits before printing the record (e.g. a CLI without the
+/// `verse` command), `Verse` falls back to `Serve` once; if that also fails the
+/// launch window explains why.
+fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
+    eprintln!("[ashlr-desktop] starting sidecar: {}", mode.label());
+
+    let mut command = handle
+        .shell()
+        .sidecar("ashlr")
+        .expect("ashlr sidecar not configured")
+        .args(mode.args());
+    match web_public_dir(&handle) {
+        Some(public) => {
+            eprintln!("[ashlr-desktop] serving web assets from {}", public.display());
+            command = command.env("ASHLR_WEB_PUBLIC", &public);
+        }
+        None => eprintln!(
+            "[ashlr-desktop] web assets (public/) not found next to the app — static routes may 404; run desktop/scripts/prepare-sidecar.mjs"
+        ),
+    }
+    let spawned = command.spawn();
+
+    let (mut rx, child) = match spawned {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("[ashlr-desktop] failed to spawn {}: {e}", mode.label());
+            if attempt_is_current(&handle, attempt) {
+                set_launch_phase(
+                    &handle,
+                    &LaunchPhase::Failed(LaunchFailure::SpawnFailed {
+                        reason: e.to_string(),
+                    }),
+                );
+            }
+            return;
+        }
+    };
+
+    // Record who owns this sidecar before anything else can go wrong, so a
+    // crash from here on is repairable by the next launch.
+    sidecar_guard::record(child.pid(), SERVE_PORT, mode.args());
+
+    // Store the child so we can kill it on exit (replacing a dead one on fallback).
+    match handle.try_state::<AppState>() {
+        Some(state) => {
+            let mut guard = match state.sidecar.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if let Some(previous) = guard.take() {
+                // Same ordering rule as `reap_sidecar`: the tree has to be
+                // walked while the parent is alive, or `pgrep -P` finds nothing.
+                let previous_pid = previous.pid() as i32;
+                sidecar_guard::terminate_tree(previous_pid);
+                let _ = previous.kill();
+            }
+            *guard = Some(child);
+        }
+        None => eprintln!(
+            "[ashlr-desktop] app state slot missing — child will not be reaped on quit"
+        ),
+    }
+
+    let ready = Arc::new(AtomicBool::new(false));
+
+    // Watchdog: if nothing reports readiness in time, say what we observed
+    // instead of leaving a spinner up forever.
+    {
+        let handle = handle.clone();
+        let ready = ready.clone();
+        thread::spawn(move || {
+            let listening = wait_for_server();
+            thread::sleep(Duration::from_millis(HEALTH_POLL_MS * 4));
+            if ready.load(Ordering::SeqCst) || !attempt_is_current(&handle, attempt) {
+                return;
+            }
+            if listening {
+                // The server IS up, it just never printed a record we could
+                // read (an older CLI, for example). Opening the console
+                // token-less works — the SessionGate asks for one.
+                eprintln!(
+                    "[ashlr-desktop] {SERVE_ORIGIN} is listening but no startup record was seen — showing {VERSE_URL} without tokens"
+                );
+                if ready.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                if let Some(state) = handle.try_state::<AppState>() {
+                    state.opened.store(true, Ordering::SeqCst);
+                }
+                create_main_window(&handle, None);
+            } else {
+                eprintln!("[ashlr-desktop] timed out waiting for {SERVE_ORIGIN}");
+                set_launch_phase(
+                    &handle,
+                    &LaunchPhase::Failed(LaunchFailure::Timeout {
+                        seconds: HEALTH_TIMEOUT_SECS,
+                    }),
+                );
+            }
+        });
+    }
+
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            match event {
+                CommandEvent::Stdout(line) => {
+                    let text = String::from_utf8_lossy(&line).into_owned();
+                    match route_stdout_line(&text, &ready) {
+                        StdoutRoute::Startup { startup, first } => {
+                            eprintln!(
+                                "[ashlr-desktop] {} is ready (dispatch {}) — {}",
+                                mode.label(),
+                                if startup.token.is_some() {
+                                    "enabled"
+                                } else {
+                                    "disabled"
+                                },
+                                if first {
+                                    format!("opening {VERSE_URL}")
+                                } else {
+                                    "handing tokens to the already-open window".to_string()
+                                }
+                            );
+                            if first {
+                                // Belt and braces: the record is printed after listen().
+                                wait_for_server();
+                                set_launch_phase(&handle, &LaunchPhase::Ready);
+                            }
+                            if let Some(state) = handle.try_state::<AppState>() {
+                                state.opened.store(true, Ordering::SeqCst);
+                            }
+                            create_main_window(&handle, Some(&startup));
+                            // never forward the token line
+                        }
+                        StdoutRoute::Forward => {
+                            record_diagnostic(&handle, &text);
+                            let _ = handle.emit("sidecar-stdout", text);
+                        }
+                    }
+                }
+                CommandEvent::Stderr(line) => {
+                    let text = String::from_utf8_lossy(&line).into_owned();
+                    record_diagnostic(&handle, &text);
+                    let _ = handle.emit("sidecar-stderr", text);
+                }
+                CommandEvent::Error(e) => {
+                    eprintln!("[ashlr-desktop] sidecar error: {e}");
+                    record_diagnostic(&handle, &e);
+                }
+                CommandEvent::Terminated(status) => {
+                    eprintln!(
+                        "[ashlr-desktop] sidecar ({}) exited with code {:?}",
+                        mode.label(),
+                        status.code
+                    );
+                    // Disarm the guard: this pid is dead. Without this,
+                    // `SIDECAR_PID` kept pointing at it for the rest of the
+                    // app's life — the common case, since the app then parks on
+                    // the "sidecar stopped while starting" screen — and a later
+                    // SIGTERM/SIGINT/SIGHUP ran `terminate_handler`, which
+                    // signals unconditionally with no argv check. Once the
+                    // kernel recycled that pid, the victim was a stranger's
+                    // process. `reclaim_orphan` goes to real trouble to prove a
+                    // pid is ours before killing it; the warm paths cannot, so
+                    // they must not stay armed on a pid known to be gone.
+                    //
+                    // The fallback below re-`record()`s via
+                    // `spawn_server_sidecar`, so the Serve child stays covered.
+                    sidecar_guard::clear();
+                    if !ready.load(Ordering::SeqCst) && mode == SidecarMode::Verse {
+                        eprintln!(
+                            "[ashlr-desktop] `ashlr verse` unavailable in this build — falling back to `ashlr serve --allow-dispatch`"
+                        );
+                        ready.store(true, Ordering::SeqCst);
+                        spawn_server_sidecar(handle.clone(), SidecarMode::Serve, attempt);
+                    } else if !ready.load(Ordering::SeqCst) && attempt_is_current(&handle, attempt) {
+                        set_launch_phase(
+                            &handle,
+                            &LaunchPhase::Failed(LaunchFailure::SidecarExited {
+                                code: status.code,
+                            }),
+                        );
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+}
+
 // ── auto-update ──────────────────────────────────────────────────────────────
 
 /// Fire-and-forget update check on launch.
 ///
-/// This function is intentionally best-effort: any error (network offline,
-/// no signing key configured, invalid pubkey placeholder, no new version) is
-/// logged to stderr and silently dropped.  It never blocks the app start or
-/// causes a panic.
-///
-/// When a signed update IS available, the plugin downloads and installs it,
-/// then emits "tauri://update-install" — the app must be restarted by the user
-/// (no forced restart here).
+/// Intentionally best-effort: any error (network offline, no signing key
+/// configured, invalid pubkey placeholder, no new version) is logged to stderr
+/// and silently dropped. It never blocks the app start or causes a panic.
 fn check_for_updates(handle: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let updater = match handle.updater() {
             Ok(u) => u,
             Err(e) => {
-                // Likely: no pubkey configured yet (placeholder still in place).
                 eprintln!("[ashlr-desktop] updater not available: {e}");
                 return;
             }
@@ -205,13 +1015,8 @@ fn check_for_updates(handle: AppHandle) {
                     let _ = handle.emit("ashlr-update-installed", ());
                 }
             }
-            Ok(None) => {
-                eprintln!("[ashlr-desktop] already on latest version");
-            }
-            Err(e) => {
-                // Common causes: offline, bad pubkey placeholder, no latest.json yet.
-                eprintln!("[ashlr-desktop] update check skipped: {e}");
-            }
+            Ok(None) => eprintln!("[ashlr-desktop] already on latest version"),
+            Err(e) => eprintln!("[ashlr-desktop] update check skipped: {e}"),
         }
     });
 }
@@ -221,119 +1026,124 @@ fn check_for_updates(handle: AppHandle) {
 fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle().clone();
 
+    // `pkill`, a `kill` from a terminal, or Ctrl-C on a foreground run never
+    // reach Tauri's event loop. Arm the reaper before a sidecar can exist.
+    sidecar_guard::install_signal_handlers();
+
+    // ── restore the saved window geometry + theme ────────────────────────────
+    let saved = window_state::load().unwrap_or_default();
+    app.manage(AppState {
+        window: Mutex::new(saved),
+        ..Default::default()
+    });
+    app.manage(app_menu::ZoomLevel::default());
+
+    // ── menu bar ─────────────────────────────────────────────────────────────
+    // Built before any window so ⌘C / ⌘V / ⌘Z work in the composer from the
+    // first frame.
+    let menu = app_menu::build(&handle)?;
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        let id = event.id().as_ref();
+        if id == "tray.show" || id == "tray.quit" {
+            handle_tray_event(app, id);
+            return;
+        }
+        app_menu::handle_menu_event(app, id, MAIN_WINDOW_LABEL);
+    });
+
+    // ── the launch window, immediately ───────────────────────────────────────
+    create_launch_window(&handle, saved.theme);
+    set_launch_phase(&handle, &LaunchPhase::Starting);
+
+    // ── launch-window actions ────────────────────────────────────────────────
+    {
+        let handle = handle.clone();
+        app.listen(LAUNCH_ACTION_EVENT, move |event| {
+            let action = serde_json::from_str::<String>(event.payload())
+                .unwrap_or_else(|_| event.payload().trim_matches('"').to_string());
+            match action.as_str() {
+                "retry" => {
+                    let handle = handle.clone();
+                    thread::spawn(move || start_sequence(handle));
+                }
+                "use-running" => adopt_running_server(&handle),
+                "quit" => {
+                    reap_sidecar(&handle);
+                    handle.exit(0);
+                }
+                other => eprintln!("[ashlr-desktop] ignoring unknown launch action {other:?}"),
+            }
+        });
+    }
+
+    // ── the UI tells us which theme it settled on ────────────────────────────
+    {
+        let handle = handle.clone();
+        app.listen(shell_contract::THEME_EVENT, move |event| {
+            let raw = serde_json::from_str::<String>(event.payload())
+                .unwrap_or_else(|_| event.payload().trim_matches('"').to_string());
+            let Some(theme) = ShellTheme::parse(&raw) else {
+                return;
+            };
+            let Some(state) = handle.try_state::<AppState>() else {
+                return;
+            };
+            {
+                let mut guard = match state.window.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                if guard.theme == Some(theme) {
+                    return;
+                }
+                guard.theme = Some(theme);
+            }
+            if let Some(window) = handle.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = window.set_background_color(Some(tauri_color(theme)));
+            }
+            flush_window_state(&state, true);
+        });
+    }
+
     // ── first-run: run `ashlr setup --yes` once if the marker is absent ──────
-    //
-    // Runs before `ashlr serve` so config/engines are in place before the
-    // server starts.  Idempotent — skipped entirely if the marker exists.
     if is_first_run() {
         run_first_time_setup(app);
     }
 
-    // ── spawn `ashlr serve` as a sidecar ─────────────────────────────────────
-    let (mut rx, child) = app
-        .shell()
-        .sidecar("ashlr")
-        .expect("ashlr sidecar not configured")
-        .args(["serve"])
-        .spawn()
-        .expect("failed to spawn ashlr serve sidecar");
+    // ── spawn `ashlr verse`; the Verse window opens once it is ready ─────────
+    start_sequence(handle.clone());
 
-    // Store the child so we can kill it on exit.
-    app.manage(Arc::new(Mutex::new(ServeProcess(Some(child)))));
-
-    // Forward stdout/stderr from the sidecar to the Tauri event bus so the
-    // DevTools console can see it during development.
-    let handle2 = handle.clone();
-    tauri::async_runtime::spawn(async move {
-        while let Some(event) = rx.recv().await {
-            match event {
-                CommandEvent::Stdout(line) => {
-                    let _ = handle2.emit(
-                        "sidecar-stdout",
-                        String::from_utf8_lossy(&line).into_owned(),
-                    );
-                }
-                CommandEvent::Stderr(line) => {
-                    let _ = handle2.emit(
-                        "sidecar-stderr",
-                        String::from_utf8_lossy(&line).into_owned(),
-                    );
-                }
-                CommandEvent::Error(e) => {
-                    eprintln!("[ashlr-desktop] sidecar error: {e}");
-                }
-                CommandEvent::Terminated(status) => {
-                    eprintln!("[ashlr-desktop] sidecar exited with code {:?}", status.code);
-                    break;
-                }
-                _ => {}
-            }
-        }
-    });
-
-    // ── wait for the server, then show the window ─────────────────────────────
-    let handle3 = handle.clone();
-    thread::spawn(move || {
-        if wait_for_server() {
-            if let Some(win) = handle3.get_webview_window("main") {
-                // The window's URL was already set to SERVE_URL in tauri.conf.json;
-                // just make it visible now that the server is ready.
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
-        } else {
-            eprintln!("[ashlr-desktop] timed out waiting for {SERVE_URL} — showing window anyway");
-            if let Some(win) = handle.get_webview_window("main") {
-                let _ = win.show();
-            }
-        }
-    });
-
-    // ── tray icon ─────────────────────────────────────────────────────────────
+    // ── tray icon ────────────────────────────────────────────────────────────
     build_tray(app)?;
 
-    // ── background update check ───────────────────────────────────────────────
-    // Non-blocking, non-fatal.  See check_for_updates() for details.
+    // ── background update check (non-blocking, non-fatal) ────────────────────
     check_for_updates(app.handle().clone());
 
     Ok(())
 }
 
+// ── tray ─────────────────────────────────────────────────────────────────────
+
+/// Show and Quit only.
+///
+/// Autonomy controls (start/stop the daemon, the global kill switch) are
+/// deliberately NOT here: the kill switch is an emergency stop that also
+/// disables the agent's own write tools, and a menu-bar item is far too easy to
+/// hit by accident for something with that blast radius. Both live in the
+/// Autonomy section of the console, behind a confirm step.
 fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let handle = app.handle();
 
-    // Menu items
-    let open = MenuItemBuilder::with_id("open", "Open Dashboard").build(app)?;
-    let sep1 = PredefinedMenuItem::separator(app)?;
-    let daemon_start = MenuItemBuilder::with_id("daemon_start", "Start Daemon").build(app)?;
-    let daemon_stop = MenuItemBuilder::with_id("daemon_stop", "Stop Daemon").build(app)?;
-    let sep2 = PredefinedMenuItem::separator(app)?;
-    let kill_label = if kill_switch_active() {
-        "Kill Switch: ON  (click to disable)"
-    } else {
-        "Kill Switch: OFF (click to enable)"
-    };
-    let kill = MenuItemBuilder::with_id("kill_switch", kill_label).build(app)?;
-    let sep3 = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItemBuilder::with_id("quit", "Quit Ashlr").build(app)?;
-
+    let show = MenuItemBuilder::with_id("tray.show", "Show Ashlr Verse").build(app)?;
+    let quit = MenuItemBuilder::with_id("tray.quit", "Quit Ashlr").build(app)?;
     let menu = Menu::with_items(
         app,
-        &[
-            &open,
-            &sep1,
-            &daemon_start,
-            &daemon_stop,
-            &sep2,
-            &kill,
-            &sep3,
-            &quit,
-        ],
+        &[&show, &PredefinedMenuItem::separator(app)?, &quit],
     )?;
 
     // Prefer the app's default window icon (always present, no path resolution
-    // issues on Windows).  Fall back to loading icons/32x32.png explicitly if
-    // the default icon is unavailable for any reason.
+    // issues on Windows). Fall back to loading icons/32x32.png explicitly.
     let icon = if let Some(ico) = app.default_window_icon() {
         ico.clone()
     } else {
@@ -347,12 +1157,12 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     TrayIconBuilder::with_id("main-tray")
-        .tooltip("Ashlr")
+        .tooltip("Ashlr Verse")
         .icon(icon)
         .menu(&menu)
-        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| handle_tray_event(app, event.id().as_ref()))
         .on_tray_icon_event(|tray, event| {
-            // Left-click on macOS/Windows toggles the window.
             if let TrayIconEvent::Click {
                 button: MouseButton::Left,
                 button_state: MouseButtonState::Up,
@@ -360,7 +1170,7 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             } = event
             {
                 let app = tray.app_handle();
-                if let Some(win) = app.get_webview_window("main") {
+                if let Some(win) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                     if win.is_visible().unwrap_or(false) {
                         let _ = win.hide();
                     } else {
@@ -375,96 +1185,266 @@ fn build_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn handle_menu_event(app: &AppHandle, id: &str) {
+fn handle_tray_event(app: &AppHandle, id: &str) {
     match id {
-        "open" => {
-            if let Some(win) = app.get_webview_window("main") {
+        "tray.show" => {
+            if let Some(win) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                let _ = win.show();
+                let _ = win.set_focus();
+            } else if let Some(win) = app.get_webview_window(LAUNCH_WINDOW_LABEL) {
                 let _ = win.show();
                 let _ = win.set_focus();
             }
         }
-
-        "daemon_start" => {
-            let app2 = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let result = app2
-                    .shell()
-                    .sidecar("ashlr")
-                    .expect("ashlr sidecar not configured")
-                    .args(["daemon", "start"])
-                    .output()
-                    .await;
-                match result {
-                    Ok(out) => eprintln!(
-                        "[ashlr-desktop] daemon start: {}",
-                        String::from_utf8_lossy(&out.stdout)
-                    ),
-                    Err(e) => eprintln!("[ashlr-desktop] daemon start error: {e}"),
-                }
-            });
-        }
-
-        "daemon_stop" => {
-            let app2 = app.clone();
-            tauri::async_runtime::spawn(async move {
-                let result = app2
-                    .shell()
-                    .sidecar("ashlr")
-                    .expect("ashlr sidecar not configured")
-                    .args(["daemon", "stop"])
-                    .output()
-                    .await;
-                match result {
-                    Ok(out) => eprintln!(
-                        "[ashlr-desktop] daemon stop: {}",
-                        String::from_utf8_lossy(&out.stdout)
-                    ),
-                    Err(e) => eprintln!("[ashlr-desktop] daemon stop error: {e}"),
-                }
-            });
-        }
-
-        "kill_switch" => {
-            let active = toggle_kill_switch();
-            eprintln!(
-                "[ashlr-desktop] kill switch {}",
-                if active { "ENABLED" } else { "DISABLED" }
-            );
-            // (Tauri v2's TrayIcon exposes no menu() getter to relabel an item
-            // live; the kill-switch state is logged above and reflected in the
-            // dashboard. Live relabeling would require rebuilding + set_menu.)
-        }
-
-        "quit" => {
-            // Kill the sidecar before exiting so we never leave orphan processes.
-            if let Some(state) = app.try_state::<Arc<Mutex<ServeProcess>>>() {
-                let mut guard = state.lock().unwrap();
-                if let Some(child) = guard.0.take() {
-                    let _ = child.kill();
-                }
-            }
+        "tray.quit" => {
+            // The Exit handler reaps the sidecar; do it here too so the child is
+            // gone before the event loop starts tearing down.
+            reap_sidecar(app);
             app.exit(0);
         }
-
         _ => {}
     }
 }
 
-// ── entry point ───────────────────────────────────────────────────────────────
+// ── window events ────────────────────────────────────────────────────────────
+
+fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
+    let handle = window.app_handle().clone();
+    let is_main = window.label() == MAIN_WINDOW_LABEL;
+    let is_launch = window.label() == LAUNCH_WINDOW_LABEL;
+
+    match event {
+        // Closing the Verse window hides it to the tray (standard macOS
+        // behaviour: ⌘W closes a window, it does not quit the app). Quit — from
+        // ⌘Q, the app menu, or the tray — is the only path that stops the
+        // sidecar, and it always does (see RunEvent::ExitRequested).
+        WindowEvent::CloseRequested { api, .. } if is_main => {
+            if let Some(state) = handle.try_state::<AppState>() {
+                if let Some(win) = handle.get_webview_window(MAIN_WINDOW_LABEL) {
+                    let mut guard = match state.window.lock() {
+                        Ok(guard) => guard,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    capture_geometry(&win, &mut guard);
+                }
+                flush_window_state(&state, true);
+            }
+            api.prevent_close();
+            let _ = window.hide();
+        }
+        // Closing the launch window before the app ever came up means "give up".
+        WindowEvent::CloseRequested { .. } if is_launch => {
+            let opened = handle
+                .try_state::<AppState>()
+                .map(|s| s.opened.load(Ordering::SeqCst))
+                .unwrap_or(false);
+            if !opened {
+                reap_sidecar(&handle);
+                handle.exit(0);
+            }
+        }
+        WindowEvent::Moved(_) | WindowEvent::Resized(_) if is_main => {
+            let Some(state) = handle.try_state::<AppState>() else {
+                return;
+            };
+            let Some(win) = handle.get_webview_window(MAIN_WINDOW_LABEL) else {
+                return;
+            };
+            {
+                let mut guard = match state.window.lock() {
+                    Ok(guard) => guard,
+                    Err(poisoned) => poisoned.into_inner(),
+                };
+                capture_geometry(&win, &mut guard);
+            }
+            flush_window_state(&state, false);
+        }
+        WindowEvent::Focused(false) if is_main => {
+            if let Some(state) = handle.try_state::<AppState>() {
+                flush_window_state(&state, true);
+            }
+        }
+        _ => {}
+    }
+}
+
+// ── entry point ──────────────────────────────────────────────────────────────
 
 fn main() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(setup)
-        .on_window_event(|window, event| {
-            // Hide (don't close) the window when the user presses the X button
-            // so the tray icon remains the only quit path.
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                api.prevent_close();
-                let _ = window.hide();
+        .on_window_event(|window, event| on_window_event(window, event))
+        .build(tauri::generate_context!())
+        .expect("error building Ashlr desktop app");
+
+    app.run(|handle, event| match event {
+        // Every quit path lands here: ⌘Q, the app menu, the tray, or a signal.
+        // Reaping the sidecar in one place is what keeps orphan `ashlr verse`
+        // processes off the machine.
+        RunEvent::ExitRequested { .. } | RunEvent::Exit => {
+            eprintln!("[ashlr-desktop] exiting — reaping the sidecar");
+            if let Some(state) = handle.try_state::<AppState>() {
+                if let Some(win) = handle.get_webview_window(MAIN_WINDOW_LABEL) {
+                    if let Ok(mut guard) = state.window.lock() {
+                        capture_geometry(&win, &mut guard);
+                    }
+                }
+                flush_window_state(&state, true);
             }
-        })
-        .run(tauri::generate_context!())
-        .expect("error running Ashlr desktop app");
+            reap_sidecar(handle);
+        }
+        _ => {}
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_startup_record_and_ignores_other_lines() {
+        assert!(parse_startup_line("  ashlr serve — local web dashboard").is_none());
+        assert!(parse_startup_line("{\"url\":\"http://127.0.0.1:7777\"}").is_none());
+        assert!(parse_startup_line("{\"readToken\":\"\",\"token\":\"b\"}").is_none());
+        assert!(parse_startup_line("{\"readToken\":\"a\",\"port\":7778}").is_none());
+
+        let parsed = parse_startup_line(
+            "{\"url\":\"http://127.0.0.1:7777\",\"port\":7777,\"allowDispatch\":true,\"readToken\":\"aa11\",\"readTokenHeader\":\"X-Ashlr-Token\",\"token\":\"bb22\",\"tokenHeader\":\"X-Ashlr-Token\"}\n",
+        )
+        .expect("startup record");
+        assert_eq!(parsed.read_token, "aa11");
+        assert_eq!(parsed.token.as_deref(), Some("bb22"));
+
+        let read_only = parse_startup_line("{\"readToken\":\"aa11\"}").expect("read-only record");
+        assert_eq!(read_only.token, None);
+    }
+
+    #[test]
+    fn startup_record_is_never_forwarded_even_after_ready() {
+        let record = "{\"readToken\":\"aa11\",\"token\":\"bb22\"}";
+
+        // The user adopted a running server first: ready is already true and the
+        // window is token-less.
+        let ready = AtomicBool::new(true);
+        match route_stdout_line(record, &ready) {
+            StdoutRoute::Startup { startup, first } => {
+                assert!(!first, "a late record must not count as the first readiness");
+                assert_eq!(startup.read_token, "aa11");
+                assert_eq!(startup.token.as_deref(), Some("bb22"));
+            }
+            StdoutRoute::Forward => panic!("startup record was routed to the sidecar-stdout bus"),
+        }
+        assert!(ready.load(Ordering::SeqCst));
+
+        // Normal boot: the record arrives first and flips ready.
+        let ready = AtomicBool::new(false);
+        match route_stdout_line(record, &ready) {
+            StdoutRoute::Startup { first, .. } => assert!(first),
+            StdoutRoute::Forward => panic!("startup record was not recognised"),
+        }
+        assert!(ready.load(Ordering::SeqCst));
+
+        // Ordinary output is forwarded and leaves ready alone.
+        let ready = AtomicBool::new(false);
+        assert!(matches!(
+            route_stdout_line("  Listening on http://127.0.0.1:7777", &ready),
+            StdoutRoute::Forward
+        ));
+        assert!(!ready.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_forwarded_startup_record_can_never_reach_the_launch_window() {
+        // Belt and braces: even if routing regressed and the token line were
+        // forwarded, the launch window's redaction would drop it.
+        assert_eq!(
+            launch_state::redact_diagnostic("{\"readToken\":\"aa11\",\"token\":\"bb22\"}"),
+            None
+        );
+    }
+
+    #[test]
+    fn init_script_is_origin_gated_and_json_encoded() {
+        let script = shell_contract::init_script(
+            SERVE_ORIGIN,
+            Some(shell_contract::ShellTokens {
+                read_token: "aa11\"</script>",
+                token: Some("bb22"),
+            }),
+        );
+        assert!(script.contains("\"origin\":\"http://127.0.0.1:7777\""));
+        assert!(script.contains("window.__ASHLR_TOKENS__ = Object.freeze(cfg.tokens)"));
+        assert!(script.contains("\"readToken\":\"aa11\\\"</script>\""));
+        assert!(script.contains("\"token\":\"bb22\""));
+
+        let no_dispatch = shell_contract::init_script(
+            SERVE_ORIGIN,
+            Some(shell_contract::ShellTokens {
+                read_token: "aa11",
+                token: None,
+            }),
+        );
+        assert!(no_dispatch.contains("\"token\":null"));
+    }
+
+    #[test]
+    fn sidecar_modes_use_port_7777_and_machine_readable_output() {
+        assert_eq!(
+            SidecarMode::Verse.args(),
+            &["verse", "--port", "7777", "--no-open", "--json"]
+        );
+        assert_eq!(
+            SidecarMode::Serve.args(),
+            &["serve", "--port", "7777", "--allow-dispatch", "--json"]
+        );
+    }
+
+    #[test]
+    fn the_startup_theme_prefers_what_the_ui_last_reported() {
+        // Saved wins even when the OS disagrees — that is the white-flash case.
+        assert_eq!(
+            startup_theme(Some(ShellTheme::Dark), Some(tauri::Theme::Light)),
+            ShellTheme::Dark
+        );
+        assert_eq!(
+            startup_theme(Some(ShellTheme::Light), Some(tauri::Theme::Dark)),
+            ShellTheme::Light
+        );
+        // Nothing saved: follow the OS.
+        assert_eq!(startup_theme(None, Some(tauri::Theme::Light)), ShellTheme::Light);
+        assert_eq!(startup_theme(None, Some(tauri::Theme::Dark)), ShellTheme::Dark);
+        // Nothing at all: dark, because that is the design's primary look and a
+        // dark window behind a dark page is the invisible failure.
+        assert_eq!(startup_theme(None, None), ShellTheme::Dark);
+    }
+
+    #[test]
+    fn a_failure_without_diagnostics_does_not_get_a_window_full_of_empty_canvas() {
+        let port = LaunchPhase::Failed(LaunchFailure::PortInUse { port: SERVE_PORT }).payload(&[]);
+        assert!(port.detail.is_empty(), "the port probe produces no sidecar output");
+        let (_, short) = launch_window_size(&port);
+
+        let exited = LaunchPhase::Failed(LaunchFailure::SidecarExited { code: Some(1) })
+            .payload(&["EADDRINUSE".to_string(), "stack".to_string()]);
+        let (_, tall) = launch_window_size(&exited);
+
+        assert!(tall > short, "a failure with diagnostics needs more room, got {tall} vs {short}");
+
+        let (_, starting) = launch_window_size(&LaunchPhase::Starting.payload(&[]));
+        assert!(starting < short, "the starting state is the smallest window");
+    }
+
+    #[test]
+    fn window_background_uses_the_design_canvas_colours() {
+        assert_eq!(
+            tauri_color(ShellTheme::Dark),
+            tauri::window::Color(0x0b, 0x0b, 0x0d, 0xff)
+        );
+        assert_eq!(
+            tauri_color(ShellTheme::Light),
+            tauri::window::Color(0xfa, 0xfa, 0xfa, 0xff)
+        );
+    }
 }

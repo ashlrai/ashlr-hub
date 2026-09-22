@@ -2450,7 +2450,10 @@ async function runGoalInternal(
           const wtMod = await import('../sandbox/worktree.js');
           let titrrSandbox: Sandbox | null = null;
           try {
-            titrrSandbox = wtMod.createSandbox(cwd);
+            // Async creation so concurrent api-model agents QUEUE on the
+            // process-wide worktree fence instead of each freezing the event
+            // loop while they wait for it. This is the fleet's dispatch path.
+            titrrSandbox = await wtMod.createSandboxAsync(cwd);
           } catch {
             // handled below
           }

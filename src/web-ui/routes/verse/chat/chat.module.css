@@ -1,0 +1,644 @@
+/**
+ * routes/verse/chat/chat.module.css — the agentic parts of the transcript:
+ * diffs, command output, the per-turn file summary and the nav strip.
+ *
+ * Same language as the rest of Verse (DESIGN §1–2): hairlines and whitespace
+ * instead of cards, no shadows except on the one true overlay (the outline
+ * menu), colour only where it carries meaning, and every meaning also
+ * carried by a word or a glyph so nothing depends on the tint alone.
+ */
+
+/* ========================================================================== */
+/* Diff                                                                        */
+/* ========================================================================== */
+
+/*
+ * The add/delete tints are the diff's OWN, not the badge `--status-*-bg`
+ * tokens they used to borrow. Those are ~14% alpha and composite to
+ * near-isoluminant pairs over `--bg-code` — 1.01:1 apart in light, 1.05:1 in
+ * dark — so the only thing separating an addition from a deletion was a
+ * red/green hue difference, the exact pair that collapses under
+ * protanopia/deuteranopia.
+ *
+ * Mixing against `--bg-code` at 22% makes each row legible against the
+ * surrounding context (1.24:1 / 1.32:1 light, 1.45:1 / 1.32:1 dark, where
+ * before they were ~1.03:1 washes). It does NOT meaningfully separate the two
+ * from EACH OTHER: measured, they are 1.06:1 apart in light and 1.10:1 in
+ * dark. That is deliberate and it is the honest statement of the design —
+ * weighting deletions heavier than additions to buy luminance would say
+ * something about the change that is not true. The tint is a supporting cue;
+ * the CARRIER is the `+`/`−` glyph in `.diffMarker`, which is why that column
+ * is pinned to `--text-secondary` (body contrast on both tints) rather than
+ * left at tertiary. design/tokens-contrast.test.ts asserts exactly that pair,
+ * so the glyph cannot quietly recede back into the tint.
+ */
+.diff {
+  --diff-add: color-mix(in srgb, var(--status-success-solid) 22%, var(--bg-code));
+  --diff-del: color-mix(in srgb, var(--status-danger-solid) 22%, var(--bg-code));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-code);
+  overflow: hidden;
+}
+
+/* Screen-reader-only text (the rename's "renamed to", which the arrow shows
+   visually). Not display:none — it must stay in the accessibility tree. */
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+.diffMulti { min-width: 0; }
+
+.diffHead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.diffPath {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+/* A rename's OLD path. Recessive against the new one, which is the path the
+   operator will go on to open, but present — dropping it was what made a
+   rename read as "nothing happened". */
+.diffOldPath {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+.diffOldPath::after {
+  content: ' \2192';
+  color: var(--text-tertiary);
+}
+
+/* The word, because a rename/add/delete is not conveyed by the paths alone. */
+.diffStatus {
+  flex: 0 0 auto;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.diffStats {
+  flex: 0 0 auto;
+  display: flex;
+  gap: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+}
+.diffAdd { color: var(--status-success-fg); }
+.diffDel { color: var(--status-danger-fg); }
+
+.diffNotice {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-secondary);
+}
+.diffEmpty {
+  padding: var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+
+.diffTable {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+}
+.diffNo {
+  width: 42px;
+  min-width: 42px;
+  padding: 0 var(--space-2);
+  text-align: right;
+  vertical-align: top;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+  /* These are REAL line numbers the operator reads to locate a change in their
+     editor, not a disabled-control label. `--text-disabled` measures 2.33:1
+     light / 2.48:1 dark on `--bg-code` and is exempted from 4.5:1 only because
+     WCAG exempts disabled text — an exemption this usage cannot borrow.
+     `--text-tertiary` does not fix it either: it is 4.40:1 on light `--bg-code`
+     (its 4.83:1 figure is against `--bg-surface`, a lighter ground).
+     `--text-secondary` is the token already pinned above the floor on this
+     ground, and is still clearly recessive against `.diffText`'s
+     `--text-primary`. */
+  color: var(--text-secondary);
+}
+.diffMarker {
+  width: 14px;
+  min-width: 14px;
+  text-align: center;
+  vertical-align: top;
+  user-select: none;
+  /* The +/− is the non-colour channel for add vs delete, so it has to clear the
+     body floor on the tinted rows, not sit at tertiary. */
+  color: var(--text-secondary);
+}
+.diffText {
+  padding: 0 var(--space-2) 0 0;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.diffCode { font-family: inherit; }
+
+.diffRow_add { background: var(--diff-add); }
+.diffRow_del { background: var(--diff-del); }
+.diffRow_context { background: transparent; }
+
+.diffHunkRow > * {
+  padding-top: var(--space-1);
+  padding-bottom: var(--space-1);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+}
+.diffHunkRow:first-child > * { border-top: 0; }
+.diffHunkHead {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.diffMore,
+.commandMore,
+.activityMore {
+  display: block;
+  width: 100%;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-medium);
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.diffMore:hover,
+.commandMore:hover,
+.activityMore:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.diffUnanchored {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+}
+
+.tok_plain { color: var(--text-primary); }
+.tok_comment { color: var(--text-tertiary); font-style: italic; }
+.tok_string { color: var(--status-success-fg); }
+.tok_number { color: var(--status-warning-fg); }
+.tok_keyword { color: var(--accent-600); font-weight: var(--font-weight-medium); }
+
+/* ========================================================================== */
+/* Command output                                                              */
+/* ========================================================================== */
+
+.command {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-code);
+  overflow: hidden;
+}
+.command[data-failed='true'] { border-left: 2px solid var(--status-danger-solid); }
+
+.commandLine {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.commandPrompt {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+  user-select: none;
+}
+.commandText {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.commandStatus {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.commandStatusText {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.commandStatusText[data-tone='bad'] { color: var(--status-danger-fg); }
+.commandStatusText[data-tone='pending'] { color: var(--status-warning-fg); }
+.commandMeta {
+  font-size: var(--text-2xs-size, 11px);
+  color: var(--text-tertiary);
+}
+
+.commandPre {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  padding: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  white-space: pre;
+  color: var(--text-primary);
+  tab-size: 8;
+}
+.commandPending {
+  margin: 0;
+  padding: var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+
+/* ========================================================================== */
+/* File activity — the blast radius of one turn                                */
+/* ========================================================================== */
+
+.activity {
+  margin-top: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  overflow: hidden;
+}
+
+.activityHead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-height: var(--control-h-xs);
+  padding: var(--space-1) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-canvas);
+}
+.activityCount {
+  font-family: var(--font-display);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.activityLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.activityBreakdown {
+  margin-left: auto;
+  font-size: var(--text-2xs-size, 11px);
+  color: var(--text-tertiary);
+}
+
+.activityList { list-style: none; margin: 0; padding: 0; }
+
+.activityRow {
+  display: grid;
+  grid-template-columns: 2px 6ch minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--density-row-sm);
+  padding: 0 var(--space-3) 0 0;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.activityRow:hover { background: var(--bg-hover); }
+.activityRow:active { background: var(--bg-active); }
+
+/* The 2px rule repeats what .activityVerb says in words — never the only
+   carrier of the meaning (DESIGN §6). For `data-failed` that was NOT true:
+   the tint swapped from info to danger and nothing else changed, and those two
+   solids are 1.29:1 apart in light and 1.08:1 in dark, i.e. the same rule once
+   hue is removed. `.activityFailed` below is the word that carries it. */
+.activityRule { align-self: stretch; background: var(--border-default); }
+.activityRow[data-action='edit'] .activityRule { background: var(--status-info-solid); }
+.activityRow[data-action='create'] .activityRule { background: var(--status-success-solid); }
+.activityRow[data-action='delete'] .activityRule { background: var(--status-danger-solid); }
+.activityRow[data-failed='true'] .activityRule { background: var(--status-danger-solid); }
+
+.activityVerb {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+  padding-left: var(--space-3);
+  white-space: nowrap;
+}
+.activityRow[data-action='edit'] .activityVerb,
+.activityRow[data-action='create'] .activityVerb,
+.activityRow[data-action='delete'] .activityVerb { color: var(--text-secondary); }
+
+/* The visible failure marker: a glyph plus the word, in the danger FOREGROUND
+   token (which clears the text floor) rather than the solid used for fills. */
+.activityFailed {
+  flex: 0 0 auto;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  white-space: nowrap;
+  color: var(--status-danger-fg);
+}
+
+.activityPath {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+}
+.activityName { color: var(--text-primary); white-space: nowrap; }
+.activityDir {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size, 11px);
+}
+.activityTimes,
+.activityDelta {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.activityDelta { display: flex; gap: var(--space-2); }
+.activityAdd { color: var(--status-success-fg); }
+.activityDel { color: var(--status-danger-fg); }
+
+/* ========================================================================== */
+/* Nav strip + outline                                                         */
+/* ========================================================================== */
+
+.nav {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.navSpacer { flex: 1; }
+
+.navOutlineButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  background: transparent;
+  border: 0;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.navOutlineButton:hover { background: var(--bg-hover); color: var(--text-primary); }
+.navChevron { display: inline-flex; transition: transform var(--duration-fast) var(--ease-standard); }
+.navChevron[data-open='true'] { transform: rotate(90deg); }
+.navCount {
+  font-family: var(--font-display);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+.navWord {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+}
+
+.navSearch {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 1 26ch;
+  min-width: 12ch;
+  height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-input);
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+/* The wrapper is the visual control — the <input> inside it has no border,
+   no ground and no padding of its own — so the standard ring belongs on the
+   wrapper. It used to be a 1px border-colour change, which is not a focus
+   indicator under DESIGN-V2 §6 ("a visible :focus-visible ring, 2px accent,
+   2px offset"); the global ring meanwhile landed on the bare input, inset
+   inside the box the operator can actually see. Hoist one, suppress the
+   other, and keep the border tint as the second channel. */
+.navSearch:focus-within {
+  border-color: var(--accent-500);
+  box-shadow: var(--shadow-focus-ring);
+}
+.navSearchIcon { display: inline-flex; color: var(--text-tertiary); }
+.navSearch input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: none;
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+}
+.navSearch input::-webkit-search-cancel-button { display: none; }
+.navSearch input:focus-visible { outline: none; box-shadow: none; }
+
+.navMatches {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.navStep { display: inline-flex; gap: 2px; }
+.navStep button {
+  min-width: var(--control-h-xs);
+  min-height: var(--control-h-xs);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  line-height: 1;
+}
+.navStep button:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.navError {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-left: 2px solid var(--status-danger-solid);
+  border-radius: 0 var(--radius-xs) var(--radius-xs) 0;
+  background: transparent;
+  color: var(--status-danger-fg);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.navError:hover { background: var(--status-danger-bg); }
+.navErrorGlyph {
+  font-family: var(--font-display);
+  font-weight: var(--font-weight-semibold);
+}
+
+.outline {
+  position: absolute;
+  top: calc(100% + 2px);
+  left: var(--space-2);
+  right: var(--space-2);
+  max-width: var(--measure-read);
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+  padding: var(--space-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-menu, var(--shadow-md));
+}
+.outlineEmpty {
+  padding: var(--space-3);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+.outlineList { list-style: none; margin: 0; padding: 0; }
+.outlineRow {
+  display: grid;
+  grid-template-columns: 3ch minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+.outlineRow:hover { background: var(--bg-hover); }
+.outlineIndex {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  padding-top: 2px;
+}
+.outlineBody { display: grid; gap: 2px; min-width: 0; }
+.outlineTitle {
+  font-size: var(--text-xs-size);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.outlineSnippet {
+  font-family: var(--font-mono);
+  /* A quotation from the transcript — content the operator reads to pick a
+     turn, not a label. Body floor, per tokens.css. */
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.outlineMeta {
+  font-size: var(--text-2xs-size, 11px);
+  color: var(--text-tertiary);
+}
+.outlineStatus {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-tertiary);
+}
+.outlineRow[data-status='error'] .outlineStatus { color: var(--status-danger-fg); }
+.outlineRow[data-status='running'] .outlineStatus { color: var(--status-running-fg); }
+
+@media (max-width: 900px) {
+  .navSearch { flex-basis: 14ch; }
+  .activityRow { grid-template-columns: 2px 6ch minmax(0, 1fr) auto auto; }
+  .activityDir { display: none; }
+}

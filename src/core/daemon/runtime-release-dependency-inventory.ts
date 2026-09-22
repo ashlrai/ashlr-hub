@@ -497,6 +497,8 @@ function rootPackageIsPortable(
     'docs/ELITE-AGENT-EFFICIENCY.md',
     'docs/MISSION-OS.md',
     'docs/ASHLR-UNIVERSE.md',
+    'docs/AUTONOMY-GAP.md',
+    'docs/FIRM-DEMO.md',
     'docs/UNIVERSE-RESEARCH.md',
     'docs/UNIVERSE-AUTONOMY-RESEARCH.md',
     'docs/NORTH-STAR.md',
@@ -509,6 +511,13 @@ function rootPackageIsPortable(
     'schema',
     'scripts/run-verify-command.mjs',
     'scripts/scorecard-history-worker.mjs',
+    // Fixed host imports for builtin custody; never admit the scripts directory
+    // or candidate/controller entrypoints through a wildcard declaration.
+    'scripts/evaluators/preparation-verification-activity.mjs',
+    'scripts/evaluators/preparation-verification-activity.d.mts',
+    'scripts/evaluators/preparation-verification-protocol.mjs',
+    'scripts/evaluators/preparation-verification-native.mjs',
+    'scripts/evaluators/preparation-verification-native.d.mts',
   ]);
   const requiredFiles = [
     'bin',

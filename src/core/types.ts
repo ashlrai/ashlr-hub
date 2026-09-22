@@ -446,6 +446,10 @@ export interface DelegationScopeSummary {
 
 /** Persisted configuration for the hub. Lives at ~/.ashlr/config.json. */
 export interface AshlrConfig {
+  /** Optional agent graph inspection root. Explicit existing canonical private directory;
+   * absent disables firm MCP resources. Reading never enrolls, executes, or creates keys.
+   */
+  firm?: { graphRoot: string };
   /** Schema/config version for forward migration. */
   version: number;
   /** Absolute roots to scan (typically the Desktop and github/). */
@@ -613,6 +617,24 @@ export interface AshlrConfig {
     /** Backends the fleet may use. Absent ⇒ ['builtin'] only. */
     allowedBackends?: EngineId[];
     /**
+     * LOCAL-ONLY: make cloud engines UNREACHABLE, not merely deprioritised.
+     *
+     * This is a refusal, not a preference. While it is true, every dispatch
+     * path (`getActiveClient`, `buildOpenAICompatibleClient`, `spawnEngine`,
+     * and both sandboxed runners) refuses any engine whose RESOLVED ENDPOINT
+     * is not loopback, with a named reason — so an accidental frontier
+     * dispatch cannot spend money the operator has deliberately forgone.
+     *
+     * Locality is decided by endpoint, not by tier: `local-coder` and `nim`
+     * are both tier 'mid', but one is free and one bills NVIDIA. An engine
+     * whose locality cannot be determined is treated as CLOUD.
+     *
+     * Also honoured at `cfg.models.localOnly`, and forced on for the process
+     * by `ASHLR_LOCAL_ONLY`. See src/core/policy/local-only.ts and
+     * docs/LOCAL-FLEET.md ("What 'local only' has to mean").
+     */
+    localOnly?: boolean;
+    /**
      * M308: executable autonomy control loop. When Foundry is configured, each
      * daemon tick consumes the resource-aware direction report before dispatching:
      * pause/verify-only modes skip new proposal generation, local-only constrains
@@ -749,6 +771,19 @@ export interface AshlrConfig {
      * Absent ⇒ unlimited. Used by the fleet scheduler (M46/M48).
      */
     limits?: Partial<Record<EngineId, { window: string; max: number }>>;
+    /**
+     * M80: subscription-window throttle. A subscription-billed engine is
+     * skipped for the rest of its window once a KNOWN window reading reaches
+     * this percentage. Unknown usage (e.g. Claude, which has no local signal)
+     * is never throttled by it.
+     *
+     * Valid range 1–100; absent ⇒ 90. Read ONLY through
+     * `resolveSubscriptionMaxPercent()` in `core/config.ts` — that helper owns
+     * the clamp so the daemon loop, the fleet router, and the fabric gateway
+     * cannot drift apart. Before V2 this key was read through an untyped cast
+     * in five places; this declaration is its typed home.
+     */
+    subscriptionMaxPercent?: number;
     /**
      * M50 (v5): declarative engine roster. Each entry overrides a builtin
      * engine spec or adds a new backend (cli-agent or OpenAI-compatible

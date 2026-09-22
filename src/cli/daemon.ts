@@ -24,6 +24,10 @@
  * status); all proposal creation happens inside the sandboxed swarm.
  */
 
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { dirname, join, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { makeColors } from './ui.js';
 import { DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT } from '../core/types.js';
 import type { AshlrConfig, DaemonConfig, DaemonDrainMode, DaemonState } from '../core/types.js';
@@ -32,9 +36,93 @@ import { serviceActivity } from '../core/daemon/service-activity.js';
 import { assertResidentServiceInstallAuthorized } from '../core/daemon/service-install-authority.js';
 import type { PolicyMutationResult } from '../core/sandbox/policy.js';
 
+// ---------------------------------------------------------------------------
+// Detached `ashlr daemon start` launcher (shared with the Verse control plane)
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of {@link spawnDetachedDaemonStart}. Carries a pid and a reason
+ * code ONLY — never the argv, the resolved launcher path, or any env value.
+ */
+export interface DetachedDaemonSpawnResult {
+  ok: boolean;
+  /** The detached child's pid when the spawn succeeded. */
+  pid: number | null;
+  /**
+   * Machine-readable outcome: 'spawned' | 'launcher-missing' | 'spawn-failed'
+   * | 'reentrancy-refused'.
+   */
+  reason: string;
+}
+
+/** Absolute path to this build's `bin/ashlr` (works from src/ and dist/). */
+function resolveAshlrBinPath(): string {
+  // This file lives at <root>/src/cli/daemon.ts or <root>/dist/cli/daemon.js;
+  // bin/ashlr is always at <root>/bin/ashlr. Mirrors service.ts's resolver.
+  const here = dirname(fileURLToPath(import.meta.url));
+  return join(resolvePath(here, '..', '..'), 'bin', 'ashlr');
+}
+
+/**
+ * Launch `ashlr daemon start [--once]` as a DETACHED child and return its pid.
+ *
+ * This is the one place that knows how to start the autonomous loop out of
+ * process, so the Verse control plane's `POST /api/verse/daemon` reuses the
+ * exact CLI entry point instead of reimplementing the tick. The child is its
+ * own process-group leader with `stdio: 'ignore'` and is unref'd, so the
+ * caller (a long-lived web server) neither blocks on it nor keeps it alive.
+ *
+ * ENV: the child gets the SAME minimal environment the installed launchd /
+ * systemd service gives the daemon in production — HOME and PATH (plus TMPDIR
+ * / LANG / LC_ALL when set). The parent's environment is NOT forwarded
+ * wholesale: a web server's env can hold this server's own tokens, and the
+ * daemon has no business reading them.
+ *
+ * Never throws.
+ */
+export function spawnDetachedDaemonStart(
+  opts: { once?: boolean } = {},
+): DetachedDaemonSpawnResult {
+  // No daemon-inside-daemon / daemon-inside-swarm. cmdDaemonStart and runDaemon
+  // both refuse this too; refusing here keeps the child from ever being born.
+  if (process.env['ASHLR_IN_DAEMON'] || process.env['ASHLR_IN_SWARM']) {
+    return { ok: false, pid: null, reason: 'reentrancy-refused' };
+  }
+
+  const binPath = resolveAshlrBinPath();
+  if (!existsSync(binPath)) {
+    return { ok: false, pid: null, reason: 'launcher-missing' };
+  }
+
+  const env: Record<string, string> = {};
+  for (const key of ['HOME', 'PATH', 'TMPDIR', 'LANG', 'LC_ALL'] as const) {
+    const value = process.env[key];
+    if (typeof value === 'string' && value.length > 0) env[key] = value;
+  }
+
+  const args = ['daemon', 'start', ...(opts.once === true ? ['--once'] : [])];
+
+  try {
+    const child = spawn(process.execPath, [binPath, ...args], {
+      detached: true,
+      stdio: 'ignore',
+      env,
+    });
+    child.unref();
+    const pid = typeof child.pid === 'number' ? child.pid : null;
+    return pid === null
+      ? { ok: false, pid: null, reason: 'spawn-failed' }
+      : { ok: true, pid, reason: 'spawned' };
+  } catch {
+    return { ok: false, pid: null, reason: 'spawn-failed' };
+  }
+}
+
 type DaemonSubcommand =
   | 'start'
   | 'stop'
+  | 'pause'
+  | 'resume'
   | 'status'
   | 'activation-preflight'
   | 'activate'
@@ -47,6 +135,8 @@ type DaemonSubcommand =
 const DAEMON_SUBCOMMANDS = new Set<DaemonSubcommand>([
   'start',
   'stop',
+  'pause',
+  'resume',
   'status',
   'activation-preflight',
   'activate',
@@ -73,6 +163,8 @@ const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
   start:
     'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--limit <n>] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
   stop: 'Usage: ashlr daemon stop',
+  pause: 'Usage: ashlr daemon pause',
+  resume: 'Usage: ashlr daemon resume',
   status: 'Usage: ashlr daemon status [--json]',
   'activation-preflight':
     'Usage: ashlr daemon activation-preflight --request <absolute-canonical-plan-path> [--json]',
@@ -93,7 +185,9 @@ const DAEMON_TOP_LEVEL_USAGE = `Usage: ashlr daemon [subcommand] [flags]
 
 Subcommands:
   start           Run the proposal-only daemon
-  stop            Request an orderly daemon shutdown
+  pause           Halt autonomous dispatch only (your own write tools keep working)
+  resume          Lift the pause
+  stop            Request an orderly daemon shutdown (WIDE: sets the global kill switch)
   status          Show daemon state [--json]
   activation-preflight  Verify operator-custodied signed release and rollback evidence (read-only)
   activate        Permit-gated 3.2.7 selection while preserving the exact stopped service state
@@ -662,7 +756,56 @@ async function cmdDaemonStop(): Promise<number> {
       col.dim(' — kill switch set; resident state clears after current work settles.'),
   );
   console.log(col.dim('  The resident loop aborts current work and clears state after it settles.'));
+  console.log(col.dim('  This ALSO refuses the agent\'s own write tools until the switch is cleared.'));
+  console.log(col.dim('  Want only the loop halted? `ashlr daemon pause` — narrower and reversible.'));
   console.log(col.dim('  Re-enable with `ashlr sandbox kill --off` before starting again.'));
+  console.log('');
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommands: pause / resume (DAEMON-SCOPED — not the global kill switch)
+// ---------------------------------------------------------------------------
+
+/**
+ * `ashlr daemon pause` / `ashlr daemon resume` — CLI parity with
+ * `POST /api/verse/daemon {action:'pause'|'resume'}`.
+ *
+ * Writes `~/.ashlr/daemon.paused` (core/daemon/pause.ts), NOT `~/.ashlr/KILL`.
+ * A resident loop parks and keeps its lock; nothing else in the system reads
+ * this sentinel, so the operator's own editing tools stay usable.
+ */
+async function cmdDaemonPause(on: boolean): Promise<number> {
+  const tty = process.stdout.isTTY === true;
+  const col = makeColors(tty);
+
+  const { pauseDaemon, resumeDaemon } = await import('../core/daemon/pause.js');
+  const result = on ? pauseDaemon('cli') : resumeDaemon('cli');
+
+  if (!result.ok) {
+    console.error(
+      col.red('error: ') +
+      `daemon ${on ? 'pause' : 'resume'} failed (${result.reason}); dispatch is treated as PAUSED until the sentinel reads cleanly.`,
+    );
+    return 1;
+  }
+
+  console.log('');
+  if (on) {
+    console.log(
+      col.green('  ✓ autonomous dispatch paused') +
+        col.dim(result.changed ? '' : ' (already paused)'),
+    );
+    console.log(col.dim('  The loop parks between ticks; nothing in flight is rolled back.'));
+    console.log(col.dim('  Your own write tools are UNAFFECTED — the global kill switch is untouched.'));
+    console.log(col.dim('  Lift it with `ashlr daemon resume`.'));
+  } else {
+    console.log(
+      col.green('  ✓ autonomous dispatch resumed') +
+        col.dim(result.changed ? '' : ' (was not paused)'),
+    );
+    console.log(col.dim('  A resident loop picks up on its next cycle; a stopped one needs `ashlr daemon start`.'));
+  }
   console.log('');
   return 0;
 }
@@ -1342,6 +1485,10 @@ export async function cmdDaemon(args: string[]): Promise<number> {
       return cmdDaemonStart(startFlags!);
     case 'stop':
       return cmdDaemonStop();
+    case 'pause':
+      return cmdDaemonPause(true);
+    case 'resume':
+      return cmdDaemonPause(false);
     case 'status':
       return cmdDaemonStatus(rest.includes('--json'));
     case 'activation-preflight':

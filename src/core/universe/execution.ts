@@ -3,6 +3,9 @@ import { acquireLocalStoreLockWithOutcome, ownsLocalStoreLock, releaseLocalStore
   type LocalStoreLock } from '../fleet/local-store-lock.js';
 import { defaultUniverseRoot, inspectPrivateDirectory } from './artifacts.js';
 import { universePath } from './store.js';
+import { assertCampaignSeedEvaluatorsSettled } from './campaign-store.js';
+import { assertPreparationMeasurementsSettled } from './preparation-measurement-capture-store.js';
+import { assertBuiltinTrialEvaluatorsSettled } from './builtin-trial-custody.js';
 import type { UniverseStoreOptions } from './types.js';
 
 /** Acquire experiment ownership; distinguish verified live contention from unavailable ownership. */
@@ -10,8 +13,14 @@ export function acquireUniverseExecution(id: string, options: UniverseStoreOptio
   const root = inspectPrivateDirectory(resolve(options.root ?? defaultUniverseRoot()));
   inspectPrivateDirectory(join(root, 'universes'));
   const directory = inspectPrivateDirectory(universePath(root, id));
-  return acquireLocalStoreLockWithOutcome(join(directory, '.execution.lock'), 0,
+  const outcome = acquireLocalStoreLockWithOutcome(join(directory, '.execution.lock'), 0,
     { anchorPath: directory, exactPrivateStorage: true });
+  if (outcome.state === 'acquired') {
+    try { assertCampaignSeedEvaluatorsSettled(id, { root }); assertPreparationMeasurementsSettled(directory);
+      assertBuiltinTrialEvaluatorsSettled(directory); }
+    catch (error) { releaseLocalStoreLock(outcome.lock); throw error; }
+  }
+  return outcome;
 }
 
 /** One owner spans an entire campaign, including the gaps between generations. */

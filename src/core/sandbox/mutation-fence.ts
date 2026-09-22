@@ -166,6 +166,40 @@ export function acquireOutwardMutationFence(waitMs = 2_000): OutwardMutationFenc
   }
 }
 
+/**
+ * Acquire the fence WITHOUT blocking the event loop.
+ *
+ * `acquireOutwardMutationFence` spins on `Atomics.wait`, which is a
+ * SYNCHRONOUS sleep: for its whole `waitMs` nothing else in the process runs —
+ * no timer, no I/O callback, no abort handler, no HTTP route. That is
+ * tolerable at the 2s default and catastrophic at anything longer on a daemon,
+ * where the same loop also owns the hang watchdog (a `setTimeout`), the queue
+ * lease renewer (a `setInterval`, whose missed fence lets another machine
+ * steal the claim), the shutdown signal handler and the operator's own control
+ * plane. Worse, the contending holder is usually IN THIS PROCESS and holds the
+ * fence across awaits, so a synchronous waiter can never win: it burns the
+ * entire wait with the loop frozen and then fails anyway.
+ *
+ * This variant makes each attempt as short as the lock allows and yields
+ * between attempts, so everything else keeps running while a turn waits.
+ */
+export async function acquireOutwardMutationFenceAsync(
+  waitMs = 2_000,
+  opts?: { pollMs?: number; signal?: AbortSignal },
+): Promise<OutwardMutationFence | null> {
+  const pollMs = Math.max(1, Math.min(250, opts?.pollMs ?? 25));
+  const deadline = Date.now() + Math.max(0, waitMs);
+  for (;;) {
+    if (opts?.signal?.aborted === true) return null;
+    // A 1ms per-attempt bound keeps each synchronous spin to a single sleep
+    // tick; the waiting happens in the timer below, off the critical path.
+    const fence = acquireOutwardMutationFence(1);
+    if (fence !== null) return fence;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => { setTimeout(resolve, pollMs); });
+  }
+}
+
 export function ownsOutwardMutationFence(
   fence: OutwardMutationFence | null | undefined,
 ): boolean {

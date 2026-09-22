@@ -35,6 +35,8 @@ import { generatedRepairCandidateAllowed, routeBackend } from '../fleet/router.j
 import { isTrustedDiagnosticResliceItem } from '../fleet/self-heal-trust.js';
 import { withinLimit } from '../fleet/quota.js';
 import { subscriptionAllows, isSubscriptionEngine } from '../fleet/subscription-usage.js';
+// V2: ONE clamp for foundry.subscriptionMaxPercent (see core/config.ts).
+import { resolveSubscriptionMaxPercent } from '../config.js';
 import { recommendRoute, recoverWithinBudget } from '../run/learned-router.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import { getResourceSnapshot, type BackendResourceState, type ResourceSnapshot } from './resource-monitor.js';
@@ -214,13 +216,10 @@ export async function decide(
 
     // Step 3: Subscription throttle — skip when subscription window is at cap.
     if (isSubscriptionEngine(current.backend)) {
-      const rawPct = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
-      const maxPct: number =
-        typeof ctx.subscriptionMaxPercent === 'number'
-          ? Math.min(100, Math.max(1, ctx.subscriptionMaxPercent))
-          : typeof rawPct === 'number'
-            ? Math.min(100, Math.max(1, rawPct))
-            : 90;
+      // The per-call ctx override wins; otherwise fall back to config.
+      const maxPct: number = typeof ctx.subscriptionMaxPercent === 'number'
+        ? resolveSubscriptionMaxPercent(ctx.subscriptionMaxPercent, resolveSubscriptionMaxPercent(cfg))
+        : resolveSubscriptionMaxPercent(cfg);
       const subCheck = subscriptionAllows(current.backend, { maxPercent: maxPct });
       if (!subCheck.allowed) {
         // Return a 'throttled' decision — caller handles the skip.
@@ -324,13 +323,10 @@ export async function decide(
     }
 
     if (isSubscriptionEngine(current.backend)) {
-      const rawPct = (cfg.foundry as Record<string, unknown> | undefined)?.['subscriptionMaxPercent'];
-      const maxPct: number =
-        typeof ctx.subscriptionMaxPercent === 'number'
-          ? Math.min(100, Math.max(1, ctx.subscriptionMaxPercent))
-          : typeof rawPct === 'number'
-            ? Math.min(100, Math.max(1, rawPct))
-            : 90;
+      // The per-call ctx override wins; otherwise fall back to config.
+      const maxPct: number = typeof ctx.subscriptionMaxPercent === 'number'
+        ? resolveSubscriptionMaxPercent(ctx.subscriptionMaxPercent, resolveSubscriptionMaxPercent(cfg))
+        : resolveSubscriptionMaxPercent(cfg);
       const subCheck = subscriptionAllows(current.backend, { maxPercent: maxPct });
       if (!subCheck.allowed) {
         const reason = `throttled: subscription window — ${subCheck.reason}`;

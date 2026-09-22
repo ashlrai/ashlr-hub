@@ -780,6 +780,63 @@ describe('release artifact contract v1', () => {
     expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toMatchObject({ ok: true });
   });
 
+  it('admits only the explicit builtin custody helpers in the actual npm file report', () => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    const helpers = [
+      'scripts/evaluators/preparation-verification-activity.mjs',
+      'scripts/evaluators/preparation-verification-activity.d.mts',
+      'scripts/evaluators/preparation-verification-protocol.mjs',
+      'scripts/evaluators/preparation-verification-native.mjs',
+      'scripts/evaluators/preparation-verification-native.d.mts',
+    ];
+    for (const file of helpers) write(join(release.packageRoot, file), 'export {};\n');
+    write(join(release.packageRoot, 'scripts/evaluators/private-helper.mjs'), 'export const privateOnly = true;\n');
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...packageJson.files as string[], ...helpers] })}\n`);
+    const packed = runNpm(['pack', '--dry-run', '--ignore-scripts', '--json'], release.packageRoot);
+    expect(packed.status, packed.stderr).toBe(0);
+    const report = JSON.parse(packed.stdout) as Array<{ files: RuntimeReleasePackFileRecord[] }>;
+    const paths = report[0]!.files.map(file => file.path);
+    expect(paths.filter(path => path.startsWith('scripts/evaluators/')).sort()).toEqual([...helpers].sort());
+    const rebuilt = buildRuntimeReleaseDependencyInventory(release.packageRoot, { packagedFiles: report[0]!.files });
+    expect(rebuilt.ok).toBe(true);
+    if (!rebuilt.ok) return;
+    expect(rebuilt.inventory.schemaVersion).toBe(parsedInventory(release).schemaVersion);
+    expect(rebuilt.inventory.package.manifestSha256).not.toBe(parsedInventory(release).package.manifestSha256);
+  });
+
+  it.each([
+    'scripts',
+    'scripts/evaluators',
+    'scripts/evaluators/**',
+    'scripts/evaluators/preparation-verification-*.mjs',
+    'scripts/evaluators/../run-verify-command.mjs',
+    'scripts/evaluators/preparation-verification-controller.mjs',
+    'scripts/evaluators/preparation-verification-tool.mjs',
+    'scripts/evaluators/private-helper.mjs',
+  ])('keeps builtin custody helper declarations closed against %s', declaration => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...packageJson.files as string[], declaration] })}\n`);
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toEqual({
+      ok: false, reason: 'release package files declaration is not portable',
+    });
+  });
+
+  it.each(['scripts/evaluators/preparation-verification-activity.mjs',
+    'scripts/evaluators/preparation-verification-native.mjs', 'scripts/evaluators/preparation-verification-native.d.mts'])(
+    'refuses duplicate explicit builtin helper declaration %s', helper => {
+    const release = fixture();
+    const packagePath = join(release.packageRoot, 'package.json');
+    const packageJson = JSON.parse(readFileSync(packagePath, 'utf8')) as Record<string, unknown>;
+    writeFileSync(packagePath, `${JSON.stringify({ ...packageJson, files: [...packageJson.files as string[], helper, helper] })}\n`);
+    expect(buildRuntimeReleaseDependencyInventory(release.packageRoot)).toEqual({
+      ok: false, reason: 'release package files declaration is not portable',
+    });
+  });
+
   it.each(['README.md', 'QUICKSTART.md', 'ARCHITECTURE.md', 'ASHLR-UNIVERSE.md', 'UNIVERSE-RESEARCH.md', 'UNIVERSE-AUTONOMY-RESEARCH.md', 'NORTH-STAR.md', 'RESOURCE-POOLS.md'])(
     'admits shipped documentation %s without opening arbitrary package paths',
     (documentName) => {

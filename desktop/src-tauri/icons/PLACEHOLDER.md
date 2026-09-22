@@ -25,6 +25,10 @@ it automatically for dark mode.
 
 ## Current state
 
-No real icons are present yet.  The build will fail on missing icon files until
-you place them here.  A quick workaround for dev is to copy any 32×32 PNG to each
-required filename.
+Generated from `icon.svg` with `npm run icons` (= `cargo tauri icon src-tauri/icons/icon.svg`,
+run from `desktop/`) or `./generate-icons.sh` from this directory. The five files referenced by
+`tauri.conf.json` (`32x32.png`, `128x128.png`, `128x128@2x.png`, `icon.icns`, `icon.ico`) are
+checked in; regenerate them whenever `icon.svg` changes. The generator also emits Windows Store
+`Square*Logo.png` / `StoreLogo.png` sizes plus `ios/` and `android/` sets; only the five files
+above are referenced by the bundle config. `tray-icon.png` is optional: the tray reuses
+`32x32.png` via `app.trayIcon.iconPath`.

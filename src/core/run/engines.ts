@@ -30,9 +30,23 @@ import {
   formatPreMutateBlockers,
 } from '../integrations/locus.js';
 import { resolveEngineSpec, compileArgv } from './engine-registry.js';
+// The local serving runtime owns "which llama-server, and what is it serving".
+// Resolving that here too would give dispatch and supervision two independent
+// answers to the same question — the exact failure docs/LOCAL-FLEET.md warns
+// about for slot counts, applied to the endpoint instead.
+import {
+  resolveLlamaServerBaseUrl,
+  resolveLlamaServerDefaultModel,
+} from '../local-runtime/llama/config.js';
 import { attachStallMonitor } from './run-monitor.js';
 import type { TerminationReason } from './run-monitor.js';
 import { recordClaudeRateLimitEventLine } from '../fabric/claude-rate-limit-event.js';
+// LOCAL-ONLY last-resort gate. spawnEngine is the ONE funnel every CLI-agent
+// subprocess in the hub passes through — orchestrator, fleet manager, director,
+// strategist, goal-loop and sandboxed-engine all land here — so gating it is
+// what makes "no cloud spend is possible" true rather than true-for-the-paths-
+// we-remembered. See src/core/policy/local-only.ts.
+import { binPermitted } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // RunEvent — normalised event emitted by a streaming engine subprocess
@@ -133,39 +147,25 @@ export function phantomInitializedAt(cwd: string): boolean {
 /**
  * Resolve the llama.cpp llama-server base URL.
  *
- * Priority order (loose cfg read — no types.ts edit):
- *   1. cfg.models.llamaServer?.baseUrl  (operator config override)
- *   2. LLAMA_SERVER_BASE_URL env var
- *   3. http://localhost:8080/v1          (llama-server OpenAI-compat default)
+ * Delegates to the local serving runtime's own resolver
+ * (src/core/local-runtime/llama/config.ts), which is the single source of
+ * truth for where the fleet dispatches. Kept exported under this name because
+ * it is the established seam callers already import.
  *
- * Recommended launch command for Apple Silicon (EAGLE-3 speculative decoding,
- * continuous batching, prefix-cache, 4 parallel slots):
+ * Priority order:
+ *   1. cfg.models.llamaServer.baseUrl   (operator config override)
+ *   2. LLAMA_SERVER_BASE_URL            (per-process override)
+ *   3. the supervised runtime's ownership record, when it names a port or host
+ *      the default would not reach
+ *   4. http://localhost:8080/v1         (llama-server's own default)
  *
- *   llama-server \
- *     -m <qwen3-coder-next-q4.gguf> \
- *     -np 4 \
- *     -cb \
- *     --cache-prompt \
- *     --slot-prompt-similarity 0.1 \
- *     --spec-type draft-eagle3 \
- *     --model-draft <small-draft.gguf>
- *
- * This gives ~1.5–2.5x throughput over single-slot Ollama at zero quality cost
- * on Apple Silicon. qwen3-coder-next (80B-A3B, q4, ~52 GB) fits a 128 GB Mac.
- * Default draft model: any sub-4B GGUF (e.g. qwen2.5-coder-1.5b-instruct-q8).
+ * The runtime itself is started, supervised and inspected with
+ * `ashlr local-runtime start|status|stop` — see docs/LOCAL-FLEET.md for why it
+ * exists (Ollama refuses parallel requests for this architecture; llama-server
+ * serves four agents concurrently off one 27 GB copy of the weights).
  */
 export function buildLlamaServerBaseUrl(cfg?: AshlrConfig): string {
-  const cfgModels = (cfg as unknown as Record<string, unknown>)?.['models'] as
-    | Record<string, unknown>
-    | undefined;
-  const cfgLlamaServer = cfgModels?.['llamaServer'] as
-    | { baseUrl?: string }
-    | undefined;
-  return (
-    cfgLlamaServer?.baseUrl?.trim() ||
-    process.env['LLAMA_SERVER_BASE_URL']?.trim() ||
-    'http://localhost:8080/v1'
-  );
+  return resolveLlamaServerBaseUrl(cfg);
 }
 
 /**
@@ -174,7 +174,13 @@ export function buildLlamaServerBaseUrl(cfg?: AshlrConfig): string {
  * llama-server speaks the same OpenAI-compatible /v1/chat/completions protocol
  * as Ollama — so it reuses the runApiModelSandboxed path in sandboxed-engine.ts
  * unchanged. No envKey (local, no API key needed); probe via GET /v1/models like
- * Ollama. Not registered in engine-registry.ts (file-ownership bounds for M144).
+ * Ollama.
+ *
+ * It IS registered in engine-registry.ts now, so dispatch resolves it like any
+ * other api-model. This inline spec survives as the probe path's fallback: it
+ * keeps `engineInstalled('llama-server')` answering correctly even if the
+ * registry entry is removed or overridden by a malformed cfg.foundry.engines
+ * entry, and both spellings resolve the same base URL and the same model.
  */
 function buildLlamaServerSpec(cfg?: AshlrConfig): {
   id: string; kind: 'api-model'; tier: 'mid';
@@ -189,7 +195,7 @@ function buildLlamaServerSpec(cfg?: AshlrConfig): {
       envKey: '',
       baseUrlEnv: 'LLAMA_SERVER_BASE_URL',
       defaultBaseUrl: buildLlamaServerBaseUrl(cfg),
-      defaultModel: 'qwen3-coder-next',
+      defaultModel: resolveLlamaServerDefaultModel(cfg),
       protocol: 'openai',
     },
     capabilities: ['agent', 'edit', 'tools'],
@@ -442,6 +448,19 @@ export async function spawnEngine(
   // CONTRACT: spawnEngine NEVER throws. Any failure is reported as { ok:false, error }.
   try {
     if (opts?.signal?.aborted) return cancelledEngineResult();
+    // LOCAL-ONLY: refuse a cloud agent binary before the subprocess exists.
+    // Reported through the normal never-throws contract so callers that do not
+    // know about the mode still surface a named reason instead of a mystery.
+    // No-op when the mode is off; no-op for binaries no engine claims.
+    const localOnly = binPermitted(cmd.bin, cfg);
+    if (!localOnly.permitted) {
+      return {
+        ok: false,
+        output: '',
+        error: localOnly.reason ?? 'local-only: refused',
+        terminationReason: 'error-exit',
+      };
+    }
     if (opts?.signal && (opts._platform ?? process.platform) === 'win32') {
       return {
         ok: false,

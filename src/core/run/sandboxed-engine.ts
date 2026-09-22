@@ -21,6 +21,21 @@
  *
  * ENTIRELY GATED: only reached when cfg.foundry opts in (or opts.sandboxEngine).
  * Default builtin-only behavior is unaffected.
+ *
+ * LOCAL-ONLY (policy/local-only.ts):
+ *  Both dispatch entry points refuse a cloud engine BEFORE any side effect —
+ *  before the worktree is created, before the mutation fence is taken, before a
+ *  subprocess is spawned or a request is opened. The refusal is reported as a
+ *  RunProposalOutcome whose reason names the engine, the mode, and the remedy,
+ *  exactly like the kill-switch refusal it sits beside, so a refused run is a
+ *  legible failed run rather than a silently absent one:
+ *
+ *    runEngineSandboxed()    — external CLI agents (claude, codex, …)
+ *    runApiModelSandboxed()  — in-process OpenAI-compatible api-models (nim, kimi, grok, …)
+ *
+ *  This is the fleet-level gate. `provider-client.ts` holds the transport-level
+ *  one; both consult the same predicate, and the api-model path passes `cfg`
+ *  down to it so a PERSISTED local-only is honoured exactly there too.
  */
 
 import { randomUUID } from 'node:crypto';
@@ -72,11 +87,8 @@ import {
 } from '../integrations/locus.js';
 import { iterateToGreen } from './verify-to-green.js';
 import type { TerminationReason } from './run-monitor.js';
-import {
-  classifyAgentDiagnosticError,
-  measureAgentDiagnosticText,
-  recordAgentDiagnostic,
-} from './agent-diagnostics.js';
+import { measureAgentDiagnosticText, recordAgentDiagnostic } from './agent-diagnostics.js';
+import { classifyEngineError, toAgentDiagnosticErrorClass } from '../classify/engine-errors.js';
 import { resolveEngineSpec } from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
 import { runTask, type ReserveModelStep } from './agent-loop.js';
@@ -89,8 +101,12 @@ import {
 import { buildSandboxLauncher, confinementProfileFor } from '../sandbox/confine.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
 import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
+// LOCAL-ONLY: the ONE predicate. No parallel mechanism lives in this file.
+import { enginePermitted } from '../policy/local-only.js';
+import { markLocalFleetAgentRunning } from '../daemon/local-fleet.js';
 import {
   acquireOutwardMutationFence,
+  acquireOutwardMutationFenceAsync,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
@@ -1486,6 +1502,33 @@ export async function runEngineSandboxed(
     };
   }
 
+  // LOCAL-ONLY: refuse a cloud CLI agent before ANY side effect — no worktree,
+  // no mutation fence, no subprocess. 'engine-unsupported' is the outcome kind:
+  // under this mode the engine genuinely is unsupported, and the reason carries
+  // the engine name, the mode source, and what to do about it.
+  {
+    const verdict = enginePermitted(engine, cfg);
+    if (!verdict.permitted) {
+      const outcome = proposalOutcome('engine-unsupported', verdict.reason ?? 'local-only: refused');
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        outcome,
+        status: 'failed',
+        actionCounts,
+      });
+      return {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+        proposalOutcome: outcome,
+      };
+    }
+  }
+
   const wt = await import('../sandbox/worktree.js');
 
   // Acquire a worktree (reuse the caller's when provided).
@@ -1496,8 +1539,14 @@ export async function runEngineSandboxed(
     setRunActionCount(actionCounts, 'sandboxCreated', 0);
   } else {
     try {
-      sb = wt.createSandbox(opts.sourceRepo, {
+      // ASYNC creation: the fence guarding `git worktree add` is process-wide,
+      // so concurrent agents necessarily queue on it. Waiting for it
+      // synchronously froze the whole event loop — watchdog, lease renewer,
+      // shutdown handler, control plane — for the entire wait, and then failed
+      // anyway. This queues off the loop instead.
+      sb = await wt.createSandboxAsync(opts.sourceRepo, {
         allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
+        ...(opts.signal ? { signal: opts.signal } : {}),
       });
       createdHere = true;
       setRunActionCount(actionCounts, 'sandboxCreated', 1);
@@ -1784,7 +1833,21 @@ export async function runEngineSandboxed(
         engine,
         ok: res.ok,
         ...(res.terminationReason ? { terminationReason: res.terminationReason } : {}),
-        errorClass: classifyAgentDiagnosticError(res.error),
+        // Unified classification, collapsed back onto the existing
+        // AgentDiagnosticErrorClass union, so this persisted audit row keeps
+        // its exact schema and every stored value keeps its meaning.
+        //
+        // The win this buys, measured live: `model "…" not found, try pulling
+        // it first` was classified `command-missing` by the regex table, i.e.
+        // "the binary is not installed", so the run gave up instead of
+        // recovering. The classifier calls it a model failure (0.81), which
+        // collapses to `execution` and stays recoverable.
+        //
+        // Falls back to the regex answer when the classifier is unkeyed,
+        // unreachable, or below its confidence gate — this is a diagnostic
+        // record, never a gate, so a wrong answer costs accuracy and never
+        // availability.
+        errorClass: toAgentDiagnosticErrorClass((await classifyEngineError(res.error, cfg)).kind),
         durationMs: invocationDurationMs,
         attempt,
         maxAttempts,
@@ -2386,6 +2449,16 @@ export async function runEngineSandboxed(
  * agent makes fetch calls directly) — the same residual as cli-agent sandbox,
  * and intentional: Ollama runs at localhost:11434 which must be reachable.
  */
+/**
+ * How long a finished api-model run waits to retake the outward mutation fence
+ * before filing its proposal.
+ *
+ * Generous, because losing the race here means throwing away work the model
+ * already did, and because the wait is asynchronous — the event loop keeps
+ * running, so a long wait costs this turn's latency and nothing else.
+ */
+const FENCE_REACQUIRE_WAIT_MS = 120_000;
+
 export async function runApiModelSandboxed(
   engine: EngineId,
   goal: string,
@@ -2518,6 +2591,34 @@ export async function runApiModelSandboxed(
     return result;
   }
 
+  // LOCAL-ONLY: refuse a cloud api-model before ANY side effect. An api-model's
+  // trust tier says nothing about where it bills — 'nim' and 'local-coder' are
+  // both tier 'mid' — so the predicate classifies by the RESOLVED endpoint.
+  {
+    const verdict = enginePermitted(engine, cfg);
+    if (!verdict.permitted) {
+      const outcome = proposalOutcome('engine-unsupported', verdict.reason ?? 'local-only: refused');
+      recordSandboxedRunAgentAction({
+        engine,
+        engineModel,
+        tier,
+        runId: id,
+        sourceRepo: opts.sourceRepo,
+        workItemId: opts.workItemId,
+        workSource: opts.workSource,
+        outcome,
+        status: 'failed',
+        actionCounts,
+      });
+      const result = {
+        state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
+        proposalOutcome: outcome,
+      };
+      endStreamSink(streamSink);
+      return result;
+    }
+  }
+
   // Locus identity pre-mutate gate (opt-in via LOCUS_ENFORCE).
   // API-model producers never hit spawnEngine — fence here so LOCUS_ENFORCE
   // covers in-process mutate paths. Default off; enforce fails closed.
@@ -2634,7 +2735,25 @@ export async function runApiModelSandboxed(
     return result;
   }
 
-  const executionFence = acquireOutwardMutationFence();
+  // ── THE OUTWARD MUTATION FENCE, SCOPED TO WHAT IT PROTECTS ──────────────
+  //
+  // This fence is the machine-wide "at most one agent is positioned to make
+  // outward mutations" guarantee, and it must keep meaning exactly that. It
+  // was previously ACQUIRED HERE and released at the end of the run — spanning
+  // the whole model loop, which is ~99% of wall time and makes no outward
+  // mutation at all. Because it is process-wide and cross-process, that made
+  // every agent past the first block on a lock held across inference: one
+  // sandboxed agent at a time machine-wide, no matter how many serving slots
+  // the runtime has. A four-slot fleet ran one agent.
+  //
+  // So it is held for the two sections that actually need it — the policy gate
+  // here, and proposal filing plus sandbox cleanup at the end — and RELEASED
+  // across inference. The guarantee is unchanged: no outward mutation happens
+  // in the gap, and the re-acquisition re-checks the kill switch through
+  // `borrowSandboxCleanupAuthority`, so a KILL armed mid-inference stops the
+  // filing. Pause also reaches quiescence sooner, because it no longer has to
+  // wait behind a model.
+  let executionFence = acquireOutwardMutationFence();
   let cleanupAuthority: ReturnType<typeof wt.borrowSandboxCleanupAuthority> = null;
   let executionAuthorityFailure: string | undefined;
   if (!ownsOutwardMutationFence(executionFence)) {
@@ -2649,8 +2768,43 @@ export async function runApiModelSandboxed(
     }
     catch (err) { executionAuthorityFailure = err instanceof Error ? err.message : String(err); }
   }
-  if (executionAuthorityFailure) {
+
+  /** Drop the fence. The borrowed cleanup authority dies with it, by design. */
+  const releaseExecutionFence = (): void => {
+    if (executionFence === null) return;
     releaseOutwardMutationFence(executionFence);
+    executionFence = null;
+    cleanupAuthority = null;
+  };
+
+  /**
+   * Re-take the fence before anything outward happens again.
+   *
+   * Re-minting the cleanup authority re-checks `killSwitchOn()`, so a switch
+   * armed while the model was running refuses the filing rather than being
+   * outrun by a fence acquired twenty minutes earlier. Returns false when the
+   * fence could not be retaken; callers then file nothing and let
+   * `removeSandbox` take its own fence for cleanup.
+   */
+  const reacquireExecutionFence = async (): Promise<boolean> => {
+    if (executionFence !== null && ownsOutwardMutationFence(executionFence)) return true;
+    executionFence = await acquireOutwardMutationFenceAsync(FENCE_REACQUIRE_WAIT_MS);
+    if (!ownsOutwardMutationFence(executionFence)) {
+      releaseOutwardMutationFence(executionFence);
+      executionFence = null;
+      cleanupAuthority = null;
+      return false;
+    }
+    cleanupAuthority = wt.borrowSandboxCleanupAuthority(executionFence);
+    if (cleanupAuthority === null) {
+      releaseExecutionFence();
+      return false;
+    }
+    return true;
+  };
+
+  if (executionAuthorityFailure) {
+    releaseExecutionFence();
     if (createdHere) {
       try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
     }
@@ -2675,6 +2829,22 @@ export async function runApiModelSandboxed(
   const runStartedAt = Date.now();
   let streamedTask: RunTask | undefined;
   let streamFailed = false;
+
+  /**
+   * The model has actually been contacted.
+   *
+   * This is the moment a fleet agent stops WAITING and starts WORKING, and it
+   * is the only honest place to say so: the daemon enrols the turn before
+   * sandbox creation and before the outward mutation fence, so a row marked
+   * 'running' from enrolment describes queueing as work — with a ticking
+   * elapsed column beside a slot meter reading zero busy. The run id is the
+   * daemon's own attempt id, so this needs no new plumbing and is a no-op in
+   * any process that is not the daemon.
+   */
+  const noteProviderContacted = (): void => {
+    providerContacted = true;
+    markLocalFleetAgentRunning(id);
+  };
 
   try {
     // A verified local shadow supplies an immutable numeric-loopback binding.
@@ -2712,6 +2882,9 @@ export async function runApiModelSandboxed(
       supportsTools,
       undefined,
       opts.signal,
+      // `cfg` is threaded so provider-client's endpoint-level local-only gate
+      // sees the PERSISTED setting rather than falling back to the ambient
+      // (env + latch) mode. Defence in depth behind the engine gate above.
       shadowBinding
         ? {
             redirect: 'error',
@@ -2719,9 +2892,14 @@ export async function runApiModelSandboxed(
             maxRequestBytes: shadowBinding.maxRequestBytes,
             maxResponseBytes: shadowBinding.maxResponseBytes,
             maxOutputTokens: shadowBinding.maxOutputTokens,
-            onRequestStart: () => { providerContacted = true; },
+            onRequestStart: noteProviderContacted,
+            cfg,
           }
-        : undefined,
+          // The hook belongs on BOTH branches. `providerContacted` was only
+          // ever set on the shadow path, and the fleet's agent-state promotion
+          // below needs it on the ordinary one — which is the path the local
+          // fleet actually takes.
+        : { onRequestStart: noteProviderContacted, cfg },
     );
 
     // Engineer tools scoped to the sandbox worktree — write/exec enabled so the
@@ -2826,6 +3004,12 @@ export async function runApiModelSandboxed(
       taskId: task.id,
       text: `api-model task started (${engineModel.slice(0, 256)})`,
     });
+    // RELEASE ACROSS INFERENCE. Everything from here to the capture below
+    // writes only inside this run's throwaway worktree (`allowWrite` is scoped
+    // to `sb.worktreePath`, `allowExec` is false) and talks to a model. None of
+    // it is an outward mutation, and holding the machine-wide fence through it
+    // is what reduced a four-slot fleet to one agent.
+    releaseExecutionFence();
     await runTask(task, client, {
       tools,
       budget,
@@ -2857,6 +3041,20 @@ export async function runApiModelSandboxed(
       effectJournal: { scopeId: id, generation: opts.effectGeneration ?? randomUUID() },
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
+
+    // RE-TAKE IT before anything outward happens again — proposal filing and
+    // sandbox cleanup both live past this point. Re-minting the cleanup
+    // authority re-checks the kill switch, so a KILL armed during inference
+    // refuses here instead of being outrun. A failure to retake is not fatal:
+    // nothing is filed, and `removeSandbox` acquires its own fence to clean up.
+    const fenceRetaken = await reacquireExecutionFence();
+    if (!fenceRetaken) {
+      emitSinkEvent(streamSink, {
+        kind: 'log',
+        taskId: task.id,
+        text: 'outward mutation authority unavailable after the model run — filing nothing',
+      });
+    }
 
     const finalUsage: RunUsage = {
       ...usage,
@@ -3110,11 +3308,20 @@ export async function runApiModelSandboxed(
     }
     if (createdHere) {
       try {
-        wt.removeSandboxWithBorrowedAuthority(sb!, cleanupAuthority);
+        // With the fence in hand, cleanup borrows this run's authority. Without
+        // it — the run threw during inference, or the fence could not be
+        // retaken — `removeSandbox` acquires its own fence and re-checks KILL,
+        // which is the standalone path built for exactly this case. Passing a
+        // null borrowed authority would instead REFUSE and leak the worktree.
+        if (cleanupAuthority !== null) {
+          wt.removeSandboxWithBorrowedAuthority(sb!, cleanupAuthority);
+        } else {
+          wt.removeSandbox(sb!);
+        }
       } catch {
         // removal is idempotent
       }
     }
-    releaseOutwardMutationFence(executionFence);
+    releaseExecutionFence();
   }
 }

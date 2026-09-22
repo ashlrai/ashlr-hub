@@ -2,11 +2,14 @@
  * data/auth-store.ts — the read-session + mutation-token authority for the
  * whole app. Mirrors the two-token model in src/core/web/server.ts exactly:
  *
- *   READ authority  — exchanged once via POST /api/session (raw readToken +
- *                      a per-tab client proof) for an HttpOnly cookie good
- *                      for 15 minutes. The raw read token is held in memory
- *                      only long enough to make that exchange and is then
- *                      discarded; the client proof is not a secret by
+ *   READ authority  — exchanged via POST /api/session (raw readToken + a
+ *                      per-tab client proof) for an HttpOnly cookie good
+ *                      for 15 minutes. The raw read token is remembered in
+ *                      MEMORY ONLY (never any storage) for the tab's
+ *                      lifetime so the 15-minute ticket can be renewed
+ *                      silently when a GET/SSE comes back 401 — a live
+ *                      chat must not turn into "paste a 64-hex token every
+ *                      15 minutes". The client proof is not a secret by
  *                      itself (it has no authority without the signed
  *                      cookie) and is kept in sessionStorage so a page
  *                      reload can keep using the still-valid cookie instead
@@ -25,7 +28,10 @@
  * for the query cache.
  */
 
-import { evictAll } from './cache.js';
+import { evictAll, invalidatePrefix } from './cache.js';
+// The composer owns its own storage format, so the key names live with it
+// rather than being duplicated here where they could drift.
+import { clearComposerMemory } from '../routes/verse/chat/composer-state.js';
 
 const READ_CLIENT_STORAGE_KEY = 'ashlr.readClientProof.v1';
 const READ_CLIENT_RE = /^[a-f0-9]{64}$/;
@@ -68,6 +74,22 @@ let clientProof = loadOrCreateClientProof();
 /** In-memory only. Never touches storage. Cleared by clearMutationToken(). */
 let mutationToken: string | null = null;
 let mutationHoldTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * The mutation token came from the desktop host (window.__ASHLR_TOKENS__).
+ * The operator never saw it, so an idle timeout must re-arm the hold rather
+ * than clear it — a cleared hold would ask for a token nobody can paste.
+ */
+let mutationHeldByHost = false;
+
+/**
+ * Last read token that the server accepted (typed or host-injected). Memory
+ * only, same trust boundary as the mutation hold; used to renew the cookie
+ * silently on 401. Dropped on explicit disconnect or when renewal fails.
+ */
+let rememberedReadToken: string | null = null;
+let renewal: Promise<boolean> | null = null;
+/** Desktop-injected tokens kept for re-adoption (see the host-injected section below). */
+let hostTokens: InjectedTokens | null = null;
 
 let state: AuthState = { phase: 'checking', checked: false, mutationTokenHeldUntil: null };
 const listeners = new Set<() => void>();
@@ -123,6 +145,7 @@ export async function establishReadSession(rawReadToken: string): Promise<void> 
     },
   });
   if (res.status === 204) {
+    rememberedReadToken = trimmed;
     setState({ phase: 'authenticated', checked: true });
     return;
   }
@@ -142,21 +165,134 @@ export async function clearReadSession(): Promise<void> {
   } catch {
     /* best-effort */
   }
+  rememberedReadToken = null;
+  hostTokens = null;
+  expireNow();
+}
+
+function expireNow(): void {
   clearMutationToken();
   evictAll();
+  // `evictAll` clears the query cache so nothing stale leaks into the next
+  // session's first paint. The composer's drafts and sent-message history live
+  // in localStorage, not in that cache, and they are verbatim prompt text —
+  // exactly the kind of content this wipe exists for.
+  clearComposerMemory();
   setState({ phase: 'unauthenticated', checked: true });
 }
 
-/** Called by data/client.ts whenever any authenticated GET comes back 401. */
+/**
+ * Called by data/client.ts whenever any authenticated GET comes back 401
+ * (and by sse.ts on `session-expired`). With a remembered read token the
+ * cookie is re-issued silently and the phase never flips; the failed call's
+ * own retry/reconnect (SSE backoff, the next refetch) then succeeds. Only
+ * when renewal fails (server restarted with fresh tokens) does the gate show.
+ */
 export function reportSessionExpired(): void {
   if (state.phase !== 'authenticated') return;
-  clearMutationToken();
-  evictAll();
-  setState({ phase: 'unauthenticated', checked: true });
+  if (rememberedReadToken) {
+    void renewReadSession();
+    return;
+  }
+  expireNow();
+}
+
+/** Re-exchange the remembered read token for a fresh cookie; one flight at a time. */
+export function renewReadSession(): Promise<boolean> {
+  if (renewal) return renewal;
+  const token = rememberedReadToken;
+  if (!token) return Promise.resolve(false);
+  renewal = (async () => {
+    try {
+      await establishReadSession(token);
+      // Whatever 401ed while the ticket was lapsed refetches against the new cookie.
+      invalidatePrefix('');
+      return true;
+    } catch {
+      rememberedReadToken = null;
+      hostTokens = null;
+      expireNow();
+      return false;
+    } finally {
+      renewal = null;
+    }
+  })();
+  return renewal;
+}
+
+/** Test hygiene: forget the remembered read token and host tokens without a network call. */
+export function forgetRememberedTokens(): void {
+  rememberedReadToken = null;
+  hostTokens = null;
+  renewal = null;
 }
 
 export function markCheckComplete(authenticated: boolean): void {
   setState({ phase: authenticated ? 'authenticated' : 'unauthenticated', checked: true });
+}
+
+// ---------------------------------------------------------------------------
+// Host-injected tokens (desktop wrapper). The Tauri shell starts the server
+// itself and hands both tokens to the page through an initialization script
+// (`window.__ASHLR_TOKENS__`, see desktop/README.md) so the operator never
+// pastes them. The object is removed from `window` before either token is
+// used and kept in this module's memory instead (`hostTokens`), because the
+// desktop operator has no terminal to paste from: when the 15-minute cookie
+// lapses or the gate re-mounts, adoption re-runs from memory. The read token
+// is exchanged for the cookie exactly like a typed one and the mutation token
+// goes into the memory-only hold. Nothing is persisted and nothing is logged.
+// ---------------------------------------------------------------------------
+
+export interface InjectedTokens {
+  readToken: string;
+  /** Mutation token; absent or null when the host started the server without dispatch. */
+  token?: string | null;
+}
+
+declare global {
+  interface Window {
+    __ASHLR_TOKENS__?: InjectedTokens;
+  }
+}
+
+/**
+ * Take host-injected tokens: from `window` (cleared from the page on first
+ * sight, remembered here) or, on later calls, from memory.
+ */
+export function takeInjectedTokens(): InjectedTokens | null {
+  const injected = window.__ASHLR_TOKENS__;
+  if (injected && typeof injected === 'object') {
+    try {
+      delete window.__ASHLR_TOKENS__;
+    } catch {
+      window.__ASHLR_TOKENS__ = undefined;
+    }
+    if (typeof injected.readToken === 'string') {
+      hostTokens = { readToken: injected.readToken, ...(typeof injected.token === 'string' ? { token: injected.token } : {}) };
+    }
+  }
+  return hostTokens ? { ...hostTokens } : null;
+}
+
+/**
+ * Establish the read session (and set the mutation hold) from host-injected
+ * tokens. Resolves true when a session was established; false when nothing
+ * was injected or the server rejected the read token (the caller then falls
+ * back to the normal SessionGate flow — the failure is never surfaced with
+ * the token in it).
+ */
+export async function adoptInjectedTokens(): Promise<boolean> {
+  const injected = takeInjectedTokens();
+  if (!injected) return false;
+  try {
+    await establishReadSession(injected.readToken);
+  } catch {
+    // Wrong or stale tokens are not worth retrying from memory.
+    hostTokens = null;
+    return false;
+  }
+  if (injected.token && /^[a-f0-9]{64}$/.test(injected.token.trim())) setMutationToken(injected.token.trim(), { host: true });
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -173,12 +309,20 @@ export function hasMutationHold(): boolean {
 
 function armIdleClear(): void {
   if (mutationHoldTimer) clearTimeout(mutationHoldTimer);
-  mutationHoldTimer = setTimeout(() => clearMutationToken(), MUTATION_HOLD_MS);
+  mutationHoldTimer = setTimeout(() => {
+    // A host-held token has no operator to re-paste it: keep the hold alive.
+    if (mutationHeldByHost && mutationToken !== null) touchMutationHold();
+    else clearMutationToken();
+  }, MUTATION_HOLD_MS);
 }
 
-/** Set the mutation token for this tab's session hold. Never persisted. */
-export function setMutationToken(token: string): void {
+/**
+ * Set the mutation token for this tab's session hold. Never persisted.
+ * `host` marks a token injected by the desktop wrapper (see adoptInjectedTokens).
+ */
+export function setMutationToken(token: string, opts: { host?: boolean } = {}): void {
   mutationToken = token;
+  mutationHeldByHost = opts.host === true;
   const heldUntil = Date.now() + MUTATION_HOLD_MS;
   setState({ mutationTokenHeldUntil: heldUntil });
   armIdleClear();
@@ -194,6 +338,7 @@ export function touchMutationHold(): void {
 
 export function clearMutationToken(): void {
   mutationToken = null;
+  mutationHeldByHost = false;
   if (mutationHoldTimer) {
     clearTimeout(mutationHoldTimer);
     mutationHoldTimer = null;

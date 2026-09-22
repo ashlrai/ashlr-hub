@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "scope": "diagnostic-only-previous-recipe-bundle",
+  "session": 10612,
+  "status": "terminal",
+  "exitCode": 0,
+  "testFile": "test/preparation-qualified-workload-acceptance.test.ts",
+  "passed": 5,
+  "skipped": 0,
+  "durationMs": 1268670,
+  "checkout": "/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-scoring",
+  "bundleDigest": "3a711953b85b5c3b51435743a5ddb0a9fcabf871a22f2087e53a7265d16c72b5",
+  "preservedBundle": "/Users/masonwyatt/.codex/artifacts/ashlr-preparation-recipe-qualified.l5cTqq/preparation",
+  "preservedDigestVerified": true,
+  "fullCase": {
+    "testMs": 942909,
+    "evaluatorMs": 937937,
+    "checks": 23,
+    "qualifications": 2,
+    "regions": 15,
+    "benchmarkProcesses": 4828,
+    "reportBytes": 1993,
+    "reportSha256": "2d88050128e908dff438f368d7214815ad870f4c6131bc97407b34eb11022230",
+    "processGroupSettlement": "group-exit-confirmed",
+    "stderrBytes": 0,
+    "timedOut": false,
+    "cancelled": false
+  },
+  "controlCaseMs": { "runtimeCurrent": 33657, "runtimeStale": 28294, "sourceCurrent": 190987, "sourceStale": 71665 },
+  "exclusions": ["corrected primary bundle 25d57874", "genuine calibration", "accepted optimization", "production activation"]
+}

@@ -5,9 +5,15 @@ const core = vi.hoisted(() => ({
   initUniverse: vi.fn(), readUniverseOverview: vi.fn(), runUniverse: vi.fn(),
 }));
 const demo = vi.hoisted(() => ({ runUniverseDemo: vi.fn() }));
+const measurement = vi.hoisted(() => ({ cmdUniversePreparationMeasurement: vi.fn() }));
+const calibration = vi.hoisted(() => ({ cmdUniversePreparationMeasurementCalibrate: vi.fn() }));
+const candidateComparison = vi.hoisted(() => ({ cmdUniversePreparationMeasurementCompare: vi.fn() }));
 const files = vi.hoisted(() => ({ readFileSync: vi.fn() }));
 vi.mock('../src/core/universe/index.js', () => core);
 vi.mock('../src/cli/universe-demo.js', () => demo);
+vi.mock('../src/cli/universe-preparation-measurement.js', () => measurement);
+vi.mock('../src/cli/universe-preparation-measurement-calibrate.js', () => calibration);
+vi.mock('../src/cli/universe-preparation-measurement-compare.js', () => candidateComparison);
 vi.mock('node:fs', () => files);
 import { cmdUniverse } from '../src/cli/universe.js';
 
@@ -50,6 +56,37 @@ describe('Universe CLI', () => {
     expect(await cmdUniverse(['--json'])).toBe(0);
     expect(JSON.parse(output.mock.calls[0]![0] as string)).toEqual(overview());
     expect(core.runUniverse).not.toHaveBeenCalled();
+    expect(measurement.cmdUniversePreparationMeasurement).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1, 2])('forwards preparation inspection arguments and exit %i without generic store handling', async code => {
+    const args = ['--input', '/private/report.json', '--json', ...(code === 2 ? ['--root', '/forbidden'] : [])];
+    measurement.cmdUniversePreparationMeasurement.mockResolvedValue(code);
+    expect(await cmdUniverse(['preparation-measurement', ...args])).toBe(code);
+    expect(measurement.cmdUniversePreparationMeasurement).toHaveBeenCalledExactlyOnceWith(args);
+    for (const mock of Object.values(core)) expect(mock).not.toHaveBeenCalled();
+    expect(demo.runUniverseDemo).not.toHaveBeenCalled(); expect(files.readFileSync).not.toHaveBeenCalled();
+    expect(output).not.toHaveBeenCalled();
+  });
+
+  it('delegates inspector help rather than treating it as generic Universe help', async () => {
+    measurement.cmdUniversePreparationMeasurement.mockResolvedValue(0);
+    expect(await cmdUniverse(['preparation-measurement', '--help'])).toBe(0);
+    expect(measurement.cmdUniversePreparationMeasurement).toHaveBeenCalledExactlyOnceWith(['--help']);
+    for (const mock of Object.values(core)) expect(mock).not.toHaveBeenCalled();
+    expect(files.readFileSync).not.toHaveBeenCalled(); expect(output).not.toHaveBeenCalled();
+  });
+
+  it.each([0, 1, 2])('routes calibration and captured comparison before generic parsing: %i', async code => {
+    const args = ['specific', '--root', '/private', '--capture', 'one', '--json'];
+    calibration.cmdUniversePreparationMeasurementCalibrate.mockResolvedValue(code);
+    candidateComparison.cmdUniversePreparationMeasurementCompare.mockResolvedValue(code);
+    expect(await cmdUniverse(['preparation-measurement-calibrate', ...args])).toBe(code);
+    expect(await cmdUniverse(['preparation-measurement-compare', ...args])).toBe(code);
+    expect(calibration.cmdUniversePreparationMeasurementCalibrate).toHaveBeenCalledExactlyOnceWith(args);
+    expect(candidateComparison.cmdUniversePreparationMeasurementCompare).toHaveBeenCalledExactlyOnceWith(args);
+    for (const mock of Object.values(core)) expect(mock).not.toHaveBeenCalled();
+    expect(files.readFileSync).not.toHaveBeenCalled(); expect(demo.runUniverseDemo).not.toHaveBeenCalled();
   });
 
   it('reports missing requested experiments, rather than a misleading empty success', async () => {
@@ -155,6 +192,8 @@ describe('Universe CLI', () => {
     expect(output.mock.calls[0]![0]).toContain('init --manifest');
     expect(output.mock.calls[0]![0]).toContain('explicitly configured loopback model');
     expect(output.mock.calls[0]![0]).toContain('without auth or tools');
+    expect(output.mock.calls[0]![0]).toContain('preparation-measurement --input');
     expect(core.readUniverseOverview).not.toHaveBeenCalled();
+    expect(measurement.cmdUniversePreparationMeasurement).not.toHaveBeenCalled();
   });
 });

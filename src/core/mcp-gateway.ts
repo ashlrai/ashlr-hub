@@ -26,6 +26,9 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ListResourceTemplatesRequestSchema,
+  ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 
 import type { McpRegistry, McpServerSpec, McpServerHealth, HealEvent } from './types.js';
@@ -33,6 +36,7 @@ import { loadConfig } from './config.js';
 import { withToolEnv } from './env-bridge.js';
 import { withHeal, defaultHealPolicy } from './run/self-heal.js';
 import { listNativeTools, isNativeTool, callNativeTool } from './mcp-native.js';
+import { listFirmResources, listFirmResourceTemplates, readFirmResource } from './mcp-firm-resources.js';
 import { hasSecretLikeArgv, redactedCommand } from './mcp-argv-safety.js';
 import { scrubSecrets } from './util/scrub.js';
 
@@ -473,8 +477,14 @@ export async function startGateway(
   // ── Build the gateway server ──────────────────────────────────────────────
   const server = new Server(
     { name: 'ashlr', version: '0.1.0' },
-    { capabilities: { tools: {} } },
+    { capabilities: { tools: {}, resources: {} } },
   );
+
+  // This resource-read path bypasses native-tool audit writes. Gateway startup
+  // and existing native tools retain their separate configuration/audit behavior.
+  server.setRequestHandler(ListResourcesRequestSchema, async () => listFirmResources());
+  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => listFirmResourceTemplates());
+  server.setRequestHandler(ReadResourceRequestSchema, async (request) => readFirmResource(request.params.uri));
 
   // tools/list — native ashlr tools first, then every downstream's, namespaced.
   server.setRequestHandler(ListToolsRequestSchema, async () => {

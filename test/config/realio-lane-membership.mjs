@@ -43,8 +43,47 @@ export const REAL_IO_LANE_TIMEOUT_MS = 60_000;
  * lane by default instead of silently rejoining the flaky pile.
  */
 export const REAL_IO_TEST_FILES = [
+  'test/builtin-activity-pgid-reuse.test.ts', // private activity journals with synthetic identity reuse probes
+  'test/builtin-activity-settlement-witness.test.ts', // private journals and one real owned subprocess
+  'test/resource-quota-cleanup-diagnostics.test.ts', // private real collector leases with inert failure witnesses
+  'test/resource-quota-native-lifecycle.test.ts', // real inert native protocol, shared quota lease and group settlement
+  'test/collector-cleanup-reproduction.test.ts', // inert inherited descendants and actual native helper cleanup
+  'test/legacy-collector-reconciliation-driver.test.ts', // operator quarantine in private fixtures with real lock custody
+  'test/resource-engineering-mission-store.test.ts', // private immutable mission records and configuration replay
+  'test/resource-engineering-mission-invocations.test.ts', // private immutable invocation observations and timing
+  'test/resource-engineering-mission-diagnostics.test.ts', // real journal and lease cleanup with execution doubles
+  'test/resource-engineering-mission-feedback-loop.test.ts', // private mission/receipt journals and inert loopback transport
+  'test/resource-engineering-mission-acceptance.test.ts', // two actual mission scopes, local transport, delivery and restart
+  'test/resource-engineering-setup-evidence.test.ts', // private Git setup receipts and fresh metadata reconstruction
+  'test/universe-seed-batch.test.ts', // real SHA1/SHA256 seed materialization and bounded blob batches
+  'test/resource-quota-scopes.test.ts', // scoped quota collection, native fixtures and console IPC
+  'test/mcp-firm-resources.test.ts', // signed history via real CLI MCP processes
+  'test/local-runtime-anthropic-proxy.test.ts', // two real loopback HTTP servers: a llama-server stub and the proxy in front of it
+  'test/verse-seats.test.ts', // real loopback HTTP server standing in for Ollama
+  'test/verse-local-dispatch.test.ts', // real loopback HTTP server standing in for Ollama's discovery endpoints
+  'test/verse-accounts.test.ts', // real collector lease acquisition and private evidence files in a tmp root
+  'test/verse-api.test.ts', // real web server bind + SSE tails against an in-memory fake engine
+  'test/verse-control-api.test.ts', // real web server bind + real enrollment/audit/kill-switch state in a tmp HOME
+  'test/verse-daemon-pause.test.ts', // real web server bind + real git repos, pause/kill sentinels and audit in a tmp HOME
+  'test/universe-control-execution.test.ts', // private signed effect and interrupted settlement records
+  'test/universe-firm-resource-control-handler.test.ts', // enrolled graph dispatch to real inert transports
+  'test/universe-firm-cli-integration.test.ts', // real CLI processes with test-owned provenance
+  'test/universe-firm-engineering-control.test.ts', // real confined candidates, resource ledger and local delivery
+  'test/universe-firm-engineering-cli.test.ts', // private enrollment files and CLI dispatch boundary
+  'test/universe-firm-graph-query.test.ts', // verified history and immutable read-only inspection
+  'test/universe-firm-resource-execution.test.ts', // enrolled receipt to real inert resource transport
+  'test/universe-value-allocation-store.test.ts', // private signed storage and concurrent final-slot admission
+  'test/resource-worker-kill.test.ts', // real loopback cancellation and native owned cleanup
+  'test/universe-firm-demo.test.ts', // complete signed fixture graph and CLI queries
+  'test/universe-control-graph.test.ts', // private signed graph records, ownership and restart
+  'test/universe-control-recovery-guards.test.ts', // signed intent linkage and no-retry private graph evidence
+  'test/universe-harness-archive.test.ts', // private immutable candidate snapshots and admission
+  'test/universe-firm-memory.test.ts', // private immutable daily journals and consolidation CAS
   'test/universe-showcase-cli.test.ts', // private demo source/export custody and CLI subprocesses
   'test/universe-campaign-delivery.test.ts', // actual campaign evaluation and local Git branch delivery
+  'test/universe-campaign-initial-repair-delivery.test.ts', // measured failed seed, local repair branch and custody/recovery checks
+  'test/universe-calibrated-campaign.test.ts', // synthetic score transport with real seed records, local branch delivery and replay
+  'test/universe-campaign-passed-seed-acceptance.test.ts', // real command worker/evaluator from passing seed to one-generation local branch
   'test/m11.stream-file-sink.test.ts', // thousands of real sink writes and reads across secret boundaries
   'test/m442.runtime-release-launch-revalidation.test.ts', // large dependency fixtures, permissions and recursive cleanup
   'test/m444.external-skill-audit.test.ts', // large real audit trees and recursive cleanup
@@ -66,10 +105,51 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-pool-supervisor.test.ts', // durable queues, verified locks, native and loopback tasks
   'test/resource-console-worker.test.ts', // fixed-scope worker threads and private evidence files
   'test/resource-console-server.test.ts', // real scoped HTTP listener and authentication fences
+  'test/resource-console-quota-scopes.test.ts', // final HTTP quota projection and shared account ceilings
+  'test/resource-console-history-server.test.ts', // private history HTTP reads, deletes and restart persistence
+  'test/resource-console-history.test.ts', // durable supervisor transcripts with real inert transports
+  'test/resource-console-history-acceptance.test.ts', // independent restart, deletion and receipt reconciliation
+  'test/resource-console-followup.test.ts', // context headroom and corrupted durable-state refusal
+  'test/resource-console-followup-server.test.ts', // authenticated follow-up HTTP and shared quota accounting
+  'test/resource-console-followup-acceptance.test.ts', // independent context deletion, replay and real local transport
+  'test/resource-console-projects-server.test.ts', // catalog HTTP boundaries and actual CLI bootstrap
+  'test/resource-console-projects-acceptance.test.ts', // independent project cwd, shared accounting and migration
+  'test/resource-console-project-state.test.ts', // pinned-directory drift at reservation and worker dispatch
+  'test/resource-console-files.test.ts', // registered-project filesystem reads
+  'test/resource-console-files-server.test.ts', // authenticated project-file HTTP routes
+  'test/resource-console-files-acceptance.test.ts', // independent real file-to-task snapshot acceptance
+  'test/resource-console-engineering-acceptance.test.ts', // actual HTTP, shared quota, Git evaluation and delivery
+  'test/resource-console-engineering-core.test.ts', // signed graph attribution and durable console launch/cancel ownership
+  'test/resource-console-engineering-graph-completion.test.ts', // read-only completion over real private ownership records
+  'test/resource-console-engineering-registration.test.ts', // immutable same-owner dynamic enrollment with real private supervisor state
+  'test/resource-console-engineering-preparation-boundaries.test.ts', // real pinned recipe files and immutable objective registration boundaries
+  'test/resource-console-engineering-preparation-reuse.test.ts', // real committed bundle replay and call-local validation counts
+  'test/resource-engineering-successor-preparation.test.ts', // real upstream delivery and pinned downstream preparation
+  'test/resource-engineering-successor-acceptance.test.ts', // actual proposal-to-successor delivery and accounting
+  'test/resource-console-engineering-preparation-acceptance.test.ts', // actual objective HTTP preparation, restart and evaluated delivery
+  'test/resource-engineering-outcomes.test.ts', // exact receipt joins against real private resource history and ledger
+  'test/resource-engineering-outcomes-review.test.ts', // independent overflow, changed-sample and incomplete-proof regressions
+  'test/resource-engineering-supervisor-admission.test.ts', // durable bounded queue admission and restart over private state
+  'test/resource-engineering-supervision-state.test.ts', // read-only private supervision state and owner restart identity
+  'test/resource-engineering-supervisor-admission-acceptance.test.ts', // actual prepare-to-queue evaluation, delivery and restart
+  'test/resource-engineering-auto-admission-recovery-acceptance.test.ts', // ordinary registration gap recovery, paused restart and delivery
+  'test/universe-preparation-measurement-capture-acceptance.test.ts', // actual installed failed diagnostic, immutable custody and CLI report replay
+  'test/universe-builtin-trial-custody-acceptance.test.ts', // actual installed failed diagnostics, private trial custody, and injected return-loss hold
+  'test/resource-console-engineering-inspect.test.ts', // read-only commissioning through real CLI, Git and history fixtures
+  'test/resource-console-state-inspection.test.ts', // strict persisted-state decoding and pinned-directory previews
+  'test/universe-backlog-marker-evaluator.test.ts', // real bounded Node evaluator processes over fixed source cases
+  'test/universe-hub-marker-campaign.test.ts', // full pinned Hub seed, confined evaluator and exact local Git delivery
+  'test/universe-campaign-seed-store.test.ts', // private campaign records and Git fixtures
+  'test/universe-campaign-seed-evaluation.test.ts', // confined evaluator subprocess lifecycle
+  'test/universe-seed-measurement-acceptance.test.ts', // loopback generation and verified local delivery
+  'test/universe-campaign-seed-context.test.ts', // raw campaign/run history and immutable context reconstruction
+  'test/universe-seed-context-model.test.ts', // candidate filesystem and actual model-boundary receipts
+  'test/resource-console-engineering-routes.test.ts', // actual HTTP auth and lifecycle with inert engineering owner
   'test/resource-console-acceptance.test.ts', // end-to-end console sessions, supervision and queue recovery
   'test/resource-worker-process.test.ts', // real bounded stdin and process ownership
   'test/resource-worker.test.ts', // native worker fixtures and numeric-loopback model transport
   'test/resource-pool-runtime.test.ts', // durable admission, concurrent tasks, and replay
+  'test/resource-admission-preflight.test.ts', // read-only admission parity against private persisted ledgers
   'test/resource-performance-runtime.test.ts', // monotonic measurements in the private task ledger
   'test/resource-review-benchmark.test.ts', // fixed calibration through real ledger and loopback transport
   'test/resource-pool-cli.test.ts', // explicit private manifests and CLI output files
@@ -95,12 +175,61 @@ export const REAL_IO_TEST_FILES = [
   'test/universe-delivery.test.ts', // real Git object/ref delivery and private receipts
   'test/universe-delivery-git-entries.test.ts', // bounded real Git blob loading and read-only inventory verification
   'test/universe-delivery-git-precommit.test.ts', // prepared real Git transaction guards and create-only ref outcomes
+  'test/universe-delivery-kill.test.ts', // global stop under real prepared Git ref locks
   'test/universe-integration-delivery.test.ts', // private delivery evidence and fault-injected local Git publication
   'test/universe-integration-handoff.test.ts', // immutable downstream registration and source-lineage verification
   'test/universe-portfolio-controller.test.ts', // durable controller records and injected dispatch/restart faults
+  'test/universe-portfolio-controller-graph-dispatch.test.ts', // immutable parent linkage and controller enrollment compatibility
   'test/universe-portfolio-controller-integration.test.ts', // native checkpointed DAG execution and replay
   'test/universe-dispatch-recovery-integration.test.ts', // native dispatch-attributed controller recovery without worker replay
   'test/universe-controller-reconciliation.test.ts', // private controller recovery ledger with injected attribution faults
+  'test/universe-controller-diagnostics.test.ts', // private diagnostic history and failure publication invariants
+  'test/universe-controller-handoff-diagnostics.test.ts', // real evaluated delivery and receipt-only acknowledgement recovery
+  'test/universe-engineering-handoff-recovery.test.ts', // graph-linked delivery acknowledgement without repeating effects
+  'test/universe-engineering-pending-continuation.test.ts', // real recovered delivery and bounded pending campaign continuation
+  'test/universe-controller-pending-continuation.test.ts', // owned controller history and continuation refusal cases
+  'test/universe-control-continuation-authority.test.ts', // signed graph intent and live continuation capability lifetime
+  'test/resource-engineering-supervisor.test.ts', // private persisted supervision and owned execution lifecycle
+  'test/resource-engineering-supervisor-boundaries.test.ts', // independent supervisor ownership and restart boundary checks
+  'test/resource-engineering-supervisor-acceptance.test.ts', // actual unattended console queue and local evaluated delivery
+  'test/resource-engineering-preparation.test.ts', // private linked campaign preparation and replay
+  'test/resource-engineering-preparation-builtin.test.ts', // closed scoring recipes, pinned Git scope and mocked installed identity
+  'test/resource-engineering-preparation-metadata.test.ts', // verified metadata reads and real source drift
+  'test/resource-engineering-preparation-boundaries.test.ts', // independent private preparation boundary checks
+  'test/resource-engineering-preparation-acceptance.test.ts', // actual prepared campaign to evaluated local delivery
+  'test/resource-engineering-setup-acceptance.test.ts', // actual setup CLI and emitted autonomous A-to-B startup
+  'test/resource-engineering-autonomous-setup.test.ts', // private Git fixtures and offline registration publication
+  'test/resource-engineering-preparation-registry.test.ts', // immutable configuration and legacy registration identity
+  'test/resource-engineering-worker-rpc.test.ts', // actual worker-thread authority calls and timeout/close races
+  'test/resource-engineering-successor-store.test.ts', // private immutable journal records and drift/staging refusal
+  'test/resource-engineering-successor-reader.test.ts', // fixed actual read worker, private journal and concurrent busy worker
+  'test/resource-engineering-lifecycle.test.ts', // actual effect worker caught coordinator fault and independent journal observation
+  'test/universe-preparation-verification.test.ts', // pinned evaluator prototype, real Git fixtures and OS confinement
+  'test/preparation-verification-workflow.test.ts', // real candidate-linked manager restoration and successor delivery fixtures
+  'test/preparation-batch-candidate-acceptance.test.ts', // pinned patch versus baseline in confined children with during-call drift
+  'test/preparation-batch-node-boundary.test.ts', // actual Node combined stdout/stderr buffer boundaries
+  'test/preparation-verification-runtime-drift.test.ts', // real candidate reads with trusted during-call runtime mutation
+  'test/preparation-verification-successor-drift.test.ts', // real delivered source with trusted during-call branch mutation
+  'test/preparation-verification-workflow-bridge.test.ts', // real fixed workflow bundle construction and graph checks
+  'test/universe-builtin-preparation-evaluator.test.ts', // installed builtin through real Universe registration and isolated measurement
+  'test/universe-preparation-measurement-files.test.ts', // actual bounded descriptor reads through the public diagnostic CLI route
+  'test/universe-preparation-measurement-candidate-comparison.test.ts', // real private journals and calibration-to-comparison CLI; synthetic measurement contents
+  'test/preparation-qualified-workload-acceptance.test.ts', // installed v2 workload and fixed packaged same-call stale-guard controls
+  'test/preparation-score-packaging.test.ts', // private package fixtures, real esbuild/import and pinned native identity reads; no candidate dispatch
+  'test/preparation-typecheck-authoring.test.ts', // private compiler graph snapshots and real closed full-program baseline verification
+  'test/preparation-typecheck-full-project-acceptance.test.ts', // real full-project packaged compiler subprocess and process-group settlement
+  'test/preparation-verification-child.test.ts', // actual OS-confined persistent candidate processes and deadline settlement
+  'test/resource-pool-evolution.test.ts', // private ledger evolution and journal publication
+  'test/resource-spark-enrollment-files.test.ts', // private proposal publication and filesystem tamper refusal
+  'test/resource-quota-inspection.test.ts', // passive private collector marker inspection without acquisition
+  'test/resource-console-inspection.test.ts', // authenticated loopback inspection with real private evidence preservation
+  'test/resource-pool-evolution-boundaries.test.ts', // independent real account-capacity and conversation evolution fixtures
+  'test/resource-console-pool-evolution.test.ts', // pinned console origins across private ledger epochs
+  'test/resource-pool-evolution-engineering.test.ts', // evolved account ledger through campaign preparation and evaluated delivery
+  'test/resource-quota-scope-access.test.ts', // durable private scope policy and locked admission
+  'test/resource-quota-scope-access-boundaries.test.ts', // independent scope policy HTTP and native fixture acceptance
+  'test/universe-graph-controller-reconciliation.test.ts', // immutable settlement guards and terminal graph preservation
+  'test/universe-campaign-dispatch.test.ts', // exact dispatch recovery with actual private measured-seed records
   'test/universe-controller-contention-integration.test.ts', // native execution-lock contention, bounded waiting and cancellation
   'test/universe-admission-preflight-integration.test.ts', // invalid resource configuration withheld before real campaign dispatch
   'test/universe-controller-crash-integration.test.ts', // separate-process SIGKILL, stale leases and exact-dispatch recovery
@@ -309,4 +438,5 @@ export const REAL_IO_TEST_FILES = [
   'test/h8.demo.test.ts', // hermetic real temp git repo + real fs fixture — 4.2s slowest test in the quiet baseline
   'test/h8.docs.test.ts', // hermetic real temp git repo + real fs fixture — 0.0s slowest test in the quiet baseline
   'test/h8.no-new-outward.test.ts', // hermetic real temp git repo + real fs fixture — 0.0s slowest test in the quiet baseline
+  'test/verse-session-engine.test.ts', // real detached subprocesses (fake vendor CLIs) with process-group cancel/timeout kill paths
 ];

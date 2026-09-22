@@ -628,7 +628,12 @@ const KNOWN_FOUNDRY_KEYS: ReadonlySet<string> = new Set([
   'fleetMcp', 'generative', 'goalFocusActiveThreshold', 'goalFocusMode',
   'goalPlanning', 'grok', 'intelligence', 'inventPerCycle', 'judgeAllowedBackends',
   'judgePerPass', 'killSwitch', 'kimi', 'learnedRouting', 'limits', 'local',
-  'localContext', 'localModel', 'localization', 'managerJudgeEngine',
+  // `localOnly` is the enforced local-only mode (src/core/policy/local-only.ts
+  // and types.ts's FoundryConfig). It must appear in BOTH key sets: this one
+  // warns on every config load, effective-config.ts's only on an explicit
+  // `ashlr config effective`. Registering it in one and not the other is why a
+  // correctly-configured local-only fleet printed a typo warning on boot.
+  'localContext', 'localModel', 'localOnly', 'localization', 'managerJudgeEngine',
   'managerJudgeModel', 'mergeAuthority', 'minItemValue', 'modelGranularRouting',
   'modelRacing', 'models', 'nim', 'ollamaBaseUrl', 'outcomeWatcher',
   'productionVelocity', 'proposalRepair', 'proposalTtlDays', 'pulseEmit',
@@ -922,6 +927,43 @@ function currentConfigMatches(configPath: string, expected: FileStat | undefined
   } catch (err) {
     return expected === undefined && (err as NodeJS.ErrnoException).code === 'ENOENT';
   }
+}
+
+// ---------------------------------------------------------------------------
+// foundry.subscriptionMaxPercent — ONE clamp, used by every reader
+// ---------------------------------------------------------------------------
+
+/**
+ * Default subscription-window throttle percentage when none is configured.
+ * A subscription engine is skipped once a KNOWN window reading reaches this.
+ */
+export const SUBSCRIPTION_MAX_PERCENT_DEFAULT = 90;
+
+/**
+ * Resolve `cfg.foundry.subscriptionMaxPercent` to an effective percentage.
+ *
+ * Clamped to [1, 100] because both ends are footguns: 0 or negative would
+ * disable the throttle entirely (everything is "under 0%") and anything above
+ * 100 could never fire. A missing or non-finite value falls back to
+ * {@link SUBSCRIPTION_MAX_PERCENT_DEFAULT}.
+ *
+ * This is the SINGLE definition of that rule. Before V2 the same expression
+ * was inlined behind an untyped cast in `daemon/loop.ts`, `fleet/router.ts`,
+ * and `fabric/gateway.ts`; those readers now call this instead so the throttle
+ * cannot mean different things in different code paths.
+ *
+ * @param source the config (or just its `foundry` block) to read, or a raw
+ *   candidate value — a per-call override, e.g. the fabric gateway's `ctx`.
+ */
+export function resolveSubscriptionMaxPercent(
+  source: { foundry?: { subscriptionMaxPercent?: number } } | number | null | undefined,
+  fallback: number = SUBSCRIPTION_MAX_PERCENT_DEFAULT,
+): number {
+  const raw = typeof source === 'number'
+    ? source
+    : source?.foundry?.subscriptionMaxPercent;
+  if (typeof raw !== 'number' || !Number.isFinite(raw)) return fallback;
+  return Math.min(100, Math.max(1, raw));
 }
 
 /**

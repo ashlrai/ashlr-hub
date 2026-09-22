@@ -1,0 +1,361 @@
+/* Settings — one reading column of quiet two-column rows. Shared by every
+   panel in this folder so the label/control rhythm can never drift between
+   Appearance and Connection. */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-canvas);
+}
+
+.strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  flex: none;
+  height: var(--strip-height);
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.stripTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.column {
+  width: 100%;
+  max-width: var(--measure-read);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-5) var(--space-16);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-8);
+}
+
+/* ---------------------------------------------------------------------------
+ * Panel = a titled group of rows, separated by hairlines rather than cards.
+ * ------------------------------------------------------------------------- */
+.panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.panelHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding-bottom: var(--space-2);
+}
+
+.panelTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-medium);
+  color: var(--text-tertiary);
+}
+
+.panelBody {
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* ---------------------------------------------------------------------------
+ * Row: label + description on the left, control on the right.
+ * ------------------------------------------------------------------------- */
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--density-pad) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.rowStacked {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.rowText {
+  min-width: 0;
+}
+
+.rowLabel {
+  display: block;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+}
+
+.rowDescription {
+  margin-top: 2px;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+.rowControl {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.rowStacked .rowControl {
+  justify-content: flex-start;
+}
+
+/* Below the shell's 900px breakpoint the two columns stack rather than
+   squeezing a slider into 80px. */
+@media (max-width: 720px) {
+  .row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .rowControl {
+    justify-content: flex-start;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Accent controls
+ * ------------------------------------------------------------------------- */
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.swatch {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.swatch:hover {
+  transform: translateY(-1px);
+}
+
+/* Selection is carried by a ring AND the check glyph, never by color. */
+.swatch[aria-checked='true'] {
+  box-shadow: 0 0 0 2px var(--bg-surface), 0 0 0 3px var(--text-primary);
+}
+
+.swatchCheck {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  mix-blend-mode: difference;
+}
+
+.sliderStack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  width: min(320px, 100%);
+}
+
+.contrastWarning {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--status-warning-solid);
+  border-radius: var(--radius-xs);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+/* ---------------------------------------------------------------------------
+ * Live preview
+ * ------------------------------------------------------------------------- */
+.preview {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.previewRow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.previewHeading {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
+  letter-spacing: var(--tracking-display);
+  font-weight: var(--font-weight-semibold);
+}
+
+.previewBody {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-secondary);
+}
+
+.previewNumerals {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-display);
+  color: var(--text-primary);
+}
+
+/* ---------------------------------------------------------------------------
+ * Connection / About
+ * ------------------------------------------------------------------------- */
+.origin {
+  width: min(320px, 100%);
+}
+
+.note {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  /* --bg-canvas, not --bg-hover: in light both --bg-hover and --bg-code
+     resolve to --gray-100, so the .code chip nested inside this note had no
+     ground of its own and was distinguished only by its hairline — a rounded
+     bordered box inside a rounded bordered box, which §1.2 forbids. */
+  background: var(--bg-canvas);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.noteIcon {
+  flex: none;
+  margin-top: 1px;
+  color: var(--text-tertiary);
+}
+
+.code {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  padding: 1px 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-code);
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+ * Keyboard reference
+ * ------------------------------------------------------------------------- */
+.shortcuts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 0 var(--space-6);
+}
+
+.shortcut {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm-size);
+}
+
+.keys {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.key {
+  min-width: 20px;
+  padding: 2px var(--space-1);
+  border: 1px solid var(--border-default);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  text-align: center;
+}
+
+.about {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.aboutLine {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm-size);
+  color: var(--text-secondary);
+}
+
+.aboutName {
+  font-family: var(--font-display);
+  font-size: var(--text-lg-size);
+  line-height: var(--text-lg-line);
+  letter-spacing: var(--tracking-display);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-link);
+  text-decoration: none;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+/* ---- desktop shell (see desktop/README.md "Desktop shell contract") -----
+ * In the Tauri window the OS title bar overlays the top 48px and the macOS
+ * traffic lights float over the top-LEFT 92px of the WINDOW. This strip does
+ * not start at the window's left edge — the 56px rail does — so the inset it
+ * owes is the overlap, never the full 92px. Both vars are absent in a
+ * browser, where the expression floors to 0px and the layout is unchanged. */
+.strip {
+  padding-left: max(
+    var(--space-5),
+    calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px))
+  );
+}

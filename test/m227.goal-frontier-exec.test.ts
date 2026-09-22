@@ -124,11 +124,21 @@ vi.mock('../src/core/env-bridge.js', () => ({
   withToolEnv: vi.fn((_, fn: () => unknown) => fn()),
 }));
 
-vi.mock('../src/sandbox/worktree.js', () => ({
+vi.mock('../src/sandbox/worktree.js', () => {
+    const double = {
   createSandbox: vi.fn(() => ({ id: 'mock-sb', worktreePath: '/tmp/mock-wt', sourceRepo: '/tmp/mock-src' })),
   removeSandbox: vi.fn(),
   sandboxDiff: vi.fn(() => ({ files: 0, patch: '', insertions: 0, deletions: 0 })),
-}));
+};
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
 // ---------------------------------------------------------------------------
 // Imports under test (after all vi.mock hoisting)

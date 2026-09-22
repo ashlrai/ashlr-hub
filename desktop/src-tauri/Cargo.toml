@@ -29,7 +29,11 @@ serde_json = "1"
 hmac = "0.12"
 sha2 = "0.10"
 
-[target.'cfg(target_os = "macos")'.dependencies]
+# `libc` was already a macOS dependency; the target is widened to every unix so
+# `sidecar_guard`'s `kill(2)` / signal handling compiles on Linux too (the Linux
+# BUNDLE stays quarantined — see scripts/assert-desktop-bundle-policy.mjs — but
+# the crate must still build there).
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [profile.release]

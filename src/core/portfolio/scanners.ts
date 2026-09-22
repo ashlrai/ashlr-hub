@@ -31,6 +31,7 @@ import type {
 } from '../types.js';
 import { listIssues, githubStatus } from '../integrations/github.js';
 import { isTrivialItem, isNonCodePath } from './value-filter.js';
+import { scoreItem } from './scoring.js';
 import { listGoals } from '../goals/store.js';
 import { createProposalMilestoneCompletionPredicate } from '../goals/completion.js';
 import {
@@ -181,17 +182,6 @@ function clamp(n: number): number {
   return Math.max(1, Math.min(5, Math.round(n)));
 }
 
-/**
- * Import scoreItem lazily to avoid a circular dep if backlog.ts imports us.
- * We inline the same pure formula here so scanners.ts is self-contained.
- * Must match backlog.ts#scoreItem exactly: value / max(1, effort), clamped.
- */
-function score(value: number, effort: number): number {
-  const v = clamp(value);
-  const e = Math.max(1, clamp(effort));
-  return Math.round((v / e) * 100) / 100;
-}
-
 function boundedGoalDisplayTitle(objective: string, milestoneTitle: string): string {
   const prefix = 'Advance goal "';
   const separator = '" — ';
@@ -233,7 +223,7 @@ function makeItem(
     detail: boundedWorkItemText(detail, MAX_WORK_ITEM_DETAIL_LENGTH),
     value: v,
     effort: e,
-    score: score(v, e),
+    score: scoreItem(v, e),
     tags,
     ts: nowIso(),
   };

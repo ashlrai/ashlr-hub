@@ -6,9 +6,10 @@ import {
   type ImmutablePrivateRecordCodec, type ImmutablePrivateRecordStoreConfig,
 } from '../util/immutable-private-record-store.js';
 import { canonical, defaultUniverseRoot, digest, ensureUniverseRoot, inspectPrivateDirectory, privateDirectory } from './artifacts.js';
-import { projectUniverse, scheduledVariants, universePath } from './store.js';
+import { parseEvaluation, projectUniverse, scheduledVariants, universePath } from './store.js';
 import type {
-  UniverseCampaignDefinition, UniverseCampaignStep, UniverseCampaignSummary, UniverseStoreOptions, UniverseSummary,
+  UniverseCampaignDefinition, UniverseCampaignSeedEvaluation, UniverseCampaignSeedIntent, UniverseCampaignSeedResult,
+  UniverseCampaignStep, UniverseCampaignSummary, UniverseStoreOptions, UniverseSummary,
 } from './types.js';
 
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
@@ -20,6 +21,8 @@ type SettledState = 'paused' | 'stopped' | 'completed' | 'interrupted' | 'failed
 export type CampaignEventInput =
   { kind: 'created'; definition: UniverseCampaignDefinition; definitionDigest: string; manifestDigest: string; comparatorDigest: string; at: string } |
   { kind: 'started'; at: string; deadlineAt: string; owner: CampaignOwner; dispatchId?: string } |
+  { kind: 'seed-evaluation-intent'; at: string; evaluation: UniverseCampaignSeedIntent } |
+  { kind: 'seed-evaluation-result'; at: string; evaluation: UniverseCampaignSeedResult } |
   { kind: 'step'; at: string; ordinal: number; runId: string; generation: number; variantIds: string[]; reservedModelRequests: number } |
   { kind: 'control'; at: string; action: 'pause' | 'stop' } |
   { kind: 'settled'; at: string; state: SettledState; reason: string; dispatchId?: string };
@@ -32,7 +35,8 @@ function object(value: unknown): value is Record<string, unknown> {
     (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 }
 function exact(value: Record<string, unknown>, keys: string[]): boolean {
-  return Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key));
+  return Reflect.ownKeys(value).length === keys.length && Reflect.ownKeys(value).every((key) => typeof key === 'string' &&
+    keys.includes(key) && Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value'));
 }
 function integer(value: unknown, low: number, high: number): value is number {
   return Number.isSafeInteger(value) && Number(value) >= low && Number(value) <= high;
@@ -47,7 +51,9 @@ function hash(value: unknown): value is string { return typeof value === 'string
 export function validCampaignDispatchId(value: unknown): value is string { return typeof value === 'string' && UUID.test(value); }
 
 export function validateUniverseCampaignDefinition(value: unknown): UniverseCampaignDefinition {
-  if (!object(value) || !exact(value, ['schemaVersion', 'id', 'universeId', 'budget', 'feedback']) ||
+  if (!object(value) || !exact(value, ['schemaVersion', 'id', 'universeId', 'budget', 'feedback',
+    ...(Object.hasOwn(value, 'measureSeed') ? ['measureSeed'] : [])]) ||
+      Object.hasOwn(value, 'measureSeed') && value.measureSeed !== true ||
       value.schemaVersion !== 1 || !identifier(value.id) || !identifier(value.universeId) || typeof value.feedback !== 'boolean' ||
       !object(value.budget) || !exact(value.budget, ['maxGenerations', 'maxDurationMs', 'maxModelRequests', 'maxStagnantGenerations', 'maxReportedTokens']) ||
       !integer(value.budget.maxGenerations, 1, 128) || !integer(value.budget.maxDurationMs, 1, 86_400_000) ||
@@ -56,6 +62,32 @@ export function validateUniverseCampaignDefinition(value: unknown): UniverseCamp
     throw new Error('Invalid Universe campaign: bounded identity, generation/time/request/stagnation budgets and explicit feedback required');
   }
   return JSON.parse(canonical(value)) as UniverseCampaignDefinition;
+}
+
+function validSeedIntent(value: unknown): value is UniverseCampaignSeedIntent {
+  return object(value) && exact(value, ['schemaVersion', 'id', 'sessionSequence', 'definitionDigest', 'manifestDigest',
+    'comparatorDigest', 'seedArtifactDigest', 'context', 'startedAt', 'deadlineAt']) && value.schemaVersion === 1 &&
+    typeof value.id === 'string' && UUID.test(value.id) && integer(value.sessionSequence, 1, MAX_EVENTS - 1) &&
+    hash(value.definitionDigest) && hash(value.manifestDigest) && hash(value.comparatorDigest) && hash(value.seedArtifactDigest) &&
+    value.context === 'campaign-seed-v1' && iso(value.startedAt) && iso(value.deadlineAt) && value.startedAt < value.deadlineAt;
+}
+
+function validSeedResult(value: unknown): value is UniverseCampaignSeedResult {
+  if (!object(value) || !exact(value, ['schemaVersion', 'intentDigest', 'status', 'finishedAt', 'durationMs',
+    'processGroupSettlement', 'measurement', 'reason']) || value.schemaVersion !== 1 || !hash(value.intentDigest) ||
+    !iso(value.finishedAt) || typeof value.durationMs !== 'number' || !Number.isFinite(value.durationMs) ||
+    value.durationMs < 0 || value.durationMs > 86_400_000 ||
+    !['not-started', 'group-exit-confirmed'].includes(String(value.processGroupSettlement))) return false;
+  if (value.status === 'measured') {
+    if (value.processGroupSettlement !== 'group-exit-confirmed' || value.reason !== null || !object(value.measurement)) return false;
+    try {
+      const measurement = parseEvaluation(canonical(value.measurement));
+      return canonical(measurement) === canonical(value.measurement);
+    } catch { return false; }
+  }
+  return value.measurement === null && (value.status === 'cancelled' && value.reason === 'evaluation-cancelled' ||
+    value.status === 'timed-out' && value.reason === 'evaluation-timed-out' ||
+    value.status === 'failed' && ['evaluator-failed', 'evaluator-invalid-result', 'integrity-changed'].includes(String(value.reason)));
 }
 
 function parseEvent(value: unknown): CampaignEvent | null {
@@ -72,6 +104,10 @@ function parseEvent(value: unknown): CampaignEvent | null {
         Object.hasOwn(value, 'dispatchId') && !validCampaignDispatchId(value.dispatchId) || !iso(value.deadlineAt) || !object(value.owner) ||
         !exact(value.owner, ['pid', 'startRef']) || !integer(value.owner.pid, 1, 2 ** 31 - 1) ||
         typeof value.owner.startRef !== 'string' || value.owner.startRef.length < 1 || value.owner.startRef.length > 64) return null;
+  } else if (value.kind === 'seed-evaluation-intent') {
+    if (!exact(value, [...shared, 'evaluation']) || !validSeedIntent(value.evaluation) || value.evaluation.startedAt !== value.at) return null;
+  } else if (value.kind === 'seed-evaluation-result') {
+    if (!exact(value, [...shared, 'evaluation']) || !validSeedResult(value.evaluation) || value.evaluation.finishedAt !== value.at) return null;
   } else if (value.kind === 'step') {
     if (!exact(value, [...shared, 'ordinal', 'runId', 'generation', 'variantIds', 'reservedModelRequests']) ||
         !integer(value.ordinal, 1, 128) || typeof value.runId !== 'string' || !UUID.test(value.runId) ||
@@ -126,6 +162,7 @@ export function readCampaignEvents(directory: string): CampaignEvent[] {
 export function foldCampaignEvents(records: CampaignEvent[]): {
   created: CreatedEvent; state: UniverseCampaignSummary['state']; reason: string | null;
   owner: CampaignOwner | null; startedAt: string | null; deadlineAt: string | null; finishedAt: string | null; steps: StepEvent[];
+  seedEvaluation?: UniverseCampaignSeedEvaluation;
 } {
   const created = records[0];
   if (!created || created.kind !== 'created' || records.some((event, index) => event.sequence !== index || !parseEvent(event))) {
@@ -141,10 +178,14 @@ export function foldCampaignEvents(records: CampaignEvent[]): {
   let reserved = 0;
   let activeDispatchId: string | undefined;
   const dispatches = new Set<string>();
+  let sessionSequence: number | null = null;
+  let sessionStartedAt: string | null = null;
+  let seedEvaluation: UniverseCampaignSeedEvaluation | undefined;
   for (const event of records.slice(1)) {
     if (terminalCampaign(state)) throw new Error('Campaign terminal history cannot be extended');
     if (event.kind === 'started') {
       if (!['ready', 'paused', 'interrupted'].includes(state)) throw new Error('Campaign session started from an invalid state');
+      if (seedEvaluation && seedEvaluation.result?.status !== 'measured') throw new Error('Campaign seed evaluation requires resolution, not replay');
       if (event.dispatchId !== undefined && dispatches.has(event.dispatchId)) throw new Error('Campaign dispatch identity cannot be reused');
       activeDispatchId = event.dispatchId;
       if (activeDispatchId !== undefined) dispatches.add(activeDispatchId);
@@ -154,8 +195,28 @@ export function foldCampaignEvents(records: CampaignEvent[]): {
       }
       if (event.deadlineAt !== deadlineAt) throw new Error('Campaign deadline cannot be reset on resume');
       state = 'running'; owner = event.owner; reason = null; finishedAt = null;
+      sessionSequence = event.sequence; sessionStartedAt = event.at;
+    } else if (event.kind === 'seed-evaluation-intent') {
+      const intent = event.evaluation;
+      if (created.definition.measureSeed !== true || seedEvaluation || steps.length || state !== 'running' || !owner ||
+          intent.sessionSequence !== sessionSequence || sessionStartedAt === null || intent.startedAt < sessionStartedAt ||
+          intent.deadlineAt !== deadlineAt || intent.definitionDigest !== created.definitionDigest ||
+          intent.manifestDigest !== created.manifestDigest || intent.comparatorDigest !== created.comparatorDigest) {
+        throw new Error('Campaign seed evaluation intent does not match its initial owned session');
+      }
+      seedEvaluation = { intent, result: null };
+    } else if (event.kind === 'seed-evaluation-result') {
+      const result = event.evaluation;
+      if (!seedEvaluation || seedEvaluation.result || !owner || !['running', 'pause-requested', 'stop-requested'].includes(state) ||
+          seedEvaluation.intent.sessionSequence !== sessionSequence || result.intentDigest !== digest(canonical(seedEvaluation.intent)) ||
+          result.finishedAt < seedEvaluation.intent.startedAt ||
+          result.status === 'measured' && (state !== 'running' || deadlineAt === null || result.finishedAt >= deadlineAt)) {
+        throw new Error('Campaign seed evaluation result does not match its unsettled intent');
+      }
+      seedEvaluation = { ...seedEvaluation, result };
     } else if (event.kind === 'step') {
-      if (state !== 'running' || !owner || event.ordinal !== steps.length + 1 ||
+      if (state !== 'running' || !owner || created.definition.measureSeed === true && seedEvaluation?.result?.status !== 'measured' ||
+          event.ordinal !== steps.length + 1 ||
           steps.some((step) => step.runId === event.runId) || event.ordinal > created.definition.budget.maxGenerations ||
           reserved + event.reservedModelRequests > created.definition.budget.maxModelRequests) throw new Error('Campaign dispatch exceeds its identity or reserved budget');
       steps.push(event); reserved += event.reservedModelRequests;
@@ -164,6 +225,9 @@ export function foldCampaignEvents(records: CampaignEvent[]): {
       state = event.action === 'stop' ? 'stop-requested' : 'pause-requested';
       reason = event.action === 'stop' ? 'Stop requested by owner' : 'Pause requested by owner';
     } else if (event.kind === 'settled') {
+      if (event.state === 'completed' && created.definition.measureSeed === true && seedEvaluation?.result?.status !== 'measured') {
+        throw new Error('Campaign cannot complete without a measured seed evaluator');
+      }
       if (event.dispatchId !== undefined && event.dispatchId !== activeDispatchId) throw new Error('Campaign settlement dispatch identity does not match its session');
       if ((state === 'stop-requested' && event.state !== 'stopped') ||
           (state === 'pause-requested' && event.state !== 'paused' && event.state !== 'stopped')) throw new Error('Campaign settlement ignored a durable control request');
@@ -171,7 +235,8 @@ export function foldCampaignEvents(records: CampaignEvent[]): {
       activeDispatchId = undefined;
     } else throw new Error('Campaign definition cannot be replaced');
   }
-  return { created, state, reason, owner, startedAt, deadlineAt, finishedAt, steps };
+  return { created, state, reason, owner, startedAt, deadlineAt, finishedAt, steps,
+    ...(seedEvaluation ? { seedEvaluation } : {}) };
 }
 
 /** Admission conflicts must not be converted into a settlement of another owner's control. */
@@ -179,7 +244,7 @@ export class CampaignControlConflictError extends Error {}
 
 /** Short transaction lock is separate from the entire campaign execution lease. */
 export function appendCampaignEvent(directory: string, input: CampaignEventInput,
-  options: { expectedRecordsDigest?: string } = {}): CampaignEvent[] {
+  options: { expectedRecordsDigest?: string; prepublish?: () => void } = {}): CampaignEvent[] {
   if (options.expectedRecordsDigest !== undefined && !hash(options.expectedRecordsDigest)) {
     throw new Error('Invalid campaign control checkpoint');
   }
@@ -197,10 +262,36 @@ export function appendCampaignEvent(directory: string, input: CampaignEventInput
     const event = { ...input, sequence: records.length, id: String(records.length).padStart(8, '0') } as CampaignEvent;
     const next = [...records, event];
     foldCampaignEvents(next);
-    const disposition = writeImmutablePrivateRecord(config(directory), event);
+    const disposition = writeImmutablePrivateRecord(config(directory), event,
+      options.prepublish ? { prepublish: () => { options.prepublish!(); return true; } } : {});
     if (!['recorded', 'replayed'].includes(disposition)) throw new Error(`Campaign evidence write ${disposition}`);
     return next;
   } finally { releaseLocalStoreLock(lock); }
+}
+
+/** A lost evaluator receipt may mean a process is still alive. Reclaiming a dead
+ * owner's lock must not authorize another campaign or direct run on this seed.
+ * Called only after acquiring the Universe lease; never repairs or executes.
+ */
+export function assertCampaignSeedEvaluatorsSettled(universeId: string, options: UniverseStoreOptions): void {
+  const directory = join(resolve(options.root ?? defaultUniverseRoot()), 'campaigns');
+  try { lstatSync(directory); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
+  inspectPrivateDirectory(directory);
+  const names = readdirSync(directory).sort();
+  if (names.length > 64) throw new Error('Campaign inventory limit exceeded');
+  for (const id of names) {
+    const path = campaignDirectory(id, options);
+    inspectPrivateDirectory(path);
+    const first = readImmutablePrivateRecordPoint(config(path), '00000000', '00000000.json').record;
+    if (first?.kind !== 'created' || first.definition.id !== id) throw new Error('Campaign identity unavailable');
+    if (first.definition.universeId !== universeId || first.definition.measureSeed !== true) continue;
+    const folded = foldCampaignEvents(readCampaignEvents(path));
+    if (canonical(folded.created) !== canonical(first)) throw new Error('Campaign identity changed during execution admission');
+    if (folded.seedEvaluation && folded.seedEvaluation.result === null) {
+      throw new Error('Universe has an unresolved campaign seed evaluator');
+    }
+  }
 }
 
 export function projectCampaign(records: CampaignEvent[], universe: UniverseSummary): UniverseCampaignSummary {
@@ -260,6 +351,7 @@ export function projectCampaign(records: CampaignEvent[], universe: UniverseSumm
     comparatorDigest: created.comparatorDigest, createdAt: created.at, state,
     reason: state === 'interrupted' && folded.state === 'running' ? 'Campaign owner exited before settlement' : folded.reason,
     startedAt: folded.startedAt, deadlineAt: folded.deadlineAt, finishedAt: folded.finishedAt, steps,
+    ...(folded.seedEvaluation ? { seedEvaluation: folded.seedEvaluation } : {}),
     progress: { attempts: steps.length, completedRuns: steps.filter((step) => step.state === 'completed').length,
       interruptedRuns: steps.filter((step) => step.state === 'interrupted').length,
       reservedModelRequests: steps.reduce((sum, step) => sum + step.reservedModelRequests, 0),

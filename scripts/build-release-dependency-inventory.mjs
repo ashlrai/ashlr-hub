@@ -189,7 +189,51 @@ function observeNpmRuntimeClosure(npmRoot, snapshotRoot) {
       const path = join(directory, entry.name);
       const logicalPath = relative(npmRoot, path).split(sep).join('/');
       if (entry.isSymbolicLink()) {
-        throw new Error('npm runtime closure contains a symbolic link');
+        // A blanket rejection here made the inventory impossible to build
+        // against a stock npm: `npm/node_modules/.bin` ships 9 shims
+        // (node-which, pacote, semver, node-gyp, ...) that are symlinks by
+        // design, so every release build and all 79 tests in
+        // m482.release-artifact-contract failed on an ordinary install.
+        //
+        // The property actually worth defending is that nothing OUTSIDE the
+        // closure gets inventoried as if it were inside. So resolve the link
+        // and enforce exactly that: an escape is still fatal, while a link
+        // pointing within the closure is hashed at its own logical path. A
+        // swapped shim therefore still changes the inventory and is still
+        // caught, which a skip would not have achieved.
+        let resolved;
+        try {
+          resolved = realpathSync(path);
+        } catch {
+          throw new Error('npm runtime closure contains an unresolvable symbolic link');
+        }
+        const inside = resolved === npmRoot || resolved.startsWith(npmRoot + sep);
+        if (!inside) {
+          throw new Error('npm runtime closure contains a symbolic link escaping the closure');
+        }
+        // Only file links are followed. A directory link could revisit a
+        // subtree and is not something npm's own layout produces.
+        if (!lstatSync(resolved).isFile()) {
+          throw new Error('npm runtime closure contains a non-file symbolic link');
+        }
+        const linked = openStableRegularFile(resolved, 'npm runtime file', MAX_NPM_RUNTIME_FILE_BYTES);
+        try {
+          fileCount += 1;
+          totalBytes += linked.bytes.length;
+          if (fileCount > MAX_NPM_RUNTIME_FILES || totalBytes > MAX_NPM_RUNTIME_BYTES) {
+            throw new Error('npm runtime closure exceeds resource limits');
+          }
+          records.push({
+            identity: fileIdentity(linked.identity),
+            path: logicalPath,
+            sha256: createHash('sha256').update(linked.bytes).digest('hex'),
+            size: linked.bytes.length,
+            type: 'file',
+          });
+        } finally {
+          closeSync(linked.descriptor);
+        }
+        continue;
       }
       if (entry.isDirectory()) {
         visit(path, depth + 1);

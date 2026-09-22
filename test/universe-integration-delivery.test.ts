@@ -4,8 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const state = vi.hoisted(() => ({ branchCommit: null as string | null, commit: null as string | null, failCreate: false,
-  failIntent: false, failReceipt: false, abortAfterCommit: null as AbortController | null, abortBeforeGuard: null as AbortController | null }));
-const mocks = vi.hoisted(() => ({ readEvaluation: vi.fn(), settled: vi.fn(), comparator: vi.fn(), owned: vi.fn(), createRef: vi.fn() }));
+  failIntent: false, failReceipt: false, kill: false, killAfterCommit: false, killBeforeGuard: false, unchanged: false,
+  abortAfterCommit: null as AbortController | null, abortBeforeGuard: null as AbortController | null }));
+const mocks = vi.hoisted(() => ({ readEvaluation: vi.fn(), settled: vi.fn(), comparator: vi.fn(), owned: vi.fn(), createRef: vi.fn(), writeTree: vi.fn(), hashObject: vi.fn() }));
+vi.mock('../src/core/sandbox/policy.js', () => ({ killSwitchOn: () => state.kill }));
 
 vi.mock('../src/core/util/immutable-private-record-store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/util/immutable-private-record-store.js')>();
@@ -38,9 +40,9 @@ vi.mock('../src/core/universe/store.js', () => ({
 vi.mock('../src/core/universe/delivery.js', () => ({ validUniverseDeliveryBranch: (value: unknown) => typeof value === 'string' && value.startsWith('codex/') }));
 vi.mock('../src/core/universe/delivery-git.js', () => ({
   deliveryGit: vi.fn(() => {
-    const base = 'c'.repeat(40); const baseTree = 'e'.repeat(40); const tree = 'f'.repeat(40);
+    const base = 'c'.repeat(40); const tree = 'f'.repeat(40); const baseTree = state.unchanged ? tree : 'e'.repeat(40);
     return {
-      invoke: vi.fn(), writeTree: vi.fn(() => tree), treeDigest: vi.fn(() => 'd'.repeat(64)),
+      invoke: vi.fn(), writeTree: mocks.writeTree.mockImplementation(() => tree), treeDigest: vi.fn(() => 'd'.repeat(64)),
       entries: vi.fn((oid: string) => oid === baseTree ? [] : [{ path: 'value.txt', oid: '2'.repeat(40), executable: false }]),
       oid: vi.fn((args: string[], input?: Buffer) => {
         const value = args.at(-1)!;
@@ -49,6 +51,7 @@ vi.mock('../src/core/universe/delivery-git.js', () => ({
         if (value === `${state.commit}^{tree}`) return tree;
         if (value === `${state.commit}^{commit}`) return state.commit!;
         if (args[0] === 'hash-object') {
+          mocks.hashObject();
           state.commit = require('node:crypto').createHash('sha1').update(`commit ${input!.length}\0`).update(input!).digest('hex');
           return state.commit;
         }
@@ -56,7 +59,9 @@ vi.mock('../src/core/universe/delivery-git.js', () => ({
       }),
       text: vi.fn(() => `${state.commit} ${base}`), ref: vi.fn(() => state.branchCommit), assertNotCheckedOut: vi.fn(),
       createRef: mocks.createRef.mockImplementation(async (_branch: string, target: string, guard: () => void) => {
-        state.abortBeforeGuard?.abort(); guard(); if (state.failCreate) throw new Error('transaction unavailable'); state.branchCommit = target; state.abortAfterCommit?.abort();
+        state.abortBeforeGuard?.abort(); if (state.killBeforeGuard) state.kill = true;
+        guard(); if (state.failCreate) throw new Error('transaction unavailable'); state.branchCommit = target;
+        state.abortAfterCommit?.abort(); if (state.killAfterCommit) state.kill = true;
       }),
     };
   }),
@@ -100,11 +105,56 @@ function makeWritable(path: string): void {
 beforeEach(() => {
   state.branchCommit = null; state.commit = null; state.failCreate = false; state.failIntent = false; state.failReceipt = false;
   state.abortAfterCommit = null; state.abortBeforeGuard = null;
+  state.kill = false; state.killAfterCommit = false; state.killBeforeGuard = false; state.unchanged = false;
   vi.clearAllMocks(); mocks.readEvaluation.mockReturnValue(evidence());
 });
 afterEach(() => { for (const value of roots.splice(0)) { makeWritable(value); rmSync(value, { recursive: true, force: true }); } });
 
 describe('Universe integration delivery durable branches', () => {
+  it('withholds new delivery before artifact staging or intent under global KILL', async () => {
+    state.kill = true; const rootPath = root();
+    await expect(deliverUniverseIntegration(request(), { root: rootPath })).rejects.toThrow('global KILL');
+    expect(records(rootPath)).toEqual([]); expect(mocks.createRef).not.toHaveBeenCalled();
+    expect(mocks.writeTree).not.toHaveBeenCalled(); expect(mocks.hashObject).not.toHaveBeenCalled();
+  });
+
+  it('retains intent without publication if KILL arrives at the prepared guard', async () => {
+    state.killBeforeGuard = true; const rootPath = root();
+    await expect(deliverUniverseIntegration(request(), { root: rootPath })).rejects.toThrow('global KILL');
+    expect(state.branchCommit).toBeNull(); expect(records(rootPath).map((row) => row.kind)).toEqual(['intent']);
+  });
+
+  it('settles truthful delivery evidence when KILL arrives after publication', async () => {
+    state.killAfterCommit = true; const rootPath = root();
+    await expect(deliverUniverseIntegration(request(), { root: rootPath })).resolves.toMatchObject({ status: 'delivered' });
+    expect(state.kill).toBe(true); expect(records(rootPath).map((row) => row.kind)).toEqual(['intent', 'receipt']);
+  });
+
+  it('recovers a published pending receipt under KILL without republishing', async () => {
+    state.failReceipt = true; const rootPath = root();
+    await expect(deliverUniverseIntegration(request(), { root: rootPath })).rejects.toThrow('durably written');
+    state.failReceipt = false; state.kill = true;
+    await expect(deliverUniverseIntegration(request(), { root: rootPath })).resolves.toMatchObject({ status: 'delivered' });
+    expect(mocks.createRef).toHaveBeenCalledOnce(); expect(records(rootPath)).toHaveLength(2);
+  });
+
+  it('does not treat an unpublished pending intent as stop-exempt recovery', async () => {
+    state.failCreate = true; const rootPath = root();
+    await expect(deliverUniverseIntegration(request(), { root: rootPath })).rejects.toThrow('transaction unavailable');
+    state.failCreate = false; state.kill = true;
+    await expect(deliverUniverseIntegration(request(), { root: rootPath })).rejects.toThrow('global KILL');
+    expect(state.branchCommit).toBeNull(); expect(mocks.createRef).toHaveBeenCalledOnce();
+    expect(records(rootPath).map((row) => row.kind)).toEqual(['intent']);
+  });
+
+  it('does not complete an unchanged delivery if KILL arrives during final validation', async () => {
+    state.unchanged = true; let reads = 0;
+    mocks.readEvaluation.mockImplementation(() => { if (++reads === 3) state.kill = true; return evidence(); });
+    const rootPath = root();
+    await expect(deliverUniverseIntegration(request(), { root: rootPath })).rejects.toThrow('global KILL');
+    expect(mocks.createRef).not.toHaveBeenCalled(); expect(records(rootPath).map((row) => row.kind)).toEqual(['intent']);
+  });
+
   it('rejects malformed branch delivery requests before reading evaluation evidence', () => {
     expect(() => validateUniverseIntegrationDeliveryRequest({ ...request(), branch: 'main' })).toThrow(/Invalid/);
     expect(() => validateUniverseIntegrationDeliveryRequest({ ...request(), expectedEvaluationDigest: 'bad' })).toThrow(/Invalid/);

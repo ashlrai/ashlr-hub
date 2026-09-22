@@ -32,7 +32,7 @@ import { computeQualityMetrics } from './quality-metrics.js';
 import { renderPlaybook } from '../vision/playbook.js';
 import { engineInstalled, buildEngineCommand, spawnEngine } from '../run/engines.js';
 import { peekBackendAvailability } from '../fabric/resource-monitor.js';
-import { CLAUDE5_FABLE_API_ID, fableEnabled } from '../run/model-catalog.js';
+import { CLAUDE5_FABLE_API_ID, DEFAULT_LOCAL_MODEL_TAG, fableEnabled } from '../run/model-catalog.js';
 import {
   agentSemanticSubjectRef,
   agentSemanticModelFamily,
@@ -45,6 +45,7 @@ import {
   reviewModelFamily,
   type ReviewModelFamily,
 } from './reviewer-independence.js';
+import { assertPermitted, endpointPermitted } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Public types (defined here — not in types.ts per file ownership rules)
@@ -896,6 +897,14 @@ async function ollamaDirectComplete(
 ): Promise<string> {
   throwIfJudgeCancelled(signal);
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+  // LOCAL-ONLY GATE. This path builds its own request instead of going
+  // through provider-client's transport — it needs a far longer timeout
+  // than that path allows — which means it also bypasses the refusal that
+  // lives there. The base URL is loopback by default, so nothing reaches a
+  // paid provider as configured; the gate is here so that an operator who
+  // repoints it at a remote inference host does not end up with a
+  // local-only mode that has a hole in it.
+  assertPermitted(endpointPermitted(url));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180_000); // 3 min
   const onAbort = () => controller.abort(signal?.reason);
@@ -1242,9 +1251,18 @@ export function resolveFrontierJudgeClient(
   cfg: AshlrConfig,
   opts: FrontierJudgeResolutionOptions = {},
 ): FrontierJudgeClient | null {
+  // The LOCAL judge fallback follows the local default (DEFAULT_LOCAL_MODEL_TAG)
+  // rather than staying pinned to qwen2.5:72b-instruct-q4_K_M. This is the same
+  // Ollama runtime the coder default dispatches to, so a tag the machine no
+  // longer has would simply fail the judge call — and of the two, the judge is
+  // the one that most wants a thinking model, which the 72b is not and Qwen3.8
+  // is. `cfg.foundry.managerJudgeModel` still overrides. Judge independence is
+  // unaffected: `requireIndependent` only ever accepts a claude/openai-family
+  // reviewer, so a local model is reachable solely on the correlated path,
+  // exactly as before.
   const judgeModel =
     ((cfg.foundry as Record<string, unknown> | undefined)?.['managerJudgeModel'] as string | undefined) ||
-    'qwen2.5:72b-instruct-q4_K_M';
+    DEFAULT_LOCAL_MODEL_TAG;
   const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
   const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
   const resolve = (candidate: AshlrConfig): FrontierJudgeClient | null => {

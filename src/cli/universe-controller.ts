@@ -46,6 +46,9 @@ Known recovery failures include a bounded reasonCode and nextStep in JSON output
 These diagnostics do not authorize deletion, publication repair, or worker retry.
 The optional delivery plan is private JSON at most 64 KiB. Planned local branch
 handoffs gate downstream work; no push, merge, deployment or acceptance is implied.
+Optional target allowInitialRepair:true pins delivery of a first passing repair
+only against an earlier measured failed exact seed in the same campaign/niche.
+Omission retains prior-passing-elite delivery; the flag does not run a baseline.
 Repeat --resource-runtime for every intended resource-pool invocation; its private
 locator is not stored in the controller. Account reserves and policy still apply.
 SIGINT/SIGTERM requests cancellation and waits for started work to settle.

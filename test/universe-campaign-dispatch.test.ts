@@ -1,23 +1,30 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { canonical, digest } from '../src/core/universe/artifacts.js';
-import { foldCampaignEvents, projectCampaign, type CampaignEvent, type CampaignEventInput } from '../src/core/universe/campaign-store.js';
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { artifactDigest, canonical, digest } from '../src/core/universe/artifacts.js';
+import { appendCampaignEvent, campaignDirectory, foldCampaignEvents, initUniverseCampaign, projectCampaign,
+  readCampaignEvents, type CampaignEvent, type CampaignEventInput } from '../src/core/universe/campaign-store.js';
 import { readCompletedUniverseCampaignDispatch } from '../src/core/universe/campaign-dispatch.js';
 import { runUniverseCampaign } from '../src/core/universe/campaign.js';
-import type { UniverseCampaignDefinition, UniverseRun, UniverseSummary } from '../src/core/universe/types.js';
+import { appendRecord, comparatorDigest, type ManifestRecord } from '../src/core/universe/store.js';
+import type { UniverseCampaignDefinition, UniverseCampaignSeedIntent, UniverseCampaignSeedResult, UniverseRun, UniverseSummary } from '../src/core/universe/types.js';
 
 const hooks = vi.hoisted(() => ({ events: [] as CampaignEvent[], universe: undefined as UniverseSummary | undefined,
-  reads: 0, failRead: false, mutateRead: undefined as (() => void) | undefined, run: vi.fn() }));
+  reads: 0, failRead: false, realRecords: false, mutateRead: undefined as (() => void) | undefined, run: vi.fn() }));
 vi.mock('../src/core/universe/campaign-store.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/core/universe/campaign-store.js')>();
   return { ...actual,
-    readCampaignEvents: () => {
+    readCampaignEvents: (...args: Parameters<typeof actual.readCampaignEvents>) => {
+      if (hooks.realRecords) return actual.readCampaignEvents(...args);
       hooks.reads++; if (hooks.failRead) throw new Error('Unavailable synthetic evidence');
       const mutate = hooks.mutateRead; hooks.mutateRead = undefined; mutate?.();
       actual.foldCampaignEvents(hooks.events); return structuredClone(hooks.events);
     },
-    readUniverseCampaign: () => actual.projectCampaign(hooks.events, hooks.universe!),
+    readUniverseCampaign: (...args: Parameters<typeof actual.readUniverseCampaign>) => hooks.realRecords ? actual.readUniverseCampaign(...args) : actual.projectCampaign(hooks.events, hooks.universe!),
     campaignUniverse: () => hooks.universe!,
-    appendCampaignEvent: (_directory: string, input: CampaignEventInput) => {
+    appendCampaignEvent: (directory: string, input: CampaignEventInput) => {
+      if (hooks.realRecords) return actual.appendCampaignEvent(directory, input);
       const next = [...hooks.events, { ...input, id: String(hooks.events.length).padStart(8, '0'), sequence: hooks.events.length }];
       actual.foldCampaignEvents(next); hooks.events = next; return structuredClone(next);
     },
@@ -25,8 +32,11 @@ vi.mock('../src/core/universe/campaign-store.js', async (importOriginal) => {
 });
 vi.mock('../src/core/universe/execution.js', () => ({ assertUniverseExecution: () => {}, withUniverseExecution: async (_id: string, _options: unknown,
   callback: (lock: unknown) => unknown) => callback({}) }));
-vi.mock('../src/core/fleet/local-store-lock.js', () => ({ ownsLocalStoreLock: () => true,
-  verifiedProcessStartRef: () => 'synthetic-owner' }));
+vi.mock('../src/core/fleet/local-store-lock.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/fleet/local-store-lock.js')>();
+  return { ...actual, ownsLocalStoreLock: (...args: Parameters<typeof actual.ownsLocalStoreLock>) => hooks.realRecords ? actual.ownsLocalStoreLock(...args) : true,
+    verifiedProcessStartRef: (...args: Parameters<typeof actual.verifiedProcessStartRef>) => hooks.realRecords ? actual.verifiedProcessStartRef(...args) : 'synthetic-owner' };
+});
 vi.mock('../src/core/universe/runner.js', () => ({ runUniverseOwned: hooks.run }));
 
 const DISPATCH = '11111111-1111-4111-8111-111111111111';
@@ -34,8 +44,10 @@ const OTHER = '22222222-2222-4222-8222-222222222222';
 const AT = '2026-01-01T00:00:00.000Z';
 const LATER = '2026-01-01T00:00:01.000Z';
 const DEADLINE = '2026-01-01T00:01:00.000Z';
+const roots: string[] = [];
 afterEach(() => { hooks.events = []; hooks.universe = undefined; hooks.reads = 0; hooks.failRead = false;
-  hooks.mutateRead = undefined; hooks.run.mockReset(); });
+  hooks.realRecords = false; hooks.mutateRead = undefined; hooks.run.mockReset();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 function append(input: CampaignEventInput): void {
   hooks.events.push({ ...input, id: String(hooks.events.length).padStart(8, '0'), sequence: hooks.events.length });
 }
@@ -178,5 +190,79 @@ describe('read-only completed dispatch proof', () => {
   it('rejects degraded projection and unavailable private evidence', () => {
     const expected = fixture(); start(); complete(); hooks.universe!.sourceState = 'degraded'; hooks.universe!.reasons = ['Synthetic degradation'];
     expect(proof(expected)).toBeNull(); hooks.failRead = true; expect(proof(expected)).toBeNull();
+  });
+});
+
+describe('completed seed measurement dispatch proof from real private records', () => {
+  function measuredFixture() {
+    hooks.realRecords = true;
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'seed-dispatch-proof-'))); roots.push(root);
+    const universe = join(root, 'universes', 'fixture'); const seed = join(universe, 'seed');
+    mkdirSync(seed, { recursive: true, mode: 0o700 }); mkdirSync(join(universe, 'artifacts'), { mode: 0o700 });
+    writeFileSync(join(seed, 'evaluate.mjs'), 'throw new Error("Fixture evaluator must not execute");');
+    const manifest: ManifestRecord['manifest'] = { schemaVersion: 1, id: 'fixture', name: 'Seed dispatch fixture', objective: 'Verify exact recorded attribution',
+      seed: { repo: join(root, 'source'), revision: 'a'.repeat(40) }, metric: { name: 'value', direction: 'maximize', minImprovement: 0 },
+      budget: { maxTrials: 1, maxParallel: 1, maxDurationMs: 1000, trialTimeoutMs: 1000 },
+      evaluation: { command: ['evaluate.mjs'], timeoutMs: 1000 },
+      variants: [{ id: 'change', niche: 'quality', hypothesis: 'Fixture only', command: ['evaluate.mjs'] }] };
+    const partial: Omit<ManifestRecord, 'comparatorDigest'> = { id: 'manifest', kind: 'manifest', manifest,
+      manifestDigest: digest(canonical(manifest)), seedArtifact: { path: seed, digest: artifactDigest(seed), revision: manifest.seed.revision },
+      evaluationCommand: [join(seed, 'evaluate.mjs')], evaluationExecutableDigest: digest(readFileSync(join(seed, 'evaluate.mjs'))) };
+    const record = { ...partial, comparatorDigest: comparatorDigest(partial) }; appendRecord(universe, record);
+    const summary = initUniverseCampaign({ schemaVersion: 1, id: 'campaign', universeId: 'fixture', feedback: false, measureSeed: true,
+      budget: { maxGenerations: 1, maxDurationMs: 60_000, maxModelRequests: 0, maxStagnantGenerations: 1, maxReportedTokens: null } }, { root });
+    const directory = campaignDirectory('campaign', { root });
+    const expected = { dispatchId: DISPATCH, intentAt: AT, universeId: 'fixture', definitionDigest: summary.definitionDigest,
+      manifestDigest: record.manifestDigest, comparatorDigest: record.comparatorDigest, recordsDigest: digest(canonical(readCampaignEvents(directory))) };
+    appendCampaignEvent(directory, { kind: 'started', at: AT, deadlineAt: DEADLINE,
+      owner: { pid: process.pid, startRef: 'fixture-owner' }, dispatchId: DISPATCH });
+    const intent: UniverseCampaignSeedIntent = { schemaVersion: 1, id: OTHER, sessionSequence: 1,
+      definitionDigest: summary.definitionDigest, manifestDigest: record.manifestDigest, comparatorDigest: record.comparatorDigest,
+      seedArtifactDigest: record.seedArtifact.digest, context: 'campaign-seed-v1', startedAt: AT, deadlineAt: DEADLINE };
+    appendCampaignEvent(directory, { kind: 'seed-evaluation-intent', at: AT, evaluation: intent });
+    const result: UniverseCampaignSeedResult = { schemaVersion: 1, intentDigest: digest(canonical(intent)), status: 'measured',
+      finishedAt: LATER, durationMs: 1000, processGroupSettlement: 'group-exit-confirmed',
+      measurement: { passed: false, score: 0, metrics: { checks: 82 } }, reason: null };
+    appendCampaignEvent(directory, { kind: 'seed-evaluation-result', at: LATER, evaluation: result });
+    appendCampaignEvent(directory, { kind: 'settled', at: LATER, state: 'completed', reason: 'Recorded fixture completion', dispatchId: DISPATCH });
+    return { root, directory, expected };
+  }
+  function snapshot(root: string) {
+    const rows: unknown[] = [];
+    const visit = (path: string) => {
+      const stat = lstatSync(path); rows.push({ path: path.slice(root.length), mode: stat.mode, inode: stat.ino,
+        mtime: stat.mtimeMs, ctime: stat.ctimeMs, bytes: stat.isFile() ? digest(readFileSync(path)) : null });
+      if (stat.isDirectory()) for (const name of readdirSync(path).sort()) visit(join(path, name));
+    };
+    visit(root); return canonical(rows);
+  }
+  it('accepts a measured seed suffix without reevaluation, redispatch, or any store mutation', () => {
+    const f = measuredFixture(); const before = snapshot(f.root);
+    const result = readCompletedUniverseCampaignDispatch('campaign', f.expected, { root: f.root });
+    expect(result).toMatchObject({ campaign: { state: 'completed', sourceState: 'healthy', seedEvaluation: {
+      result: { status: 'measured', measurement: { passed: false, score: 0 } } } },
+    recordsDigest: digest(canonical(readCampaignEvents(f.directory))) });
+    expect(snapshot(f.root)).toBe(before); expect(hooks.run).not.toHaveBeenCalled();
+    expect(readCompletedUniverseCampaignDispatch('campaign', { ...f.expected, dispatchId: OTHER }, { root: f.root })).toBeNull();
+  });
+  it.each(['orphan-result', 'intent-mismatch', 'operational-result', 'operational-completed'] as const)('refuses %s without repairing or replaying private evidence', (kind) => {
+    const f = measuredFixture(); const events = readCampaignEvents(f.directory);
+    if (kind === 'orphan-result') events[2] = { kind: 'control', action: 'pause', at: AT, sequence: 2, id: '00000002' };
+    else {
+      const event = events[3]; if (event?.kind !== 'seed-evaluation-result') throw new Error('Fixture result missing');
+      if (kind === 'intent-mismatch') event.evaluation.intentDigest = 'f'.repeat(64);
+      else {
+        event.evaluation = { ...event.evaluation, status: 'failed', measurement: null, reason: 'evaluator-failed' };
+        if (kind === 'operational-result') {
+          const settled = events[4]; if (settled?.kind !== 'settled') throw new Error('Fixture settlement missing');
+          settled.state = 'failed';
+        }
+      }
+    }
+    for (const event of events.slice(2)) writeFileSync(join(f.directory, 'ledger', 'records', `${event.id}.json`), `${canonical(event)}\n`);
+    if (kind === 'operational-result') expect(foldCampaignEvents(readCampaignEvents(f.directory)).state).toBe('failed');
+    const before = snapshot(f.root);
+    expect(readCompletedUniverseCampaignDispatch('campaign', f.expected, { root: f.root })).toBeNull();
+    expect(snapshot(f.root)).toBe(before); expect(hooks.run).not.toHaveBeenCalled();
   });
 });

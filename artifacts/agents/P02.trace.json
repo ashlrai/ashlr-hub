@@ -1,0 +1,9 @@
+{
+  "packageId": "P02",
+  "kind": "unsigned-agent-task-stub",
+  "productionEvidence": false,
+  "provenanceSig": null,
+  "note": "This task stub is not a DecisionTraceV1, HMAC attestation, execution permit, or production acceptance receipt.",
+  "module": "src/core/universe/decision-trace.ts",
+  "tests": "test/universe-decision-trace.test.ts"
+}

@@ -136,6 +136,13 @@ vi.mock('../src/core/env-bridge.js', () => ({
 
 vi.mock('../src/core/sandbox/worktree.js', () => ({
   createSandbox: mocks.createSandbox,
+  // Production calls the ASYNC creator: it waits for the process-wide worktree
+  // fence off the event loop, so concurrent agents queue instead of each
+  // freezing the loop. A double for this module must provide it, and must
+  // provide it as a DOUBLE — the real one would take a real fence and run a
+  // real `git worktree add`, which is exactly what this suite avoids.
+  createSandboxAsync: async (...args: Parameters<typeof mocks.createSandbox>) =>
+    mocks.createSandbox(...args),
   removeSandbox: mocks.removeSandbox,
   sandboxDiff: mocks.sandboxDiff,
 }));

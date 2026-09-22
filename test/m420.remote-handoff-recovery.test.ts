@@ -61,6 +61,10 @@ vi.mock('../src/core/inbox/proposal-mutation-lock.js', () => ({
 
 vi.mock('../src/core/sandbox/mutation-fence.js', () => ({
   acquireOutwardMutationFence: () => ({ token: 'm420-outward' }),
+  // The async acquirer is what a RUN uses to retake the fence after
+  // inference. A double must provide it or the run throws where the
+  // real module would simply have waited off the event loop.
+  acquireOutwardMutationFenceAsync: async () => (() => ({ token: 'm420-outward' }))(),
   ownsOutwardMutationFence: () => outwardOwnsMock(),
   releaseOutwardMutationFence: vi.fn(),
 }));

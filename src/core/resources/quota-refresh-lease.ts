@@ -11,7 +11,7 @@ import { fsyncDirectory } from '../util/durability.js';
 import { writePrivateFileAtomically } from '../util/private-file-write.js';
 import { readResourceJson } from './pool-runtime.js';
 import { readNativeBootIdentity, type NativeBootIdentity } from './native-boot-identity.js';
-import type { ResourceCollectorRecoveryDiagnosis } from './console-types.js';
+import type { ResourceCollectorInspection, ResourceCollectorRecoveryDiagnosis } from './console-types.js';
 
 export type ResourceQuotaRefreshLeaseErrorCode = 'collector-owned' | 'reconciliation-required' |
   'collector-unavailable' | 'cleanup-unconfirmed' | 'cancelled';
@@ -88,6 +88,38 @@ function readPendingMarker(path: string): { marker: PendingMarker; stat: BigIntS
   return { marker, stat: after, recordDigest: digest(canonical(marker)) };
 }
 
+/** Read only the selected private marker; never acquire ownership or evaluate recovery. */
+export function inspectResourceQuotaRefreshPending(root: string): ResourceCollectorInspection {
+  const report = (state: ResourceCollectorInspection['state'], markerVersion: ResourceCollectorInspection['markerVersion'],
+    reasonCode: ResourceCollectorInspection['reasonCode']): ResourceCollectorInspection => ({
+    scope: 'local-record-inspection', sampledAt: new Date().toISOString(), state, markerVersion, reasonCode, recoveryAttempted: false,
+  });
+  try {
+    if (typeof root !== 'string' || !isAbsolute(root) || resolve(root) !== root || root === parse(root).root ||
+      root.length > 4096 || [...root].some(character => character.charCodeAt(0) < 32 ||
+        character.charCodeAt(0) >= 127 && character.charCodeAt(0) <= 159)) throw new Error();
+    inspectPrivateDirectory(root);
+    const before = lstatSync(root, { bigint: true });
+    const finish = () => {
+      inspectPrivateDirectory(root);
+      const after = lstatSync(root, { bigint: true });
+      if (before.dev !== after.dev || before.ino !== after.ino || before.mode !== after.mode || before.uid !== after.uid ||
+        before.mtimeNs !== after.mtimeNs || before.ctimeNs !== after.ctimeNs) throw new Error();
+    };
+    const path = join(root, '.resource-quota-refresh-pending.json');
+    try { lstatSync(path); }
+    catch (error) {
+      // ENOENT is absence only when the already verified parent remains intact.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      finish(); return report('absent', null, 'no-pending-record');
+    }
+    const { marker } = readPendingMarker(path);
+    finish();
+    return report('pending', marker.schemaVersion, marker.schemaVersion === 1
+      ? 'legacy-owner-evidence-missing' : 'recovery-not-evaluated');
+  } catch { return report('unavailable', null, 'pending-evidence-unavailable'); }
+}
+
 function privateActivityStat(stat: BigIntStats): boolean {
   return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1n && stat.size > 0n && stat.size <= BigInt(MAX_ACTIVITY_BYTES) &&
     (typeof process.getuid !== 'function' || stat.uid === BigInt(process.getuid())) &&
@@ -127,15 +159,20 @@ function activityMatches(activity: ActivityRecord, previous: ReturnType<typeof r
 }
 
 /** Signal zero is observation only: a recycled/present group or any non-ESRCH error blocks recovery. */
-function activityRecoveryBlocker(activity: ActivityRecord): ResourceCollectorRecoveryDiagnosis['reasonCode'] | null {
-  if (activity.schemaVersion === 1) return activity.reservations.length === 0 ? null : 'legacy-active-work-unverifiable';
-  for (const reservation of activity.reservations) {
+function reservationRecoveryBlocker(
+  entries: readonly ActivityReservation[],
+): ResourceCollectorRecoveryDiagnosis['reasonCode'] | null {
+  for (const reservation of entries) {
     if (reservation.phase === 'preparing') return 'command-registration-incomplete';
     if (reservation.phase === 'ready') continue;
     try { process.kill(-reservation.pgid!, 0); return 'process-group-not-confirmed-absent'; }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ESRCH') return 'process-group-not-confirmed-absent'; }
   }
   return null;
+}
+function activityRecoveryBlocker(activity: ActivityRecord): ResourceCollectorRecoveryDiagnosis['reasonCode'] | null {
+  if (activity.schemaVersion === 1) return activity.reservations.length === 0 ? null : 'legacy-active-work-unverifiable';
+  return reservationRecoveryBlocker(activity.reservations);
 }
 
 export interface ResourceNativeProcessGroupLifecycle {
@@ -146,6 +183,20 @@ export interface ResourceNativeActivity {
   processGroupLifecycle: ResourceNativeProcessGroupLifecycle;
 }
 
+/**
+ * Outcome of `reclaimNativeActivity()`.
+ *
+ * `idle` — nothing is outstanding. `reclaimed` — every outstanding reservation
+ * was confirmed by the kernel to own no surviving process group and has been
+ * durably released. `blocked` — at least one reservation could NOT be confirmed
+ * absent; the durable fence is untouched and the caller must keep treating this
+ * owner's native cleanup as unwitnessed.
+ */
+export type ResourceNativeActivityReclamation =
+  | { state: 'idle' }
+  | { state: 'reclaimed'; released: number }
+  | { state: 'blocked'; reasonCode: ResourceCollectorRecoveryDiagnosis['reasonCode'] };
+
 export interface ResourceQuotaRefreshLease {
   assertOwnership(): void;
   /** Private, verified identity. Available only after durable contact fencing. */
@@ -154,6 +205,14 @@ export interface ResourceQuotaRefreshLease {
   markPending(): void;
   /** Reserve durably before invocation; settle only after verified native teardown. */
   beginNativeActivity(): ResourceNativeActivity;
+  /**
+   * Finish, later, a settlement witness that a bounded in-band drain could not
+   * complete. Releases an outstanding reservation ONLY when the kernel reports
+   * its process group absent — the same evidence `activityRecoveryBlocker`
+   * demands of a dead owner's durable record, applied here to a live one.
+   * Observation only: it never signals, spawns, or assumes.
+   */
+  reclaimNativeActivity(): ResourceNativeActivityReclamation;
   /** The caller must await native teardown before requesting marker removal. */
   close(preservePending?: boolean): void;
 }
@@ -442,6 +501,40 @@ export async function acquireResourceQuotaRefreshLease(root: string,
       } catch { poisoned = true; throw new ResourceQuotaRefreshLeaseError('cleanup-unconfirmed', 'Native activity settlement unavailable'); }
     } });
   }
+  /**
+   * WHY THIS IS NOT A WEAKENING OF THE FENCE.
+   *
+   * `requireProcessGroupExit` publishes `group-exit-confirmed` only when
+   * `kill(-pgid, 0)` reports ESRCH within the runner's fixed post-close drain.
+   * Missing that window yields `unconfirmed` — which is honest ("not witnessed
+   * YET"), not a verdict that the group is immortal. Treating it as permanent
+   * strands the reservation forever and, with it, the whole collector.
+   *
+   * This re-runs the IDENTICAL kernel check at a later moment and releases the
+   * reservation only on ESRCH. A present group, a recycled group, or any
+   * non-ESRCH errno all keep the reservation and the durable fence exactly as
+   * they were. `preparing` stays unrecoverable for the same reason the dead
+   * owner's path refuses it: no PGID was ever published, so absence is
+   * unprovable. Nothing is signalled and no process is started here.
+   */
+  function reclaimNativeActivity(): ResourceNativeActivityReclamation {
+    if (!options.trackNativeActivity) return { state: 'blocked', reasonCode: 'activity-evidence-unavailable' };
+    try { assertOwnership(); }
+    catch { return { state: 'blocked', reasonCode: 'activity-evidence-unavailable' }; }
+    if (reservations.size === 0) return { state: 'idle' };
+    const outstanding = [...reservations.values()];
+    const blocker = reservationRecoveryBlocker(outstanding);
+    if (blocker) return { state: 'blocked', reasonCode: blocker };
+    try {
+      writeReservations([]);
+      reservations.clear();
+    } catch {
+      // A failed durable release leaves the fence intact and this owner fenced.
+      poisoned = true;
+      return { state: 'blocked', reasonCode: 'recovery-confirmation-failed' };
+    }
+    return { state: 'reclaimed', released: outstanding.length };
+  }
   function identity(): ResourceQuotaRefreshOwner {
     assertOwnership();
     if (!pending) throw new Error('Resource quota collector identity unavailable');
@@ -469,5 +562,5 @@ export async function acquireResourceQuotaRefreshLease(root: string,
     }
     if (closeError) throw closeError;
   }
-  return Object.freeze({ assertOwnership, identity, markPending, beginNativeActivity, close });
+  return Object.freeze({ assertOwnership, identity, markPending, beginNativeActivity, reclaimNativeActivity, close });
 }

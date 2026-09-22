@@ -7,7 +7,8 @@ import { performance } from 'node:perf_hooks';
 import { mergeResourceObservations, readResourceJson, readResourcePoolAllocation, resourcePoolStatus, runResourceTask, type ResourceTask } from '../resources/pool-runtime.js';
 import { refreshResourceQuotaOnce, validateResourceQuotaRefreshConfig } from '../resources/quota-refresh.js';
 import { readSharedQuotaEvidence } from '../resources/quota-shared-evidence.js';
-import { waitForResourceCapacity } from '../resources/capacity-wait.js';
+import { waitForResourceCapacity, type ResourceCapacityEvidence } from '../resources/capacity-wait.js';
+import { sharesResourceQuota } from '../resources/quota-scope.js';
 import { refreshResourceLocalModelsOnce, validateResourceLocalModelConfig } from '../resources/local-model-refresh.js';
 import { validateResourcePool, validateResourceObservations } from '../resources/pool-policy.js';
 import { validateResourceBindings } from '../resources/worker.js';
@@ -37,6 +38,12 @@ export interface ResourceGenerationContext {
   timeoutMs: number;
   signal: AbortSignal;
   resourceRuntime?: string;
+  /** Optional host pin, checked against the runtime actually consumed here. */
+  expectedRuntimeDigest?: string;
+  /** Synchronous enclosing graph ownership/KILL check, including final worker admission. */
+  isExecutionStopped?: () => boolean;
+  /** Optional absolute host deadline; never renewed by setup, waiting or retry. */
+  deadlineAt?: string;
   resourceUniverseRoot?: string;
   resourceIdentity?: { universeId: string; runId: string; variantId: string };
 }
@@ -98,6 +105,8 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
   const result: ResourceGenerationCompletion = { status: 'failed', content: null, resource: evidence,
     usage: { state: 'unavailable', inputTokens: null, outputTokens: null } };
   const started = performance.now(); const controller = new AbortController(); let timedOut = false;
+  const absoluteDeadline = context.deadlineAt === undefined ? null :
+    typeof context.deadlineAt === 'string' ? Date.parse(context.deadlineAt) : NaN;
   let quotaRefreshStarted = false;
   let sharedEvidenceFailed = false;
   let localRefreshStarted = false;
@@ -108,7 +117,9 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
   if (context.signal.aborted) cancel();
   const remaining = (): number => {
     if (context.signal.aborted) throw new Error();
-    const available = Math.floor(context.timeoutMs - (performance.now() - started));
+    if (context.isExecutionStopped?.()) { controller.abort(); throw new Error('Parent execution stopped'); }
+    const available = Math.floor(Math.min(context.timeoutMs - (performance.now() - started),
+      absoluteDeadline === null ? Infinity : absoluteDeadline - Date.now()));
     if (available < 1) { timedOut = true; controller.abort(); throw new Error(); }
     return available;
   };
@@ -117,14 +128,19 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     if (validated.kind !== 'resource-pool' || !Number.isSafeInteger(context.timeoutMs) || context.timeoutMs < 1 ||
       context.timeoutMs > 900_000 || !context.resourceIdentity || !path(context.resourceRuntime) ||
       !path(context.resourceUniverseRoot) || !path(context.candidatePath)) throw new Error();
+    if (absoluteDeadline !== null && (!Number.isFinite(absoluteDeadline) || typeof context.deadlineAt !== 'string' ||
+      new Date(absoluteDeadline).toISOString() !== context.deadlineAt)) throw new Error();
     const taskId = resourceGenerationTaskId(context.resourceIdentity);
     const withheld = (): ResourceGenerationCompletion => {
       evidence.taskId = taskId; evidence.dispatch = 'withheld';
       result.error = 'Resource generation withheld by current capacity evidence'; return result;
     };
-    timer = setTimeout(() => { timedOut = true; controller.abort(); }, context.timeoutMs);
+    timer = setTimeout(() => { timedOut = true; controller.abort(); }, remaining());
     remaining();
     const runtime = validateResourceGenerationRuntime(readResourceJson(context.resourceRuntime));
+    if (context.expectedRuntimeDigest !== undefined &&
+      (typeof context.expectedRuntimeDigest !== 'string' || !/^[a-f0-9]{64}$/.test(context.expectedRuntimeDigest) ||
+        digest(canonical(runtime)) !== context.expectedRuntimeDigest)) throw new Error('Resource runtime pin changed');
     inspectPrivateDirectory(context.resourceUniverseRoot);
     if (realpathSync(context.candidatePath) !== context.candidatePath || !lstatSync(context.candidatePath).isDirectory()) throw new Error();
     for (const boundary of [context.candidatePath, context.resourceUniverseRoot, runtime.root]) {
@@ -145,6 +161,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     const fileObservations = validateResourceObservations(readResourceJson(runtime.observationsPath), pool);
     let observations = fileObservations;
     let managedUnavailable: string[] = [];
+    const managedQuotaUnavailable = new Set<string>();
     let capturedObservations: typeof fileObservations = [];
     const quotaConfig = runtime.quotaConfigPath ?
       validateResourceQuotaRefreshConfig(readResourceJson(runtime.quotaConfigPath), pool, bindings) : null;
@@ -209,6 +226,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
         observeDenials(latestFile);
         observeDenials(capturedObservations);
         managedUnavailable = refreshed.unavailableWorkerIds;
+        for (const id of refreshed.quotaUnavailableWorkerIds ?? []) managedQuotaUnavailable.add(id);
       }
     }
     if (localConfig) {
@@ -231,7 +249,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
     // Only managed captures can supplement the current file during waiting.
     // Unmanaged workers removed from that file must not regain cached readiness.
     let evidenceRead = false;
-    const readEvidence = () => {
+    const readEvidence = (): ResourceCapacityEvidence => {
       if (priorReceipt) return { observations: fileObservations, unavailableWorkerIds: [] };
       if (sharedCollector && quotaConfig) {
         let shared: ReturnType<typeof readSharedQuotaEvidence>;
@@ -248,6 +266,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
         // A failed refresh remains a veto for this invocation, even if the
         // collector later recovers while it is waiting for a worker slot.
         for (const id of shared.unavailableWorkerIds) deniedWorkerIds.add(id);
+        for (const id of shared.quotaUnavailableWorkerIds ?? []) managedQuotaUnavailable.add(id);
         observeDenials(shared.observations);
         evidenceRead = true;
       }
@@ -258,15 +277,19 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       }
       evidenceRead = true;
       const now = Date.now();
+      const quotaUnavailableWorkerIds = new Set(managedQuotaUnavailable);
       // This integration requires current explicit evidence even when a general
       // resource pool permits operator-capped unknown-quota bootstrap elsewhere.
       const unavailableWorkerIds = new Set(validated.allowedWorkerIds.filter((id) => {
         const worker = pool.workers.find((row) => row.id === id)!;
         const observation = observations.find((row) => row.workerId === id);
-        return !observation || observation.health !== 'ready' || Date.parse(observation.expiresAt) <= now || Date.parse(observation.observedAt) > now ||
+        const invalid = !observation || observation.health !== 'ready' || Date.parse(observation.expiresAt) <= now || Date.parse(observation.observedAt) > now ||
           observation.updatedAt !== undefined && Date.parse(observation.updatedAt) > now || worker.provider !== 'local' &&
           (!observation.windows.length || observation.windows.some((window) => window.usedPercent === null ||
             window.resetsAt === null || Date.parse(window.resetsAt) <= now));
+        if (invalid && worker.quotaScope && observation?.health !== 'unavailable' &&
+          !(observation?.retryAfter && Date.parse(observation.retryAfter) > now)) { quotaUnavailableWorkerIds.add(id); return false; }
+        return invalid;
       }));
       for (const id of deniedWorkerIds) unavailableWorkerIds.add(id);
       // Retain measured usage across capture, but not an obsolete operator
@@ -274,16 +297,19 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
       const allocation = readResourcePoolAllocation(runtime.root, pool, bindings);
       for (const [id, usedPercent] of retainedUsage) {
         const capacityKey = bindings.find((binding) => binding.workerId === id)!.capacityKey;
+        const source = pool.workers.find((worker) => worker.id === id)!;
         const aliases = pool.workers.filter((worker) => validated.allowedWorkerIds.includes(worker.id) &&
-          bindings.find((binding) => binding.workerId === worker.id)!.capacityKey === capacityKey);
+          bindings.find((binding) => binding.workerId === worker.id)!.capacityKey === capacityKey && sharesResourceQuota(source, worker));
+        if (!aliases.length) continue;
         const ceiling = allocation.ceilingPercent ?? 100 - Math.max(...aliases.map((worker) => worker.reservePercent));
-        if (usedPercent >= ceiling) unavailableWorkerIds.add(id);
+        if (usedPercent >= ceiling) (source.quotaScope ? quotaUnavailableWorkerIds : unavailableWorkerIds).add(id);
       }
       for (const id of managedUnavailable) unavailableWorkerIds.add(id);
       // Process identity checks are synchronous. A timer cannot interrupt them,
       // so enforce the outer deadline again before locked admission can proceed.
       remaining();
-      return { observations, unavailableWorkerIds: [...unavailableWorkerIds] };
+      return { observations, unavailableWorkerIds: [...unavailableWorkerIds],
+        ...(pool.workers.some((worker) => worker.quotaScope) ? { quotaUnavailableWorkerIds: [...quotaUnavailableWorkerIds] } : {}) };
     };
     // The ID never depends on temporary trial paths. The full task digest also
     // binds this call's effective budget, workspace and prompt: a changed
@@ -301,7 +327,7 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
           // Derived zero is not the operator's legacy no-wait setting. After
           // expiry only an existing identity may reach atomic replay/conflict.
           current = readEvidence();
-          const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds);
+          const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
           remaining();
           if (!prior.attempts.some((attempt) => attempt.id === taskId)) return withheld();
         } else {
@@ -309,19 +335,25 @@ export async function generateResourceCompletion(config: UniverseResourceGenerat
             waitMs, signal: controller.signal, readEvidence });
           remaining();
           if (!capacity.ready) return withheld();
-          current = { observations: capacity.observations, unavailableWorkerIds: capacity.unavailableWorkerIds };
+          current = { observations: capacity.observations, unavailableWorkerIds: capacity.unavailableWorkerIds,
+            ...(capacity.quotaUnavailableWorkerIds === undefined ? {} : { quotaUnavailableWorkerIds: capacity.quotaUnavailableWorkerIds }) };
         }
         capacityWaiting = false;
       } else current = readEvidence();
       remaining();
       if (runtime.capacityWaitMs && capacityRemaining() < 1) {
-        const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds);
+        const prior = resourcePoolStatus(runtime.root, pool, bindings, current.observations, current.unavailableWorkerIds, current.quotaUnavailableWorkerIds);
         remaining();
         if (!prior.attempts.some((attempt) => attempt.id === taskId)) return withheld();
       }
       evidence.taskId = taskId; evidence.dispatch = 'unavailable';
       handoff = await runResourceTask({ root: runtime.root, pool, bindings, ...current, task, signal: controller.signal,
-        ...(sharedCollector ? { readAdmissionEvidence: readEvidence } : {}) });
+        ...(context.isExecutionStopped ? { beforeWorkerDispatch: () => { remaining(); return true; } } : {}),
+        ...(sharedCollector || absoluteDeadline !== null || context.isExecutionStopped ? { readAdmissionEvidence: () => {
+          // Recheck under the ledger lock: synchronous setup/lock waits cannot
+          // renew the host's absolute allocation window before reservation.
+          remaining(); return readEvidence();
+        } } : {}) });
       // Only an explicit no-reservation concurrency race can return to waiting.
       // Throws and every receipt retain the existing no-retry semantics.
       if (handoff.receipt || handoff.replayed || !runtime.capacityWaitMs || capacityRemaining() < 1 ||

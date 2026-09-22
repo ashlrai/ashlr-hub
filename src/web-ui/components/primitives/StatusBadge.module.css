@@ -1,12 +1,16 @@
+/* V2: a tag, not a pill — the design language reserves fully-round shapes
+   for dots and avatars. Height derives from the density tokens so a badge in
+   a table row lines up with the controls next to it. */
 .badge {
   display: inline-flex;
   align-items: center;
   gap: var(--space-1);
-  padding: 2px var(--space-2);
-  border-radius: var(--radius-full);
+  height: var(--density-row-sm);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
   font-size: var(--text-xs-size);
   font-weight: var(--font-weight-medium);
-  line-height: var(--text-xs-line);
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -93,7 +97,11 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .running .dot {
+  :root:not([data-motion="full"]) .running .dot {
     animation: none;
   }
+}
+
+:root[data-motion="reduce"] .running .dot {
+  animation: none;
 }

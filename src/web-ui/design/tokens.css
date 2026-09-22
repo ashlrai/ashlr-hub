@@ -6,86 +6,130 @@
  * ../DESIGN.md for the full rationale and the status-color semantics chosen
  * here to resolve the running/done inversion between them.
  *
- * Pattern: the full LIGHT palette lives on bare :root. Dark mode redefines
- * only what changes, twice — once for the OS-level signal
- * (`@media (prefers-color-scheme: dark)`, guarded so an explicit light
- * choice always wins) and once for an explicit in-app toggle
- * (`:root[data-theme="dark"]`). No token is EVER defined only inside a
- * media query or a [data-theme] block — every token has a real value on
- * bare :root first. This is the rule every future view must keep following.
+ * Pattern (UNCHANGED — every future view must keep following it): the full
+ * LIGHT palette lives on bare :root. Dark mode redefines only what changes,
+ * twice — once for the OS-level signal
+ * (`@media (prefers-color-scheme: dark)`, guarded by
+ * `:root:not([data-theme="light"])` so an explicit light choice always wins)
+ * and once for the explicit in-app toggle (`:root[data-theme="dark"]`).
+ * No token is EVER defined only inside a media query or a [data-theme]
+ * block — every token has a real value on bare :root first.
+ *
+ * V2 RETUNE (docs/VERSE-DESIGN-V2.md §2). Every token NAME here is
+ * load-bearing for the fleet dashboard, resources console, universe console
+ * and inbox, so this pass changed VALUES and ADDED names; it removed none.
+ * What changed and why:
+ *   - Neutral ramp is now a true neutral (zinc), not the old blue-tinted
+ *     one: "monochrome first, color only carries meaning".
+ *   - The accent is defined as raw HSL CHANNELS (--accent-h/s/l) so the
+ *     appearance store can swap one number and the whole app follows. The
+ *     ramp steps are derived with calc() from those channels.
+ *   - Status keeps all six names and the running=amber / done=green
+ *     semantics; backgrounds are desaturated in light and alpha-tinted in
+ *     dark. Every `--status-*-solid` and every `--phase-*` KEPT ITS EXACT
+ *     VALUE on purpose: components/charts/chart-tokens.css builds its
+ *     CVD-validated categorical rotation out of those seven hexes, and
+ *     re-tuning them would invalidate that validation (see that file's
+ *     header). Only the bg/fg pairs moved.
+ *   - New: engine identity, tracking, --text-2xs, density, three named
+ *     elevations, and the three shell measures the design doc fixes.
+ *
+ * Contrast (design doc §6) is asserted in both themes by
+ * ./tokens-contrast.test.ts, which parses THIS file — keep the declarations
+ * machine-readable (one `--token: value;` per line).
  */
 
 :root {
   color-scheme: light;
 
   /* ---------------------------------------------------------------------
-   * Neutral scale — 12 steps, light-mode values. Used for backgrounds,
-   * borders, and text at decreasing/increasing lightness.
+   * Neutral scale — 12 steps, light-mode values. True neutral, a whisper
+   * warm: color is reserved for meaning, so the chrome must not carry a hue.
    * ------------------------------------------------------------------- */
   --gray-0: #ffffff;
-  --gray-50: #f5f7fc;
-  --gray-100: #edf1f9;
-  --gray-200: #dfe5f1;
-  --gray-300: #c9d3e6;
-  --gray-400: #98a2b3;
-  --gray-500: #667085;
-  --gray-600: #475467;
-  --gray-700: #344054;
-  --gray-800: #1d2939;
-  --gray-900: #172746;
-  --gray-950: #0e1730;
+  --gray-50: #fafafa;
+  --gray-100: #f4f4f5;
+  --gray-200: #e8e8ea;
+  --gray-300: #d6d6da;
+  --gray-400: #a1a1aa;
+  --gray-500: #71717a;
+  --gray-600: #52525b;
+  --gray-700: #3f3f46;
+  --gray-800: #27272a;
+  --gray-900: #18181b;
+  --gray-950: #09090b;
 
-  /* Accent — one accent for the whole system (links, primary actions, focus
-     ring, active nav, brand). Indigo-blue: distinct from every semantic
-     status color below so "this is clickable/primary" never collides with
-     "this is a status". */
-  --accent-50: #edf2ff;
-  --accent-100: #dce5ff;
-  --accent-300: #a0b7fa;
-  --accent-500: #526fe8;
-  --accent-600: #3c59d9;
-  --accent-700: #304ab8;
+  /* ---------------------------------------------------------------------
+   * Accent — ONE accent for the whole system (links, primary actions, focus
+   * ring, active nav, brand), user-selectable at runtime.
+   *
+   * The three channels below are the only thing the appearance store writes
+   * (as inline custom properties on <html>); every step is derived from them
+   * so a hue drag re-colors the entire app in one paint.
+   *
+   * --accent-l-shift exists because dark mode must raise the accent's
+   * lightness (~6%) to stay luminous on near-black, and an INLINE
+   * --accent-l from the store would out-specify any dark-block redefinition
+   * of --accent-l itself. Shifting in a separate channel keeps both the
+   * user's choice and the dark-mode correction. (Deliberate refinement of
+   * the design doc's shorthand formula; same result, survives live editing.)
+   * ------------------------------------------------------------------- */
+  --accent-h: 245;
+  --accent-s: 72%;
+  --accent-l: 58%;
+  --accent-l-shift: 0%;
+  --accent-l-resolved: calc(var(--accent-l) + var(--accent-l-shift));
+
+  --accent-50: hsl(var(--accent-h) var(--accent-s) 96%);
+  --accent-100: hsl(var(--accent-h) var(--accent-s) 92%);
+  --accent-300: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) + 14%));
+  --accent-500: hsl(var(--accent-h) var(--accent-s) var(--accent-l-resolved));
+  --accent-600: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) - 8%));
+  --accent-700: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) - 16%));
   --accent-contrast: #ffffff;
 
   /* ---------------------------------------------------------------------
    * Semantic status color — ONE system, three uses (status / phase /
    * intent). See DESIGN.md "Status-color semantics" for why `running` is
-   * amber and `done` is green.
+   * amber and `done` is green. Backgrounds are near-neutral in light so a
+   * dense table of badges still reads as a gray interface.
    * ------------------------------------------------------------------- */
-  --status-neutral-bg: #eef0f3;
-  --status-neutral-fg: #4b5566;
-  --status-neutral-solid: #8a94a6;
+  --status-neutral-bg: #f1f1f2;
+  --status-neutral-fg: #52525b;
+  --status-neutral-solid: #a1a1aa;
 
-  --status-info-bg: #e7edff;
-  --status-info-fg: #2f4bd6;
+  --status-info-bg: #ebeef7;
+  --status-info-fg: #2b46bf;
   --status-info-solid: #3d5afe;
 
-  --status-running-bg: #fff3d6;
-  --status-running-fg: #92660a;
+  --status-running-bg: #f6f0e4;
+  --status-running-fg: #7a5406;
   --status-running-solid: #e8a417;
 
-  --status-success-bg: #e2f6ea;
-  --status-success-fg: #17794f;
+  --status-success-bg: #eaf2ec;
+  --status-success-fg: #15633f;
   --status-success-solid: #22a866;
 
-  --status-warning-bg: #fff0e0;
-  --status-warning-fg: #a15200;
+  --status-warning-bg: #f6efe7;
+  --status-warning-fg: #8a4408;
   --status-warning-solid: #f2882e;
 
-  --status-danger-bg: #fde7e7;
-  --status-danger-fg: #b0261c;
+  --status-danger-bg: #f7ecec;
+  --status-danger-fg: #a32219;
   --status-danger-solid: #e5473a;
 
   /* Epistemic honesty: degraded/unknown data. Deliberately NOT gray
      (would read as "resolved, uninteresting") and NOT red (not an error) —
      violet reads as "we genuinely don't know", matching its use nowhere
      else in the palette. */
-  --status-unknown-bg: #f1e9ff;
-  --status-unknown-fg: #6b3fc9;
+  --status-unknown-bg: #f0edf8;
+  --status-unknown-fg: #5b3aab;
   --status-unknown-solid: #8b5cf6;
 
   /* Phase palette — categorical, for swarm/goal-milestone phases. Distinct
-     hues from status so "phase 3 of 5" never reads as a health signal. */
+     hues from status so "phase 3 of 5" never reads as a health signal.
+     VALUES FROZEN: chart-tokens.css's CVD-validated series order is built
+     from these exact hexes. */
   --phase-1: #3d5afe;
   --phase-2: #8b5cf6;
   --phase-3: #ec4899;
@@ -94,19 +138,47 @@
   --phase-6: #64748b;
 
   /* ---------------------------------------------------------------------
+   * Engine identity — one hue per provider. Used ONLY for a 2px seat
+   * marker, a seat-pill tint, and the usage bar. NEVER for text: these are
+   * identity, not status, and several fail text contrast by design.
+   * ------------------------------------------------------------------- */
+  --engine-claude: #c96442;
+  --engine-codex: #10a37f;
+  --engine-grok: #6b7280;
+  --engine-local: #7c5cff;
+
+  /* ---------------------------------------------------------------------
    * Surface / text / border roles
    * ------------------------------------------------------------------- */
   --bg-canvas: var(--gray-50);
-  --bg-surface: var(--gray-0);
-  --bg-surface-raised: var(--gray-0);
-  --bg-overlay: rgba(16, 24, 40, 0.48);
-  --bg-input: var(--gray-0);
+  --bg-surface: #ffffff;
+  --bg-surface-raised: #ffffff;
+  --bg-overlay: rgba(9, 9, 11, 0.44);
+  --bg-input: #ffffff;
   --bg-hover: var(--gray-100);
   --bg-active: var(--gray-200);
-  --bg-selected: var(--accent-50);
+  /* DEVIATION from the design doc's light table (which lists selected =
+     --gray-100): hover is ALSO --gray-100 there, which would make a hovered
+     row and the keyboard-selected row identical in light mode — the command
+     palette and every list would lose their selection cue. Selected takes
+     the next step down instead; --bg-active only differs from it during a
+     press, which is transient. Dark keeps the doc's three distinct values. */
+  --bg-selected: var(--gray-200);
   --bg-code: var(--gray-100);
 
-  --text-primary: var(--gray-900);
+  /* The EMPTY half of a meter. Four surfaces drew it with --bg-active, a
+     press ground: 1.22:1 against a light card and 1.20:1 against a dark one,
+     i.e. the track vanished and the fill floated on nothing — an operator
+     with low vision could see how much was used but not what it was a
+     fraction OF. It is not a hairline (it is a filled shape carrying the
+     scale), so it takes a share of --text-tertiary rather than a border
+     token, and it is alpha rather than a mix against one ground so it
+     composites correctly on --bg-surface, --bg-canvas and inside a card
+     alike. 45% lands at 1.83:1 light / 2.06:1 dark — the same floor
+     design/tokens-contrast.test.ts already holds the status solids to. */
+  --meter-track: color-mix(in srgb, var(--text-tertiary) 45%, transparent);
+
+  --text-primary: var(--gray-950);
   --text-secondary: var(--gray-600);
   --text-tertiary: var(--gray-500);
   --text-disabled: var(--gray-400);
@@ -114,17 +186,25 @@
   --text-link: var(--accent-600);
 
   --border-default: var(--gray-200);
-  --border-subtle: var(--gray-100);
+  --border-subtle: #ececee;
   --border-strong: var(--gray-300);
   --border-focus: var(--accent-500);
 
   /* ---------------------------------------------------------------------
-   * Type scale — no body text below 12px anywhere in the system.
+   * Type scale — no body text below 12px anywhere in the system, with one
+   * exception: --text-2xs is for uppercase micro-labels and keyboard hints,
+   * never for prose.
    * ------------------------------------------------------------------- */
-  --font-display: "Space Grotesk", "Avenir Next", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-grotesk: "Space Grotesk", "Avenir Next", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+  /* The display face is a user preference: the appearance store rewrites
+     THIS token (to var(--font-ui) or var(--font-mono)); --font-grotesk keeps
+     the real stack so the choice is reversible. */
+  --font-display: var(--font-grotesk);
 
+  --text-2xs-size: 11px;
+  --text-2xs-line: 14px;
   --text-xs-size: 12px;
   --text-xs-line: 16px;
   --text-sm-size: 13px;
@@ -141,6 +221,21 @@
   --text-2xl-line: 32px;
   --text-3xl-size: 30px;
   --text-3xl-line: 38px;
+
+  /* RELAXED leading, paired to the same three sizes. The ramp above is the
+     CHROME leading: 14/20 is right for a one-line list row, a control label
+     or a table cell, and too tight for a paragraph read across the 720px
+     measure. Everything that wraps — transcript prose, the composer, code
+     blocks, onboarding copy — used to carry a unitless literal instead
+     (1.5, 1.55, 1.6, 1.65, 1.7, one per file), which put the most-read text
+     in the app outside the type system and let it drift. These are the pair
+     to reach for whenever text wraps. */
+  --text-xs-line-relaxed: 18px;
+  --text-sm-line-relaxed: 20px;
+  --text-base-line-relaxed: 24px;
+
+  --tracking-display: -0.02em;
+  --tracking-label: 0.06em;
 
   --font-weight-regular: 400;
   --font-weight-medium: 500;
@@ -166,31 +261,74 @@
   --space-24: 96px;
 
   /* ---------------------------------------------------------------------
-   * Radius scale
+   * Density — every list row and control height derives from these, never
+   * from a hardcoded px. Compact is set by the appearance store via
+   * :root[data-density="compact"] below.
    * ------------------------------------------------------------------- */
-  --radius-xs: 4px;
-  --radius-sm: 6px;
-  --radius-md: 8px;
-  --radius-lg: 12px;
-  --radius-xl: 16px;
+  --density-row: 32px;
+  --density-row-sm: 26px;
+  --density-pad: var(--space-3);
+
+  /* Control heights. The density note above says every control height derives
+     from these tokens "never a hardcoded px", but --density-row alone only
+     covers LIST ROWS: the chrome also has three distinct control sizes (a
+     full-size field or primary button, a ghost/icon button, an inline pill),
+     and before these existed each surface hardcoded its own 32/28/24. The
+     effect was that switching to compact shrank the rows and the shared
+     primitives while every button in the Verse chrome stayed comfortable —
+     the density switch half-applied, and baselines stopped lining up where
+     the two met. Three named steps, scaled together below. */
+  --control-h: 32px;
+  --control-h-sm: 28px;
+  --control-h-xs: 24px;
+
+  /* The 2px engine identity marker that prefixes a session row (DESIGN-V2 §4).
+     One token so the sidebar and the quick switcher draw the SAME tick — they
+     had drifted to 14px and 20px, which read as two different marks. */
+  --engine-marker-h: 14px;
+
+  /* ---------------------------------------------------------------------
+   * Shell measures — fixed by the design language (§3, §4). Tokens rather
+   * than five builders each hardcoding the same numbers.
+   * ------------------------------------------------------------------- */
+  --rail-width: 56px;
+  --strip-height: 48px;
+  --measure-read: 720px;
+
+  /* ---------------------------------------------------------------------
+   * Radius scale — tightened for V2 (elite reads tighter than friendly).
+   * Scaled wholesale by :root[data-radius="sharp"|"soft"] below.
+   * ------------------------------------------------------------------- */
+  --radius-xs: 3px;
+  --radius-sm: 5px;
+  --radius-md: 7px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
   --radius-full: 9999px;
 
   /* ---------------------------------------------------------------------
-   * Elevation — light mode uses real shadows over a near-white surface.
+   * Elevation. V2 uses exactly three — menu, dialog, toast — and separates
+   * everything else with hairlines. The sm/md/lg/xl set stays defined for
+   * the older consoles that still reference it.
    * ------------------------------------------------------------------- */
-  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
-  --shadow-md: 0 2px 8px rgba(16, 24, 40, 0.08), 0 1px 2px rgba(16, 24, 40, 0.06);
-  --shadow-lg: 0 8px 24px rgba(16, 24, 40, 0.12), 0 2px 6px rgba(16, 24, 40, 0.06);
-  --shadow-xl: 0 16px 48px rgba(16, 24, 40, 0.18), 0 4px 12px rgba(16, 24, 40, 0.08);
+  --shadow-menu: 0 4px 16px rgba(9, 9, 11, 0.1), 0 1px 2px rgba(9, 9, 11, 0.06);
+  --shadow-dialog: 0 16px 48px rgba(9, 9, 11, 0.18), 0 2px 8px rgba(9, 9, 11, 0.08);
+  --shadow-toast: 0 8px 24px rgba(9, 9, 11, 0.12), 0 1px 3px rgba(9, 9, 11, 0.08);
+
+  --shadow-sm: 0 1px 2px rgba(9, 9, 11, 0.05);
+  --shadow-md: 0 2px 8px rgba(9, 9, 11, 0.07), 0 1px 2px rgba(9, 9, 11, 0.05);
+  --shadow-lg: var(--shadow-toast);
+  --shadow-xl: var(--shadow-dialog);
   --shadow-focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--border-focus);
 
   /* ---------------------------------------------------------------------
-   * Motion — respects prefers-reduced-motion at the bottom of this file.
+   * Motion — quiet: 120-180ms, ease-out, opacity and 2-4px translate only.
+   * Reduced motion is handled once at the bottom of this file.
    * ------------------------------------------------------------------- */
   --duration-instant: 80ms;
   --duration-fast: 120ms;
-  --duration-base: 180ms;
-  --duration-slow: 280ms;
+  --duration-base: 160ms;
+  --duration-slow: 220ms;
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-decelerate: cubic-bezier(0, 0, 0, 1);
   --ease-accelerate: cubic-bezier(0.3, 0, 1, 1);
@@ -214,52 +352,55 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
 
-    --gray-0: #0e1730;
-    --gray-50: #111e3a;
-    --gray-100: #16264a;
-    --gray-200: #23375d;
-    --gray-300: #314a75;
-    --gray-400: #4b5566;
-    --gray-500: #6b7688;
-    --gray-600: #939cad;
-    --gray-700: #b3bccb;
-    --gray-800: #d5dae3;
-    --gray-900: #eef1f6;
-    --gray-950: #ffffff;
+    --gray-0: #09090b;
+    --gray-50: #0f0f11;
+    --gray-100: #17171a;
+    --gray-200: #232328;
+    --gray-300: #33333a;
+    --gray-400: #52525b;
+    --gray-500: #71717a;
+    --gray-600: #a1a1aa;
+    --gray-700: #c4c4cc;
+    --gray-800: #dededf;
+    --gray-900: #f4f4f5;
+    --gray-950: #fafafa;
 
-    --accent-50: #1b2d52;
-    --accent-100: #293f6d;
-    --accent-300: #7097f2;
-    --accent-500: #8babff;
-    --accent-600: #a0baff;
-    --accent-700: #c0d0ff;
-    --accent-contrast: #0e1730;
+    /* Raise the accent's lightness so it stays luminous on near-black, and
+       invert the ramp: in dark, 600/700 are LIGHTER than 500 (they are used
+       as text/link colors), 300 is the dimmer step. */
+    --accent-l-shift: 6%;
+    --accent-50: hsl(var(--accent-h) var(--accent-s) 16%);
+    --accent-100: hsl(var(--accent-h) var(--accent-s) 22%);
+    --accent-300: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) - 12%));
+    --accent-600: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) + 8%));
+    --accent-700: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) + 16%));
+    --accent-contrast: #09090b;
 
-    --status-neutral-bg: #1c2130;
-    --status-neutral-fg: #aab3c5;
-    --status-neutral-solid: #8a94a6;
+    --status-neutral-bg: rgba(161, 161, 170, 0.14);
+    --status-neutral-fg: #b4b4bd;
+    --status-neutral-solid: #a1a1aa;
 
-    --status-info-bg: #16204a;
-    --status-info-fg: #93a7ff;
+    --status-info-bg: rgba(91, 124, 255, 0.14);
+    --status-info-fg: #9db0ff;
     --status-info-solid: #5b7cff;
 
-    --status-running-bg: #3a2c0a;
+    --status-running-bg: rgba(232, 164, 23, 0.14);
     --status-running-fg: #f2c353;
     --status-running-solid: #e8a417;
 
-    --status-success-bg: #0f2f21;
+    --status-success-bg: rgba(46, 194, 126, 0.14);
     --status-success-fg: #5fd6a0;
     --status-success-solid: #2ec27e;
 
-    --status-warning-bg: #3a220a;
+    --status-warning-bg: rgba(242, 136, 46, 0.14);
     --status-warning-fg: #f5a259;
     --status-warning-solid: #f2882e;
 
-    --status-danger-bg: #3a1414;
-    --status-danger-fg: #f28b83;
+    --status-danger-bg: rgba(239, 90, 76, 0.14);
+    --status-danger-fg: #f79189;
     --status-danger-solid: #ef5a4c;
 
-    --status-unknown-bg: #241a3a;
+    --status-unknown-bg: rgba(162, 118, 255, 0.14);
     --status-unknown-fg: #c4a6ff;
     --status-unknown-solid: #a276ff;
 
@@ -270,33 +411,43 @@
     --phase-5: #2dd4bf;
     --phase-6: #94a3b8;
 
-    --bg-canvas: #0e1730;
-    --bg-surface: #111e3a;
-    --bg-surface-raised: #16264a;
-    --bg-overlay: rgba(4, 6, 12, 0.6);
-    --bg-input: #16264a;
-    --bg-hover: #1c3155;
-    --bg-active: #263e68;
-    --bg-selected: #1b2d52;
-    --bg-code: #16264a;
+    --engine-claude: #d97757;
+    --engine-codex: #19c79b;
+    --engine-grok: #9ca3af;
+    --engine-local: #9b82ff;
 
-    --text-primary: #edf3ff;
-    --text-secondary: #b2c0da;
-    --text-tertiary: #96a7c7;
-    --text-disabled: #4b5566;
-    --text-on-accent: #0e1730;
-    --text-link: #a0baff;
+    --bg-canvas: #0b0b0d;
+    --bg-surface: #121214;
+    --bg-surface-raised: #171719;
+    --bg-overlay: rgba(0, 0, 0, 0.62);
+    --bg-input: #111113;
+    --bg-hover: #1c1c20;
+    --bg-active: #232328;
+    --bg-selected: #26262c;
+    --bg-code: #0f0f11;
 
-    --border-default: #2c4168;
-    --border-subtle: #203457;
-    --border-strong: #405b87;
-    --border-focus: #8babff;
+    --text-primary: #f4f4f5;
+    --text-secondary: #a1a1aa;
+    --text-tertiary: #8a8a93;
+    --text-disabled: #52525b;
+    --text-on-accent: var(--accent-contrast);
+    --text-link: var(--accent-600);
 
+    --border-default: #2a2a30;
+    --border-subtle: #1f1f23;
+    --border-strong: #3a3a42;
+    --border-focus: var(--accent-500);
+
+    /* Near-invisible on near-black by design — separation in dark comes
+       from --border-default, not from elevation. */
+    --shadow-menu: 0 4px 16px rgba(0, 0, 0, 0.5);
+    --shadow-dialog: 0 16px 48px rgba(0, 0, 0, 0.62), 0 2px 8px rgba(0, 0, 0, 0.4);
+    --shadow-toast: 0 8px 24px rgba(0, 0, 0, 0.55);
     --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
-    --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.3);
-    --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.35);
-    --shadow-focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--border-focus);
+    --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
+    --shadow-lg: var(--shadow-toast);
+    --shadow-xl: var(--shadow-dialog);
+    --shadow-focus-ring: 0 0 0 2px var(--bg-canvas), 0 0 0 4px var(--border-focus);
   }
 }
 
@@ -308,52 +459,52 @@
 :root[data-theme="dark"] {
   color-scheme: dark;
 
-  --gray-0: #0e1730;
-  --gray-50: #111e3a;
-  --gray-100: #16264a;
-  --gray-200: #23375d;
-  --gray-300: #314a75;
-  --gray-400: #4b5566;
-  --gray-500: #6b7688;
-  --gray-600: #939cad;
-  --gray-700: #b3bccb;
-  --gray-800: #d5dae3;
-  --gray-900: #eef1f6;
-  --gray-950: #ffffff;
+  --gray-0: #09090b;
+  --gray-50: #0f0f11;
+  --gray-100: #17171a;
+  --gray-200: #232328;
+  --gray-300: #33333a;
+  --gray-400: #52525b;
+  --gray-500: #71717a;
+  --gray-600: #a1a1aa;
+  --gray-700: #c4c4cc;
+  --gray-800: #dededf;
+  --gray-900: #f4f4f5;
+  --gray-950: #fafafa;
 
-  --accent-50: #1b2d52;
-  --accent-100: #293f6d;
-  --accent-300: #7097f2;
-  --accent-500: #8babff;
-  --accent-600: #a0baff;
-  --accent-700: #c0d0ff;
-  --accent-contrast: #0e1730;
+  --accent-l-shift: 6%;
+  --accent-50: hsl(var(--accent-h) var(--accent-s) 16%);
+  --accent-100: hsl(var(--accent-h) var(--accent-s) 22%);
+  --accent-300: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) - 12%));
+  --accent-600: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) + 8%));
+  --accent-700: hsl(var(--accent-h) var(--accent-s) calc(var(--accent-l-resolved) + 16%));
+  --accent-contrast: #09090b;
 
-  --status-neutral-bg: #1c2130;
-  --status-neutral-fg: #aab3c5;
-  --status-neutral-solid: #8a94a6;
+  --status-neutral-bg: rgba(161, 161, 170, 0.14);
+  --status-neutral-fg: #b4b4bd;
+  --status-neutral-solid: #a1a1aa;
 
-  --status-info-bg: #16204a;
-  --status-info-fg: #93a7ff;
+  --status-info-bg: rgba(91, 124, 255, 0.14);
+  --status-info-fg: #9db0ff;
   --status-info-solid: #5b7cff;
 
-  --status-running-bg: #3a2c0a;
+  --status-running-bg: rgba(232, 164, 23, 0.14);
   --status-running-fg: #f2c353;
   --status-running-solid: #e8a417;
 
-  --status-success-bg: #0f2f21;
+  --status-success-bg: rgba(46, 194, 126, 0.14);
   --status-success-fg: #5fd6a0;
   --status-success-solid: #2ec27e;
 
-  --status-warning-bg: #3a220a;
+  --status-warning-bg: rgba(242, 136, 46, 0.14);
   --status-warning-fg: #f5a259;
   --status-warning-solid: #f2882e;
 
-  --status-danger-bg: #3a1414;
-  --status-danger-fg: #f28b83;
+  --status-danger-bg: rgba(239, 90, 76, 0.14);
+  --status-danger-fg: #f79189;
   --status-danger-solid: #ef5a4c;
 
-  --status-unknown-bg: #241a3a;
+  --status-unknown-bg: rgba(162, 118, 255, 0.14);
   --status-unknown-fg: #c4a6ff;
   --status-unknown-solid: #a276ff;
 
@@ -364,45 +515,100 @@
   --phase-5: #2dd4bf;
   --phase-6: #94a3b8;
 
-  --bg-canvas: #0e1730;
-  --bg-surface: #111e3a;
-  --bg-surface-raised: #16264a;
-  --bg-overlay: rgba(4, 6, 12, 0.6);
-  --bg-input: #16264a;
-  --bg-hover: #1c3155;
-  --bg-active: #263e68;
-  --bg-selected: #1b2d52;
-  --bg-code: #16264a;
+  --engine-claude: #d97757;
+  --engine-codex: #19c79b;
+  --engine-grok: #9ca3af;
+  --engine-local: #9b82ff;
 
-  --text-primary: #edf3ff;
-  --text-secondary: #b2c0da;
-  --text-tertiary: #96a7c7;
-  --text-disabled: #4b5566;
-  --text-on-accent: #0e1730;
-  --text-link: #a0baff;
+  --bg-canvas: #0b0b0d;
+  --bg-surface: #121214;
+  --bg-surface-raised: #171719;
+  --bg-overlay: rgba(0, 0, 0, 0.62);
+  --bg-input: #111113;
+  --bg-hover: #1c1c20;
+  --bg-active: #232328;
+  --bg-selected: #26262c;
+  --bg-code: #0f0f11;
 
-  --border-default: #2c4168;
-  --border-subtle: #203457;
-  --border-strong: #405b87;
-  --border-focus: #8babff;
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-tertiary: #8a8a93;
+  --text-disabled: #52525b;
+  --text-on-accent: var(--accent-contrast);
+  --text-link: var(--accent-600);
 
+  --border-default: #2a2a30;
+  --border-subtle: #1f1f23;
+  --border-strong: #3a3a42;
+  --border-focus: var(--accent-500);
+
+  --shadow-menu: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-dialog: 0 16px 48px rgba(0, 0, 0, 0.62), 0 2px 8px rgba(0, 0, 0, 0.4);
+  --shadow-toast: 0 8px 24px rgba(0, 0, 0, 0.55);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45), 0 1px 2px rgba(0, 0, 0, 0.3);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.55), 0 2px 6px rgba(0, 0, 0, 0.3);
-  --shadow-xl: 0 16px 48px rgba(0, 0, 0, 0.6), 0 4px 12px rgba(0, 0, 0, 0.35);
-  --shadow-focus-ring: 0 0 0 2px var(--bg-surface), 0 0 0 4px var(--border-focus);
+  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.45);
+  --shadow-lg: var(--shadow-toast);
+  --shadow-xl: var(--shadow-dialog);
+  --shadow-focus-ring: 0 0 0 2px var(--bg-canvas), 0 0 0 4px var(--border-focus);
+}
+
+/* ===========================================================================
+ * Density — data/appearance-store.ts sets data-density on <html>. Comfortable
+ * is the bare :root value above; only the deltas live here.
+ * ========================================================================= */
+:root[data-density="compact"] {
+  --density-row: 26px;
+  --density-row-sm: 22px;
+  --density-pad: var(--space-2);
+  --control-h: 28px;
+  --control-h-sm: 24px;
+  --control-h-xs: 20px;
+  --engine-marker-h: 12px;
+}
+
+/* ===========================================================================
+ * Radius scale — data-radius scales the whole ramp at once so a component
+ * never has to know which setting is active. --radius-full is unaffected
+ * (pills and dots stay round in every setting).
+ * ========================================================================= */
+:root[data-radius="sharp"] {
+  --radius-xs: 0px;
+  --radius-sm: 2px;
+  --radius-md: 3px;
+  --radius-lg: 4px;
+  --radius-xl: 6px;
+}
+
+:root[data-radius="soft"] {
+  --radius-xs: 5px;
+  --radius-sm: 8px;
+  --radius-md: 11px;
+  --radius-lg: 15px;
+  --radius-xl: 20px;
 }
 
 /* ===========================================================================
  * Reduced motion — collapse every duration token to effectively-instant
- * rather than disabling transitions per-component. Components only ever
- * read var(--duration-*), so this one override covers the whole system.
+ * rather than disabling transitions per-component. Components only ever read
+ * var(--duration-*), so this one override covers the whole system.
+ *
+ * Two triggers, same guard pattern as the theme: the OS preference applies
+ * unless the operator explicitly asked for full motion in Settings
+ * (data-motion="full"), and data-motion="reduce" forces it on for an
+ * operator whose OS says nothing.
  * ========================================================================= */
 @media (prefers-reduced-motion: reduce) {
-  :root {
-    --duration-instant: 0.01ms;
-    --duration-fast: 0.01ms;
-    --duration-base: 0.01ms;
-    --duration-slow: 0.01ms;
+  :root:not([data-motion="full"]) {
+    --duration-instant: 1ms;
+    --duration-fast: 1ms;
+    --duration-base: 1ms;
+    --duration-slow: 1ms;
   }
+}
+
+:root[data-motion="reduce"] {
+  --duration-instant: 1ms;
+  --duration-fast: 1ms;
+  --duration-base: 1ms;
+  --duration-slow: 1ms;
 }

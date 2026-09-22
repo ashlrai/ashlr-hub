@@ -76,7 +76,8 @@ function installHarness(opts: {
   const createCalls: unknown[] = [];
   const lifecycle: string[] = [];
 
-  vi.doMock('../src/core/sandbox/worktree.js', () => ({
+  vi.doMock('../src/core/sandbox/worktree.js', () => {
+    const double = {
     createSandbox: (sourceRepo: string) => ({
       id: 'sb-cancellation',
       worktreePath: opts.repo,
@@ -100,7 +101,16 @@ function installHarness(opts: {
       insertions: 1,
       deletions: 0,
     }),
-  }));
+  };
+    return {
+      ...double,
+      // Production calls the ASYNC creator: it waits for the process-wide
+      // worktree fence off the event loop, so concurrent agents queue instead
+      // of each freezing the loop. A double for this module must provide it.
+      createSandboxAsync: async (...args: Parameters<typeof double.createSandbox>) =>
+        double.createSandbox(...args),
+    };
+  });
 
   vi.doMock('../src/core/run/provider-client.js', () => ({
     buildOpenAICompatibleClient: () => ({

@@ -39,6 +39,7 @@ import {
   resolveEngineRegistry,
   resolveEngineSpec,
 } from '../src/core/run/engine-registry.js';
+import { DEFAULT_LOCAL_MODEL_TAG } from '../src/core/run/model-catalog.js';
 import { buildEngineCommand, engineInstalled } from '../src/core/run/engines.js';
 import { engineTierOf } from '../src/core/run/sandboxed-engine.js';
 import { routeBackend } from '../src/core/fleet/router.js';
@@ -104,9 +105,15 @@ describe('M115 registry', () => {
     expect(spec.capabilities).toContain('tools');
   });
 
-  it('local-coder default model is qwen2.5:72b-instruct-q4_K_M', () => {
+  // The default moved off qwen2.5:72b-instruct-q4_K_M (44 GB, hit the 30-turn
+  // cap on 2 of 3 fixture runs) to Qwen3.8-27B at num_ctx 65536, which passed
+  // 2/2 and is the only local model here reporting native `tools` + `thinking`.
+  // Asserted against the constant so the registry, the manager's local judge
+  // fallback and the strategist's cannot drift apart again.
+  it('local-coder default model is the shared local default tag (qwen3.8:27b-ctx64k)', () => {
     const spec = BUILTIN_ENGINE_REGISTRY['local-coder']!;
-    expect(spec.api?.defaultModel).toBe('qwen2.5:72b-instruct-q4_K_M');
+    expect(DEFAULT_LOCAL_MODEL_TAG).toBe('qwen3.8:27b-ctx64k');
+    expect(spec.api?.defaultModel).toBe(DEFAULT_LOCAL_MODEL_TAG);
   });
 
   it('local-coder resolves via resolveEngineSpec', () => {

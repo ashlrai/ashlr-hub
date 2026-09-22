@@ -1,0 +1,1046 @@
+/**
+ * routes/verse/usage/usage.module.css — Usage section styling.
+ *
+ * Follows docs/VERSE-DESIGN-V2.md: monochrome ground, separation by 1px
+ * hairlines and whitespace (no shadows, no nested rounded boxes), engine hue
+ * used ONLY for a 2px marker and a window bar, numerals in the display face.
+ * Density comes from --density-pad with a fallback so the section is correct
+ * before owner A lands the density tokens.
+ */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-canvas);
+}
+
+/* 48px header strip, hairline bottom border, ghost controls only. */
+.header {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  /* DESIGN-V2 §4: header strips are --strip-height, and the token is what the
+     desktop shell's inset maths is written against. */
+  height: var(--strip-height);
+  padding: 0 var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.headerTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+}
+
+.headerMeta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.ghostButton {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+
+.ghostButton:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-5) var(--space-5) var(--space-12);
+  scrollbar-gutter: stable;
+}
+
+.panel {
+  padding-block: var(--space-5);
+}
+
+.panel + .panel {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.panelHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+/* Display face, like every other uppercase micro-label: appearance-store.ts
+   implements the Display-font setting by writing --font-display on <html>, so
+   a label that names --font-ui explicitly opts OUT of the operator's choice
+   and the Usage panel titles stopped moving while the Settings ones did. */
+.panelTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.panelNote {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+  max-width: 48ch;
+  text-align: right;
+}
+
+.muted {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-tertiary);
+  max-width: 72ch;
+}
+
+/*
+ * The server's own caveats about how to read the meters below. They sit on the
+ * panel surface (not a hover or press ground), where --text-tertiary measures
+ * 4.83:1 light / 5.47:1 dark — above the body floor. The 2px left rule is the
+ * language's marker for an aside, reused here rather than a bordered box.
+ */
+.noteList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: 0 0 0 var(--space-3);
+  border-left: 2px solid var(--border-subtle);
+  list-style: none;
+}
+
+/* Numerals: display face, tabular so meters and columns line up. */
+.num {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--space-3);
+}
+
+/* ── Account cards ─────────────────────────────────────────────────────── */
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+
+.card {
+  position: relative;
+  padding: var(--density-pad, var(--space-3)) var(--space-4);
+  padding-left: calc(var(--space-4) + 2px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+/* The 2px engine marker — the only place an engine hue is allowed. */
+.card::before {
+  content: '';
+  position: absolute;
+  inset-block: -1px;
+  inset-inline-start: -1px;
+  width: 2px;
+  border-start-start-radius: var(--radius-md);
+  border-end-start-radius: var(--radius-md);
+  background: var(--engine-color, var(--border-strong));
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.cardLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.cardFigures {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.figure {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.figureLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.figureValue {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+
+/* ── Window meters ─────────────────────────────────────────────────────── */
+
+.windows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+
+.windowHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+  margin-bottom: var(--space-1);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+
+.windowPct {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.windowReset {
+  margin-top: var(--space-1);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+/* The unfilled half is --meter-track, not --bg-active: see the token's note
+   in tokens.css. At --bg-active this track was 1.22:1 against the card in
+   light and 1.20:1 in dark, so the remaining capacity — the whole point of a
+   window meter — was invisible and only the fill could be read. */
+.track {
+  position: relative;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--meter-track);
+  overflow: hidden;
+}
+
+.fill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--engine-color, var(--accent-500));
+  transition: width var(--duration-base, 180ms) var(--ease-decelerate);
+}
+
+.track[data-tone='warn'] .fill {
+  background: var(--status-warning-solid);
+}
+
+.track[data-tone='danger'] .fill {
+  background: var(--status-danger-solid);
+}
+
+/*
+ * Unknown is NOT a track. A filled track at 0% reads "plenty left" and a
+ * track at 100% reads "exhausted"; both are lies when there is no signal. A
+ * dashed rule reads as absence, and it is paired with the Epistemic pill and
+ * a one-line reason so the state is never carried by styling alone.
+ */
+/* --text-tertiary, not --border-strong at 0.8 opacity. This dashed rule is
+   the designed representation of ABSENCE (see above), which makes it a border
+   carrying meaning under DESIGN-V2 §6's 3:1 floor; composited it measured
+   1.34:1 light / 1.47:1 dark. --border-strong is deliberately held to the
+   1.1:1 hairline floor in tokens-contrast.test.ts, which is right for a
+   structural divider and wrong for this. --text-tertiary measures 4.83:1
+   light / 5.47:1 dark and reads as "absent" rather than "structural". */
+.unknownRule {
+  height: 0;
+  margin-block: var(--space-1) 0;
+  border: 0;
+  border-top: 2px dashed var(--text-tertiary);
+}
+
+.signalRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.reason {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+  max-width: 60ch;
+}
+
+.sourceLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+/* ── Split / limits ────────────────────────────────────────────────────── */
+
+.split {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.splitRow {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-3);
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+
+.splitBar {
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--bg-active);
+  overflow: hidden;
+}
+
+.splitFill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--split-color, var(--accent-500));
+}
+
+.limitList {
+  display: flex;
+  flex-direction: column;
+}
+
+.limitRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px auto;
+  align-items: center;
+  gap: var(--space-3);
+  padding-block: var(--space-2);
+  min-height: var(--density-row, 32px);
+}
+
+.limitRow + .limitRow {
+  border-top: 1px solid var(--border-subtle);
+}
+
+.limitName {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+
+.limitWindow {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+
+.limitValue {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+  text-align: right;
+  white-space: nowrap;
+}
+
+/* ── Verdict + binding constraint ──────────────────────────────────────── */
+
+/*
+ * The verdict sentence is the card's argument in one line, so it sits directly
+ * under the identity row at body weight — not as a caption. It is always
+ * paired with the StatusBadge above it (glyph + text), never carried by color.
+ */
+.verdictDetail {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  max-width: 60ch;
+}
+
+.bindingLabel {
+  font-family: var(--font-display);
+  display: block;
+  margin-top: var(--space-3);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.windowBlock {
+  min-width: 0;
+}
+
+.windowBlock + .windowBlock {
+  margin-top: var(--space-3);
+}
+
+/* The binding window gets the weight; the others stay deliberately quieter. */
+.windowBlockLead {
+  margin-top: var(--space-2);
+}
+
+.windowBlockLead .windowHead {
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+
+.windowBlockLead .track {
+  height: 6px;
+}
+
+.windowFlag {
+  font-family: var(--font-display);
+  font-size: var(--text-xs-size);
+  color: var(--status-danger-fg, var(--text-primary));
+}
+
+/* ── Credits + actions ─────────────────────────────────────────────────── */
+
+.creditsRow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--space-2) var(--space-3);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.creditsRow > .reason {
+  grid-column: 1 / -1;
+  margin-top: 0;
+}
+
+.actionBlock {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.command,
+.commandInline {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-primary);
+  background: var(--bg-code, var(--bg-active));
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  padding: 1px 6px;
+}
+
+.command {
+  display: inline-block;
+  margin-top: var(--space-1);
+}
+
+.negative {
+  color: var(--status-danger-fg, var(--text-primary));
+}
+
+/* ── Series panel ──────────────────────────────────────────────────────── */
+
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.segment {
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-3);
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+
+.segment + .segment {
+  border-left: 1px solid var(--border-subtle);
+}
+
+.segment:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.segment[aria-pressed='true'] {
+  background: var(--bg-selected);
+  color: var(--text-primary);
+}
+
+/* The one place an INSET ring is right: .segmented clips with
+   `overflow: hidden`, so the global outward --shadow-focus-ring would be cut
+   off. It is silenced here so exactly one ring paints. */
+.segment:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+.charts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+  margin-top: var(--space-4);
+}
+
+/*
+ * The local-model table is genuinely wide (eight independent facts per model).
+ * Per the responsive rule, a table may exceed the measure only inside its own
+ * horizontal scroll container, so the page body never scrolls sideways.
+ */
+.tableScroll {
+  overflow-x: auto;
+  scrollbar-gutter: stable;
+}
+
+/* ── States ────────────────────────────────────────────────────────────── */
+
+
+.stateBlock {
+  padding: var(--space-6) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  max-width: 72ch;
+}
+
+.stateTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.stateBody {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-secondary);
+}
+
+.stateActions {
+  margin-top: var(--space-4);
+}
+
+.skeletonGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-3);
+}
+
+/* Guarded: appearance-store.ts writes data-motion="full" so an operator can
+   opt out of the OS preference, and every other animated surface here honours
+   it. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .fill {
+    transition: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .cards,
+  .skeletonGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .limitRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .limitRow > .track {
+    display: none;
+  }
+
+  .panelNote {
+    text-align: left;
+  }
+}
+
+/* ---- desktop shell (see desktop/README.md "Desktop shell contract") -----
+ * In the Tauri window the OS title bar overlays the top 48px and the macOS
+ * traffic lights float over the top-LEFT 92px of the WINDOW. This strip does
+ * not start at the window's left edge — the 56px rail does — so the inset it
+ * owes is the overlap, never the full 92px. Both vars are absent in a
+ * browser, where the expression floors to 0px and the layout is unchanged. */
+.header {
+  padding-left: max(
+    var(--space-5),
+    calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px))
+  );
+}
+
+/* ── Capacity strip ────────────────────────────────────────────────────────
+ *
+ * The first thing on the screen and the only thing that has to be readable in
+ * under two seconds. It is NOT a card: hairline bottom rule and whitespace
+ * (DESIGN-V2 §1.2), no ground of its own, so it reads as the head of the page
+ * rather than as one more panel competing with the cards below it.
+ */
+
+.capacity {
+  padding-bottom: var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.capacityHeadline {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+  max-width: 78ch;
+}
+
+/* No capacity at all is the one state worth a tonal shift — and it is still
+   paired with the sentence itself, never carried by color. */
+.capacityHeadline[data-empty='true'] {
+  color: var(--status-warning-fg, var(--text-primary));
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3) 0 calc(var(--space-3) + 2px);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  text-align: left;
+}
+
+button.chip {
+  cursor: pointer;
+}
+
+button.chip:hover {
+  background: var(--bg-hover);
+}
+
+button.chip[aria-pressed='true'] {
+  background: var(--bg-selected);
+  border-color: var(--border-default);
+}
+
+/* The 2px engine marker, same language as the card's leading edge. */
+.chip::before {
+  content: '';
+  position: absolute;
+  inset-block: -1px;
+  inset-inline-start: -1px;
+  width: 2px;
+  border-start-start-radius: var(--radius-sm);
+  border-end-start-radius: var(--radius-sm);
+  background: var(--engine-color, var(--border-strong));
+}
+
+.chipLabel {
+  font-family: var(--font-display);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+}
+
+/* State is a WORD, never a color alone (DESIGN-V2 §6). The tint is a second
+   channel on top of it, not the channel. Display face, like every other
+   uppercase micro-label, so the Display-font setting reaches it too. */
+.chipState {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.chip[data-capacity='ready'] .chipState {
+  color: var(--status-success-fg, var(--text-secondary));
+}
+
+.chip[data-capacity='tight'] .chipState {
+  color: var(--status-warning-fg, var(--text-secondary));
+}
+
+.chip[data-capacity='blocked'] .chipState {
+  color: var(--status-danger-fg, var(--text-secondary));
+}
+
+.chipPct {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+.capacityFacts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--space-3) var(--space-5);
+  margin-top: var(--space-4);
+}
+
+.capacityFact > dd {
+  margin: 2px 0 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+.capacityMuted {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+.proseResets {
+  margin-top: var(--space-4);
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Card trigger + detail view ───────────────────────────────────────── */
+
+/*
+ * The card head IS the control. It resets the button ground entirely so the
+ * card still reads as a card, and takes the focus ring from the global
+ * treatment rather than inventing one.
+ */
+.cardTrigger {
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cardTrigger:hover .cardLabel {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.cardChevron {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  color: var(--text-tertiary);
+  margin-left: var(--space-2);
+}
+
+/*
+ * Selection, in both themes. `--bg-surface-raised` IS `--bg-surface` in light
+ * (#ffffff both), so the previous treatment's background half was a literal
+ * no-op there and the only cue was a hairline stepping from `--border-subtle`
+ * to `--border-strong`: 1.18:1 → 1.45:1, a change an operator with low vision
+ * cannot see at all. Two channels now, both of which move in light AND dark:
+ * the accent border (6.24:1 light / 3.99:1 dark on the card ground, already
+ * pinned above 3:1 by the token suite) and `--bg-selected`, the system's own
+ * selected ground (1.22:1 / 1.24:1 — symmetric, unlike raised).
+ *
+ * Colour is not the only carrier: `.cardTrigger` is a real button and reports
+ * the same state through `aria-expanded`.
+ */
+.card[data-selected='true'] {
+  border-color: var(--accent-500);
+  background: var(--bg-selected);
+}
+
+.detail {
+  margin-top: var(--space-4);
+  padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.detailHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.detailTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+}
+
+.detailGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-5);
+  margin-top: var(--space-4);
+}
+
+.detailColumn {
+  min-width: 0;
+}
+
+.evidenceList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.evidenceRow {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: baseline;
+}
+
+.evidenceValue {
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ── Local panel additions ─────────────────────────────────────────────── */
+
+.figureTile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  min-width: 0;
+}
+
+.figureBig {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-lg-size);
+  letter-spacing: var(--tracking-display, -0.02em);
+  color: var(--text-primary);
+}
+
+.figureCaption {
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+.panelActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4) 0 var(--space-3);
+}
+
+/*
+ * The GPU/CPU split, as two segments of one bar. Two hues and a text label,
+ * because "split" is exactly the state where a single-color bar would look
+ * like a percentage of something else.
+ */
+.placement {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.placementBar {
+  display: inline-flex;
+  width: 64px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  background: var(--bg-active);
+  flex: none;
+}
+
+.placementGpu,
+.placementCpu {
+  display: block;
+  height: 100%;
+  background: var(--split-color, var(--accent-500));
+}
+
+.placementText {
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+
+/*
+ * The staleness banner. It is deliberately loud in text and quiet in chrome:
+ * the fact that matters is the sentence, and a warning-tinted box would push
+ * a retained-but-valid reading toward reading as an error.
+ */
+.staleNotice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: var(--space-2) 0 var(--space-3);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--status-warning-solid, var(--border-strong));
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  max-width: 72ch;
+}
+
+.staleFlag {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--status-warning-fg, var(--text-primary));
+}
+
+/*
+ * Chart chrome, raised locally rather than in the shared chart tokens.
+ *
+ * A gridline carries meaning: it is what an eye reads a value against, so
+ * DESIGN-V2 §6's 3:1 floor applies to it. The default `--chart-grid` is
+ * `--border-subtle`, and the previous fix here moved it to `--border-default`
+ * with `--chart-axis` on `--border-strong` — but those are ALL hairline tokens,
+ * which design/tokens-contrast.test.ts pins to a 1.1 "not invisible" floor and
+ * documents as deliberately exempt from 3:1. Measured against ChartContainer's
+ * `--bg-surface` ground that swap went 1.14:1 → 1.31:1 in dark; the axis
+ * reached 1.66:1 dark / 1.45:1 light. Still effectively invisible on near-black.
+ *
+ * `--text-tertiary` is the right source: tokens-contrast.test.ts already pins
+ * it as a meaning-carrying non-text token at 4.83:1 light / 5.47:1 dark on
+ * `--bg-surface` — the same argument `.unknownRule` above makes.
+ *
+ * The grid is a SHARE of that token so a rule per gridline does not overpower
+ * the series — but the share has to stay above the floor it is claiming, and
+ * 45% did not: it measured 1.83:1 light / 2.06:1 dark, barely better than the
+ * `--border-default` it replaced, under a comment asserting it cleared 3:1.
+ * Nothing caught that because the suite could only measure the TOKEN, not the
+ * mix. 80% measures 3.29:1 / 3.92:1, still visibly recessive against the
+ * full-strength axis, and `design/contrast.ts` now parses `color-mix` so the
+ * two values below are asserted from this file rather than argued for here.
+ */
+.charts {
+  --chart-grid: color-mix(in srgb, var(--text-tertiary) 80%, transparent);
+  --chart-axis: var(--text-tertiary);
+  --chart-tooltip-border: var(--border-strong);
+}
+
+@media (max-width: 900px) {
+  .evidenceRow {
+    grid-template-columns: 1fr;
+    gap: 0;
+  }
+
+  .detailGrid {
+    grid-template-columns: 1fr;
+  }
+}

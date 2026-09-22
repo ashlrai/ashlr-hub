@@ -17,8 +17,15 @@ export interface ConfirmDialogProps {
   title: string;
   body: ReactNode;
   confirmLabel: string;
-  /** Approve reads as the primary (non-destructive-styled) action even
-   * though it's irreversible; reject reads as destructive. */
+  /**
+   * Weight the confirm button as the dangerous one. The rule is IRREVERSIBLE,
+   * not "negative-sounding": whichever branch the operator cannot undo gets
+   * the weight. In Verse's approvals that is Approve — a `pr` pushes a branch
+   * and opens a real pull request other people see immediately, a `patch`
+   * writes to disk now — while Reject only discards a proposal that stays in
+   * history. This doc used to say the opposite, which is how the red button
+   * came to be the safe one.
+   */
   destructive?: boolean;
   onConfirm: () => void;
   busy?: boolean;

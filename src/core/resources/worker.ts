@@ -8,6 +8,7 @@ import { runVerifySubprocessAsync } from '../run/verify-commands.js';
 import { MAX_RESOURCE_OBSERVATION_AGE_MS, validateResourcePool, type ResourceObservation, type ResourcePool, type ResourceWorker } from './pool-policy.js';
 import { mergeClaudeResourceObservation } from './provider-observations.js';
 import { validResourceNativeProcessSignal, type ResourceNativeProcessDiagnostic } from './native-diagnostics.js';
+import { readKillSwitch } from '../sandbox/policy.js';
 
 export type ResourceBinding =
   | { workerId: string; capacityKey: string; kind: 'native-cli'; command: string[] }
@@ -36,6 +37,16 @@ export interface ResourceWorkerResult {
 
 const MAX_BYTES = 1024 * 1024;
 const IDENTIFIER = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+const KILL_POLL_MS = 50;
+
+/** Reuse the shared authority source; an unreadable/unknown state is never clear. */
+function resourceKillReason(): 'worker-kill-active' | 'worker-kill-unavailable' | null {
+  try {
+    const observation = readKillSwitch();
+    if (observation.state === 'inactive' && observation.sourceState === 'healthy') return null;
+    return observation.state === 'active' && observation.sourceState === 'healthy' ? 'worker-kill-active' : 'worker-kill-unavailable';
+  } catch { return 'worker-kill-unavailable'; }
+}
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value) &&
@@ -302,10 +313,41 @@ export async function executeResourceWorker(worker: ResourceWorker, binding: Res
     validatedTask = validateTask(task);
   } catch { return empty('worker-invalid-configuration'); }
   if (signal?.aborted) return empty('worker-cancelled', 'cancelled');
-  const result = validatedBinding.kind === 'native-cli'
-    ? await executeNative(validatedWorker, validatedBinding, validatedTask, signal)
-    : await executeLocal(validatedWorker, validatedBinding, validatedTask, signal);
-  if (result.inputTokens === null || result.outputTokens === null) return result;
-  return { ...result, usageScope: validatedWorker.provider === 'codex' ? 'codex-turn'
-    : validatedWorker.provider === 'claude' ? 'claude-main-loop' : 'local-chat-completion' };
+  const controller = new AbortController();
+  let killReason: ReturnType<typeof resourceKillReason> = null;
+  const cancel = (): void => { controller.abort(); };
+  const checkKill = (): void => {
+    if (controller.signal.aborted) return;
+    killReason = resourceKillReason();
+    if (killReason !== null) controller.abort();
+  };
+  signal?.addEventListener('abort', cancel, { once: true });
+  let timer: ReturnType<typeof setInterval> | undefined;
+  try {
+    if (signal?.aborted) cancel();
+    checkKill();
+    if (controller.signal.aborted) return empty(killReason ?? 'worker-cancelled', 'cancelled');
+    // KILL requires cancellable owned native work. No verified Windows Job
+    // Object/tree-cleanup implementation exists, so refuse before invoking the
+    // native runner rather than attach a synthetic process/cleanup diagnostic.
+    if (validatedBinding.kind === 'native-cli' && process.platform === 'win32') {
+      return empty('worker-kill-cancellation-unsupported');
+    }
+    // Polling cadence is bounded, not a real-time latency promise under event-loop
+    // stalls. Await the existing native cleanup/fetch path instead of racing an
+    // abort against transport settlement or manufacturing a no-spend receipt.
+    timer = setInterval(checkKill, KILL_POLL_MS);
+    const result = validatedBinding.kind === 'native-cli'
+      ? await executeNative(validatedWorker, validatedBinding, validatedTask, controller.signal)
+      : await executeLocal(validatedWorker, validatedBinding, validatedTask, controller.signal);
+    // A late stop must not erase completed work, usage, timeouts or uncertain
+    // native process ownership. Cancellation still retains the parser's evidence.
+    const stopped = killReason !== null && result.status === 'cancelled' ? { ...result, reason: killReason } : result;
+    if (stopped.inputTokens === null || stopped.outputTokens === null) return stopped;
+    return { ...stopped, usageScope: validatedWorker.provider === 'codex' ? 'codex-turn'
+      : validatedWorker.provider === 'claude' ? 'claude-main-loop' : 'local-chat-completion' };
+  } finally {
+    if (timer !== undefined) clearInterval(timer);
+    signal?.removeEventListener('abort', cancel);
+  }
 }

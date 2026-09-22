@@ -13,6 +13,7 @@ export function resourceTime(value: string | null | undefined): string {
 
 const REASONS: Record<string, string> = {
   'worker-not-allowed': 'Not in this task’s worker allowlist', 'worker-unavailable': 'Shared capacity is unavailable',
+  'operator-quota-scope-excluded': 'Reserved for your work',
   'provider-retry-after': 'Provider retry interval or failure cooldown', 'observation-missing': 'No quota observation',
   'observation-future': 'Observation capture time is in the future', 'observation-stale': 'Observation needs refreshing',
   'quota-windows-missing': 'Quota windows have not been observed', 'quota-window-unknown': 'A quota window is unknown',

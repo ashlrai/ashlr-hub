@@ -18,10 +18,11 @@ let base: string;
 const save = (file: string, value: unknown): void => writeFileSync(file, JSON.stringify(value), { mode: 0o600 });
 beforeEach(() => {
   base = realpathSync(mkdtempSync(join(tmpdir(), 'universe-runtime-check-')));
-  for (const [module, name] of [[worker, 'executeResourceWorker'], [quota, 'refreshResourceQuotaOnce'],
-    [local, 'refreshResourceLocalModelsOnce'], [probe, 'probeCodexResourceAccount']] as const) {
-    vi.spyOn(module, name).mockImplementation(() => { throw new Error('Provider must not be contacted'); });
-  }
+  const forbidden = (): never => { throw new Error('Provider must not be contacted'); };
+  vi.spyOn(worker, 'executeResourceWorker').mockImplementation(forbidden);
+  vi.spyOn(quota, 'refreshResourceQuotaOnce').mockImplementation(forbidden);
+  vi.spyOn(local, 'refreshResourceLocalModelsOnce').mockImplementation(forbidden);
+  vi.spyOn(probe, 'probeCodexResourceAccount').mockImplementation(forbidden);
   vi.spyOn(globalThis, 'fetch').mockImplementation(() => { throw new Error('Network must not be contacted'); });
 });
 afterEach(() => {
@@ -74,6 +75,31 @@ function failed(result: ReturnType<typeof checkResourceGenerationRuntime>, stage
 }
 
 describe.skipIf(process.platform === 'win32')('read-only resource runtime configuration check', () => {
+  it('reports a saved scope reservation as operator policy, not a request to refresh healthy quota', () => {
+    const f = fixture(false);
+    const pool = validateResourcePool({ ...f.pool, workers: f.pool.workers.map(worker => worker.id === 'codex-a'
+      ? { ...worker, model: 'gpt-6-astra', quotaScope: 'codex-general-v1' } : worker) });
+    save(f.runtime.poolPath, pool);
+    save(f.runtime.observationsPath, f.observations.map(row => row.workerId === 'codex-a'
+      ? { ...row, windows: row.windows.map(window => ({ ...window, id: 'codex_codex_primary' })) } : row));
+    poolRuntime.setResourceQuotaScopeAccess(f.runtime.root, pool, f.bindings,
+      [{ capacityKey: 'codex-a', quotaScope: 'codex-general-v1' }], 0);
+    const before = inventory(base); const report = f.check();
+    expect(report.status, JSON.stringify(report.checks)).toBe('valid');
+    expect(report.workers.find(worker => worker.workerId === 'codex-a')).toMatchObject({
+      eligibility: 'excluded', exclusionReasons: ['operator-quota-scope-excluded'],
+      policyHolds: ['quota-scope-reserved'], nextChecks: ['review-quota-scope-reservation'] });
+    expect(report.workers.find(worker => worker.workerId === 'codex-b')?.eligibility).toBe('eligible');
+    expect(inventory(base)).toEqual(before);
+  });
+
+  it('checks the exact optional runtime pin without creating a resource ledger', () => {
+    const f = fixture();
+    expect(checkResourceGenerationRuntime({ resourceRuntime: f.runtimePath,
+      expectedRuntimeDigest: digest(canonical(f.runtime)) }).status).toBe('valid');
+    failed(checkResourceGenerationRuntime({ resourceRuntime: f.runtimePath, expectedRuntimeDigest: '0'.repeat(64) }), 'runtime');
+    expect(existsSync(f.runtime.root)).toBe(false);
+  });
   it('reports two Codex identities, Claude and local coverage without claiming authentication or mutating any input', () => {
     const f = fixture(); const before = inventory(base); const result = f.check();
     expect(result).toMatchObject({ schemaVersion: 1, status: 'valid', evidenceScope: 'local-configuration-only', providerContacted: false,

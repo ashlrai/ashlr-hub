@@ -16,6 +16,21 @@
  *
  * Never throws — on any error returns a safe local fallback RouteDecision.
  * No auto-download. No side-effects.
+ *
+ * LOCAL-ONLY (policy/local-only.ts): M15's three gates make cloud OPT-IN.
+ * Local-only makes it IMPOSSIBLE. Every exported routing surface in this file
+ * consults `enginePermitted()` — the one predicate — and, when it refuses:
+ *
+ *   routeTask / routeTaskCascade — narrow the candidate set to permitted engines
+ *                                  and, as a backstop that no internal branch can
+ *                                  escape, rewrite a non-permitted final decision
+ *                                  to 'builtin' with the refusal named in `reason`.
+ *   chooseRoute                  — never returns tier 'cloud'; the returned local
+ *                                  decision carries the refusal in `reason` so a
+ *                                  skipped escalation is never silent.
+ *   shouldEscalate               — terminates the cascade cleanly when no permitted
+ *                                  engine serves the next tier, rather than
+ *                                  re-dispatching into a wall.
  */
 
 import type { AshlrConfig, EscalationReason, RouteDecision, WorkItem } from '../types.js';
@@ -44,6 +59,16 @@ import {
   selectCostAwareModel,
   type EngineScoreMap,
 } from './learned-router.js';
+// LOCAL-ONLY: the ONE predicate. No parallel mechanism lives in this file.
+import {
+  ALWAYS_PERMITTED_ENGINE,
+  enginePermitted,
+  filterPermittedEngines,
+  localOnlyReasonTag,
+  permittedEnginesAtTier,
+  providerPermitted,
+  resolveLocalOnlyMode,
+} from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Cloud provider env-key map — detection only, values are NEVER read/logged.
@@ -361,6 +386,101 @@ function pickForEngine(
 }
 
 /**
+ * LOCAL-ONLY enforcement for a finished routing decision.
+ *
+ * `routeTaskUnenforced` has a dozen internal branches, several of which name a
+ * fallback engine directly ("both frontiers quota-exhausted → local-coder",
+ * "frontier unavailable → local qwen", the catch-all builtin). Narrowing the
+ * candidate set steers those branches, but only a backstop on the RESULT can
+ * prove that none of them escapes. This is that backstop: a decision naming a
+ * non-permitted engine is rewritten to 'builtin' with the refusal in `reason`,
+ * so the operator sees WHICH engine was refused and WHY rather than a
+ * silently-downgraded result.
+ */
+function enforceLocalOnlyTaskDecision(
+  decision: TaskRouteDecision,
+  cfg: AshlrConfig,
+): TaskRouteDecision {
+  const verdict = enginePermitted(decision.engine, cfg);
+  if (verdict.permitted) return decision;
+  return {
+    engine: ALWAYS_PERMITTED_ENGINE,
+    model: null,
+    catalogEntry: null,
+    reason:
+      `${localOnlyReasonTag(verdict)} → builtin. ` +
+      `Refused route was: ${decision.reason}. ${verdict.mode.detail}`,
+  };
+}
+
+/**
+ * Narrow a RoutingContext to engines permitted under the current mode, and
+ * report which engines the narrowing removed.
+ *
+ * The removed list matters for HONEST REPORTING. Once the cloud engines are
+ * gone from the candidate set, `routeTaskUnenforced` lands on builtin through
+ * its ordinary "no external engine available" branch and says exactly that —
+ * which reads as a quota or install problem, not as a deliberate refusal. The
+ * caller stitches the removed engines back into the reason so the operator sees
+ * why the frontier was not used.
+ *
+ * An ABSENT `availableEngines` is a permissive "all engines" signal in
+ * `engineAvailable`, so it is left absent here — filtering it would produce an
+ * empty list and block every engine including the local ones. The result
+ * backstop still refuses any cloud engine such a context lets through.
+ */
+function permittedRoutingContext(
+  ctx: RoutingContext,
+  cfg: AshlrConfig,
+): { ctx: RoutingContext; removed: EngineId[] } {
+  if (!resolveLocalOnlyMode(cfg).enabled) return { ctx, removed: [] };
+  const engines = ctx.availableEngines;
+  if (!Array.isArray(engines)) return { ctx, removed: [] };
+  const permitted = filterPermittedEngines(engines, cfg);
+  const removed = engines.filter((e) => !permitted.includes(e));
+  // 'builtin' is permitted in every mode and is the guaranteed fallback target;
+  // keeping it present stops the narrowing from emptying the context entirely.
+  return {
+    ctx: {
+      availableEngines: permitted.includes(ALWAYS_PERMITTED_ENGINE)
+        ? permitted
+        : [...permitted, ALWAYS_PERMITTED_ENGINE],
+    },
+    removed,
+  };
+}
+
+/**
+ * Route a WorkItem to a concrete {engine, model}, respecting difficulty, source
+ * type, cost policy, quota/subscription availability, AND the local-only mode.
+ *
+ * Under local-only the candidate set is narrowed to permitted engines and the
+ * final decision is enforced (see `enforceLocalOnlyTaskDecision`). With the mode
+ * off both steps are no-ops and routing is byte-identical to pre-local-only.
+ *
+ * Never throws.
+ */
+export function routeTask(
+  item: WorkItem,
+  cfg: AshlrConfig,
+  ctx: RoutingContext,
+): TaskRouteDecision {
+  const narrowed = permittedRoutingContext(ctx, cfg);
+  const decision = enforceLocalOnlyTaskDecision(
+    routeTaskUnenforced(item, cfg, narrowed.ctx),
+    cfg,
+  );
+  if (narrowed.removed.length === 0 || decision.reason.includes('local-only')) return decision;
+  // The narrowing is why the stronger engines were not considered. Say so.
+  return {
+    ...decision,
+    reason:
+      `${decision.reason} [local-only: ${narrowed.removed.join(', ')} withheld — ` +
+      `cloud engines are refused in this mode, not merely deprioritised]`,
+  };
+}
+
+/**
  * Route a WorkItem to a concrete {engine, model}, respecting difficulty, source
  * type, cost policy, and quota/subscription availability.
  *
@@ -370,7 +490,7 @@ function pickForEngine(
  * This is called by fleet/router.ts AFTER it has already determined the engine
  * tier. It enriches the decision with model granularity.
  */
-export function routeTask(
+function routeTaskUnenforced(
   item: WorkItem,
   cfg: AshlrConfig,
   ctx: RoutingContext,
@@ -825,6 +945,21 @@ export function routeTask(
 const ESCALATION_TIER_ORDER: readonly string[] = ['local', 'mid', 'frontier'];
 
 /**
+ * Engines that can serve each cascade tier.
+ *
+ * Hoisted to module scope (it was inline in routeTaskCascade) so `shouldEscalate`
+ * can answer the question local-only makes urgent: "can the NEXT tier be reached
+ * at all?". 'nim' appears under both mid and frontier — membership here only
+ * makes it a CANDIDATE; its resolved per-cfg tier decides.
+ */
+const CASCADE_TIER_ENGINES: Readonly<Record<'local' | 'mid' | 'frontier', readonly EngineId[]>> =
+  Object.freeze({
+    local: ['builtin' as EngineId],
+    mid: ['local-coder' as EngineId, 'nim' as EngineId],
+    frontier: ['claude' as EngineId, 'codex' as EngineId, 'nim' as EngineId],
+  });
+
+/**
  * Which tier a TaskRouteDecision's engine belongs to for cascade purposes.
  *
  * M195: cfg-aware. When a cfg is supplied it reads the RESOLVED tier from the
@@ -931,10 +1066,44 @@ export interface TaskResult {
  * Escalation is CAPPED at frontier (max 2 hops: local→mid→frontier).
  * A task already at frontier is never escalated further.
  *
+ * LOCAL-ONLY: the cascade's higher tiers are mostly cloud — 'frontier' is
+ * claude/codex/nim, all of which local-only refuses. Escalating into that tier
+ * would re-dispatch, be refused at the engine gate, and read to the operator as
+ * a run that simply got worse. So when no PERMITTED engine serves the target
+ * tier, escalation terminates here, cleanly, naming the mode. Pass `opts.cfg` to
+ * get that behaviour; without a cfg the function is byte-identical to before.
+ *
+ * ── WHERE THE PRODUCTION GUARANTEE ACTUALLY LIVES ────────────────────────
+ *
+ * Stated plainly so nobody reads the paragraph above as a claim about the
+ * running system: NO production caller passes `opts.cfg` today, because no
+ * production caller invokes this function at all. The M155 cascade
+ * (`routeTaskCascade` / `shouldEscalate`) is re-exported by `learned-router.ts`
+ * and exercised by tests; live escalation goes through `chooseRoute` and the
+ * daemon's tiered dispatch.
+ *
+ * On those paths the property "escalation never re-dispatches into a tier
+ * local-only refuses" holds for a DIFFERENT and stronger reason: `availableFrom`
+ * (src/core/fleet/router.ts) filters every candidate list through
+ * `enginePermitted`, so a refused engine is ABSENT from routing rather than
+ * selected and then blocked. There is nothing to escalate into. That is what
+ * test/local-only-dispatch-paths.test.ts §D pins, on the entry points that run.
+ *
+ * This branch is therefore correct and inert. It stays because the cascade is
+ * a live API surface that a caller may wire in, and a cascade wired in WITHOUT
+ * this rule would walk into exactly the refusal described above.
+ *
  * @param result    The objective result of the cheap-first attempt.
  * @param decision  The CascadeDecision that produced this result (used for tier cap).
+ * @param opts      Optional local-only context: `cfg` enables the termination
+ *                  check, `availableEngines` narrows the tier's candidates to
+ *                  the ones this fleet actually has.
  */
-export function shouldEscalate(result: TaskResult, decision: CascadeDecision): EscalationSignal {
+export function shouldEscalate(
+  result: TaskResult,
+  decision: CascadeDecision,
+  opts?: { cfg?: AshlrConfig; availableEngines?: readonly EngineId[] },
+): EscalationSignal {
   const currentTierIdx = ESCALATION_TIER_ORDER.indexOf(decision.tierLabel);
   const atFrontier = decision.tierLabel === 'frontier';
 
@@ -991,6 +1160,29 @@ export function shouldEscalate(result: TaskResult, decision: CascadeDecision): E
   // If stepping up would leave us at the same tier (shouldn't happen, but guard),
   // or the next tier is the same, cap at frontier.
   const toTier: 'mid' | 'frontier' = nextTier === 'local' ? 'mid' : nextTier;
+
+  // ── LOCAL-ONLY: terminate rather than escalate into an unreachable tier ────
+  const cfg = opts?.cfg;
+  if (cfg) {
+    const mode = resolveLocalOnlyMode(cfg);
+    if (mode.enabled) {
+      const tierCandidates = opts?.availableEngines
+        ? CASCADE_TIER_ENGINES[toTier].filter((e) => opts.availableEngines!.includes(e))
+        : CASCADE_TIER_ENGINES[toTier];
+      const reachable = permittedEnginesAtTier(toTier, tierCandidates, cfg);
+      if (reachable.length === 0) {
+        return {
+          escalate: false,
+          toTier: null,
+          reason:
+            `escalation ${decision.tierLabel}→${toTier} terminated by local-only: ` +
+            `no permitted local engine serves the ${toTier} tier ` +
+            `(candidates: ${tierCandidates.length > 0 ? tierCandidates.join(', ') : 'none'}). ` +
+            `signals=[${failures.join(',')}] on attempt ${decision.attempt}. ${mode.detail}`,
+        };
+      }
+    }
+  }
 
   return {
     escalate: true,
@@ -1103,12 +1295,13 @@ export function routeTaskCascade(
     // resolved per-cfg by engineTierLabel/routeTask, so listing it here only
     // makes it a CANDIDATE for that tier; a non-frontier-promoted nim won't be
     // selected as frontier (its resolved tier stays 'mid').
-    const tierEngines: Record<string, EngineId[]> = {
-      local: ['builtin' as EngineId],
-      mid: ['local-coder' as EngineId, 'nim' as EngineId],
-      frontier: ['claude' as EngineId, 'codex' as EngineId, 'nim' as EngineId],
-    };
-    const preferredEngines = tierEngines[forceTier] ?? [];
+    // LOCAL-ONLY: an escalation must not re-introduce a cloud engine that the
+    // first attempt's routing already refused. filterPermittedEngines is a
+    // no-op when the mode is off.
+    const preferredEngines = filterPermittedEngines(
+      CASCADE_TIER_ENGINES[forceTier] ?? [],
+      cfg,
+    );
     // Narrow context to requested tier engines still in availableEngines.
     const filteredEngines = preferredEngines.filter((e) => ctx.availableEngines.includes(e));
     const escalatedCtx: RoutingContext = {
@@ -1219,17 +1412,30 @@ export async function chooseRoute(
       opts.allowCloud &&
       opts.lastReason !== 'none';
 
+    // LOCAL-ONLY: a FOURTH gate that outranks the other three. A refusal here
+    // must not be silent — the operator asked for cloud and is about to get a
+    // local model instead, which without an explanation looks like the escalation
+    // simply did not help. `localOnlyNote` is prefixed to every local reason below.
+    let localOnlyNote = '';
     if (mayEscalate) {
       const cloudProvider = pickCloudProvider(cfg.models.providerChain);
       if (cloudProvider !== null) {
-        // All three gates passed — return a cloud escalation route.
-        const cloudModel = defaultCloudModel(cloudProvider);
-        return {
-          provider: cloudProvider,
-          model: cloudModel,
-          tier: 'cloud',
-          reason: `escalated to cloud (${cloudProvider}/${cloudModel}) after ${opts.lastReason} on attempt ${opts.attempt}; --allow-cloud set and key present`,
-        };
+        const verdict = providerPermitted(cloudProvider, cfg);
+        if (!verdict.permitted) {
+          localOnlyNote =
+            `${localOnlyReasonTag(verdict)} — cloud escalation after ` +
+            `${opts.lastReason} on attempt ${opts.attempt} was REFUSED, not skipped; ` +
+            `${verdict.mode.detail} staying local. `;
+        } else {
+          // All gates passed — return a cloud escalation route.
+          const cloudModel = defaultCloudModel(cloudProvider);
+          return {
+            provider: cloudProvider,
+            model: cloudModel,
+            tier: 'cloud',
+            reason: `escalated to cloud (${cloudProvider}/${cloudModel}) after ${opts.lastReason} on attempt ${opts.attempt}; --allow-cloud set and key present`,
+          };
+        }
       }
       // allowCloud + real reason, but no cloud key available → fall through to local.
     }
@@ -1292,7 +1498,7 @@ export async function chooseRoute(
         model: preferredModel ?? 'default',
         tier: 'local',
         reason:
-          `${ruleMatchReason}no local provider reachable; staying local (start Ollama or LM Studio, ` +
+          `${localOnlyNote}${ruleMatchReason}no local provider reachable; staying local (start Ollama or LM Studio, ` +
           `or pass --allow-cloud with an escalation reason to escalate)`,
       };
     }
@@ -1326,7 +1532,7 @@ export async function chooseRoute(
       provider: activeLocalId,
       model: chosenModel,
       tier: 'local',
-      reason: `${modelReason} on ${activeLocalId}`,
+      reason: `${localOnlyNote}${modelReason} on ${activeLocalId}`,
     };
   } catch (err: unknown) {
     // Never throw — return a safe local fallback.

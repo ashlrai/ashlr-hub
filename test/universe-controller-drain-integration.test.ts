@@ -72,6 +72,7 @@ function snapshot(path: string): unknown {
 function fixture(delivery = true) {
   const base = realpathSync(mkdtempSync(join(tmpdir(), 'universe-controller-drain-'))); roots.push(base);
   const root = join(base, 'store'); const temp = join(base, 'tmp'); mkdirSync(temp, { mode: 0o700 });
+  const fixtureHome = join(base, 'home'); mkdirSync(fixtureHome, { mode: 0o700 });
   const manifests: UniverseManifest[] = [];
   for (const name of ['a', 'b', 'c']) {
     const repo = join(base, `repo-${name}`); mkdirSync(repo, { mode: 0o700 });
@@ -110,7 +111,7 @@ console.log(JSON.stringify({passed:Number.isInteger(value)&&value>0,score:value,
   const deliveryPlan = join(base, 'delivery.json');
   writeFileSync(deliveryPlan, JSON.stringify({ schemaVersion: 1, deliveries: [{ campaignId: 'campaign-a',
     branch: 'codex/drain-delivery', baseCommit: manifests[0]!.seed.revision }] }), { mode: 0o600 });
-  return { base, root, temp, definition, manifest, manifests, deliveryPlan: delivery ? deliveryPlan : null };
+  return { base, root, temp, fixtureHome, definition, manifest, manifests, deliveryPlan: delivery ? deliveryPlan : null };
 }
 type Fixture = ReturnType<typeof fixture>;
 type Receipt = UniversePortfolioControllerControlReceipt;
@@ -145,7 +146,11 @@ function launch(value: Fixture, command: 'run' | 'status' | 'drain' | 'resume', 
 const {cmdUniverseController}=await import('./src/cli/universe-controller.ts');process.exitCode=await cmdUniverseController(${JSON.stringify(args)});`;
   const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source], {
     cwd: project, stdio: ['ignore', 'pipe', 'pipe'],
-    env: { PATH: process.env.PATH, LC_ALL: 'C', TMPDIR: value.temp, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
+    // Explicit child environments must retain isolation: absent HOME makes
+    // native homedir() fall back to the account home outside Vitest's mock.
+    env: { PATH: process.env.PATH, LC_ALL: 'C', TMPDIR: value.temp, HOME: value.fixtureHome,
+      USERPROFILE: value.fixtureHome, ASHLR_HOME: join(value.fixtureHome, '.ashlr'),
+      GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' },
   });
   let stdout = ''; let stderr = ''; let error: string | null = null;
   const capture = (name: 'stdout' | 'stderr', chunk: Buffer): void => {
@@ -239,7 +244,7 @@ describe.runIf(process.platform === 'darwin')('Universe durable drain across CLI
     expect(readUniverseCampaign('campaign-a', value).state).toBe('running');
     writeFileSync(active.release, 'finish admitted fixture\n', { mode: 0o600, flag: 'wx' });
     const drained = await result<Report>(owner, 1);
-    expect(drained).toMatchObject({ status: 'drained', sourceState: 'healthy', createdAt: initial.createdAt,
+    expect(drained, JSON.stringify(drained)).toMatchObject({ status: 'drained', sourceState: 'healthy', createdAt: initial.createdAt,
       deadlineAt: initial.deadlineAt, control: { mode: 'drain', sequence: request.sequence, acknowledgedAt: expect.any(String) } });
     expect(Date.parse(drained.control.acknowledgedAt!)).toBeGreaterThanOrEqual(Date.parse(request.requestedAt));
     expect(drained.outcomes).toMatchObject([{ campaignId: 'campaign-a', state: 'completed', attempted: true, deliveryDigest: expect.any(String) },

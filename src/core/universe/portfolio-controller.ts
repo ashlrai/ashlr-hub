@@ -12,15 +12,18 @@ import { runUniverseCampaignOwned } from './campaign.js';
 import { acquireUniverseExecution } from './execution.js';
 import { readUniverseCampaignReadiness, type UniverseCampaignReadiness } from './campaign-readiness.js';
 import { resourceAdmissionPreflight } from './resource-admission-preflight.js';
+import { readGraphContinuationAuthority, type GraphContinuationAuthority } from './control-graph.js';
+import { reconcileGraphControllerDispatchOwned } from './graph-controller-reconciliation.js';
 import { deliverCompletedUniverseCampaign, preflightUniverseCampaignDelivery, validateUniverseCampaignDeliveryPlan } from './campaign-delivery.js';
 import { readUniverseDeliveries } from './delivery.js';
 import { readUniversePortfolioPlan, validateUniversePortfolioDefinition } from './portfolio-plan.js';
 import { appendPortfolioControllerEvent, foldPortfolioController, portfolioControllerDirectory,
   portfolioControllerPrerequisites, readPortfolioControllerEvents, refreshPortfolioControllerEvents,
-  withPortfolioControllerTransaction, PortfolioControllerTransactionBusyError, PortfolioControllerDrainError } from './portfolio-controller-store.js';
+  withPortfolioControllerTransaction, PortfolioControllerTransactionBusyError, PortfolioControllerDrainError,
+  validatePortfolioControllerGraphDispatch } from './portfolio-controller-store.js';
 import type { UniversePortfolioRunOptions } from './portfolio.js';
-import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin,
-  UniversePortfolioControllerReport } from './portfolio-controller-types.js';
+import type { PortfolioControllerEnrollment, PortfolioControllerEvent, PortfolioControllerPin, PortfolioControllerGraphDispatch,
+  UniversePortfolioControllerReport, UniversePortfolioControllerDiagnosticPhase, UniversePortfolioControllerDiagnosticCode } from './portfolio-controller-types.js';
 import type { UniverseStoreOptions } from './types.js';
 
 function matches(pin: PortfolioControllerPin, report: UniverseCampaignReadiness): boolean {
@@ -91,6 +94,7 @@ function inspect(id: string, events: PortfolioControllerEvent[], root: string, a
         ? folded.control.acknowledgedAt === null ? 'draining' : 'drained' : 'incomplete',
     createdAt: folded.first.at, deadlineAt: enrollment.deadlineAt,
     observedAt: at, outcomes, reasons,
+    ...(folded.diagnostics.size ? { diagnostics: [...folded.diagnostics.values()].map(value => ({ ...value })) } : {}),
     topology: enrollment.definition.tasks.map((task) => ({ campaignId: task.campaignId,
       dependsOn: [...task.dependsOn], prerequisites: portfolioControllerPrerequisites(enrollment, task.campaignId) })),
     ...(folded.control ? { control: { ...folded.control } } : {}) };
@@ -117,7 +121,49 @@ export function readUniversePortfolioController(id: string, options: UniverseSto
  * its concurrency slot and can never be reissued by this controller. New dispatch
  * identities permit receipt-only recovery; an arbitrary later completion does not.
  */
-export async function runUniversePortfolioController(input: unknown, options: UniversePortfolioRunOptions = {}): Promise<UniversePortfolioControllerReport> {
+export interface UniversePortfolioControllerRunOptions extends UniversePortfolioRunOptions {
+  /** Host graph enrollment must not adopt another invocation's existing controller. */
+  requireNewEnrollment?: boolean;
+  /** Kernel-derived fresh-execution association, never authority to resume. */
+  graphDispatch?: PortfolioControllerGraphDispatch;
+  /** In-process parent ownership/KILL check; never supplied by a portable manifest. */
+  isExecutionStopped?: () => boolean;
+  /** Optional outer monotonic deadline, which may only shorten the persisted allowance. */
+  deadlineMonotonicMs?: number;
+}
+
+export async function runUniversePortfolioController(input: unknown, options: UniversePortfolioControllerRunOptions = {}): Promise<UniversePortfolioControllerReport> {
+  return runPortfolioController(input, options);
+}
+
+/** Internal graph entry; portable linkage and copied callback contexts grant no authority. */
+export async function continueGraphOwnedPortfolioController(input: unknown, options: UniversePortfolioControllerRunOptions,
+  context: unknown, bindingDigest: string): Promise<UniversePortfolioControllerReport> {
+  const authority = readGraphContinuationAuthority(context, bindingDigest);
+  if (!authority) throw new Error('Live graph continuation authority required');
+  return runPortfolioController(input, options, authority);
+}
+
+async function runPortfolioController(input: unknown, options: UniversePortfolioControllerRunOptions,
+  continuation?: GraphContinuationAuthority): Promise<UniversePortfolioControllerReport> {
+  // Capture linkage before any storage or trusted callbacks. Never execute an
+  // accessor while deciding which graph's durable dispatch is being associated.
+  const graphProperty = Object.getOwnPropertyDescriptor(options, 'graphDispatch');
+  if (graphProperty && (!graphProperty.enumerable || !Object.hasOwn(graphProperty, 'value')) ||
+    !graphProperty && 'graphDispatch' in options) throw new Error('Invalid controller graph dispatch option');
+  const suppliedGraphDispatch = graphProperty ? validatePortfolioControllerGraphDispatch(graphProperty.value) : undefined;
+  const graphDispatch = continuation?.graphDispatch ?? suppliedGraphDispatch;
+  if (continuation && suppliedGraphDispatch && canonical(suppliedGraphDispatch) !== canonical(graphDispatch)) {
+    throw new Error('Graph continuation linkage differs');
+  }
+  const newProperty = Object.getOwnPropertyDescriptor(options, 'requireNewEnrollment');
+  if (newProperty && (!Object.hasOwn(newProperty, 'value') || newProperty.value !== undefined && typeof newProperty.value !== 'boolean') ||
+    !newProperty && 'requireNewEnrollment' in options) throw new Error('Invalid controller new enrollment option');
+  const requireNewEnrollment = newProperty?.value === true;
+  if (continuation && requireNewEnrollment) throw new Error('Graph continuation requires an existing enrollment');
+  if (!continuation && graphDispatch && !requireNewEnrollment) {
+    throw new Error('Graph-linked controllers require explicit fresh enrollment; use receipt-only reconciliation');
+  }
   const startedAt = new Date().toISOString();
   const startedMonotonic = performance.now();
   const definition = validateUniversePortfolioDefinition(input);
@@ -125,19 +171,34 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     definition.tasks.map((task) => task.campaignId));
   const root = resolve(options.root ?? defaultUniverseRoot());
   const resourceRuntime = options.resourceRuntime;
-  const checkRuntime = resourceRuntime === undefined ? null : resourceAdmissionPreflight(resourceRuntime);
-  const signal = options.signal;
+  const expectedResourceRuntimeDigest = options.expectedResourceRuntimeDigest;
+  const checkRuntime = resourceRuntime === undefined ? null : resourceAdmissionPreflight(resourceRuntime, expectedResourceRuntimeDigest);
+  const callerSignal = options.signal;
+  const signal = continuation?.signal ?? callerSignal;
+  const callerStopped = options.isExecutionStopped;
+  const isExecutionStopped = continuation ? () => continuation.isExecutionStopped() ||
+    signal?.aborted === true || callerSignal?.aborted === true || !!callerStopped?.() : callerStopped;
+  const requestedDeadline = options.deadlineMonotonicMs ?? Infinity;
+  if (options.deadlineMonotonicMs !== undefined && (!Number.isFinite(requestedDeadline) || requestedDeadline < 0)) {
+    throw new Error('Invalid outer controller deadline');
+  }
+  const outerDeadline = Math.min(requestedDeadline, continuation?.deadlineMonotonicMs ?? Infinity);
   const directory = portfolioControllerDirectory(definition.id, { root });
   if (signal?.aborted) return { ...readUniversePortfolioController(definition.id, { root }), status: 'cancelled' };
+  if (continuation && (isExecutionStopped?.() || performance.now() >= outerDeadline)) {
+    throw new Error('Graph continuation stopped');
+  }
   inspectPrivateDirectory(root);
   for (const path of [join(root, 'portfolios'), directory]) {
+    if (continuation) { inspectPrivateDirectory(path); continue; }
     try { privateDirectory(path); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; inspectPrivateDirectory(path); }
   }
   const acquired = acquireLocalStoreLockWithOutcome(join(directory, '.execution.lock'), 0, { anchorPath: directory, exactPrivateStorage: true });
   if (acquired.state !== 'acquired') {
     const report = readUniversePortfolioController(definition.id, { root });
-    return { ...report, reasons: [...report.reasons, acquired.state === 'contended' ? 'controller-owned' : 'controller-ownership-unavailable'] };
+    return { ...report, ...(requireNewEnrollment || graphDispatch ? { status: 'unavailable' as const } : {}),
+      reasons: [...report.reasons, acquired.state === 'contended' ? 'controller-owned' : 'controller-ownership-unavailable'] };
   }
   const controller = new AbortController();
   const active = new Map<string, Promise<void>>();
@@ -148,7 +209,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   let events: PortfolioControllerEvent[] = [];
   // Until the existing registration can be read, waiting is bounded by this
   // invocation's supplied duration. No work can dispatch before the real pin.
-  let deadlineMonotonic = startedMonotonic + definition.maxDurationMs;
+  let deadlineMonotonic = Math.min(startedMonotonic + definition.maxDurationMs, outerDeadline);
   let drainSequence: number | null = null;
   const halt = (status: NonNullable<typeof stopped>, reason?: string): void => {
     stopped ??= status; if (reason && !errors.includes(reason)) errors.push(reason); controller.abort();
@@ -157,6 +218,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   const owned = (): void => { if (!ownsLocalStoreLock(acquired.lock)) throw new Error('Controller execution ownership lost'); };
   const stopping = (): boolean => {
     if (signal?.aborted) cancel();
+    try { if (isExecutionStopped?.()) halt('cancelled', 'parent-execution-stopped'); }
+    catch { halt('unavailable', 'parent-execution-unavailable'); }
     const now = new Date().toISOString();
     const folded = events.length ? foldPortfolioController(events) : null;
     if (folded && now < folded.highWaterAt) halt('unavailable', 'controller-clock-rollback');
@@ -213,8 +276,9 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     };
     capture(appendPortfolioControllerEvent(directory, event.kind === 'created' ? event : { ...event, at: new Date().toISOString() },
       { expectedRecords: events, ...(event.kind === 'intent' ? { beforeIntent: check } :
-        event.kind === 'settled' && beforeWrite ? { beforeSettlement: check } : {}) }));
-  }, event.kind === 'settled' || event.kind === 'drained');
+        event.kind === 'settled' && beforeWrite ? { beforeSettlement: check } :
+          event.kind === 'dispatch-diagnostic' && beforeWrite ? { beforeDiagnostic: check } : {}) }));
+  }, event.kind === 'settled' || event.kind === 'drained' || event.kind === 'dispatch-diagnostic');
   const acknowledgeDrain = (): void | Promise<void> => transaction(() => {
     owned();
     // Refresh and append are separate short transactions. The final append CAS
@@ -230,10 +294,38 @@ export async function runUniversePortfolioController(input: unknown, options: Un
   signal?.addEventListener('abort', cancel, { once: true });
   try {
     const existing = transaction(() => withPortfolioControllerTransaction(directory, () => {
-      recoverControllerRecordLock(definition.id, { root }, acquired.lock);
       try { lstatSync(join(directory, 'ledger')); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false; throw error; }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT' && !continuation) return false;
+        throw error;
+      }
+      if (requireNewEnrollment) throw new Error('Host graph requires a new controller enrollment');
+      let linkedSnapshot: PortfolioControllerEvent[] | undefined;
+      if (continuation) {
+        // Unlike ordinary legacy recovery, continuation cannot repair storage
+        // until a strict snapshot proves which existing enrollment it belongs to.
+        // An unreadable writer mutex is not enough evidence to claim that owner.
+        linkedSnapshot = readPortfolioControllerEvents(directory);
+        const enrolled = foldPortfolioController(linkedSnapshot).first.enrollment;
+        if (!enrolled.graphDispatch || canonical(enrolled.graphDispatch) !== canonical(graphDispatch) ||
+            canonical(enrolled.definition) !== canonical(definition) || canonical(enrolled.deliveryPlan) !== canonical(deliveryPlan)) {
+          throw new Error('Graph continuation enrollment differs');
+        }
+        if (isExecutionStopped?.() || performance.now() >= outerDeadline) throw new Error('Graph continuation stopped');
+        owned();
+      }
+      // The strict reader refuses every writer mutex. Reclaiming a proven-dead
+      // mutex is storage cleanup, not permission to resume graph-linked execution.
+      recoverControllerRecordLock(definition.id, { root }, acquired.lock);
       capture(readPortfolioControllerEvents(directory));
+      if (linkedSnapshot && canonical(events) !== canonical(linkedSnapshot)) throw new Error('Graph continuation enrollment changed');
+      const enrolledLink = foldPortfolioController(events).first.enrollment.graphDispatch;
+      if (continuation && (!enrolledLink || canonical(enrolledLink) !== canonical(graphDispatch))) {
+        throw new Error('Graph continuation enrollment differs');
+      }
+      if (!continuation && enrolledLink) {
+        throw new Error('Graph-linked controller execution cannot resume; use receipt-only reconciliation');
+      }
       return true;
     }));
     if (!(existing instanceof Promise ? await existing : existing)) {
@@ -265,7 +357,8 @@ export async function runUniversePortfolioController(input: unknown, options: Un
         refs.add(ref);
       }
       const enrollment: PortfolioControllerEnrollment = { definition, deliveryPlan, definitionDigest: digest(canonical(definition)), pins,
-        deadlineAt: new Date(Date.parse(startedAt) + definition.maxDurationMs).toISOString() };
+        deadlineAt: new Date(Date.parse(startedAt) + definition.maxDurationMs).toISOString(),
+        ...(graphDispatch ? { graphDispatch } : {}) };
       const created = append({ kind: 'created', at: startedAt, enrollment });
       if (created instanceof Promise) await created;
     }
@@ -274,13 +367,47 @@ export async function runUniversePortfolioController(input: unknown, options: Un
     if (canonical(enrollment.definition) !== canonical(definition) || canonical(enrollment.deliveryPlan) !== canonical(deliveryPlan)) {
       throw new Error('Controller definition or delivery plan differs from its fixed enrollment');
     }
-    deadlineMonotonic = startedMonotonic + Math.max(0, Date.parse(enrollment.deadlineAt) - Date.parse(startedAt));
+    deadlineMonotonic = Math.min(outerDeadline,
+      startedMonotonic + Math.max(0, Date.parse(enrollment.deadlineAt) - Date.parse(startedAt)));
     const initialObservation = observe();
     const initialReport = initialObservation instanceof Promise ? await initialObservation : initialObservation;
     if (initialReport.sourceState !== 'healthy') return initialReport;
+    if (continuation) {
+      if (!deliveryPlan) throw new Error('Graph continuation delivery enrollment required');
+      const assertPending = (): void => {
+        owned();
+        const folded = foldPortfolioController(events);
+        for (const [campaignId, row] of folded.states) {
+          if (row.state === 'completed' || row.state === 'in-flight') continue;
+          const pin = folded.pins.get(campaignId)!;
+          const current = readUniverseCampaignReadiness(campaignId, { root });
+          if (row.state !== 'pending' || pin.initialState !== 'pending' || pin.dispatch !== 'campaign' ||
+              folded.intentEvents.has(campaignId) || !matches(pin, current) ||
+              current.recordsDigest !== pin.recordsDigest || current.expectedIdentity!.summaryDigest !== pin.campaignDigest ||
+              current.automaticAction !== 'run' && !waitable(current)) {
+            throw new Error('Graph continuation requires untouched pending campaigns');
+          }
+        }
+        if (isExecutionStopped?.() || performance.now() >= outerDeadline) throw new Error('Graph continuation stopped');
+        owned();
+      };
+      assertPending();
+      // Receipt acknowledgment may follow an expired child allowance, but only
+      // under the live original graph. The scheduler below still enforces both.
+      capture(reconcileGraphControllerDispatchOwned({ root, definition, deliveryPlan, graphDispatch: graphDispatch!,
+        pins: enrollment.pins.map(({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest }) =>
+          ({ campaignId, universeId, definitionDigest, manifestDigest, comparatorDigest })),
+        checkEnrollment: () => { if (isExecutionStopped?.()) throw new Error('Graph continuation stopped'); },
+        isExecutionStopped: () => isExecutionStopped?.() === true,
+        deadlineMonotonicMs: outerDeadline }, events, owned, true));
+      assertPending();
+      if ([...foldPortfolioController(events).states.values()].some(row => row.state === 'in-flight')) {
+        throw new Error('Graph continuation dispatch remains unresolved');
+      }
+    }
     // Recovery observes already completed effects, including after the original
     // deadline. It cannot launch workers, deliver branches, or renew admission.
-    for (const [campaignId, intent] of initial.intentEvents) {
+    for (const [campaignId, intent] of continuation ? [] : initial.intentEvents) {
       if (initial.states.get(campaignId)?.state !== 'in-flight' || !intent.dispatchId) continue;
       const pin = initial.pins.get(campaignId)!;
       if (pin.dispatch !== 'campaign') continue;
@@ -358,6 +485,10 @@ export async function runUniversePortfolioController(input: unknown, options: Un
         throw error;
       }
       const work = Promise.resolve().then(async () => {
+        // Values originate only from these controller-owned call boundaries;
+        // caught exception messages, properties and stacks are never inspected.
+        let phase: UniversePortfolioControllerDiagnosticPhase = pin.dispatch === 'campaign' ? 'campaign-execution' : 'campaign-verification';
+        let code: UniversePortfolioControllerDiagnosticCode = pin.dispatch === 'campaign' ? 'campaign-call-threw' : 'campaign-evidence-changed';
         try {
           let result;
           try {
@@ -365,6 +496,7 @@ export async function runUniversePortfolioController(input: unknown, options: Un
               // Only this direct pre-call path knows no runner or delivery was
               // invoked. A restart or thrown call can never infer this receipt.
               if (stopped !== 'cancelled' && stopped !== 'timed-out') return;
+              phase = 'settlement-publication'; code = 'settlement-write-failed';
               await append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: latestAdmission.recordsDigest!,
                 outcome: { campaignId, state: 'held', attempted: pin.dispatch === 'campaign', reasonCode: 'dispatch-not-started',
                   campaignDigest: latestAdmission.expectedIdentity!.summaryDigest, deliveryDigest: null } }, () => {
@@ -393,12 +525,15 @@ export async function runUniversePortfolioController(input: unknown, options: Un
             result = pin.dispatch === 'campaign' ? await runUniverseCampaignOwned(campaignId, { root, signal: controller.signal,
               dispatchId,
               ...(resourceRuntime === undefined ? {} : { resourceRuntime }),
+              ...(expectedResourceRuntimeDigest === undefined ? {} : { expectedResourceRuntimeDigest }),
+              isExecutionStopped: stopping,
               expectedIdentity: { ...latestAdmission.expectedIdentity!, recordsDigest: latestAdmission.recordsDigest! } }, executionLock!) : readUniverseCampaign(campaignId, { root });
           } finally {
             // Delivery acquires its own execution lease. Never retain the
             // campaign lease across that separate handoff or any early return.
             releaseLocalStoreLock(executionLock);
           }
+          phase = 'campaign-verification'; code = 'campaign-evidence-changed';
           let current = readUniverseCampaignReadiness(campaignId, { root });
           if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== digest(canonical(result))) throw new Error('Runner settlement changed');
           const settledRecordsDigest = current.recordsDigest;
@@ -411,12 +546,16 @@ export async function runUniversePortfolioController(input: unknown, options: Un
           if (target && completed) {
             if (stopping()) { completed = false; reasonCode = 'delivery-not-attempted'; }
             else {
+              phase = 'delivery-execution'; code = 'delivery-call-threw';
               const delivered = await deliverCompletedUniverseCampaign(campaignId, { root, delivery: target, signal: controller.signal,
-                deadlineMonotonicMs: deadlineMonotonic, expectedIdentity: { ...current.expectedIdentity!, recordsDigest: current.recordsDigest! } });
+                isExecutionStopped: stopping, deadlineMonotonicMs: deadlineMonotonic,
+                expectedIdentity: { ...current.expectedIdentity!, recordsDigest: current.recordsDigest! } });
+              phase = 'delivery-verification'; code = 'delivery-evidence-changed';
               if (digest(canonical(delivered.campaign)) !== current.expectedIdentity!.summaryDigest) throw new Error('Delivery campaign evidence changed');
               completed = delivered.delivery.status === 'delivered';
               reasonCode = completed ? 'campaign-and-delivery-completed' : 'delivery-withheld';
               if (delivered.delivery.status === 'delivered') {
+                code = 'delivery-receipt-unverified';
                 const receipts = readUniverseDeliveries(pin.universeId, { root });
                 deliveryDigest = digest(canonical(delivered.delivery.receipt));
                 if (delivered.delivery.receipt.universeId !== pin.universeId || delivered.delivery.receipt.branch !== target.branch ||
@@ -427,19 +566,34 @@ export async function runUniversePortfolioController(input: unknown, options: Un
               }
             }
           }
+          phase = 'campaign-verification'; code = 'campaign-evidence-changed';
           current = readUniverseCampaignReadiness(campaignId, { root });
           if (!matches(pin, current) || current.expectedIdentity!.summaryDigest !== digest(canonical(result)) ||
               current.recordsDigest !== settledRecordsDigest) throw new Error('Campaign changed before settlement');
           try {
+            phase = 'settlement-publication'; code = 'settlement-write-failed';
             await append({ kind: 'settled', at: new Date().toISOString(), recordsDigest: current.recordsDigest!,
               outcome: { campaignId, state: completed ? 'completed' : 'held', attempted: pin.dispatch === 'campaign',
                 reasonCode, campaignDigest: current.expectedIdentity!.summaryDigest, deliveryDigest } });
-          } catch { halt('unavailable', 'controller-settlement-persistence-failed'); }
+          } catch (error) { halt('unavailable', 'controller-settlement-persistence-failed'); throw error; }
         } catch {
           // A thrown call or unconfirmed publication proves no settlement here;
           // persisted evidence determines restart. An unresolved intent needs
           // exact dispatch-linked completion proof; workers are never replayed.
           errors.push(`${campaignId}:dispatch-unsettled`);
+          try {
+            await append({ kind: 'dispatch-diagnostic', at: new Date().toISOString(), campaignId,
+              intentDigest: digest(localIntent), phase, code }, () => {
+              owned();
+              const current = foldPortfolioController(events);
+              if (current.states.get(campaignId)?.state !== 'in-flight' ||
+                  canonical(current.intentEvents.get(campaignId)) !== localIntent) throw new Error('Diagnostic dispatch identity changed');
+            });
+          } catch {
+            // Diagnostic publication cannot consume settlement authority or
+            // replace missing evidence with a success claim.
+            errors.push(`${campaignId}:dispatch-diagnostic-unavailable`);
+          }
         }
       }).finally(() => { active.delete(campaignId); });
       active.set(campaignId, work);

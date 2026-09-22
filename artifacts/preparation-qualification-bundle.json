@@ -1,0 +1,94 @@
+{
+  "kind": "installed-workload-build-identity",
+  "scope": "diagnostic-only",
+  "integration": {
+    "sourceCommit": "fd8250e7",
+    "rebuiltIdentityMatches": true,
+    "fixedEvaluatorSourceDigest": "cf07bb8ce9c08e8d691a7b51aeff4fc06ea3843b71bb84e2a010a2c24780a3f6",
+    "verifyCommandsSourceDigest": "18a3a6cdb443724a73250405f992eda51ee66e71ded8a090ed3d18076708f1e2",
+    "acceptanceSourceDigest": "ed1583f70ebdb4dccf89466c8bec40a015fbbca6ef873b859d21948984be66de"
+  },
+  "nativeGate": {
+    "session": "41730",
+    "status": "passed",
+    "tests": 5,
+    "skipped": 0,
+    "durationSeconds": 1250.74,
+    "reportSha256": "2d88050128e908dff438f368d7214815ad870f4c6131bc97407b34eb11022230",
+    "checks": 23,
+    "benchmarkRegions": 15,
+    "benchmarkProcesses": 4828,
+    "settlement": "group-exit-confirmed"
+  },
+  "digest": "474989f5fbce91ae3442ab2519915ec6a9162b06ce9447e0347ec83d537c8f19",
+  "executableDigest": "72c18e2eeda260f67a5b2b66e96fa9b5ad82864676ebb54925695d87120cae3f",
+  "command": [
+    "/opt/homebrew/Cellar/node@24/24.18.0/bin/node",
+    "--experimental-vm-modules",
+    "--no-warnings",
+    "preparation-verification.mjs",
+    "preparation-bridge.mjs"
+  ],
+  "files": [
+    {
+      "name": "preparation-bridge.mjs",
+      "digest": "f4455ea02995b8b45b641455390e8880878b3e6fe35779d29b09b105942e8c7f"
+    },
+    {
+      "name": "preparation-verification-activity.mjs",
+      "digest": "02d0f8a3d9addb899266859c6eaf110286e9dedc2bef9da9e4efe6e304188dce"
+    },
+    {
+      "name": "preparation-verification-child.mjs",
+      "digest": "f89798b6b43006c72e00f53a2fabea8b27c121d4f4a55e081783974851b0ef37"
+    },
+    {
+      "name": "preparation-verification-controller.mjs",
+      "digest": "4c7e80cb73a7f3b6df7a40301544273e9d08cdb28ee4d904223ae4e029c873bf"
+    },
+    {
+      "name": "preparation-verification-fixtures.mjs",
+      "digest": "2b913461e4e874ce02b24eccccdbdb04bd6c6fc0dae421c21808e687db3a5c10"
+    },
+    {
+      "name": "preparation-verification-native.mjs",
+      "digest": "f61520b2dc6d3fb6d7e99afc167865ecefd0bb548df307166c32e2cac4787a5c"
+    },
+    {
+      "name": "preparation-verification-protocol.mjs",
+      "digest": "9b9664097862c2391d0d9c12060905517a285e1fb8862e079e880bcb2ebb56c6"
+    },
+    {
+      "name": "preparation-verification-tool.mjs",
+      "digest": "5e42f135f463c13f777e2ceef6751fabd252a02c2c11266dac550f13713e33e3"
+    },
+    {
+      "name": "preparation-verification.mjs",
+      "digest": "a683fdb26cbaf693e75b4ec2ad144bbe65ef423384a2023532e572c4ced56640"
+    }
+  ],
+  "tools": [
+    {
+      "path": "/Library/Developer/CommandLineTools/usr/bin/git",
+      "digest": "74b90b9f97ec79bfe7886a4fc6132533b3e1014ef4195d28abd1ca9bf321f34a"
+    },
+    {
+      "path": "/bin/ls",
+      "digest": "24752389e1d97c9555dd153b644902fadd460dfbe1a166251876c67bbacb0810"
+    },
+    {
+      "path": "/bin/ps",
+      "digest": "3bbba882e30d91fc4ff6e6844ca7c59fef4351b9a3fea35dca55708d6d487d1c"
+    },
+    {
+      "path": "/usr/bin/sandbox-exec",
+      "digest": "abc5bb136d6b5cce8fa85d789f78e3326c51ca60cae637b2064adfb67a1dcd9a"
+    }
+  ],
+  "git": {
+    "path": "/Library/Developer/CommandLineTools/usr/bin/git",
+    "digest": "74b90b9f97ec79bfe7886a4fc6132533b3e1014ef4195d28abd1ca9bf321f34a"
+  },
+  "manifestDigest": "e6da69772fa359a4eb358fb6cfa08c63482327f1d48565024b3138a23b36e661",
+  "targetDigest": "33c52a614d017e7651b74111a3e3b175588f2a1a082dead5b6b1b0b1674ffabd"
+}

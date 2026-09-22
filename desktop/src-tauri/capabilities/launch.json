@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2/capability",
+  "identifier": "launch-capability",
+  "description": "The launch window is a local, bundled page (dist-placeholder/index.html). It needs no shell, no updater and no filesystem — only the event channel it uses to report which of its own buttons was pressed (retry / use-running / quit) and to receive its render state.",
+  "windows": ["launch"],
+  "permissions": [
+    "core:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "core:window:allow-start-dragging"
+  ]
+}

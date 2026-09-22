@@ -44,7 +44,7 @@ import { createHash } from 'node:crypto';
 import { basename, isAbsolute, join } from 'node:path';
 import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig, Goal } from '../types.js';
-import { defaultStrategistModel } from '../run/model-catalog.js';
+import { DEFAULT_LOCAL_MODEL_TAG, defaultStrategistModel } from '../run/model-catalog.js';
 import { loadSpec, applyEvolution } from './spec.js';
 import type { EndStateSpec, ToolRoadmapEntry } from './spec.js';
 import { addDelta, curate, renderPlaybook } from './playbook.js';
@@ -61,6 +61,7 @@ import {
   type MissionNodeObservation,
   type MissionNodeProjectionStatus,
 } from './mission-graph.js';
+import { assertPermitted, endpointPermitted } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -392,6 +393,14 @@ async function ollamaDirectComplete(
   temperature: number,
 ): Promise<string> {
   const url = baseUrl.replace(/\/+$/, '') + '/chat/completions';
+  // LOCAL-ONLY GATE. This path builds its own request instead of going
+  // through provider-client's transport — it needs a far longer timeout
+  // than that path allows — which means it also bypasses the refusal that
+  // lives there. The base URL is loopback by default, so nothing reaches a
+  // paid provider as configured; the gate is here so that an operator who
+  // repoints it at a remote inference host does not end up with a
+  // local-only mode that has a hole in it.
+  assertPermitted(endpointPermitted(url));
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 180_000); // 3 min
   try {
@@ -1182,8 +1191,12 @@ export async function runStrategist(
     // M162: strategistModel from cfg.foundry.strategistModel → elite Opus 4.8.
     // M135: Claude CLI FIRST when managerJudgeEngine='auto'/'claude' + claude allowed+installed.
     const foundryRaw = cfg.foundry as Record<string, unknown> | undefined;
-    // localFallbackModel: used only when Claude CLI is unavailable.
-    const localFallbackModel = (foundryRaw?.['managerJudgeModel'] as string | undefined) || 'qwen2.5:72b-instruct-q4_K_M';
+    // localFallbackModel: used only when Claude CLI is unavailable. Follows
+    // DEFAULT_LOCAL_MODEL_TAG for the same reason the manager's local judge
+    // does — it is one Ollama runtime, and a fallback pinned to a tag the
+    // machine no longer has is not a fallback. Strategy work also benefits
+    // most from the first local entry that is a thinking model.
+    const localFallbackModel = (foundryRaw?.['managerJudgeModel'] as string | undefined) || DEFAULT_LOCAL_MODEL_TAG;
     const visionModel = localFallbackModel; // kept for getActiveClient fallback path
     const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
     const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';

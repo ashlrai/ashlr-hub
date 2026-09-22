@@ -34,6 +34,24 @@ function setup() {
 }
 
 describe('resource dispatch desk', () => {
+  it('shows passive inspection on the existing read-only poll and keeps failed samples historical', async () => {
+    const f = setup(); f.scope.readOnly = true; f.scope.workspace = null; f.scope.maxParallel = 0; f.scope.maxQueued = 0;
+    f.snapshot.supervisor = null;
+    f.snapshot.collectorInspection = { scope: 'local-record-inspection', sampledAt: f.snapshot.sampledAt,
+      state: 'pending', markerVersion: 1, reasonCode: 'legacy-owner-evidence-missing', recoveryAttempted: false };
+    delete f.snapshot.metadataCollector; delete f.snapshot.quotaRefresh; delete f.snapshot.connections;
+    const user = userEvent.setup(); const { container } = render(<ResourcePoolView scope={f.scope} />);
+    expect(await screen.findByText('Legacy ownership evidence missing')).toBeVisible();
+    expect(screen.getByText(/No collector startup or recovery was attempted/)).toBeVisible();
+    expect(container.querySelector('#collector-inspection-title')?.closest('section')?.querySelector('time')).toHaveAttribute('dateTime', f.snapshot.sampledAt);
+    f.request.mockResolvedValueOnce(json({ error: 'unavailable' }, 503));
+    await user.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('Last reported: Legacy ownership evidence missing')).toBeVisible();
+    expect(screen.getByText(/Current collector records, activity and quota freshness are unverified/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: /restart collector|retry collector|recover|Pause queue/ })).not.toBeInTheDocument();
+    expect(f.request.mock.calls.every(([path, init]) => path === '/api/resources' && init?.method === 'GET')).toBe(true);
+  });
+
   it('keeps the desk useful when configured metadata collection was blocked at startup', async () => {
     const f = setup(); f.scope.quotaRefreshEnabled = true; f.scope.connectionsEnabled = true;
     f.snapshot.metadataCollector = { state: 'blocked', reasonCode: 'reconciliation-required', sampledAt: f.snapshot.sampledAt };

@@ -103,3 +103,5 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+.optional { font-weight: var(--font-weight-normal, 400); color: var(--text-tertiary); }

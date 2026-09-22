@@ -4,36 +4,38 @@
   gap: var(--space-4);
 }
 
+/* No border and no fill: a skeleton stands in for CONTENT, and drawing it as
+   a bordered card meant the placeholder had a box the real card does not
+   (DESIGN-V2 §1.2) and the layout visibly lost an outline on first paint. */
 .card {
   display: flex;
   flex-direction: column;
   gap: var(--space-3);
-  padding: var(--space-4);
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
+  padding: var(--space-4) 0;
 }
 
+/* Each bar matches the LINE BOX of the text it replaces, so nothing reflows
+   when the real content lands: a label line, a display-face stat, a caption. */
 .title {
-  height: 12px;
+  height: var(--text-xs-line);
   width: 60%;
   border-radius: var(--radius-xs);
 }
 
 .stat {
-  height: 28px;
+  height: var(--text-2xl-line);
   width: 40%;
   border-radius: var(--radius-xs);
 }
 
 .caption {
-  height: 10px;
+  height: var(--text-2xs-line);
   width: 80%;
   border-radius: var(--radius-xs);
 }
 
 .line {
-  height: 14px;
+  height: var(--text-base-line);
   border-radius: var(--radius-xs);
 }
 
@@ -41,11 +43,12 @@
   display: flex;
   align-items: center;
   gap: var(--space-4);
+  min-height: var(--density-row);
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
 }
 
 .cell {
-  height: 12px;
+  height: var(--text-sm-line);
   border-radius: var(--radius-xs);
 }

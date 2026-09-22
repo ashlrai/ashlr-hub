@@ -1,0 +1,9 @@
+{
+  "packageId": "P27",
+  "kind": "unsigned-agent-task-stub",
+  "productionEvidence": false,
+  "provenanceSig": null,
+  "note": "This stub is not a signed DecisionTrace, effect permit or production acceptance receipt.",
+  "module": "src/core/universe/firm-memory.ts",
+  "tests": "test/universe-firm-memory.test.ts"
+}

@@ -5,7 +5,9 @@
  * Copies the compiled `ashlr` binary (built by `npm run build:binary` /
  * `scripts/build-sea.mjs`) into `src-tauri/binaries/` with the
  * triple-suffixed filename that Tauri's externalBin bundler expects, and
- * copies the companion `public/` assets directory alongside it.
+ * stages the companion `public/` assets directory at
+ * `src-tauri/resources/public/` so `bundle.resources` in tauri.conf.json
+ * ships it inside the app bundle.
  *
  * Usage: node scripts/prepare-sidecar.mjs [--target <triple>]
  *
@@ -31,11 +33,15 @@
  *   2. This script copies the binary to
  *        src-tauri/binaries/ashlr-<triple>[.exe]
  *      and the assets to
- *        src-tauri/binaries/ashlr-public-<triple>/
- *      Tauri bundles the binary via the `externalBin` key in tauri.conf.json.
+ *        src-tauri/resources/public/
+ *      Tauri bundles the binary via the `externalBin` key and the assets via
+ *      the `bundle.resources` map (`resources/public` -> `Resources/public`)
+ *      in tauri.conf.json.
  *   3. At runtime, `tauri-plugin-shell` resolves the correct binary for the
- *      host OS/arch and spawns it with ASHLR_WEB_PUBLIC set to the extracted
- *      assets directory (see main.rs sidecar spawn args).
+ *      host OS/arch and main.rs spawns it with ASHLR_WEB_PUBLIC pointing at
+ *      `<resource_dir>/public` (see `web_public_dir()` in main.rs), because the
+ *      binary's own default (`<exe dir>/public`) does not exist inside a
+ *      bundle where the sidecar lives in Contents/MacOS/.
  *
  * Fallback — Node.js SEA (if Bun is not available):
  *   Node 21+ supports `node --experimental-sea-config` to produce a
@@ -53,6 +59,7 @@ import { fileURLToPath } from "node:url";
 const __dir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(__dir, "..", "..");
 const binariesDir = join(__dir, "..", "src-tauri", "binaries");
+const resourcesDir = join(__dir, "..", "src-tauri", "resources");
 
 // ── resolve target triple ────────────────────────────────────────────────────
 function hostTriple() {
@@ -120,14 +127,16 @@ const dest = join(binariesDir, `ashlr-${triple}${ext}`);
 cpSync(src, dest);
 console.log(`[prepare-sidecar] Binary : ${src} → ${dest}`);
 
-// ── copy public/ assets alongside the binary ──────────────────────────────────
-// Tauri does NOT bundle arbitrary sibling directories automatically, so we
-// store them under a triple-namespaced subdirectory in binaries/ and the Rust
-// code (main.rs) resolves them relative to the bundle's resource path.
+// ── stage public/ assets as a bundle resource ─────────────────────────────────
+// Tauri does NOT bundle arbitrary sibling directories automatically, so the
+// assets go to src-tauri/resources/public/ (triple-independent), which
+// tauri.conf.json `bundle.resources` maps to `<Resources>/public`, and main.rs
+// passes that directory to the sidecar as ASHLR_WEB_PUBLIC.
 const publicSrc = findPublicAssets(src);
+const publicDest = join(resourcesDir, "public");
 if (publicSrc) {
-  const publicDest = join(binariesDir, `ashlr-public-${triple}`);
   if (existsSync(publicDest)) rmSync(publicDest, { recursive: true });
+  mkdirSync(resourcesDir, { recursive: true });
   cpSync(publicSrc, publicDest, { recursive: true });
   console.log(`[prepare-sidecar] Assets  : ${publicSrc} → ${publicDest}`);
 } else {
@@ -141,5 +150,5 @@ if (publicSrc) {
 console.log(`\n[prepare-sidecar] Done. Triple: ${triple}`);
 console.log(`  Binary : ${dest}`);
 if (publicSrc) {
-  console.log(`  Assets : ${join(binariesDir, `ashlr-public-${triple}`)}`);
+  console.log(`  Assets : ${publicDest}`);
 }

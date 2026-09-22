@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "scope": "local-packaged-qualification-controls-not-calibration",
+  "checkout": "/Users/masonwyatt/.codex/worktrees/ashlr-hub/firm-p00",
+  "sourceCommit": "242cf7fd66d01e4c7c22450248c003ad15bac731",
+  "testFile": "test/preparation-qualified-workload-acceptance.test.ts",
+  "selection": "fixed packaged same-call qualification controls",
+  "session": 3245,
+  "exitCode": 0,
+  "passed": 4,
+  "filtered": 1,
+  "durationSeconds": 362.58,
+  "cases": [
+    { "name": "runtime-drift current", "durationMs": 39038 },
+    { "name": "runtime-drift stale", "durationMs": 32651 },
+    { "name": "source-drift current", "durationMs": 215380 },
+    { "name": "source-drift stale", "durationMs": 74060 }
+  ],
+  "evaluatorDigest": "25d5787412e177238745216d259a9167768ca6460bfed126cc453eb714d0f953",
+  "allNineRecordedAssetHashesUnchangedAfterRun": true,
+  "exclusions": ["filtered full-workload case", "genuine calibration", "accepted campaign", "account activation", "production deployment"]
+}

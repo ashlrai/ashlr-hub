@@ -1,4 +1,7 @@
-.view { display: grid; gap: var(--space-5); min-width: 0; }
+/* Constrain the track, not its table contents: nested evidence tables scroll
+   inside the workspace rather than giving this implicit column a minimum width. */
+.view { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-5); min-width: 0; }
+.view > * { min-width: 0; }
 .statusBar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--space-2) var(--space-5); padding-bottom: var(--space-3); border-bottom: 1px solid var(--border-default); min-width: 0; }
 .sectionNav { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1); }
 .sectionNav a { display: inline-flex; align-items: center; min-height: 40px; padding: var(--space-2) var(--space-3); border-radius: var(--radius-sm); color: var(--text-secondary); font-size: var(--text-sm-size); font-weight: var(--font-weight-medium); text-decoration: none; }

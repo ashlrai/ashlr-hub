@@ -32,7 +32,7 @@ function ScopedResourceWorkspace() {
       {scope.status === 'error' ? <section role="alert" className={styles.notice}>
         <h1>Resource scope unavailable</h1><p>{scope.error?.message} No pool data is shown until its scope is checked.</p>
         <button type="button" onClick={retry}>Retry scope check</button>
-      </section> : scope.data ? <ResourcePoolView key={`${scope.data.root}:${scope.data.poolId}`} scope={scope.data} />
+      </section> : scope.data ? <ResourcePoolView key={`${scope.data.root}:${scope.data.poolId}:${scope.data.workspace ?? ''}`} scope={scope.data} />
         : <p role="status">Checking the selected resource pool…</p>}
     </main>
   </>;

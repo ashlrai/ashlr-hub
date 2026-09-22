@@ -1,0 +1,69 @@
+.wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.trigger {
+  display: inline-flex;
+}
+
+.bubble {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  max-width: 260px;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  background: var(--bg-surface-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-menu);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  font-weight: var(--font-weight-regular);
+  /* Was `nowrap`, which defeated the max-width above: a long tooltip ran off
+     the viewport instead of wrapping inside 260px. */
+  white-space: normal;
+  text-wrap: pretty;
+  pointer-events: none;
+  animation: tooltip-in var(--duration-fast) var(--ease-standard);
+}
+
+.top {
+  bottom: calc(100% + var(--space-1));
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.bottom {
+  top: calc(100% + var(--space-1));
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.left {
+  right: calc(100% + var(--space-1));
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.right {
+  left: calc(100% + var(--space-1));
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+@keyframes tooltip-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .bubble {
+    animation: none;
+  }
+}
+
+:root[data-motion="reduce"] .bubble {
+  animation: none;
+}

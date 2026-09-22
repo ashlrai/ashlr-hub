@@ -11,6 +11,15 @@ hub (M1–M20). Entries below detail each milestone; dates are merge dates into 
 
 ## [Unreleased]
 
+### Autonomous coordinator lifecycle visibility
+
+- Separates last-reported coordinator transitions, fixed failure reasons and
+  report time from fresh journal samples and worker connection status.
+- Keeps caught successor-loop faults visible without closing independent work;
+  reports do not grant execution, refresh budgets or trigger automatic recovery.
+- Adds a test-only preparation measurement prototype with incorrect-candidate
+  controls. Its diagnostic output cannot serve as accepted evaluation evidence.
+
 ### Controller observation comparison
 
 - Adds session-only before/after comparison for consecutive accepted controller

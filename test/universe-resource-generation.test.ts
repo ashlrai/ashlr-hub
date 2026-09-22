@@ -87,6 +87,46 @@ beforeEach(() => {
 });
 afterEach(() => { vi.restoreAllMocks(); rmSync(base, { recursive: true, force: true }); });
 
+describe('host-pinned resource runtime consumption', () => {
+  it.each(['expired', 'invalid'])('withholds an %s absolute deadline before contact', async (kind) => {
+    const f = fixture();
+    const deadlineAt = kind === 'expired' ? new Date(Date.now() - 1).toISOString() : 'yesterday';
+    expect(await f.run({ deadlineAt })).toMatchObject({ status: kind === 'expired' ? 'timed-out' : 'failed', content: null });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(refreshResourceQuotaOnce).not.toHaveBeenCalled();
+  });
+  it('rechecks the host deadline inside locked admission even after synchronous setup', async () => {
+    const f = fixture(); const deadline = Date.now() + 60_000;
+    vi.mocked(runResourceTask).mockImplementation(async (options) => {
+      vi.spyOn(Date, 'now').mockReturnValue(deadline + 1);
+      expect(options.readAdmissionEvidence).toBeTypeOf('function');
+      expect(() => options.readAdmissionEvidence!()).toThrow();
+      expect(options.signal?.aborted).toBe(true);
+      throw new Error('No reservation admitted');
+    });
+    expect(await f.run({ deadlineAt: new Date(deadline).toISOString() })).toMatchObject({ status: 'timed-out', content: null });
+    expect(runResourceTask).toHaveBeenCalledOnce(); expect(existsSync(f.marker)).toBe(false);
+  });
+  it('admits the exact pinned runtime using the existing task path', async () => {
+    const f = fixture();
+    expect(await f.run({ expectedRuntimeDigest: digest(canonical(f.runtime)) })).toMatchObject({ status: 'succeeded' });
+    expect(runResourceTask).toHaveBeenCalledOnce();
+  });
+  it.each(['different', 'malformed'])('withholds a %s runtime pin before quota or task contact', async (kind) => {
+    const f = fixture();
+    const expectedRuntimeDigest = kind === 'different' ? '0'.repeat(64) : 'not-a-digest';
+    expect(await f.run({ expectedRuntimeDigest })).toMatchObject({ status: 'failed', content: null });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(refreshResourceQuotaOnce).not.toHaveBeenCalled();
+    expect(refreshResourceLocalModelsOnce).not.toHaveBeenCalled();
+  });
+  it('refuses a changed ledger root between enrollment and runtime consumption', async () => {
+    const f = fixture(); const expectedRuntimeDigest = digest(canonical(f.runtime));
+    const changedRoot = join(base, 'different-ledger');
+    save(f.runtimePath, { ...f.runtime, root: changedRoot });
+    expect(await f.run({ expectedRuntimeDigest })).toMatchObject({ status: 'failed', content: null });
+    expect(runResourceTask).not.toHaveBeenCalled(); expect(existsSync(changedRoot)).toBe(false);
+  });
+});
+
 function localFixture() {
   const f = fixture();
   const pool = validateResourcePool({ ...f.pool, workers: f.pool.workers.map((worker) => ({ ...worker, provider: 'local' })) });
@@ -568,6 +608,34 @@ describe.skipIf(process.platform === 'win32')('resource candidate transport boun
 });
 
 describe.skipIf(process.platform === 'win32')('current-file veto against an existing real resource ledger', () => {
+  it.each(['stopped', 'throw'] as const)('retains the charged reservation when enclosing execution is %s at final worker dispatch', async (kind) => {
+    const f = fixture(); const actual = await vi.importActual<typeof import('../src/core/resources/pool-runtime.js')>('../src/core/resources/pool-runtime.js');
+    vi.mocked(runResourceTask).mockImplementation(actual.runResourceTask);
+    const ledgerPath = join(f.runtime.root, 'pool-state.json'); let reservedChecks = 0;
+    const isExecutionStopped = () => {
+      if (!existsSync(ledgerPath)) return false;
+      const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as { attempts: ResourceTaskReceipt[] };
+      if (!ledger.attempts.some((attempt) => attempt.status === 'reserved')) return false;
+      reservedChecks++;
+      if (kind === 'throw') throw new Error('Fixture parent ownership unavailable');
+      return true;
+    };
+    const result = await f.run({ isExecutionStopped });
+    expect(result).toMatchObject({ status: 'failed', content: null, resource: { dispatch: 'settled', taskStatus: 'failed' } });
+    expect(reservedChecks).toBe(1); expect(existsSync(f.marker)).toBe(false);
+    expect(runResourceTask).toHaveBeenCalledOnce();
+    const options = vi.mocked(runResourceTask).mock.calls[0]![0];
+    expect(options.readAdmissionEvidence).toBeTypeOf('function'); expect(options.beforeWorkerDispatch).toBeTypeOf('function');
+    const ledger = JSON.parse(readFileSync(ledgerPath, 'utf8')) as { attempts: ResourceTaskReceipt[] };
+    expect(ledger.attempts).toHaveLength(1);
+    expect(ledger.attempts[0]).toMatchObject({ id: resourceGenerationTaskId(identity), status: 'failed',
+      reason: 'worker-dispatch-precondition-failed', inputTokens: null, outputTokens: null, outputDigest: null, verifiedAccepted: false });
+    expect(ledger.attempts[0]).not.toHaveProperty('execution'); expect(ledger.attempts[0]).not.toHaveProperty('nativeProcess');
+    expect(await f.run({ isExecutionStopped })).toMatchObject({ status: 'failed', content: null, resource: { dispatch: 'replayed' } });
+    expect(JSON.parse(readFileSync(ledgerPath, 'utf8')).attempts).toEqual(ledger.attempts);
+    expect(existsSync(f.marker)).toBe(false);
+  });
+
   it.each(['missing', 'reserve', 'retry', 'alias-reserve', 'alias-retry'])('does not recontact after current %s evidence despite newer durable readiness', async (kind) => {
     const f = fixture(true); const original = await vi.importActual<typeof import('../src/core/resources/pool-runtime.js')>('../src/core/resources/pool-runtime.js');
     vi.mocked(runResourceTask).mockImplementation(original.runResourceTask);
@@ -594,6 +662,23 @@ describe.skipIf(process.platform === 'win32')('current-file veto against an exis
 });
 
 describe.skipIf(process.platform === 'win32')('Universe allocation transitions at real locked admission', () => {
+  it('keeps independent model reserve thresholds separate through real locked admission', async () => {
+    const f = fixture(true);
+    const pool = validateResourcePool({ ...f.pool, workers: [
+      { ...f.pool.workers[0], model: 'gpt-6-astra', quotaScope: 'codex-general-v1', reservePercent: 90 },
+      { ...f.pool.workers[1], model: 'gpt-5.3-codex-spark', quotaScope: 'codex-spark-v1', reservePercent: 10 },
+    ] });
+    const observations = f.observations.map((row, index) => ({ ...row, windows: [{
+      id: index ? 'codex_codex_bengalfox_primary' : 'codex_codex_primary', usedPercent: 20, resetsAt: f.at(120_000),
+    }] }));
+    save(f.runtime.poolPath, pool); save(f.runtime.observationsPath, observations);
+    f.config.poolDigest = digest(canonical({ pool, bindings: f.bindings }));
+    f.config.allowedWorkerIds = ['native', 'alias'];
+    const actual = await vi.importActual<typeof import('../src/core/resources/pool-runtime.js')>('../src/core/resources/pool-runtime.js');
+    vi.mocked(runResourceTask).mockImplementation(actual.runResourceTask);
+    expect(await f.run()).toMatchObject({ status: 'succeeded', resource: { workerId: 'alias', workerModel: 'gpt-5.3-codex-spark' } });
+    expect(readFileSync(f.marker, 'utf8')).toBe('x');
+  });
   it.each(['refresh', 'wait'].flatMap((stage) => ['lower', 'raise', 'native-exhaustion'].map((transition) => ({ stage, transition }))))(
     '$transition during $stage uses current allocation without discarding native exhaustion', async ({ stage, transition }) => {
       const f = fixture(true);

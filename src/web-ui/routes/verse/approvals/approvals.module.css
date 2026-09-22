@@ -1,0 +1,144 @@
+/**
+ * routes/verse/approvals/approvals.module.css — list + detail styling for the
+ * Approvals surface. Same language as the cockpit: hairlines, no cards, tight
+ * radii, Space Grotesk on identifiers and numerals, colour reserved for risk
+ * and for the two irreversible buttons.
+ */
+
+.layout { display: grid; grid-template-columns: minmax(320px, 420px) minmax(0, 1fr); min-height: 0; height: 100%; }
+.listPane { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--border-subtle); background: var(--bg-surface); }
+.detailPane { display: flex; flex-direction: column; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; background: var(--bg-canvas); }
+
+.filters { flex-shrink: 0; display: flex; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--border-subtle); }
+.filterField { display: flex; flex-direction: column; gap: var(--space-1); flex: 1; min-width: 120px; }
+.filterLabel { font-family: var(--font-display); font-size: var(--text-2xs-size, 11px); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; color: var(--text-tertiary); }
+.filters input {
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+}
+
+/* The Select primitive renders its own <label>; restyle it to the uppercase
+   micro-label the sibling text filters use so the row still reads as one
+   group. Descendant element selector, so it stays module-scoped. */
+/* Layout comes from the primitive's own .field; this only matches the
+   sibling text filters' flex behaviour. */
+.filterSelect { flex: 1; min-width: 120px; }
+.filterSelect > label {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-regular, 400);
+  color: var(--text-tertiary);
+}
+
+/* WebKit paints its own clear affordance inside type=search, which is a
+   default browser control (§7). Sidebar.module.css already resets it. */
+.filters input[type='search']::-webkit-search-cancel-button { appearance: none; }
+
+
+.count { flex-shrink: 0; display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-4); font-size: var(--text-xs-size); color: var(--text-tertiary); border-bottom: 1px solid var(--border-subtle); }
+
+.rows { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
+.row {
+  display: grid;
+  grid-template-columns: 2px minmax(0, 1fr);
+  column-gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-bottom: 1px solid var(--border-subtle);
+  background: transparent;
+  text-align: left;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.row:hover { background: var(--bg-hover); }
+.rowActive { background: var(--bg-selected); }
+/* Inset, because .rows scrolls (`overflow-y: auto`) and a full-width row's
+   outward ring is clipped at the left and right edges. The global ring is
+   silenced so only one paints. */
+.row:focus-visible { outline: 2px solid var(--border-focus); outline-offset: -2px; box-shadow: none; }
+.riskRule { grid-row: 1 / span 2; border-radius: var(--radius-full); background: var(--border-strong); }
+.riskRule[data-risk="high"] { background: var(--status-danger-solid); }
+.riskRule[data-risk="medium"] { background: var(--status-warning-solid); }
+.riskRule[data-risk="low"] { background: var(--status-success-solid); }
+.rowTitle { font-size: var(--text-sm-size); line-height: var(--text-sm-line); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rowMeta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-3); margin-top: 2px; font-size: var(--text-xs-size); color: var(--text-tertiary); }
+/* --text-tertiary is a direct declaration on a CHILD, so the parent's
+   :hover/[aria-current] colour change does not reach it — only the ground
+   under it moves. Measured on --bg-selected it is 3.95:1 in light and 4.40:1
+   in dark, both under the 4.5:1 floor in DESIGN-V2 §6; --text-secondary is
+   6.32:1 on the worst of them. design/tokens-contrast.test.ts now pins the
+   token pair so the gap cannot reopen. */
+.row:hover .rowMeta,
+.rowActive .rowMeta { color: var(--text-secondary); }
+.rowMetaMono { font-family: var(--font-mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 14ch; }
+.rowAge { font-family: var(--font-display); }
+.riskWord { font-family: var(--font-display); letter-spacing: var(--tracking-label, 0.06em); text-transform: uppercase; font-size: var(--text-2xs-size, 11px); }
+.riskWord[data-risk="high"] { color: var(--status-danger-fg); }
+.riskWord[data-risk="medium"] { color: var(--status-warning-fg); }
+.riskWord[data-risk="low"] { color: var(--status-success-fg); }
+
+/* --- detail ------------------------------------------------------------- */
+.detail { padding: var(--space-5) var(--space-6) var(--space-16); max-width: 1040px; }
+.detailHead { padding-bottom: var(--space-4); border-bottom: 1px solid var(--border-subtle); }
+.detailTitle { font-family: var(--font-display); font-size: var(--text-xl-size); line-height: var(--text-xl-line); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-display, -0.02em); }
+.detailMeta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); margin-top: var(--space-2); font-size: var(--text-xs-size); color: var(--text-tertiary); }
+.detailMeta code { font-family: var(--font-mono); }
+.summary { margin-top: var(--space-3); font-size: var(--text-base-size); line-height: var(--text-base-line); color: var(--text-secondary); max-width: 72ch; }
+
+.block { padding-block: var(--space-5); border-bottom: 1px solid var(--border-subtle); }
+.blockTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-xs-size);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-3);
+}
+.defs { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-2) var(--space-4); margin: 0; font-size: var(--text-sm-size); line-height: var(--text-sm-line); }
+.defs dt { color: var(--text-tertiary); }
+.defs dd { margin: 0; color: var(--text-primary); min-width: 0; overflow-wrap: anywhere; }
+.defs dd code { font-family: var(--font-mono); font-size: var(--text-xs-size); }
+.muted { color: var(--text-tertiary); }
+.failedChecks { margin: var(--space-1) 0 0; font-family: var(--font-mono); font-size: var(--text-xs-size); color: var(--status-danger-fg); }
+
+.actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-2); padding-top: var(--space-5); }
+.actionNote { flex: 1; min-width: 240px; font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-secondary); }
+.reject,
+.approve {
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+}
+.reject { border: 1px solid var(--border-default); background: var(--bg-surface); color: var(--text-primary); }
+.reject:hover:not(:disabled) { border-color: var(--status-danger-solid); color: var(--status-danger-fg); }
+.approve { border: 1px solid var(--accent-500); background: var(--accent-500); color: var(--accent-contrast); }
+.approve:hover:not(:disabled) { background: var(--accent-600); border-color: var(--accent-600); }
+.reject:disabled,
+.approve:disabled { border-color: var(--border-default); background: var(--bg-surface); color: var(--text-disabled); cursor: not-allowed; }
+
+.decided { padding-top: var(--space-5); font-size: var(--text-sm-size); color: var(--text-secondary); }
+
+.empty { padding: var(--space-8) var(--space-6); font-size: var(--text-sm-size); line-height: var(--text-base-line); color: var(--text-secondary); max-width: 62ch; }
+.emptyStrong { color: var(--text-primary); font-weight: var(--font-weight-medium); }
+.error { margin: var(--space-4); padding: var(--space-3); border: 1px solid var(--status-danger-solid); border-radius: var(--radius-sm); background: var(--status-danger-bg); color: var(--status-danger-fg); font-size: var(--text-sm-size); line-height: var(--text-sm-line); }
+.skeletons { display: flex; flex-direction: column; gap: var(--space-2); padding: var(--space-4); }
+
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(160px, 38%) minmax(0, 1fr); }
+  .listPane { border-right: 0; border-bottom: 1px solid var(--border-subtle); }
+  .detail { padding: var(--space-4) var(--space-4) var(--space-12); }
+}

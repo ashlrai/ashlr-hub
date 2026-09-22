@@ -65,6 +65,7 @@ function renderArm(label: string, arm: UniverseComparisonArm): string[] {
     `  Attempts: ${arm.counts.attempts} · completed runs: ${arm.counts.completedRuns} · passed trials: ${arm.counts.passedTrials}`,
     `  Archive admissions: ${arm.counts.admissions} · strict improvements: ${arm.counts.improvements} · distinct selected artifacts: ${arm.counts.distinctSelectedArtifacts}`,
     `  Feedback: ${arm.feedback.observed} · recorded search-context receipts: ${arm.feedback.receipts.searchContext}`,
+    `  Seed measurement configured: ${arm.seed.measureSeed ?? 'unavailable'} · observed seed context: ${arm.seed.observedContext} · context receipts: ${arm.seed.receipts}`,
     `  Model request coverage: ${arm.counts.reportedModelRequests}/${arm.counts.modelRequestsStarted} recorded started requests reported usage · ${arm.counts.reservedModelRequests} reserved`,
     `  Observed token subtotal: ${arm.usage.recordedTokens} · complete model-generation tokens: ${available(arm.usage.reportedTokens)} · coverage complete: ${arm.usage.complete}`,
     `  Recorded run duration: ${available(arm.timing.recordedRunDurationMs)} ms · wall-clock span: ${available(arm.timing.wallSpanMs)} ms`,
@@ -81,6 +82,7 @@ function render(report: UniverseCampaignComparison): string {
   return [
     `Universe campaign comparison · source ${report.sourceState} · ${report.matching.comparable ? 'comparison-eligible' : 'not comparison-eligible'}`,
     `Exact comparator match: ${report.matching.comparator} · configuration match: ${report.matching.configuration} · workload match: ${report.matching.workload}`,
+    `Seed measurement/context regime match: ${report.matching.seedRegime}`,
     `Observed feedback contrast: ${report.feedbackContrast}`,
     ...renderArm('Baseline', report.baseline), ...renderArm('Challenger', report.challenger),
     ...report.differences.map((difference) => `Difference: ${difference}`),

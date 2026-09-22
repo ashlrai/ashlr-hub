@@ -1,0 +1,300 @@
+/**
+ * The composer: one measure with the transcript (720px), a hairline that
+ * takes the accent on focus, and a single control row. No inner card.
+ */
+.composer {
+  flex-shrink: 0;
+  padding: 0 var(--space-6) var(--space-4);
+  background: var(--bg-surface);
+}
+.box {
+  width: 100%;
+  max-width: var(--measure-read);
+  margin: 0 auto;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-input);
+  transition: border-color var(--duration-fast) var(--ease-standard);
+}
+/* The accent edge replaces the global focus ring FOR THE TEXTAREA, which
+   suppresses its own (a ring inside the box would double up).
+   `:has(> .textarea:focus)` rather than `:focus-within`, because the box also
+   contains the seat pill, the mic and Send/Stop: with `:focus-within`, tabbing
+   to Send lit the whole composer — saying "you are typing here", which is
+   false — and painted the global focus ring on the button inside it, giving
+   two concentric accent rings. It also fired on mouse-down on those buttons,
+   where `:focus-visible` deliberately would not. */
+.box:has(> .textarea:focus) { border-color: var(--accent-500); box-shadow: 0 0 0 1px var(--accent-500); }
+.boxListening { border-color: var(--status-running-solid); }
+
+.textarea {
+  display: block;
+  width: 100%;
+  min-height: calc(var(--control-h) + var(--space-2));
+  max-height: 40vh;
+  resize: none;
+  padding: var(--space-3) var(--space-3) var(--space-1);
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: var(--text-base-size);
+  line-height: var(--text-base-line-relaxed);
+}
+.textarea::placeholder { color: var(--text-tertiary); }
+.textarea:focus-visible { box-shadow: none; outline: none; }
+.textarea:disabled { color: var(--text-secondary); cursor: not-allowed; }
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2) var(--space-2) var(--space-2);
+}
+.spacer { flex: 1; }
+
+/* ---- engine identity --------------------------------------------------- */
+.engine-claude { --verse-engine: var(--engine-claude, #c96442); }
+.engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
+.engine-grok { --verse-engine: var(--engine-grok, #6b7280); }
+.engine-local { --verse-engine: var(--engine-local, #7c5cff); }
+.engineDot {
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-full);
+  background: var(--verse-engine, var(--text-tertiary));
+}
+
+/* ---- seat selector (new-chat dialog) ----------------------------------- */
+.seatField { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
+.seatFieldCompact { flex-direction: row; align-items: center; max-width: 320px; }
+.fieldLabel { font-size: var(--text-sm-size); font-weight: var(--font-weight-medium); color: var(--text-primary); }
+.seatSelect {
+  width: 100%;
+  min-height: var(--control-h);
+  max-width: 100%;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  text-overflow: ellipsis;
+}
+.seatSelect:hover:not(:disabled) { border-color: var(--border-strong); }
+.seatSelect:disabled { opacity: 0.6; cursor: not-allowed; }
+.seatFieldCompact .seatSelect { min-height: var(--control-h-sm); font-size: var(--text-xs-size); border-color: transparent; background: transparent; }
+
+/* ---- seat pill (read-only) + menu -------------------------------------- */
+.seatPillWrap { position: relative; display: inline-flex; min-width: 0; }
+.seatPill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 34ch;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-medium);
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.seatPill:hover:not(:disabled),
+.seatPill[aria-expanded='true'] { background: var(--bg-hover); color: var(--text-primary); }
+.seatPill:active:not(:disabled) { background: var(--bg-active); }
+.seatPill:disabled { opacity: 0.6; cursor: not-allowed; }
+.seatPillText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.seatMenu {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  left: 0;
+  z-index: var(--z-dropdown);
+  min-width: 260px;
+  max-width: 360px;
+  padding: var(--space-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-menu, var(--shadow-md));
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.seatMenuHeading {
+  margin: 0 0 var(--space-1);
+  padding: var(--space-2) var(--space-2) var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+.seatMenuHeading strong { color: var(--text-primary); font-weight: var(--font-weight-medium); }
+.seatMenuEmpty { margin: 0; padding: var(--space-2); font-size: var(--text-xs-size); color: var(--text-tertiary); }
+.seatMenuItem {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  padding: var(--space-2);
+  border-radius: var(--radius-xs);
+  text-align: left;
+  color: var(--text-primary);
+}
+.seatMenuItem:hover,
+.seatMenuItem:focus-visible { background: var(--bg-hover); }
+.seatMenuItem:active { background: var(--bg-active); }
+.seatMenuText { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.seatMenuPrimary { font-size: var(--text-sm-size); }
+.seatMenuSecondary { font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
+
+/* The seat's capacity, at the point the seat is chosen. The WORD carries the
+   state and the tint is a second channel, never the only one (DESIGN-V2 §6);
+   `blocked` is marked, not disabled, because a spent window can still have
+   credits behind it (docs/VERSE-TELEMETRY-V2.md). */
+.seatMenuCapacity {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.seatMenuItem[data-capacity='tight'] .seatMenuCapacity { color: var(--status-warning-fg); }
+.seatMenuItem[data-capacity='blocked'] .seatMenuCapacity { color: var(--status-danger-fg); }
+
+/* ---- dictation --------------------------------------------------------- */
+.dictationWrap { position: relative; display: inline-flex; align-items: center; }
+.dictation {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.dictation:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.dictation:active:not(:disabled) { background: var(--bg-active); }
+.dictation:disabled { opacity: 0.45; cursor: not-allowed; }
+.dictationLive { color: var(--status-running-fg); background: var(--status-running-bg); }
+.dictationPulse {
+  position: absolute;
+  inset: -2px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--status-running-solid);
+  animation: verse-ring 1.4s ease-out infinite;
+  pointer-events: none;
+}
+.dictationHint {
+  position: absolute;
+  bottom: calc(100% + var(--space-2));
+  right: 0;
+  width: max-content;
+  max-width: 260px;
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-menu, var(--shadow-md));
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+  z-index: var(--z-dropdown);
+}
+.dictationWrap:hover .dictationHint,
+.dictationWrap:focus-within .dictationHint { opacity: 1; }
+.dictationError { margin-left: var(--space-2); font-size: var(--text-xs-size); color: var(--status-danger-fg); }
+
+/* ---- send / stop ------------------------------------------------------- */
+.send,
+.stop {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+.send { background: var(--accent-600); color: var(--accent-contrast); }
+.send:hover:not(:disabled) { background: var(--accent-700); }
+.send:active:not(:disabled) { background: var(--accent-700); border-color: var(--accent-700); }
+.send:disabled { opacity: 0.4; cursor: not-allowed; }
+.stop { border-color: var(--border-default); color: var(--text-primary); }
+.stop:hover { border-color: var(--status-danger-solid); color: var(--status-danger-fg); }
+.stop:active { background: var(--status-danger-bg); }
+.stopIcon { width: 8px; height: 8px; border-radius: 1px; background: currentColor; }
+
+/* ---- hint row ---------------------------------------------------------- */
+.help {
+  max-width: var(--measure-read);
+  margin: var(--space-2) auto 0;
+  min-height: var(--text-2xs-line);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: 1.4;
+  color: var(--text-tertiary);
+}
+.helpQuiet { min-height: 0; margin-top: 0; }
+.help kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size, 11px);
+  padding: 0 3px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  color: var(--text-secondary);
+}
+.helpError { color: var(--status-danger-fg); }
+
+@keyframes verse-ring {
+  0% { opacity: 0.9; transform: scale(0.94); }
+  100% { opacity: 0; transform: scale(1.35); }
+}
+/* Two triggers, the same pattern as the duration tokens in tokens.css and the
+   shimmer in global.css: the OS preference applies unless Settings explicitly
+   asked for full motion, and data-motion="reduce" forces it on for an operator
+   whose OS says nothing. A persistent `animation` has a hardcoded duration, so
+   collapsing --duration-* does NOT reach it — it needs both rules by name. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .dictationPulse { animation: none; }
+}
+:root[data-motion="reduce"] .dictationPulse { animation: none; }
+@media (max-width: 900px) {
+  .composer { padding: 0 var(--space-4) var(--space-3); }
+}
+@media (max-width: 640px) {
+  .row { flex-wrap: wrap; }
+  .seatPill { max-width: 100%; }
+  .textarea { font-size: 16px; }
+}
+
+/* ---- pre-send cost hint ------------------------------------------------- */
+/* Only rendered once the session is past the ContextMeter's warn threshold,
+   so a normal message shows nothing at all. The figure is an ESTIMATE and
+   says so: `≈` in the number, the full caveat in the accessible text. */
+.cost {
+  max-width: var(--measure-read);
+  margin: var(--space-2) auto 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--status-warning-solid);
+  color: var(--text-secondary);
+  /* Prose, not a micro-label: tokens.css sets the body floor at 12px and
+     reserves --text-2xs for uppercase labels and keyboard hints. */
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+}
+.cost[data-tone='danger'] { border-left-color: var(--status-danger-solid); }
+.costFigure {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+}

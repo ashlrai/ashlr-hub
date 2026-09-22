@@ -6,7 +6,12 @@
  *    sandboxed swarms, create PENDING inbox proposals, record spend + state.
  *  - runDaemon(cfg, opts): loop ticks on an interval (or once); REFUSES when
  *    nested; marks running state; stops on kill switch; idles on budget exhaustion.
- *  - stopDaemon(): request shutdown by setting the kill switch.
+ *  - stopDaemon(): request shutdown by setting the GLOBAL kill switch. Wide:
+ *    ~/.ashlr/KILL is also read by assertMayMutate, so it refuses the agent's
+ *    own write tools too. For a narrow, reversible halt of autonomous dispatch
+ *    ONLY, use daemon/pause.ts (`~/.ashlr/daemon.paused`) — this loop honours
+ *    it in tick()'s stopRequested() and parks the continuous loop on it, and
+ *    nothing outside this file consults it.
  *
  * NON-NEGOTIABLE GUARDRAILS (enforced here, grep-provable):
  *  1. PROPOSAL-FIRST (proposal-only by default): every dispatch produces a
@@ -91,6 +96,7 @@ import {
   upgradeLegacyDaemonSpendGuard,
 } from './state.js';
 import type { DaemonLock, SaveDaemonStateResult } from './state.js';
+import { daemonPaused } from './pause.js';
 // Type-only: erased at compile time, so this does NOT eagerly load
 // self-improve.js/post-merge-credit.js at module init (those are still
 // reached only via the lazy `await import(...)` calls in
@@ -113,6 +119,21 @@ import {
   type DaemonActivationCapability,
 } from './activation-permit.js';
 import { nullSink } from '../run/streaming.js';
+import {
+  LOCAL_FLEET_ENGINE,
+  deriveLocalFleetConcurrency,
+  FENCE_SERIALIZED_ENGINES,
+  localFleetDispatchAllowed,
+  localFleetEnabled,
+  localFleetMonitor,
+  localFleetOutcomeOf,
+  readLocalFleetSettings,
+  reserveLocalFleetDispatch,
+  resolveServingCapacity,
+  startLocalFleetHangWatchdog,
+  type LocalFleetConcurrency,
+  type LocalFleetSettings,
+} from './local-fleet.js';
 import { createOuterAttemptIdentity } from '../fleet/attempt-identity.js';
 import { runSwarm } from '../swarm/runner.js';
 import { runGoal } from '../run/orchestrator.js';
@@ -247,7 +268,7 @@ import {
   pendingProposalItemKeysForBacklog,
   workItemCoverageKey,
 } from '../fleet/proposal-matching.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, resolveSubscriptionMaxPercent } from '../config.js';
 import { hostname as osHostname } from 'node:os';
 import {
   buildResourceStrategyReport,
@@ -1038,6 +1059,17 @@ const DEFAULTS: DaemonConfig = {
   intervalMs: 5 * 60_000, // 5-minute tick interval in loop mode
 };
 const KILL_SWITCH_POLL_MS = 50;
+/**
+ * How long a PAUSED continuous loop parks before re-reading the sentinel.
+ *
+ * The kill switch is polled at 50ms because it is an emergency stop and every
+ * millisecond of latency is work that should not have happened. A pause is the
+ * opposite: the loop is already doing nothing, nothing is at risk, and the only
+ * thing waiting is a human who just clicked Resume. One second is well inside
+ * their perception of "immediate" and keeps a long park from turning into a
+ * twenty-lstat-per-second spin on the sentinel.
+ */
+const DAEMON_PAUSE_PARK_MS = 1_000;
 const pendingDaemonTickEffects = new WeakMap<DaemonTick, Set<Promise<void>>>();
 const durableAgentOsObserverTicks = new WeakSet<object>();
 
@@ -1078,7 +1110,19 @@ export async function drainDaemonTickEffects(tickResult: DaemonTick): Promise<vo
   }
 }
 
-const LOCAL_ONLY_BACKENDS = new Set<EngineId>(['builtin', 'local-coder', 'ashlrcode', 'aw']);
+/**
+ * Backends whose inference runs on THIS machine.
+ *
+ * 'llama-server' joins the set because it is the only runtime measured to serve
+ * Qwen3.8 agents concurrently (docs/LOCAL-FLEET.md): Ollama — which is what
+ * 'local-coder' talks to — refuses parallel requests for this architecture and
+ * silently queues them. Both are local; only one is a fleet. Membership here is
+ * about LOCALITY, not throughput, so both belong, and the fleet's preference
+ * between them is expressed in the router, not by omission here.
+ */
+const LOCAL_ONLY_BACKENDS = new Set<EngineId>([
+  'builtin', 'local-coder', 'ashlrcode', 'aw', LOCAL_FLEET_ENGINE,
+]);
 const DRAIN_MODE_TAG_PREFIX = 'drain:';
 const MAX_DRAIN_SELECTED_IDS = 12;
 const MAX_DIAGNOSTIC_RESLICE_DRAIN_LIMIT = 50;
@@ -3294,9 +3338,18 @@ function resolveCfg(cfg: AshlrConfig): DaemonConfig {
     : (typeof o.concurrency?.total === 'number' && o.concurrency.total > 0
         ? Math.floor(o.concurrency.total) : 8);
   return {
-    dailyBudgetUsd: typeof o.dailyBudgetUsd === 'number' && o.dailyBudgetUsd > 0
-      ? o.dailyBudgetUsd
-      : DEFAULTS.dailyBudgetUsd,
+    // ZERO IS A CHOICE, NOT AN ABSENCE. The Verse control plane offers 0 as
+    // "stop the loop" (VERSE-CONTRACT-V2: "a budget of 0 means 'stopped', say
+    // so") and the cockpit states that as fact. Coercing 0 back to the $1/day
+    // default would authorise a dollar a day of autonomous work against a
+    // screen that says the loop is stopped. A stored 0 therefore survives into
+    // DaemonConfig, where the existing `remainingBudget <= 0` guard skips
+    // every tick as budget-exhausted — exactly what the UI promises. Negative
+    // and non-finite values are still nonsense and still fall back.
+    dailyBudgetUsd:
+      typeof o.dailyBudgetUsd === 'number' && Number.isFinite(o.dailyBudgetUsd) && o.dailyBudgetUsd >= 0
+        ? o.dailyBudgetUsd
+        : DEFAULTS.dailyBudgetUsd,
     perTickItems: typeof o.perTickItems === 'number' && o.perTickItems > 0
       ? Math.floor(o.perTickItems)
       : DEFAULTS.perTickItems,
@@ -3326,6 +3379,47 @@ function resolveCfg(cfg: AshlrConfig): DaemonConfig {
  */
 function poolTierOf(engineTier: import('../types.js').EngineTier): 'local' | 'cloud' {
   return engineTier === 'local' ? 'local' : 'cloud';
+}
+
+/**
+ * Which concurrency pool a routed backend draws from — by LOCALITY.
+ *
+ * `poolTierOf` maps a TRUST tier, and the two are not the same question. The
+ * local fleet's engine is registered `tier: 'mid'` because it is branch-
+ * eligible after verification, which sent every llama-server turn into the
+ * 'cloud' bucket — so `TieredPool.local`, the only place the measured slot
+ * ceiling is ever applied, bounded nothing the fleet dispatched. A 4-slot
+ * runtime would then hold up to `concurrency.cloud ?? 6` turns open, two of
+ * them queueing inside llama-server with no signal.
+ *
+ * Exported so a future tier change to the engine registry cannot silently
+ * unbind the ceiling again without a test noticing.
+ */
+export function poolTierForBackend(
+  backend: EngineId,
+  engineTier: import('../types.js').EngineTier,
+): 'local' | 'cloud' {
+  return LOCAL_ONLY_BACKENDS.has(backend) ? 'local' : poolTierOf(engineTier);
+}
+
+/**
+ * The local-tier cap the dispatcher must use.
+ *
+ * `deriveLocalFleetConcurrency` has ALREADY folded in the operator's explicit
+ * cap — that is its job, and it reports limiter 'config' when it did. Taking
+ * `min(baseLocalCap, derived)` afterwards re-imposed the very default the
+ * derivation was built to replace: `resolveCfg` always populates
+ * `concurrency.local` (defaulting to 2), so an unconfigured machine with a
+ * four-slot runtime dispatched TWO agents while every surface reported
+ * concurrency 4, limiter 'serving-slots', and 50% utilisation forever.
+ *
+ * Exported and pure so that rule is pinned by a test rather than by a comment.
+ */
+export function resolveLocalPoolCap(
+  fleetConcurrency: { effective: number } | null,
+  baseLocalCap: number,
+): number {
+  return fleetConcurrency === null ? baseLocalCap : fleetConcurrency.effective;
 }
 
 /**
@@ -3552,8 +3646,21 @@ export async function tick(
     opts.ownerLock
       ? saveResidentDaemonState(opts.ownerLock, nextState)
       : saveDaemonStateResult(nextState);
+  // M-PAUSE: `daemonPaused()` reads ~/.ashlr/daemon.paused FRESH on every call,
+  // exactly as `killSwitchOn()` re-reads KILL — config and both sentinels are
+  // per-tick inputs, never captured at start. It is scoped to DISPATCH only:
+  // `assertMayMutate` / mcp-native / mcp-native-engineer do not consult it, so
+  // a paused daemon leaves the agent's own write tools working.
   const stopRequested = (): boolean =>
-    opts.signal?.aborted === true || killSwitchOn() || !stillOwnsTick();
+    opts.signal?.aborted === true || killSwitchOn() || daemonPaused() || !stillOwnsTick();
+  /**
+   * Why dispatch is refused, for the tick record and the audit trail. The
+   * three causes have genuinely different blast radii and an operator reading
+   * `daemon status` must be able to tell "I paused it" from "the global kill
+   * switch is engaged" without guessing. Kill first: it is the wider fact.
+   */
+  const stopCause = (): 'kill-switch' | 'daemon-paused' | 'shutdown-requested' =>
+    killSwitchOn() ? 'kill-switch' : daemonPaused() ? 'daemon-paused' : 'shutdown-requested';
   const audit = (entry: Parameters<typeof persistAudit>[0]): void => {
     if (stillOwnsTick()) persistAudit(entry);
   };
@@ -4369,14 +4476,19 @@ export async function tick(
   };
 
   // -------------------------------------------------------------------------
-  // 1. Kill-switch check.
+  // 1. Kill-switch / daemon-pause check.
   // -------------------------------------------------------------------------
   if (stopRequested()) {
+    const cause = stopCause();
     audit({
       action: 'daemon:tick',
       repo: null,
       sandboxId: null,
-      summary: killSwitchOn() ? 'tick skipped: kill switch is ON' : 'tick skipped: shutdown requested',
+      summary: cause === 'kill-switch'
+        ? 'tick skipped: kill switch is ON'
+        : cause === 'daemon-paused'
+          ? 'tick skipped: daemon dispatch is paused (the kill switch is not engaged)'
+          : 'tick skipped: shutdown requested',
       result: 'ok',
     });
     return recordTick({
@@ -4384,7 +4496,7 @@ export async function tick(
       itemsConsidered: 0,
       proposalsCreated: 0,
       spentUsd: 0,
-      reason: killSwitchOn() ? 'kill-switch' : 'shutdown-requested',
+      reason: cause,
     });
   }
 
@@ -5547,34 +5659,122 @@ export async function tick(
   // status` reflects real work, not merely items considered.
   type ItemOutcome = TickItemOutcome;
 
+  // -------------------------------------------------------------------------
+  // LOCAL FLEET: parallelism derived from the serving runtime's REAL slots.
+  //
+  // `daemon.concurrency.local` defaults to 2 and `foundry.local.maxConcurrent`
+  // to 1. Both were right for Ollama, which refuses to serve this model
+  // architecture in parallel at all — one slot is all there ever was. Neither
+  // is right for llama-server, which was measured here running four agents to
+  // completion together out of ONE 27 GB copy of the weights. Keeping the old
+  // default would leave three paid-for slots idle; raising it by hand to a
+  // number nobody checked against the runtime would queue agents invisibly and
+  // make every latency figure this daemon reports a fiction. So the number is
+  // DERIVED, every tick, from what the runtime says it has — and fails closed
+  // to 1 when the runtime is down or will not say.
+  // -------------------------------------------------------------------------
+  const fleetMonitor = localFleetMonitor();
+  const localFleet: LocalFleetSettings = readLocalFleetSettings(routingCfg);
+  fleetMonitor.setSettings(localFleet);
+  let fleetConcurrency: LocalFleetConcurrency | null = null;
+  let fleetDispatchBlocked: string | null = null;
+  if (localFleet.enabled) {
+    const capacity = await resolveServingCapacity(routingCfg, localFleet);
+    fleetMonitor.setCapacity(capacity);
+    fleetConcurrency = deriveLocalFleetConcurrency(
+      capacity,
+      // null (not 2) when the operator configured nothing, so the runtime's own
+      // slot count — not a stale default — becomes the parallelism.
+      typeof liveCfg.daemon?.concurrency?.local === 'number' ? liveCfg.daemon.concurrency.local : null,
+      { fenceSerialized: FENCE_SERIALIZED_ENGINES.has(localFleet.engine) },
+    );
+    fleetMonitor.setConcurrency(fleetConcurrency);
+    const allowance = localFleetDispatchAllowed(localFleet);
+    if (!allowance.allowed) fleetDispatchBlocked = allowance.reason;
+    // A RUNTIME THAT CANNOT SERVE MUST BLOCK, not be dispatched into. Failing
+    // closed to concurrency 1 and then dispatching anyway burns one work item
+    // per tick into a failure against a dead socket, every backoff period,
+    // indefinitely — and the loop's park only reacts after the item is spent.
+    // Items routed elsewhere (builtin) are unaffected: the gate in
+    // `superviseFleetTurn` is scoped to turns that actually use the runtime.
+    if (fleetDispatchBlocked === null && fleetConcurrency.limiter === 'fail-closed' &&
+        capacity.state !== 'up') {
+      fleetDispatchBlocked = capacity.detail ||
+        `serving runtime ${capacity.state} — not dispatching into it`;
+    }
+    if (fleetConcurrency.limiter === 'fail-closed' || fleetDispatchBlocked) {
+      audit({
+        action: 'daemon:tick',
+        repo: null,
+        sandboxId: null,
+        summary: fleetDispatchBlocked
+          ? `local fleet held: ${fleetDispatchBlocked}`
+          : `local fleet degraded: ${fleetConcurrency.reason}`,
+        result: 'ok',
+      });
+    }
+    fleetMonitor.setQueue(
+      Math.max(0, selectionItems.length - workedSet.length),
+      workedSet.map((item) => item.title),
+    );
+    fleetMonitor.publish();
+  }
+
   // M116: build TieredPool from resolved config.
   // In batch mode (default), cap each tier at parallel to preserve identical behavior.
   // In continuous mode (or when concurrency is configured), use the per-tier caps.
   const isContinuousMode = dcfg.mode === 'continuous';
-  const tierPool = new TieredPool(
-    isContinuousMode || dcfg.concurrency !== undefined
-      ? {
-          local: dcfg.concurrency?.local ?? 2,
-          cloud: dcfg.concurrency?.cloud ?? 6,
-          total: dcfg.maxConcurrent ?? dcfg.concurrency?.total ?? 8,
-        }
-      : {
-          // Batch mode default: mirror old bounded(tasks, dcfg.parallel) — all tiers share parallel
-          local: dcfg.parallel,
-          cloud: dcfg.parallel,
-          total: dcfg.parallel,
-        },
-  );
+  // `resolveCfg` ALWAYS populates `concurrency` with defaults, so the old
+  // `dcfg.concurrency !== undefined` test was a tautology and the batch arm
+  // below it was unreachable. Only the RAW config can say whether the operator
+  // configured anything, which is the question that actually matters.
+  const explicitConcurrency =
+    liveCfg.daemon?.concurrency !== undefined || liveCfg.daemon?.maxConcurrent !== undefined;
+  const tieredCaps = isContinuousMode || explicitConcurrency;
+  const baseLocalCap = tieredCaps ? dcfg.concurrency?.local ?? 2 : dcfg.parallel;
+  // USE THE DERIVED ANSWER. `deriveLocalFleetConcurrency` has already folded in
+  // the operator's explicit cap (limiter 'config' when it is below the slot
+  // count) — that is its entire job. Intersecting it with `baseLocalCap` put
+  // back the very default it was built to replace: `dcfg.concurrency.local`
+  // defaults to 2, so an unconfigured machine with a 4-slot runtime dispatched
+  // 2 agents while every surface reported concurrency 4, limiter
+  // 'serving-slots', and 50% utilisation forever with nothing explaining it.
+  const localCap = resolveLocalPoolCap(fleetConcurrency, baseLocalCap);
+  const tierPool = new TieredPool({
+    local: localCap,
+    // Arming the local fleet must not SILENTLY widen the cloud ceiling. A batch
+    // daemon with `parallel: 2` and no concurrency block now takes the tiered
+    // pool — it is the only one that can carry the slot ceiling — so the tiers
+    // the fleet does not govern keep the batch caps they had before.
+    cloud: tieredCaps ? dcfg.concurrency?.cloud ?? 6 : dcfg.parallel,
+    // The total must leave room for the local cap, or the slot ceiling the
+    // fleet just derived would be unreachable.
+    total: tieredCaps
+      ? dcfg.maxConcurrent ?? dcfg.concurrency?.total ?? 8
+      : Math.max(dcfg.parallel, localCap),
+  });
 
   // Determine each item's pool tier BEFORE building the task array so the
-  // tieredBounded dispatcher knows which slot to request.
-  const itemTiers: Array<'local' | 'cloud'> = workedSet.map((item) => {
+  // tieredBounded dispatcher knows which slot to request. The planned backend
+  // and model are kept alongside so an in-flight agent can say what it is
+  // running on without re-routing.
+  const itemRoutePlans = workedSet.map((item) => {
     const routed = routeBackend(item, routingCfg);
     let backend = routed.backend;
     if (backend !== 'builtin' && !withinLimit(backend, routingCfg)) backend = 'builtin';
     const engineTier = engineTierOf(backend, routingCfg);
-    return poolTierOf(engineTier);
+    // TIER BY LOCALITY, NOT BY TRUST TIER. The fleet's own engine is registered
+    // `tier: 'mid'` (it is branch-eligible after verification), and `poolTierOf`
+    // maps everything that is not tier 'local' into the 'cloud' bucket — so the
+    // measured slot ceiling, which is only ever applied to `TieredPool.local`,
+    // bounded nothing the fleet actually dispatches. On a 4-slot runtime the
+    // daemon would hold up to `concurrency.cloud ?? 6` llama-server turns open,
+    // two of them queueing inside llama-server with no signal: precisely the
+    // invisible queue the whole derivation exists to prevent.
+    const tier: 'local' | 'cloud' = poolTierForBackend(backend, engineTier);
+    return { backend, model: routed.model ?? null, tier };
   });
+  const itemTiers: Array<'local' | 'cloud'> = itemRoutePlans.map((plan) => plan.tier);
 
   const attemptIds = new Map(workedSet.map((item) => [item.id, createOuterAttemptIdentity()] as const));
   class QueueClaimAuthorityError extends Error {
@@ -5597,18 +5797,22 @@ export async function tick(
     }),
   });
   const stopRequestedOutcome = (item: WorkItem, attemptId: string): ItemOutcome => {
-    const killed = killSwitchOn();
+    const cause = stopCause();
     return {
       item,
       spentUsd: 0,
       dispatched: false,
       dispatch: dispatchTrace(item, {
         assignedBy: 'preflight',
-        reason: killed ? 'kill switch is ON' : 'shutdown requested',
+        reason: cause === 'kill-switch'
+          ? 'kill switch is ON'
+          : cause === 'daemon-paused'
+            ? 'daemon dispatch is paused'
+            : 'shutdown requested',
         dispatched: false,
         runId: attemptId,
         trajectoryId: `run:${attemptId}`,
-        skipReason: killed ? 'kill-switch' : 'shutdown-requested',
+        skipReason: cause,
       }),
     };
   };
@@ -5623,6 +5827,31 @@ export async function tick(
       runId: attemptId,
       trajectoryId: `run:${attemptId}`,
       skipReason: 'queue-lease-lost',
+    }),
+  });
+  /**
+   * A turn the local-fleet hang watchdog killed.
+   *
+   * Distinct from `queueLeaseLostOutcome` on purpose. The watchdog used to
+   * abort the SHARED queue-lease controller, whose only other producer is
+   * `abortLostClaims` signalling "another machine took this item" — so a local
+   * agent wedged for twenty minutes was recorded in the tick trace, the audit
+   * trail and `daemon status` as a queue-coordination failure, and inherited
+   * whatever requeue and cooldown policy lease loss carries. Two surfaces then
+   * disagreed about the same event, because the fleet monitor separately
+   * recorded it as a timeout.
+   */
+  const fleetWatchdogOutcome = (item: WorkItem, attemptId: string, timeoutMs: number): ItemOutcome => ({
+    item,
+    spentUsd: 0,
+    dispatched: false,
+    dispatch: dispatchTrace(item, {
+      assignedBy: 'local-fleet-limit',
+      reason: `local agent produced nothing within ${timeoutMs}ms and was aborted by the hang watchdog`,
+      dispatched: false,
+      runId: attemptId,
+      trajectoryId: `run:${attemptId}`,
+      skipReason: 'local-fleet-timeout',
     }),
   });
   const quotaRefusalOutcome = (
@@ -5657,12 +5886,185 @@ export async function tick(
       }),
     };
   };
+  /**
+   * Wrap one agent turn with the two things an UNATTENDED local fleet needs and
+   * a supervised one does not: a hang watchdog, and a record that it is running.
+   *
+   * The failure this guards is not a crash — a crash is loud, and the pool slot
+   * is released by the rejection. It is the turn that never returns: the slot is
+   * held forever, `tieredBounded` never settles, the tick never ends, and the
+   * daemon looks alive while doing nothing. That is the exact shape of a 24/7
+   * loop that has quietly stopped, so the watchdog aborts the turn's dispatch
+   * signal, which the swarm runner already honours, and the slot comes back.
+   *
+   * It adds NO authority and NO gate beyond the explicit daily local ceiling:
+   * with the fleet off this is a direct call through to the original function.
+   */
+  const superviseFleetTurn = async (
+    item: WorkItem,
+    plan: { backend: EngineId; model: string | null },
+    attemptId: string,
+    watchdogController: AbortController,
+    inner: () => Promise<ItemOutcome>,
+  ): Promise<ItemOutcome> => {
+    if (!localFleet.enabled) return inner();
+
+    // WHICH TURNS THIS GOVERNS. The hang watchdog applies to EVERY turn while
+    // the fleet is armed — a wedged builtin swarm holds its pool slot just as
+    // permanently as a wedged llama-server one, and "the daemon looks alive
+    // while doing nothing" is the same failure either way. The serving
+    // runtime's ledger and its in-flight table apply only to turns that
+    // actually USE that runtime:
+    //
+    //   * the daily ceiling was applied before `plan.backend` was consulted,
+    //     so a cap on llama-server dispatches silently became a cap on ALL
+    //     autonomous work — `builtin` included, which touches no serving
+    //     runtime, spends nothing, and is the engine `ALWAYS_PERMITTED_ENGINE`
+    //     exists to guarantee; and
+    //   * enrolling every item listed 'builtin' and Ollama-backed turns as
+    //     "Fleet in flight" beside a slot meter fed from llama-server's own
+    //     `/slots`, i.e. N agents apparently running against a runtime
+    //     reporting zero busy slots, with nothing saying they were elsewhere.
+    const onServingRuntime = plan.backend === localFleet.engine;
+
+    const capRefusal = (reason: string): ItemOutcome => ({
+      item,
+      spentUsd: 0,
+      dispatched: false,
+      dispatch: dispatchTrace(item, {
+        backend: plan.backend,
+        tier: engineTierOf(plan.backend, routingCfg),
+        model: plan.model,
+        assignedBy: 'local-fleet-limit',
+        reason,
+        dispatched: false,
+        runId: attemptId,
+        trajectoryId: `run:${attemptId}`,
+        skipReason: 'local-fleet-daily-cap',
+      }),
+    });
+
+    // The explicit, non-monetary limiter, RE-EVALUATED PER TURN and reserved
+    // BEFORE the work. A local dispatch costs $0, so the daily USD cap can
+    // never fire for it; this is the cap that actually binds. Evaluating it
+    // once per tick froze the verdict while the tick spent it, and counting
+    // after completion made long-running agents invisible to it for their
+    // whole duration — both wrong in the permissive direction.
+    let reservation: ReturnType<typeof reserveLocalFleetDispatch> | null = null;
+    if (onServingRuntime) {
+      if (fleetDispatchBlocked !== null) return capRefusal(fleetDispatchBlocked);
+      reservation = reserveLocalFleetDispatch(localFleet);
+      if (!reservation.allowed) {
+        fleetDispatchBlocked = reservation.reason;
+        return capRefusal(reservation.reason);
+      }
+    }
+
+    const agentId = onServingRuntime
+      ? fleetMonitor.beginAgent({
+        agentId: attemptId,
+        itemId: item.id,
+        repo: item.repo,
+        title: item.title,
+        engine: plan.backend,
+        model: plan.model,
+      })
+      : null;
+    if (agentId !== null) fleetMonitor.publish();
+    let timedOut = false;
+    const cancelWatchdog = startLocalFleetHangWatchdog({
+      timeoutMs: localFleet.taskTimeoutMs,
+      onExpire: () => {
+        timedOut = true;
+        // ITS OWN CONTROLLER. The queue-lease controller means exactly one
+        // thing — "another machine took this claim" — and borrowing it to
+        // signal "this agent is wedged" made every downstream reader diagnose
+        // a hung local agent as claim contention. The dispatch signal composes
+        // both, so aborting this one still stops the turn.
+        if (!watchdogController.signal.aborted) {
+          watchdogController.abort(new Error(
+            `local fleet watchdog: no completion within ${localFleet.taskTimeoutMs}ms`,
+          ));
+        }
+        audit({
+          action: 'daemon:tick',
+          repo: item.repo,
+          sandboxId: null,
+          summary: `local fleet watchdog aborted a wedged turn for "${item.title}"`,
+          result: 'error',
+        });
+      },
+    });
+    try {
+      const outcome = await inner();
+      // A turn that never dispatched hands its place in the ceiling back —
+      // otherwise a kill-switch or budget skip would consume the day's quota.
+      if (outcome.dispatched !== true) reservation?.release();
+      const classified = localFleetOutcomeOf(outcome);
+      const finalOutcome = timedOut ? 'timeout' : classified.outcome;
+      if (agentId === null) {
+        // Off-runtime turn: the watchdog governed it, nothing else did.
+        return timedOut
+          ? fleetWatchdogOutcome(item, attemptId, localFleet.taskTimeoutMs)
+          : outcome;
+      }
+      // HEALTH MUST SEE DISPATCH FAILURES, not just timeouts. A runtime that
+      // answers /health and /props while returning 500 on every completion is
+      // reachable and useless; without this the failure streak never grew, the
+      // fleet reported 'healthy' with backoff 0, and the continuous loop shed
+      // the whole backlog into failures at full speed.
+      if (finalOutcome === 'failed') {
+        fleetMonitor.recordRuntimeFailure(
+          `local fleet turn failed on ${plan.backend}: ${classified.detail || 'no detail'}`,
+        );
+      } else if (finalOutcome === 'proposed' || finalOutcome === 'no-proposal') {
+        // A turn that reached the model and came back is the only evidence
+        // that a reachable runtime can actually serve.
+        fleetMonitor.recordRuntimeSuccess();
+      }
+      fleetMonitor.endAgent(
+        agentId,
+        finalOutcome,
+        timedOut ? 'hang watchdog expired' : classified.detail,
+      );
+      return timedOut
+        ? fleetWatchdogOutcome(item, attemptId, localFleet.taskTimeoutMs)
+        : outcome;
+    } catch (err) {
+      reservation?.release();
+      if (agentId !== null) {
+        fleetMonitor.recordRuntimeFailure(
+          timedOut
+            ? 'agent turn exceeded the hang watchdog'
+            : `local fleet turn threw on ${plan.backend}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        fleetMonitor.endAgent(
+          agentId,
+          timedOut ? 'timeout' : 'failed',
+          err instanceof Error ? err.message : String(err),
+        );
+      }
+      throw err;
+    } finally {
+      cancelWatchdog();
+      if (agentId !== null) fleetMonitor.publish();
+    }
+  };
+
   const tasks: Array<{ tier: 'local' | 'cloud'; run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null) => Promise<ItemOutcome> }> = workedSet.map((item, _taskIdx) => {
     const attemptId = attemptIds.get(item.id)!;
     const leaseController = leaseAbortControllers.get(item.id)!;
-    const dispatchSignal = opts.signal
-      ? AbortSignal.any([opts.signal, leaseController.signal])
-      : leaseController.signal;
+    // The hang watchdog gets its OWN controller, composed into the dispatch
+    // signal beside the lease. Aborting it stops the turn exactly as before,
+    // but leaves the lease signal meaning only what it has always meant —
+    // "another machine took this claim" — so a wedged agent and a lost claim
+    // stay distinguishable in the tick trace and the audit trail.
+    const fleetWatchdogController = new AbortController();
+    const dispatchSignal = AbortSignal.any(
+      opts.signal
+        ? [opts.signal, leaseController.signal, fleetWatchdogController.signal]
+        : [leaseController.signal, fleetWatchdogController.signal],
+    );
     const beginQueueExecution = (): void => {
       if (dispatchSignal.aborted || !coordinator.beginExecution(item.id, machineId)) {
         if (!leaseController.signal.aborted) {
@@ -5671,11 +6073,15 @@ export async function tick(
         throw new QueueClaimAuthorityError(item.id);
       }
     };
-    return ({
-    tier: itemTiers[_taskIdx] ?? 'local',
-    run: async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
+    const runItem = async (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> => {
       // Re-check kill switch before each item dispatch.
       if (stopRequested()) return stopRequestedOutcome(item, attemptId);
+      // Watchdog first: it is the more specific cause, and reporting a wedged
+      // local agent as a lost queue claim would send an operator to look at
+      // coordinator contention that never happened.
+      if (fleetWatchdogController.signal.aborted) {
+        return fleetWatchdogOutcome(item, attemptId, localFleet.taskTimeoutMs);
+      }
       if (leaseController.signal.aborted) return queueLeaseLostOutcome(item, attemptId);
       // In-tick budget short-circuit: if cumulative realized spend has already
       // reached the remaining daily headroom, do NOT dispatch further items.
@@ -5943,18 +6349,13 @@ export async function tick(
         }
 
         // M80: subscription-window throttle — skip this item (not crash) when a
-        // KNOWN subscription window is at or above the cap (default 90%). Reads
-        // cfg.foundry.subscriptionMaxPercent defensively with a fallback default.
+        // KNOWN subscription window is at or above the cap (default 90%).
         // allowed:true when usage is unknown (claude) or under the cap.
         if (isSubscriptionEngine(backend)) {
-          // Read maxPercent from liveCfg.foundry defensively — no types.ts change.
-          // Clamp to [1,100]: a negative or zero value would disable the throttle
-          // (anything is "under 0%"), and >100 could never fire (nothing is ">100%").
-          const rawPct = (liveCfg.foundry as Record<string, unknown> | undefined
-            )?.['subscriptionMaxPercent'];
-          const maxPct: number = typeof rawPct === 'number'
-            ? Math.min(100, Math.max(1, rawPct))
-            : 90;
+          // V2: the [1,100] clamp + default 90 live in ONE place
+          // (config.ts resolveSubscriptionMaxPercent) so this reader, the fleet
+          // router, and the fabric gateway cannot drift apart.
+          const maxPct = resolveSubscriptionMaxPercent(liveCfg);
           const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
           if (!subCheck.allowed) {
             // M334: shadow the BLOCKED legacy decision — a gateway that would
@@ -6125,11 +6526,7 @@ export async function tick(
         }
       }
       if (isSubscriptionEngine(backend)) {
-        const rawPct = (routingCfg.foundry as Record<string, unknown> | undefined
-          )?.['subscriptionMaxPercent'];
-        const maxPct: number = typeof rawPct === 'number'
-          ? Math.min(100, Math.max(1, rawPct))
-          : 90;
+        const maxPct = resolveSubscriptionMaxPercent(routingCfg);
         const subCheck = subscriptionAllows(backend, { maxPercent: maxPct });
         if (!subCheck.allowed) {
           audit({
@@ -6856,6 +7253,9 @@ export async function tick(
       }
 		    } catch (err) {
 		      if (err instanceof QueueClaimAuthorityError) {
+		        if (fleetWatchdogController.signal.aborted) {
+		          return fleetWatchdogOutcome(item, attemptId, localFleet.taskTimeoutMs);
+		        }
 		        return queueLeaseLostOutcome(item, attemptId);
 		      }
 		      const msg = err instanceof Error ? err.message : String(err);
@@ -6945,7 +7345,19 @@ export async function tick(
     }
 
 	    return { item, spentUsd: swarmSpent, dispatched, dispatch };
-    }, // end run:
+    }; // end runItem
+
+    const routePlan = itemRoutePlans[_taskIdx] ?? { backend: 'builtin' as EngineId, model: null };
+    return ({
+      tier: itemTiers[_taskIdx] ?? 'local',
+      run: (assignedBackend?: EngineId, assignedReason?: string, assignedModel?: string | null): Promise<ItemOutcome> =>
+        superviseFleetTurn(
+          item,
+          { backend: assignedBackend ?? routePlan.backend, model: assignedModel ?? routePlan.model },
+          attemptId,
+          fleetWatchdogController,
+          () => runItem(assignedBackend, assignedReason, assignedModel),
+        ),
     });
   });  // end tasks.map
 
@@ -6989,7 +7401,37 @@ export async function tick(
         ? Math.max(1, (routingCfg.foundry!.fabric as Record<string, unknown>)['maxSlotsPerBackend'] as number)
         : 3;
 
-    const concurrentCfg = { maxSlotsPerBackend };
+    // THE FLEET CEILING MUST FOLLOW THE PATH THE TICK ACTUALLY TAKES. This
+    // branch never touches `tierPool`, so `fleetConcurrency.effective` had no
+    // effect here at all while `/api/verse/fleet` and LocalRuntimePanel kept
+    // printing it as the fleet's concurrency with limiter 'serving-slots' — a
+    // limiter that was simply not in force. The measured slot count is handed
+    // to the planner as a per-backend override so the runtime's own width
+    // binds, and the reported limiter is corrected below to name the cap that
+    // is really applied.
+    const concurrentCfg: {
+      maxSlotsPerBackend: number;
+      slotsByBackend?: Readonly<Partial<Record<EngineId, number>>>;
+    } = { maxSlotsPerBackend };
+    if (localFleet.enabled && fleetConcurrency !== null) {
+      concurrentCfg.slotsByBackend = { [localFleet.engine]: fleetConcurrency.effective };
+      const concurrentEffective = Math.min(fleetConcurrency.effective, maxSlotsPerBackend);
+      if (concurrentEffective !== fleetConcurrency.effective) {
+        // `foundry.fabric.maxSlotsPerBackend` is lower than the runtime's
+        // slots, so IT is the limiter, not the slot count. Say that rather
+        // than leaving a number the dispatcher will not honour on screen.
+        fleetConcurrency = {
+          ...fleetConcurrency,
+          effective: concurrentEffective,
+          limiter: 'config',
+          reason:
+            `concurrent dispatch is on and foundry.fabric.maxSlotsPerBackend=${maxSlotsPerBackend} ` +
+            `is below the runtime's ${fleetConcurrency.slots} slot(s)`,
+        };
+        fleetMonitor.setConcurrency(fleetConcurrency);
+        fleetMonitor.publish();
+      }
+    }
 
     // planConcurrentDispatch: pure, uses gateway routing hints for suitability.
     // Build routing hints in parallel via gateway.decide, then call the pure planner.
@@ -7140,16 +7582,54 @@ export async function tick(
     // tiered pool only engages for continuous mode or explicit daemon.concurrency.
     // Detect batch mode from the RAW user config — resolveCfg ALWAYS populates
     // dcfg.concurrency with defaults, so checking dcfg would never be batch.
-    const explicitConcurrency =
-      liveCfg.daemon?.concurrency !== undefined || liveCfg.daemon?.maxConcurrent !== undefined;
-    const useBatchPool = !isContinuousMode && !explicitConcurrency;
+    // `explicitConcurrency` is computed once, where the pool is built.
+    // The batch pool has no per-tier awareness, so it cannot carry the serving
+    // runtime's slot ceiling. When the local fleet is armed, take the tiered
+    // pool — which does, and which above keeps the batch caps for the cloud and
+    // total tiers so arming the fleet changes only the tier it governs.
+    const useBatchPool = !isContinuousMode && !explicitConcurrency && fleetConcurrency === null;
     outcomes = useBatchPool
       ? await bounded(tasks.map((t) => t.run), dcfg.parallel)
       : await tieredBounded(tasks, tierPool);
   }
   } catch (err) {
     stopLeaseRenewer();
+    // A tick that unwinds must not leave phantom agents in the snapshot: a
+    // cockpit showing four busy agents for a tick that died ten minutes ago is
+    // worse than showing none, because it looks like the fleet is working.
+    if (localFleet.enabled) {
+      fleetMonitor.clearInFlight('tick unwound');
+      fleetMonitor.publish();
+    }
     throw err;
+  }
+  if (localFleet.enabled) {
+    fleetMonitor.clearInFlight('tick ended');
+    fleetMonitor.setQueue(Math.max(0, selectionItems.length - workedSet.length));
+    // A serving runtime that dies mid-tick fails every remaining turn in
+    // seconds. Left alone, a continuous loop would shred the whole backlog into
+    // failures at full speed while every surface still said "running" — the
+    // precise failure this lane exists to prevent. A tick that dispatched work
+    // and produced NOTHING but failures is the signal, so re-probe once (past
+    // the memo) and let health, and therefore the loop's park, reflect it.
+    // A REJECTED SETTLEMENT IS A DISPATCH FAILURE. Counting only fulfilled
+    // outcomes meant a tick whose every turn was killed by the hang watchdog —
+    // the case this recovery path was written for — left `dispatchedOutcomes`
+    // empty, so `everyDispatchFailed` was false and the force re-probe never
+    // ran. A rejection is the loudest possible evidence that the turn failed.
+    const dispatchedOutcomes = outcomes.filter(
+      (outcome) => outcome.status === 'rejected' ||
+        (outcome.status === 'fulfilled' && outcome.value.dispatched),
+    );
+    const everyDispatchFailed = dispatchedOutcomes.length > 0 &&
+      dispatchedOutcomes.every((outcome) => outcome.status === 'rejected' ||
+        localFleetOutcomeOf(outcome.value).outcome === 'failed');
+    if (everyDispatchFailed) {
+      fleetMonitor.setCapacity(
+        await resolveServingCapacity(routingCfg, localFleet, { force: true }),
+      );
+    }
+    fleetMonitor.publish();
   }
 
   const postDispatchOwnershipLost = (): DaemonTick | null => {
@@ -7780,7 +8260,7 @@ export async function tick(
     proposalsCreated,
     spentUsd: tickSpent,
     reason: stopRequested()
-      ? (killSwitchOn() ? 'kill-switch' : 'shutdown-requested')
+      ? stopCause()
       : workedOutcomeFailedItemIds.size > 0 ||
           repairTreatmentPublicationFailed ||
           proposalDuplicateAuthorityUnavailable ||
@@ -8396,11 +8876,48 @@ export async function runDaemon(
       // Batch mode sleeps between ticks; continuous mode loops immediately while
       // work is flowing and only sleeps on idle/no-op ticks.
       let cyclesLeft = opts.maxCycles ?? Infinity;
+      // M-PAUSE: transition tracking so a park audits once, not once per poll.
+      let parkedByPause = false;
+      // Same discipline for the serving runtime: audit the transition, not
+      // every poll, so a runtime that is down for an hour writes two lines.
+      let localFleetRuntimeDownAudited = false;
       while (true) {
         if (shutdown.signal.aborted) break;
         if (!ownsDaemonLock()) break;
         if (cyclesLeft-- <= 0) break;
         if (killSwitchOn() || shutdown.signal.aborted) break;
+
+        // M-PAUSE: the daemon-scoped pause PARKS the loop; it does not stop it.
+        // Unlike the kill switch above (which breaks, letting the process exit
+        // and clear running/pid), a pause keeps the resident daemon alive and
+        // holding its lock so Resume takes effect without a respawn, a fresh
+        // singleton-lock acquisition, or an orphan sweep. Read fresh here — the
+        // sentinel is a per-iteration input exactly like the config below it.
+        if (daemonPaused()) {
+          if (!parkedByPause) {
+            parkedByPause = true;
+            transitionActivity('idle');
+            audit({
+              action: 'daemon:tick',
+              repo: null,
+              sandboxId: null,
+              summary: 'daemon dispatch paused; loop parked (the global kill switch is NOT engaged)',
+              result: 'ok',
+            });
+          }
+          if (!(await sleep(DAEMON_PAUSE_PARK_MS, shutdown.signal))) break;
+          continue;
+        }
+        if (parkedByPause) {
+          parkedByPause = false;
+          audit({
+            action: 'daemon:tick',
+            repo: null,
+            sandboxId: null,
+            summary: 'daemon dispatch resumed; loop unparked',
+            result: 'ok',
+          });
+        }
 
         const liveCfg = reloadLiveConfigForDaemon(cfg);
 
@@ -8505,6 +9022,46 @@ export async function runDaemon(
         }
 
         const noWorkDispatched = !tickResult.dispatches?.some((dispatch) => dispatch.dispatched);
+
+        // 24/7 SURVIVAL. A serving runtime that has been restarted, is still
+        // loading a 27 GB model, or has died outright must not turn this loop
+        // into a hot spin on a dead socket — and must not stop it either. The
+        // fleet's own health carries an exponential park for exactly this, and
+        // the next tick re-probes, so recovery needs no restart and no operator.
+        // The loop is never broken out of here: a runtime coming back must find
+        // the daemon still waiting for it.
+        // Continuous mode only. Batch mode already parks for `intervalMs`,
+        // which is longer than any fleet backoff, so applying this there would
+        // make an unreachable runtime tick MORE often than a healthy one.
+        const fleetHealth = afterLoopCfg.mode === 'continuous' && localFleetEnabled(afterTickCfg)
+          ? localFleetMonitor().health()
+          : null;
+        if (fleetHealth !== null && fleetHealth.state !== 'healthy' && fleetHealth.backoffMs > 0) {
+          if (!localFleetRuntimeDownAudited) {
+            localFleetRuntimeDownAudited = true;
+            audit({
+              action: 'daemon:tick',
+              repo: null,
+              sandboxId: null,
+              summary:
+                `local serving runtime ${fleetHealth.state} (${fleetHealth.reasons[0] ?? 'no detail'}); ` +
+                `loop parked ${fleetHealth.backoffMs}ms and will retry — it is NOT stopped`,
+              result: 'ok',
+            });
+          }
+          if (!(await sleep(fleetHealth.backoffMs, shutdown.signal))) break;
+          continue;
+        }
+        if (fleetHealth !== null && fleetHealth.state === 'healthy' && localFleetRuntimeDownAudited) {
+          localFleetRuntimeDownAudited = false;
+          audit({
+            action: 'daemon:tick',
+            repo: null,
+            sandboxId: null,
+            summary: 'local serving runtime recovered; fleet dispatch resumed',
+            result: 'ok',
+          });
+        }
 
         if (afterLoopCfg.mode === 'continuous') {
           if (noWorkDispatched) {

@@ -9,6 +9,7 @@ import { runUniverseDemo } from './universe-demo.js';
 const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--json]
 
   demo                         Build and evaluate two local demo generations
+  firm <command>               Signed engineering delivery, fixtures and graph inspection
   init --manifest <file.json>   Register a pinned experiment definition
   run <id>                     Execute one budgeted generation
   status [id]                  Read objectives, runs, and measurements
@@ -28,6 +29,14 @@ const USAGE = `usage: ashlr universe <command> [--root <private directory>] [--j
   graph <id>                   Trace recorded lineage and evidence (read-only)
   compare <baseline> <challenger>
                                Compare two explicit campaigns (read-only)
+  preparation-measurement --input <absolute report.json>
+                               Inspect diagnostic measurements (read-only; no score)
+  preparation-measurement-capture <id> --root <absolute> --capture <safe id>
+                               Run and retain one installed diagnostic (no score)
+  preparation-measurement-calibrate <id> --root <absolute> --capture <id1> --capture <id2> --capture <id3> --expected-source-digest <sha256>
+                               Calibrate three retained captures (read-only; no score)
+  preparation-measurement-compare <id> --root <absolute> --capture <id> --calibration <absolute JSON>
+                               Compare a captured candidate (read-only; no acceptance)
   help                         Show this help
 
 Candidate and evaluator commands run with network access denied. An optional
@@ -47,6 +56,8 @@ The evaluator is pinned separately from candidate edits. Results are local
 experiments, not accepted production changes. --root defaults to ~/.ashlr/universe.
 Delivery creates only a local branch; it never pushes, merges, or deploys.
 Console requires an explicit absolute root; --port defaults to 0 (ephemeral).
+Preparation-measurement requires --input instead of --root and never runs work.
+Preparation-measurement-capture executes local verification; use --report for retained raw report bytes.
 Exit codes: 0 success, 1 failed/degraded execution, 2 invalid arguments.
 `;
 
@@ -157,6 +168,26 @@ function renderOverview(overview: UniverseOverview, archiveOnly: boolean): strin
 
 /** CLI and dashboard share the same persisted experiment records. */
 export async function cmdUniverse(args: string[]): Promise<number> {
+  if (args[0] === 'preparation-measurement-calibrate') {
+    const { cmdUniversePreparationMeasurementCalibrate } = await import('./universe-preparation-measurement-calibrate.js');
+    return cmdUniversePreparationMeasurementCalibrate(args.slice(1));
+  }
+  if (args[0] === 'preparation-measurement-compare') {
+    const { cmdUniversePreparationMeasurementCompare } = await import('./universe-preparation-measurement-compare.js');
+    return cmdUniversePreparationMeasurementCompare(args.slice(1));
+  }
+  if (args[0] === 'preparation-measurement-capture') {
+    const { cmdUniversePreparationMeasurementCapture } = await import('./universe-preparation-measurement-capture.js');
+    return cmdUniversePreparationMeasurementCapture(args.slice(1));
+  }
+  if (args[0] === 'preparation-measurement') {
+    const { cmdUniversePreparationMeasurement } = await import('./universe-preparation-measurement.js');
+    return cmdUniversePreparationMeasurement(args.slice(1));
+  }
+  if (args[0] === 'firm') {
+    const { cmdUniverseFirm } = await import('./universe-firm.js');
+    return cmdUniverseFirm(args.slice(1));
+  }
   if (args[0] === 'resources') {
     const { cmdUniverseResources } = await import('./universe-resources.js');
     return cmdUniverseResources(args.slice(1));

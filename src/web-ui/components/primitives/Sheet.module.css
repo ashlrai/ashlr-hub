@@ -1,0 +1,105 @@
+.backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--bg-overlay);
+  z-index: var(--z-dialog);
+  display: flex;
+  animation: fade var(--duration-fast) var(--ease-standard);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-surface);
+  box-shadow: var(--shadow-dialog);
+}
+
+.right {
+  margin-left: auto;
+  border-left: 1px solid var(--border-default);
+  animation: slide-right var(--duration-base) var(--ease-decelerate);
+}
+
+.left {
+  margin-right: auto;
+  border-right: 1px solid var(--border-default);
+  animation: slide-left var(--duration-base) var(--ease-decelerate);
+}
+
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--strip-height);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.heading {
+  min-width: 0;
+}
+
+.title {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-display);
+}
+
+.description {
+  margin-top: 2px;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-4);
+}
+
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+@keyframes fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes slide-right {
+  from {
+    transform: translateX(4px);
+    opacity: 0;
+  }
+}
+
+@keyframes slide-left {
+  from {
+    transform: translateX(-4px);
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .backdrop,
+  :root:not([data-motion="full"]) .panel {
+    animation: none;
+  }
+}
+
+:root[data-motion="reduce"] .backdrop,
+:root[data-motion="reduce"] .panel {
+  animation: none;
+}

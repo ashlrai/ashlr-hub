@@ -99,7 +99,7 @@ h1,
 h2,
 h3 {
   font-family: var(--font-display);
-  letter-spacing: -0.025em;
+  letter-spacing: var(--tracking-display);
 }
 
 /* ---------------------------------------------------------------------------
@@ -111,17 +111,24 @@ h3 {
   outline: none;
 }
 
+/* NO border-radius here. It would be a property of the ELEMENT, not of the
+   ring, at (0,1,0) specificity — the same as a single CSS-module class — so
+   whether it beat a component's own radius was decided by injection order.
+   The pill-shaped focusables (Switch's .track, Tag, Transcript's .jump, all
+   --radius-full) became 5px rectangles while keyboard-focused, which also
+   silently overrode the operator's Corner-radius setting for that element.
+   The ring is a box-shadow and already follows whatever radius the element
+   has. */
 :focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus-ring);
-  border-radius: var(--radius-sm);
 }
 
 /* ---------------------------------------------------------------------------
  * Selection + scrollbars
  * ------------------------------------------------------------------------- */
 ::selection {
-  background: var(--bg-selected);
+  background: var(--accent-100);
   color: var(--text-primary);
 }
 
@@ -150,6 +157,10 @@ h3 {
  * Type scale utility classes — component CSS should reference the tokens
  * directly, but these exist for quick text nodes in views.
  * ------------------------------------------------------------------------- */
+.text-2xs {
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+}
 .text-xs {
   font-size: var(--text-xs-size);
   line-height: var(--text-xs-line);
@@ -184,6 +195,26 @@ h3 {
   font-size: var(--text-3xl-size);
   line-height: var(--text-3xl-line);
   font-weight: var(--font-weight-bold);
+}
+
+/* Uppercase micro-label — section headers in dense chrome. Display face,
+   11px, wide tracking; never used for prose (see DESIGN-V2 §2 "Type"). */
+.label-micro {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-medium);
+  color: var(--text-tertiary);
+}
+
+/* Numerals that are the point (metrics, token counts, durations) — the
+   display face's tabular figures, so a changing number does not reflow. */
+.numeral {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: var(--tracking-display);
 }
 
 .text-secondary {
@@ -245,8 +276,15 @@ h3 {
   border-radius: var(--radius-sm);
 }
 
+/* Same two triggers as the duration tokens (tokens.css): the OS preference,
+   unless Settings explicitly asked for full motion, and the explicit
+   data-motion="reduce" choice. */
 @media (prefers-reduced-motion: reduce) {
-  .skeleton {
+  :root:not([data-motion="full"]) .skeleton {
     animation: none;
   }
+}
+
+:root[data-motion="reduce"] .skeleton {
+  animation: none;
 }

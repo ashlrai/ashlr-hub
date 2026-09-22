@@ -6,9 +6,11 @@ import { canonical, digest } from '../universe/artifacts.js';
 import { mergeResourceObservations, readResourcePoolAllocation } from './pool-runtime.js';
 import { validateResourceObservations, validateResourcePool, type ResourceObservation, type ResourcePool } from './pool-policy.js';
 import { validateResourceBindings, type ResourceBinding } from './worker.js';
-import { probeCodexResourceAccount, type CodexResourceProbeOptions, type CodexResourceProbeResult } from './codex-account-probe.js';
+import { probeCodexResourceAccount, sanitizeCodexProbeCleanupDiagnostics, type CodexProbeCleanupDiagnostics,
+  type CodexResourceProbeOptions, type CodexResourceProbeResult } from './codex-account-probe.js';
 import { acquireResourceQuotaRefreshLease, type ResourceQuotaRefreshLease } from './quota-refresh-lease.js';
 import { createNativeMetadataCoordinator, type NativeMetadataCoordinator } from './metadata-coordinator.js';
+import { resourceQuotaBuckets, expandResourceQuotaDenials } from './quota-scope.js';
 
 export const RESOURCE_QUOTA_REFRESH_INTERVAL_MS = 30_000;
 export const RESOURCE_QUOTA_REFRESH_TTL_MS = 60_000;
@@ -16,6 +18,27 @@ const MAX_BACKOFF_MS = 300_000;
 const PROBE_TIMEOUT_MS = 10_000;
 const ID = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const HASH = /^[a-f0-9]{64}$/;
+
+export interface ResourceQuotaWorkerCleanupDiagnostics {
+  readonly workerId: string;
+  readonly probeStatus: 'observed' | 'failed' | 'timed-out' | 'cancelled' | 'uncertain' | 'unknown' | 'rejected';
+  readonly cleanupDiagnostics: CodexProbeCleanupDiagnostics;
+}
+/** Failure evidence only: never attach partial observations or admission decisions to an error. */
+export class ResourceQuotaRefreshError extends Error {
+  readonly workerDiagnostics: readonly ResourceQuotaWorkerCleanupDiagnostics[];
+  constructor(message: string, diagnostics: readonly ResourceQuotaWorkerCleanupDiagnostics[]) {
+    super(message);
+    this.workerDiagnostics = Object.freeze(diagnostics.slice(0, 64).map((row) => Object.freeze({
+      workerId: row.workerId, probeStatus: row.probeStatus,
+      cleanupDiagnostics: sanitizeCodexProbeCleanupDiagnostics(row.cleanupDiagnostics) ?? Object.freeze({
+        failure: 'diagnostics-unavailable' as const, processGroupSettlement: 'unknown' as const,
+        timedOut: 'unknown' as const, cancelled: 'unknown' as const,
+      }),
+    })));
+    Object.defineProperty(this, 'workerDiagnostics', { writable: false, configurable: false });
+  }
+}
 
 /** Local pre-contact cancellation: no provider sample or successful read is asserted. */
 function cancelledBeforeNativeContact(workerId: string, poolDigest: string, startedAt = new Date().toISOString()): CodexResourceProbeResult {
@@ -63,6 +86,8 @@ export interface ResourceQuotaRefresher {
   readObservations(base: ResourceObservation[]): ResourceObservation[];
   /** Ephemeral admission constraint, not a fabricated provider observation or persisted quota measurement. */
   unavailableWorkerIds(deferAllocationToAdmission?: boolean): string[];
+  /** Quota-only vetoes; explicit account/transport denials remain in unavailableWorkerIds. */
+  quotaUnavailableWorkerIds(deferAllocationToAdmission?: boolean): string[];
   snapshot(): ResourceQuotaRefreshSnapshot;
   close(): Promise<void>;
 }
@@ -108,6 +133,8 @@ export function validateResourceQuotaRefreshConfig(value: unknown, poolValue: Re
       pool.workers.find((worker) => worker.id === row.workerId)?.provider !== 'codex' ||
       bindings.find((binding) => binding.workerId === row.workerId)?.kind !== 'native-cli') return invalid();
     seen.add(row.workerId);
+    const expected = resourceQuotaBuckets(pool.workers.find((worker) => worker.id === row.workerId)!);
+    if (expected && canonical([...row.bucketIds].sort()) !== canonical(expected)) return invalid();
     workers.push({ workerId: row.workerId, accountHint: row.accountHint, bucketIds: [...row.bucketIds as string[]].sort() });
   }
   const hints = new Map<string, string>(); const byWorker = new Map(workers.map((worker) => [worker.workerId, worker]));
@@ -118,7 +145,10 @@ export function validateResourceQuotaRefreshConfig(value: unknown, poolValue: Re
     hints.set(row.accountHint, binding.capacityKey);
     for (const alias of bindings.filter((candidate) => candidate.capacityKey === binding.capacityKey)) {
       const enrolled = byWorker.get(alias.workerId);
-      if (!enrolled || enrolled.accountHint !== row.accountHint || canonical(enrolled.bucketIds) !== canonical(row.bucketIds)) return invalid();
+      if (!enrolled || enrolled.accountHint !== row.accountHint) return invalid();
+      const a = resourceQuotaBuckets(pool.workers.find((worker) => worker.id === row.workerId)!);
+      const b = resourceQuotaBuckets(pool.workers.find((worker) => worker.id === alias.workerId)!);
+      if ((!a || !b) && canonical(enrolled.bucketIds) !== canonical(row.bucketIds)) return invalid();
     }
   }
   return immutable({ schemaVersion: 1, poolDigest: value.poolDigest, workers });
@@ -209,6 +239,13 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
     if (observation.windows.length === 0 || observation.windows.some((window) => window.usedPercent === null ||
       window.resetsAt === null || Date.parse(window.resetsAt) <= now)) return 'managed-quota-unknown';
     return null;
+  }
+
+  function quotaOnly(row: ManagedWorker, reason: string | null): boolean {
+    return resourceQuotaBuckets(pool.workers.find((worker) => worker.id === row.config.workerId)!) !== null &&
+      row.observation?.health === 'ready' && !(row.observation.retryAfter && Date.parse(row.observation.retryAfter) > Date.now()) &&
+      reason !== null && ['managed-quota-future', 'managed-quota-expired', 'managed-quota-reserve-reached',
+        'managed-quota-unknown'].includes(reason);
   }
 
   function checkedObservation(result: CodexResourceProbeResult, row: ManagedWorker, attemptAt: string): ResourceObservation | null {
@@ -348,9 +385,18 @@ function createRefresher(options: ReturnType<typeof checkedOptions>, once: boole
     },
     unavailableWorkerIds(deferAllocationToAdmission = false): string[] {
       owns();
-      const now = Date.now(); const unavailable = new Set(rows.filter((row) => unavailableReason(row, now, deferAllocationToAdmission) !== null)
+      const now = Date.now(); const unavailable = new Set(rows.filter((row) => {
+        const reason = unavailableReason(row, now, deferAllocationToAdmission);
+        return reason !== null && !quotaOnly(row, reason);
+      })
         .map((row) => row.capacityKey));
       return Object.freeze(rows.filter((row) => unavailable.has(row.capacityKey)).map((row) => row.config.workerId)) as string[];
+    },
+    quotaUnavailableWorkerIds(deferAllocationToAdmission = false): string[] {
+      owns();
+      const now = Date.now();
+      return expandResourceQuotaDenials(pool, bindings, rows.filter((row) =>
+        quotaOnly(row, unavailableReason(row, now, deferAllocationToAdmission))).map((row) => row.config.workerId));
     },
     snapshot(): ResourceQuotaRefreshSnapshot {
       const now = Date.now();
@@ -376,7 +422,7 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
   capacityWaitMs?: number;
   /** The caller retains measured usage and reevaluates the current policy at atomic admission. */
   deferAllocationToAdmission?: boolean;
-}): Promise<{ observations: ResourceObservation[]; unavailableWorkerIds: string[] }> {
+}): Promise<{ observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] }> {
   const started = performance.now();
   const timeoutMs = options.timeoutMs;
   if (options.deferAllocationToAdmission !== undefined && typeof options.deferAllocationToAdmission !== 'boolean') {
@@ -409,8 +455,30 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
   let coordinator: NativeMetadataCoordinator | undefined;
   let refresher: ResourceQuotaRefresher | undefined;
   let preservePending = false;
-  let result: { observations: ResourceObservation[]; unavailableWorkerIds: string[] } | undefined;
+  let result: { observations: ResourceObservation[]; unavailableWorkerIds: string[]; quotaUnavailableWorkerIds?: string[] } | undefined;
   let failure: Error | undefined;
+  const workerDiagnostics: ResourceQuotaWorkerCleanupDiagnostics[] = [];
+  const captureDiagnostics = (workerId: string, value: unknown, rejected = false): void => {
+    let diagnostic: CodexProbeCleanupDiagnostics | undefined;
+    let probeStatus: ResourceQuotaWorkerCleanupDiagnostics['probeStatus'] = rejected ? 'rejected' : 'unknown';
+    try {
+      if (value !== null && typeof value === 'object') {
+        const status = Object.getOwnPropertyDescriptor(value, 'status');
+        if (status && 'value' in status && typeof status.value === 'string' &&
+          ['observed', 'failed', 'timed-out', 'cancelled', 'uncertain'].includes(status.value)) {
+          probeStatus = status.value as ResourceQuotaWorkerCleanupDiagnostics['probeStatus'];
+        }
+        const property = Object.getOwnPropertyDescriptor(value, 'cleanupDiagnostics');
+        if (property && 'value' in property) diagnostic = sanitizeCodexProbeCleanupDiagnostics(property.value);
+      }
+    } catch { /* Uninspectable injected evidence cannot add diagnostic authority. */ }
+    // The identity comes from pinned enrollment, never from the injected result.
+    if (workerDiagnostics.length === 64) workerDiagnostics.shift();
+    workerDiagnostics.push({ workerId, probeStatus, cleanupDiagnostics: diagnostic ?? Object.freeze({
+      failure: rejected ? 'probe-rejected' : 'diagnostics-unavailable',
+      processGroupSettlement: 'unknown', timedOut: 'unknown', cancelled: 'unknown',
+    }) });
+  };
   try {
     const available = remaining();
     if (available < 1 || controller.signal.aborted) throw new Error();
@@ -428,12 +496,19 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
       coordinator = createNativeMetadataCoordinator({ signal: controller.signal,
         beginNativeActivity: () => lease!.beginNativeActivity() });
       const pass = createRefresher({ ...checked, signal: AbortSignal.any([controller.signal, coordinator.signal]), assertOwnership, coordinator,
-        probe: (probeOptions) => {
+        probe: async (probeOptions) => {
           const available = remaining();
           if (available < 1 || controller.signal.aborted) {
             return Promise.resolve(cancelledBeforeNativeContact(probeOptions.workerId, checked.config.poolDigest));
           }
-          return checked.probe({ ...probeOptions, timeoutMs: Math.min(PROBE_TIMEOUT_MS, available) });
+          try {
+            const value = await checked.probe({ ...probeOptions, timeoutMs: Math.min(PROBE_TIMEOUT_MS, available) });
+            captureDiagnostics(probeOptions.workerId, value);
+            return value;
+          } catch {
+            captureDiagnostics(probeOptions.workerId, undefined, true);
+            throw new Error('Native quota settlement unavailable');
+          }
         } }, true);
       refresher = pass.refresher;
       await pass.completed;
@@ -441,7 +516,9 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
       // Preserve capture-time evidence, not the intentionally closed collector's
       // availability. The caller must recheck freshness after awaited cleanup.
       result = { observations: refresher.readObservations(observations),
-        unavailableWorkerIds: refresher.unavailableWorkerIds(options.deferAllocationToAdmission) };
+        unavailableWorkerIds: refresher.unavailableWorkerIds(options.deferAllocationToAdmission),
+        ...(checked.pool.workers.some((worker) => worker.quotaScope) ? {
+          quotaUnavailableWorkerIds: refresher.quotaUnavailableWorkerIds(options.deferAllocationToAdmission) } : {}) };
     }
   } catch {
     failure = new Error('Resource quota refresh could not complete');
@@ -453,6 +530,6 @@ export async function refreshResourceQuotaOnce(options: ResourceQuotaRefresherOp
     catch { failure = new Error('Resource quota refresh lease cleanup unconfirmed'); }
     clearTimeout(timer); checked.signal?.removeEventListener('abort', cancel);
   }
-  if (failure) throw failure;
+  if (failure) throw new ResourceQuotaRefreshError(failure.message, workerDiagnostics);
   return result!;
 }

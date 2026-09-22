@@ -1135,9 +1135,103 @@ Only a passing, retained artifact with strictly positive measured improvement
 and changed bytes is eligible for a new branch. Each configured outcome adds a
 `delivery` field: `delivered` includes the evidence-bound receipt; `withheld`
 explains cancellation, incomplete work, an unattempted handoff or no strict improvement; `failed`
-requires inspection. An initial admission or unchanged passing trial is not a
-delivered improvement. `attempted` continues to mean campaign execution, so a
+requires inspection. An initial admission without a verified measured-seed
+comparison is not a delivered improvement; unchanged passing trials never
+qualify. A passing measured seed can establish a first-candidate improvement
+as described below. Separately, a plan target may opt in
+with `allowInitialRepair: true`: the campaign must contain a valid failed
+evaluation of the byte-identical pinned seed, either from an earlier completed
+step in the same niche or from its opt-in seed measurement described below.
+The changed passing artifact must improve that finite score
+by a positive amount meeting `minImprovement`. Operational failures without
+measurement, missing or changed baseline artifacts, and unrelated campaigns
+cannot supply that proof. The first elite retains its `null` parent/delta;
+delivery eligibility does not rewrite archive lineage. The delivery option
+alone neither evaluates a baseline nor expands budgets. Only literal `true` or omission is
+valid. The opt-in is pinned in controller/graph enrollment and must also be
+present for recovery. `attempted` continues to mean campaign execution, so a
 successful delivery-only replay reports `attempted: false`.
+
+### Measure the seed before spending a model request
+
+For a **new** campaign definition, set `measureSeed: true` to evaluate the exact
+pinned seed once, before reserving a generation or model request. Omit the field
+to preserve existing campaign behavior; `false`, `null` and other values are
+invalid. Definitions are immutable: use a new campaign ID instead of editing
+an existing campaign's policy or history.
+
+This evaluator-only phase uses the existing experiment execution lease, fixed
+comparator, OS confinement, stop checks and original campaign deadline. It has
+its own intent and result in campaign history, visible as `seedEvaluation` in
+campaign inspection. It creates no trial, elite, model reservation, model-token
+usage or synthetic parent. Elapsed time still counts against the campaign's
+time budget, including downtime on restart. Evaluators can identify this phase
+through `ASHLR_UNIVERSE_EVALUATION_CONTEXT=campaign-seed-v1`; there is no invented
+generation zero.
+
+A valid measured result may be passing or failing. A failed finite measurement
+can support `allowInitialRepair: true` for a changed, passing first candidate
+that meets the fixed improvement threshold. A passing measured seed supports a
+distinct first-candidate improvement: with an explicit delivery target, the
+selected candidate must have changed bytes and improve the seed score in the
+declared direction by a positive amount meeting `minImprovement`. No repair
+opt-in or preliminary no-op generation is needed for this passed-seed path.
+Delivery and recovery verify the exact seed intent/result, campaign linkage,
+original timing, settled evaluation and current artifact bytes. Equal, worse,
+below-threshold or unchanged candidates remain ineligible.
+
+The passing seed also remains the delivery baseline for **later generations**.
+A positive parent-relative delta alone cannot authorize a result that is equal
+to, worse than, or insufficiently better than that seed. For example, with a
+minimized score and `minImprovement: 1`, seed 140 → candidate 145 → candidate 144
+can remain useful exploration, but cannot be delivered; candidate 139 can qualify.
+This guard is rechecked against durable seed evidence and artifact bytes before
+Git publication and by recovery readers. A historical receipt that fails this
+comparison is not a verified campaign handoff; its branch and records are retained.
+
+This comparison does not invent an archive parent: the first trial retains
+`parentTrialId: null` and `delta: null`. Archive admission/improvement counters
+keep their existing meaning; successful seed-based delivery is recorded in the
+separate delivery receipt. Failed-seed repair still requires its original
+`allowInitialRepair: true` opt-in, including recovery.
+
+A completed seed measurement is
+reused after verifying its pins and bytes. When the campaign also enables
+`feedback: true`, each newly started generation receives that measurement in a
+separate `seedContext`, including generations editing an already retained elite.
+The historical seed context stays alongside current-parent source and latest
+trial feedback; it is not a synthetic trial or an acceptance decision.
+When that seed passed, the model instruction explicitly distinguishes archive
+selection from delivery: improving a retained parent alone is insufficient;
+delivery must also strictly improve the exact starting seed in the recorded
+metric direction and meet `minImprovement`. This explains the existing delivery
+gate without changing scores, scheduling or acceptance. Absent and failed seed
+measurements retain their prior prompt wording.
+
+The context contains the finite score, passing status, declared numeric metrics
+and bounded evaluator diagnostics. It is limited to 16 KiB of UTF-8 canonical
+data, with at most 32 metrics and 16 diagnostics under the existing diagnostic
+limits. Diagnostic text is evidence, not instructions or permission to edit a
+file. Supplying this context makes no extra model request and does not change
+scheduling, archive selection, evaluation, request limits or delivery policy.
+
+The durable run pins the full context to the campaign definition, manifest,
+comparator, seed artifact and exact measurement records. Both local and
+resource-pool generation include its digest receipt in the existing generation
+evidence. Reconstruction and pre-request checks refuse changed or mismatched
+history. Previously recorded runs without this optional pin stay unpinned;
+absent-context prompts retain their prior bytes. The generation inspector shows
+the receipt; web views omit diagnostic messages and paths while retaining codes
+and measured values. Private local records retain the original evidence.
+
+An operational failure, timeout or cancellation is not a measured rejection and
+holds generation. An intent without a confirmed result remains unresolved and
+is never silently retried. It also prevents new execution on the same Universe,
+because the evaluator process may still exist even if its original owner died.
+Inspect the recorded campaign and process state; do not delete history or reset
+the deadline to force a retry. Recorded readiness distinguishes unresolved seed
+evaluation from an operational result needing attention. No provider probing or
+evaluator execution occurs during readiness inspection.
 
 Repeat the same queue and plan after an interrupted handoff. Existing immutable
 intents and receipts reconcile the same branch/commit, including a campaign that
@@ -1301,6 +1395,16 @@ score deltas require matched controls/workload and healthy, fresh, complete,
 fully attributed histories. Positive `directionAdjustedDelta` means the
 challenger's retained score is better under the declared metric, including a
 minimization metric. It is not a business-value estimate.
+
+`matching.seedRegime` additionally requires matching configured seed measurement
+and uniform observed seed-context conditions. Each arm's `seed` field reports
+whether `measureSeed` was configured, how many runs pinned context, and how many
+generation receipts carried it. Historical runs without seed context remain
+valid, but are not matched to runs whose workers received measured seed evidence.
+Mixed or invalid context evidence withholds comparison; a context pin must agree
+with the recorded seed evaluation and the corresponding generation receipt.
+This prevents extra baseline information from being mistaken for a model or
+feedback improvement. It does not change scheduling or acceptance.
 
 Counts distinguish passed trials, first niche admissions, strict retained
 improvements, and distinct selected artifact digests excluding the seed. A
@@ -1860,7 +1964,10 @@ and the campaign's start and settlement records. If the campaign completed but
 the controller lost its response or settlement write, repeating `controller run`
 can record that proven completion without running the worker again. Recovery
 requires the original campaign history as an exact prefix, one matching start,
-only the attributed session's steps, and its matching completed settlement.
+only the attributed session's steps and validated optional seed-intent/result
+pair, and its matching completed settlement. Seed records must satisfy the
+campaign's ordinary once-only, exact-session validation; their presence is not
+permission to accept unrelated history.
 An external resume, owner control, changed history, or merely completed-looking
 summary is not sufficient.
 
@@ -1898,6 +2005,32 @@ recorded settlement, **not** proof that a worker is alive. `held` is not success
 not acquire or probe execution locks: a lock-only conflict is detected by `run`,
 and `pending` alone does not establish that capacity is available.
 Read-only status never creates missing stores or reconciles uncertain work.
+
+When dispatch throws or its handoff cannot be verified, the controller attempts
+to record one `dispatch-diagnostic` against that exact unresolved intent. The
+optional `diagnostics` report array preserves this history even after a later
+verified settlement; it is not the current outcome or permission to retry.
+Each private row carries `campaignId`, `intentDigest`, `phase`, `code` and `at`.
+The console omits the private intent digest and shows the remaining fields in
+the inspector's **Recorded handoff diagnostics** section. Raw exception text,
+stack traces, command output and credentials are not retained by this feature.
+
+| Recorded stage | Closed failure codes |
+| --- | --- |
+| `campaign-execution` | `campaign-call-threw` |
+| `campaign-verification` | `campaign-evidence-changed` |
+| `delivery-execution` | `delivery-call-threw` |
+| `delivery-verification` | `delivery-evidence-changed`, `delivery-receipt-unverified` |
+| `settlement-publication` | `settlement-write-failed` |
+
+These codes identify the failed boundary, not an inferred root cause. In
+particular, an unverified receipt does not prove that branch publication failed.
+If diagnostic publication itself cannot retain ownership or valid storage, the
+invocation reports `dispatch-diagnostic-unavailable` and leaves the intent
+unresolved. Absence of diagnostics does not prove success or that no call ran.
+Legacy histories without diagnostics remain readable. Diagnostic events consume
+bounded history, never release a concurrency slot, change acceptance, restore a
+budget or authorize an otherwise-forbidden dispatch.
 
 When a dispatched campaign settles without completing, its outcome preserves
 the verified readiness reason, such as `owner-paused`, `campaign-stopped`,
@@ -1986,7 +2119,10 @@ npx vitest run test/universe-controller-crash-integration.test.ts
 The controller has a separate local execution lock and bounded immutable history
 under `<root>/portfolios/<id>/`. Only one invocation owns that controller at a
 time. History is limited to 512 records and 4 MiB, with a 128 KiB canonical
-enrollment limit. Dispatch reserves space for settlement; repeated run
+enrollment limit. New dispatch admission reserves space for a diagnostic and
+settlement, in addition to control cleanup. Existing near-capacity histories
+retain their original settlement/drain/acknowledgement allowance; adding this
+diagnostic reserve must not strand their cleanup. Repeated run
 observations consume history capacity. Exhaustion refuses new work rather than
 discarding checkpoints. SIGINT/SIGTERM and deadline expiry cancel and await owned
 calls; cleanup can extend elapsed time beyond the allowance. No daemon or background restart is
@@ -2194,7 +2330,7 @@ reserves; a delivery plan does not supply credentials or additional usage.
 The runtime validates all targets before dispatch: campaign identity, pinned
 seed base, and duplicate repository/branch assignments. For a planned handoff,
 campaign completion alone is insufficient. The existing delivery helper must
-retain a strict measured improvement and record its local Git branch receipt
+retain a measured improvement under the declared delivery policy and record its local Git branch receipt
 before new downstream work starts. This gate also applies through an
 already-completed intermediate campaign. Historical completion is preserved;
 it does not bypass a pending ancestor delivery. Independent branches may proceed.
@@ -2437,6 +2573,345 @@ writer policy; existing version-one records retain their reader compatibility.
 The archive preserves raw dimensions so future comparisons can use a consistent objective. When objective weights or evaluation conditions change, both challenger and incumbent need comparable measurements. Partial progress and complete task success remain distinct fields in the measurement model.
 
 Niches represent meaningful differences such as task family, execution cost, or latency. A global winner can hide useful low-cost or specialized variants. A retained failure can supply correction context without becoming an archive parent.
+
+### Inspect preparation measurements
+
+Use the read-only inspector to summarize an existing installed preparation
+workload report for an operator or agent:
+
+```sh
+ashlr universe preparation-measurement --input /absolute/path/report.json
+ashlr universe preparation-measurement --input /absolute/path/report.json --json
+```
+
+The input must be one regular, nonsymlink UTF-8 JSON file, at most 24 KiB, at an
+explicit normalized absolute path. Only the
+`preparation-verification-measurement` envelope for `preparation-workflows-v1`
+or `preparation-workflows-v2` is supported. Legacy standalone and pre-initialization
+reports are unsupported. V1 remains a historical 19-check workload; it is never
+silently upgraded to v2's during-call qualification coverage.
+This command does not accept `--root`, discover stores, run a benchmark, dispatch
+workers, or contact providers. It leaves the supplied file unchanged.
+
+The summary separates healthy leaf broker launches, workflow broker launches,
+per-request counts, and fixture-owned process groups. Blob launches are a subset,
+not an extra quantity to add. Missing totals in failed reports remain `null` in
+JSON and `unknown` in text; completed workflow rows provide only a labelled
+subtotal. Output includes fixed diagnostic codes but omits raw diagnostic
+messages and input paths.
+
+The installed v2 workload preserves the same fifteen leaf/workflow measurement
+regions and adds two fixed during-call qualification pairs. Each pair first
+confirms exact healthy metadata in one candidate process, then changes a trusted
+fixture while that same process awaits an intent-file ACL result. Runtime drift
+changes the resource configuration; source drift changes the delivered upstream
+reference. A completed pair requires exactly one observed mutation, semantic
+refusal without a returned value, unchanged fixture state apart from that mutation,
+and confirmed process shutdown. A transport failure does not count as refusal.
+
+Full v2 success requires 23 checks and both ordered qualification records. Its
+additional process/blob counters are labelled separately and excluded from the
+original fifteen-region comparison total. The same selected artifact, owned
+activity and original deadline cover both measurement and qualification; no
+extra time allowance is granted. A failed or interrupted pair remains incomplete.
+The inspector shows `not-in-workload` for v1, and `complete` or `incomplete` for v2.
+
+The closed measurement builtin permits an explicitly configured
+`evaluation.timeoutMs` up to 1,800,000 ms for diagnostic captures. This is a
+ceiling, not a new default or a renewed deadline. Each candidate session remains
+bounded to 900,000 ms. A campaign seed invocation is still limited by the original
+campaign time remaining, but even a successful diagnostic envelope is refused as
+scored seed evidence (`evaluator-invalid-result`); a separate scoring evaluator is
+not implemented yet. Command evaluators and
+the whole worker-plus-evaluation trial budget remain capped at 900,000 ms, so a
+long diagnostic allowance does **not** enable longer ordinary candidate trials.
+
+Exit status is 0 when the report says its checks were satisfied, 1 for reported
+failure or an unavailable/unsupported report, and 2 for invalid arguments. For
+status 1, inspect the fixed diagnostic code or verify the input format and path;
+the command never retries execution. JSON output is tagged `diagnostic-only`:
+neither a successful exit nor internally consistent counters authenticate the
+report, prove process settlement, assign a score, or accept a candidate. Keep the
+original evaluation and custody evidence for those decisions. See the
+[measurement benchmark plan](../artifacts/hub-verification-benchmark-plan.md)
+for the workload and remaining optimization acceptance requirements.
+
+### Capture preparation measurements
+
+The explicit capture command runs the installed diagnostic against an existing
+Universe's frozen seed and retains its evidence privately:
+
+```sh
+ashlr universe preparation-measurement-capture hub-verification \
+  --root /absolute/private/universe --capture baseline-001 --json
+```
+
+The registered manifest must select `preparation-measurement-v1`. Its pinned
+evaluator and timeout apply; this command cannot select another executable,
+candidate artifact, environment or provider. It launches local fixture and
+verification processes, unlike the read-only inspector above. It does not make
+model requests, create a scored trial, select an elite, deliver into the user's
+registered repository or start a resident service. The installed workload may
+create branches inside its isolated test fixtures.
+
+Use a stable capture ID. The durable intent records the original deadline,
+manifest/comparator digests, seed revision and artifact digest, installed bundle,
+Node and native-tool identities. Exact completed replay returns the recorded
+result without running again. An unfinished or uncertain attempt is held rather
+than retried, including under a different capture ID. The same Universe's
+execution remains fenced while process custody is unresolved; independent
+Universes can acquire their own execution independently. Existing enclosing
+portfolio controllers may hold their whole enrollment on an ownership refusal;
+this command does not change those controller semantics. A settled failure does
+not authorize an automatic retry.
+
+Valid partial or failed diagnostic reports remain useful evidence. Retained
+report text preserves whitespace and is bound to its byte length and SHA-256;
+missing or malformed output is not replaced with invented metrics. The receipt
+distinguishes outcome, identity verification and actual process-group settlement.
+Capture success is not a score, causal improvement or independent acceptance.
+Summaries include start/finish timestamps and label identity verification as
+`recorded-attempt-only`: replay reads historical evidence without revalidating
+the current runtime, comparator or account health.
+
+New receipts also retain fixed-field `custodyDiagnostics`: the observed boundary
+(`outer-process-group`, `nested-activity`, `completed`, `not-started`, or
+`unobserved`), exit code, and signal, timeout, cancellation and truncation flags.
+Unknown observations are `null`; older receipts omit the field and are not
+rewritten. These diagnostics exclude raw process errors, stderr, paths and signal
+names. `completed` describes the custody check, not a passing report or accepted
+candidate. JSON summaries include these fields when recorded; human summaries
+show the boundary and exit code. Inspect them to distinguish an unresolved outer process group
+from a completed outer runner whose nested activity could not be confirmed.
+
+A nested-activity refusal is not proof that a worker is still running: malformed
+or incomplete activity records and reuse of a historical numeric process-group
+ID can also prevent confirmation. Preserve the receipt and activity evidence;
+do not clear the hold, signal a possibly unrelated process, or relabel a passing
+report as a successful capture. Diagnostics do not change settlement checks,
+retry authority or calibration eligibility.
+
+The fixed evaluator uses a **version-two settlement witness**. It uses a private, per-invocation 32-byte key
+to authenticate the complete owner and activity transcript. Before recording a
+spawned group's exit, the trusted tracker independently requires a kernel absence
+observation; present, denied or unknown results poison completion. The parent
+can subsequently verify that observation without probing an old numeric ID.
+This addresses delayed ID reuse, not all possible process races or escaped
+descendants. The kernel's distinction between PID allocation and an existing
+process group is visible in [Apple's process creation implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_fork.c).
+
+The parent sends the key through its existing private stdin pipe, never argv or
+environment variables. Both measurement and scoring adapters require exactly 64
+lowercase hexadecimal bytes followed by EOF. Input waits at most five seconds
+within the original invocation deadline and stops on cancellation. Malformed,
+missing or interrupted input cannot launch candidate work. Candidate and tool
+processes receive separate explicit environments and input messages; neither
+contains this key. The activity journal and tracker output do not contain it.
+
+Legacy version-one owners still use retrospective absence checks and do not
+consume stdin. Version two has no user-selected CLI activation flag, does not
+migrate old records or release held captures, and refuses verification when its
+key is unavailable. A parent crash before verification is not repaired by
+reconstructing a secret or trusting an unauthenticated completion. This mechanism
+trusts the installed runner; it is not protection against a compromised host or
+trusted evaluator. Source changes require a newly built, pinned and qualified
+evaluator bundle; they do not update an already running or installed runtime.
+
+An explicit `--report` mode emits only the retained report bytes, with no added
+newline or summary. Use the same capture ID to export an already completed report
+for the existing inspector. A new ID requests a new diagnostic execution, not a
+read-only export. Raw reports can contain diagnostic prose and should remain
+private; default and JSON summaries do not substitute for their custody evidence.
+There is no `--output` option; filesystem redirection is a separate caller-owned
+write. Exit status is 0 only for a recorded, identity-verified, settled capture
+whose report says its checks passed; 1 for failed, held or unavailable capture;
+and 2 for invalid arguments. `--report` can emit valid failed or held diagnostic
+bytes while returning 1. If no valid report is retained, stdout stays empty and
+a fixed error goes to stderr. A nonzero exit never authorizes replaying the work.
+
+### Calibrate and compare retained preparation evidence
+
+Use this read-only path to determine whether a captured preparation-source change
+reduced broker processes without hiding a per-region regression. It does not run
+captures, select an elite, install a scoring evaluator, or deliver code.
+
+Prerequisites are three distinct, completed baseline capture IDs in one private
+Universe, its unchanged frozen seed, and the expected SHA-256 of
+`src/core/resources/engineering-preparation.ts`. Each capture must retain an
+identity-verified, group-exit-confirmed, full passing report. The three captures
+must agree on artifact, revision, evaluator, manifest, comparator and all fifteen
+measurement regions. Replaying one capture three times is not three attempts;
+identical report hashes across distinct attempts are expected for deterministic
+counts.
+
+All three captures must use the same workload version. V2 calibration requires
+both completed during-call qualification pairs; v1 evidence remains readable
+without claiming those checks. V1/v2 comparisons are non-comparable. A new
+installed workload changes its implementation digest and needs fresh captures;
+old receipts or calibration files are not migrated into stronger evidence.
+
+```sh
+ashlr universe preparation-measurement-calibrate hub-baseline \
+  --root /absolute/private/universe \
+  --capture baseline-001 --capture baseline-002 --capture baseline-003 \
+  --expected-source-digest <64-lowercase-hex-sha256> --json
+```
+
+Replace the digest placeholder before running. JSON stdout is a deterministic
+calibration descriptor containing the baseline file inventory, workload and native
+tool identities, capture provenance hashes, scenario vector and process total.
+Saving stdout to a file is a separate caller-owned write; the command itself
+does not create files. The descriptor omits private capture and bundle directories
+and report prose, but retains native executable paths and repository-relative
+inventory. Keep it private if those names reveal sensitive project structure.
+
+Register and capture an explicitly chosen candidate as a separate Universe seed
+using the existing registration and capture procedures. This comparison command
+does not prepare that candidate or request new execution:
+
+```sh
+ashlr universe preparation-measurement-compare hub-candidate \
+  --root /absolute/private/universe --capture candidate-001 \
+  --calibration /absolute/private/baseline-calibration.json --json
+```
+
+The supplied calibration file must be regular, nonsymlink UTF-8 JSON at a normalized
+absolute path, bounded to 2 MiB. Comparison verifies retained candidate custody,
+matching workload implementation and native identities, and the current seed
+inventory against its recorded artifact. Only preparation-source content may
+differ from the baseline: added, removed, executable-mode-changed, or unrelated
+modified files make the candidate non-comparable. Candidate and baseline may use
+different Universe manifests; matching workload and bounded artifact scope, not
+matching experiment names, govern this diagnostic comparison.
+
+The process total adds four leaf and eleven workflow request regions once. Blob
+counts are subsets and fixture-owned process groups are separate. Any increase in
+a region's process **or** blob count is `regressed`, even if the aggregate improves.
+`improved` requires a strictly lower total and no region regression; equal totals
+without regressions are `unchanged`. Failed or partial reports are never promoted
+to an improvement. JSON retains exact region deltas; positive means more processes.
+
+Exit status is 0 for emitted calibration or an improved/unchanged comparison,
+1 for regressed, non-comparable or unavailable evidence, and 2 for invalid options.
+Failures use fixed reason codes, never retry work, and never disclose raw exception
+messages. Verify the indicated evidence or mismatch rather than treating a failure
+as permission to run another capture.
+
+Both SDK APIs are exported from `@ashlr/hub/universe`:
+`calibratePreparationMeasurements` and `compareCapturedPreparationMeasurement`.
+The pure `comparePreparationMeasurements` and `comparePreparationScenarioVectors`
+helpers perform arithmetic only; they do not establish capture provenance.
+
+**Trust boundary:** a caller-supplied descriptor is diagnostic input, not installed
+acceptance authority. Parsing validates structure and internal consistency, not
+authorship. Historical capture identity is not current provider health. These
+commands do not themselves authorize autonomous scoring. V2 supplies the fixed
+candidate-linked during-call checks, but installed scoring-baseline pins and a
+commissioned end-to-end optimization acceptance run remain necessary. These two
+mutation cases are not universal correctness or hostile-code security proof.
+This diagnostic comparison alone does not change campaign or delivery rules.
+
+### Calibrated preparation scoring
+
+The separate closed evaluator `preparation-process-score-v1` connects the fixed
+qualified workload to ordinary Universe evaluation. It is unavailable until an
+explicit local authoring operation installs a matching calibrated package.
+Ordinary builds do not invent a baseline or install this package. The measurement
+evaluator remains diagnostic-only.
+
+The score is the integer total of the original fifteen process regions. A full
+v2 report, both during-call qualifications, unchanged runtime/native identities,
+and an unchanged before/after candidate inventory are required. Only the content
+of `src/core/resources/engineering-preparation.ts` may differ from calibration;
+extra, missing, mode-changed or unrelated modified files are refused before the
+workload starts. A process or blob-count regression in any region fails even when
+the aggregate improves. Equality passes with no improvement; setup and qualification
+counts do not enter the score. The outer owner alone completes process custody
+and emits evaluation output after final identity and deadline checks.
+An unchanged baseline artifact must reproduce the entire calibrated vector;
+different counts are baseline drift, not credit for an improvement without a
+source change.
+
+Before the native workload starts, a separately tracked compiler process checks
+the selected source against the complete pinned TypeScript project, including
+reverse consumers. Its virtual filesystem resolves only packaged sources,
+declarations and package metadata; it never imports candidate code or falls back
+to the live checkout. Compiler errors, suppression directives, changed identities,
+timeouts and unconfirmed process settlement refuse the evaluation. This phase has
+a 60-second ceiling within the original evaluation deadline, a 1-GiB V8 heap
+ceiling and bounded output. It does not replace the native behavioral checks.
+
+The manifest must use metric `preparation_processes`, direction `minimize`, and
+an integer `minImprovement` of at least one. Its optional `budget.workerTimeoutMs`
+allows an explicit worker phase of at most 900,000 ms within a whole trial of at
+most 2,700,000 ms; evaluation remains at most 1,800,000 ms. Each phase cap must fit
+the whole trial. Setup and final checks consume that allowance, and the original
+campaign deadline can shorten it. Omission preserves the legacy shared 900,000-ms
+trial ceiling. Other evaluators cannot use the split-budget field. The workspace
+inspector shows the worker ceiling separately when configured.
+
+Trusted local authoring from a source checkout with development dependencies uses
+`buildPreparationScoringBuiltin` from `scripts/build-preparation-score.mjs` after
+compiling the core. This builder is not included in the runtime npm package. It requires an
+explicit frozen `measurementDirectory` and the existing calibration request
+`{root, universeId, captureIds, expectedSourceDigest}` with three genuine retained
+captures. This operation writes a private fixed package under
+`dist/core/universe/builtins/preparation-score`; it refuses a nonempty destination
+instead of overwriting it. It copies the original nine measurement files and their
+manifest verbatim, then separately pins the score entry, compiler child, full
+compiler-project snapshot and calibration. Authoring must compile the unchanged
+baseline successfully using the closed project before publication. Finish
+all workload-affecting code before collecting the matching captures. Retain the
+original bundle and evidence for rollback; do not substitute newly rebuilt bytes.
+
+Production authoring also requires the full calibrated checkout inventory, not
+only the editable file's hash. It checks every calibrated file's bytes, size and
+executable mode before and after capture, and rejects captured checkout inputs
+that are absent from that inventory. Deleting or weakening a reverse consumer,
+changing configuration or adding an untracked ambient declaration cannot silently
+weaken the compiler gate. Installed `node_modules` declarations and the compiler
+are separately trusted authoring inputs pinned into the resulting package; they
+are not described as calibrated repository source.
+
+The lower-level `buildPreparationScoreBundle` is a test/release-authoring helper;
+accepting a supplied descriptor and compiler project there does not prove capture
+provenance. The SDK
+`scorePreparationProcesses` and inventory helpers are pure policy utilities, not
+authority to publish a score. A packaged native baseline, improved candidate and
+end-to-end delivery still require their own acceptance evidence. No calibrated
+package or live autonomous optimization is claimed by source support alone.
+
+### Built-in trial shutdown custody
+
+New ordinary trials using the installed builtin also retain a private dispatch
+intent before starting their evaluator. The intent binds the Universe, run,
+trial, frozen candidate, manifest, comparator and installed implementation.
+This is process custody, not an evaluation score or acceptance receipt.
+
+Only an explicit `not-started` or `group-exit-confirmed` result can settle the
+intent. A missing result, uncertain controller or inner process group, thrown
+post-dispatch integrity check, or failed settlement publication retains the
+trial scratch and activity evidence. The current batch cancels cooperatively
+and drains its siblings before returning; it does not select winners or start
+another batch. New execution for that same Universe is held, including a new
+generation under an already-held campaign lease. Separately acquired Universes
+remain independent; enclosing portfolio ownership rules are unchanged.
+
+Confirmed failure or malformed output can settle custody without passing the
+trial. Scratch removal remains best-effort: installed fixture seeds contain
+read-only directories that can prevent recursive removal even after confirmed
+shutdown. Retained scratch alone is not an unresolved invocation; the custody
+journal distinguishes these states. Automatic reclamation of those settled
+fixtures is not implemented by this change. `not-started` can never supply a
+score. Records are bounded, immutable,
+and kept under `builtin-trial-custody` in that Universe's private store. No
+automatic evidence deletion or uncertain retry is provided. Preserve unresolved
+records and scratch for investigation; removing a journal or extending a budget
+does not prove that the original process groups stopped.
+
+Legacy command evaluators keep their existing behavior. A missing journal on
+older stores remains compatible, but does not retrospectively attest older
+builtin trials whose scratch may already have been removed.
 
 ## Architecture that can absorb better models
 
