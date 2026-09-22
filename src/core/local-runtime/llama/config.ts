@@ -41,12 +41,27 @@ export const DEFAULT_LLAMA_SLOTS = 4;
  * did not fit in its context before a single turn began, which is a failure
  * with no useful error attached.
  *
- * 262,144 is Qwen3.8 27B's native trained context, not a guess. Measured on a
- * 128 GB machine: raising `-c` from 131,072 to 262,144 moved resident memory
- * from 46.2 GB to 43.4 GB — no increase at all, because Qwen3.8 runs linear
- * attention on 48 of its 64 layers and only 16 carry a full KV cache. Verified
- * with a real agent turn afterwards: correct edit, prefix cache still reusing
- * (23,301 cold, then 56 and 306 tokens).
+ * 262,144 is Qwen3.8 27B's native trained context.
+ *
+ * CORRECTION. This comment previously claimed raising `-c` from 131,072 to
+ * 262,144 cost no extra memory, citing 46.2 GB falling to 43.4 GB. That
+ * comparison was invalid: the 46.2 GB reading came from a process that had been
+ * serving for hours with a populated cache, the 43.4 GB from one measured
+ * seconds after startup with an empty one. Warm against cold, no control.
+ *
+ * The arithmetic contradicts it. From the model card — 4 KV heads, 256 head
+ * dim, fp16 K and V, and 16 of 64 layers carrying a full KV cache — the cache
+ * costs 64 KiB per token: 8 GiB at 131,072 and 16 GiB at 262,144. The same
+ * process later measured 47.0 GB resident, consistent with the cache filling.
+ *
+ * So the honest statement is: this costs up to ~8 GiB more than 131,072 once
+ * the cache is populated, which a 128 GB machine carries comfortably. The 48
+ * linear-attention layers do make it far cheaper than a full-attention model of
+ * this size would be, but "free" was wrong.
+ *
+ * Verified separately and still true: a real agent turn at this setting made
+ * the correct edit with the prefix cache reusing (23,301 cold, then 56 and 306
+ * tokens).
  *
  * Operators on less memory override it with `--ctx` or
  * `models.llamaServer.contextSize`.
