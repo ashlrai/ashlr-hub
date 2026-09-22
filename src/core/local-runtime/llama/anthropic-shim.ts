@@ -47,6 +47,8 @@
  * answer `DONE` without doing the work.
  */
 
+import type { LocalAgentRequestDefaults } from './config.js';
+
 export interface AnthropicTextBlock {
   readonly type: 'text';
   readonly text: string;
@@ -164,4 +166,68 @@ export function normaliseAnthropicRequest<T extends AnthropicRequestLike>(body: 
   const system = existingSystemBlocks(body.system);
   for (const text of lifted) system.push({ type: 'text', text });
   return { ...body, system, messages: kept };
+}
+
+/**
+ * Apply the operator's per-request defaults to an Anthropic body, WITHOUT
+ * overriding anything the client already set.
+ *
+ * WHERE THE REASONING EFFORT GOES, and why it is not the obvious spelling.
+ *
+ * `reasoning_effort` is a top-level field on llama-server's OpenAI-compatible
+ * endpoint. On `/v1/messages` — the endpoint this lane actually carries — it
+ * is silently ignored. That was measured rather than assumed, using the
+ * template's own fatal value as the probe: `high` is not in the template's
+ * accepted set, so a request that REACHES the template answers 500, and one
+ * that does not answers 200.
+ *
+ *   POST /v1/chat/completions  {reasoning_effort: 'high'}                  -> 500  (reaches template)
+ *   POST /v1/messages          {reasoning_effort: 'high'}                  -> 200  (DROPPED)
+ *   POST /v1/messages          {chat_template_kwargs:{reasoning_effort:'high'}} -> 500  (reaches template)
+ *   POST /v1/messages          {output_config:{effort:'high'}}             -> 200  (DROPPED)
+ *
+ * So the carrier on this lane is `chat_template_kwargs`, and the top-level
+ * spelling would have been a no-op that looked exactly like a working
+ * setting. The last line is why Claude Code cannot ask for this itself: the
+ * CLI sends `output_config.effort` on every request and llama-server drops
+ * it, which is also why sending it never triggers the `high` exception.
+ *
+ * Sampling rides at the top level because `temperature`, `top_p` and `top_k`
+ * ARE part of the Anthropic request schema and survive the crossing.
+ *
+ * Returns the SAME OBJECT REFERENCE when it adds nothing, because
+ * `normaliseMessagesBody` uses identity to decide whether to forward the
+ * client's original bytes untouched.
+ */
+export function applyLocalAgentDefaults<T extends AnthropicRequestLike>(
+  body: T,
+  defaults: LocalAgentRequestDefaults,
+): T {
+  if (!body || typeof body !== 'object') return body;
+
+  const patch: Record<string, unknown> = {};
+
+  // Sampling: top-level, and only when the client left it out entirely.
+  if (defaults.temperature !== null && body['temperature'] === undefined) {
+    patch['temperature'] = defaults.temperature;
+  }
+  if (defaults.topP !== null && body['top_p'] === undefined) patch['top_p'] = defaults.topP;
+  if (defaults.topK !== null && body['top_k'] === undefined) patch['top_k'] = defaults.topK;
+
+  // Reasoning effort: through chat_template_kwargs, merged rather than
+  // replaced so an operator's other template kwargs survive, and never
+  // overriding an effort the client already chose.
+  if (defaults.reasoningEffort !== null) {
+    const existing = body['chat_template_kwargs'];
+    const kwargs =
+      typeof existing === 'object' && existing !== null && !Array.isArray(existing)
+        ? (existing as Record<string, unknown>)
+        : undefined;
+    if (kwargs?.['reasoning_effort'] === undefined) {
+      patch['chat_template_kwargs'] = { ...(kwargs ?? {}), reasoning_effort: defaults.reasoningEffort };
+    }
+  }
+
+  if (Object.keys(patch).length === 0) return body;
+  return { ...body, ...patch };
 }

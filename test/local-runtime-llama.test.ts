@@ -42,6 +42,8 @@ import {
   baseUrlFromRecord,
   buildLlamaServerArgs,
   isLoopbackHost,
+  NO_LOCAL_AGENT_DEFAULTS,
+  resolveLocalAgentDefaults,
   originFor,
   resolveLlamaRuntimeConfig,
   resolveLlamaServerBaseUrl,
@@ -358,7 +360,33 @@ describe('llama-server launch argv', () => {
       '-c', '65536',
       '--cont-batching',
       '--cache-prompt',
+      '--metrics',
     ]);
+  });
+
+  // Regression: a runtime launched without `--metrics` answers 501 on
+  // /metrics ("Start it with `--metrics`", llama-server's own words) while
+  // /props and /slots answer normally — so the gap is invisible until someone
+  // tries to read cumulative token counters.
+  it('enables the metrics endpoint', () => {
+    expect(
+      buildLlamaServerArgs(
+        { host: '127.0.0.1', port: 8080, slots: 4, context: 65_536, extraArgs: [] },
+        '/blob',
+      ),
+    ).toContain('--metrics');
+  });
+
+  // The asymmetry is deliberate and worth pinning: `--metrics` exposes
+  // read-only counters, `--props` would let anything that reaches the port
+  // rewrite sampling on a live launchd-managed server via POST /props.
+  it('does NOT enable POST /props', () => {
+    expect(
+      buildLlamaServerArgs(
+        { host: '127.0.0.1', port: 8080, slots: 4, context: 65_536, extraArgs: [] },
+        '/blob',
+      ),
+    ).not.toContain('--props');
   });
 
   it('appends operator extras verbatim, after the managed flags', () => {
@@ -845,5 +873,50 @@ describe('launch agent plist', () => {
     const plist = buildLaunchAgentPlist(spec, '/Users/a&b/launch.sh');
     expect(plist).toContain('/Users/a&amp;b/launch.sh');
     expect(plist).not.toContain('/Users/a&b/launch.sh');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Local agent request defaults
+// ---------------------------------------------------------------------------
+
+describe('resolveLocalAgentDefaults', () => {
+  const cfg = (agentDefaults: unknown) =>
+    ({ models: { llamaServer: { agentDefaults } } }) as never;
+
+  it('changes nothing when the operator configured nothing', () => {
+    expect(resolveLocalAgentDefaults(undefined)).toEqual(NO_LOCAL_AGENT_DEFAULTS);
+    expect(resolveLocalAgentDefaults(cfg(undefined))).toEqual(NO_LOCAL_AGENT_DEFAULTS);
+  });
+
+  it('accepts the three efforts the chat template actually implements', () => {
+    for (const effort of ['low', 'medium', 'xhigh'] as const) {
+      expect(resolveLocalAgentDefaults(cfg({ reasoningEffort: effort })).reasoningEffort)
+        .toBe(effort);
+    }
+  });
+
+  // THE trap, and the reason this is a closed list rather than a passthrough:
+  // 'high' is the spelling every other vendor uses and the one Claude Code
+  // itself sends, and Qwen3.8's template answers it with a 500 raised BEFORE
+  // inference — a dead turn with no partial output. 'bogus' is the control:
+  // if it were accepted, this test would prove nothing about 'high'.
+  it('refuses the fatal "high", exactly as it refuses junk', () => {
+    expect(resolveLocalAgentDefaults(cfg({ reasoningEffort: 'high' })).reasoningEffort).toBeNull();
+    expect(resolveLocalAgentDefaults(cfg({ reasoningEffort: 'bogus' })).reasoningEffort).toBeNull();
+    expect(resolveLocalAgentDefaults(cfg({ reasoningEffort: 42 })).reasoningEffort).toBeNull();
+  });
+
+  it('range-gates sampling and drops anything out of bounds', () => {
+    expect(resolveLocalAgentDefaults(cfg({ temperature: 0.2, topP: 0.9, topK: 20 })))
+      .toEqual({ reasoningEffort: null, temperature: 0.2, topP: 0.9, topK: 20 });
+    expect(resolveLocalAgentDefaults(cfg({ temperature: 99, topP: 4, topK: 0 })))
+      .toEqual(NO_LOCAL_AGENT_DEFAULTS);
+  });
+
+  it('survives junk in the config without throwing', () => {
+    for (const junk of ['string', 42, [], null]) {
+      expect(resolveLocalAgentDefaults(cfg(junk))).toEqual(NO_LOCAL_AGENT_DEFAULTS);
+    }
   });
 });

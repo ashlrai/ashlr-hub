@@ -8,8 +8,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   anthropicContentText,
+  applyLocalAgentDefaults,
   normaliseAnthropicRequest,
 } from '../src/core/local-runtime/llama/anthropic-shim.js';
+import { NO_LOCAL_AGENT_DEFAULTS } from '../src/core/local-runtime/llama/config.js';
 
 describe('normaliseAnthropicRequest', () => {
   it('hoists the system turn Claude Code puts second, preserving both texts', () => {
@@ -142,5 +144,64 @@ describe('normaliseAnthropicRequest', () => {
     expect(anthropicContentText('plain')).toBe('plain');
     expect(anthropicContentText([{ type: 'text', text: 'a' }, { type: 'text', text: 'b' }])).toBe('a\nb');
     expect(anthropicContentText(undefined)).toBe('');
+  });
+});
+
+describe('applyLocalAgentDefaults', () => {
+  const none = NO_LOCAL_AGENT_DEFAULTS;
+
+  it('returns the SAME REFERENCE when nothing is configured', () => {
+    // normaliseMessagesBody uses identity to decide whether to forward the
+    // client's original bytes, so this is behaviour, not an optimisation.
+    const body = { model: 'local', messages: [] };
+    expect(applyLocalAgentDefaults(body, none)).toBe(body);
+  });
+
+  // MEASURED: on /v1/messages a top-level `reasoning_effort` is dropped by
+  // llama-server, while chat_template_kwargs.reasoning_effort reaches the
+  // template. Sending the obvious spelling would be a silent no-op.
+  it('carries reasoning effort through chat_template_kwargs, not top level', () => {
+    const out = applyLocalAgentDefaults(
+      { model: 'local', messages: [] },
+      { ...none, reasoningEffort: 'low' },
+    ) as Record<string, unknown>;
+    expect(out['chat_template_kwargs']).toEqual({ reasoning_effort: 'low' });
+    expect(out['reasoning_effort']).toBeUndefined();
+  });
+
+  it('merges into chat_template_kwargs the client already sent', () => {
+    const out = applyLocalAgentDefaults(
+      { model: 'local', messages: [], chat_template_kwargs: { enable_thinking: true } },
+      { ...none, reasoningEffort: 'medium' },
+    ) as Record<string, unknown>;
+    expect(out['chat_template_kwargs']).toEqual({
+      enable_thinking: true,
+      reasoning_effort: 'medium',
+    });
+  });
+
+  it('never overrides an effort or sampling value the client chose', () => {
+    const body = {
+      model: 'local',
+      messages: [],
+      temperature: 0.1,
+      chat_template_kwargs: { reasoning_effort: 'xhigh' },
+    };
+    const out = applyLocalAgentDefaults(body, {
+      reasoningEffort: 'low', temperature: 0.9, topP: 0.5, topK: 7,
+    }) as Record<string, unknown>;
+    expect(out['temperature']).toBe(0.1);
+    expect(out['chat_template_kwargs']).toEqual({ reasoning_effort: 'xhigh' });
+    // top_p/top_k were absent, so those DO get filled in.
+    expect(out['top_p']).toBe(0.5);
+    expect(out['top_k']).toBe(7);
+  });
+
+  it('puts sampling at the top level, where the Anthropic schema carries it', () => {
+    const out = applyLocalAgentDefaults(
+      { model: 'local', messages: [] },
+      { ...none, temperature: 0.2, topP: 0.9, topK: 20 },
+    ) as Record<string, unknown>;
+    expect(out).toMatchObject({ temperature: 0.2, top_p: 0.9, top_k: 20 });
   });
 });
