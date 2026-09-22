@@ -351,7 +351,12 @@ describe('GET /api/verse/bootstrap', () => {
     };
     expect(Object.keys(body).sort()).toEqual(['dispatchEnabled', 'localRuntime', 'projects', 'seats', 'sessions']);
     expect(body.seats.map((s) => s.id)).toEqual(['claude']);
-    expect(body.seats[0]?.models[0]?.id).toBe('claude-opus-5');
+    // The FIRST model is what a new session defaults to, so it must be the
+    // newest the catalog offers — not whichever was newest when this was
+    // written. Pinning a specific id here is how this test broke the moment
+    // Fable 5.1 was added, and how the Codex list sat stale at gpt-5.5 while
+    // the catalog had already moved to the GPT-6 family.
+    expect(body.seats[0]?.models[0]?.id).toBe('claude-fable-5-1');
     expect(body.projects).toEqual([{ path: repo, name: path.basename(repo), enrolled: true }]);
     expect(body.sessions).toEqual([]);
     expect(body.dispatchEnabled).toBe(true);

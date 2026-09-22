@@ -99,7 +99,42 @@
   font-weight: var(--font-weight-medium);
   color: var(--text-tertiary);
 }
-.seatList, .models, .windows, .runningList { list-style: none; margin: 0; padding: 0; }
+/* Provider groups and individual seats are both disclosures. The marker is
+   the same triangle the old "more windows" row used; the state lives in
+   aria-expanded, not in the triangle. */
+.groupToggle,
+.seatToggle {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  min-height: var(--control-h-xs);
+  text-align: left;
+  color: inherit;
+}
+.groupToggle { font: inherit; letter-spacing: inherit; }
+.seatToggle { min-height: var(--density-row, 32px); }
+.groupToggle:hover,
+.seatToggle:hover { color: var(--text-secondary); }
+.groupToggle:focus-visible,
+.seatToggle:focus-visible {
+  outline: 2px solid var(--accent-500);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
+}
+.twist {
+  flex: none;
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+.twist[data-open] { transform: rotate(90deg); }
+.groupToggle .count { margin-left: auto; }
+.seatList, .models, .runningList { list-style: none; margin: 0; padding: 0; }
 .seat {
   padding-left: var(--space-3);
   border-left: 2px solid var(--verse-engine, var(--border-subtle));
@@ -111,6 +146,7 @@
 .engine-local { --verse-engine: var(--engine-local, #7c5cff); }
 
 .seatHead { display: flex; align-items: center; justify-content: space-between; gap: var(--space-2); min-width: 0; }
+.seatToggle .seatLabel { flex: 1; color: var(--text-primary); }
 .seatLabel {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -153,37 +189,7 @@
 }
 
 .seatWindows { margin-top: var(--space-2); display: flex; flex-direction: column; gap: var(--space-2); }
-.windows { display: flex; flex-direction: column; gap: var(--space-2); margin-top: var(--space-2); }
-.credits { margin: 0; font-size: var(--text-2xs-size, 11px); line-height: var(--text-2xs-line, 14px); color: var(--text-tertiary); }
-
-/* Claude has three windows and the per-model one is usually the binding one.
-   The other two stay one disclosure away — reachable without leaving the
-   screen, and silent until asked for. */
-.more { min-width: 0; }
-.moreSummary {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  min-height: var(--control-h-xs);
-  font-size: var(--text-2xs-size, 11px);
-  line-height: var(--text-2xs-line, 14px);
-  color: var(--text-tertiary);
-  cursor: pointer;
-  list-style: none;
-}
-.moreSummary::-webkit-details-marker { display: none; }
-.moreSummary::before {
-  content: '';
-  width: 0;
-  height: 0;
-  border-left: 4px solid currentColor;
-  border-top: 3px solid transparent;
-  border-bottom: 3px solid transparent;
-  transition: transform var(--duration-fast) var(--ease-standard);
-}
-.more[open] > .moreSummary::before { transform: rotate(90deg); }
-.moreSummary:hover { color: var(--text-secondary); }
-.moreSummary:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 2px; border-radius: var(--radius-xs); }
+.credits { margin: var(--space-2) 0 0; font-size: var(--text-2xs-size, 11px); line-height: var(--text-2xs-line, 14px); color: var(--text-tertiary); }
 
 /* ---- local runtime ----------------------------------------------------- */
 .local { display: flex; flex-direction: column; gap: var(--space-1); }
@@ -294,6 +300,7 @@
      meter fills themselves are the Meter primitive's, whose transition reads
      --duration-base — already collapsed by the token file under both
      triggers — so only the disclosure marker needs naming here. */
-  :root:not([data-motion="full"]) .moreSummary::before { transition: none; }
+  :root:not([data-motion="full"]) .twist { transition: none; }
 }
 :root[data-motion="reduce"] .runningDot { animation: none; }
+:root[data-motion="reduce"] .twist { transition: none; }
