@@ -64,7 +64,17 @@ type NativeEngine = Exclude<VerseEngine, 'local'>;
 
 export const VERSE_NATIVE_MODELS: Readonly<Record<NativeEngine, readonly VerseModelOption[]>> = {
   claude: [
+    // Every id below was checked against the CLI's own model catalog, not
+    // recalled. The discriminator: an id the catalog does not know answers
+    // `[claude-code:unrecognized_model]` and warns that it "isn't described by
+    // this version's model catalog"; a known id goes straight through to auth.
+    // Checked and REJECTED on this machine, so do not add them back from
+    // memory: claude-sonnet-4-8, claude-haiku-4-1.
+    { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
+    { id: 'claude-fable-5', label: 'Claude Fable 5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
     { id: 'claude-opus-5', label: 'Claude Opus 5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
+    { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
+    { id: 'claude-opus-4-5', label: 'Claude Opus 4.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
     { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
     { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
   ],
