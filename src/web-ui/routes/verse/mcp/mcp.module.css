@@ -1,0 +1,183 @@
+/**
+ * routes/verse/mcp/mcp.module.css — MCP + CLI management styling.
+ *
+ * Follows docs/VERSE-DESIGN-V2.md, same as usage.module.css: monochrome
+ * ground, 1px hairlines and whitespace for separation (no shadows, no nested
+ * rounded boxes), display face for headings, mono for anything the operator
+ * has to read character-by-character — which here is the whole point, because
+ * the command line is the thing being disclosed.
+ */
+
+.section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  background: var(--bg-canvas);
+}
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-6);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.panelHead {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.panelTitle {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-md-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.panelNote,
+.muted {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+
+/* A fact that changes what the operator should do. Never colour alone: it
+   carries a word ("Version drift") as well as the rule. */
+.alert {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-warning, var(--border-strong));
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.alertTitle {
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+}
+
+.seatList,
+.rowList {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.seatRow,
+.healthRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.seatHead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.seatLabel {
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.engineTag,
+.code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary, var(--text-secondary));
+}
+
+/* The machine-readable code is shown BESIDE the sentence, never as it. */
+.code {
+  letter-spacing: 0;
+}
+
+.count {
+  font-size: var(--text-sm-size);
+  color: var(--text-secondary);
+}
+
+/* The disclosure: everything the operator must read before confirming. */
+.disclosure {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+}
+
+.commandLine {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+  word-break: break-all;
+  white-space: pre-wrap;
+  margin: 0;
+}
+
+.envList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.envItem {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+
+.warnList {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  font-size: var(--text-sm-size);
+  color: var(--text-primary);
+}
+
+.digest {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary, var(--text-secondary));
+  word-break: break-all;
+}
+
+.actions {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  flex-wrap: wrap;
+}
