@@ -264,12 +264,12 @@ const MAX_PATH_CHARS = 4096;
  * sanitizePublicJson() rewrites the home directory as `~` on every outbound
  * payload, so a project path the UI read from bootstrap comes back as
  * `~/...`. Expand it here so round-trips validate against the real path.
+ *
+ * Defined in `path-guard.ts` (the deny-root checker needs it before anything
+ * else runs) and re-exported here, which is the import path every existing
+ * caller and test already uses.
  */
-export function expandHomePrefix(path: string): string {
-  if (path === '~') return homedir();
-  if (path.startsWith('~/')) return join(homedir(), path.slice(2));
-  return path;
-}
+export { expandHomePrefix };
 
 function parseCreateRequest(body: Record<string, unknown>, res: ServerResponse): VerseCreateSessionRequest | null {
   const projectPath = body['projectPath'];

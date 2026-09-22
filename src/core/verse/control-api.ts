@@ -87,7 +87,12 @@ import {
   type DaemonPauseReadResult,
 } from '../daemon/pause.js';
 import { buildRollup } from '../observability/rollup.js';
-import { expandHomePrefix } from './verse-api.js';
+import {
+  checkGuardedPath,
+  ENROLLMENT_PHRASING,
+  isDirectoryPath,
+  type GuardedPathCheck,
+} from './path-guard.js';
 import { buildVerseAccountsSnapshot, getVerseAccountCollector } from './accounts.js';
 import { collectVerseLocalModels } from './local-models.js';
 import {
@@ -680,112 +685,20 @@ export function readVerseScope(): VerseScope {
     repos: snapshot.repos.map((path) => ({
       path,
       name: basename(path) || path,
-      exists: isDirectory(path),
+      exists: isDirectoryPath(path),
     })),
   };
 }
 
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-/** Fully resolved physical path, or null when it cannot be resolved. */
-function physicalPath(path: string): string | null {
-  try {
-    return existsSync(path) ? realpathSync.native(path) : null;
-  } catch {
-    return null;
-  }
-}
-
-function isUnder(path: string, root: string): boolean {
-  const r = resolvePath(root);
-  const p = resolvePath(path);
-  return p === r || p.startsWith(r.endsWith(sep) ? r : r + sep);
-}
-
-/** Longest path a scope request may carry. */
-const MAX_SCOPE_PATH_CHARS = 4096;
-
-export type VerseScopePathCheck =
-  | { ok: true; path: string }
-  | { ok: false; error: string };
-
-/**
- * A directory autonomous scope may never cover, and how far the ban reaches.
- *
- *  - `exact`    — only the root itself (the filesystem root: everything is
- *                 "under" it, so containment would reject every path).
- *  - `ancestor` — the root itself, plus any directory that CONTAINS it. The
- *                 home directory: ordinary repos live inside it, so being
- *                 under it is fine, but enrolling `/Users` (which would drag
- *                 the whole home in) is not.
- *  - `both`     — the root itself, anything under it, and anything containing
- *                 it. Used for the two control directories.
- */
-interface ScopeDenyRoot {
-  path: string;
-  label: string;
-  reach: 'exact' | 'ancestor' | 'both';
-}
-
-/**
- * The roots autonomous scope must never cover, most-meaningful message first.
- *
- * `~/.ashlr` is the agent's own control directory: config.json (which can hold
- * provider tokens in plaintext), enrollment.json, the KILL sentinel, and the
- * private 0600 `verse/*.launch.json` launcher records. `isEnrolled()` is the
- * gate on the mcp-native write tools, so enrolling it would hand those tools
- * the very files that bound them.
- *
- * Re-resolved from `homedir()` on every call so a relocated HOME (tests, a
- * moved home dir) is honored — the same rule config.ts follows.
- */
-function scopeDenyRoots(artifactsRoot: string): ScopeDenyRoot[] {
-  const home = resolvePath(homedir());
-  return [
-    { path: resolvePath(sep), label: 'the filesystem root', reach: 'exact' },
-    { path: home, label: 'your home directory', reach: 'ancestor' },
-    { path: join(home, '.ashlr'), label: '~/.ashlr', reach: 'both' },
-    { path: artifactsRoot, label: '~/.codex/artifacts', reach: 'both' },
-  ];
-}
-
-/**
- * First deny rule `candidate` trips, or null. `verb` distinguishes the lexical
- * pass ("is under") from the physical one ("resolves under") so the operator
- * can tell a plain path from a symlink escape.
- */
-function deniedScopeRoot(
-  candidate: string,
-  roots: readonly ScopeDenyRoot[],
-  verb: 'is' | 'resolves',
-): string | null {
-  for (const root of roots) {
-    if (candidate === root.path) {
-      return `${root.label} cannot be enrolled as autonomous scope`;
-    }
-    if (root.reach === 'both' && isUnder(candidate, root.path)) {
-      return `path ${verb === 'is' ? 'is' : 'resolves'} under ${root.label} and cannot be enrolled`;
-    }
-    if (root.reach !== 'exact' && isUnder(root.path, candidate)) {
-      return `path contains ${root.label} and cannot be enrolled`;
-    }
-  }
-  return null;
-}
+export type VerseScopePathCheck = GuardedPathCheck;
 
 /**
  * Validate a scope path before it reaches the enrollment registry.
  *
  * Rejects: relative paths, NUL bytes, over-long paths, and anything that
  * resolves — LEXICALLY OR PHYSICALLY — into (or around) one of the forbidden
- * roots above: `~/.codex/artifacts` (codex's scratch checkouts), `~/.ashlr`
- * (the agent's own control directory), the home directory itself, and the
+ * roots: `~/.codex/artifacts` (codex's scratch checkouts), `~/.ashlr` (the
+ * agent's own control directory), the home directory itself, and the
  * filesystem root. Checking both spellings is the symlink-escape guard: a
  * symlink whose target sits inside a forbidden root is rejected even though
  * its own path looks innocent.
@@ -793,55 +706,20 @@ function deniedScopeRoot(
  * `requireDirectory` is true for enroll (you cannot take scope over something
  * that is not there) and false for unenroll (a repo deleted from disk must
  * still be removable from the registry).
+ *
+ * The rule itself now lives in `path-guard.ts`, because workspace roots need
+ * exactly the same forbidden set and a second copy would drift. Only the
+ * WORDING is passed in, so every error string here is unchanged.
  */
 export function checkVerseScopePath(
   raw: string,
   opts: { requireDirectory: boolean; artifactsRoot?: string },
 ): VerseScopePathCheck {
-  if (typeof raw !== 'string' || raw.length === 0) {
-    return { ok: false, error: 'path is required' };
-  }
-  if (raw.length > MAX_SCOPE_PATH_CHARS) {
-    return { ok: false, error: `path must be at most ${MAX_SCOPE_PATH_CHARS} characters` };
-  }
-  if (raw.includes('\0')) {
-    return { ok: false, error: 'path must not contain NUL bytes' };
-  }
-  // sanitizePublicJson rewrites $HOME as `~` on the way out, so a path the UI
-  // read back from us comes in with that spelling. Expand it before checking.
-  const expanded = expandHomePrefix(raw);
-  if (!isAbsolute(expanded)) {
-    return { ok: false, error: 'path must be absolute' };
-  }
-
-  const lexical = resolvePath(expanded);
-  const artifactsRoot = opts.artifactsRoot ?? join(homedir(), '.codex', 'artifacts');
-  const lexicalRoots = scopeDenyRoots(artifactsRoot);
-  const lexicalDenial = deniedScopeRoot(lexical, lexicalRoots, 'is');
-  if (lexicalDenial !== null) return { ok: false, error: lexicalDenial };
-
-  // Physical identity: resolves symlinks, so an escape into a forbidden root
-  // is caught even when the spelling hides it. Both sides are resolved — the
-  // home directory itself can sit behind a symlink (macOS /var → /private/var),
-  // and comparing a resolved path against an unresolved root would miss.
-  const physical = physicalPath(lexical);
-  if (physical !== null) {
-    const physicalRoots = lexicalRoots.map((root) => ({
-      ...root,
-      path: physicalPath(root.path) ?? root.path,
-    }));
-    const physicalDenial = deniedScopeRoot(physical, physicalRoots, 'resolves');
-    if (physicalDenial !== null) return { ok: false, error: physicalDenial };
-  }
-
-  if (opts.requireDirectory && !isDirectory(lexical)) {
-    return { ok: false, error: 'path must be an existing directory' };
-  }
-  // Return the PHYSICAL path when one exists: that is what enroll() stores in
-  // the registry, so the mutation result and the scope listing agree and the
-  // UI never has to reconcile two spellings of the same repo. A path that is
-  // gone (unenroll) keeps its lexical spelling — unenroll() matches both.
-  return { ok: true, path: physical ?? lexical };
+  return checkGuardedPath(raw, {
+    requireDirectory: opts.requireDirectory,
+    phrasing: ENROLLMENT_PHRASING,
+    ...(opts.artifactsRoot === undefined ? {} : { artifactsRoot: opts.artifactsRoot }),
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -154,6 +154,237 @@ export interface VerseProject {
   enrolled: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Workspaces (V2.2, ADDITIVE) — see docs/VERSE-WORKSPACES.md §1.
+//
+// A session bound to ONE directory cannot express "this service plus the
+// shared library it depends on", which is most real work. A workspace is a
+// NAMED set of roots with exactly one marked primary.
+//
+// `VerseSession.projectPath` keeps its meaning — it IS the primary root — so
+// every session record, adapter and test written before workspaces existed
+// still loads and still runs. Nothing rewrites saved chat history.
+//
+// ENROLLMENT IS NOT PART OF THIS SHAPE ON PURPOSE. A workspace says what a
+// session may REACH; `~/.ashlr/enrollment.json` says what the AUTONOMOUS lane
+// may mutate, and the two are deliberately separate registries. Membership in
+// a workspace grants no enrollment: `enrolled` below is READ from the
+// registry per root and is never written by anything in this feature.
+// ---------------------------------------------------------------------------
+
+/** One directory in a workspace. Exactly one root in a workspace is primary. */
+export interface VerseWorkspaceRoot {
+  /** Absolute, physically resolved path (symlinks followed). */
+  path: string;
+  /** Display name; defaults to the basename. */
+  name: string;
+  /**
+   * The session's cwd and the value `projectPath` carries. Exactly one root
+   * per workspace has this set.
+   */
+  primary: boolean;
+}
+
+/**
+ * A named set of roots.
+ *
+ * ONE TYPE, TWO USES, DELIBERATELY. An interactive session binds to a
+ * workspace to decide what it can reach; the autonomous lane reads the same
+ * workspace as a SECTION — "these repositories collaborate, work on them
+ * together" — when `section` is true. They were not split because the thing
+ * being named is identical in both: a set of directories that belong to one
+ * piece of work. Two registries of named repo groups would drift.
+ *
+ * What is NOT on this type is priority. A repo may belong to several
+ * workspaces, so a per-membership rank would give one repo several
+ * contradictory ranks. Priority is therefore an attribute OF THE REPO, held
+ * once per path in the same registry — see `VerseRootPriority`.
+ */
+export interface VerseWorkspace {
+  id: string;
+  name: string;
+  /** Primary first, then the extras in the order they were added. */
+  roots: VerseWorkspaceRoot[];
+  /**
+   * Offer this workspace to the autonomous lane as a section.
+   *
+   * GRANTS NOTHING. The fleet still reaches only what
+   * `~/.ashlr/enrollment.json` permits; a section can group and order those
+   * repos and nothing else. A member that is not enrolled stays unreachable.
+   */
+  section: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Relative standing of one repository in the autonomous lane's attention.
+ *
+ * ORDERING ONLY, NEVER ADMISSION. `critical` on an unenrolled repo is still
+ * refused by `assertMayMutate`; `low` on an enrolled one is still permitted.
+ * An ordinal rather than a number because the operator's judgement here is
+ * "this matters more than that", and a 0-100 score would invent a precision
+ * nobody holds.
+ *
+ * Absent means `normal`, which is how every repo already behaves — so a
+ * registry with no priorities at all reproduces today's flat list exactly.
+ */
+export type VerseRootPriority = 'critical' | 'high' | 'normal' | 'low';
+
+export const VERSE_ROOT_PRIORITIES: readonly VerseRootPriority[] =
+  ['critical', 'high', 'normal', 'low'];
+
+export const VERSE_DEFAULT_ROOT_PRIORITY: VerseRootPriority = 'normal';
+
+/** Sort weight; lower sorts first. Never a budget, never a multiplier. */
+export const VERSE_ROOT_PRIORITY_RANK: Record<VerseRootPriority, number> = {
+  critical: 0,
+  high: 1,
+  normal: 2,
+  low: 3,
+};
+
+/** One enrolled repository as the autonomy scope view ranks it. */
+export interface VerseAutonomyScopeEntry {
+  path: string;
+  name: string;
+  priority: VerseRootPriority;
+  /** Sections (workspaces with `section: true`) this repo belongs to. */
+  sections: Array<{ id: string; name: string }>;
+  /** True when a focus section is set and this repo is outside it. */
+  outsideFocus: boolean;
+}
+
+/**
+ * The autonomous lane's scope, ORDERED.
+ *
+ * Built by INTERSECTING section membership with the enrollment registry, so
+ * it can only ever be a subset of what enrollment already allows. Sections
+ * add ordering and grouping; they never add reach.
+ */
+export interface VerseAutonomyScopeView {
+  focusSectionId: string | null;
+  focusSectionName: string | null;
+  /** Enrolled repos, most important first. */
+  entries: VerseAutonomyScopeEntry[];
+  /**
+   * Paths a section names that are NOT enrolled. Listed so the blast radius
+   * is legible in both directions — these are exactly the repos a section
+   * does NOT give the fleet.
+   */
+  unenrolledSectionRoots: string[];
+}
+
+/**
+ * Per-root git identity. A turn that edits two repos produces two diffs, so
+ * the transcript has to be able to attribute each file to the right one.
+ *
+ * `remote` is the canonical `owner/repo` for a GitHub origin and null for
+ * anything else — deliberately NOT the raw remote URL, which can carry a
+ * token in its userinfo and would then reach an API response.
+ */
+export interface VerseRootGit {
+  branch: string;
+  /** Count of porcelain entries; 0 is clean. */
+  dirty: number;
+  ahead: number;
+  behind: number;
+  remote: string | null;
+}
+
+/** A root as the client sees it: identity, reachability and honest scope. */
+export interface VerseRootStatus {
+  path: string;
+  name: string;
+  primary: boolean;
+  exists: boolean;
+  /**
+   * Read live from the enrollment registry. FALSE means the interactive lane
+   * still works on this root while the autonomous lane refuses it — being in
+   * a workspace never changes this.
+   */
+  enrolled: boolean;
+  /** Null when the root is not a git repository, or git is unavailable. */
+  git: VerseRootGit | null;
+  /**
+   * False when the session's engine has no way to be granted this root (Grok's
+   * CLI exposes `--cwd` and nothing else). The root is still listed, because
+   * hiding it would misrepresent what the workspace is.
+   */
+  reachable: boolean;
+}
+
+/** GET /api/verse/sessions/:id/roots */
+export interface VerseSessionRootsResponse {
+  sessionId: string;
+  workspaceId: string | null;
+  workspaceName: string | null;
+  roots: VerseRootStatus[];
+  /**
+   * Plain-language facts the UI must show rather than imply: an unreachable
+   * root on a Grok seat, or a root the autonomous lane will refuse.
+   */
+  notes: string[];
+}
+
+/** GET /api/verse/workspaces */
+export interface VerseWorkspacesResponse {
+  workspaces: VerseWorkspace[];
+  /** Live per-root facts, keyed by workspace id, so one read draws the list. */
+  status: Record<string, VerseRootStatus[]>;
+  /** Per-repo priority, keyed by canonical path. Absent key means `normal`. */
+  priorities: Record<string, VerseRootPriority>;
+  focusSectionId: string | null;
+}
+
+/** POST /api/verse/workspaces */
+export interface VerseWorkspaceCreateRequest {
+  name: string;
+  /** Absolute paths. The first is the primary. */
+  roots: string[];
+  /** Also offer this set to the autonomous lane as a section. Default false. */
+  section?: boolean;
+}
+
+/** POST /api/verse/workspaces/:id/update */
+export interface VerseWorkspaceUpdateRequest {
+  name?: string;
+  /** When present, replaces the root set wholesale. First entry is primary. */
+  roots?: string[];
+  section?: boolean;
+}
+
+/** POST /api/verse/workspaces/priority */
+export interface VerseRootPriorityRequest {
+  path: string;
+  priority: VerseRootPriority;
+}
+
+/** POST /api/verse/workspaces/focus — `sectionId: null` clears the focus. */
+export interface VerseFocusSectionRequest {
+  sectionId: string | null;
+}
+
+/** Hard cap on roots per workspace — a blast radius, not a UI limit. */
+export const VERSE_MAX_WORKSPACE_ROOTS = 8;
+
+/**
+ * Every root a session can reach, primary first.
+ *
+ * Pure and total: a record written before workspaces existed has no
+ * `extraRoots` and yields exactly `[projectPath]`, which is what every caller
+ * assumed before this existed.
+ */
+export function verseSessionRoots(
+  session: Pick<VerseSession, 'projectPath' | 'extraRoots'>,
+): string[] {
+  const out = [session.projectPath];
+  for (const root of session.extraRoots ?? []) {
+    if (typeof root === 'string' && root.length > 0 && !out.includes(root)) out.push(root);
+  }
+  return out;
+}
+
 export interface VerseUsage {
   inputTokens: number;
   outputTokens: number;
@@ -167,7 +398,28 @@ export interface VerseUsage {
 export interface VerseSession {
   id: string;
   title: string;
+  /**
+   * The PRIMARY root: the process cwd and the folder every pre-workspace
+   * client already reads. Unchanged in meaning, which is why no session
+   * record ever has to be rewritten.
+   */
   projectPath: string;
+  /**
+   * V2.2 ADDITIVE. Roots BEYOND the primary, pinned at creation time.
+   *
+   * Absent on every record written before workspaces existed, and absent on
+   * a single-root session today — so the on-disk shape of an ordinary chat
+   * does not change at all.
+   *
+   * PINNED, not referenced: a session keeps the roots it was created with
+   * even if the named workspace is later edited or deleted, for the same
+   * reason `launch.anthropicBaseUrl` is pinned — a conversation must not
+   * silently gain reach because config moved underneath it.
+   */
+  extraRoots?: string[];
+  /** V2.2 ADDITIVE. Provenance of the pinned roots; absent for an ad-hoc set. */
+  workspaceId?: string;
+  workspaceName?: string;
   engine: VerseEngine;
   accountId: string;
   seatId: string;
@@ -239,6 +491,13 @@ export interface VerseBootstrap {
   seats: VerseSeat[];
   projects: VerseProject[];
   sessions: VerseSession[];
+  /**
+   * V2.2 ADDITIVE. Named workspaces, so the new-chat dialog can offer them
+   * without a second round trip. An older client ignores the key; a newer
+   * client against an older server sees `undefined` and falls back to the
+   * single-project picker.
+   */
+  workspaces?: VerseWorkspace[];
   /** Whether POST routes are enabled on this server (`ashlr serve --allow-dispatch` / `ashlr verse`). */
   dispatchEnabled: boolean;
   localRuntime: VerseLocalRuntimeSummary;
@@ -259,12 +518,31 @@ export interface VerseSeatsResponse {
   localRuntime: VerseBootstrap['localRuntime'];
 }
 
-/** POST /api/verse/sessions */
+/**
+ * POST /api/verse/sessions
+ *
+ * Two spellings, never mixed (the API rejects the mix rather than silently
+ * preferring one):
+ *   - `workspaceId` alone — the named workspace supplies primary and extras.
+ *   - `projectPath` (+ optional `extraRoots`) — an ad-hoc set, which is also
+ *     exactly the pre-workspace request shape.
+ */
 export interface VerseCreateSessionRequest {
   projectPath: string;
   seatId: string;
   model?: string;
   title?: string;
+  /** V2.2 ADDITIVE. Absolute paths beyond the primary. */
+  extraRoots?: string[];
+  /** V2.2 ADDITIVE. Bind to a named workspace instead of naming paths. */
+  workspaceId?: string;
+  /**
+   * SERVER-FILLED. The API resolves this from the registry once `workspaceId`
+   * is validated, and never reads it off the request body — so a session can
+   * not be labelled with a workspace name that is not the one it was built
+   * from.
+   */
+  workspaceName?: string;
 }
 
 /** POST /api/verse/sessions/:id/turns */
