@@ -101,6 +101,8 @@ import { handleRunEventsSse, RUN_EVENTS_PATH_RE } from './run-stream.js';
 import { handleVerseApi, isVerseApiPath, verseSessionsDigest, verseSessionsSnapshot } from '../verse/verse-api.js';
 // V2 autonomy control plane (mounted BEFORE handleVerseApi — see handleApi).
 import { handleVerseControlApi, isVerseControlPath } from '../verse/control-api.js';
+// GitHub, reachable from Verse (docs/VERSE-WORKSPACES.md §2) — also BEFORE handleVerseApi.
+import { handleVerseGithubApi, isVerseGithubPath } from '../verse/github-api.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -2130,6 +2132,15 @@ export async function handleApi(
         path,
         method,
       );
+    }
+
+    // ── /api/verse/github{,/pr-plan} (docs/VERSE-WORKSPACES.md §2) ──────────
+    // Same ordering rule as the control plane above: the V1 handler below
+    // matches every /api/verse/* path and 404s what it does not recognize.
+    // Both routes are GET-only reads behind the read-session boundary; there
+    // is no POST half, so no dispatch gate is needed here.
+    if (isVerseGithubPath(path)) {
+      return handleVerseGithubApi({ readSession: ctx.readSession }, req, res, path, method);
     }
 
     // ── /api/verse/* (Ashlr Verse — src/core/verse/verse-api.ts) ────────────
