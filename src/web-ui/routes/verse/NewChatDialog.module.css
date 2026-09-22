@@ -73,3 +73,30 @@
   padding-left: var(--space-3);
   border-left: 1px solid var(--border-default);
 }
+
+/* Extra workspace folders: one row per folder, with its own Remove. */
+.rootRow {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-top: var(--space-2);
+}
+
+.rootRow .input { flex: 1 1 auto; min-width: 0; }
+
+.removeRoot,
+.addRoot {
+  flex: none;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-default);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.addRoot { margin-top: var(--space-2); align-self: flex-start; }
+
+.removeRoot:hover,
+.addRoot:hover { border-color: var(--border-strong, var(--border-subtle)); }

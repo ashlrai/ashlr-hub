@@ -18,6 +18,9 @@ import { RefreshIndicator } from '../../../components/primitives/RefreshIndicato
 import { useQuery } from '../../../data/hooks.js';
 import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
 import { updateVerseScope, verseScopeQuery } from './control-queries.js';
+import { verseAutonomyScopeQuery } from '../verse-queries.js';
+import { ROOT_PRIORITY_LABEL, ROOT_PRIORITY_NOTE } from '../workspace-model.js';
+import type { VerseAutonomyScopeView } from '../../../data/api-types.js';
 import type { VerseScopeRepo } from './control-types.js';
 import type { GuardedAction } from './use-guarded-action.js';
 import styles from './autonomy.module.css';
@@ -42,8 +45,34 @@ export function validateRepoPath(raw: string): string | null {
   return null;
 }
 
+/**
+ * One repo's standing in the autonomous lane: its sections and its priority.
+ *
+ * Renders NOTHING when the repo is in no section and carries the default
+ * priority — which is every repo until the operator says otherwise, and is
+ * exactly how the panel behaved before sections existed.
+ */
+function ScopeRepoStanding({ path, scope }: { path: string; scope: VerseAutonomyScopeView | null }) {
+  const entry = scope?.entries.find((e) => e.path === path) ?? null;
+  if (entry === null) return null;
+  const ranked = entry.priority !== 'normal';
+  if (!ranked && entry.sections.length === 0) return null;
+  return (
+    <span className={styles.repoStanding} title={ROOT_PRIORITY_NOTE}>
+      {ranked ? <span className={styles.repoPriority}>{ROOT_PRIORITY_LABEL[entry.priority]}</span> : null}
+      {entry.sections.map((section) => (
+        <span key={section.id} className={styles.repoSection}>{section.name}</span>
+      ))}
+      {entry.outsideFocus ? <span className={styles.repoOutsideFocus}>outside the focused section</span> : null}
+    </span>
+  );
+}
+
 export function ScopePanel({ guard, dispatchEnabled }: { guard: GuardedAction; dispatchEnabled: boolean }) {
   const scope = useQuery(verseScopeQuery);
+  // The RANKED view of the same registry. Read separately so it is obvious
+  // these are two facts: what is enrolled, and in what order it is worked on.
+  const autonomy = useQuery(verseAutonomyScopeQuery);
   const [path, setPath] = useState('');
   const [pathError, setPathError] = useState<string | null>(null);
   const [removing, setRemoving] = useState<VerseScopeRepo | null>(null);
@@ -114,6 +143,10 @@ export function ScopePanel({ guard, dispatchEnabled }: { guard: GuardedAction; d
                 {repo.path}
               </span>
               {repo.exists ? null : <span className={styles.repoMissing}>⚠ path missing on disk</span>}
+              {/* Workspace membership and rank, so the blast radius is legible:
+                  WHICH sections claim this repo, and where the fleet's
+                  attention goes. Both are ordering — neither enrols. */}
+              <ScopeRepoStanding path={repo.path} scope={autonomy.data ?? null} />
               <button type="button" className={styles.button} disabled={locked || guard.busy} onClick={() => setRemoving(repo)}>
                 Remove
               </button>

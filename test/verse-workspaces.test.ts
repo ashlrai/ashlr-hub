@@ -231,8 +231,9 @@ describe('codex adapter — extra roots', () => {
     );
     const override = valuesFor(turn.argv, '-c')[0]!;
     expect(override).toBe('sandbox_workspace_write.writable_roots=["/tmp/we\\"ird\\\\path"]');
-    // And it must contain no raw control characters.
-    expect(/[\x00-\x1f\x7f]/.test(override)).toBe(false);
+    // And it must carry no RAW control characters into argv.
+    const codes = [...override].map((c) => c.codePointAt(0) ?? 0);
+    expect(codes.some((c) => c < 0x20 || c === 0x7f)).toBe(false);
   });
 });
 

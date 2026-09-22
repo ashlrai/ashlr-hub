@@ -46,12 +46,19 @@ function safeJson(value: unknown): string {
  * array rather than sitting inside it.
  */
 function tomlString(value: string): string {
-  const escaped = value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    // TOML basic strings forbid raw control characters.
-    .replace(/[\x00-\x1f\x7f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-  return `"${escaped}"`;
+  let out = '"';
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (char === '\\') out += '\\\\';
+    else if (char === '"') out += '\\"';
+    // TOML basic strings forbid RAW control characters; they must be escaped.
+    // Written as a scan rather than a regex character class on purpose: a
+    // class spelling this range puts literal control bytes in the source
+    // (and trips `no-control-regex`).
+    else if (code < 0x20 || code === 0x7f) out += `\\u${code.toString(16).padStart(4, '0')}`;
+    else out += char;
+  }
+  return `${out}"`;
 }
 
 /**
