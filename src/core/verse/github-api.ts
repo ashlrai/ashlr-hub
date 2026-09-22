@@ -161,10 +161,17 @@ function handleRepos(req: IncomingMessage, res: ServerResponse, deps: VerseGithu
 
   const requested = queryParam(req, 'repo');
   let roots: string[];
+  // Without `?repo=`, this is the cheap index: identity and default branch per
+  // root, from local `git` reads only. `gh` is an 8 s-ceilinged synchronous
+  // subprocess on a single-threaded server, so a dozen roots' worth of list
+  // calls in one request is not something a UI mount may trigger. The panel
+  // fills in one root at a time with `?repo=`.
+  let includeLists = false;
 
   if (requested === null) {
     roots = known.slice(0, MAX_REPOS_PER_REQUEST);
   } else {
+    includeLists = true;
     if (requested.length === 0 || requested.length > MAX_PATH_CHARS) {
       sendError(res, 'VERSE_INVALID', 'repo must be a non-empty path');
       return;
@@ -183,7 +190,10 @@ function handleRepos(req: IncomingMessage, res: ServerResponse, deps: VerseGithu
     roots = [resolved];
   }
 
-  const snapshot: VerseGithubSnapshot = read(roots, deps.readOptions ?? {});
+  const snapshot: VerseGithubSnapshot = read(roots, {
+    includeLists,
+    ...(deps.readOptions ?? {}),
+  });
   sendJson(res, 200, snapshot);
 }
 

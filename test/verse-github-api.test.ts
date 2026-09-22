@@ -73,6 +73,7 @@ function snapshotFor(paths: readonly string[]): VerseGithubSnapshot {
       remote: { state: 'github', nameWithOwner: 'ashlrai/ashlr-hub', defaultBranch: 'main' },
       prs: [],
       issues: [],
+      listsRequested: true,
       prsAvailable: true,
       issuesAvailable: true,
       observedAt: '2026-09-22T12:00:00.000Z',
@@ -180,6 +181,23 @@ describe('GET /api/verse/github', () => {
     // sendJson() → sanitizePublicJson() rewrites the home directory to `~` in
     // every string it emits, so a root under $HOME comes back home-relative.
     expect(body.repos.map((r) => r.path)).toEqual([KNOWN_A, '~/code/other-repo']);
+  });
+
+  it('does not invoke gh for the multi-root index', async () => {
+    // gh is a synchronous 8 s-ceilinged subprocess and the server is
+    // single-threaded; a dozen roots of list calls must not be reachable by
+    // simply mounting the panel.
+    let opts: { includeLists?: boolean } = {};
+    await call(VERSE_GITHUB_ROUTE, 'GET', {
+      read: (paths, o) => { opts = o ?? {}; return snapshotFor(paths); },
+    });
+    expect(opts.includeLists).toBe(false);
+
+    let single: { includeLists?: boolean } = {};
+    await call(`${VERSE_GITHUB_ROUTE}?repo=${encodeURIComponent(KNOWN_A)}`, 'GET', {
+      read: (paths, o) => { single = o ?? {}; return snapshotFor(paths); },
+    });
+    expect(single.includeLists).toBe(true);
   });
 
   it('caps how many roots one request can read', async () => {

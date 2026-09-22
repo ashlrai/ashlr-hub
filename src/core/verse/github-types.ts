@@ -95,10 +95,15 @@ export interface VerseGithubRemote {
 /**
  * Everything Verse shows for one workspace root. Reads only; never throws.
  *
- * `prsAvailable` / `issuesAvailable` are false when `gh` could not answer
- * (absent, unauthenticated, offline, rate-limited). An empty list with
- * `available: true` genuinely means zero open — the UI must be able to tell
- * "nothing open" from "could not look", which a bare `[]` cannot.
+ * THREE STATES, NOT TWO. `gh` is a synchronous subprocess with an 8 s ceiling,
+ * so a multi-root listing deliberately does not call it — it answers with
+ * `listsRequested: false` and identity only, and the UI asks for one root at a
+ * time to fill in the rest. `prsAvailable` / `issuesAvailable` then mean
+ * something narrower but honest: gh WAS asked and could not answer (absent,
+ * unauthenticated, offline, rate-limited). An empty list with `available:
+ * true` genuinely means zero open. The UI must be able to tell "nothing open"
+ * from "could not look" from "have not looked yet", and a bare `[]` collapses
+ * all three.
  */
 export interface VerseGithubRepoSnapshot {
   path: string;
@@ -106,6 +111,8 @@ export interface VerseGithubRepoSnapshot {
   remote: VerseGithubRemote;
   prs: VerseGithubPr[];
   issues: VerseGithubIssue[];
+  /** False when this read was identity-only and gh was never invoked. */
+  listsRequested: boolean;
   prsAvailable: boolean;
   issuesAvailable: boolean;
   /** ISO-8601. */

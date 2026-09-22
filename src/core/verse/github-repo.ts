@@ -105,6 +105,16 @@ export interface VerseGithubReadOptions {
   now?: () => Date;
   /** Directory existence seam for tests. */
   isDirectory?: (path: string) => boolean;
+  /**
+   * Invoke `gh` for the PR and issue lists. Default true.
+   *
+   * `gh` is a synchronous subprocess with an 8 s ceiling, and the web server
+   * is single-threaded: reading N roots' lists in one request blocks it for up
+   * to N x 2 x 8 s. A multi-root listing therefore passes false and returns
+   * identity only (`listsRequested: false`), which costs nothing but two local
+   * `git` reads per root.
+   */
+  includeLists?: boolean;
 }
 
 const realGit: VerseGithubGitProbe = {
@@ -387,6 +397,7 @@ function emptySnapshot(
     remote,
     prs: [],
     issues: [],
+    listsRequested: false,
     prsAvailable: false,
     issuesAvailable: false,
     observedAt,
@@ -466,6 +477,15 @@ export function readVerseGithubRepo(
     defaultBranch: branch,
   };
 
+  if (opts.includeLists === false) {
+    return emptySnapshot(
+      path,
+      remote,
+      observedAt,
+      'pull requests and issues not requested for this root',
+    );
+  }
+
   const prRaw = runList(gh, path, 'pr', PR_JSON_FIELDS, prLimit);
   const issueRaw = runList(gh, path, 'issue', ISSUE_JSON_FIELDS, issueLimit);
 
@@ -480,6 +500,7 @@ export function readVerseGithubRepo(
     remote,
     prs,
     issues,
+    listsRequested: true,
     prsAvailable,
     issuesAvailable,
     observedAt,

@@ -323,6 +323,26 @@ describe('readVerseGithubRepo', () => {
     expect(calls).toHaveLength(0);
   });
 
+  it('answers identity only, without invoking gh, when lists are not requested', () => {
+    const calls: GhCall[] = [];
+    const snap = read({
+      gh: ghFrom({ pr: PR_FIXTURE, issue: ISSUE_FIXTURE }, calls),
+      includeLists: false,
+    });
+    expect(calls).toHaveLength(0);
+    expect(snap.remote).toEqual({
+      state: 'github', nameWithOwner: 'ashlrai/ashlr-hub', defaultBranch: 'main',
+    });
+    expect(snap.listsRequested).toBe(false);
+    expect(snap.prsAvailable).toBe(false);
+    expect(snap.detail).toBe('pull requests and issues not requested for this root');
+  });
+
+  it('marks a full read as one that actually asked gh', () => {
+    const snap = read({ gh: ghFrom({ pr: '[]', issue: '[]' }) });
+    expect(snap.listsRequested).toBe(true);
+  });
+
   it('refuses a relative or absurd path without touching the disk', () => {
     expect(readVerseGithubRepo('relative/path', { git: githubGit }).detail)
       .toBe('path is not absolute');
