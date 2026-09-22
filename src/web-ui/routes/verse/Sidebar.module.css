@@ -18,6 +18,36 @@
   border-bottom: 1px solid var(--border-subtle);
 }
 
+/* ---- desktop shell (see desktop/README.md "Desktop shell contract") -----
+ * The Tauri window uses an overlay title bar, so macOS paints the traffic
+ * lights over the window's top-left corner — which is exactly where this
+ * header's search field sits. Without this the close/minimise/zoom buttons
+ * overlap the search input and both become hard to hit.
+ *
+ * The rail already does this (VerseApp.module.css `.rail`); the sidebar was
+ * simply missed, and it is the one panel that actually reaches the corner.
+ * `--app-titlebar-height` is absent in a browser, so this resolves to the
+ * plain strip height there and nothing moves. */
+.head {
+  position: relative;
+  height: calc(var(--strip-height) + var(--app-titlebar-height, 0px));
+  padding-top: var(--app-titlebar-height, 0px);
+}
+
+/* The cleared strip is draggable, so the window still moves by its top edge
+ * rather than becoming a dead band. Zero-height in a browser, where
+ * --app-titlebar-height is absent, so it can never eat a click there. */
+.headDragStrip {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: var(--app-titlebar-height, 0px);
+  -webkit-app-region: drag;
+  app-region: drag;
+  pointer-events: auto;
+}
+
 .search {
   position: relative;
   flex: 1;
