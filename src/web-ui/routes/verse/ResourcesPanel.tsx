@@ -19,8 +19,26 @@
  *     even though Claude publishes a SENTENCE and no timestamp. So every row
  *     now leads with the seat's plan and its BINDING window — the one that
  *     actually blocks work — as a labelled <Meter>, with the reset rendered
- *     verbatim and the other windows one disclosure away rather than a
- *     navigation away.
+ *     verbatim.
+ *
+ *  TWO FURTHER FACTS THE LIST WAS HIDING.
+ *
+ *  3. ONE BAR PER ACCOUNT. Claude's probe emits three windows — `five_hour`,
+ *     `seven_day`, and a per-model `seven_day_{model}` (claude-account-usage.ts
+ *     TITLES) — and Codex emits each bucket's primary and, only when the
+ *     provider sent one, its secondary (provider-observations.ts), with
+ *     credits as a separate fact. Folding the non-binding windows behind
+ *     "N more windows" showed one bar per account. Each reported window is
+ *     now its own bar with its own reset. A window that arrived without a
+ *     percent says "no reading"; a window the probe did not emit is not
+ *     drawn at all. Local seats still get no meter.
+ *  4. SPENT SEATS START SHUT. A blocked seat (exhausted, or signed out)
+ *     defaults collapsed, because that is the row the operator does not need
+ *     open. Groups collapse too. Both choices persist under
+ *     `ashlr.verse.resources.v1` — not the shell key, whose shape is pinned —
+ *     so a refresh does not slam an opened spent seat shut again. `tight`
+ *     stays open: a Codex week at its limit with spendable credits is still
+ *     usable.
  *  2. THE DATA NEVER REFRESHED. `bootstrap` is a mount-time snapshot with no
  *     SSE invalidation, and the collector needs ~75s to warm. Opening the app
  *     cold guaranteed "unknown" forever. The chat surfaces now poll
@@ -33,13 +51,23 @@
  * model, and nothing that implies a meter exists.
  */
 import { useEffect, useState } from 'react';
-import type { VerseBootstrap, VerseSeat, VerseSession } from '../../data/api-types.js';
+import type { VerseBootstrap, VerseEngine, VerseSeat, VerseSession } from '../../data/api-types.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { useQuery, useRefresh } from '../../data/hooks.js';
 import { CapacityChip, SeatWindowMeter } from './SeatCapacity.js';
-import { evidenceNote, seatSubscription, seatSubscriptionSentence } from './seat-subscription.js';
+import {
+  groupIsOpen,
+  readResourcesCollapse,
+  reportedLimitBars,
+  seatIsOpen,
+  toggleGroupCollapse,
+  toggleSeatCollapse,
+  writeResourcesCollapse,
+  type ResourcesCollapseState,
+} from './resources-collapse.js';
+import { evidenceNote, seatSubscription, seatSubscriptionSentence, type SeatSubscriptionView } from './seat-subscription.js';
 import { ENGINE_LABEL, formatClock, formatElapsed, groupSeats, projectName } from './verse-model.js';
 import { verseBootstrapQuery } from './verse-queries.js';
 import { formatTokens } from './verse-store.js';
@@ -80,8 +108,30 @@ function newestObservation(seats: readonly VerseSeat[]): string | null {
   return newest;
 }
 
-function SeatRow({ seat }: { seat: VerseSeat }) {
-  const view = seatSubscription(seat);
+function useResourcesCollapse(): {
+  state: ResourcesCollapseState;
+  toggleGroup: (engine: VerseEngine) => void;
+  toggleSeat: (seat: VerseSeat, view: SeatSubscriptionView) => void;
+} {
+  const [state, setState] = useState(readResourcesCollapse);
+  // Functional update so two quick toggles cannot drop each other. Writing
+  // here is idempotent: the same previous state always produces the same next.
+  const update = (fn: (prev: ResourcesCollapseState) => ResourcesCollapseState): void => {
+    setState((prev) => {
+      const next = fn(prev);
+      writeResourcesCollapse(next);
+      return next;
+    });
+  };
+  return {
+    state,
+    toggleGroup: (engine) => update((prev) => toggleGroupCollapse(prev, engine)),
+    toggleSeat: (seat, view) => update((prev) => toggleSeatCollapse(prev, seat.id, view.cls)),
+  };
+}
+
+function SeatDetails({ seat, view }: { seat: VerseSeat; view: SeatSubscriptionView }) {
+  const bars = reportedLimitBars(view);
   const sentence = seatSubscriptionSentence(seat, view);
   const ctx = seat.contextWindow === null ? 'ctx n/a' : `${formatTokens(seat.contextWindow)} ctx`;
   const models = `${seat.models.length} model${seat.models.length === 1 ? '' : 's'}`;
@@ -91,15 +141,7 @@ function SeatRow({ seat }: { seat: VerseSeat }) {
   const notes = provenance === null ? view.notes : [...view.notes, provenance];
 
   return (
-    <li className={`${styles.seat} ${styles[`engine-${seat.engine}`] ?? ''}`} data-engine={seat.engine}
-      data-capacity={view.cls}>
-      <div className={styles.seatHead}>
-        <span className={styles.seatLabel} title={sentence}>{seat.label}</span>
-        {view.kind === 'local'
-          ? <StatusBadge status={seat.health.state} tone={seat.health.state === 'ready' ? 'success' : seat.health.state === 'unavailable' ? 'danger' : 'unknown'} />
-          : <CapacityChip view={view} title={sentence} />}
-      </div>
-
+    <>
       <div className={styles.seatMeta}>
         <span>{ENGINE_LABEL[seat.engine]}</span>
         {view.plan === null ? null : <><span aria-hidden="true">·</span><span className={styles.plan}>{view.plan}</span></>}
@@ -109,40 +151,34 @@ function SeatRow({ seat }: { seat: VerseSeat }) {
         <span className={styles.num}>{ctx}</span>
       </div>
 
-      {view.kind === 'local' ? (
-        // No subscription, no quota, no bill — say that, rather than leaving
-        // a gap where a meter would be on every other row.
-        <p className={styles.seatSummary}>{view.summary}</p>
-      ) : view.binding === null ? (
-        // Nothing to meter. Say so, and hand over whatever the provider DID
-        // say, rather than drawing an empty bar that would read "plenty left".
+      {view.kind === 'local' || bars.length === 0 ? (
+        // Nothing measured, or a local seat with no subscription at all.
+        // Say so. An empty bar would read "plenty left". A local seat's
+        // health summary already travels in `notes`, so it is not repeated here.
         <>
           <p className={styles.seatSummary}>{view.summary}</p>
-          {seat.health.summary === null || seat.health.summary === view.summary
+          {view.kind === 'local' || seat.health.summary === null || seat.health.summary === view.summary
             ? null
             : <p className={styles.seatSummary}>{seat.health.summary}</p>}
         </>
       ) : (
         <div className={styles.seatWindows}>
-          <SeatWindowMeter windowView={view.binding} ariaPrefix={seat.label} prominent />
-          {view.others.length === 0 ? null : (
-            <details className={styles.more}>
-              <summary className={styles.moreSummary}>
-                {view.others.length} more window{view.others.length === 1 ? '' : 's'}
-              </summary>
-              <ul className={styles.windows}>
-                {view.others.map((w) => (
-                  <li key={w.id}><SeatWindowMeter windowView={w} ariaPrefix={seat.label} /></li>
-                ))}
-              </ul>
-            </details>
-          )}
-          {view.credits === null ? null : (
-            // Two distinct facts: a spent window with a spendable balance is
-            // not a blocked account (docs/VERSE-TELEMETRY-V2.md, Codex).
-            <p className={styles.credits} title={view.creditsTitle ?? undefined}>{view.credits}</p>
-          )}
+          {bars.map((windowView) => (
+            <SeatWindowMeter
+              key={windowView.id}
+              windowView={windowView}
+              ariaPrefix={seat.label}
+              prominent={view.binding?.id === windowView.id}
+            />
+          ))}
         </div>
+      )}
+
+      {view.credits === null ? null : (
+        // Credits are not a window. A spent week with a spendable balance is
+        // not a blocked account, and there is no maximum to draw a bar against
+        // (docs/VERSE-TELEMETRY-V2.md, Codex).
+        <p className={styles.credits} title={view.creditsTitle ?? sentence}>{view.credits}</p>
       )}
 
       {/* The provider's own plain-language facts. Owner S's contract requires
@@ -154,6 +190,46 @@ function SeatRow({ seat }: { seat: VerseSeat }) {
           {notes.map((note) => <li key={note}>{note}</li>)}
         </ul>
       )}
+    </>
+  );
+}
+
+function SeatRow({
+  seat,
+  open,
+  onToggle,
+}: {
+  seat: VerseSeat;
+  open: boolean;
+  onToggle: () => void;
+}) {
+  const view = seatSubscription(seat);
+  const sentence = seatSubscriptionSentence(seat, view);
+  const bodyId = `verse-seat-${seat.id.replace(/[^A-Za-z0-9_-]/g, '-')}`;
+
+  return (
+    <li className={`${styles.seat} ${styles[`engine-${seat.engine}`] ?? ''}`} data-engine={seat.engine}
+      data-capacity={view.cls} data-open={open ? 'true' : 'false'}>
+      <button
+        type="button"
+        className={styles.seatToggle}
+        aria-expanded={open}
+        aria-controls={bodyId}
+        aria-label={seat.label}
+        onClick={onToggle}
+      >
+        <span className={styles.twist} data-open={open ? '' : undefined} aria-hidden="true" />
+        <span className={styles.seatLabel} title={sentence}>{seat.label}</span>
+        {view.kind === 'local'
+          ? <StatusBadge status={seat.health.state} tone={seat.health.state === 'ready' ? 'success' : seat.health.state === 'unavailable' ? 'danger' : 'unknown'} />
+          : <CapacityChip view={view} title={sentence} />}
+      </button>
+
+      {open
+        ? <div id={bodyId}><SeatDetails seat={seat} view={view} /></div>
+        // The one line that says WHY it is shut. The meters stay unmounted,
+        // so a spent account is a row and not a page.
+        : <p id={bodyId} className={styles.seatSummary}>{view.summary}</p>}
     </li>
   );
 }
@@ -170,6 +246,7 @@ export function ResourcesPanel({ bootstrap, sessions, current, onStop, onOpen, o
   const refresh = useRefresh(verseBootstrapQuery);
   const observedAt = bootstrap ? newestObservation(bootstrap.seats) : null;
   const observedClock = observedAt === null ? null : formatClock(observedAt);
+  const collapse = useResourcesCollapse();
 
   return (
     <aside className={styles.panel} aria-label="Resources">
@@ -191,12 +268,43 @@ export function ResourcesPanel({ bootstrap, sessions, current, onStop, onOpen, o
           </h3>
           {!bootstrap ? <div className={styles.skeleton}><SkeletonLine width="70%" /><SkeletonLine width="50%" /><SkeletonLine width="64%" /></div>
             : groups.length === 0 ? <p className={styles.muted}>No seats discovered. Connect an account with <code>ashlr accounts</code> or start Ollama.</p>
-              : groups.map((group) => (
-                <div key={group.engine} className={styles.engineGroup}>
-                  <h4 className={styles.engineTitle}>{ENGINE_LABEL[group.engine]}</h4>
-                  <ul className={styles.seatList}>{group.seats.map((seat) => <SeatRow key={seat.id} seat={seat} />)}</ul>
-                </div>
-              ))}
+              : groups.map((group) => {
+                const open = groupIsOpen(collapse.state, group.engine);
+                const listId = `verse-res-group-${group.engine}`;
+                return (
+                  <div key={group.engine} className={styles.engineGroup}>
+                    <h4 className={styles.engineTitle}>
+                      <button
+                        type="button"
+                        className={styles.groupToggle}
+                        aria-expanded={open}
+                        aria-controls={listId}
+                        aria-label={`${ENGINE_LABEL[group.engine]} seats`}
+                        onClick={() => collapse.toggleGroup(group.engine)}
+                      >
+                        <span className={styles.twist} data-open={open ? '' : undefined} aria-hidden="true" />
+                        <span>{ENGINE_LABEL[group.engine]}</span>
+                        <span className={styles.count}>{group.seats.length}</span>
+                      </button>
+                    </h4>
+                    {open ? (
+                      <ul id={listId} className={styles.seatList}>
+                        {group.seats.map((seat) => {
+                          const view = seatSubscription(seat);
+                          return (
+                            <SeatRow
+                              key={seat.id}
+                              seat={seat}
+                              open={seatIsOpen(collapse.state, seat.id, view.cls)}
+                              onToggle={() => collapse.toggleSeat(seat, view)}
+                            />
+                          );
+                        })}
+                      </ul>
+                    ) : <ul id={listId} className={styles.seatList} hidden />}
+                  </div>
+                );
+              })}
         </section>
 
         <section className={styles.section} aria-labelledby="verse-res-local">
