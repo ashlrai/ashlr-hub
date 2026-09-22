@@ -57,6 +57,7 @@ import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { useQuery, useRefresh } from '../../data/hooks.js';
 import { CapacityChip, SeatWindowMeter } from './SeatCapacity.js';
+import { SessionRoots } from './SessionRoots.js';
 import {
   groupIsOpen,
   readResourcesCollapse,
@@ -344,6 +345,13 @@ export function ResourcesPanel({ bootstrap, sessions, current, onStop, onOpen, o
             </ul>
           )}
         </section>
+
+        {/* Folders this chat reaches, each with its own branch and dirty
+            count — a turn that edits two repos produces two diffs, and they
+            have to be attributable. Renders nothing for a single-folder chat,
+            which already says its folder everywhere else. `turnCount` is the
+            refresh key: a finished turn may have changed a branch. */}
+        <SessionRoots session={current} refreshKey={current?.turnCount ?? 0} />
 
         <section className={styles.section} aria-labelledby="verse-res-usage">
           <h3 id="verse-res-usage" className={styles.sectionTitle}>This chat</h3>

@@ -140,21 +140,34 @@ export interface SnapshotEventPayload {
  * never drift from what /api/verse/* actually returns.
  */
 export type {
+  VerseAutonomyScopeEntry,
+  VerseAutonomyScopeView,
   VerseBootstrap,
   VerseCreateSessionRequest,
   VerseEngine,
   VerseEvent,
   VerseEventType,
+  VerseFocusSectionRequest,
   VerseModelOption,
   VerseProject,
+  VerseRootGit,
+  VerseRootPriority,
+  VerseRootPriorityRequest,
+  VerseRootStatus,
   VerseSeat,
   VerseSeatHealth,
   VerseSession,
   VerseSessionDetail,
+  VerseSessionRootsResponse,
   VerseSessionStatus,
   VerseTurnRequest,
   VerseTurnResponse,
   VerseUsage,
+  VerseWorkspace,
+  VerseWorkspaceCreateRequest,
+  VerseWorkspaceRoot,
+  VerseWorkspacesResponse,
+  VerseWorkspaceUpdateRequest,
 } from '../../core/verse/types.js';
 
 /**

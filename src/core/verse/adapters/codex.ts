@@ -16,7 +16,7 @@
  *   turn.failed{error:{message}} / error{message}
  */
 
-import type { VerseSession, VerseTurnLaunch } from '../types.js';
+import { verseSessionRoots, type VerseSession, type VerseTurnLaunch } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
 import { parseJsonObjectLine } from './claude.js';
@@ -39,11 +39,65 @@ function safeJson(value: unknown): string {
   try { return JSON.stringify(value) ?? ''; } catch { return ''; }
 }
 
+/**
+ * One TOML string literal. Codex parses a `-c key=value` value AS TOML, so a
+ * path has to be quoted and escaped the way TOML expects — a directory with a
+ * quote or a backslash in its name would otherwise change the shape of the
+ * array rather than sitting inside it.
+ */
+function tomlString(value: string): string {
+  let out = '"';
+  for (const char of value) {
+    const code = char.codePointAt(0) ?? 0;
+    if (char === '\\') out += '\\\\';
+    else if (char === '"') out += '\\"';
+    // TOML basic strings forbid RAW control characters; they must be escaped.
+    // Written as a scan rather than a regex character class on purpose: a
+    // class spelling this range puts literal control bytes in the source
+    // (and trips `no-control-regex`).
+    else if (code < 0x20 || code === 0x7f) out += `\\u${code.toString(16).padStart(4, '0')}`;
+    else out += char;
+  }
+  return `${out}"`;
+}
+
+/**
+ * Grant the extra roots the SAME sandbox treatment as the primary.
+ *
+ * WHY A CONFIG OVERRIDE RATHER THAN `--add-dir`, verified on codex-cli 0.136.0:
+ *
+ *   `codex exec --help`         has `--add-dir <DIR>  Additional directories
+ *                               that should be writable alongside the primary
+ *                               workspace`
+ *   `codex exec resume --help`  has NEITHER `--add-dir` NOR `--cd`. It does
+ *                               have `-c, --config <key=value>`.
+ *
+ * Turn 1 and turn 2 of one chat must grant the same write set, or the agent
+ * reads a file on turn 3 that it could edit on turn 1 and produces a diff
+ * that will not apply. `--add-dir` cannot express that on resume, so BOTH
+ * turns use the config override instead of splitting the mechanism.
+ *
+ * `sandbox_workspace_write.writable_roots` was verified as a real, correctly
+ * typed config key rather than recalled: `codex exec --strict-config -c
+ * 'zzz_not_a_key.bogus=1' …` fails with "unknown configuration field
+ * `zzz_not_a_key`", `-c 'sandbox_workspace_write.zzz_bogus_subfield=1'` fails
+ * with "unknown configuration field `sandbox_workspace_write.
+ * zzz_bogus_subfield`", and `-c 'sandbox_workspace_write.writable_roots=
+ * ["/tmp"]'` passes config loading and starts the run.
+ */
+function writableRootsOverride(extraRoots: readonly string[]): string[] {
+  if (extraRoots.length === 0) return [];
+  const array = extraRoots.map(tomlString).join(',');
+  return ['-c', `sandbox_workspace_write.writable_roots=[${array}]`];
+}
+
 function buildCodexLaunch(session: VerseSession, text: string, launch: VerseSeatLaunch): VerseTurnLaunch {
   const prefix = launch.launcher ? [...launch.launcher] : ['codex'];
+  const extraRoots = verseSessionRoots(session).slice(1);
+  const writable = writableRootsOverride(extraRoots);
   const argv = session.turnCount > 0 && session.nativeSessionId
-    ? [...prefix, 'exec', 'resume', session.nativeSessionId, '--json', '-']
-    : [...prefix, 'exec', '--json', '--model', session.model, '--cd', session.projectPath, '--sandbox', 'workspace-write', '-'];
+    ? [...prefix, 'exec', 'resume', session.nativeSessionId, ...writable, '--json', '-']
+    : [...prefix, 'exec', ...writable, '--json', '--model', session.model, '--cd', session.projectPath, '--sandbox', 'workspace-write', '-'];
   return { argv, cwd: session.projectPath, env: {}, stdin: text };
 }
 

@@ -25,6 +25,7 @@ import { createVerseSessionStore, type VerseSessionStore } from './session-store
 import {
   VERSE_DEFAULT_CONTEXT_WINDOWS,
   VERSE_MAX_TURN_TEXT_BYTES,
+  VERSE_MAX_WORKSPACE_ROOTS,
   VERSE_TURN_TIMEOUT_MS,
   type VerseCreateSessionRequest,
   type VerseEngine,
@@ -253,6 +254,48 @@ function resolveProjectDir(projectPath: unknown): string {
     throw new VerseError('VERSE_INVALID', 'projectPath must be an existing directory');
   }
   return real;
+}
+
+/**
+ * Resolve the roots a session gets BEYOND its primary.
+ *
+ * Structural validation only — absolute, real, a directory, deduplicated
+ * after realpath so a symlink and its target cannot be granted twice, and
+ * capped. The POLICY question (is this directory one Verse may ever name?) is
+ * `path-guard.ts`, applied at the API boundary alongside every other
+ * request-shaped check; this mirrors `resolveProjectDir`, which has always
+ * validated shape here and left policy to its caller.
+ *
+ * `undefined` in means `[]` out, so a pre-workspace create request produces a
+ * record with no `extraRoots` key at all.
+ */
+function resolveExtraRoots(extraRoots: unknown, primary: string): string[] {
+  if (extraRoots === undefined || extraRoots === null) return [];
+  if (!Array.isArray(extraRoots)) {
+    throw new VerseError('VERSE_INVALID', 'extraRoots must be an array of absolute paths');
+  }
+  if (extraRoots.length > VERSE_MAX_WORKSPACE_ROOTS - 1) {
+    throw new VerseError('VERSE_INVALID', `a session may have at most ${VERSE_MAX_WORKSPACE_ROOTS} roots`);
+  }
+  const out: string[] = [];
+  for (const raw of extraRoots) {
+    if (typeof raw !== 'string' || !raw.trim()) {
+      throw new VerseError('VERSE_INVALID', 'every extra root must be a non-empty absolute path');
+    }
+    if (!isAbsolute(raw)) {
+      throw new VerseError('VERSE_INVALID', `extra root must be an absolute path: ${raw}`);
+    }
+    let real: string;
+    try {
+      real = realpathSync(raw);
+      if (!statSync(real).isDirectory()) throw new Error('not a directory');
+    } catch {
+      throw new VerseError('VERSE_INVALID', `extra root must be an existing directory: ${raw}`);
+    }
+    if (real === primary || out.includes(real)) continue;
+    out.push(real);
+  }
+  return out;
 }
 
 function errorCode(err: unknown): string {
@@ -716,6 +759,10 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       if (!isObject(req)) throw new VerseError('VERSE_INVALID', 'request body must be an object');
       if (!isSeatLaunch(launch)) throw new VerseError('VERSE_INVALID', 'seat launch is malformed');
       const projectPath = resolveProjectDir(req.projectPath);
+      const extraRoots = resolveExtraRoots(req.extraRoots, projectPath);
+      if (req.workspaceId !== undefined && typeof req.workspaceId !== 'string') {
+        throw new VerseError('VERSE_INVALID', 'workspaceId must be a string');
+      }
       const seat = launch.seat;
       if (typeof req.seatId !== 'string' || req.seatId !== seat.id) {
         throw new VerseError('VERSE_INVALID', `unknown seat: ${String(req.seatId)}`);
@@ -738,6 +785,16 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         id: randomUUID(),
         title: title || DEFAULT_TITLE,
         projectPath,
+        // Spread-only-when-present, so a single-root chat writes a record that
+        // is byte-identical to what it would have written before workspaces
+        // existed. Nothing has to migrate because nothing changed shape.
+        ...(extraRoots.length > 0 ? { extraRoots } : {}),
+        ...(typeof req.workspaceId === 'string' && req.workspaceId.length > 0
+          ? { workspaceId: req.workspaceId }
+          : {}),
+        ...(typeof req.workspaceName === 'string' && req.workspaceName.length > 0
+          ? { workspaceName: req.workspaceName }
+          : {}),
         engine,
         accountId: seat.accountId,
         seatId: seat.id,

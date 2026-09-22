@@ -18,7 +18,7 @@
  * the grok adapter, which emits the same events without the wrapper.
  */
 
-import type { VerseSession, VerseTurnLaunch, VerseUsage } from '../types.js';
+import { verseSessionRoots, type VerseSession, type VerseTurnLaunch, type VerseUsage } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
 
@@ -388,6 +388,9 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
     throw new Error('claude session is missing its native session id');
   }
   const prefix = session.engine === 'local' || !launch.launcher ? ['claude'] : [...launch.launcher];
+  // Workspace roots beyond the primary. `verseSessionRoots` puts the primary
+  // first and it is already the cwd, so only the tail needs a flag.
+  const extraRoots = verseSessionRoots(session).slice(1);
   // `-p` is boolean (`--print`); the prompt is the positional `[prompt]`. It
   // goes LAST, behind the end-of-options marker, so a message that starts
   // with `-` (a bullet list, or a literal `--dangerously-skip-permissions`)
@@ -402,6 +405,18 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
     '--permission-mode', 'acceptEdits',
     '--strict-mcp-config',
     '--mcp-config', '{"mcpServers":{}}',
+    // VERIFIED against `claude --help` on 2.1.280:
+    //   `--add-dir <directories...>  Additional directories to allow tool access to`
+    // It is variadic, so it is spelled ONE DIRECTORY PER FLAG rather than
+    // `--add-dir a b c`: a variadic option swallows following words until the
+    // next flag, and the prompt is a positional. `--add-dir /a /b -- text`
+    // would hand commander an ambiguity we have no reason to create.
+    // Repetition was checked on the real binary, not assumed: commander
+    // rejects unknown options loudly (`claude --zzz …` → "error: unknown
+    // option"), and `claude --add-dir /tmp --add-dir /private/var/tmp -p
+    // --session-id NOTAUUID -- hi` got PAST option parsing to the downstream
+    // "Invalid session ID" check, so both flags parsed.
+    ...extraRoots.flatMap((dir) => ['--add-dir', dir]),
     ...(session.turnCount > 0 ? ['--resume', session.nativeSessionId] : ['--session-id', session.nativeSessionId]),
     '--', text,
   ];

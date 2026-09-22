@@ -38,6 +38,19 @@ function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatL
     // tasks (it shells out to find files), so this failed nearly always.
     // 'dontAsk' and 'auto' both complete; 'dontAsk' is the narrower of the two.
     '--permission-mode', 'dontAsk',
+    // NO MULTI-ROOT FLAG IS EMITTED HERE, deliberately. A workspace session on
+    // a Grok seat gets its primary root and nothing else.
+    //
+    // Checked on grok 0.2.118, not recalled: `grok --help` exposes `--cwd
+    // <CWD>` and `--sandbox <PROFILE>` (a profile NAME, not a root list), and
+    // `grok agent --help` adds only `--plugin-dir`. There is no `--add-dir`,
+    // no `--allow-dir`, no writable-roots option anywhere in either. Inventing
+    // one would fail the turn at argv parsing, before inference — which is
+    // exactly how the invented Grok model ids failed.
+    //
+    // `workspaces.ts engineSupportsExtraRoots()` returns false for grok, so
+    // the roots view marks the extras unreachable and says why, instead of
+    // letting the operator believe the agent can see them.
     ...(session.turnCount > 0 ? ['--resume', session.nativeSessionId] : ['--session-id', session.nativeSessionId]),
     `--single=${text}`,
   ];
