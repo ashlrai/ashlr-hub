@@ -79,8 +79,22 @@ export const VERSE_NATIVE_MODELS: Readonly<Record<NativeEngine, readonly VerseMo
     { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
   ],
   codex: [
-    { id: 'gpt-5.5', label: 'GPT-5.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['codex'] ?? null },
-    { id: 'gpt-5.5-mini', label: 'GPT-5.5 Mini', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['codex'] ?? null },
+    // Read from the CLI's own catalog cache
+    // (~/.ashlr/native-profiles/<account>/native-state/models_cache.json), which
+    // carries the ids, display names and 272,000-token window the service
+    // reported. Not recalled — `codex models` needs an interactive terminal and
+    // was sitting on a hook-trust prompt, and the cache is the same authority
+    // without asking anyone to trust anything.
+    //
+    // `gpt-5.5-mini` used to be listed here and is NOT in the catalog.
+    { id: 'gpt-6-astra', label: 'GPT-6 Astra', contextWindow: 272_000 },
+    { id: 'gpt-6-sol', label: 'GPT-6 Sol', contextWindow: 272_000 },
+    { id: 'gpt-6-luna', label: 'GPT-6 Luna', contextWindow: 272_000 },
+    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', contextWindow: 272_000 },
+    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', contextWindow: 272_000 },
+    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', contextWindow: 272_000 },
+    { id: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 272_000 },
+    { id: 'gpt-reserve', label: 'GPT-Reserve', contextWindow: 272_000 },
   ],
   grok: [
     // Verified against `grok models` run with GROK_HOME pinned to the seat's own

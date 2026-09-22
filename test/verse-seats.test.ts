@@ -223,7 +223,12 @@ describe('verse seats — native accounts', () => {
 
     const codex = discovery.seats.find((s) => s.id === 'codex-personal')!;
     expect(codex.engine).toBe('codex');
-    expect(codex.models[0]?.id).toBe('gpt-5.5');
+    // The FIRST entry is what a new session defaults to, so it must be the
+    // newest model the catalog offers, not whichever one was newest when this
+    // test was written. Pinning a specific id here is how the Codex list went
+    // stale at gpt-5.5 while the catalog had moved on to the GPT-6 family.
+    expect(codex.models[0]?.id).toBe('gpt-6-astra');
+    expect(codex.models.map((m) => m.id)).not.toContain('gpt-5.5-mini');
     expect(codex.contextWindow).toBe(272_000);
 
     // The wire shape must never carry the launcher.
