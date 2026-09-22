@@ -31,8 +31,27 @@ export const DEFAULT_LLAMA_HOST = '127.0.0.1';
  */
 export const DEFAULT_LLAMA_SLOTS = 4;
 
-/** Total context shared across slots (65536 / 4 slots = 16384 per agent). */
-export const DEFAULT_LLAMA_CONTEXT = 65_536;
+/**
+ * Total context, SHARED across slots — llama-server divides `-c` by `--parallel`,
+ * so this is not the per-agent window. At the default 4 slots each agent gets
+ * 65,536.
+ *
+ * The old default of 65,536 gave each agent 16,384, and a Claude Code system
+ * prompt measured 23,310 tokens on this machine. The agent's own instructions
+ * did not fit in its context before a single turn began, which is a failure
+ * with no useful error attached.
+ *
+ * 262,144 is Qwen3.8 27B's native trained context, not a guess. Measured on a
+ * 128 GB machine: raising `-c` from 131,072 to 262,144 moved resident memory
+ * from 46.2 GB to 43.4 GB — no increase at all, because Qwen3.8 runs linear
+ * attention on 48 of its 64 layers and only 16 carry a full KV cache. Verified
+ * with a real agent turn afterwards: correct edit, prefix cache still reusing
+ * (23,301 cold, then 56 and 306 tokens).
+ *
+ * Operators on less memory override it with `--ctx` or
+ * `models.llamaServer.contextSize`.
+ */
+export const DEFAULT_LLAMA_CONTEXT = 262_144;
 
 /**
  * Default port for the Anthropic normalising proxy (anthropic-proxy.ts).
