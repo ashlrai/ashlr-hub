@@ -6,6 +6,7 @@
 <meta name="description" content="Ashlr Verse is an operator console for coding agents: every subscription you own plus a local model that never runs out, with four agents running at once on one machine. macOS, Windows and Linux.">
 <meta name="color-scheme" content="light dark">
 <link rel="canonical" href="https://verse.ashlr.ai/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6' fill='none' stroke='%232F2BD6' stroke-width='1.8' stroke-linejoin='round' stroke-linecap='round'/%3E%3C/svg%3E">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://verse.ashlr.ai/">
 <meta property="og:title" content="Ashlr Verse">
@@ -32,8 +33,8 @@
     --faint:     #8593A6;
     --line:      #D3DBE4;
     --line-soft: #E3E9EF;
-    --accent:    #C8452F;
-    --accent-dim:#F2DCD7;
+    --accent:    hsl(245 72% 50%);
+    --accent-dim:hsl(245 72% 94%);
     --live:      #0E6F78;
     --live-dim:  #D2E6E8;
     --warn:      #8A6100;
@@ -58,7 +59,7 @@
       --bg:#0C121A; --surface:#121A24; --surface-2:#17212C;
       --ink:#E7EDF4; --muted:#93A1B4; --faint:#6B7B8F;
       --line:#22303F; --line-soft:#1B2734;
-      --accent:#FF6F55; --accent-dim:#36201C;
+      --accent:hsl(245 72% 66%); --accent-dim:hsl(245 40% 20%);
       --live:#44CBD8; --live-dim:#0F3239; --warn:#E0A93B;
     }
   }
@@ -66,7 +67,7 @@
     --bg:#0C121A; --surface:#121A24; --surface-2:#17212C;
     --ink:#E7EDF4; --muted:#93A1B4; --faint:#6B7B8F;
     --line:#22303F; --line-soft:#1B2734;
-    --accent:#FF6F55; --accent-dim:#36201C;
+    --accent:hsl(245 72% 66%); --accent-dim:hsl(245 40% 20%);
     --live:#44CBD8; --live-dim:#0F3239; --warn:#E0A93B;
   }
 
@@ -92,7 +93,7 @@
   }
   .masthead .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-block: 14px; }
   .brand { display: flex; align-items: center; gap: 10px; font-family: var(--f-display); font-weight: 700; font-size: var(--step-1); letter-spacing: -0.03em; }
-  .brand .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--live); box-shadow: 0 0 0 3px var(--live-dim); flex: none; }
+  .brand .mark { flex: none; fill: none; stroke: var(--accent); stroke-width: 1.8; stroke-linejoin: round; stroke-linecap: round; }
   .brand .sub { color: var(--faint); font-weight: 500; }
   .masthead nav { display: flex; gap: 20px; font-size: var(--step--1); }
   .masthead nav a { color: var(--muted); text-decoration: none; }
@@ -221,7 +222,7 @@
 <body>
 <header class="masthead">
   <div class="wrap">
-    <div class="brand"><span class="dot"></span>Ashlr&nbsp;<span class="sub">Verse</span></div>
+    <div class="brand"><svg class="mark" viewBox="0 0 32 32" width="22" height="22" aria-hidden="true"><path d="m5 11 11-6 11 6-11 6Z M5 16l11 6 11-6 M5 21l11 6 11-6"/></svg>Ashlr&nbsp;<span class="sub">Verse</span></div>
     <nav>
       <a href="#measured">Measured</a>
       <a href="#seats">Seats</a>
