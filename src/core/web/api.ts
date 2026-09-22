@@ -101,6 +101,10 @@ import { handleRunEventsSse, RUN_EVENTS_PATH_RE } from './run-stream.js';
 import { handleVerseApi, isVerseApiPath, verseSessionsDigest, verseSessionsSnapshot } from '../verse/verse-api.js';
 // V2 autonomy control plane (mounted BEFORE handleVerseApi — see handleApi).
 import { handleVerseControlApi, isVerseControlPath } from '../verse/control-api.js';
+// GitHub, reachable from Verse (docs/VERSE-WORKSPACES.md §2) — also BEFORE handleVerseApi.
+import { handleVerseGithubApi, isVerseGithubPath } from '../verse/github-api.js';
+// MCP + per-account CLI management (mounted BEFORE both — see handleApi).
+import { handleVerseMcpApi, isVerseMcpPath } from '../verse/mcp-control-api.js';
 
 // ---------------------------------------------------------------------------
 // SSE registry — shared across all open SSE connections so server.ts can
@@ -2116,6 +2120,24 @@ export async function handleApi(
       return true;
     }
 
+    // ── /api/verse/mcp[/...] (MCP + per-account CLI management) ─────────────
+    // MUST come before BOTH verse handlers below. isVerseApiPath() matches
+    // every /api/verse/* path and 404s what it does not recognize, and the
+    // control handler's own route Set does not contain these paths — so an
+    // MCP request would never be reached if this sat any later. GETs ride the
+    // read-session boundary; every POST is behind ctx.allowDispatch +
+    // passesMutationGate inside handleVerseMcpApi, including the one that
+    // spawns provider CLIs to read their versions.
+    if (isVerseMcpPath(path)) {
+      return handleVerseMcpApi(
+        { cfg, token: ctx.token, allowDispatch: ctx.allowDispatch, readSession: ctx.readSession },
+        req,
+        res,
+        path,
+        method,
+      );
+    }
+
     // ── /api/verse/{control,caps,scope,audit,daemon,safety} (V2 control) ────
     // MUST come before the V1 verse handler below: isVerseApiPath() matches
     // every /api/verse/* path and 404s what it does not recognize, so the
@@ -2130,6 +2152,15 @@ export async function handleApi(
         path,
         method,
       );
+    }
+
+    // ── /api/verse/github{,/pr-plan} (docs/VERSE-WORKSPACES.md §2) ──────────
+    // Same ordering rule as the control plane above: the V1 handler below
+    // matches every /api/verse/* path and 404s what it does not recognize.
+    // Both routes are GET-only reads behind the read-session boundary; there
+    // is no POST half, so no dispatch gate is needed here.
+    if (isVerseGithubPath(path)) {
+      return handleVerseGithubApi({ readSession: ctx.readSession }, req, res, path, method);
     }
 
     // ── /api/verse/* (Ashlr Verse — src/core/verse/verse-api.ts) ────────────
