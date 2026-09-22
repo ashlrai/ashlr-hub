@@ -23,6 +23,10 @@ that every integration, provider or autonomous effect is active.
 | Install or roll back an exact trusted local package | [Pinned runtime](ASHLR-UNIVERSE.md#install-a-pinned-local-runtime) |
 | Change code and verify it locally | [Contributing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/CONTRIBUTING.md) |
 | Build release evidence and distinguish distribution from activation | [Releasing — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/RELEASING.md) |
+| Run agents in Ashlr Verse against your accounts and a local model | [Local fleet](LOCAL-FLEET.md) |
+| Decide whether to give one agent the whole context window or four a quarter each | [Plan deep, execute wide](LOCAL-CONTEXT-STRATEGY.md) |
+| Cut a release and publish without CI | [Releasing locally](RELEASING-LOCALLY.md) |
+| See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](VERSE-WORKSPACES.md) |
 
 The CLI's `universe help`, `resources pool --help` and `runtime help` describe
 the command surface in the exact binary you are running. A source guide may
