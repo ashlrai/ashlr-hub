@@ -5,7 +5,8 @@ One 27B model on one GPU. The question this answers: when should that capacity b
 each**? Splitting it four ways all the time is the wrong default for thinking, and not
 splitting it is the wrong default for throughput.
 
-Every number here was measured on this machine (128 GB, Qwen3.8 27B at four-bit), not
+Every number here was measured on this machine (128 GB, Qwen3.8 27B at **Q8_0** — an
+earlier version of this doc said four-bit, which was wrong; the blob is 27 GiB), not
 estimated.
 
 ## The constraint that shapes everything

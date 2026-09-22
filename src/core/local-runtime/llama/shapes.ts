@@ -5,7 +5,8 @@
  * `llama-server` divides `-c` by `--parallel` AT LAUNCH, so a slot cannot borrow
  * from its neighbours and "give the planner the whole window" is a different
  * server shape rather than a request-time option. Measured on a 128 GB machine
- * with Qwen3.8 27B at four-bit:
+ * with Qwen3.8 27B at Q8_0 (NOT four-bit — an earlier comment said so; the blob is
+ * 27 GiB, where a four-bit build would be roughly 16 GB):
  *
  *   plan      1 slot  x 262,144   43.0 GB   read widely, plan, review
  *   execute   4 slots x  65,536   43.4 GB   four targeted edits at once
