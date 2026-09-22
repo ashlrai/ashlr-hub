@@ -71,6 +71,10 @@ export const VERSE_NATIVE_MODELS: Readonly<Record<NativeEngine, readonly VerseMo
     // Checked and REJECTED on this machine, so do not add them back from
     // memory: claude-sonnet-4-8, claude-haiku-4-1.
     { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
+    // NOTE the dot. `claude-opus-5-5` is NOT in the catalog; only the dotted
+    // form is. That differs from Opus 4.8, which the CLI accepts either way,
+    // so the spelling here is the one that was actually checked.
+    { id: 'claude-opus-5.5', label: 'Claude Opus 5.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
     { id: 'claude-fable-5', label: 'Claude Fable 5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
     { id: 'claude-opus-5', label: 'Claude Opus 5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
     { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
