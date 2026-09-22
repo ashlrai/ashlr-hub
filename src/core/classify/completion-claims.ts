@@ -249,3 +249,32 @@ export function describeTurnIntegrity(integrity: TurnIntegrity): string {
       return '';
   }
 }
+
+/**
+ * How many files a unified diff actually touches.
+ *
+ * The missing half of the integrity check. `turnIntegrity` needs a count, and
+ * the fleet already carries a proposal's `diff` — this turns one into the other
+ * so wiring the check is a single call rather than a parsing exercise repeated
+ * at each site.
+ *
+ * Returns `null` when there is no diff to read, which is deliberately NOT zero:
+ * "we did not look" and "nothing changed" are different states, and
+ * `turnIntegrity` only reports a verdict for the second.
+ *
+ * Counts distinct `+++ b/<path>` targets, ignoring `/dev/null` (the target of a
+ * pure deletion hunk's counterpart) and de-duplicating, because one file can
+ * appear in several hunks.
+ */
+export function changedFileCountFromDiff(diff: unknown): number | null {
+  if (typeof diff !== 'string') return null;
+  if (diff.trim().length === 0) return 0;
+
+  const files = new Set<string>();
+  for (const line of diff.split('\n')) {
+    if (!line.startsWith('+++ ')) continue;
+    const path = line.slice(4).replace(/^[ab]\//, '').trim();
+    if (path && path !== '/dev/null') files.add(path);
+  }
+  return files.size;
+}
