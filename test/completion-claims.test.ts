@@ -14,6 +14,7 @@ import {
   classifyCompletionClaim,
   turnIntegrity,
   describeTurnIntegrity,
+  changedFileCountFromDiff,
   type CompletionClaim,
 } from '../src/core/classify/completion-claims.js';
 
@@ -134,5 +135,42 @@ describe('describeTurnIntegrity', () => {
     expect(describeTurnIntegrity('silent-change')).toMatch(/files were modified/);
     expect(describeTurnIntegrity('consistent')).toBe('');
     expect(describeTurnIntegrity('unknown')).toBe('');
+  });
+});
+
+describe('changedFileCountFromDiff', () => {
+  const diff = [
+    '--- a/src/cart.js', '+++ b/src/cart.js', '@@ -6,3 +6,3 @@', '-  return total - pct;', '+  return total * (1 - pct / 100);',
+    '--- a/src/tax.js', '+++ b/src/tax.js', '@@ -1,3 +1,3 @@', '-  return total + rate;', '+  return total * (1 + rate / 100);',
+  ].join('\n');
+
+  it('counts the files a diff touches', () => {
+    expect(changedFileCountFromDiff(diff)).toBe(2);
+  });
+
+  it('de-duplicates a file that appears in several hunks', () => {
+    const repeated = `${diff}\n--- a/src/cart.js\n+++ b/src/cart.js\n@@ -20,1 +20,1 @@`;
+    expect(changedFileCountFromDiff(repeated)).toBe(2);
+  });
+
+  it('ignores /dev/null, which is not a file that changed', () => {
+    const deletion = '--- a/src/gone.js\n+++ /dev/null\n@@ -1,2 +0,0 @@';
+    expect(changedFileCountFromDiff(deletion)).toBe(0);
+  });
+
+  it('separates "no diff to read" from "diff changed nothing"', () => {
+    // null must not collapse to 0, or every turn whose caller never captured a
+    // diff would be reported as an unsupported claim.
+    expect(changedFileCountFromDiff(undefined)).toBeNull();
+    expect(changedFileCountFromDiff(null)).toBeNull();
+    expect(changedFileCountFromDiff(42)).toBeNull();
+    expect(changedFileCountFromDiff('')).toBe(0);
+    expect(changedFileCountFromDiff('   ')).toBe(0);
+  });
+
+  it('composes with turnIntegrity to flag the real failure', () => {
+    expect(turnIntegrity('claims-change', changedFileCountFromDiff(''))).toBe('unsupported-claim');
+    expect(turnIntegrity('claims-change', changedFileCountFromDiff(diff))).toBe('consistent');
+    expect(turnIntegrity('claims-change', changedFileCountFromDiff(undefined))).toBe('unknown');
   });
 });
