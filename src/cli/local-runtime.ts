@@ -85,7 +85,9 @@ const USAGE = `usage: ashlr local-runtime <status|start|stop|restart|install|uni
 options:
   --port N               TCP port (default 8080)
   --slots N              Concurrent slots to request (default 4)
-  --ctx N                Total context shared across slots (default 65536)
+  --ctx N                Total context shared across slots (default 262144).
+                         Divided by --slots: 4 slots gives each agent 65536.
+                         Use --slots 1 for one agent with the whole window.
   --model REF            Ollama model reference to serve (default: the hub's local model)
   --model-path PATH      Serve this GGUF directly, bypassing Ollama's store
   --wait-ms N            How long start waits for /health (default 300000)
