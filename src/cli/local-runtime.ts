@@ -47,6 +47,13 @@ import { isAbsolute } from 'node:path';
 import { loadConfigReadOnly } from '../core/config.js';
 import { readKillSwitch } from '../core/sandbox/policy.js';
 import {
+  RUNTIME_SHAPES,
+  resolveRuntimeShape,
+  reshapeBlockedBy,
+  contextPerAgent,
+  describeShape,
+} from '../core/local-runtime/llama/shapes.js';
+import {
   buildLlamaServerArgs,
   installLaunchAgent,
   isLoopbackHost,
@@ -75,6 +82,9 @@ const USAGE = `usage: ashlr local-runtime <status|start|stop|restart|install|uni
   start                  Launch llama-server (or adopt one already on the port).
   stop                   Terminate it cleanly and release the port. --force for an unowned one.
   restart                stop then start.
+  reshape <plan|execute> Re-divide the context between agents. Refuses while slots are busy.
+                           plan     1 slot  x 262,144 - read widely, plan, review
+                           execute  4 slots x  65,536 - targeted edits in parallel
   install                Write + load a launchd agent so it runs 24/7. Refused while KILL is engaged.
   uninstall              Boot out and remove the launch agent.
   logs                   Tail the runtime's stderr log.
@@ -99,6 +109,8 @@ options:
 interface ParsedFlags {
   json: boolean;
   force: boolean;
+  /** Bare words after the subcommand, in order. */
+  positionals: string[];
   port?: number;
   slots?: number;
   ctx?: number;
@@ -110,7 +122,7 @@ interface ParsedFlags {
 }
 
 function parseFlags(args: string[]): ParsedFlags {
-  const out: ParsedFlags = { json: false, force: false };
+  const out: ParsedFlags = { json: false, force: false, positionals: [] };
 
   const num = (raw: string | undefined, name: string, min: number, max: number): number | undefined => {
     const value = Number.parseInt(raw ?? '', 10);
@@ -144,6 +156,12 @@ function parseFlags(args: string[]): ParsedFlags {
         break;
       }
       default:
+        // A bare word is a positional, not a bad flag. `reshape <plan|execute>`
+        // takes one; rejecting it here made the subcommand unreachable.
+        if (typeof arg === 'string' && !arg.startsWith('-')) {
+          out.positionals.push(arg);
+          break;
+        }
         out.error = `unknown option "${arg}"`;
     }
     if (out.error) break;
@@ -208,6 +226,52 @@ function printSnapshot(snapshot: LlamaRuntimeSnapshot): void {
   if (snapshot.lastError) {
     console.log(`  last error   ${c.dim(snapshot.lastError)}`);
   }
+}
+
+/**
+ * `reshape` — re-divide the runtime's context between agents.
+ *
+ * Reshaping RESTARTS llama-server, so a slot that is generating loses its turn
+ * mid-stream and the agent sees a truncated response rather than an error it
+ * can act on. `reshapeBlockedBy` is what stops that happening silently, and
+ * `--force` is the deliberate override.
+ */
+async function cmdReshape(
+  flags: ParsedFlags,
+  options: LifecycleOptions,
+  args: readonly string[],
+): Promise<number> {
+  const shape = resolveRuntimeShape(args[0]);
+  if (!shape) {
+    console.error(
+      `reshape needs a shape name.\n\n  ${describeShape(RUNTIME_SHAPES.plan)}\n`
+      + `  ${describeShape(RUNTIME_SHAPES.execute)}`,
+    );
+    return 2;
+  }
+
+  const live = await statusLocalRuntime(options);
+  const block = reshapeBlockedBy({
+    target: shape,
+    capacity: live.slots ?? null,
+    currentContextPerSlot: live.contextPerSlot ?? null,
+  });
+
+  if (block && !flags.force) {
+    console.error(`reshape refused: ${block.detail}`);
+    if (block.kind === 'busy') console.error('Wait for those turns, or pass --force to end them.');
+    return 1;
+  }
+
+  const per = contextPerAgent(shape).toLocaleString('en-US');
+  console.log(
+    `reshaping to ${shape.name}: ${shape.slots} slot${shape.slots === 1 ? '' : 's'} x ${per} tokens each`,
+  );
+
+  return await runLifecycle('restart', flags, {
+    ...options,
+    runtime: { ...options.runtime, slots: shape.slots, context: shape.context },
+  });
 }
 
 /** `status` — read-only. */
@@ -478,6 +542,7 @@ export async function cmdLocalRuntime(args: string[]): Promise<number> {
       case 'start': return await runLifecycle('start', flags, options);
       case 'stop': return await runLifecycle('stop', flags, options);
       case 'restart': return await runLifecycle('restart', flags, options);
+      case 'reshape': return await cmdReshape(flags, options, flags.positionals);
       case 'install': return await cmdInstall(flags, runtime);
       case 'uninstall': return cmdUninstall(flags);
       case 'logs': return cmdLogs(flags);
