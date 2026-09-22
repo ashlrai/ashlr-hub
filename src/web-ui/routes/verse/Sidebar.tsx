@@ -50,6 +50,10 @@ export function Sidebar(props: SidebarProps) {
   return (
     <nav className={styles.sidebar} aria-label="Chats">
       <div className={styles.head}>
+        {/* Draggable strip under the overlay title bar, so the cleared
+            space still moves the window instead of being a dead band.
+            Zero-height in a browser. */}
+        <div className={styles.headDragStrip} aria-hidden="true" />
         <label className={styles.search} htmlFor={searchId}>
           <span className={styles.searchIcon} aria-hidden="true"><SearchIcon /></span>
           <span className="visually-hidden">Search chats</span>
