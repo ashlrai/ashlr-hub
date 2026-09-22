@@ -115,6 +115,20 @@ export function renderReport(report: EvalReport): string {
   }
   lines.push('');
 
+  // Reported separately and never folded into the pass rate. An
+  // `unsupported-claim` reading is a prompt to go and read one transcript, not
+  // a verdict: the shared classifier fires on change verbs wherever they
+  // appear, including in a refusal that merely MENTIONS refactoring. Treat a
+  // flag on a passing trial as a question, and a flag on a failing one as the
+  // most likely explanation.
+  const flagged = report.outcomes.flatMap((o) =>
+    o.trials
+      .filter((t) => t.integrity === 'unsupported-claim')
+      .map((t) => `${o.taskId}#${t.trial} (${t.passed ? 'passed the check' : t.mode})`));
+  lines.push(`INTEGRITY FLAGS  ${flagged.length === 0 ? 'none' : flagged.join(', ')}`);
+  lines.push('  claimed a change while the tree did not move — read the transcript before believing either side');
+  lines.push('');
+
   lines.push('TOKENS PER TRIAL (input / output / cache-read)');
   for (const o of report.outcomes) {
     for (const t of o.trials) {

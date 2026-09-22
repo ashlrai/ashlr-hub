@@ -218,4 +218,125 @@ console.log('OK');
 `,
     verify: ['node', 'check.mjs'],
   },
+
+  {
+    id: 'api-migration',
+    why:
+      'Added after the first baseline returned 12/12, which proved the set had '
+      + 'no headroom: a suite everything passes can detect a regression but '
+      + 'never an improvement. This one compounds the earlier shapes instead of '
+      + 'repeating them — the target signature must be READ from a file the '
+      + 'prompt does not name, then applied across three call sites, one of '
+      + 'which passes its arguments in a deliberately surprising order. Getting '
+      + 'the rename right while transposing that call is the near-miss it '
+      + 'exists to catch.',
+    expectation: 'edit',
+    prompt:
+      'src/http.js still calls `request()` with positional arguments. The '
+      + 'options-object form is already defined and documented in the project — '
+      + 'find it, then migrate every call site in src/http.js to it. Behaviour '
+      + 'must be identical.',
+    files: {
+      'src/client.js':
+        '// The supported call form is an options object:\n'
+        + '//   request({ url, method, retries })\n'
+        + '// `method` defaults to GET and `retries` defaults to 0.\n'
+        + 'export function request(options) {\n'
+        + '  const { url, method = \'GET\', retries = 0 } = options;\n'
+        + '  return `${method} ${url} r=${retries}`;\n'
+        + '}\n',
+      'src/http.js':
+        "import { request } from './client.js';\n\n"
+        + '// NOTE: legacy positional order is (url, method, retries).\n'
+        + 'export function fetchUser(id) {\n'
+        + '  return request(`/users/${id}`, \'GET\', 0);\n'
+        + '}\n\n'
+        + 'export function createUser(body) {\n'
+        + '  return request(`/users?body=${body}`, \'POST\', 2);\n'
+        + '}\n\n'
+        + '// Careful: this one was written against an older argument order.\n'
+        + 'export function deleteUser(id) {\n'
+        + '  return request(`/users/${id}`, \'DELETE\', 5);\n'
+        + '}\n',
+    },
+    check:
+      CHECK_PREAMBLE
+      + `const http = await load('./src/http.js');
+if (http.fetchUser(7) !== 'GET /users/7 r=0') fail('fetchUser: ' + http.fetchUser(7));
+if (http.createUser('x') !== 'POST /users?body=x r=2') fail('createUser: ' + http.createUser('x'));
+if (http.deleteUser(9) !== 'DELETE /users/9 r=5') fail('deleteUser: ' + http.deleteUser(9));
+const src = read('./src/http.js');
+if (!src.includes('{')) fail('no options object appears in http.js');
+// A positional call has a comma directly between the url and a quoted method.
+if (/request\\(\`[^\`]*\`,\\s*'/.test(src)) fail('a positional request(...) call remains');
+if (read('./src/client.js').includes('...args')) fail('client.js was altered to accept the old form');
+console.log('OK');
+`,
+    verify: ['node', 'check.mjs'],
+  },
+
+  {
+    id: 'edge-case-parser',
+    why:
+      'The second headroom task. A naive implementation passes the obvious '
+      + 'cases and fails the boundaries, so it rewards an agent that RUNS the '
+      + 'suite and iterates rather than one that writes plausible code and '
+      + 'stops. Descending ranges and empty input are the two a first draft '
+      + 'almost always misses, which makes this the task most likely to '
+      + 'separate a good local configuration from a mediocre one.',
+    expectation: 'edit',
+    prompt:
+      'Implement `parseRange` in src/range.js so the whole suite passes. Run '
+      + '`node --test` to see what is expected. Do not modify any file under '
+      + 'test/.',
+    files: {
+      'src/range.js':
+        '// Parse a compact range list such as "1-3,7" into a sorted array of\n'
+        + '// numbers. See test/range.test.mjs for the exact contract.\n'
+        + 'export function parseRange(input) {\n'
+        + '  return [];\n'
+        + '}\n',
+      'test/range.test.mjs':
+        "import test from 'node:test';\n"
+        + "import assert from 'node:assert/strict';\n"
+        + "import { parseRange } from '../src/range.js';\n\n"
+        + "test('single numbers', () => {\n"
+        + "  assert.deepEqual(parseRange('3'), [3]);\n"
+        + "  assert.deepEqual(parseRange('3,5,4'), [3, 4, 5]);\n"
+        + '});\n\n'
+        + "test('ranges expand inclusively', () => {\n"
+        + "  assert.deepEqual(parseRange('1-3'), [1, 2, 3]);\n"
+        + "  assert.deepEqual(parseRange('1-3,7'), [1, 2, 3, 7]);\n"
+        + '});\n\n'
+        + "test('tolerates whitespace and de-duplicates', () => {\n"
+        + "  assert.deepEqual(parseRange(' 1 - 3 , 2 '), [1, 2, 3]);\n"
+        + '});\n\n'
+        + "test('empty input yields an empty list', () => {\n"
+        + "  assert.deepEqual(parseRange(''), []);\n"
+        + "  assert.deepEqual(parseRange('   '), []);\n"
+        + '});\n\n'
+        + "test('a descending range is rejected', () => {\n"
+        + "  assert.throws(() => parseRange('5-1'), /descending/i);\n"
+        + '});\n',
+    },
+    check:
+      CHECK_PREAMBLE
+      + `import { spawnSync } from 'node:child_process';
+const expected = [
+  "assert.deepEqual(parseRange('1-3,7'), [1, 2, 3, 7]);",
+  "assert.deepEqual(parseRange('   '), []);",
+  "assert.throws(() => parseRange('5-1'), /descending/i);",
+];
+const suite = read('./test/range.test.mjs');
+for (const line of expected) {
+  if (!suite.includes(line)) fail('the test file was modified: missing ' + JSON.stringify(line));
+}
+const res = spawnSync(process.execPath, ['--test'], {
+  cwd: new URL('.', W).pathname, encoding: 'utf8', timeout: 120000,
+});
+if (res.status !== 0) fail('node --test still fails (exit ' + res.status + ')\\n' + (res.stdout || '') + (res.stderr || ''));
+console.log('OK');
+`,
+    verify: ['node', 'check.mjs'],
+  },
 ];
