@@ -10,6 +10,12 @@
  * its own process-group leader (`detached: true`) so cancellation signals the
  * whole group, escalating SIGINT → SIGKILL after a grace period, with a bounded
  * drain so a descendant holding our pipes cannot keep a turn "running" forever.
+ *
+ * LOCAL-ONLY. Because the spawn is raw rather than routed through
+ * `run/engines.spawnEngine`, this module is a SECOND subprocess funnel and none
+ * of the daemon's gates cover it. It therefore carries its own call to the one
+ * shared predicate (`policy/local-only.decidePermission`, reached through its
+ * published wrappers) at the top of `startTurn` — see `verseSeatPermitted`.
  */
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
@@ -18,6 +24,13 @@ import { realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, sep } from 'node:path';
 
+import { loadConfigReadOnly } from '../config.js';
+import {
+  endpointPermitted,
+  enginePermitted,
+  type LocalOnlyVerdict,
+} from '../policy/local-only.js';
+import type { AshlrConfig } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 
 import { adapterFor, type VerseParsedEvent, type VerseTurnParser } from './adapters/index.js';
@@ -114,6 +127,64 @@ export interface VerseEngineOptions {
   turnTimeoutMs?: number;
   /** SIGINT → SIGKILL escalation delay. Default 10s. */
   killGraceMs?: number;
+  /**
+   * Read the operator config that the local-only gate consults.
+   *
+   * Called ONCE PER TURN rather than once at construction, deliberately: the
+   * cockpit's Local-only switch writes `~/.ashlr/config.json` while this engine
+   * is already live, and a mode read at startup would leave the switch looking
+   * like it did nothing until a restart. `undefined` means "no config in hand",
+   * which the policy answers from env + its process latch — i.e. toward refusal.
+   *
+   * Default: `loadConfigReadOnly()`, which never creates, seeds or writes the
+   * file. The config is the user's; this module only ever reads it.
+   */
+  loadConfig?: () => AshlrConfig | undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Local-only
+// ---------------------------------------------------------------------------
+
+/**
+ * Is this SEAT permitted to run a turn right now?
+ *
+ * NOT a second policy predicate — that is the point. Both branches delegate to
+ * `decidePermission()` through its published wrappers, so "local" means here
+ * exactly what it means at the daemon's chokepoints. This function contributes
+ * only the mapping from a Verse seat to a subject the predicate understands:
+ *
+ *   claude / codex / grok — a Verse engine id IS the registry engine id, so
+ *     `enginePermitted` classifies it directly (cli-agent → cloud for claude and
+ *     codex, api-model at api.x.ai → cloud for grok).
+ *
+ *   local — a local seat is discovered from a serving runtime and has no
+ *     registry engine to name, so the ENDPOINT it dispatches to is the truth
+ *     and `endpointPermitted` classifies that. A loopback runtime (the default,
+ *     and every local seat today) is permitted exactly as before. One repointed
+ *     at a remote inference host is refused, because that one would spend — the
+ *     same rule the raw-transport sites apply to `cfg.foundry.ollamaBaseUrl`.
+ */
+export function verseSeatPermitted(
+  engine: VerseEngine,
+  launch: VerseSeatLaunch,
+  cfg: AshlrConfig | undefined,
+): LocalOnlyVerdict {
+  if (engine === 'local') {
+    const dispatchUrl = launch.anthropicBaseUrl?.trim() || launch.ollamaBaseUrl;
+    return endpointPermitted(dispatchUrl, cfg);
+  }
+  return enginePermitted(engine, cfg);
+}
+
+/** Read the live config for the gate. A config we cannot read is not an excuse to dispatch. */
+function readConfigForPolicy(): AshlrConfig | undefined {
+  try {
+    return loadConfigReadOnly();
+  } catch {
+    // undefined → the policy falls back to env + latch, which errs toward refusal.
+    return undefined;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -392,6 +463,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   const now = opts.now ?? (() => new Date());
   const turnTimeoutMs = opts.turnTimeoutMs ?? VERSE_TURN_TIMEOUT_MS;
   const killGraceMs = opts.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+  const loadCfg = opts.loadConfig ?? readConfigForPolicy;
   const store: VerseSessionStore = createVerseSessionStore(root);
   const running = new Map<string, RunningTurn>();
   const listeners = new Map<string, Set<(event: VerseEvent) => void>>();
@@ -637,8 +709,45 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
 
   // ---- spawn ----------------------------------------------------------------
 
-  function startTurn(session: VerseSession, turnId: string, launch: VerseTurnLaunch, redactions: Redaction[]): void {
+  function startTurn(
+    session: VerseSession,
+    turnId: string,
+    seatLaunch: VerseSeatLaunch,
+    launch: VerseTurnLaunch,
+    redactions: Redaction[],
+  ): void {
     const id = session.id;
+
+    // ---- LOCAL-ONLY: the last gate before a vendor process exists ----------
+    //
+    // The cockpit's Local-only panel tells the operator that nothing can spend
+    // money while the mode is on. That claim is only true if the refusal lands
+    // HERE — before the spawn — because an interactive turn bypasses
+    // `run/engines.spawnEngine` and every gate the daemon path carries.
+    //
+    // Reported as an ordinary failed turn (`error` then `turn-done`) rather
+    // than thrown: the refusal has to be legible in the session the person is
+    // looking at. A silent no-op, or an exception escaping into the control
+    // API, both read as a broken app rather than a policy doing its job. The
+    // reason is the policy's OWN sentence, quoted verbatim — it already names
+    // the seat, how the mode resolved, and how to turn it off.
+    const verdict = verseSeatPermitted(session.engine, seatLaunch, loadCfg());
+    if (!verdict.permitted) {
+      const message = verdict.reason ?? 'local-only: refused';
+      emit(id, { type: 'error', turnId, message });
+      emit(id, {
+        type: 'turn-done',
+        turnId,
+        ok: false,
+        nativeSessionId: session.nativeSessionId,
+        durationMs: 0,
+      });
+      session.status = 'error';
+      session.lastError = message;
+      save(session);
+      return;
+    }
+
     const adapter = adapterFor(session.engine);
     const parser = adapter.createParser(turnId);
     const env = buildTurnEnv(launch.env);
@@ -865,7 +974,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         save(session);
         return { turnId, session: cloneSession(session) };
       }
-      startTurn(session, turnId, turnLaunch, redactionsFor(launch, turnLaunch));
+      startTurn(session, turnId, launch, turnLaunch, redactionsFor(launch, turnLaunch));
       return { turnId, session: cloneSession(store.get(id) ?? session) };
     },
 

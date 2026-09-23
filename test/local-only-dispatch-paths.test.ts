@@ -27,6 +27,16 @@
  *    11. fleet/router.generatedRepairCandidateAllowed
  *    12. fleet/router.inspectGeneratedRepairRouteFeasibility
  *
+ *   Interactive dispatch (a PERSON driving a seat, not the fleet)
+ *    13. verse/session-engine.startTurn   — the SECOND subprocess spawner
+ *
+ * §H exists because item 13 did not, and the gap was invisible precisely
+ * because this file looked exhaustive. Verse chat spawns its vendor CLI with a
+ * raw `node:child_process.spawn` rather than through `engines.spawnEngine`, so
+ * it is a wholly separate funnel that has to be gated on its own — and it is
+ * the funnel a person reaches by typing into the cockpit while the Local-only
+ * panel tells them nothing can spend.
+ *
  * Hermetic: no network, no real worktrees, no ~/.ashlr writes (the sandboxed
  * paths refuse before any side effect, and `deferTerminalAction` silences the
  * ledger writer). The kill switch is never read or written — §E mocks
@@ -34,7 +44,8 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 // killSwitchOn is mocked so this suite tests the LOCAL-ONLY refusal rather than
@@ -84,6 +95,13 @@ import {
   inspectGeneratedRepairRouteFeasibility,
   routeBackend,
 } from '../src/core/fleet/router.js';
+import {
+  createVerseEngine,
+  type VerseEngineHandle,
+  type VerseEngineOptions,
+  type VerseSeatLaunch,
+} from '../src/core/verse/session-engine.js';
+import type { VerseSeat } from '../src/core/verse/types.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -170,7 +188,7 @@ describe('§A dispatch-path inventory', () => {
   const read = (rel: string) => readFileSync(join(SRC, rel), 'utf8');
 
   /**
-   * The five chokepoints. Each is the SOLE constructor/spawner for its class of
+   * The six chokepoints. Each is the SOLE constructor/spawner for its class of
    * outbound model call, and each must reference the policy module. If someone
    * removes a gate, this fails before any behavioural test does.
    */
@@ -180,6 +198,8 @@ describe('§A dispatch-path inventory', () => {
     { file: 'core/run/engines.ts', fn: 'spawnEngine' },
     { file: 'core/run/sandboxed-engine.ts', fn: 'runEngineSandboxed' },
     { file: 'core/run/sandboxed-engine.ts', fn: 'runApiModelSandboxed' },
+    // The interactive funnel. Not reachable through spawnEngine — see below.
+    { file: 'core/verse/session-engine.ts', fn: 'startTurn' },
   ];
 
   for (const { file, fn } of CHOKEPOINTS) {
@@ -291,6 +311,49 @@ describe('§A dispatch-path inventory', () => {
         `${rel} imports the policy but never asserts on it before fetching`,
       ).toBe(true);
     }
+  });
+
+  /**
+   * THE SECOND SPAWNER.
+   *
+   * `engines.ts` owns the FLEET's subprocesses. It does not own the cockpit's:
+   * a Verse chat turn is spawned by `verse/session-engine.startTurn` with a raw
+   * `node:child_process.spawn`, so `binPermitted` inside `spawnEngine` never
+   * runs for it. That made the Local-only panel's "nothing can spend money
+   * while this is on" false for every interactive claude/codex/grok turn.
+   *
+   * The gate has to sit INSIDE `startTurn` and BEFORE the `spawn(` call —
+   * refusing after the child exists is not refusing. Asserted on source order
+   * within the function body so a later refactor that moves the check below the
+   * spawn fails here, even if the behavioural tests below still pass by luck.
+   */
+  it('the verse session engine gates its raw spawn on the shared predicate', () => {
+    const src = read('core/verse/session-engine.ts');
+    expect(src, 'session-engine must import policy/local-only').toContain(
+      "from '../policy/local-only.js'",
+    );
+
+    const bodyStart = src.indexOf('function startTurn');
+    expect(bodyStart, 'startTurn not found').toBeGreaterThan(-1);
+    const spawnAt = src.indexOf('spawn(bin, args', bodyStart);
+    expect(spawnAt, 'the raw spawn call moved — re-point this assertion').toBeGreaterThan(-1);
+
+    const beforeSpawn = src.slice(bodyStart, spawnAt);
+    expect(
+      /verseSeatPermitted\s*\(/.test(beforeSpawn),
+      'startTurn reaches its spawn without consulting the local-only policy',
+    ).toBe(true);
+
+    // ...and the seam must DELEGATE rather than decide for itself. A second
+    // opinion about what "local" means is how this drifts back open.
+    expect(
+      /enginePermitted\s*\(/.test(src) && /endpointPermitted\s*\(/.test(src),
+      'verseSeatPermitted must delegate to the published decidePermission wrappers',
+    ).toBe(true);
+    expect(
+      src.includes('LOCAL_CLI_AGENTS') || src.includes('isLoopbackEndpoint('),
+      're-implementing locality classification in verse is a second predicate',
+    ).toBe(false);
   });
 
   it('engines.ts is the ONLY module that executes an engine subprocess', () => {
@@ -706,5 +769,165 @@ describe('§G local dispatch is unaffected when the mode is off', () => {
     });
     expect(d.engine).toBe('local-coder');
     expect(d.reason).not.toContain('local-only');
+  });
+});
+
+// ===========================================================================
+// §H — interactive Verse sessions (chokepoint 13)
+// ===========================================================================
+
+/**
+ * The cockpit path, driven by a person. Everything above this point is the
+ * fleet deciding to spend; this is a human pressing Enter in a chat with a
+ * claude / codex / grok seat while the Local-only panel says nothing can.
+ *
+ * Hermetic: `createVerseEngine` takes an injected `spawn`, so NOTHING is ever
+ * executed. The injected spawn RECORDS and then throws, which lets the same
+ * fixture prove both directions — a refused turn must leave the recorder empty,
+ * and a permitted turn must reach it. Config is injected too, so the real
+ * ~/.ashlr/config.json is never read and never written.
+ */
+describe('§H verse interactive sessions', () => {
+  let work: string;
+  let handles: VerseEngineHandle[] = [];
+  let spawned: string[][] = [];
+
+  /** Records the attempt, then fails it. Reaching this at all is the assertion. */
+  const recordingSpawn = ((bin: string, args: readonly string[]): never => {
+    spawned.push([bin, ...args]);
+    throw new Error('spawn attempted');
+  }) as unknown as VerseEngineOptions['spawn'];
+
+  function verseEngine(cfg: AshlrConfig | undefined): VerseEngineHandle {
+    const handle = createVerseEngine({
+      root: mkdtempSync(join(work, 'root-')),
+      spawn: recordingSpawn,
+      loadConfig: () => cfg,
+    });
+    handles.push(handle);
+    return handle;
+  }
+
+  function verseSeat(engine: VerseSeat['engine'], model: string): VerseSeat {
+    return {
+      id: `seat-${engine}`,
+      engine,
+      label: engine,
+      accountId: engine === 'local' ? 'local' : `${engine}-account`,
+      models: [{ id: model, label: model, contextWindow: 32_000 }],
+      contextWindow: null,
+      health: { state: 'unknown', summary: null, windows: [], observedAt: null },
+    };
+  }
+
+  function verseLaunch(seat: VerseSeat, ollamaBaseUrl = 'http://127.0.0.1:11434'): VerseSeatLaunch {
+    return {
+      seat,
+      // A native-profile launcher prefix for the vendor seats; local resolves
+      // its binary through PATH and carries none.
+      launcher: seat.engine === 'local' ? null : [process.execPath, '/tmp/ashlr-test-launcher.mjs'],
+      ollamaBaseUrl,
+    };
+  }
+
+  /** Create a session on `seat` and send one turn. Returns what the user would see. */
+  function oneTurn(
+    handle: VerseEngineHandle,
+    seat: VerseSeat,
+    launch: VerseSeatLaunch,
+  ): { status: string; lastError: string | null; errors: string[] } {
+    const model = seat.models[0]!.id;
+    const created = handle.createSession(
+      { projectPath: work, seatId: seat.id, model },
+      launch,
+    );
+    handle.sendTurn(created.id, 'hello, please do a thing');
+    const session = handle.getSession(created.id)!;
+    const errors = handle
+      .getEvents(created.id)
+      .flatMap((e) => (e.type === 'error' ? [e.message] : []));
+    return { status: session.status, lastError: session.lastError, errors };
+  }
+
+  beforeEach(() => {
+    work = mkdtempSync(join(tmpdir(), 'local-only-verse-'));
+    spawned = [];
+    handles = [];
+  });
+
+  afterEach(() => {
+    for (const handle of handles) {
+      try { handle.close(); } catch { /* already closed */ }
+    }
+    handles = [];
+    rmSync(work, { recursive: true, force: true });
+  });
+
+  for (const engine of ['claude', 'codex', 'grok'] as const) {
+    it(`refuses a ${engine} seat BEFORE the process is spawned`, () => {
+      const seat = verseSeat(engine, `${engine}-model`);
+      const outcome = oneTurn(verseEngine(lockedCfg()), seat, verseLaunch(seat));
+
+      // 1. No child process. This is the whole bug: the panel's claim is only
+      //    true if the refusal lands before the spawn, not after it.
+      expect(spawned, `a ${engine} turn spawned a process under local-only`).toEqual([]);
+
+      // 2. The user sees a reason, in the session, not in a log nobody reads.
+      expect(outcome.errors).toHaveLength(1);
+      expect(outcome.errors[0]).toContain('local-only');
+      expect(outcome.errors[0]).toContain(engine);
+      expect(outcome.errors[0], 'the refusal must say how to undo it').toContain(
+        'cfg.foundry.localOnly=false',
+      );
+
+      // 3. Not a crash and not a silent no-op: an ordinary failed turn.
+      expect(outcome.status).toBe('error');
+      expect(outcome.lastError ?? '').toContain('local-only');
+    });
+  }
+
+  it('a LOCAL seat is untouched — it still reaches the spawn', () => {
+    const seat = verseSeat('local', 'qwen3-coder');
+    const outcome = oneTurn(verseEngine(lockedCfg()), seat, verseLaunch(seat));
+    expect(spawned, 'local-only must not degrade a local seat').toHaveLength(1);
+    // It failed only because the injected spawn throws; never on policy grounds.
+    for (const message of outcome.errors) expect(message).not.toContain('local-only');
+  });
+
+  it('CONTROL: with the mode OFF a cloud seat dispatches exactly as before', () => {
+    const seat = verseSeat('claude', 'claude-opus-5');
+    const outcome = oneTurn(verseEngine(openCfg()), seat, verseLaunch(seat));
+    expect(spawned).toHaveLength(1);
+    for (const message of outcome.errors) expect(message).not.toContain('local-only');
+  });
+
+  it('an env-only enable refuses the interactive path too', () => {
+    process.env['ASHLR_LOCAL_ONLY'] = '1';
+    const seat = verseSeat('codex', 'gpt-5.5');
+    const outcome = oneTurn(verseEngine(openCfg()), seat, verseLaunch(seat));
+    expect(spawned).toEqual([]);
+    expect(outcome.errors[0] ?? '').toContain('local-only');
+  });
+
+  it('env cannot DISABLE a persisted local-only at the verse gate', () => {
+    process.env['ASHLR_LOCAL_ONLY'] = '0';
+    const seat = verseSeat('grok', 'grok-4');
+    const outcome = oneTurn(verseEngine(lockedCfg()), seat, verseLaunch(seat));
+    expect(spawned).toEqual([]);
+    expect(outcome.errors[0] ?? '').toContain('was refused');
+  });
+
+  it('a "local" seat pointed at a REMOTE runtime is refused, not waved through', () => {
+    // engine==='local' is a seat label, not a guarantee. The endpoint decides,
+    // by the same rule endpointPermitted applies everywhere else — otherwise
+    // repointing ollamaBaseUrl at a rented GPU host reopens the hole.
+    const seat = verseSeat('local', 'qwen3-coder');
+    const outcome = oneTurn(
+      verseEngine(lockedCfg()),
+      seat,
+      verseLaunch(seat, 'https://ollama.example.com'),
+    );
+    expect(spawned).toEqual([]);
+    expect(outcome.errors[0] ?? '').toContain('local-only');
   });
 });
