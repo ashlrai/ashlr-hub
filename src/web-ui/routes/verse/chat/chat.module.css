@@ -354,6 +354,17 @@
 }
 
 .activityList { list-style: none; margin: 0; padding: 0; }
+/* Each row is wrapped in a Tooltip, whose wrapper spans are shrink-to-fit and
+   would collapse the row's grid. Re-stretch them by STRUCTURE, not by the
+   primitive's hashed class names. `:not([role='tooltip'])` keeps this away
+   from the bubble itself — a blanket `display: block` would beat its `hidden`
+   attribute and leave it painted open. */
+.activityList > li > span:not([role='tooltip']),
+.activityList > li > span > span:not([role='tooltip']) {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
 
 .activityRow {
   display: grid;

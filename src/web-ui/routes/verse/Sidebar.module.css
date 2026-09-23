@@ -129,6 +129,32 @@
   line-height: var(--text-sm-line);
 }
 .emptyTitle { color: var(--text-secondary); font-weight: var(--font-weight-medium); margin-bottom: var(--space-1); }
+/* An empty list is a dead end unless it carries the way out of itself. Same
+   shape as .error button, so the two read as one control vocabulary. */
+.emptyAction {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  margin-top: var(--space-3);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: var(--text-xs-size);
+  transition: background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+.emptyAction:hover { background: var(--bg-hover); border-color: var(--border-strong); }
+.emptyAction:active { background: var(--bg-active); }
+.emptyKey {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+}
 
 .group { padding-top: var(--space-4); }
 .groupTitle {
@@ -146,8 +172,36 @@
 }
 .groupName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .enrolled { flex-shrink: 0; color: var(--text-tertiary); opacity: 0.7; font-weight: var(--font-weight-regular); }
+/* How many chats sit under this heading, pushed to the far edge. It is the
+   one number that makes a long list scannable without opening anything, and
+   it is aria-hidden because the group's own <section> already names itself. */
+.groupCount {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  color: var(--text-tertiary);
+  font-weight: var(--font-weight-regular);
+}
 
 .list { display: flex; flex-direction: column; list-style: none; margin: 0; padding: 0; }
+/* The row is wrapped in a Tooltip, so the <li>'s child is the tooltip's own
+   wrapper span and not the button. That wrapper is shrink-to-fit, which would
+   collapse a full-width row and defeat .sessionText's ellipsis. These two
+   rules re-stretch whatever spans the primitive interposes, addressed by
+   STRUCTURE rather than by its hashed class names, so they survive the
+   primitive being swapped.
+     The `:not([role='tooltip'])` is load-bearing: the bubble is a sibling
+   span, and a blanket `display: block` here would beat its `hidden`
+   attribute and leave the tooltip painted open over the transcript — the
+   exact failure this change exists to remove. */
+.list > li { display: block; min-width: 0; }
+.list > li > span:not([role='tooltip']),
+.list > li > span > span:not([role='tooltip']) {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
 
 /* One row: 2px engine marker · title · state · relative time. */
 .session {
@@ -166,6 +220,24 @@
 .session:hover { background: var(--bg-hover); color: var(--text-primary); }
 .session:active { background: var(--bg-active); }
 .session[aria-current] { background: var(--bg-selected); color: var(--text-primary); }
+/* WHICH ROW AM I ON. --bg-selected and --bg-hover are one step apart, so a
+   hovered row and the open one read the same at a glance and the list loses
+   its "you are here". The selected row now carries THREE non-colour signals
+   as well: its engine marker runs the full row height, its title steps up a
+   weight, and a solid accent rule sits on the leading edge. None of them is
+   colour alone — DESIGN-V2 §6. */
+.session[aria-current] { font-weight: var(--font-weight-medium); }
+.session[aria-current]::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 2px;
+  background: var(--accent-500);
+}
+/* The engine marker is deliberately left alone here. Growing it as well put
+   two 2px rules a dozen pixels apart and the row read as striped; the edge
+   rule is the "you are here" and the marker stays the engine's identity. */
 
 .marker {
   width: 2px;

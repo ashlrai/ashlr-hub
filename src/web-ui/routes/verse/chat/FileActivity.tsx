@@ -12,6 +12,7 @@
  * accessible name spells it out in full.
  */
 import { useState } from 'react';
+import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { fileBasename, fileDirname } from './tool-semantics.js';
 import { describeFiles, type TurnFileEntry } from './turn-model.js';
 import styles from './chat.module.css';
@@ -53,28 +54,34 @@ export function FileActivity({ files, onJump }: FileActivityProps) {
           }${file.failed ? ', a call on this file failed' : ''}`;
           return (
             <li key={file.path}>
-              <button type="button" className={styles.activityRow} data-action={file.action}
-                data-failed={file.failed ? 'true' : undefined}
-                onClick={() => onJump(file.anchorToolUseId)} aria-label={name} title={file.path}>
-                <span className={styles.activityRule} aria-hidden="true" />
-                <span className={styles.activityVerb}>{VERB[file.action]}</span>
-                <span className={styles.activityPath}>
-                  <span className={styles.activityName}>{fileBasename(file.path)}</span>
-                  <span className={styles.activityDir}>{fileDirname(file.path)}</span>
-                </span>
-                {file.failed ? (
-                  // DESIGN §6: the danger tint on the 2px rule was the ONLY
-                  // difference between a failed row and a successful one, and
-                  // it is the same rule once hue is removed. The word is what
-                  // actually carries it.
-                  <span className={styles.activityFailed} aria-hidden="true">! failed</span>
-                ) : null}
-                {times > 1 ? <span className={styles.activityTimes}>×{times}</span> : null}
-                <span className={styles.activityDelta}>
-                  {file.additions > 0 ? <span className={styles.activityAdd}>+{file.additions}</span> : null}
-                  {file.deletions > 0 ? <span className={styles.activityDel}>−{file.deletions}</span> : null}
-                </span>
-              </button>
+              {/* The row draws the basename in full and lets the DIRECTORY
+                  clip, which is the half that tells two same-named files
+                  apart. The full path stays in aria-label — this restores it
+                  for sighted operators, on focus as well as hover. */}
+              <Tooltip label={file.path} placement="right">
+                <button type="button" className={styles.activityRow} data-action={file.action}
+                  data-failed={file.failed ? 'true' : undefined}
+                  onClick={() => onJump(file.anchorToolUseId)} aria-label={name}>
+                  <span className={styles.activityRule} aria-hidden="true" />
+                  <span className={styles.activityVerb}>{VERB[file.action]}</span>
+                  <span className={styles.activityPath}>
+                    <span className={styles.activityName}>{fileBasename(file.path)}</span>
+                    <span className={styles.activityDir}>{fileDirname(file.path)}</span>
+                  </span>
+                  {file.failed ? (
+                    // DESIGN §6: the danger tint on the 2px rule was the ONLY
+                    // difference between a failed row and a successful one, and
+                    // it is the same rule once hue is removed. The word is what
+                    // actually carries it.
+                    <span className={styles.activityFailed} aria-hidden="true">! failed</span>
+                  ) : null}
+                  {times > 1 ? <span className={styles.activityTimes}>×{times}</span> : null}
+                  <span className={styles.activityDelta}>
+                    {file.additions > 0 ? <span className={styles.activityAdd}>+{file.additions}</span> : null}
+                    {file.deletions > 0 ? <span className={styles.activityDel}>−{file.deletions}</span> : null}
+                  </span>
+                </button>
+              </Tooltip>
             </li>
           );
         })}

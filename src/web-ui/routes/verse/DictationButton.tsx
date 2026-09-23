@@ -7,7 +7,8 @@
  * a tooltip points at Wispr Flow / Superwhisper — system-level dictation
  * types straight into the textarea, so nothing is lost.
  */
-import { useCallback, useEffect, useId, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Tooltip } from '../../components/primitives/Tooltip.js';
 import styles from './Composer.module.css';
 
 export const DICTATION_FALLBACK_HINT = 'Use Wispr Flow / Superwhisper — system dictation works in this box';
@@ -52,7 +53,6 @@ export function DictationButton({ disabled = false, onInterim, onFinal, onListen
   const [listening, setListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const recognizer = useRef<RecognitionLike | null>(null);
-  const hintId = useId();
   const callbacks = useRef({ onInterim, onFinal, onListeningChange });
   callbacks.current = { onInterim, onFinal, onListeningChange };
 
@@ -146,26 +146,35 @@ export function DictationButton({ disabled = false, onInterim, onFinal, onListen
   if (!Recognizer) {
     return (
       <span className={styles.dictationWrap}>
-        <button type="button" className={styles.dictation} disabled aria-disabled="true" aria-describedby={hintId}
-          title={DICTATION_FALLBACK_HINT}>
-          <MicIcon />
-          <span className="visually-hidden">Dictation unavailable</span>
-        </button>
-        <span role="tooltip" id={hintId} className={styles.dictationHint}>{DICTATION_FALLBACK_HINT}</span>
+        {/* This button previously carried the hint THREE times over: a native
+            `title`, an aria-describedby, and a hand-rolled `role="tooltip"`
+            span that lived in the DOM permanently at opacity 0 and was
+            revealed by a :hover rule on the wrapper. That span is the grey
+            slab that overhangs the panel beside the composer. One Tooltip
+            replaces all three and is mounted only while it is open. */}
+        <Tooltip label={DICTATION_FALLBACK_HINT} placement="top">
+          <button type="button" className={styles.dictation} disabled aria-disabled="true">
+            <MicIcon />
+            <span className="visually-hidden">Dictation unavailable</span>
+          </button>
+        </Tooltip>
       </span>
     );
   }
 
   return (
     <span className={styles.dictationWrap}>
-      <button type="button" className={`${styles.dictation} ${listening ? styles.dictationLive : ''}`}
-        disabled={disabled && !listening} aria-pressed={listening}
-        aria-label={listening ? 'Stop dictation (Esc)' : 'Start dictation'}
-        title={listening ? 'Stop dictation (Esc)' : 'Dictate'}
-        onClick={() => (listening ? stop() : start())}>
-        <MicIcon />
-        {listening ? <span className={styles.dictationPulse} aria-hidden="true" /> : null}
-      </button>
+      {/* Icon-only, so the aria-label stays put: the tooltip describes, it
+          does not name. */}
+      <Tooltip label={listening ? 'Stop dictation' : 'Dictate'} shortcut={listening ? 'Esc' : undefined} placement="top">
+        <button type="button" className={`${styles.dictation} ${listening ? styles.dictationLive : ''}`}
+          disabled={disabled && !listening} aria-pressed={listening}
+          aria-label={listening ? 'Stop dictation (Esc)' : 'Start dictation'}
+          onClick={() => (listening ? stop() : start())}>
+          <MicIcon />
+          {listening ? <span className={styles.dictationPulse} aria-hidden="true" /> : null}
+        </button>
+      </Tooltip>
       {error ? <span role="alert" className={styles.dictationError}>{error}</span> : null}
     </span>
   );

@@ -84,9 +84,16 @@ export function SessionRoots({ session, refreshKey = 0 }: SessionRootsProps) {
           return (
             <li key={root.path} className={styles.root} data-tone={rootTone(root)}>
               <div className={styles.rootHead}>
-                <span className={styles.name} title={root.path}>{root.name}</span>
+                <span className={styles.name}>{root.name}</span>
                 <span className={styles.badge}>{root.primary ? 'primary' : 'added'}</span>
               </div>
+              {/* The path was a hover `title` on the folder name. This card is
+                  the one place in the app that exists to ATTRIBUTE a diff to a
+                  repository, and two checkouts of the same repo share a name —
+                  so the thing that tells them apart cannot be the one fact you
+                  have to hover to read. It is shown, directory-first, with the
+                  head clipping so the tail that disambiguates stays visible. */}
+              <p className={styles.path}>{root.path}</p>
               <p className={styles.git}>{git ?? 'not a git repo'}</p>
               {root.git?.remote ? <p className={styles.remote}>{root.git.remote}</p> : null}
               {caveat ? <p className={styles.caveat}>{caveat}</p> : null}

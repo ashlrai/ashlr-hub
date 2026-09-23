@@ -10,6 +10,12 @@
  *     announced rather than merely drawn;
  *   - it carries description, never the accessible NAME — icon buttons still
  *     need their own aria-label.
+ *
+ * TWO SPELLINGS, ONE COMPONENT. `label` (plus an optional `shortcut`, drawn
+ * as a keycap) is the contract the verse surfaces are written against;
+ * `content` is the original free-ReactNode spelling and keeps working, so
+ * nothing that already calls this has to move. `label` wins when both are
+ * given.
  */
 import { useId, useRef, useState, type ReactElement, type ReactNode } from 'react';
 import styles from './Tooltip.module.css';
@@ -17,7 +23,12 @@ import styles from './Tooltip.module.css';
 export type TooltipPlacement = 'top' | 'bottom' | 'left' | 'right';
 
 export interface TooltipProps {
-  content: ReactNode;
+  /** The description. Preferred spelling — a short phrase, never a paragraph. */
+  label?: string;
+  /** Drawn as a keycap after the label, e.g. `⌘N`. */
+  shortcut?: string;
+  /** Free-form alternative to `label`, kept for the call sites that predate it. */
+  content?: ReactNode;
   children: ReactElement<{ 'aria-describedby'?: string }>;
   placement?: TooltipPlacement;
   /** Skip rendering entirely (e.g. content not known yet) without changing the tree. */
@@ -25,12 +36,21 @@ export interface TooltipProps {
   className?: string;
 }
 
-export function Tooltip({ content, children, placement = 'top', disabled = false, className }: TooltipProps) {
+export function Tooltip({
+  label,
+  shortcut,
+  content,
+  children,
+  placement = 'top',
+  disabled = false,
+  className,
+}: TooltipProps) {
   const [open, setOpen] = useState(false);
   const id = useId();
   const wrapperRef = useRef<HTMLSpanElement>(null);
 
-  if (disabled || content === null || content === undefined || content === '') return children;
+  const body: ReactNode = label === undefined || label === '' ? content : label;
+  if (disabled || body === null || body === undefined || body === '') return children;
 
   return (
     <span
@@ -53,7 +73,8 @@ export function Tooltip({ content, children, placement = 'top', disabled = false
         {children}
       </span>
       <span role="tooltip" id={id} className={`${styles.bubble} ${styles[placement]}`} hidden={!open}>
-        {content}
+        {body}
+        {shortcut ? <kbd className={styles.shortcut}>{shortcut}</kbd> : null}
       </span>
     </span>
   );

@@ -7,6 +7,24 @@
   display: inline-flex;
 }
 
+/* The keycap after a label. `inherit`ing nothing on purpose: a shortcut is a
+   glyph run, so it takes the display face and tabular figures rather than the
+   bubble's body text. */
+.shortcut {
+  display: inline-block;
+  margin-left: var(--space-2);
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-xs);
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  line-height: calc(var(--text-xs-line) - 2px);
+  white-space: nowrap;
+}
+
 .bubble {
   position: absolute;
   z-index: var(--z-dropdown);

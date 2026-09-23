@@ -26,6 +26,7 @@ import type { VerseProject, VerseSeat, VerseSession } from '../../data/api-types
 import type { QueryStatus } from '../../data/cache.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
+import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { PlusIcon, SearchIcon, SidebarIcon } from './verse-icons.js';
 import { seatSubscription } from './seat-subscription.js';
 import { formatRelative, groupSessions, seatById, seatPillLabel } from './verse-model.js';
@@ -68,12 +69,18 @@ export function Sidebar(props: SidebarProps) {
           <input id={searchId} type="search" value={query} placeholder="Search chats" autoComplete="off"
             onChange={(event) => onQuery(event.target.value)} />
         </label>
-        <button type="button" className={styles.iconButton} onClick={onNew} title="New chat (⌘N)" aria-label="New chat">
-          <PlusIcon />
-        </button>
-        <button type="button" className={styles.iconButton} onClick={onCollapse} title="Hide chat list" aria-label="Hide chat list">
-          <SidebarIcon />
-        </button>
+        {/* Icon-only, so each keeps its own aria-label: the tooltip is the
+            DESCRIPTION, never the accessible name. */}
+        <Tooltip label="New chat" shortcut="⌘N" placement="bottom">
+          <button type="button" className={styles.iconButton} onClick={onNew} aria-label="New chat">
+            <PlusIcon />
+          </button>
+        </Tooltip>
+        <Tooltip label="Hide chat list" placement="bottom">
+          <button type="button" className={styles.iconButton} onClick={onCollapse} aria-label="Hide chat list">
+            <SidebarIcon />
+          </button>
+        </Tooltip>
         {sessionsStatus === 'refreshing' ? <RefreshIndicator label="Refreshing chats" /> : null}
       </div>
 
@@ -96,18 +103,39 @@ export function Sidebar(props: SidebarProps) {
           </div>
         ) : groups.length === 0 ? (
           <div className={styles.empty}>
-            {query ? <p>No chats match “{query}”.</p> : (
+            {query ? (
               <>
-                <p className={styles.emptyTitle}>No chats yet — ⌘N</p>
+                <p className={styles.emptyTitle}>No chats match “{query}”</p>
+                <p>Search covers chat titles and the project each one is on.</p>
+                {/* A dead end needs a way out. Without this the only exit is
+                    to find the field again and clear it by hand. */}
+                <button type="button" className={styles.emptyAction} onClick={() => onQuery('')}>
+                  Clear search
+                </button>
+              </>
+            ) : (
+              <>
+                <p className={styles.emptyTitle}>No chats yet</p>
                 <p>Start one on any project with any seat.</p>
+                {/* Deliberately NOT named "New chat": the header already has a
+                    control by that name, and two buttons sharing one
+                    accessible name is a coin toss for anyone navigating by
+                    name rather than by sight. */}
+                <button type="button" className={styles.emptyAction} onClick={onNew}>
+                  Start your first chat <kbd className={styles.emptyKey}>⌘N</kbd>
+                </button>
               </>
             )}
           </div>
         ) : groups.map((group) => (
           <section key={group.projectPath} className={styles.group} aria-label={group.name}>
+            {/* The path stays a native `title`: this heading is not focusable,
+                so a tooltip would reach mice only, and what it discloses is
+                the text the ellipsis clipped rather than a description. */}
             <h2 className={styles.groupTitle} title={group.projectPath}>
               <span className={styles.groupName}>{group.name}</span>
-              {group.enrolled ? <span className={styles.enrolled} title="Enrolled repo">enrolled</span> : null}
+              {group.enrolled ? <span className={styles.enrolled}>enrolled</span> : null}
+              <span className={styles.groupCount} aria-hidden="true">{group.sessions.length}</span>
             </h2>
             <ul className={styles.list}>
               {group.sessions.map((session) => {
@@ -122,23 +150,30 @@ export function Sidebar(props: SidebarProps) {
                   : `${session.title} · ${seatPillLabel(seats, session)} · ${capacity.summary}`;
                 return (
                   <li key={session.id}>
-                    <button type="button" className={`${styles.session} ${styles[`engine-${session.engine}`] ?? ''}`}
-                      aria-current={session.id === selectedId ? 'true' : undefined}
-                      data-focus-key={`verse-session:${session.id}`} data-engine={session.engine}
-                      onClick={() => onSelect(session.id)} title={title}>
-                      <span className={styles.marker} aria-hidden="true" />
-                      <span className={styles.sessionText}>{session.title || 'Untitled chat'}</span>
-                      {spentWhileRunning && capacity !== null ? (
-                        <span className={styles.seatSpent} role="img"
-                          aria-label={`Seat limit reached: ${capacity.summary}`}>▮</span>
-                      ) : null}
-                      {session.status === 'running' ? (
-                        <span className={styles.running} role="img" aria-label="Running" />
-                      ) : session.status === 'error' ? (
-                        <span className={styles.errored} role="img" aria-label="Last turn failed">!</span>
-                      ) : null}
-                      <time className={styles.time} dateTime={session.updatedAt}>{formatRelative(session.updatedAt)}</time>
-                    </button>
+                    {/* The row is where the list stops being scannable: the
+                        title is clipped at one line and the seat is not drawn
+                        at all. A native `title` disclosed both to mice only —
+                        this one opens on keyboard focus too, and cannot be
+                        clipped by the sidebar's own overflow. */}
+                    <Tooltip label={title} placement="right">
+                      <button type="button" className={`${styles.session} ${styles[`engine-${session.engine}`] ?? ''}`}
+                        aria-current={session.id === selectedId ? 'true' : undefined}
+                        data-focus-key={`verse-session:${session.id}`} data-engine={session.engine}
+                        onClick={() => onSelect(session.id)}>
+                        <span className={styles.marker} aria-hidden="true" />
+                        <span className={styles.sessionText}>{session.title || 'Untitled chat'}</span>
+                        {spentWhileRunning && capacity !== null ? (
+                          <span className={styles.seatSpent} role="img"
+                            aria-label={`Seat limit reached: ${capacity.summary}`}>▮</span>
+                        ) : null}
+                        {session.status === 'running' ? (
+                          <span className={styles.running} role="img" aria-label="Running" />
+                        ) : session.status === 'error' ? (
+                          <span className={styles.errored} role="img" aria-label="Last turn failed">!</span>
+                        ) : null}
+                        <time className={styles.time} dateTime={session.updatedAt}>{formatRelative(session.updatedAt)}</time>
+                      </button>
+                    </Tooltip>
                   </li>
                 );
               })}

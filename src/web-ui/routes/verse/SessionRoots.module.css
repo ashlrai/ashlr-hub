@@ -77,6 +77,23 @@
   color: var(--text-muted);
 }
 
+/* The full path, shown rather than hovered. `direction: rtl` with the text
+   isolated flips only WHICH END the ellipsis eats — the head, so the tail
+   that actually disambiguates two same-named checkouts survives. The bdi
+   isolation keeps the path itself rendering left-to-right. */
+.path {
+  margin: var(--space-1) 0 0;
+  direction: rtl;
+  text-align: left;
+  unicode-bidi: plaintext;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
 .git,
 .remote,
 .caveat {

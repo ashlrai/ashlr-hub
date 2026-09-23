@@ -229,3 +229,38 @@ describe('ResourcesPanel — collapsing what cannot be used', () => {
     expect(within(panel()).getByText('limit reached')).toBeInTheDocument();
   });
 });
+
+describe('ResourcesPanel — the seat row after the title sweep', () => {
+  /**
+   * THE REGRESSION A CARELESS title -> Tooltip SWEEP CAUSES. The seat toggle
+   * is an expandable control whose accessible name is its aria-label; the
+   * subscription sentence that used to hang off a `title` on the inner label
+   * span is a DESCRIPTION. If the sweep ever lets the tooltip supply the name
+   * instead, every seat in this list becomes "Claude Max Max plan tight ..."
+   * to a screen reader, and the list stops being navigable by name.
+   */
+  it('keeps the seat toggle named by its label, not by its tooltip', async () => {
+    const user = userEvent.setup();
+    mount([CLAUDE_TIGHT_SEAT]);
+    const toggle = within(panel()).getByRole('button', { name: 'Claude Max' });
+    expect(toggle).toHaveAccessibleName('Claude Max');
+    expect(toggle).not.toHaveAttribute('title');
+
+    // The sentence is still reachable — and now on keyboard focus too, which
+    // a native `title` never managed.
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    await user.hover(toggle);
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Claude Max');
+    // Naming is unchanged by the tooltip being open.
+    expect(toggle).toHaveAccessibleName('Claude Max');
+  });
+
+  it('does not repeat the same sentence on the capacity chip beside it', async () => {
+    const user = userEvent.setup();
+    mount([CLAUDE_TIGHT_SEAT]);
+    const toggle = within(panel()).getByRole('button', { name: 'Claude Max' });
+    await user.hover(toggle);
+    // One row, one tooltip. It used to be on the label span AND the chip.
+    expect(screen.getAllByRole('tooltip')).toHaveLength(1);
+  });
+});
