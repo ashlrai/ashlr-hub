@@ -87,6 +87,7 @@ const SECTION_BLURB: Record<string, string> = {
   approvals: 'Everything the loop produced that is waiting on you. Approving a PR proposal pushes a branch.',
   usage: 'Which account you can actually use right now, and what it costs.',
   settings: 'Theme, accent, density, font — and this tour again whenever you want it.',
+  mcp: 'What each seat would actually load as an MCP server, and whether any provider CLI has drifted off its pin.',
 };
 
 function WelcomeStep() {

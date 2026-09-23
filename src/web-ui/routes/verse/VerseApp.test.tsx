@@ -1,5 +1,5 @@
 /**
- * Shell tests: the 56px rail, the five lazily-mounted sections, and the
+ * Shell tests: the 56px rail, the lazily-mounted sections, and the
  * global shortcuts. The chat surface itself is covered in
  * sections/ChatSection.test.tsx — this file only asserts that the shell
  * mounts it and gets out of the way.
@@ -11,9 +11,9 @@ import { ToastProvider } from '../../components/primitives/Toast.js';
 import { clearMutationToken, markCheckComplete } from '../../data/auth-store.js';
 import { evictAll } from '../../data/cache.js';
 import { MockEventSource, verseFetch } from './fixtures.test-support.js';
-import { MissingSection, VerseApp } from './VerseApp.js';
+import { MissingSection, SECTION_MODULES, VerseApp } from './VerseApp.js';
 import { resetVerseStore } from './verse-store.js';
-import { resetVerseUi, setVersePendingApprovals } from './verse-ui-store.js';
+import { resetVerseUi, setVersePendingApprovals, VERSE_SECTIONS } from './verse-ui-store.js';
 
 /** verseFetch's mock is typed loosely; this is the shape we actually delegate to. */
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -41,10 +41,12 @@ afterEach(() => {
 });
 
 describe('VerseApp shell', () => {
-  it('renders the five rail sections and mounts Chat first', async () => {
+  it('renders a rail button for every registered section and mounts Chat first', async () => {
     mount();
     const rail = screen.getByRole('navigation', { name: 'Verse sections' });
-    for (const label of ['Chat', 'Autonomy', 'Approvals', 'Usage', 'Settings']) {
+    // Driven off VERSE_SECTIONS, not a hard-coded five: a section added to the
+    // list and given no rail button is the same bug as one with no module.
+    for (const label of VERSE_SECTIONS.map((s) => s.label)) {
       expect(within(rail).getByRole('button', { name: label })).toBeInTheDocument();
     }
     expect(within(rail).getByRole('button', { name: 'Chat' })).toHaveAttribute('aria-current', 'page');
@@ -93,6 +95,64 @@ describe('VerseApp shell', () => {
       // Focusable, or main?.focus() from SkipToContent is a no-op.
       expect(main.tabIndex).toBe(-1);
     }
+  });
+
+  it('resolves EVERY registered section through the shell’s own glob', async () => {
+    // THE REGRESSION THIS PINS. A section is reachable only when it is BOTH in
+    // VERSE_SECTIONS and at `sections/<module>.tsx`, where the shell's
+    // `import.meta.glob` can see it. MCP satisfied neither for a whole release
+    // — a complete component with its own queries, contract, tests and two
+    // live server routes, invisible to the app, and nothing failed to say so.
+    //
+    // This walks SECTION_MODULES, the shell's actual glob result, so changing
+    // the pattern in VerseApp.tsx is covered too — a test carrying its own
+    // copy of the pattern would keep passing through exactly that change.
+    //
+    // Asserted here rather than by mounting each section and looking for
+    // MissingSection: when a lazy child re-suspends, React keeps the PREVIOUS
+    // section mounted (hidden) beside the fallback, so a DOM sweep reads stale
+    // content and passes on nothing. The end-to-end proof that the shell
+    // really mounts MCP is the next test, which fails if this breaks.
+    for (const entry of VERSE_SECTIONS) {
+      const key = `./sections/${entry.module}.tsx`;
+      const importer = SECTION_MODULES[key];
+      expect(
+        importer,
+        `VERSE_SECTIONS lists ${entry.id} as ${key}, which the shell's glob cannot see`,
+      ).toBeTypeOf('function');
+
+      // The shell takes `mod[entry.module] ?? mod.default`; a module that
+      // loads but exports neither renders the missing state just the same.
+      const mod = (await importer!()) as Record<string, unknown>;
+      expect(
+        typeof (mod[entry.module] ?? mod.default),
+        `${key} must export a \`${entry.module}\` component`,
+      ).toBe('function');
+    }
+  });
+
+  it('reaches the MCP section by rail button and by ⌘6, with its real panel', async () => {
+    // Positive proof, not just "not missing": the heading below is rendered by
+    // sections/McpSection.tsx itself, so seeing it means the glob resolved the
+    // real module rather than the designed placeholder.
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+
+    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
+    await user.click(within(rail).getByRole('button', { name: 'MCP' }));
+    expect(await screen.findByRole('heading', { name: 'MCP and CLI' })).toBeInTheDocument();
+    expect(within(rail).getByRole('button', { name: 'MCP' })).toHaveAttribute('aria-current', 'page');
+
+    act(() => { fireEvent.keyDown(document, { key: '1', metaKey: true }); });
+    await screen.findByRole('navigation', { name: 'Chats' });
+    act(() => { fireEvent.keyDown(document, { key: '6', metaKey: true }); });
+    expect(await screen.findByRole('heading', { name: 'MCP and CLI' })).toBeInTheDocument();
+
+    // ⌘5 still means Settings — the new section extended the scheme rather
+    // than renumbering the five bindings people already have.
+    act(() => { fireEvent.keyDown(document, { key: '5', metaKey: true }); });
+    expect(within(rail).getByRole('button', { name: 'Settings' })).toHaveAttribute('aria-current', 'page');
   });
 
   it('explains a rail slot whose module has not landed instead of going blank', () => {

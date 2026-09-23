@@ -1,10 +1,14 @@
 /**
  * routes/verse/VerseApp.tsx — the Verse shell (VERSE-CONTRACT-V2 "Shell
- * contract"): a 56px icon rail down the left, and exactly one of the five
- * section modules lazily mounted beside it.
+ * contract"): a 56px icon rail down the left, and exactly one section module
+ * lazily mounted beside it.
  *
- *   Chat · Autonomy · Approvals · Usage · Settings
- *   ⌘1–⌘5 switch · ⌘K quick switcher · ⌘N new chat · ⌘, Settings
+ *   Chat · Autonomy · Approvals · Usage · Settings · MCP
+ *   ⌘1–⌘6 switch · ⌘K quick switcher · ⌘N new chat · ⌘, Settings
+ *
+ * The rail is driven entirely by `VERSE_SECTIONS`, including the number of
+ * ⌘-digit bindings, so adding a section is one entry there plus a matching
+ * `sections/<Module>.tsx` — never an edit here.
  *
  * Each section module exports a named component taking NO props and owns
  * its own data; the shell knows nothing about chat, caps or inboxes. That
@@ -12,11 +16,19 @@
  * one-shot commands through verse-ui-store instead of being passed down.
  *
  * Section modules are resolved through `import.meta.glob` rather than a
- * static `import()` per section, for one deliberate reason: the four
- * non-chat modules are written by other owners and land at different times.
+ * static `import()` per section, for one deliberate reason: the non-chat
+ * modules are written by other owners and land at different times.
  * A glob yields real per-section code splitting when a module is present
  * and a designed "not built yet" state when it is not, instead of a build
  * that cannot compile until every owner has finished.
+ *
+ * THE COST OF THAT CHOICE, paid once: a finished section whose file sits
+ * outside `sections/` is invisible to the glob and therefore to the app, with
+ * nothing failing to say so. MCP shipped that way — complete component,
+ * queries, contract, tests and server routes, unreachable — because it lived
+ * at `mcp/McpSection.tsx`. The fix was to move the file, not to add a second
+ * mounting path; `VerseApp.test.tsx` now mounts every `VERSE_SECTIONS` entry
+ * and fails if any of them falls back to `MissingSection`.
  */
 import { Suspense, lazy, useEffect, useMemo, type ComponentType } from 'react';
 import { RouteErrorBoundary } from '../../components/primitives/RouteErrorBoundary.js';
@@ -40,8 +52,12 @@ import styles from './VerseApp.module.css';
  * resolves this at build time (one chunk per match, `{}` when there are no
  * matches), so a module that has not been written yet is a missing key, not
  * an unresolved import.
+ *
+ * EXPORTED so the registration test can walk THIS map rather than re-typing
+ * the glob pattern. A test with its own copy of the pattern still passes when
+ * the pattern here changes, which is most of how a section goes unreachable.
  */
-const SECTION_MODULES = import.meta.glob('./sections/*Section.tsx');
+export const SECTION_MODULES = import.meta.glob('./sections/*Section.tsx');
 
 /**
  * The designed state for a rail slot whose module has not landed (or failed
@@ -119,7 +135,8 @@ export function VerseApp() {
     if (typeof pendingCount === 'number') setVersePendingApprovals(pendingCount);
   }, [pendingCount]);
 
-  // ⌘1–⌘5 sections · ⌘K quick switcher · ⌘N new chat · ⌘, Settings.
+  // ⌘1–⌘n sections (n = VERSE_SECTIONS.length) · ⌘K quick switcher ·
+  // ⌘N new chat · ⌘, Settings.
   // Held at the document so they work wherever focus is, except inside a
   // dialog's own text field where the browser's own editing shortcuts win.
   useEffect(() => {
