@@ -6,7 +6,7 @@
  */
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '../../components/primitives/Toast.js';
 import { clearMutationToken, markCheckComplete } from '../../data/auth-store.js';
 import { evictAll } from '../../data/cache.js';
@@ -26,6 +26,49 @@ type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Respo
 function mount() {
   return render(<ToastProvider><VerseApp /></ToastProvider>);
 }
+
+/**
+ * Resolve every lazily-imported section module BEFORE any test asserts that
+ * one of them mounted.
+ *
+ * WHY THIS HOOK EXISTS — a real order dependence, not a convenience.
+ *
+ * The shell mounts sections through `React.lazy(sectionLoader(id))`, and
+ * `sectionLoader` awaits the `import.meta.glob` importer. The first test to
+ * mount the shell therefore pays, inside its own assertion window, the cost
+ * of transforming and evaluating a whole section's module graph for the first
+ * time in this worker — ChatSection plus everything it pulls in. Testing
+ * Library's `findBy*` allows 1000ms for that, and a cold ChatSection does not
+ * reliably fit: run this file on its own and the FIRST test times out waiting
+ * for the Chats nav, while every test after it passes on the module the first
+ * one just warmed.
+ *
+ * That made the file pass or fail depending on what ran before it. In a full
+ * suite some earlier file had usually already imported the section modules,
+ * so the race was won and nobody saw it; alone, or after a change to the file
+ * order, it was lost. The failure looked like "Chat did not mount", which is
+ * a real bug's signature — so the test was not just flaky, it was pointing at
+ * the wrong thing.
+ *
+ * The fix is to establish the precondition the assertions depend on instead
+ * of leaving it to whatever ran first. Awaiting the importers here resolves
+ * them once, in a hook with its own generous budget, so every `React.lazy` in
+ * every test below resolves from an already-evaluated module. The assertions
+ * are untouched: the shell must still actually mount ChatSection and render
+ * its nav, and if it does not, the test still fails.
+ *
+ * It walks `SECTION_MODULES` — the shell's own glob result, the same map the
+ * registration test below walks — so it cannot warm a different set of
+ * modules from the ones the shell will load.
+ */
+beforeAll(async () => {
+  await Promise.all(Object.values(SECTION_MODULES).map((load) => load()));
+  // An explicit budget rather than the default hook timeout: this hook does
+  // module loading, whose cost depends on the machine and on how cold the
+  // transform cache is, and inheriting a default is precisely how the race
+  // above went unnoticed. 30s is far more than the ~2s it takes warm, and it
+  // is a ceiling on setup — not on any assertion.
+}, 30_000);
 
 beforeEach(() => {
   window.history.replaceState(null, '', '/verse/');
