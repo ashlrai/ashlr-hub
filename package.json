@@ -147,7 +147,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "marked": "17.0.0",
+    "marked": "18.0.10",
     "tar": "7.5.22"
   }
 }
