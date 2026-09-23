@@ -133,7 +133,7 @@ import type { CacheEntry } from '../fabric/cache/store.js';
 // mechanism — phantom vault first, then process.env. Never logs the value.
 import { resolveProviderKey } from '../integrations/secrets.js';
 import { normalizeNumericLoopbackOllamaBaseUrl } from './ollama-identity.js';
-// M264: elite context injection for local api-model engines (local-coder, local-agent).
+// M264: elite context injection for local api-model engines (local-coder, llama-server).
 // Frontier engines (claude, codex) are never modified. Flag-off → no-op.
 import {
   buildLocalContextBundle,

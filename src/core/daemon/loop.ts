@@ -145,8 +145,9 @@ import {
   type DaemonActivationCapability,
 } from './activation-permit.js';
 import { nullSink } from '../run/streaming.js';
+// The ONE enumerator of what counts as local — see isLocalBackend below.
+import { engineLocality } from '../policy/local-only.js';
 import {
-  LOCAL_FLEET_ENGINE,
   deriveLocalFleetConcurrency,
   FENCE_SERIALIZED_ENGINES,
   localFleetDispatchAllowed,
@@ -1137,18 +1138,31 @@ export async function drainDaemonTickEffects(tickResult: DaemonTick): Promise<vo
 }
 
 /**
- * Backends whose inference runs on THIS machine.
+ * Does this backend's inference run on THIS machine?
  *
- * 'llama-server' joins the set because it is the only runtime measured to serve
- * Qwen3.8 agents concurrently (docs/LOCAL-FLEET.md): Ollama — which is what
- * 'local-coder' talks to — refuses parallel requests for this architecture and
- * silently queues them. Both are local; only one is a fleet. Membership here is
- * about LOCALITY, not throughput, so both belong, and the fleet's preference
- * between them is expressed in the router, not by omission here.
+ * Asks `src/core/policy/local-only.ts`, which is the ONE module that decides
+ * what counts as local. This used to be a hand-maintained `LOCAL_ONLY_BACKENDS`
+ * set right here — and a second enumeration is precisely how the daemon and
+ * `autonomy/resource-strategy.ts` ended up shipping opposite answers for
+ * 'ashlrcode'. A backend added to the engine registry is now classified
+ * without anyone remembering to edit this file.
+ *
+ * The reasoning the old set carried still holds and still applies, so it is
+ * kept here: 'llama-server' classifies LOCAL, for the same reason it was listed
+ * by hand. It is the only runtime measured to serve Qwen3.8 agents concurrently
+ * (docs/LOCAL-FLEET.md) — Ollama, which is what 'local-coder' talks to, refuses
+ * parallel requests for this architecture and silently queues them. Both are
+ * local; only one is a fleet. That distinction is about LOCALITY, not
+ * throughput, so both are local here and the fleet's preference between them
+ * stays expressed in the router, not smuggled in by omission.
+ *
+ * `cfg` matters: an operator-registered engine (cfg.foundry.engines) and the
+ * llama-server runtime's actually-resolved endpoint are both config-derived, so
+ * a call without it sees only the builtin registry.
  */
-const LOCAL_ONLY_BACKENDS = new Set<EngineId>([
-  'builtin', 'local-coder', 'ashlrcode', 'aw', LOCAL_FLEET_ENGINE,
-]);
+function isLocalBackend(backend: EngineId, cfg?: AshlrConfig): boolean {
+  return engineLocality(backend, cfg) === 'local';
+}
 const DRAIN_MODE_TAG_PREFIX = 'drain:';
 const MAX_DRAIN_SELECTED_IDS = 12;
 const MAX_DIAGNOSTIC_RESLICE_DRAIN_LIMIT = 50;
@@ -1427,7 +1441,7 @@ function constrainToLocalBackends(cfg: AshlrConfig): AshlrConfig {
     return { ...cfg, foundry: { allowedBackends: ['builtin'] } };
   }
   const current: EngineId[] = foundry.allowedBackends?.length ? foundry.allowedBackends : ['builtin'];
-  const allowedBackends = current.filter((backend) => LOCAL_ONLY_BACKENDS.has(backend));
+  const allowedBackends = current.filter((backend) => isLocalBackend(backend, cfg));
   return {
     ...cfg,
     foundry: {
@@ -1437,8 +1451,12 @@ function constrainToLocalBackends(cfg: AshlrConfig): AshlrConfig {
   };
 }
 
-function enforceLocalBackend(backend: EngineId, plan: ResourceStrategyDaemonPlan | null): EngineId {
-  return plan?.forceLocalOnly === true && !LOCAL_ONLY_BACKENDS.has(backend) ? 'builtin' : backend;
+function enforceLocalBackend(
+  backend: EngineId,
+  plan: ResourceStrategyDaemonPlan | null,
+  cfg?: AshlrConfig,
+): EngineId {
+  return plan?.forceLocalOnly === true && !isLocalBackend(backend, cfg) ? 'builtin' : backend;
 }
 
 function configuredModelForBackend(backend: EngineId, cfg: AshlrConfig): string | null {
@@ -3438,12 +3456,18 @@ function poolTierOf(engineTier: import('../types.js').EngineTier): 'local' | 'cl
  *
  * Exported so a future tier change to the engine registry cannot silently
  * unbind the ceiling again without a test noticing.
+ *
+ * `cfg` is optional so the existing two-argument callers keep working, but pass
+ * it where you have it: without it an operator-registered local engine looks
+ * remote and lands in the cloud pool, which is the same unbound-ceiling bug in
+ * a new disguise.
  */
 export function poolTierForBackend(
   backend: EngineId,
   engineTier: import('../types.js').EngineTier,
+  cfg?: AshlrConfig,
 ): 'local' | 'cloud' {
-  return LOCAL_ONLY_BACKENDS.has(backend) ? 'local' : poolTierOf(engineTier);
+  return isLocalBackend(backend, cfg) ? 'local' : poolTierOf(engineTier);
 }
 
 /**
@@ -5068,7 +5092,7 @@ export async function tick(
   const autoDrainEligibleItems = autoDrainAvailableItems.filter(isClaimEligible);
   const diagnosticRoute = (item: WorkItem): { backend: EngineId; tier: EngineTier | null } => {
     const routed = routeBackend(item, routingCfg);
-    let backend = enforceLocalBackend(routed.backend, directionPlan);
+    let backend = enforceLocalBackend(routed.backend, directionPlan, routingCfg);
     const retryPolicy = effectiveGeneratedRepairRetryPolicy(item);
     if (retryPolicy.available && retryPolicy.requireAlternative &&
       retryPolicy.excludedBackend !== null && backend === retryPolicy.excludedBackend) {
@@ -5815,7 +5839,7 @@ export async function tick(
     // daemon would hold up to `concurrency.cloud ?? 6` llama-server turns open,
     // two of them queueing inside llama-server with no signal: precisely the
     // invisible queue the whole derivation exists to prevent.
-    const tier: 'local' | 'cloud' = poolTierForBackend(backend, engineTier);
+    const tier: 'local' | 'cloud' = poolTierForBackend(backend, engineTier, routingCfg);
     return { backend, model: routed.model ?? null, tier };
   });
   const itemTiers: Array<'local' | 'cloud'> = itemRoutePlans.map((plan) => plan.tier);
@@ -6505,7 +6529,7 @@ export async function tick(
       } // end flag-off path
 
       const beforeLocalClamp = backend;
-      backend = enforceLocalBackend(backend, directionPlan);
+      backend = enforceLocalBackend(backend, directionPlan, routingCfg);
       if (backend !== beforeLocalClamp) {
         assignmentReason = `${assignmentReason}; autonomy local-only fallback to ${backend}`;
         assignedBy = 'local-only';

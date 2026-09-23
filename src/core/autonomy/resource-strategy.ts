@@ -25,6 +25,8 @@ import {
   resolveProductionVelocityProfile,
   type EffectiveProductionVelocityProfile,
 } from '../fabric/production-velocity.js';
+// The ONE enumerator of what counts as local — see isLocalBackend below.
+import { engineLocality } from '../policy/local-only.js';
 
 export type AutonomousDirectionMode =
   | 'pause'
@@ -161,8 +163,27 @@ export interface ResourceStrategyDaemonPlan {
 
 const DEFAULT_MAX_OUTCOMES = 8;
 const DEFAULT_MAX_CHECKS = 8;
-const CLOUD_BACKENDS = new Set<string>(['claude', 'codex', 'nim', 'kimi', 'ashlrcode', 'opencode', 'hermes']);
-const LOCAL_BACKENDS = new Set<string>(['builtin', 'local-coder', 'ollama']);
+/**
+ * Does this backend's inference run on THIS machine?
+ *
+ * Asks `src/core/policy/local-only.ts`, the ONE module that decides what counts
+ * as local. What stood here were two hand-written sets, and they were WRONG in
+ * a way that mattered: `CLOUD_BACKENDS` listed 'ashlrcode' while the daemon's
+ * own set (`daemon/loop.ts`) and the policy (`LOCAL_CLI_AGENTS`) both called it
+ * local. The autonomous director and the dispatcher therefore held opposite
+ * views of the same backend — this module read 'ashlrcode' as cloud pressure
+ * while the daemon was happily dispatching to it on-device. `LOCAL_BACKENDS`
+ * was wrong in a quieter way too: it listed 'ollama', which is a PROVIDER id
+ * and never an EngineId, so that entry could never match anything.
+ *
+ * Exported for the consumer-parity suite, which asserts this answer against the
+ * policy across the whole resolved registry.
+ */
+export function isLocalBackend(backend: EngineId | string, cfg?: AshlrConfig): boolean {
+  return engineLocality(backend, cfg) === 'local';
+}
+
+
 const HARD_STOP_AVAILABILITY = new Set<BackendAvailability>(['exhausted', 'throttled', 'unreachable']);
 const RISK_ORDER: Record<'low' | 'medium' | 'high', number> = { low: 0, medium: 1, high: 2 };
 
@@ -453,15 +474,18 @@ function summarizeEcosystem(report: EcosystemDoctorReport, max: number): Resourc
   };
 }
 
-function hasOpenLocal(backends: ResourceStrategyBackend[]): boolean {
+function hasOpenLocal(backends: ResourceStrategyBackend[], cfg: AshlrConfig): boolean {
   return backends.some((backend) =>
-    LOCAL_BACKENDS.has(backend.backend) &&
+    isLocalBackend(backend.backend, cfg) &&
     (backend.availability === 'open' || backend.availability === 'near' || backend.availability === 'unknown'),
   );
 }
 
-function cloudConstrained(backends: ResourceStrategyBackend[]): boolean {
-  const cloud = backends.filter((backend) => CLOUD_BACKENDS.has(backend.backend));
+function cloudConstrained(backends: ResourceStrategyBackend[], cfg: AshlrConfig): boolean {
+  // Cloud is now the complement of local rather than its own roster, so a
+  // backend the old CLOUD_BACKENDS list never got around to naming ('grok',
+  // say) is finally counted as the cloud pressure it is.
+  const cloud = backends.filter((backend) => !isLocalBackend(backend.backend, cfg));
   return cloud.length > 0 && cloud.every((backend) =>
     backend.availability === 'not-sensed' ||
     backend.availability === 'unknown' ||
@@ -515,8 +539,8 @@ function recommendMode(
     return { mode: 'pause', confidence: 'high', reasons, recommendedActions: actions };
   }
 
-  const localOpen = hasOpenLocal(resources.backends);
-  const cloudHeld = cloudConstrained(resources.backends);
+  const localOpen = hasOpenLocal(resources.backends, cfg);
+  const cloudHeld = cloudConstrained(resources.backends, cfg);
   if ((cloudHeld || budgets.daemonBudgetLevel === 'near') && localOpen) {
     if (cloudHeld) reasons.push('cloud/frontier resources are constrained or unknown while local capacity is available');
     if (budgets.daemonBudgetLevel === 'near') reasons.push('daemon spend is near its configured daily cap');

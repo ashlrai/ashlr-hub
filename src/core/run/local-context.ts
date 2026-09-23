@@ -2,7 +2,7 @@
  * local-context.ts — M264: Elite Context Injection for local models.
  *
  * Assembles a rich, token-bounded system-prompt prefix for local api-model
- * engines (local-coder, local-agent) so they start each task context-aware
+ * engines (local-coder, llama-server) so they start each task context-aware
  * instead of context-blind. Frontier engines (claude, codex) are NEVER
  * modified — this only enriches the local model's system prompt.
  *
@@ -27,6 +27,9 @@ import {
   ecosystemSummary,
 } from '../ecosystem/map.js';
 import { recall } from '../genome/recall.js';
+// The ONE enumerator of what counts as local — see isLocalContextEnabled below.
+import { engineLocality } from '../policy/local-only.js';
+import { resolveEngineSpec } from './engine-registry.js';
 
 // ---------------------------------------------------------------------------
 // Section caps (chars)
@@ -286,16 +289,36 @@ export function renderLocalContextBundle(bundle: LocalContextBundle): string {
  * Returns true when the local-context injection is enabled for `engine`.
  *
  * Rules:
- *   - Only for api-model local engines: 'local-coder', 'local-agent'.
+ *   - Only for LOCAL API-MODEL engines, resolved from the engine registry.
  *   - Disabled when cfg.foundry.localContext === false (flag-off).
  *   - Enabled by default (absent → true).
+ *
+ * BOTH HALVES OF THE GATE ARE LOAD-BEARING, and they answer different
+ * questions. Locality comes from `src/core/policy/local-only.ts`, the ONE
+ * module that decides what runs on this machine. The api-model half is this
+ * module's own narrower claim: the bundle is a system-PROMPT prefix, and only
+ * the in-process api-model path (`run/sandboxed-engine.ts`) composes that
+ * prompt. A local CLI agent — 'ashlrcode', 'aw' — spawns a binary that writes
+ * its own system prompt and would simply drop the bundle, and 'builtin' needs
+ * no orientation. So "local" alone would be too wide.
+ *
+ * ON 'local-agent', WHICH THIS GATE USED TO NAME. It is not a typo and not a
+ * legacy alias: it is an engine that was DESIGNED AND NEVER BUILT. It appears
+ * only in docs/SPEC-ELITE-ENGINE-UTILIZATION.md as M268 ("Add `local-agent` as
+ * a new engine backed by ashlrcode's `ac` CLI", listed as a future milestone
+ * against `engine-registry.ts`), and it has never had a registry entry. Naming
+ * it in a hardcoded set made the gate LOOK like it supported an engine that
+ * cannot be dispatched. Driving off the registry drops it for the right reason
+ * and picks it up automatically the day M268 registers it — or the day an
+ * operator declares one under cfg.foundry.engines. Note that as specified it is
+ * a CLI agent wrapping `ac`, so the api-model half would exclude it anyway.
  */
 export function isLocalContextEnabled(
   engine: string,
   cfg: AshlrConfig,
 ): boolean {
-  const LOCAL_ENGINES = new Set(['local-coder', 'local-agent']);
-  if (!LOCAL_ENGINES.has(engine)) return false;
+  if (resolveEngineSpec(engine, cfg)?.kind !== 'api-model') return false;
+  if (engineLocality(engine, cfg) !== 'local') return false;
 
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
   // Default-on: only off when explicitly false

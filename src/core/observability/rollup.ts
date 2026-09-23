@@ -21,6 +21,8 @@ import type {
 import { collectUsageEvents, dashNormalize } from './usage-source.js';
 import { evalBudget } from './budget-alert.js';
 import { estCostUsd } from '../run/budget.js';
+// The ONE enumerator of what counts as local — see isLocalProviderModel below.
+import { providerLocality } from '../policy/local-only.js';
 import { loadIndex } from '../index-engine.js';
 import type { AshlrIndex } from '../types.js';
 
@@ -94,15 +96,19 @@ export function modelToProviderKey(model: string): string {
 }
 
 /**
- * Local (zero-cost) provider keys. A model whose `modelToProviderKey` lands in
- * this set is served by a LOCAL backend and costs $0. Shared with forecast.ts so
- * the local/cloud split stays consistent across rollup and savings computation.
+ * True when `model` is served by a local provider (cost $0).
+ *
+ * The provider key is resolved here; whether that key is LOCAL is asked of
+ * `src/core/policy/local-only.ts`, the ONE module that decides. The exported
+ * `LOCAL_PROVIDER_KEYS` set that used to sit here held only 'ollama' and
+ * 'lmstudio', so every token served by the local fleet runtime ('llama-server')
+ * or the in-process 'builtin' provider was rolled up at the conservative
+ * $3/$15-per-MTok cloud fallback — inflating the very savings figure this
+ * module exists to report. Shared with forecast.ts and web/control.ts so the
+ * local/cloud split stays consistent across rollup, savings and the cockpit.
  */
-export const LOCAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(['ollama', 'lmstudio']);
-
-/** True when `model` is served by a local provider (cost $0). */
 export function isLocalProviderModel(model: string): boolean {
-  return LOCAL_PROVIDER_KEYS.has(modelToProviderKey(model));
+  return providerLocality(modelToProviderKey(model)) === 'local';
 }
 
 // ---------------------------------------------------------------------------

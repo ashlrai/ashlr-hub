@@ -24,7 +24,9 @@ import {
 } from '../fleet/status.js';
 import { getCachedFleetStatus, type CachedFleetStatus } from './fleet-status-cache.js';
 import { getProviderRegistry } from '../providers.js';
-import { buildRollup, modelToProviderKey, LOCAL_PROVIDER_KEYS } from '../observability/rollup.js';
+import { buildRollup, modelToProviderKey } from '../observability/rollup.js';
+// The ONE enumerator of what counts as local.
+import { providerLocality } from '../policy/local-only.js';
 import {
   readPublicDaemonObservation,
   type DaemonSourceQuality,
@@ -207,10 +209,13 @@ function fallbackModels(): ControlModels {
 async function buildModels(cfg: AshlrConfig): Promise<ControlModels> {
   try {
     const registry = await getProviderRegistry(cfg);
-    const LOCAL_IDS = new Set(['lmstudio', 'ollama']);
+    // Locality comes from the policy (src/core/policy/local-only.ts), the ONE
+    // module that decides. The private LOCAL_IDS set that stood here named only
+    // lmstudio and ollama, so the cockpit painted the local fleet runtime as a
+    // cloud provider.
     const providers: ControlProviderEntry[] = registry.providers.map((ep) => ({
       id: ep.id,
-      kind: LOCAL_IDS.has(ep.id) ? 'local' : 'cloud',
+      kind: providerLocality(ep.id),
       up: ep.up,
       baseUrl: ep.url ?? null,
       models: ep.models,
@@ -307,7 +312,7 @@ function buildUsage(cfg: AshlrConfig): ControlUsage {
 
     for (const mu of rollup.byModel) {
       const provKey = modelToProviderKey(mu.model);
-      const tier: 'local' | 'cloud' = LOCAL_PROVIDER_KEYS.has(provKey) ? 'local' : 'cloud';
+      const tier: 'local' | 'cloud' = providerLocality(provKey);
       const tokens = mu.tokensIn + mu.tokensOut;
       const existing = providerMap.get(provKey);
       if (existing) {

@@ -28,6 +28,8 @@ import type {
   RollbackSnapshot,
 } from '../core/types.js';
 import { pad, makeColors, isTty, isStderrTty } from './ui.js';
+// The ONE enumerator of what counts as local — see swarmLocality below.
+import { providerLocality } from '../core/policy/local-only.js';
 import { parsePositiveInt } from './args.js';
 
 // ---------------------------------------------------------------------------
@@ -429,6 +431,31 @@ function formatDuration(createdAt: string, updatedAt: string): string {
 // Swarm summary renderer
 // ---------------------------------------------------------------------------
 
+/**
+ * Where a swarm's inference actually ran, derived from the PROVIDERS its tasks
+ * used. Null when no task recorded one.
+ *
+ * This used to be `usage.estCostUsd === 0`, which read locality off cost. That
+ * is backwards, and it is now circular: budget.ts derives cost FROM locality —
+ * a local provider is priced at $0 BECAUSE it is local, not local because it
+ * is priced at $0. The old form also lied in both directions. A swarm aborted
+ * before its first model call spent $0 and was reported "local — $0.00" having
+ * run nowhere; and had any cloud provider's price ever rounded to zero it
+ * would have been called local too.
+ *
+ * Null is reported as unknown rather than guessed: swarms persisted before
+ * SwarmTaskRun.provider existed have nothing to derive from, and inventing
+ * "local" for them is how the old bug read in the first place.
+ */
+function swarmLocality(swarm: SwarmRun): 'local' | 'cloud' | null {
+  const providers = swarm.tasks
+    .map((t) => t.provider?.trim())
+    .filter((p): p is string => typeof p === 'string' && p.length > 0);
+  if (providers.length === 0) return null;
+  // Mixed counts as cloud: one cloud task means money was spent.
+  return providers.every((p) => providerLocality(p) === 'local') ? 'local' : 'cloud';
+}
+
 function printSwarmSummary(swarm: SwarmRun): void {
   const {
     id, goal, status, usage, budget, tasks, result,
@@ -440,7 +467,7 @@ function printSwarmSummary(swarm: SwarmRun): void {
   const totalTokens  = usage.tokensIn + usage.tokensOut;
   const doneTasks    = tasks.filter(t => t.status === 'done').length;
   const failedTasks  = tasks.filter(t => t.status === 'failed').length;
-  const isLocal      = usage.estCostUsd === 0;
+  const locality     = swarmLocality(swarm);
 
   console.log('');
   console.log(bold('  ashlr swarm') + gray(` — ${id}`));
@@ -538,7 +565,10 @@ function printSwarmSummary(swarm: SwarmRun): void {
   }
 
   // ── Usage / cost summary ─────────────────────────────────────────────────
-  const cloudNote = isLocal ? green('local — $0.00') : yellow('cloud provider');
+  const cloudNote =
+    locality === 'local' ? green('local') :
+    locality === 'cloud' ? yellow('cloud provider') :
+    dim('provider not recorded');
   console.log(`  ${bold('Usage:')}`);
   console.log(`    Tokens in:   ${usage.tokensIn.toLocaleString()}`);
   console.log(`    Tokens out:  ${usage.tokensOut.toLocaleString()}`);
@@ -1529,8 +1559,10 @@ export async function cmdSwarms(args: string[]): Promise<number> {
     const goalTrunc    = s.goal.length > goalW ? s.goal.slice(0, goalW - 1) + '…' : s.goal;
     const when         = relativeTime(s.createdAt);
 
-    const isLocal = s.usage.estCostUsd === 0;
-    void isLocal; // used implicitly via cloudNote in summary; not shown in list
+    // (No locality column here — the list is deliberately narrow. It is shown
+    // per-swarm in `printSwarmSummary`, derived from the recorded providers.
+    // What stood here was a `void`-ed `estCostUsd === 0`: dead code that kept
+    // the backwards cost→locality inference alive in a second place.)
 
     console.log(
       `  ${pad(dim(s.id), idW)}  ${pad(swarmStatusColor(s.status), statusW)}  ` +
