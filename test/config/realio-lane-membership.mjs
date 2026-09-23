@@ -59,6 +59,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-quota-scopes.test.ts', // scoped quota collection, native fixtures and console IPC
   'test/mcp-firm-resources.test.ts', // signed history via real CLI MCP processes
   'test/local-runtime-anthropic-proxy.test.ts', // two real loopback HTTP servers: a llama-server stub and the proxy in front of it
+  'test/local-eval.test.ts', // spawns real `node` checkers against real temp fixtures to grade the graders
   'test/verse-seats.test.ts', // real loopback HTTP server standing in for Ollama
   'test/verse-local-dispatch.test.ts', // real loopback HTTP server standing in for Ollama's discovery endpoints
   'test/verse-accounts.test.ts', // real collector lease acquisition and private evidence files in a tmp root

@@ -65,12 +65,35 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+/**
+ * An optional field is valid when it is ABSENT or of the right type.
+ *
+ * This is the backward-compatibility hinge: every session record written
+ * before workspaces existed has none of these keys, so each check has to pass
+ * on `undefined` or the record would stop loading and the chat history behind
+ * it would disappear from the sidebar.
+ */
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === 'string';
+}
+
+function isOptionalStringArray(value: unknown): boolean {
+  return value === undefined || isStringArrayValue(value);
+}
+
+function isStringArrayValue(value: unknown): boolean {
+  return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
 function isSession(value: unknown): value is VerseSession {
   if (!isObject(value)) return false;
   const usage = value['usage'];
   return typeof value['id'] === 'string' && isValidSessionId(value['id'])
     && typeof value['title'] === 'string'
     && typeof value['projectPath'] === 'string'
+    && isOptionalStringArray(value['extraRoots'])
+    && isOptionalString(value['workspaceId'])
+    && isOptionalString(value['workspaceName'])
     && typeof value['engine'] === 'string' && VERSE_ENGINES.has(value['engine'])
     && typeof value['accountId'] === 'string'
     && typeof value['seatId'] === 'string'

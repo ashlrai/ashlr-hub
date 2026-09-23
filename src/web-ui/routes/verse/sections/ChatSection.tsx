@@ -36,6 +36,7 @@ import {
   sendVerseTurn,
   verseBootstrapQuery,
   verseSessionsQuery,
+  verseWorkspacesQuery,
   VerseMutationLockedError,
 } from '../verse-queries.js';
 import {
@@ -97,6 +98,11 @@ export function ChatSection() {
 
   const seats = useMemo(() => bootstrap.data?.seats ?? [], [bootstrap.data]);
   const projects = useMemo(() => bootstrap.data?.projects ?? [], [bootstrap.data]);
+  // Workspaces come from their own route, not bootstrap: the dialog wants the
+  // live per-root status alongside the list, and bootstrap's key set is a
+  // frozen contract asserted by test/verse-api.test.ts.
+  const workspacesQuery = useQuery(verseWorkspacesQuery);
+  const workspaces = useMemo(() => workspacesQuery.data?.workspaces ?? [], [workspacesQuery.data]);
   const dispatchEnabled = bootstrap.data?.dispatchEnabled ?? true;
 
   const view = useVerseSession(selectedId, reload);
@@ -378,7 +384,7 @@ export function ChatSection() {
         </>
       ) : null}
 
-      <NewChatDialog open={newChat.open} onClose={() => setNewChat({ open: false })} projects={projects} seats={seats}
+      <NewChatDialog open={newChat.open} onClose={() => setNewChat({ open: false })} projects={projects} seats={seats} workspaces={workspaces}
         initialProjectPath={newChat.projectPath ?? null} initialSeat={newChat.seat ?? null} busy={creating} error={createError} onCreate={create} />
       <QuickSwitcher open={switcherOpen} onClose={() => setSwitcherOpen(false)} sessions={sessions} seats={seats} projects={projects}
         onSelectSession={setSelectedId} onNewChat={(seat) => openNewChat({ projectPath: view.session?.projectPath ?? null, seat })} />

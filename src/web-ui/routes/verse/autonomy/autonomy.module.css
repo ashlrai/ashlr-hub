@@ -351,3 +351,27 @@
 .fleetMeters { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); align-items: end; gap: var(--space-3) var(--space-5); margin: var(--space-4) 0; }
 .elapsedQualifier { color: var(--text-tertiary); font-family: var(--font-ui); font-style: italic; }
 .noteList { display: flex; flex-direction: column; gap: var(--space-1); margin-top: var(--space-3); list-style: none; }
+
+/* Standing of one enrolled repo in the autonomous lane: its sections and its
+   rank. Ordering only — neither of these enrols anything. */
+.repoStanding {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.repoPriority,
+.repoSection,
+.repoOutsideFocus {
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-subtle);
+  font-size: var(--text-2xs, 0.6875rem);
+  line-height: 1.6;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.repoPriority { border-color: var(--accent); color: var(--text-default); }
+.repoOutsideFocus { font-style: italic; }

@@ -1,0 +1,131 @@
+{
+  "configuration": {
+    "model": "qwen3.8:27b-ctx64k",
+    "modelPath": "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+    "quantization": "Q8_0",
+    "slots": 4,
+    "contextPerSlot": 65536,
+    "contextTotal": 262144,
+    "samplingParams": {
+      "temperature": 1,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "typical_p": 1,
+      "repeat_penalty": 1,
+      "repeat_last_n": 64,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "mirostat": 0,
+      "seed": 4294967295
+    },
+    "baseUrl": "http://127.0.0.1:8090",
+    "proxy": "on",
+    "proxyImplementation": "node /private/tmp/claude-501/-Users-masonwyatt-Desktop/9d28bdb1-37c3-419d-a2bc-f7e3fd7b72ef/scratchpad/shim.mjs",
+    "agentCli": "claude 2.1.280 (Claude Code)",
+    "llamaServerArgv": [
+      "/opt/homebrew/bin/llama-server",
+      "-m",
+      "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8080",
+      "--parallel",
+      "4",
+      "-c",
+      "262144",
+      "--cont-batching",
+      "--cache-prompt"
+    ],
+    "capturedAt": "2026-09-22T22:23:55.842Z"
+  },
+  "trialsPerTask": 3,
+  "concurrency": 2,
+  "outcomes": [
+    {
+      "taskId": "api-migration",
+      "why": "Added after the first baseline returned 12/12, which proved the set had no headroom: a suite everything passes can detect a regression but never an improvement. This one compounds the earlier shapes instead of repeating them — the target signature must be READ from a file the prompt does not name, then applied across three call sites, one of which passes its arguments in a deliberately surprising order. Getting the rename right while transposing that call is the near-miss it exists to catch.",
+      "expectation": "edit",
+      "trials": [
+        {
+          "taskId": "api-migration",
+          "trial": 1,
+          "mode": "timeout",
+          "passed": false,
+          "wallMs": 900032,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0
+          },
+          "agentExit": null,
+          "verifyExit": null,
+          "changedFiles": 0,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": null,
+          "note": "killed at the wall-clock budget"
+        },
+        {
+          "taskId": "api-migration",
+          "trial": 2,
+          "mode": "timeout",
+          "passed": false,
+          "wallMs": 900030,
+          "tokens": {
+            "input": 0,
+            "output": 0,
+            "cacheRead": 0,
+            "cacheCreation": 0
+          },
+          "agentExit": null,
+          "verifyExit": null,
+          "changedFiles": 0,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": null,
+          "note": "killed at the wall-clock budget"
+        },
+        {
+          "taskId": "api-migration",
+          "trial": 3,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 433494,
+          "tokens": {
+            "input": 3271,
+            "output": 3396,
+            "cacheRead": 14564,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "claims-change",
+          "integrity": "consistent",
+          "turns": 7,
+          "note": ""
+        }
+      ],
+      "passes": 1,
+      "total": 3,
+      "passRate": 0.3333333333333333,
+      "medianWallMs": 900030,
+      "meanWallMs": 744519,
+      "modes": [
+        {
+          "mode": "timeout",
+          "count": 2
+        }
+      ]
+    }
+  ],
+  "overallPassRate": 0.3333333333333333,
+  "totalPasses": 1,
+  "totalTrials": 3,
+  "startedAt": "2026-09-22T22:23:55.843Z",
+  "finishedAt": "2026-09-22T22:46:09.433Z",
+  "wallMs": 1333590
+}

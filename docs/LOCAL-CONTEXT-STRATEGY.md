@@ -5,7 +5,8 @@ One 27B model on one GPU. The question this answers: when should that capacity b
 each**? Splitting it four ways all the time is the wrong default for thinking, and not
 splitting it is the wrong default for throughput.
 
-Every number here was measured on this machine (128 GB, Qwen3.8 27B at four-bit), not
+Every number here was measured on this machine (128 GB, Qwen3.8 27B at **Q8_0** — an
+earlier version of this doc said four-bit, which was wrong; the blob is 27 GiB), not
 estimated.
 
 ## The constraint that shapes everything
@@ -19,9 +20,13 @@ whole window" is not a request-time choice; it is a different server shape.
 | `--parallel 1 -c 262144` | 262,144 | 43.0 GB | Reading broadly, planning, review |
 | `--parallel 4 -c 262144` | 65,536 | 43.4 GB | Four targeted edits at once |
 
-262,144 is Qwen3.8 27B's native trained context. The memory figures are the surprise: the
-wide shape costs 0.4 GB more than the deep one, because Qwen3.8 runs linear attention on
-48 of its 64 layers and only 16 carry a full KV cache.
+262,144 is Qwen3.8 27B's native trained context. The memory figures above were measured
+cold, seconds after start, and are therefore only the weights plus an empty cache. **They
+understate the steady state.** From the model card's own numbers — 4 KV heads, 256 head
+dim, fp16 K and V, 16 of 64 layers with a full cache — the KV costs 64 KiB per token, so
+16 GiB at 262,144 against 8 GiB at 131,072. The same process later measured 47.0 GB once
+the cache had filled. The 48 linear-attention layers make this far cheaper than a
+full-attention model of this size, but it is not free.
 
 **Switching shapes is cheap.** Measured at a few seconds, not a cold model load, because
 the weights stay in the OS page cache across a restart. That is what makes a two-phase

@@ -339,7 +339,62 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
-## [3.4.0] — Unreleased — Governed agent-native engineering OS
+## [3.5.0] — 2026-09-22 UTC — Ashlr Verse: the operator console, and a local model that keeps working
+
+Verse becomes the surface you drive the fleet from, and the local lane becomes
+usable rather than a demo. Published as 3.5.0 the same day as 3.4.0 because the
+work below landed after that tag, not because 3.4.0 was wrong.
+
+### Verse
+
+- **Multi-folder workspaces** with sections and explicit priority, so one Verse
+  window drives several repositories instead of one checkout.
+- **MCP panel** — shows which MCP servers each seat would actually load, rather
+  than what is configured somewhere and may or may not apply.
+- **GitHub panel** that states what a PR approval will do before you click it,
+  and no longer blocks the server on `gh` when it is missing.
+- **Collapsible resources panel**, with a separate usage bar per limit instead
+  of one bar averaging limits that reset on different clocks.
+- **Titlebar inset** so the macOS traffic lights never sit on top of the UI.
+- Model catalogs carry every model each provider currently serves — including
+  Opus 5.5 and Fable 5.1 on the Claude seats.
+
+### The local lane
+
+- **The Anthropic-compatible proxy is a committed, supervised process** rather
+  than a scratch script — the shim that normalizes Claude Code's requests for
+  the local model's chat template now has an owner and a lifecycle.
+- **Prefix caching actually works.** The shim used to fold per-turn counters
+  ahead of the whole conversation, invalidating the cache every turn: 23,500
+  prompt tokens reprocessed per turn became 34–556. Four parallel agents went
+  from 1386s to 540s.
+- **Reasoning effort is reachable**, and `/metrics` is on.
+- **`local-eval`** — a 6-task harness that answers whether a harness change
+  helped, with a number, against a recorded baseline.
+- **A timed-out trial now says why it timed out.** The `api-migration`
+  timeouts were not a hang: every traced trial ended `generating-at-cutoff`,
+  still emitting tokens when the kill landed. Unbudgeted, the same task
+  finishes correctly at 898s against a 900s limit.
+
+### Corrections
+
+Two published claims were wrong and are corrected in source, docs and on the
+site rather than quietly dropped:
+
+- The local model is **Q8_0, 27 GiB** — not four-bit, as was published.
+- **Raising the context window is not free.** The measurement behind that claim
+  compared a warm process to a cold one; at 64 KiB/token the real cost is about
+  +8 GiB. Retracted where it was stated.
+
+### Repository
+
+- 406 remote branches → 179; 62 open PRs → 4. The 55 closed were unreviewed
+  fleet drafts aged 35–64 days, closed as stale rather than rejected, with every
+  branch kept and each one indexed in `docs/PR-TRIAGE-2026-09.md`.
+- The README and the repository homepage point at
+  [verse.ashlr.ai](https://verse.ashlr.ai), which they did not.
+
+## [3.4.0] — 2026-09-22 UTC — Governed agent-native engineering OS
 
 - Integrates the default-off Agent OS control plane, execution identity,
   observation sandbox, bounded stream custody, and operator-facing fleet

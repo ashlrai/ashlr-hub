@@ -8,12 +8,19 @@
  * server strips those before any payload leaves it (docs/VERSE-CONTRACT-V1).
  */
 import type {
+  VerseAutonomyScopeView,
   VerseBootstrap,
   VerseCreateSessionRequest,
+  VerseRootPriority,
   VerseSession,
   VerseSessionDetail,
+  VerseSessionRootsResponse,
   VerseTurnRequest,
   VerseTurnResponse,
+  VerseWorkspace,
+  VerseWorkspaceCreateRequest,
+  VerseWorkspacesResponse,
+  VerseWorkspaceUpdateRequest,
 } from '../../data/api-types.js';
 import { getMutationToken, touchMutationHold } from '../../data/auth-store.js';
 import { apiGet, apiPost } from '../../data/client.js';
@@ -89,4 +96,71 @@ export async function renameVerseSession(sessionId: string, title: string): Prom
   const session = await post<VerseSession>(verseSessionPath(sessionId, '/rename'), { title });
   invalidate(VERSE_SESSIONS_KEY);
   return session;
+}
+
+// ---------------------------------------------------------------------------
+// Workspaces (V2.2)
+// ---------------------------------------------------------------------------
+
+export const VERSE_WORKSPACES_KEY = 'verse-workspaces';
+export const VERSE_AUTONOMY_SCOPE_KEY = 'verse-autonomy-scope';
+
+export const verseWorkspacesQuery: QueryDef<VerseWorkspacesResponse> = {
+  key: VERSE_WORKSPACES_KEY,
+  fetch: (signal) => apiGet<VerseWorkspacesResponse>('/api/verse/workspaces', signal),
+};
+
+/**
+ * Enrolled repos, ordered by section focus and priority. Kept on its own key
+ * from `verseScopeQuery` (which is the raw registry) so a re-rank refreshes
+ * the ORDER without re-reading enrollment — and so it is obvious in the cache
+ * that these are two different facts.
+ */
+export const verseAutonomyScopeQuery: QueryDef<VerseAutonomyScopeView> = {
+  key: VERSE_AUTONOMY_SCOPE_KEY,
+  fetch: (signal) => apiGet<VerseAutonomyScopeView>('/api/verse/autonomy-scope', signal),
+};
+
+/**
+ * Per-root identity for one session: branch, dirty state, remote, whether the
+ * engine can reach each root and whether the autonomous lane would.
+ *
+ * Deliberately NOT cached by session id alone at module scope — a branch goes
+ * stale the moment a turn commits, so the panel refetches it per open.
+ */
+export function fetchVerseSessionRoots(sessionId: string, signal?: AbortSignal): Promise<VerseSessionRootsResponse> {
+  return apiGet<VerseSessionRootsResponse>(verseSessionPath(sessionId, '/roots'), signal);
+}
+
+function invalidateWorkspaces(): void {
+  invalidate(VERSE_WORKSPACES_KEY);
+  invalidate(VERSE_AUTONOMY_SCOPE_KEY);
+  invalidate(VERSE_BOOTSTRAP_KEY);
+}
+
+export async function createVerseWorkspace(req: VerseWorkspaceCreateRequest): Promise<VerseWorkspace> {
+  const workspace = await post<VerseWorkspace>('/api/verse/workspaces', req);
+  invalidateWorkspaces();
+  return workspace;
+}
+
+export async function updateVerseWorkspace(id: string, patch: VerseWorkspaceUpdateRequest): Promise<VerseWorkspace> {
+  const workspace = await post<VerseWorkspace>(`/api/verse/workspaces/${encodeURIComponent(id)}/update`, patch);
+  invalidateWorkspaces();
+  return workspace;
+}
+
+export async function deleteVerseWorkspace(id: string): Promise<void> {
+  await post<{ ok: true }>(`/api/verse/workspaces/${encodeURIComponent(id)}/delete`, {});
+  invalidateWorkspaces();
+}
+
+export async function setVerseRootPriority(path: string, priority: VerseRootPriority): Promise<void> {
+  await post<unknown>('/api/verse/workspaces/priority', { path, priority });
+  invalidateWorkspaces();
+}
+
+export async function setVerseFocusSection(sectionId: string | null): Promise<void> {
+  await post<unknown>('/api/verse/workspaces/focus', { sectionId });
+  invalidateWorkspaces();
 }

@@ -1,10 +1,9 @@
 {
   "name": "@ashlr/hub",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "Local-first command center for agentic engineers.",
   "publishConfig": {
-    "access": "public",
-    "provenance": true
+    "access": "public"
   },
   "license": "MIT",
   "author": "Mason Wyatt <mason@evero-consulting.com>",
@@ -148,7 +147,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "marked": "17.0.0",
+    "marked": "18.0.10",
     "tar": "7.5.22"
   }
 }

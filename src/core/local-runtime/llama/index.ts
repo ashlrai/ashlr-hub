@@ -146,3 +146,36 @@ export {
   stderrLogPath,
   stdoutLogPath,
 } from './paths.js';
+
+/**
+ * The Anthropic proxy as a supervised PROCESS.
+ *
+ * `ensureAnthropicProxy` (above) hosts the listener inside the calling
+ * process, which is right for an attended `start` and useless for a lane that
+ * has to be up at 3am. These are the pieces that give it a launchd job of its
+ * own: the invocation resolver (which reads the MODULE's location, never
+ * `process.argv[1]` — see proxy-invocation.ts for the defect that rule exists
+ * to prevent) and the agent install/uninstall.
+ */
+export {
+  ANTHROPIC_PROXY_HOST_FLAG,
+  anthropicProxyHostArgv,
+  anthropicProxyHostEnvironment,
+  anthropicProxyHostInvocation,
+} from './proxy-invocation.js';
+export type { AnthropicProxyHostOptions } from './proxy-invocation.js';
+export {
+  anthropicProxyAgentInstalled,
+  anthropicProxyAgentLoaded,
+  anthropicProxyLogPaths,
+  buildAnthropicProxyPlist,
+  buildAnthropicProxyShim,
+  installAnthropicProxyAgent,
+  uninstallAnthropicProxyAgent,
+} from './proxy-launchd.js';
+export type { AnthropicProxyAgentSpec } from './proxy-launchd.js';
+export {
+  ANTHROPIC_PROXY_LAUNCH_AGENT_LABEL,
+  anthropicProxyPlistPath,
+  anthropicProxyShimPath,
+} from './paths.js';

@@ -53,8 +53,43 @@ export function stderrLogPath(): string {
   return join(logsDir(), 'local-runtime.err.log');
 }
 
+/**
+ * `~/.ashlr/local-runtime/anthropic-proxy-launch.sh` — the proxy job's shim.
+ *
+ * A SECOND shim rather than more flags on the llama-server one, because the
+ * two jobs have genuinely independent lifetimes: llama-server is a foreign
+ * binary that must keep running while the proxy is restarted for a config
+ * change, and a single job cannot supervise two processes.
+ */
+export function anthropicProxyShimPath(): string {
+  return join(localRuntimeDir(), 'anthropic-proxy-launch.sh');
+}
+
+/** Absolute stdout log path for the supervised Anthropic proxy. */
+export function anthropicProxyStdoutLogPath(): string {
+  return join(logsDir(), 'anthropic-proxy.out.log');
+}
+
+/** Absolute stderr log path for the supervised Anthropic proxy. */
+export function anthropicProxyStderrLogPath(): string {
+  return join(logsDir(), 'anthropic-proxy.err.log');
+}
+
 /** launchd job label. Reverse-DNS, matching the hub's other agents. */
 export const LAUNCH_AGENT_LABEL = 'ai.ashlr.local-runtime';
+
+/** launchd job label for the Anthropic normalising proxy. */
+export const ANTHROPIC_PROXY_LAUNCH_AGENT_LABEL = 'ai.ashlr.anthropic-proxy';
+
+/** `~/Library/LaunchAgents/ai.ashlr.anthropic-proxy.plist`. */
+export function anthropicProxyPlistPath(): string {
+  return join(
+    homedir(),
+    'Library',
+    'LaunchAgents',
+    `${ANTHROPIC_PROXY_LAUNCH_AGENT_LABEL}.plist`,
+  );
+}
 
 /**
  * `~/Library/LaunchAgents/ai.ashlr.local-runtime.plist`.
