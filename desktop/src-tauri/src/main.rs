@@ -1274,6 +1274,13 @@ fn main() {
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        // Registering the plugin is only half of it: the Verse page is a
+        // REMOTE origin (http://127.0.0.1:7777), so `dialog:allow-open`
+        // has to be granted in the capability that carries a `remote`
+        // block (capabilities/verse-remote.json). Granting it in
+        // capabilities/main.json instead would compile, ship, and then
+        // reject every call at runtime — silently, from the page's side.
+        .plugin(tauri_plugin_dialog::init())
         .setup(setup)
         .on_window_event(|window, event| on_window_event(window, event))
         .build(tauri::generate_context!())
