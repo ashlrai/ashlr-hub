@@ -1,10 +1,26 @@
 /**
- * routes/verse/Workspace.tsx — the chat pane: a 48px header strip with a
+ * routes/verse/Workspace.tsx — the chat pane: a --strip-height header with a
  * hairline bottom border and ghost controls only, the 2px context line
  * directly beneath it, the 720px transcript column, and the composer docked
  * at the bottom on the same measure.
  *
- * With nothing selected it renders the empty state ("No chats yet — ⌘N").
+ * THE HEADER READS LEFT TO RIGHT, in the order a person asks the questions:
+ *
+ *   [ project      ]  [ seat · model ]  ……  [ meter ] [ delete ] │ [ ⬓ ⬔ ]
+ *   [ Chat title   ]
+ *
+ *  1. WHERE AM I — a two-line lockup: the project above, the chat title
+ *     below. It is the only thing in the strip allowed to shrink, and both
+ *     of its lines ellipsise, so neither a 200-character title nor a deep
+ *     project path can shove the actions off the end.
+ *  2. WHAT IS IT RUNNING ON — the seat pill, which is now seat · model ONLY.
+ *     The project moved up into the lockup rather than being said twice.
+ *  3. WHAT CAN I DO — stream state, context numbers and the destructive
+ *     action, then a hairline, then the two pane toggles as a matched pair.
+ *
+ * With nothing selected the strip is NOT empty: the lockup says "Chat / No
+ * chat selected", so the header still answers "where am I" — which the old
+ * strip left as a bare band with one icon floating at the right edge.
  *
  * Two capacity responsibilities live here because this component is mounted
  * for the whole life of the Chat section, selected chat or not:
@@ -17,7 +33,7 @@
  *    spent. Quietly: a healthy seat adds nothing to the strip, because a
  *    badge that is always there is a badge nobody reads.
  */
-import { useEffect, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import type { VerseProject, VerseSeat } from '../../data/api-types.js';
 import { Composer } from './Composer.js';
 import { ContextMeter } from './ContextMeter.js';
@@ -75,23 +91,32 @@ export function Workspace(props: WorkspaceProps) {
     if (editing) titleInput.current?.select();
   }, [editing]);
 
-  const chrome = (
-    <>
-      {sidebarCollapsed ? (
-        <button type="button" className={styles.ghostIcon} onClick={onToggleSidebar} title="Show chat list" aria-label="Show chat list">
-          <SidebarIcon />
-        </button>
-      ) : null}
-    </>
+  /**
+   * The two pane toggles — always both rendered, always adjacent, so they
+   * read as one control for "which panes are open" rather than as whichever
+   * of them happens to apply right now.
+   */
+  const toggles = (
+    <div className={styles.toggles} role="group" aria-label="Panels">
+      <SidebarToggle collapsed={sidebarCollapsed} onToggle={onToggleSidebar} />
+      <ResourcesToggle open={resourcesOpen} onToggle={onToggleResources} />
+    </div>
   );
 
   if (!view.sessionId) {
     return (
       <section className={styles.workspace} aria-label="Chat">
         <header className={styles.header} data-app-region="drag">
-          {chrome}
+          <Lockup
+            eyebrow={<span className={styles.eyebrow}>Chat</span>}
+            title={
+              <span className={styles.titleStatic} data-state="empty">
+                {hasAnySessions ? 'No chat selected' : 'No chats yet'}
+              </span>
+            }
+          />
           <div className={styles.headerSpacer} />
-          <ResourcesToggle open={resourcesOpen} onToggle={onToggleResources} />
+          <div className={styles.actions}>{toggles}</div>
         </header>
         <div className={styles.emptyState}>
           <span className={styles.emptyMark} aria-hidden="true"><VerseMark size={36} /></span>
@@ -148,21 +173,34 @@ export function Workspace(props: WorkspaceProps) {
   return (
     <section className={styles.workspace} aria-labelledby={headingId}>
       <header className={styles.header} data-app-region="drag">
-        {chrome}
-        {session ? (
-          editing ? (
-            <input ref={titleInput} className={styles.titleInput} value={draftTitle} aria-label="Chat title"
-              onChange={(event) => setDraftTitle(event.target.value)} onBlur={() => { void commitTitle(); }}
-              onKeyDown={onTitleKey} maxLength={120} />
+        <Lockup
+          eyebrow={session ? (
+            // The full path is the tooltip; the strip shows the short name,
+            // because a deep path is exactly what used to eat the title.
+            <span className={styles.eyebrow} title={session.projectPath}>{projectName(session.projectPath, projects)}</span>
           ) : (
-            <h1 id={headingId} className={styles.title}>
-              <button type="button" className={styles.titleButton} title="Rename chat" disabled={busy || !dispatchEnabled}
-                onClick={() => { setDraftTitle(session.title); setEditing(true); }}>
-                {session.title || 'Untitled chat'}
-              </button>
-            </h1>
-          )
-        ) : <h1 id={headingId} className={`${styles.title} skeleton ${styles.titleSkeleton}`} aria-label="Loading chat" />}
+            <span className={`${styles.eyebrow} skeleton ${styles.eyebrowSkeleton}`} aria-hidden="true" />
+          )}
+          title={session ? (
+            editing ? (
+              <input ref={titleInput} className={styles.titleInput} value={draftTitle} aria-label="Chat title"
+                onChange={(event) => setDraftTitle(event.target.value)} onBlur={() => { void commitTitle(); }}
+                onKeyDown={onTitleKey} maxLength={120} />
+            ) : (
+              <h1 id={headingId} className={styles.title}>
+                <button type="button" className={styles.titleButton} title="Rename chat" disabled={busy || !dispatchEnabled}
+                  onClick={() => { setDraftTitle(session.title); setEditing(true); }}>
+                  {session.title || 'Untitled chat'}
+                </button>
+              </h1>
+            )
+          ) : (
+            // The skeleton takes .titleStatic, not .title: .title carries the
+            // optical pull-back that only the INSET BUTTON needs, and a grey
+            // bar hanging --space-2 into the gutter is just a misalignment.
+            <h1 id={headingId} className={`${styles.titleStatic} skeleton ${styles.titleSkeleton}`} aria-label="Loading chat" />
+          )}
+        />
 
         {session ? (
           <span className={`${styles.seatPill} ${styles[`engine-${session.engine}`] ?? ''}`} data-engine={session.engine}
@@ -170,7 +208,6 @@ export function Workspace(props: WorkspaceProps) {
             title={seatTitle}>
             <span className={styles.engineDot} aria-hidden="true" />
             <span className={styles.seatText}>{seatPillLabel(seats, session)}</span>
-            <span className={styles.projectName}>{projectName(session.projectPath, projects)}</span>
             {/* Only when it changes the decision. A chip on every chat is noise. */}
             {capacity !== null && worthFlagging(capacity.cls)
               ? <CapacityChip view={capacity} />
@@ -180,33 +217,39 @@ export function Workspace(props: WorkspaceProps) {
 
         <div className={styles.headerSpacer} />
 
-        {view.stream === 'reconnecting' ? <span className={styles.streamState} role="status">reconnecting…</span> : null}
-        {session ? <ContextMeter contextTokens={session.usage.contextTokens} contextWindow={contextWindow} /> : null}
+        {/* One cluster, and it never shrinks: the lockup truncates instead, so
+            the actions can never be pushed past the strip's right edge. */}
+        <div className={styles.actions}>
+          {view.stream === 'reconnecting' ? <span className={styles.streamState} role="status">reconnecting…</span> : null}
+          {session ? <ContextMeter contextTokens={session.usage.contextTokens} contextWindow={contextWindow} /> : null}
 
-        {session ? (
-          confirmDelete ? (
-            <span className={styles.confirm} role="group" aria-label="Confirm delete">
-              <span className={styles.confirmText}>Delete this chat?</span>
-              <button type="button" className={styles.danger} disabled={busy} onClick={async () => {
-                setBusy(true);
-                try {
-                  const ok = await onDelete();
-                  if (!ok) setConfirmDelete(false);
-                } finally {
-                  setBusy(false);
-                }
-              }}>Delete</button>
-              <button type="button" className={styles.ghost} onClick={() => setConfirmDelete(false)}>Keep</button>
-            </span>
-          ) : (
-            <button type="button" className={styles.ghostIcon} onClick={() => setConfirmDelete(true)}
-              disabled={!dispatchEnabled || running} aria-label="Delete chat"
-              title={running ? 'Stop the turn before deleting' : 'Delete chat'}>
-              <TrashIcon />
-            </button>
-          )
-        ) : null}
-        <ResourcesToggle open={resourcesOpen} onToggle={onToggleResources} />
+          {session ? (
+            confirmDelete ? (
+              <span className={styles.confirm} role="group" aria-label="Confirm delete">
+                <span className={styles.confirmText}>Delete this chat?</span>
+                <button type="button" className={styles.danger} disabled={busy} onClick={async () => {
+                  setBusy(true);
+                  try {
+                    const ok = await onDelete();
+                    if (!ok) setConfirmDelete(false);
+                  } finally {
+                    setBusy(false);
+                  }
+                }}>Delete</button>
+                <button type="button" className={styles.ghost} onClick={() => setConfirmDelete(false)}>Keep</button>
+              </span>
+            ) : (
+              <button type="button" className={styles.ghostIcon} onClick={() => setConfirmDelete(true)}
+                disabled={!dispatchEnabled || running} aria-label="Delete chat"
+                title={running ? 'Stop the turn before deleting' : 'Delete chat'}>
+                <TrashIcon />
+              </button>
+            )
+          ) : null}
+
+          <span className={styles.actionDivider} aria-hidden="true" />
+          {toggles}
+        </div>
       </header>
 
       <Transcript transcript={view.transcript} loaded={view.loaded} loadError={view.loadError} onRetry={onRetry} />
@@ -218,6 +261,38 @@ export function Workspace(props: WorkspaceProps) {
           onSend={onSend} onStop={onStop} onSeatChange={onSeatChange} autoFocus />
       ) : null}
     </section>
+  );
+}
+
+/**
+ * The identity lockup — context over name, one column, and the only flex item
+ * in the strip that is allowed to give up width.
+ */
+function Lockup({ eyebrow, title }: { eyebrow: ReactNode; title: ReactNode }) {
+  return (
+    <div className={styles.identity}>
+      {eyebrow}
+      {title}
+    </div>
+  );
+}
+
+/**
+ * Pane toggles. Both are `aria-pressed` buttons, so the open/closed state is
+ * spoken rather than implied by a name that changes under you.
+ *
+ * The collapsed name stays "Show chat list" — that is the contract the Chat
+ * section's own tests drive — while the expanded one is "Chat list" and NOT
+ * "Hide chat list", because the sidebar already owns a button by that exact
+ * name and two controls sharing one accessible name is an ambiguity, not a
+ * pair. The action itself is in the tooltip in both states.
+ */
+function SidebarToggle({ collapsed, onToggle }: { collapsed: boolean; onToggle: () => void }) {
+  return (
+    <button type="button" className={styles.ghostIcon} onClick={onToggle} aria-pressed={!collapsed}
+      title={collapsed ? 'Show chat list' : 'Hide chat list'} aria-label={collapsed ? 'Show chat list' : 'Chat list'}>
+      <SidebarIcon />
+    </button>
   );
 }
 
