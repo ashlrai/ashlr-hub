@@ -1,6 +1,10 @@
 /**
- * The Verse shell: a fixed --rail-width icon rail and one section beside it.
+ * The Verse shell: a --rail-width rail and one section beside it.
  * Hairlines, no cards, no shadows — separation is a 1px border and space.
+ *
+ * The rail has two widths, and the whole of that difference is ONE token:
+ * `--rail-width`, re-declared on `.shell[data-rail="expanded"]`. Nothing
+ * else needs to know the number.
  */
 .shell {
   display: grid;
@@ -16,6 +20,26 @@
   font-family: var(--font-ui);
 }
 .shell > * { min-width: 0; min-height: 0; }
+
+/* Expanded rail. Overriding the TOKEN here, rather than only this grid
+   track, is what keeps the rest of the app honest:
+
+     - Workspace/Approvals/Autonomy/Settings/Usage all inset their header
+       strip by max(--space-3, calc(--app-traffic-light-inset - --rail-width)).
+       Widen the rail without moving the token and every one of those strips
+       stays inset for a 56px rail: the macOS traffic lights get double-inset
+       in the Tauri window, which is the overlap complaint all over again.
+       With the token moved, the expression floors at --space-3 exactly when
+       the rail has grown wide enough to sit under the lights itself.
+     - onboarding.module.css docks its card at calc(--rail-width + --space-5),
+       so the card moves with the rail instead of landing on top of it.
+
+   216px is chosen to hold the longest label ("Theme: system — click to
+   cycle" truncates; every SECTION label fits) beside a 16px icon and a
+   ⌘-digit keycap, at the sidebar's own minimum-ish scale. */
+.shell[data-rail="expanded"] {
+  --rail-width: 216px;
+}
 
 /* ---- rail ------------------------------------------------------------- */
 .rail {
@@ -39,13 +63,25 @@
   padding-top: calc(var(--space-3) + var(--app-titlebar-height, 0px));
 }
 
+/* Expanded, the rail is a list of rows rather than a column of centred
+   glyphs. The padding-top above is untouched: the drag strip and the
+   traffic-light clearance behave identically in both states. */
+.rail[data-rail="expanded"] {
+  align-items: stretch;
+  padding-left: var(--space-2);
+  padding-right: var(--space-2);
+}
+
 /* The cleared strip, made draggable. Zero-height (and therefore absent) in a
- * browser, so it can never eat a click there. */
+ * browser, so it can never eat a click there. Stays pinned to the rail's
+ * own box — the rail's horizontal padding must not shrink it, or the
+ * window stops dragging from its top-left corner. */
 .railDragStrip {
   position: absolute;
   top: 0;
   left: 0;
-  width: 100%;
+  right: 0;
+  width: auto;
   height: var(--app-titlebar-height, 0px);
 }
 
@@ -68,7 +104,20 @@
   margin: 0;
   padding: 0;
 }
-.railFoot { margin-top: auto; }
+.railFoot {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin-top: auto;
+}
+
+.rail[data-rail="expanded"] .railList,
+.rail[data-rail="expanded"] .railFoot {
+  align-self: stretch;
+  align-items: stretch;
+}
+.rail[data-rail="expanded"] .railList > li { display: flex; }
 
 .railButton {
   position: relative;
@@ -84,6 +133,48 @@
     background var(--duration-fast) var(--ease-standard);
 }
 .railButton:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+/* Expanded: a full-width row — icon, label, keycap. */
+.rail[data-rail="expanded"] .railButton {
+  width: 100%;
+  justify-content: flex-start;
+  gap: var(--space-2);
+  padding: 0 var(--space-2);
+}
+
+/* The icon keeps its own box in BOTH states, so the pending dot stays
+   pinned to the glyph rather than drifting to the far corner of a row that
+   is suddenly 216px wide. */
+.railIcon {
+  position: relative;
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+}
+
+.railLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+/* The shortcut is a reminder, not a label: quiet, and it never competes
+   with the name for the row. */
+.railKey {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size, 11px);
+  color: var(--text-tertiary);
+}
+.railButton:hover .railKey { color: var(--text-secondary); }
 .railButton:active { background: var(--bg-active); }
 .railButton[aria-current] { color: var(--text-primary); }
 
@@ -91,6 +182,9 @@
 .railButton[aria-current]::before {
   content: '';
   position: absolute;
+  /* Flush with the rail's left edge. Collapsed the button is centred in a
+     56px column; expanded it starts one --space-2 in, so the offset that
+     lands the bar on the same pixel differs between the two. */
   left: -10px;
   top: 50%;
   height: 56%;
@@ -100,11 +194,16 @@
   background: var(--accent-500);
 }
 
-/* Pending approvals: a dot, paired with a count in the button's aria-label. */
+.rail[data-rail="expanded"] .railButton[aria-current]::before {
+  left: calc(var(--space-2) * -1);
+}
+
+/* Pending approvals: a dot, paired with a count in the button's aria-label.
+   Positioned against .railIcon, so it reads the same in both rail states. */
 .railDot {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: -3px;
+  right: -3px;
   width: 6px;
   height: 6px;
   border-radius: var(--radius-full);

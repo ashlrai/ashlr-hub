@@ -6,10 +6,12 @@ import {
   requestVerseCommand,
   resetVerseUi,
   setVersePendingApprovals,
+  setVerseRailExpanded,
   setVerseResourcesOpen,
   setVerseSection,
   setVerseSidebarWidth,
   subscribeVerseUi,
+  toggleVerseRail,
   toggleVerseSidebar,
   VERSE_SECTIONS,
   VERSE_SIDEBAR,
@@ -18,6 +20,18 @@ import {
 
 function stored(): Record<string, unknown> {
   return JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}') as Record<string, unknown>;
+}
+
+/**
+ * The store's own `read()` is module-private and runs ONCE at import, so a
+ * restore cannot be re-triggered from a test. This mirrors the one guard the
+ * restore applies to `railExpanded` — strict `=== true` — which is what makes
+ * a missing key (every payload written before the rail could expand) and a
+ * corrupt one both land on the collapsed default.
+ */
+function readPersisted(): { railExpanded: boolean } {
+  const parsed = JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}') as Record<string, unknown>;
+  return { railExpanded: parsed.railExpanded === true };
 }
 
 beforeEach(() => {
@@ -63,6 +77,7 @@ describe('verse-ui-store', () => {
     toggleVerseSidebar();
     expect(stored()).toEqual({
       section: 'usage',
+      railExpanded: false,
       sidebarWidth: VERSE_SIDEBAR.max,
       sidebarCollapsed: true,
       resourcesOpen: false,
@@ -70,6 +85,30 @@ describe('verse-ui-store', () => {
     });
     expect(clampWidth(10, VERSE_SIDEBAR)).toBe(VERSE_SIDEBAR.min);
     expect(clampWidth('nonsense', VERSE_SIDEBAR)).toBe(VERSE_SIDEBAR.def);
+  });
+
+  it('round-trips the rail width preference through ashlr.verse.ui.v2', () => {
+    // The rail's two states are a PREFERENCE, so they ride the same key and
+    // the same persist path as the sidebar's collapsed flag — not a second
+    // storage mechanism, and not session-only state that resets on reload.
+    expect(getVerseUiState().railExpanded).toBe(false);
+
+    toggleVerseRail();
+    expect(getVerseUiState().railExpanded).toBe(true);
+    expect(stored()).toMatchObject({ railExpanded: true });
+
+    setVerseRailExpanded(false);
+    expect(stored()).toMatchObject({ railExpanded: false });
+
+    // Collapsed is the default, so anything that is not an explicit `true`
+    // — a missing key from a pre-rail payload, or a corrupt one — reads as
+    // collapsed rather than surprising a returning operator with a wide rail.
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ section: 'chat' }));
+    expect(readPersisted().railExpanded).toBe(false);
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ railExpanded: 'yes' }));
+    expect(readPersisted().railExpanded).toBe(false);
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ railExpanded: true }));
+    expect(readPersisted().railExpanded).toBe(true);
   });
 
   it('keeps the pending-approval count and the ⌘N/⌘K command out of storage', () => {

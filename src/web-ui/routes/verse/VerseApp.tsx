@@ -1,10 +1,27 @@
 /**
  * routes/verse/VerseApp.tsx — the Verse shell (VERSE-CONTRACT-V2 "Shell
- * contract"): a 56px icon rail down the left, and exactly one section module
- * lazily mounted beside it.
+ * contract"): a rail down the left, and exactly one section module lazily
+ * mounted beside it.
  *
  *   Chat · Autonomy · Approvals · Usage · Settings · MCP
- *   ⌘1–⌘6 switch · ⌘K quick switcher · ⌘N new chat · ⌘, Settings
+ *   ⌘1–⌘6 switch · ⌘K quick switcher · ⌘N new chat · ⌘, Settings ·
+ *   ⌘\ expand / collapse the rail
+ *
+ * THE RAIL HAS TWO WIDTHS. Collapsed it is the 56px icon strip it has always
+ * been; expanded it puts each section's LABEL beside its icon. Which one you
+ * get is a persisted preference (`railExpanded`), not a responsive guess.
+ *
+ * The two states divide the labelling work between them, and they must not
+ * both do it: collapsed, every item carries a `Tooltip` with its name and
+ * ⌘-digit, because the glyph alone is a guess; expanded, the name is already
+ * on screen and a bubble repeating it is noise, so the tooltips are
+ * suppressed. That is what `Tooltip`'s `disabled` prop is for here.
+ *
+ * Those tooltips replaced `title={...}`. The native tooltip was unstyled, slow
+ * to appear, invisible to the keyboard, and — the reason it had to go —
+ * CLIPPED: the rail is a flex column inside the shell grid, so the browser's
+ * own box overlapped the sidebar beside it and got cut off. `Tooltip` portals
+ * to <body>, so nothing in this tree can clip it.
  *
  * The rail is driven entirely by `VERSE_SECTIONS`, including the number of
  * ⌘-digit bindings, so adding a section is one entry there plus a matching
@@ -32,16 +49,18 @@
  */
 import { Suspense, lazy, useEffect, useMemo, type ComponentType } from 'react';
 import { RouteErrorBoundary } from '../../components/primitives/RouteErrorBoundary.js';
+import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { reportThemeToShell, subscribeDesktopCommands } from '../../app/desktop-shell.js';
 import { useQuery, useTheme } from '../../data/hooks.js';
 import { inboxListQuery } from '../../data/queries.js';
-import { SECTION_ICON, VerseMark } from './verse-icons.js';
+import { RailToggleIcon, SECTION_ICON, VerseMark } from './verse-icons.js';
 import { OnboardingFlow } from './onboarding/OnboardingFlow.js';
 import { useVerseUi } from './useVerseUi.js';
 import {
   requestVerseCommand,
   setVerseSection,
   setVersePendingApprovals,
+  toggleVerseRail,
   VERSE_SECTIONS,
   type VerseSectionId,
 } from './verse-ui-store.js';
@@ -119,6 +138,14 @@ const SECTION_COMPONENTS = new Map<VerseSectionId, ComponentType>(
  * itself uses, so the two share one cache entry and one request rather than
  * each fetching the inbox.
  */
+/**
+ * ⌘\ — the rail's own expand/collapse binding, written once because JSX
+ * neither escapes attribute strings nor text: `shortcut="⌘\\"` renders TWO
+ * backslashes, where this constant is a real JS string literal and renders
+ * the one the key actually is.
+ */
+const RAIL_SHORTCUT = '⌘\\';
+
 const PENDING_APPROVALS_QUERY = inboxListQuery({ status: 'pending', limit: 500 });
 
 export function VerseApp() {
@@ -136,7 +163,7 @@ export function VerseApp() {
   }, [pendingCount]);
 
   // ⌘1–⌘n sections (n = VERSE_SECTIONS.length) · ⌘K quick switcher ·
-  // ⌘N new chat · ⌘, Settings.
+  // ⌘N new chat · ⌘, Settings · ⌘\ expand/collapse the rail.
   // Held at the document so they work wherever focus is, except inside a
   // dialog's own text field where the browser's own editing shortcuts win.
   useEffect(() => {
@@ -161,6 +188,12 @@ export function VerseApp() {
           event.preventDefault();
           setVerseSection('settings');
           break;
+        case '\\':
+          // Not claimed by the native menu bar (desktop/README.md §5 lists
+          // what is), so it reaches the page in the app as well as in a browser.
+          event.preventDefault();
+          toggleVerseRail();
+          break;
         default:
           break;
       }
@@ -183,10 +216,12 @@ export function VerseApp() {
   useEffect(() => { reportThemeToShell(theme.theme); }, [theme.theme]);
 
   const themeTitle = useMemo(() => `Theme: ${theme.theme} — click to cycle`, [theme.theme]);
+  const expanded = ui.railExpanded;
+  const railToggleLabel = expanded ? 'Collapse rail' : 'Expand rail';
 
   return (
-    <div className={styles.shell}>
-      <nav className={styles.rail} aria-label="Verse sections">
+    <div className={styles.shell} data-rail={expanded ? 'expanded' : 'collapsed'}>
+      <nav className={styles.rail} data-rail={expanded ? 'expanded' : 'collapsed'} aria-label="Verse sections">
         {/*
           Desktop shell: the window's top 48px is overlaid by the OS title bar
           and the traffic lights. The rail clears it in CSS; this strip makes
@@ -195,33 +230,65 @@ export function VerseApp() {
           See desktop/README.md → "Desktop shell contract".
         */}
         <span className={styles.railDragStrip} data-app-region="drag" aria-hidden="true" />
-        <span className={styles.mark} title="Ashlr Verse">
-          <VerseMark />
-          <span className="visually-hidden">Ashlr Verse</span>
-        </span>
+        <Tooltip label="Ashlr Verse" placement="right" disabled={expanded}>
+          <span className={styles.mark}>
+            <VerseMark />
+            <span className="visually-hidden">Ashlr Verse</span>
+          </span>
+        </Tooltip>
         <ul className={styles.railList}>
           {VERSE_SECTIONS.map((entry, index) => {
             const IconComponent = SECTION_ICON[entry.id];
             const pending = entry.id === 'approvals' ? ui.pendingApprovals : 0;
             const active = ui.section === entry.id;
+            const shortcut = `⌘${index + 1}`;
             return (
               <li key={entry.id}>
-                <button type="button" className={styles.railButton} aria-current={active ? 'page' : undefined}
-                  data-section={entry.id} title={`${entry.label} (⌘${index + 1})`}
-                  aria-label={pending > 0 ? `${entry.label}, ${pending} pending` : entry.label}
-                  onClick={() => setVerseSection(entry.id)}>
-                  <IconComponent />
-                  {pending > 0 ? <span className={styles.railDot} data-pending={pending} aria-hidden="true" /> : null}
-                </button>
+                {/*
+                  The accessible NAME stays on the button in both states: the
+                  tooltip is a description, never the only place the name
+                  exists, and the pending count rides that name so it is
+                  announced rather than being a dot only sighted users get.
+                */}
+                <Tooltip label={entry.label} shortcut={shortcut} placement="right" disabled={expanded}>
+                  <button type="button" className={styles.railButton} aria-current={active ? 'page' : undefined}
+                    data-section={entry.id}
+                    aria-label={pending > 0 ? `${entry.label}, ${pending} pending` : entry.label}
+                    onClick={() => setVerseSection(entry.id)}>
+                    <span className={styles.railIcon}>
+                      <IconComponent />
+                      {pending > 0 ? <span className={styles.railDot} data-pending={pending} aria-hidden="true" /> : null}
+                    </span>
+                    {expanded ? <span className={styles.railLabel}>{entry.label}</span> : null}
+                    {expanded ? <span className={styles.railKey} aria-hidden="true">{shortcut}</span> : null}
+                  </button>
+                </Tooltip>
               </li>
             );
           })}
         </ul>
         <div className={styles.railFoot}>
-          <button type="button" className={styles.railButton} onClick={theme.cycle} title={themeTitle}
-            aria-label={themeTitle} data-theme-toggle={theme.theme}>
-            <ThemeGlyph preference={theme.theme} />
-          </button>
+          <Tooltip label={railToggleLabel} shortcut={RAIL_SHORTCUT} placement="right" disabled={expanded}>
+            <button type="button" className={styles.railButton} onClick={toggleVerseRail}
+              aria-label={railToggleLabel} aria-expanded={expanded} data-rail-toggle={expanded ? 'expanded' : 'collapsed'}>
+              <span className={styles.railIcon}><RailToggleIcon expanded={expanded} /></span>
+              {expanded ? <span className={styles.railLabel}>{railToggleLabel}</span> : null}
+              {expanded ? <span className={styles.railKey} aria-hidden="true">{RAIL_SHORTCUT}</span> : null}
+            </button>
+          </Tooltip>
+          <Tooltip label={themeTitle} placement="right" disabled={expanded}>
+            <button type="button" className={styles.railButton} onClick={theme.cycle}
+              aria-label={themeTitle} data-theme-toggle={theme.theme}>
+              <span className={styles.railIcon}><ThemeGlyph preference={theme.theme} /></span>
+              {/*
+                Short on screen, descriptive to a screen reader — and the
+                accessible name CONTAINS the visible text, which is what
+                WCAG 2.5.3 (Label in Name) asks for, so "click Theme system"
+                still hits this control by voice.
+              */}
+              {expanded ? <span className={styles.railLabel}>Theme: {theme.theme}</span> : null}
+            </button>
+          </Tooltip>
         </div>
       </nav>
       {/*
