@@ -8,13 +8,14 @@
  * equivalent there is an ALIAS of it, so the rail and the inbox cannot drift
  * to two different chat glyphs.
  *
- * Four icons stay drawn here because the shared set has no equivalent and
+ * Five icons stay drawn here because the shared set has no equivalent and
  * they are Verse-specific chrome, not general console vocabulary:
  * `PanelIcon` / `SidebarIcon` (the two pane toggles, which must read as
- * mirror images of each other), `VerseMark` (the brand mark in the rail
- * head, which is 32px and never takes a color state) and `McpIcon` (a plug —
- * the shared set has no connector glyph, and every candidate in it already
- * means another rail section).
+ * mirror images of each other), `RailToggleIcon` (the rail's own expand /
+ * collapse control, which has to read as the same family as those two),
+ * `VerseMark` (the brand mark in the rail head, which is 32px and never takes
+ * a color state) and `McpIcon` (a plug — the shared set has no connector
+ * glyph, and every candidate in it already means another rail section).
  */
 import type { ComponentType, ReactNode } from 'react';
 import {
@@ -80,6 +81,23 @@ export function PanelIcon(props: IconProps) {
 
 export function SidebarIcon(props: IconProps) {
   return <Icon {...props}><rect x="2.5" y="3" width="11" height="10" rx="1.5" /><path d="M6 3v10" /></Icon>;
+}
+
+/**
+ * The rail's own expand/collapse control: the same framed panel as the two
+ * pane toggles above, plus a chevron saying which way it is about to move.
+ * ONE glyph that rotates rather than two drawings, so the control reads as a
+ * single thing in two states — and so the state is carried by direction, the
+ * one property a user can read without having memorised the other icon.
+ */
+export function RailToggleIcon({ expanded = false, ...props }: IconProps & { expanded?: boolean }) {
+  return (
+    <Icon {...props}>
+      <rect x="2.5" y="3" width="11" height="10" rx="1.5" />
+      <path d="M6 3v10" />
+      {expanded ? <path d="M11.2 6.4 9.6 8l1.6 1.6" /> : <path d="M9.4 6.4 11 8l-1.6 1.6" />}
+    </Icon>
+  );
 }
 
 /**

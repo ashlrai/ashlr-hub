@@ -1,6 +1,6 @@
 /**
- * Shell tests: the 56px rail, the lazily-mounted sections, and the
- * global shortcuts. The chat surface itself is covered in
+ * Shell tests: the rail in both of its widths, the lazily-mounted sections,
+ * and the global shortcuts. The chat surface itself is covered in
  * sections/ChatSection.test.tsx — this file only asserts that the shell
  * mounts it and gets out of the way.
  */
@@ -13,7 +13,12 @@ import { evictAll } from '../../data/cache.js';
 import { MockEventSource, verseFetch } from './fixtures.test-support.js';
 import { MissingSection, SECTION_MODULES, VerseApp } from './VerseApp.js';
 import { resetVerseStore } from './verse-store.js';
-import { resetVerseUi, setVersePendingApprovals, VERSE_SECTIONS } from './verse-ui-store.js';
+import {
+  resetVerseUi,
+  setVersePendingApprovals,
+  setVerseRailExpanded,
+  VERSE_SECTIONS,
+} from './verse-ui-store.js';
 
 /** verseFetch's mock is typed loosely; this is the shape we actually delegate to. */
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -242,5 +247,144 @@ describe('VerseApp shell', () => {
 
     act(() => setVersePendingApprovals(0));
     expect(screen.getByRole('button', { name: 'Approvals' }).querySelector('[data-pending]')).toBeNull();
+  });
+});
+
+describe('VerseApp rail', () => {
+  // The rail's job is navigation, and it has two ways of doing it. Collapsed,
+  // the name of each section lives in a tooltip; expanded, it is on screen.
+  // Exactly one of those is true at a time — a visible label with a bubble
+  // repeating it is noise, and an icon with neither is a guess.
+
+  it('starts collapsed: icons, no labels, and a Tooltip carrying name + ⌘-digit', async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
+    const usage = within(rail).getByRole('button', { name: 'Usage' });
+
+    // No visible label text — the glyph is the whole control.
+    expect(usage).toHaveTextContent('');
+    // And crucially NOT the native tooltip. `title=` is what rendered as an
+    // unstyled grey box that overlapped the sidebar and got clipped.
+    expect(usage).not.toHaveAttribute('title');
+    expect(rail.querySelectorAll('[title]')).toHaveLength(0);
+
+    await user.hover(usage);
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent('Usage');
+    expect(tip).toHaveTextContent('⌘4');
+    expect(usage).toHaveAttribute('aria-describedby', tip.id);
+    // Portalled out of the rail, which is the point: the rail is a flex column
+    // in a grid shell, so a bubble rendered inside it is cut off at its edge.
+    expect(rail).not.toContainElement(tip);
+  });
+
+  it('expanded, shows every section label and suppresses the now-redundant tooltips', async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
+
+    await user.click(within(rail).getByRole('button', { name: 'Expand rail' }));
+
+    for (const entry of VERSE_SECTIONS) {
+      const button = within(rail).getByRole('button', { name: entry.label });
+      // The label is now ON the control, not in a bubble over it.
+      expect(button).toHaveTextContent(entry.label);
+    }
+
+    await user.hover(within(rail).getByRole('button', { name: 'Usage' }));
+    // Deliberately not `findByRole`: we are asserting nothing appears, and the
+    // open delay has to be allowed to elapse before that means anything.
+    await new Promise((resolve) => setTimeout(resolve, 350));
+    expect(screen.queryByRole('tooltip')).toBeNull();
+  });
+
+  it('keeps the accessible name, aria-current and the pending dot across both widths', async () => {
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const rail = () => screen.getByRole('navigation', { name: 'Verse sections' });
+
+    act(() => setVersePendingApprovals(3));
+    for (const state of ['collapsed', 'expanded'] as const) {
+      if (state === 'expanded') {
+        await user.click(within(rail()).getByRole('button', { name: 'Expand rail' }));
+      }
+      // The count rides the accessible NAME in both states, so it is announced
+      // rather than being a dot only sighted users get.
+      const approvals = within(rail()).getByRole('button', { name: 'Approvals, 3 pending' });
+      expect(approvals.querySelector('[data-pending="3"]'), state).not.toBeNull();
+      expect(within(rail()).getByRole('button', { name: 'Chat' }), state)
+        .toHaveAttribute('aria-current', 'page');
+    }
+  });
+
+  it('⌘1–⌘6 still switch sections while the rail is expanded', async () => {
+    const user = userEvent.setup();
+    const view = mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const rail = screen.getByRole('navigation', { name: 'Verse sections' });
+    await user.click(within(rail).getByRole('button', { name: 'Expand rail' }));
+
+    const slot = () => view.container.querySelector('[data-section]:not(button)')!;
+    act(() => { fireEvent.keyDown(document, { key: '4', metaKey: true }); });
+    expect(slot()).toHaveAttribute('data-section', 'usage');
+    act(() => { fireEvent.keyDown(document, { key: '6', metaKey: true }); });
+    expect(slot()).toHaveAttribute('data-section', 'mcp');
+    act(() => { fireEvent.keyDown(document, { key: '1', metaKey: true }); });
+    await screen.findByRole('navigation', { name: 'Chats' });
+  });
+
+  it('⌘\\ toggles the rail, and the choice survives a remount', async () => {
+    const view = mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    const rail = () => screen.getByRole('navigation', { name: 'Verse sections' });
+    expect(within(rail()).getByRole('button', { name: 'Expand rail' }))
+      .toHaveAttribute('aria-expanded', 'false');
+
+    act(() => { fireEvent.keyDown(document, { key: '\\', metaKey: true }); });
+    expect(within(rail()).getByRole('button', { name: 'Collapse rail' }))
+      .toHaveAttribute('aria-expanded', 'true');
+    // Same key, same storage path as every other layout preference.
+    expect(JSON.parse(localStorage.getItem('ashlr.verse.ui.v2') ?? '{}'))
+      .toMatchObject({ railExpanded: true });
+
+    view.unmount();
+    mount();
+    expect(within(rail()).getByRole('button', { name: 'Collapse rail' })).toBeInTheDocument();
+    expect(within(rail()).getByRole('button', { name: 'Chat' })).toHaveTextContent('Chat');
+  });
+
+  it('keeps the desktop drag strip and the traffic-light clearance in BOTH widths', async () => {
+    // THE REGRESSION THIS PINS. `--app-titlebar-height` is 0px in a browser and
+    // 48px in the Tauri window, where the OS paints the traffic lights over the
+    // rail's top-left corner. The rail clears that strip in CSS and this span
+    // makes the cleared space drag the window. The user has already been bitten
+    // once by traffic lights sitting on top of the UI; a rail that grows a
+    // second layout must not drop either half of the contract.
+    // See desktop/README.md → "Desktop shell contract".
+    const view = mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+
+    for (const state of ['collapsed', 'expanded'] as const) {
+      act(() => setVerseRailExpanded(state === 'expanded'));
+      const rail = screen.getByRole('navigation', { name: 'Verse sections' });
+      expect(rail, state).toHaveAttribute('data-rail', state);
+
+      const strip = rail.querySelector('[data-app-region="drag"]');
+      expect(strip, `${state}: the rail must keep its drag region`).not.toBeNull();
+      // It must be the rail's OWN first child, above every control, or it stops
+      // covering the corner the traffic lights are painted over.
+      expect(rail.firstElementChild, state).toBe(strip);
+      expect(strip, state).toHaveAttribute('aria-hidden', 'true');
+
+      // The shell carries the state as a data attribute because the expanded
+      // width is applied by re-declaring --rail-width on it — the same token
+      // five other stylesheets subtract from --app-traffic-light-inset.
+      expect(view.container.querySelector('[data-rail]'), state)
+        .toHaveAttribute('data-rail', state);
+    }
   });
 });

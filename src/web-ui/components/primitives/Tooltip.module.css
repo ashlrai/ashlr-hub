@@ -1,33 +1,25 @@
+/* The trigger's stand-in in the tree: present in the DOM so the describedby
+   relationship has somewhere to sit, but generating NO box, so a trigger in a
+   flex or grid track keeps its own placement exactly as it had it. */
 .wrapper {
-  position: relative;
-  display: inline-flex;
+  display: contents;
 }
 
-.trigger {
-  display: inline-flex;
-}
-
-/* The keycap after a label. `inherit`ing nothing on purpose: a shortcut is a
-   glyph run, so it takes the display face and tabular figures rather than the
-   bubble's body text. */
-.shortcut {
-  display: inline-block;
-  margin-left: var(--space-2);
-  padding: 0 var(--space-1);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-xs);
-  background: var(--bg-hover);
-  color: var(--text-secondary);
-  font-family: var(--font-display);
-  font-size: var(--text-2xs-size, 11px);
-  font-variant-numeric: tabular-nums;
-  line-height: calc(var(--text-xs-line) - 2px);
-  white-space: nowrap;
-}
-
+/* Fixed, not absolute, and portalled to <body>: the bubble's coordinates come
+   from the trigger's viewport rect, so no ancestor's overflow, transform or
+   stacking context can clip it. That clipping is the exact failure of the
+   native `title=` tooltip this replaces. */
 .bubble {
-  position: absolute;
-  z-index: var(--z-dropdown);
+  position: fixed;
+  /* Above every other layer in the scale, toasts included: a tooltip can
+     describe a control inside a dialog, a sheet or the command palette, and
+     a bubble drawn behind the thing it explains is the same bug as one that
+     is clipped. There is no --z-tooltip token yet; this stays one step above
+     the top of the scale rather than inventing a number. */
+  z-index: calc(var(--z-toast) + 1);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   max-width: 260px;
   padding: var(--space-1) var(--space-2);
   border: 1px solid var(--border-default);
@@ -35,6 +27,7 @@
   background: var(--bg-surface-raised);
   color: var(--text-primary);
   box-shadow: var(--shadow-menu);
+  font-family: var(--font-ui);
   font-size: var(--text-xs-size);
   line-height: var(--text-xs-line);
   font-weight: var(--font-weight-regular);
@@ -42,32 +35,28 @@
      the viewport instead of wrapping inside 260px. */
   white-space: normal;
   text-wrap: pretty;
+  /* It follows the pointer's target, it is never a pointer target itself —
+     otherwise a bubble drawn under the cursor triggers its own mouseleave. */
   pointer-events: none;
   animation: tooltip-in var(--duration-fast) var(--ease-standard);
 }
 
-.top {
-  bottom: calc(100% + var(--space-1));
-  left: 50%;
-  transform: translateX(-50%);
+.label {
+  min-width: 0;
 }
 
-.bottom {
-  top: calc(100% + var(--space-1));
-  left: 50%;
-  transform: translateX(-50%);
-}
-
-.left {
-  right: calc(100% + var(--space-1));
-  top: 50%;
-  transform: translateY(-50%);
-}
-
-.right {
-  left: calc(100% + var(--space-1));
-  top: 50%;
-  transform: translateY(-50%);
+/* The shortcut reads as a key, not as more sentence. */
+.shortcut {
+  flex: none;
+  padding: 0 4px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  background: var(--bg-code);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: 1.5;
+  white-space: nowrap;
 }
 
 @keyframes tooltip-in {
