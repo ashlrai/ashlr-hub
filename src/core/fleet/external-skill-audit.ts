@@ -436,7 +436,7 @@ export const EXTERNAL_SKILL_AUDIT_POLICY_DIGEST = createHash('sha256')
     algorithmRevision: AUDIT_ALGORITHM_REVISION,
     upstreamReference: 'addyosmani/agent-skills@fefc4075',
     parserArtifacts: {
-      markdown: 'marked@17.0.0',
+      markdown: 'marked@18.0.10',
       frontmatter: 'closed-name-description-v1',
       json: 'bounded-streaming-closed-schema-v1',
       sectionEvidence: 'visible-markdown-token-sections-v2',
