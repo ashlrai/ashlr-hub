@@ -1,6 +1,13 @@
 # Locality is not the same claim as spend
 
-**Status: recommendation only. No behaviour changed. Needs Mason's decision.**
+**Status: DECIDED and IMPLEMENTED (steps 1–3). Option A chosen.**
+
+`Meteredness` now lives alongside `EngineLocality` in `src/core/policy/local-only.ts`;
+`decidePermission` refuses anything not provably `'free'`, `'unknown'` included; and
+`estCostUsd` keys on meteredness rather than locality. `ashlrcode` is `'metered'` and is
+refused under local-only — see "On `ashlrcode` specifically" below for the decision and
+its grounds. Steps 4 and 5 remain open. The consumer map below is kept as written,
+because it is the evidence for why the split exists; it describes the pre-change state.
 
 `src/core/policy/local-only.ts` answers one question — `EngineLocality = 'local' | 'cloud'`
 — and that answer is used to decide two different things:
@@ -77,7 +84,22 @@ type Meteredness     = 'free' | 'metered' | 'unknown';  // NEW: can this bill yo
 **What local-only should refuse:** anything not provably `'free'`. That is the one-line
 statement of intent, and it makes the UI copy true.
 
-### On `ashlrcode` specifically — two options, Mason's call
+### On `ashlrcode` specifically — DECIDED: Option A
+
+Mason chose **A**, on the grounds that ashlrcode is stale — its repo has not moved in
+three months — and Qwen3.8 now drives the local lane far better, so the capability A
+costs us is one worth losing: *"make sure that we're only using this if it's really
+relevant."* `ashlrcode` is `'metered'`; local-only refuses it. **B remains the future
+target** if ashlrcode ever grows a verifiable local mode. Do not build B now.
+
+`aw` was classified `'unknown'` rather than `'metered'`. Its cloud fallback really is
+opt-in (`ECOSYSTEM-MAP.md:155`), but that opt-in lives in aw's own `.env` and agent
+configs, which this hub neither reads nor controls — so `'unknown'` states the truth,
+where `'metered'` would assert a fact about a third-party config we have not read.
+Under local-only the two are identical in effect: both refused, both priced as spend.
+The difference is only what the refusal tells the operator.
+
+The options as they stood before the decision:
 
 **Option A — classify `ashlrcode` as `metered`, locality unchanged.** Under local-only it
 is refused. Honest and immediate; costs you the ability to use `ac` in a local-only run
@@ -111,10 +133,27 @@ id-space confusion should be resolved in the same change.
 
 ## Suggested order
 
-1. Add `Meteredness` alongside `EngineLocality`; classify everything; default cli-agents to
-   `'unknown'`.
-2. Point `local-only` at meteredness (refuse anything not `'free'`). `endpointPermitted`
-   sites are already correct and need no change.
-3. Fix `estCostUsd` to take meteredness and settle the engine-vs-provider id space.
-4. Then, and only then, merge the budgets and locality-unification branches.
+1. ~~Add `Meteredness` alongside `EngineLocality`; classify everything; default cli-agents to
+   `'unknown'`.~~ **DONE.**
+2. ~~Point `local-only` at meteredness (refuse anything not `'free'`). `endpointPermitted`
+   sites are already correct and need no change.~~ **DONE** — and because every gated site
+   funnels through `enginePermitted` / `binPermitted`, no call site needed editing: the
+   change is entirely inside `decidePermission` and the classifiers.
+3. ~~Fix `estCostUsd` to take meteredness and settle the engine-vs-provider id space.~~
+   **DONE** — `subjectMeteredness` resolves both id spaces and the parameter is renamed
+   `subject`. `'ashlrcode'` still falls to the conservative $3/$15 estimate, deliberately.
+4. Then, and only then, merge the budgets and locality-unification branches — with each
+   one's locality-based free/zero test rewritten onto meteredness first.
 5. Option B, if and when ashlrcode grows a verifiable local mode.
+
+## Known residual, out of scope for this change
+
+`daemon/loop.ts`'s `LOCAL_ONLY_BACKENDS` (`:1149`) still lists `ashlrcode` and `aw`, and
+`constrainToLocalBackends` / `enforceLocalBackend` filter on it. That set is the LOCALITY
+axis doing its legitimate job (fleet membership, pool tiering), so it was left alone — but
+it also backs `plan.forceLocalOnly`, the autonomy director's **cost-pressure** switch,
+which is a different mechanism from `cfg.foundry.localOnly` and is therefore not closed by
+this change. When `forceLocalOnly` fires, `ashlrcode` is still an allowed backend. The
+actual spawn is refused only if the local-only MODE is also on. Closing that means giving
+`forceLocalOnly` its own meteredness filter, which is a separate decision about what the
+director should do when it is trying to save money rather than forbid spending it.

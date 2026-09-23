@@ -5,7 +5,8 @@
  * return new objects; RunUsage is never mutated in place.
  */
 
-import type { RunUsage, RunBudget } from '../types.js';
+import type { AshlrConfig, RunUsage, RunBudget } from '../types.js';
+import { subjectMeteredness, type Meteredness } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Static price table (rough $/M-token estimates for cloud providers).
@@ -42,8 +43,66 @@ const PRICE_OUT: Record<string, number> = {
   cohere: 3.0,
 };
 
-/** Providers that are always local (zero cost). */
-const LOCAL_PROVIDERS = new Set(['ollama', 'lmstudio']);
+// ---------------------------------------------------------------------------
+// What costs nothing — asked, never restated
+// ---------------------------------------------------------------------------
+
+/**
+ * WHAT MAKES A CALL FREE IS METEREDNESS, NEVER LOCALITY.
+ *
+ * This file used to carry its own two-entry set (`ollama`, `lmstudio`). That was
+ * wrong in one direction — `local-coder` and `llama-server` serve the same
+ * weights off the same loopback port and were priced as cloud — and the obvious
+ * repair was worse in the other: routing the question through
+ * `engineLocality` would have called `ashlrcode` local and billed every
+ * ashlrcode run at $0.
+ *
+ * ZERO IS WORSE THAN WRONG. Before this change `'ashlrcode'` matched no price
+ * key and fell to the conservative $3/$15 estimate: a wrong number, but a
+ * VISIBLE one, and a wrong number invites scrutiny where a zero ends it. So the
+ * question asked here is the spend question, and `ashlrcode` stays priced.
+ *
+ * `subjectMeteredness` also settles the id-space confusion this function was
+ * living with: the doc comment below said "provider id" while
+ * `run/sandboxed-engine.ts` passed an ENGINE id at `:1825`, `:2161` and
+ * `:3061`. Both id spaces now resolve, and the parameter is named for it.
+ */
+function meterednessOf(subject: string, cfg?: AshlrConfig): Meteredness {
+  const key = subject.trim().toLowerCase();
+  if (key.length === 0) return 'unknown';
+  const bucket = cacheBucket(cfg);
+  const hit = bucket.get(key);
+  if (hit !== undefined) return hit;
+  const answer = subjectMeteredness(subject, cfg);
+  bucket.set(key, answer);
+  return answer;
+}
+
+/**
+ * Memoised because `estCostUsd` runs once per model step and per usage event in
+ * the rollup, while `subjectMeteredness` resolves the whole engine registry.
+ * Keyed by cfg identity so a caller that passes a different config is not served
+ * another config's answer; the no-cfg bucket is separate for the same reason.
+ */
+const meterednessByCfg = new WeakMap<object, Map<string, Meteredness>>();
+const meterednessNoCfg = new Map<string, Meteredness>();
+
+function cacheBucket(cfg?: AshlrConfig): Map<string, Meteredness> {
+  if (!cfg) return meterednessNoCfg;
+  const existing = meterednessByCfg.get(cfg);
+  if (existing) return existing;
+  const fresh = new Map<string, Meteredness>();
+  meterednessByCfg.set(cfg, fresh);
+  return fresh;
+}
+
+/**
+ * Test-only: drop memoised answers so suites that vary env or registry entries
+ * stay independent of each other's ordering.
+ */
+export function __resetBudgetMeterednessCacheForTests(): void {
+  meterednessNoCfg.clear();
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -107,33 +166,43 @@ export const CACHE_READ_MULT      = 0.1;   // cache read (served from cache)
 /**
  * Estimated USD cost for a single model call.
  *
- * - Local providers (ollama, lmstudio) → always 0.
- * - Cloud providers → looked up from the static price table by matching
- *   the provider id (case-insensitive prefix match against known keys).
- *   Falls back to a conservative $3/$15 per-M-token estimate when unknown.
+ * - PROVABLY FREE subjects → 0. That is `subjectMeteredness(...) === 'free'`:
+ *   loopback endpoints and the local serving runtimes, whatever they are called
+ *   in either id space.
+ * - Everything else → looked up from the static price table by matching the id
+ *   (case-insensitive prefix match against known keys). Falls back to a
+ *   conservative $3/$15 per-M-token estimate when nothing matches — which is
+ *   where `'ashlrcode'` lands, ON PURPOSE. A metered subject must never report
+ *   $0; a wrong number invites scrutiny, a zero ends it.
  * - M246: optional cache token params (default 0) add tiered cache pricing
  *   on top of the base cost. Existing callers with no cache args are unaffected.
  *
- * @param provider       Provider id string (e.g. 'ollama', 'anthropic', 'openai').
+ * @param subject        Provider id OR engine id — e.g. 'ollama', 'anthropic',
+ *                       'local-coder', 'ashlrcode'. Both id spaces resolve; see
+ *                       `meterednessOf` for why this parameter used to lie.
  * @param tokensIn       Number of prompt/input tokens (non-cached).
  * @param tokensOut      Number of completion/output tokens.
  * @param cacheRead      M246: Cache-read tokens (0 by default).
  * @param cacheWrite5m   M246: 5-min TTL cache-write tokens (0 by default).
  * @param cacheWrite1h   M246: 1-hour TTL cache-write tokens (0 by default).
- * @returns Estimated USD cost as a number (0 for local).
+ * @param cfg            Optional config, so engines registered through
+ *                       `cfg.foundry.engines` classify correctly. Omitting it
+ *                       can only make a subject LESS provably free, never more.
+ * @returns Estimated USD cost as a number (0 only when provably free).
  */
 export function estCostUsd(
-  provider: string,
+  subject: string,
   tokensIn: number,
   tokensOut: number,
   cacheRead = 0,
   cacheWrite5m = 0,
   cacheWrite1h = 0,
+  cfg?: AshlrConfig,
 ): number {
-  const key = provider.toLowerCase();
+  const key = subject.toLowerCase();
 
-  // Fast path: known local providers
-  if (LOCAL_PROVIDERS.has(key)) return 0;
+  // Fast path: nothing that is PROVABLY free can bill anyone.
+  if (meterednessOf(subject, cfg) === 'free') return 0;
 
   // Prefix match against the price table keys
   let priceIn = 3.0;   // conservative fallback
