@@ -25,7 +25,7 @@
  */
 
 import { createWriteStream, type WriteStream } from 'node:fs';
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { join } from 'node:path';
 import type { StreamRecord, TimeoutDiagnosis, TrialTrace } from './types.js';
@@ -122,13 +122,15 @@ export async function startTrace(opts: StartTraceOptions): Promise<TraceHandle> 
     void settled.finally(() => pending.delete(settled));
   };
   let seq = 0;
-  let firstRequestAt: number | null = null;
 
+  // One stream, not repeated appends: concurrent `appendFile` calls have no
+  // ordering guarantee, and a journal whose lines interleave is not forensics.
+  // Errors are swallowed — a write failure must never take down the run this is
+  // only observing.
+  const log = createWriteStream(journal, { flags: 'a' });
+  log.on('error', () => undefined);
   const note = (entry: Record<string, unknown>): void => {
-    // Fire and forget: the journal is forensics, and a write failure must never
-    // take down the run it is observing.
-    void appendFile(journal, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, 'utf8')
-      .catch(() => undefined);
+    log.write(`${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
   };
 
   const settle = (state: LiveStream, how: StreamRecord['ended'], upstreamComplete: boolean): void => {
@@ -163,8 +165,6 @@ export async function startTrace(opts: StartTraceOptions): Promise<TraceHandle> 
       seq += 1;
       const tag = String(index).padStart(4, '0');
       const body = Buffer.concat(chunks);
-      if (firstRequestAt === null) firstRequestAt = Date.now();
-
       const state: LiveStream = {
         seq: index, url: req.url ?? '', startedAt: Date.now(),
         firstByteAt: null, lastByteAt: null, bytes: 0, status: null, events: new Map(),
@@ -245,7 +245,7 @@ export async function startTrace(opts: StartTraceOptions): Promise<TraceHandle> 
 
   return {
     baseUrl: `http://127.0.0.1:${port}`,
-    snapshot: () => buildTrace({ finished, live, stallMs, captureDir: opts.captureDir, firstRequestAt }),
+    snapshot: () => buildTrace({ finished, live, stallMs, captureDir: opts.captureDir }),
     close: async () => {
       for (const state of [...live.values()]) settle(state, 'client-closed', false);
       for (const socket of sockets) socket.destroy();
@@ -253,6 +253,7 @@ export async function startTrace(opts: StartTraceOptions): Promise<TraceHandle> 
       // The capture is the evidence, so it is flushed before the handle is
       // considered closed — a caller that reads it next must find it whole.
       await Promise.allSettled([...pending]);
+      await new Promise<void>((resolve) => log.end(() => resolve()));
     },
   };
 }
@@ -262,7 +263,6 @@ function buildTrace(args: {
   live: ReadonlyMap<number, LiveStream>;
   stallMs: number;
   captureDir: string;
-  firstRequestAt: number | null;
 }): TrialTrace {
   const now = Date.now();
   const openStreams = [...args.live.values()].map((s) => ({
