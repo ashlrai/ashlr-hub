@@ -22,6 +22,28 @@ updates:
         dependency-type: production
       development-dependencies:
         dependency-type: development
+    # Three holds, each with the condition that lifts it. Without these the
+    # development-dependencies group regenerates a PR that cannot install or
+    # cannot pass, every week, forever.
+    ignore:
+      # typescript-eslint caps at `typescript >=4.8.4 <6.1.0`, so npm cannot
+      # even resolve a tree containing TypeScript 7. Lift when typescript-eslint
+      # ships a release whose peer range admits it.
+      - dependency-name: typescript
+        versions: [">=6.1.0"]
+      # ESLint 10 turns on no-useless-assignment, preserve-caught-error and
+      # no-unassigned-vars in eslint:recommended: 173 new errors here, and
+      # preserve-caught-error in particular is worth fixing deliberately rather
+      # than silencing. Lift by doing that migration, not by bumping.
+      - dependency-name: eslint
+        versions: [">=10.0.0"]
+      - dependency-name: eslint-plugin-react-hooks
+        versions: [">=7.0.0"]
+      # jsdom 30 changes accessible role/name computation: 9 getByRole
+      # assertions across ResourcePoolView and WorkspaceProjects stop matching.
+      # Lift once those queries are updated to whatever jsdom 30 computes.
+      - dependency-name: jsdom
+        versions: [">=30.0.0"]
 
   - package-ecosystem: npm
     directory: /src/raycast

@@ -175,7 +175,7 @@ describe('external skill-pack quarantine audit', () => {
 
   it('pins the complete routing policy manifest identity', () => {
     expect(EXTERNAL_SKILL_AUDIT_POLICY_DIGEST)
-      .toBe('b1353f227d80c2d86321d629a08904294ddb7984254f47cd32ee241dc43f9ce5');
+      .toBe('2991fdf8aa279e1848f8d772e58535d0554594a5cd385b1fdb8133f1a2fb25e4');
     const source = readFileSync(join(
       process.cwd(), 'src/core/fleet/external-skill-audit.ts',
     ), 'utf8');
@@ -187,7 +187,27 @@ describe('external skill-pack quarantine audit', () => {
     const packageJson = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>;
     };
-    expect(packageJson.dependencies.marked).toBe('17.0.0');
+    expect(packageJson.dependencies.marked).toBe('18.0.10');
+  });
+
+  it('does not treat a code-spanned placeholder as raw HTML', () => {
+    // This is why the marked version is pinned above, and why bumping it moves
+    // the policy digest. marked 17 parsed the two tildes below as GFM
+    // strikethrough, which swallowed the backticks between them and left `<id>`
+    // exposed as an inline html token — so `documentHasRawHtml` fired and the
+    // whole document lost section credit. Real repository docs hit this.
+    // marked 18 keeps the code spans intact, which is the correct reading:
+    // a code span outranks an emphasis run that would cross it.
+    const root = validPack();
+    const skill = join(root, 'skills', 'documentation-writing', 'SKILL.md');
+    const body = readFileSync(skill, 'utf8');
+    writeFileSync(skill, `${body}\n\n## Process\n\nThe id is \`swarm-<ts>\` with ~24 bits of \`Math.random\`, so two runs can share \`~/.ashlr/swarms/<id>.json\`.\n`);
+
+    const report = auditExternalSkillPack(root);
+    const entry = report.skills.find((s) => s.name === 'documentation-writing');
+
+    // The section is credited, which only holds if no raw-HTML token was found.
+    expect(entry?.sections.process).toBe(true);
   });
 
   it('content-binds eval contracts and behavioral fixtures', () => {
