@@ -5,7 +5,9 @@
   "description": "Command center for everything on your Desktop — search repos, docs, assets, and manage your workspace.",
   "icon": "command-icon.png",
   "author": "masonwyatt",
-  "categories": ["Developer Tools"],
+  "categories": [
+    "Developer Tools"
+  ],
   "license": "MIT",
   "preferences": [
     {
@@ -16,8 +18,14 @@
       "required": false,
       "default": "cursor",
       "data": [
-        { "title": "Cursor", "value": "cursor" },
-        { "title": "VS Code", "value": "vscode" }
+        {
+          "title": "Cursor",
+          "value": "cursor"
+        },
+        {
+          "title": "VS Code",
+          "value": "vscode"
+        }
       ]
     }
   ],
@@ -79,11 +87,12 @@
     "lint:raycast": "ray lint"
   },
   "dependencies": {
-    "@raycast/api": "^1.70.0"
+    "@raycast/api": "^2.0.5"
   },
   "devDependencies": {
-    "@raycast/eslint-config": "^1.0.8",
-    "@types/node": "^22.0.0",
+    "@eslint/js": "^10.0.1",
+    "@raycast/eslint-config": "^2.2.0",
+    "@types/node": "^26.2.0",
     "typescript": "^5.5.0"
   },
   "overrides": {
