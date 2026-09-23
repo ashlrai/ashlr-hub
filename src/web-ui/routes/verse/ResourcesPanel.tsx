@@ -55,6 +55,7 @@ import type { VerseBootstrap, VerseEngine, VerseSeat, VerseSession } from '../..
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
+import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { useQuery, useRefresh } from '../../data/hooks.js';
 import { CapacityChip, SeatWindowMeter } from './SeatCapacity.js';
 import { SessionRoots } from './SessionRoots.js';
@@ -211,20 +212,27 @@ function SeatRow({
   return (
     <li className={`${styles.seat} ${styles[`engine-${seat.engine}`] ?? ''}`} data-engine={seat.engine}
       data-capacity={view.cls} data-open={open ? 'true' : 'false'}>
-      <button
-        type="button"
-        className={styles.seatToggle}
-        aria-expanded={open}
-        aria-controls={bodyId}
-        aria-label={seat.label}
-        onClick={onToggle}
-      >
-        <span className={styles.twist} data-open={open ? '' : undefined} aria-hidden="true" />
-        <span className={styles.seatLabel} title={sentence}>{seat.label}</span>
-        {view.kind === 'local'
-          ? <StatusBadge status={seat.health.state} tone={seat.health.state === 'ready' ? 'success' : seat.health.state === 'unavailable' ? 'danger' : 'unknown'} />
-          : <CapacityChip view={view} title={sentence} />}
-      </button>
+      {/* The plan, the word and the reset were on a `title` hung off the inner
+          label span — reachable by mouse only, and duplicated onto the chip
+          beside it. One tooltip on the CONTROL carries it once, and a
+          keyboard operator tabbing the seat list now gets it too. The button
+          keeps its own aria-label: this describes, it does not name. */}
+      <Tooltip label={sentence} placement="left">
+        <button
+          type="button"
+          className={styles.seatToggle}
+          aria-expanded={open}
+          aria-controls={bodyId}
+          aria-label={seat.label}
+          onClick={onToggle}
+        >
+          <span className={styles.twist} data-open={open ? '' : undefined} aria-hidden="true" />
+          <span className={styles.seatLabel}>{seat.label}</span>
+          {view.kind === 'local'
+            ? <StatusBadge status={seat.health.state} tone={seat.health.state === 'ready' ? 'success' : seat.health.state === 'unavailable' ? 'danger' : 'unknown'} />
+            : <CapacityChip view={view} />}
+        </button>
+      </Tooltip>
 
       {open
         ? <div id={bodyId}><SeatDetails seat={seat} view={view} /></div>

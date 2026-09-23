@@ -24,6 +24,7 @@
  * word "pause" now belongs to the control that earns it.
  */
 import { useState } from 'react';
+import { Tooltip } from '../../../components/primitives/Tooltip.js';
 import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
 import { engageEmergencyStop, releaseEmergencyStop, runDaemonAction } from './control-queries.js';
 import type { VerseControlSnapshot, VerseDaemonActionResult } from './control-types.js';
@@ -102,27 +103,35 @@ export function DaemonControls({ snapshot, guard, dispatchEnabled }: DaemonContr
             Pause
           </button>
         )}
-        <button
-          type="button"
-          className={styles.button}
-          disabled={disabled || state === 'running' || killed || paused}
-          title={
+        {/* WHY IS THIS GREYED OUT. The reason a control is refusing is the
+            one thing a disabled control must be able to say, and a native
+            `title` said it to a mouse and to nobody else. `disabled` also
+            eats pointer events on the button itself — the Tooltip listens on
+            its wrapper, so the reason survives that too. */}
+        <Tooltip
+          label={
             killed
               ? 'Release the emergency stop before starting the loop.'
               : paused
                 ? 'Dispatch is paused — resume before starting the loop.'
-                : undefined
-          }
-          onClick={() =>
-            guard.request(
-              () => runDaemonAction('start'),
-              'Starting the autonomous loop requires the dispatch token.',
-              noteOf,
-            )
+                : ''
           }
         >
-          Start loop
-        </button>
+          <button
+            type="button"
+            className={styles.button}
+            disabled={disabled || state === 'running' || killed || paused}
+            onClick={() =>
+              guard.request(
+                () => runDaemonAction('start'),
+                'Starting the autonomous loop requires the dispatch token.',
+                noteOf,
+              )
+            }
+          >
+            Start loop
+          </button>
+        </Tooltip>
         <button
           type="button"
           className={styles.button}
@@ -131,21 +140,22 @@ export function DaemonControls({ snapshot, guard, dispatchEnabled }: DaemonContr
         >
           Stop loop
         </button>
-        <button
-          type="button"
-          className={styles.button}
-          disabled={disabled || killed || paused}
-          title={paused ? 'Dispatch is paused — resume before running a tick.' : undefined}
-          onClick={() =>
-            guard.request(
-              () => runDaemonAction('once'),
-              'Running one tick requires the dispatch token.',
-              noteOf,
-            )
-          }
-        >
-          Run one tick
-        </button>
+        <Tooltip label={paused ? 'Dispatch is paused — resume before running a tick.' : ''}>
+          <button
+            type="button"
+            className={styles.button}
+            disabled={disabled || killed || paused}
+            onClick={() =>
+              guard.request(
+                () => runDaemonAction('once'),
+                'Running one tick requires the dispatch token.',
+                noteOf,
+              )
+            }
+          >
+            Run one tick
+          </button>
+        </Tooltip>
       </div>
 
       {paused ? (

@@ -33,14 +33,46 @@ afterEach(() => {
 });
 
 describe('DictationButton', () => {
-  it('falls back to a disabled button with the Wispr Flow / Superwhisper hint when no recognizer exists', () => {
+  it('falls back to a disabled button with the Wispr Flow / Superwhisper hint when no recognizer exists', async () => {
     expect(getSpeechRecognition()).toBeNull();
     render(<DictationButton onInterim={() => {}} onFinal={() => {}} />);
     const button = screen.getByRole('button', { name: /dictation unavailable/i });
     expect(button).toBeDisabled();
-    expect(button).toHaveAttribute('title', DICTATION_FALLBACK_HINT);
-    expect(screen.getByRole('tooltip')).toHaveTextContent(DICTATION_FALLBACK_HINT);
-    expect(button).toHaveAttribute('aria-describedby', screen.getByRole('tooltip').id);
+    // The hint no longer sits in the DOM permanently. It used to: a
+    // `role="tooltip"` span at opacity 0, revealed by a :hover rule, which is
+    // the slab that overhung the panel beside the composer.
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    // Hovering the wrapper is what reveals it — `disabled` swallows pointer
+    // events on the button itself, so the listener has to be outside it.
+    // mouseOver, not mouseEnter: React synthesises onMouseEnter from the
+    // bubbling mouseover, and a dispatched `mouseenter` never reaches it.
+    fireEvent.mouseOver(button.parentElement as HTMLElement);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(DICTATION_FALLBACK_HINT);
+  });
+
+  it('keeps an accessible name on the mic button and describes it without naming it', async () => {
+    vi.stubGlobal('webkitSpeechRecognition', FakeRecognition);
+    const user = userEvent.setup();
+    render(<DictationButton onInterim={() => {}} onFinal={() => {}} />);
+
+    // THE REGRESSION A CARELESS title -> Tooltip SWEEP CAUSES. An icon-only
+    // control whose `title` was its only readable label loses its name
+    // outright when the title leaves and no aria-label was added. This button
+    // has one, and the tooltip must not be doing that job.
+    const button = screen.getByRole('button', { name: 'Start dictation' });
+    expect(button).not.toHaveAttribute('title');
+
+    // Invisible until asked for, and reachable by KEYBOARD, which the native
+    // tooltip never was.
+    expect(screen.queryByRole('tooltip')).toBeNull();
+    await user.tab();
+    expect(button).toHaveFocus();
+    const tip = await screen.findByRole('tooltip');
+    expect(tip).toHaveTextContent('Dictate');
+    // Described, not NAMED. This is the assertion that matters: whatever the
+    // tooltip draws, the button's accessible name is still its aria-label and
+    // has not been replaced by, or concatenated with, the tooltip text.
+    expect(button).toHaveAccessibleName('Start dictation');
   });
 
   it('toggles listening, streams interim results, commits finals, and stops on Escape', async () => {

@@ -140,6 +140,17 @@
   border-left: 2px solid var(--verse-engine, var(--border-subtle));
 }
 .seat + .seat { margin-top: var(--space-3); }
+/* The seat toggle is wrapped in a Tooltip, whose wrapper spans are
+   shrink-to-fit and would collapse a full-width row. Re-stretch by STRUCTURE
+   (the primitive's class names are hashed), and keep the rule off the bubble:
+   a blanket `display: block` there would beat its `hidden` attribute and pin
+   the tooltip open. */
+.seat > span:not([role='tooltip']),
+.seat > span > span:not([role='tooltip']) {
+  display: block;
+  width: 100%;
+  min-width: 0;
+}
 .engine-claude { --verse-engine: var(--engine-claude, #c96442); }
 .engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
 .engine-grok { --verse-engine: var(--engine-grok, #6b7280); }

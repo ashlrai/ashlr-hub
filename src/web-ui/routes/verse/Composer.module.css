@@ -188,27 +188,12 @@
   animation: verse-ring 1.4s ease-out infinite;
   pointer-events: none;
 }
-.dictationHint {
-  position: absolute;
-  bottom: calc(100% + var(--space-2));
-  right: 0;
-  width: max-content;
-  max-width: 260px;
-  padding: var(--space-2) var(--space-3);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  background: var(--bg-surface-raised);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-menu, var(--shadow-md));
-  font-size: var(--text-xs-size);
-  line-height: var(--text-xs-line);
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity var(--duration-fast) var(--ease-standard);
-  z-index: var(--z-dropdown);
-}
-.dictationWrap:hover .dictationHint,
-.dictationWrap:focus-within .dictationHint { opacity: 1; }
+/* `.dictationHint` lived here: a hand-rolled tooltip that sat in the DOM
+   permanently at opacity 0, anchored to a wrapper that is itself inside the
+   composer's overflow, and revealed by a :hover rule. It is gone — the
+   Tooltip primitive carries the hint now, mounted only while open, so it can
+   neither be clipped by an ancestor nor left painted over the panel beside
+   it. */
 .dictationError { margin-left: var(--space-2); font-size: var(--text-xs-size); color: var(--status-danger-fg); }
 
 /* ---- send / stop ------------------------------------------------------- */

@@ -64,6 +64,8 @@ const MARGIN = 8;
 /** The props Tooltip clones onto its trigger. */
 interface TooltipTriggerProps {
   'aria-describedby'?: string;
+  /** Read, never set: a disabled trigger fires no pointer events, so the wrapper must take over. */
+  disabled?: boolean;
   onMouseEnter?: (event: ReactMouseEvent<HTMLElement>) => void;
   onMouseLeave?: (event: ReactMouseEvent<HTMLElement>) => void;
   onFocus?: (event: ReactFocusEvent<HTMLElement>) => void;
@@ -215,6 +217,7 @@ export function Tooltip(props: TooltipProps) {
     setOpen(true);
   }
 
+  const triggerDisabled = children.props.disabled === true;
   const describedBy = open ? id : undefined;
 
   const trigger = cloneElement(children, {
@@ -246,7 +249,22 @@ export function Tooltip(props: TooltipProps) {
         as well as on the trigger itself; the behaviour all lives on the cloned
         child, which is what actually has a hover target.
       */}
-      <span className={`${styles.wrapper} ${className ?? ''}`} aria-describedby={describedBy}>
+      <span
+        className={`${styles.wrapper} ${className ?? ''}`}
+        aria-describedby={describedBy}
+        /*
+          A DISABLED trigger emits no pointer events at all, so handlers on the
+          cloned child can never fire and its tooltip could never open — which
+          is precisely the tooltip that matters, since it is the one explaining
+          WHY the control is disabled. When the child is disabled the wrapper
+          stops being `display: contents`, takes a box of its own, and carries
+          the hover itself. Focus is not mirrored here: a disabled control is
+          not focusable, so there is no focus to mirror.
+        */
+        data-disabled-trigger={triggerDisabled ? 'true' : undefined}
+        onMouseOver={triggerDisabled ? (event) => openNow(event.currentTarget) : undefined}
+        onMouseOut={triggerDisabled ? close : undefined}
+      >
         {trigger}
       </span>
       {open

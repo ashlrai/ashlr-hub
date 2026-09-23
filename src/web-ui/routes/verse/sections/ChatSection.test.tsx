@@ -12,7 +12,7 @@
  *   - stop → POST …/cancel, and the transcript stays clean
  *   - mutation guard: no token → dialog, action runs once unlocked
  */
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
@@ -59,10 +59,20 @@ describe('ChatSection bootstrap', () => {
     expect(within(nav).getByRole('heading', { name: /^hub/ })).toBeInTheDocument();
     expect(within(nav).getByRole('heading', { name: /^site/ })).toBeInTheDocument();
     // A row carries its engine identity as a 2px marker, not a seat-name badge
-    // (DESIGN §4) — the seat is in the row's title and the header pill.
+    // (DESIGN §4) — the seat is in the row's tooltip and the header pill.
     expect(within(nav).getByRole('button', { name: /Fix the login bug/ })).toHaveAttribute('data-engine', 'claude');
     expect(within(nav).getByRole('button', { name: /Write the docs/ })).toHaveAttribute('data-engine', 'local');
-    expect(within(nav).getByRole('button', { name: /Fix the login bug/ })).toHaveAttribute('title', expect.stringContaining('Claude Max'));
+    // That seat used to ride in a native `title`, which a keyboard operator
+    // could never see. It is a tooltip now, so it is asked for rather than
+    // read off an attribute.
+    const row = within(nav).getByRole('button', { name: /Fix the login bug/ });
+    expect(row).not.toHaveAttribute('title');
+    // mouseOver, not mouseEnter: React synthesises onMouseEnter from the
+    // bubbling mouseover, and a dispatched `mouseenter` never reaches it.
+    // The tooltip also opens after a delay and portals on open, so findBy.
+    fireEvent.mouseOver(row);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Claude Max');
+    fireEvent.mouseOut(row);
 
     // Resources panel lists every seat with its health and the local runtime.
     const resources = screen.getByRole('complementary', { name: 'Resources' });
@@ -83,7 +93,12 @@ describe('ChatSection bootstrap', () => {
     vi.stubGlobal('fetch', fetch);
     mount();
     await screen.findByRole('heading', { name: 'No chats yet — ⌘N' });
-    expect(screen.getByText('No chats yet — ⌘N', { selector: 'p' })).toBeInTheDocument();
+    // The sidebar's own empty state no longer folds the shortcut into a line
+    // of prose. It states the situation and then OFFERS the action, with the
+    // shortcut on the control that performs it.
+    expect(screen.getByText('No chats yet', { selector: 'p' })).toBeInTheDocument();
+    const start = screen.getByRole('button', { name: /Start your first chat/ });
+    expect(start).toHaveTextContent('⌘N');
   });
 });
 
