@@ -17,6 +17,18 @@
   :root { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); }
   img { max-width: 100%; }
   [hidden] { display: none !important; }
+
+    /* Product shot. Bordered like every other surface here — a hairline, no
+       shadow — so it sits in the page rather than floating above it. */
+    .shot { margin-top: 34px; }
+    .shot img {
+      display: block; width: 100%; height: auto;
+      border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+    }
+    .shot figcaption {
+      margin-top: 10px; color: var(--muted); font-size: 13.5px; line-height: 1.5;
+    }
+    @media (prefers-color-scheme: dark) { .shot img { border-color: var(--line); } }
 </style>
 <title>Ashlr Verse</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -387,6 +399,18 @@
           switching tools.
         </p>
       </div>
+
+      <figure class="shot">
+        <img src="assets/verse-console.png" width="1900" height="1030" loading="lazy" decoding="async"
+             alt="The Ashlr Verse console: an expandable rail of sections down the left, a project-grouped
+                  chat sidebar, and a resources panel listing every connected account with its live usage
+                  windows — two Codex seats blocked at 100%, Claude and Grok usable, two local models ready." />
+        <figcaption>
+          The console as it actually runs. Two Codex seats are out of window; Claude, Grok and both
+          local models are not. Account names are the only thing edited in this image.
+        </figcaption>
+      </figure>
+
       <div class="seats">
         <div class="seat">
           <span class="tag local">Local</span><h3>Qwen3.8 27B</h3>
