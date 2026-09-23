@@ -1,11 +1,20 @@
 /**
- * Chat section layout: sidebar · hairline handle · workspace · (handle ·
- * resources). All three regions resize and persist; at 900px the resources
- * panel collapses first, at 760px the sidebar becomes an overlay.
+ * Chat section layout: sidebar · handle · workspace · (handle · resources).
+ * Both side panels drag-resize and persist (chat-panel-sizing.ts); at 900px
+ * the resources panel collapses first, at 760px the sidebar becomes an
+ * overlay.
+ *
+ * THE GRID TRACKS MATCH THE ITEMS THAT ACTUALLY EXIST. A hidden panel renders
+ * no handle at all rather than a stranded one, and `display:none` takes an
+ * element out of grid placement entirely — so every template below is
+ * written for the exact item list that state produces. Getting this wrong is
+ * silent: items shift one track left and the transcript lands in a 1px
+ * column. `.scrim` never counts (display:none, then absolutely positioned).
  */
 .chat {
   position: relative;
   display: grid;
+  /* nav · handle · main · handle · aside */
   grid-template-columns:
     var(--verse-sidebar-width, 264px)
     1px
@@ -19,11 +28,16 @@
   background: var(--bg-canvas);
   color: var(--text-primary);
 }
+/* nav · handle · main */
 .chat[data-resources='closed'] {
   grid-template-columns: var(--verse-sidebar-width, 264px) 1px minmax(0, 1fr);
 }
-.chat[data-sidebar='collapsed'] { grid-template-columns: 0 0 minmax(0, 1fr) 1px var(--verse-resources-width, 320px); }
-.chat[data-sidebar='collapsed'][data-resources='closed'] { grid-template-columns: 0 0 minmax(0, 1fr); }
+/* main · handle · aside — the collapsed nav and its handle are both gone. */
+.chat[data-sidebar='collapsed'] {
+  grid-template-columns: minmax(0, 1fr) 1px var(--verse-resources-width, 320px);
+}
+/* main */
+.chat[data-sidebar='collapsed'][data-resources='closed'] { grid-template-columns: minmax(0, 1fr); }
 .chat[data-sidebar='collapsed'] > nav { display: none; }
 .chat > * { min-width: 0; min-height: 0; }
 
@@ -71,9 +85,19 @@
 
 /* ---- resize handles ---------------------------------------------------- */
 /* A 1px column that behaves like a 9px target: the hairline is the design,
-   the hit area is the ergonomics. */
+   the hit area is the ergonomics.
+
+   THE HAIRLINE ITSELF TAKES NO POINTER EVENTS — only the ::before grab area
+   does. That is what lets the grab area start BELOW the macOS title bar:
+   the top 48px of the panels either side is the window's drag strip
+   (Sidebar `.headDragStrip`, Workspace `.header[data-app-region="drag"]`),
+   this handle paints after them, and a ±4px overhang there would both steal
+   4px of draggable window edge and turn macOS's double-click-to-zoom into a
+   width reset. `--app-titlebar-height` is absent in a browser, so the grab
+   area is full height there and nothing changes. */
 .resize {
   position: relative;
+  pointer-events: none;
   cursor: col-resize;
   background: var(--border-subtle);
   touch-action: none;
@@ -82,26 +106,48 @@
 .resize::before {
   content: '';
   position: absolute;
-  inset-block: 0;
+  top: var(--app-titlebar-height, 0px);
+  bottom: 0;
   left: -4px;
   right: -4px;
+  pointer-events: auto;
 }
 .resize:hover,
-.resize:focus-visible { background: var(--accent-500); }
-.chat[data-sidebar='collapsed'] > .resize:first-of-type { display: none; }
+.resize:focus-visible,
+.resize[data-dragging] { background: var(--accent-500); }
+/* Focus is a wider bar rather than a ring: a 1px element cannot carry one. */
+.resize:focus-visible { outline: none; box-shadow: 0 0 0 1px var(--accent-500); }
+
+/* The drag must not select the transcript it is dragging past. Scoped to the
+   flag ChatResizer sets for the duration of the gesture, and released on
+   pointerup, pointercancel, blur, Escape and unmount alike. */
+:global(body[data-verse-resizing='true']) {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: col-resize;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .resize { transition: none; }
+}
 
 /* ---- narrow-width sidebar overlay -------------------------------------- */
 .scrim { display: none; }
 
+/* The resources panel goes first: the transcript keeps the sidebar longer
+   than it keeps reference material. Its handle goes with it — see the grid
+   comment at the top; these templates are the item lists these rules leave. */
 @media (max-width: 900px) {
   .chat,
   .chat[data-resources='open'] { grid-template-columns: var(--verse-sidebar-width, 264px) 1px minmax(0, 1fr); }
   .chat[data-sidebar='collapsed'],
-  .chat[data-sidebar='collapsed'][data-resources='open'] { grid-template-columns: 0 0 minmax(0, 1fr); }
+  .chat[data-sidebar='collapsed'][data-resources='open'] { grid-template-columns: minmax(0, 1fr); }
   .chat > aside,
-  .chat > .resize:last-of-type { display: none; }
+  .chat > [data-verse-resizer='resources'] { display: none; }
 }
 
+/* Phone width: the sidebar floats over the transcript, so there is no edge
+   left to drag and every handle goes. */
 @media (max-width: 760px) {
   .chat,
   .chat[data-sidebar='collapsed'] { grid-template-columns: minmax(0, 1fr); }
@@ -113,7 +159,7 @@
     width: min(var(--verse-sidebar-width, 264px), 86vw);
     box-shadow: var(--shadow-menu, var(--shadow-lg));
   }
-  .chat > .resize { display: none; }
+  .chat > [data-verse-resizer] { display: none; }
   .scrim {
     display: block;
     position: absolute;
@@ -124,5 +170,3 @@
   }
   .chat[data-sidebar='collapsed'] .scrim { display: none; }
 }
-
-
