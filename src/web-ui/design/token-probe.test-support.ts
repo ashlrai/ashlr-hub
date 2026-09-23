@@ -106,6 +106,49 @@ export function darkScope(css?: string): TokenScope {
   return scope;
 }
 
+/**
+ * The light palette with an arbitrary set of ROOT-LEVEL attribute blocks
+ * applied — e.g. `scopeWith([':root[data-ui-scale="xlarge"]'])` for the
+ * display-size layer, or that plus `:root[data-density="compact"]` to check
+ * the two COMPOSE rather than collide.
+ *
+ * Blocks are applied in FILE order, which is what the cascade does for the
+ * equal-specificity `:root[attr=...]` selectors this file is made of — so a
+ * test that passes here is testing the order a browser would resolve. Blocks
+ * inside an at-rule are skipped: ask for those explicitly if you ever need
+ * them, rather than having a media query silently apply at every width.
+ */
+export function scopeWith(selectors: string[], css?: string): TokenScope {
+  const scope = lightScope(css);
+  for (const rule of rulesOf(css)) {
+    if (rule.atRules.length > 0) continue;
+    if (!selectors.includes(rule.selector)) continue;
+    for (const [prop, value] of rule.decls) scope.set(prop, value);
+  }
+  return scope;
+}
+
+/** Declarations of ONE root-level block, for "what does this block change?". */
+export function declsFor(selector: string, css?: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const rule of rulesOf(css)) {
+    if (rule.atRules.length > 0 || rule.selector !== selector) continue;
+    for (const [prop, value] of rule.decls) out.set(prop, value);
+  }
+  return out;
+}
+
+/** The same, for a block nested in an at-rule matching `atRule`. */
+export function declsForAt(atRule: string, selector: string, css?: string): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const rule of rulesOf(css)) {
+    if (rule.selector !== selector) continue;
+    if (!rule.atRules.some((at) => at.includes(atRule))) continue;
+    for (const [prop, value] of rule.decls) out.set(prop, value);
+  }
+  return out;
+}
+
 /** Declarations of the OS-preference dark block, for the drift check. */
 export function mediaDarkDecls(css?: string): Map<string, string> {
   const out = new Map<string, string>();
@@ -175,26 +218,68 @@ export function allDeclarations(css?: string): Array<{ selector: string; prop: s
 
 const NUMBER_UNIT_RE = /^(-?\d*\.?\d+)(%|px|em|rem|deg)?$/;
 
-/** Evaluate `a + b` / `a - b` chains of like units (what tokens.css uses). */
+interface Term {
+  n: number;
+  unit: string;
+}
+
+/**
+ * Evaluate the arithmetic tokens.css actually uses: `a + b` / `a - b` chains
+ * of like units, and `a * b` / `a / b` where at most one side carries a unit.
+ *
+ * Multiplication matters because the DISPLAY-SIZE layer is a unitless
+ * multiplier — every type, spacing and control token is
+ * `calc(<base>px * var(--ui-scale))`. Without this the probe would hand
+ * `14px * 1.125` back as an unresolved string and design/ui-scale.test.ts
+ * could only make structural assertions, never "--control-h is 44px at
+ * xlarge, which still fits the fixed 56px rail".
+ *
+ * Anything else is handed back untouched, exactly as before — this is a
+ * probe for one stylesheet, not a CSS engine.
+ */
 function evalExpression(expr: string): string {
   const parts = expr.trim().split(/\s+/);
   if (parts.length === 1) return parts[0]!;
-  let acc: number | null = null;
-  let unit = '';
-  let op: '+' | '-' = '+';
+
+  const terms: Term[] = [];
+  const ops: string[] = [];
   for (const part of parts) {
-    if (part === '+' || part === '-') {
-      op = part;
+    if (part === '+' || part === '-' || part === '*' || part === '/') {
+      ops.push(part);
       continue;
     }
     const m = NUMBER_UNIT_RE.exec(part);
     if (!m) return expr; // not arithmetic we understand — hand it back untouched
-    const value = Number.parseFloat(m[1]!);
-    if (m[2]) unit = m[2];
-    if (acc === null) acc = value;
-    else acc = op === '+' ? acc + value : acc - value;
+    terms.push({ n: Number.parseFloat(m[1]!), unit: m[2] ?? '' });
   }
-  if (acc === null) return expr;
+  // A well-formed infix chain is value (op value)*. Anything else (a bare
+  // `a b`, a trailing operator) is not arithmetic we should be guessing at.
+  if (terms.length === 0 || terms.length !== ops.length + 1) return expr;
+
+  // `*` and `/` bind tighter than `+`/`-`. CSS only permits a unitless
+  // factor/divisor, so two united operands are a malformed expression.
+  for (let i = 0; i < ops.length; ) {
+    const op = ops[i]!;
+    if (op !== '*' && op !== '/') {
+      i += 1;
+      continue;
+    }
+    const a = terms[i]!;
+    const b = terms[i + 1]!;
+    if (a.unit !== '' && b.unit !== '') return expr;
+    const n = op === '*' ? a.n * b.n : b.n === 0 ? Number.NaN : a.n / b.n;
+    if (!Number.isFinite(n)) return expr;
+    terms.splice(i, 2, { n, unit: a.unit !== '' ? a.unit : b.unit });
+    ops.splice(i, 1);
+  }
+
+  let acc = terms[0]!.n;
+  let unit = terms[0]!.unit;
+  for (let i = 0; i < ops.length; i += 1) {
+    const b = terms[i + 1]!;
+    if (b.unit !== '') unit = b.unit;
+    acc = ops[i] === '+' ? acc + b.n : acc - b.n;
+  }
   return `${Math.round(acc * 1000) / 1000}${unit}`;
 }
 

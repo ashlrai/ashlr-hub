@@ -1,6 +1,7 @@
 /**
  * routes/verse/sections/AppearancePanel.tsx — the "Linux" part of the design
- * language: theme, accent, density, display face, radius, motion.
+ * language: theme, accent, display size, density, display face, radius,
+ * motion.
  *
  * Every control applies IMMEDIATELY (design doc §3: live preview, no save
  * button) because the whole app is the preview — the panel writes through
@@ -28,6 +29,7 @@ import {
   type DisplayFont,
   type RadiusScale,
   type ThemePreference,
+  type UiScale,
 } from '../../../data/appearance-store.js';
 import { Panel, SettingRow } from './SettingRow.js';
 import styles from './SettingsSection.module.css';
@@ -48,6 +50,21 @@ const THEME_OPTIONS = [
   { value: 'system' as ThemePreference, label: 'System', icon: <IconMonitor /> },
   { value: 'light' as ThemePreference, label: 'Light', icon: <IconSun /> },
   { value: 'dark' as ThemePreference, label: 'Dark', icon: <IconMoon /> },
+];
+
+/**
+ * Display size. The labels say what the operator gets, not what the
+ * multiplier is — "1.25x" is an implementation detail and a worse name than
+ * "Large" for a control you pick by looking at the result.
+ *
+ * Only three, and none of them smaller than Default: the type ramp bottoms
+ * out at a 12px body floor, and Density directly below is already the
+ * "tighter" control. See the [data-ui-scale] block in design/tokens.css.
+ */
+const UI_SCALE_OPTIONS = [
+  { value: 'default' as UiScale, label: 'Default' },
+  { value: 'large' as UiScale, label: 'Large' },
+  { value: 'xlarge' as UiScale, label: 'Extra large' },
 ];
 
 const DENSITY_OPTIONS = [
@@ -117,7 +134,7 @@ export function AppearancePanel({ appearance, onChange, onReset }: AppearancePan
           size="sm"
           onClick={onReset}
           disabled={isDefaultAppearance(appearance)}
-          title="Restore the shipped theme, accent, density, font, radius and motion"
+          title="Restore the shipped theme, accent, display size, density, font, radius and motion"
         >
           Reset to defaults
         </Button>
@@ -217,7 +234,22 @@ export function AppearancePanel({ appearance, onChange, onReset }: AppearancePan
         </div>
       </SettingRow>
 
-      <SettingRow label="Density" description="Row height and control padding across every view.">
+      <SettingRow
+        label="Display size"
+        description="Scales text AND spacing together across the whole app, for a large display or a long session. Applies as you pick it."
+      >
+        <Segmented
+          aria-label="Display size"
+          options={UI_SCALE_OPTIONS}
+          value={appearance.uiScale}
+          onChange={(uiScale) => onChange({ uiScale })}
+        />
+      </SettingRow>
+
+      <SettingRow
+        label="Density"
+        description="Row height and control padding across every view. Independent of display size — a large, tightly packed interface is a valid choice."
+      >
         <Segmented
           aria-label="Density"
           options={DENSITY_OPTIONS}

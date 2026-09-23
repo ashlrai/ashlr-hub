@@ -34,6 +34,14 @@
  *   - New: engine identity, tracking, --text-2xs, density, three named
  *     elevations, and the three shell measures the design doc fixes.
  *
+ * DISPLAY SIZE. On top of all of the above sits one more layer: the type,
+ * spacing and control ramps are multiplied by --ui-text-scale / --ui-scale,
+ * which the [data-ui-scale] blocks at the bottom redefine. That is how the
+ * operator makes the whole interface larger without any component knowing
+ * the setting exists. Two rules it must obey, both asserted by
+ * ./ui-scale.test.ts: type and spacing always move TOGETHER, and the shell
+ * measures (--rail-width, --strip-height) never move at all.
+ *
  * Contrast (design doc §6) is asserted in both themes by
  * ./tokens-contrast.test.ts, which parses THIS file — keep the declarations
  * machine-readable (one `--token: value;` per line).
@@ -191,9 +199,42 @@
   --border-focus: var(--accent-500);
 
   /* ---------------------------------------------------------------------
+   * Display size — the operator's "make everything bigger" control, written
+   * by data/appearance-store.ts as `data-ui-scale` on <html> (the SAME
+   * element and the same mechanism as data-theme / data-density /
+   * data-radius; there is no second theming system).
+   *
+   * TWO multipliers rather than one, and they are BOTH always applied.
+   * Scaling type alone is the failure mode this setting exists to avoid —
+   * 18px text inside 12px padding reads worse than 14px text in 12px
+   * padding, because the cramping is what makes it hard to read, not the
+   * glyph size. So every type token multiplies by --ui-text-scale and every
+   * spacing/geometry token multiplies by --ui-scale, and the two move
+   * together at every step (see the [data-ui-scale] blocks at the bottom).
+   *
+   * Space is multiplied slightly HARDER than type (1.25 vs 1.125 at Large).
+   * Type grows in a scale whose own steps are ~1.15 apart, so a small
+   * multiplier already moves it a visible step; space has no such internal
+   * ramp, and "spread out well" is most of what makes a large display read
+   * as calm rather than merely big.
+   *
+   * WHY A MULTIPLIER AND NOT A THIRD TABLE OF LITERALS. --density-row and
+   * --control-h are ALSO re-declared by [data-density="compact"], which has
+   * identical specificity to [data-ui-scale="..."]. Two literal tables would
+   * mean whichever block came last in the file silently won, and "Compact
+   * density + Large display" would resolve to one of them at random. A
+   * single unitless multiplier composes instead of colliding: the density
+   * block picks the base height, the scale block picks the factor, and
+   * source order stops mattering.
+   * ------------------------------------------------------------------- */
+  --ui-scale: 1;
+  --ui-text-scale: 1;
+
+  /* ---------------------------------------------------------------------
    * Type scale — no body text below 12px anywhere in the system, with one
    * exception: --text-2xs is for uppercase micro-labels and keyboard hints,
-   * never for prose.
+   * never for prose. (The display-size steps only ever multiply UP, so that
+   * floor holds at every setting — see the [data-ui-scale] blocks.)
    * ------------------------------------------------------------------- */
   --font-grotesk: "Space Grotesk", "Avenir Next", -apple-system, BlinkMacSystemFont, sans-serif;
   --font-ui: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
@@ -203,24 +244,24 @@
      the real stack so the choice is reversible. */
   --font-display: var(--font-grotesk);
 
-  --text-2xs-size: 11px;
-  --text-2xs-line: 14px;
-  --text-xs-size: 12px;
-  --text-xs-line: 16px;
-  --text-sm-size: 13px;
-  --text-sm-line: 18px;
-  --text-base-size: 14px;
-  --text-base-line: 20px;
-  --text-md-size: 15px;
-  --text-md-line: 22px;
-  --text-lg-size: 17px;
-  --text-lg-line: 24px;
-  --text-xl-size: 20px;
-  --text-xl-line: 28px;
-  --text-2xl-size: 24px;
-  --text-2xl-line: 32px;
-  --text-3xl-size: 30px;
-  --text-3xl-line: 38px;
+  --text-2xs-size: calc(11px * var(--ui-text-scale));
+  --text-2xs-line: calc(14px * var(--ui-text-scale));
+  --text-xs-size: calc(12px * var(--ui-text-scale));
+  --text-xs-line: calc(16px * var(--ui-text-scale));
+  --text-sm-size: calc(13px * var(--ui-text-scale));
+  --text-sm-line: calc(18px * var(--ui-text-scale));
+  --text-base-size: calc(14px * var(--ui-text-scale));
+  --text-base-line: calc(20px * var(--ui-text-scale));
+  --text-md-size: calc(15px * var(--ui-text-scale));
+  --text-md-line: calc(22px * var(--ui-text-scale));
+  --text-lg-size: calc(17px * var(--ui-text-scale));
+  --text-lg-line: calc(24px * var(--ui-text-scale));
+  --text-xl-size: calc(20px * var(--ui-text-scale));
+  --text-xl-line: calc(28px * var(--ui-text-scale));
+  --text-2xl-size: calc(24px * var(--ui-text-scale));
+  --text-2xl-line: calc(32px * var(--ui-text-scale));
+  --text-3xl-size: calc(30px * var(--ui-text-scale));
+  --text-3xl-line: calc(38px * var(--ui-text-scale));
 
   /* RELAXED leading, paired to the same three sizes. The ramp above is the
      CHROME leading: 14/20 is right for a one-line list row, a control label
@@ -230,9 +271,9 @@
      (1.5, 1.55, 1.6, 1.65, 1.7, one per file), which put the most-read text
      in the app outside the type system and let it drift. These are the pair
      to reach for whenever text wraps. */
-  --text-xs-line-relaxed: 18px;
-  --text-sm-line-relaxed: 20px;
-  --text-base-line-relaxed: 24px;
+  --text-xs-line-relaxed: calc(18px * var(--ui-text-scale));
+  --text-sm-line-relaxed: calc(20px * var(--ui-text-scale));
+  --text-base-line-relaxed: calc(24px * var(--ui-text-scale));
 
   --tracking-display: -0.02em;
   --tracking-label: 0.06em;
@@ -243,30 +284,35 @@
   --font-weight-bold: 700;
 
   /* ---------------------------------------------------------------------
-   * Spacing scale — 4px base unit.
+   * Spacing scale — 4px base unit, multiplied by the display size.
+   *
+   * --space-0 and --space-px are deliberately NOT scaled: zero is zero, and
+   * --space-px is a HAIRLINE. A 1.5px border is a blurred border on a 1x
+   * display and a different weight than every `1px solid` in the app, so the
+   * one token that means "one device-ish pixel" stays one pixel.
    * ------------------------------------------------------------------- */
   --space-0: 0px;
   --space-px: 1px;
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
-  --space-8: 32px;
-  --space-10: 40px;
-  --space-12: 48px;
-  --space-16: 64px;
-  --space-20: 80px;
-  --space-24: 96px;
+  --space-1: calc(4px * var(--ui-scale));
+  --space-2: calc(8px * var(--ui-scale));
+  --space-3: calc(12px * var(--ui-scale));
+  --space-4: calc(16px * var(--ui-scale));
+  --space-5: calc(20px * var(--ui-scale));
+  --space-6: calc(24px * var(--ui-scale));
+  --space-8: calc(32px * var(--ui-scale));
+  --space-10: calc(40px * var(--ui-scale));
+  --space-12: calc(48px * var(--ui-scale));
+  --space-16: calc(64px * var(--ui-scale));
+  --space-20: calc(80px * var(--ui-scale));
+  --space-24: calc(96px * var(--ui-scale));
 
   /* ---------------------------------------------------------------------
    * Density — every list row and control height derives from these, never
    * from a hardcoded px. Compact is set by the appearance store via
    * :root[data-density="compact"] below.
    * ------------------------------------------------------------------- */
-  --density-row: 32px;
-  --density-row-sm: 26px;
+  --density-row: calc(32px * var(--ui-scale));
+  --density-row-sm: calc(26px * var(--ui-scale));
   --density-pad: var(--space-3);
 
   /* Control heights. The density note above says every control height derives
@@ -278,22 +324,49 @@
      primitives while every button in the Verse chrome stayed comfortable —
      the density switch half-applied, and baselines stopped lining up where
      the two met. Three named steps, scaled together below. */
-  --control-h: 32px;
-  --control-h-sm: 28px;
-  --control-h-xs: 24px;
+  --control-h: calc(32px * var(--ui-scale));
+  --control-h-sm: calc(28px * var(--ui-scale));
+  --control-h-xs: calc(24px * var(--ui-scale));
 
   /* The 2px engine identity marker that prefixes a session row (DESIGN-V2 §4).
      One token so the sidebar and the quick switcher draw the SAME tick — they
      had drifted to 14px and 20px, which read as two different marks. */
-  --engine-marker-h: 14px;
+  --engine-marker-h: calc(14px * var(--ui-scale));
 
   /* ---------------------------------------------------------------------
    * Shell measures — fixed by the design language (§3, §4). Tokens rather
    * than five builders each hardcoding the same numbers.
+   *
+   * --rail-width AND --strip-height ARE DELIBERATELY NOT SCALED BY THE
+   * DISPLAY SIZE. Both are pinned by desktop/README.md "Desktop shell
+   * contract", and both have bitten this repo before:
+   *
+   *   - FIVE stylesheets inset their header strip by
+   *     `calc(var(--app-traffic-light-inset) - var(--rail-width))`, where the
+   *     inset is a FIXED 92px the Tauri shell writes for the macOS traffic
+   *     lights. That subtraction only clears the lights while --rail-width
+   *     is the number the shell was measured against; multiply it by 1.375
+   *     and the strip under-insets by 21px, which is the traffic-light
+   *     overlap regression all over again — and the display-size setting
+   *     would be the thing that caused it.
+   *   - --strip-height is deliberately EQUAL to --app-titlebar-height (48px,
+   *     also fixed by the shell). Shrinking it leaves the OS title bar
+   *     hanging below the strip; growing it desynchronises the drag region
+   *     from the header. Either way the operator loses the window drag.
+   *
+   * Nothing is lost visually: the collapsed rail's only occupant is
+   * .railButton, which VerseApp.module.css sizes as
+   * `calc(var(--control-h) + var(--space-1))` — that DOES scale, and
+   * ./ui-scale.test.ts asserts it still fits inside the fixed 56px at every
+   * step. The rail's icons grow; the strip the OS owns does not move.
+   *
+   * --measure-read is a READING measure, not a shell measure, so it tracks
+   * the type scale — a 720px column set in 17.5px type is too short a line.
+   * It is only ever used as a max-width, so it cannot force overflow.
    * ------------------------------------------------------------------- */
   --rail-width: 56px;
   --strip-height: 48px;
-  --measure-read: 720px;
+  --measure-read: calc(720px * var(--ui-text-scale));
 
   /* ---------------------------------------------------------------------
    * Radius scale — tightened for V2 (elite reads tighter than friendly).
@@ -557,13 +630,61 @@
  * is the bare :root value above; only the deltas live here.
  * ========================================================================= */
 :root[data-density="compact"] {
-  --density-row: 26px;
-  --density-row-sm: 22px;
+  --density-row: calc(26px * var(--ui-scale));
+  --density-row-sm: calc(22px * var(--ui-scale));
   --density-pad: var(--space-2);
-  --control-h: 28px;
-  --control-h-sm: 24px;
-  --control-h-xs: 20px;
-  --engine-marker-h: 12px;
+  --control-h: calc(28px * var(--ui-scale));
+  --control-h-sm: calc(24px * var(--ui-scale));
+  --control-h-xs: calc(20px * var(--ui-scale));
+  --engine-marker-h: calc(12px * var(--ui-scale));
+}
+
+/* ===========================================================================
+ * Display size — data/appearance-store.ts sets data-ui-scale on <html>.
+ * "default" is the bare :root value above (1 / 1); only the multipliers live
+ * here, so this block CANNOT collide with the density block above it — see
+ * the --ui-scale note in :root.
+ *
+ * THE STEPS ONLY GO UP. There is no step below Default on purpose:
+ *   - the file's own type rule is "no body text below 12px", and --text-xs
+ *     is already exactly 12px, so any multiplier under 1 breaks it;
+ *   - tightening is what Appearance → Density ALREADY does, and it does it
+ *     properly (it picks different base row heights rather than shrinking
+ *     everything uniformly). A second shrink axis would just be a worse
+ *     version of a control that already ships.
+ *
+ * Why these factors and not "1.25 / 1.5": the collapsed rail is a FIXED 56px
+ * (see the shell-measures note), and its .railButton is
+ * `calc(var(--control-h) + var(--space-1))`. At 1.5 that is 54px inside 56px
+ * — it technically fits, with half a pixel of air on each side and a hover
+ * ground touching the rail's hairline. 1.375 lands it at 49.5px, which has
+ * real margin. ./ui-scale.test.ts holds that invariant.
+ * ========================================================================= */
+:root[data-ui-scale="large"] {
+  --ui-scale: 1.25;
+  --ui-text-scale: 1.125;
+}
+
+:root[data-ui-scale="xlarge"] {
+  --ui-scale: 1.375;
+  --ui-text-scale: 1.25;
+}
+
+/* Narrow windows damp the largest step back to Large. The setting is a
+ * reading preference for a big display, not an instruction to overflow a
+ * 900px window: at xlarge every horizontal padding in a four-column shell
+ * (rail + sidebar + transcript + resources) grows by 37.5%, and the content
+ * column is what pays for it. 1100px is chosen as the width below which the
+ * shell is no longer the multi-pane layout the largest step was tuned for.
+ *
+ * This is a CLAMP, not an override of the operator's choice: the stored
+ * preference and the data-ui-scale attribute are untouched, so widening the
+ * window restores the full step with no interaction. */
+@media (max-width: 1100px) {
+  :root[data-ui-scale="xlarge"] {
+    --ui-scale: 1.25;
+    --ui-text-scale: 1.125;
+  }
 }
 
 /* ===========================================================================
