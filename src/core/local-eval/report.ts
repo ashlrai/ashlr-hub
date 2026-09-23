@@ -94,7 +94,10 @@ export function renderReport(report: EvalReport): string {
   lines.push(`  slots            ${c.slots}`);
   lines.push(`  context/slot     ${c.contextPerSlot.toLocaleString()} (total ${c.contextTotal.toLocaleString()})`);
   lines.push(`  sampling         ${JSON.stringify(c.samplingParams)}`);
-  lines.push(`  base url         ${c.baseUrl}  (proxy ${c.proxy}, tracing ${c.tracing})`);
+  // Baselines recorded before tracing existed have no such field, and printing
+  // `undefined` at them would read as a run that chose to turn it off.
+  const tracing: string = c.tracing ?? 'unknown (recorded before tracing existed)';
+  lines.push(`  base url         ${c.baseUrl}  (proxy ${c.proxy}, tracing ${tracing})`);
   lines.push(`  proxy impl       ${c.proxyImplementation}`);
   lines.push(`  agent cli        ${c.agentCli}`);
   lines.push(`  concurrency      ${report.concurrency} trial(s) at a time`);
@@ -140,7 +143,8 @@ export function renderReport(report: EvalReport): string {
     lines.push('TIMEOUTS, DIAGNOSED');
     for (const { task, trial } of timedOut) {
       const d = trial.timeoutDiagnosis;
-      lines.push(`  ${pad(`${task}#${trial.trial}`, 26)} ${d ? d.kind : 'UNDIAGNOSED (run without --no-trace)'}`);
+      lines.push(`  ${pad(`${task}#${trial.trial}`, 26)} `
+        + (d ? d.kind : 'UNDIAGNOSED — this run was not traced, so why it timed out is unrecoverable'));
       if (d) lines.push(`  ${' '.repeat(26)} ${d.detail}`);
       if (trial.trace) {
         // Turns the SERVER finished. The CLI's connectivity probe and token
