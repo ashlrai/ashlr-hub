@@ -576,8 +576,17 @@ export function scheduleCutoffCheckpointCapture(
   const invocation = (options.deps?.invocation ?? cutoffCaptureCliInvocation)(
     '--_cutoff-checkpoint-supervisor', [reservation.attemptId, reservation.deadlineAt],
   );
-  const scheduleTimeout = options.deps?.setTimeout ?? setTimeout;
-  const clearScheduledTimeout = options.deps?.clearTimeout ?? clearTimeout;
+  // Annotated rather than inferred, and that is load-bearing. The web tsconfig
+  // pulls this file in transitively (via resources/probe-helper-invocation) with
+  // BOTH the DOM lib and @types/node, so the global `setTimeout` is overloaded
+  // and `ReturnType<typeof setTimeout>` widens to `number | Timeout` — while the
+  // global `clearTimeout` infers the Node-only `Timeout` signature. Inference
+  // then hands a union to a parameter that accepts one arm of it. Pinning both
+  // to the union keeps the pair agreeing under either lib set.
+  const scheduleTimeout: (callback: () => void, delayMs: number) => ReturnType<typeof setTimeout>
+    = options.deps?.setTimeout ?? setTimeout;
+  const clearScheduledTimeout: (timer: ReturnType<typeof setTimeout>) => void
+    = options.deps?.clearTimeout ?? clearTimeout;
   const processKill = options.deps?.processKill ?? ((pid, signal) => { process.kill(pid, signal); });
   let child: ChildHandle;
   try {

@@ -37,9 +37,12 @@ the CLI and models Verse drives for each. Reproducing another company's mark fro
 memory produces an inaccurate version of their trademark, and naming the CLI is
 more useful to a reader deciding whether their setup is covered.
 
-**No claims about unbuilt features.** Multi-folder workspaces, GitHub surfacing
-and MCP management are specified in `docs/VERSE-WORKSPACES.md` and are not on the
-page, because they do not exist yet.
+**No claims about unbuilt features.** This rule stands; the example it used to
+give has expired. Multi-folder workspaces, GitHub surfacing and MCP management
+were listed here as unbuilt — all three now ship, and the page says so. What the
+page still does not claim: a Linux or Windows desktop package, and a notarized
+macOS build. Check this section against the product before a release rather than
+assuming the omission still holds.
 
 ## Platform claims
 
