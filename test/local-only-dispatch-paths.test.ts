@@ -250,10 +250,15 @@ describe('§A dispatch-path inventory', () => {
     'core/verse/control-api.ts',
     'core/verse/fleet-types.ts',
     'web-ui/routes/verse/autonomy/fleet-contract.ts',
-    // The llama-server Anthropic shim carries /v1/messages, never
-    // /chat/completions. It names the OpenAI path only in the comment that
-    // records how the reasoning-effort carrier was measured; the module has no
-    // `fetch` at all.
+    // The shim is a REQUEST NORMALISER, not a transport: it rewrites a body and
+    // hands it back to its caller, and the file contains no fetch, no
+    // http.request and no client of any kind. The path appears once, inside a
+    // doc comment tabulating the probe that established where
+    // `reasoning_effort` survives — /chat/completions answers 500 because it
+    // reaches the template, /v1/messages answers 200 because the field is
+    // dropped. Deleting that comment to satisfy a grep would throw away the
+    // measurement that explains why this lane carries the value in
+    // `chat_template_kwargs` at all.
     'core/local-runtime/llama/anthropic-shim.ts',
   ];
 

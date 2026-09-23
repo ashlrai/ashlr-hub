@@ -31,6 +31,13 @@
  * that change while nobody clicks anything, and neither has an SSE event yet,
  * so `useFleetPolling` re-reads them while the tab is visible. Everything else
  * here still refreshes on the existing cache rules.
+ *
+ * OVERNIGHT (owner U). It sits directly under the controls, above the local
+ * fleet, because it is a CONTROL — the one the operator arms when they walk
+ * away — and the order of this section is the priority order. It reads
+ * `/api/verse/overnight` through `overnight-queries.ts`, which treats an
+ * absent route as a designed "not available in this build" state rather than
+ * an error, and polls only while a run is armed.
  */
 import { useMemo } from 'react';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
@@ -44,6 +51,7 @@ import { FleetPanel } from '../autonomy/FleetPanel.js';
 import { GoalsBacklogPanel } from '../autonomy/GoalsBacklogPanel.js';
 import { LocalOnlyPanel } from '../autonomy/LocalOnlyPanel.js';
 import { LocalRuntimePanel } from '../autonomy/LocalRuntimePanel.js';
+import { OvernightPanel } from '../autonomy/OvernightPanel.js';
 import { SafetyPanel } from '../autonomy/SafetyPanel.js';
 import { ScopePanel } from '../autonomy/ScopePanel.js';
 import { StatusHeader } from '../autonomy/StatusHeader.js';
@@ -55,6 +63,7 @@ import {
   useFleetPolling,
 } from '../autonomy/fleet-queries.js';
 import type { SeatLike } from '../autonomy/fleet-model.js';
+import { overnightQuery, useOvernightPolling } from '../autonomy/overnight-queries.js';
 import { useGuardedAction } from '../autonomy/use-guarded-action.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import autonomy from '../autonomy/autonomy.module.css';
@@ -67,9 +76,13 @@ export function AutonomySection() {
   const runtime = useQuery(servingRuntimeQuery);
   const fleet = useQuery(fleetQuery);
   const localOnly = useQuery(localOnlyQuery);
+  const overnight = useQuery(overnightQuery);
   const refetchControl = useRefresh(verseControlQuery);
   const guard = useGuardedAction();
   useFleetPolling();
+  // Only an ARMED run has counters that move on their own; a disarmed panel
+  // has one boolean to report and is left to the ordinary cache rules.
+  useOvernightPolling(overnight.data?.value?.armed ?? false);
 
   const dispatchEnabled = (bootstrap.data?.dispatchEnabled ?? true) && !guard.readOnly;
   const snapshot = control.data;
@@ -126,6 +139,16 @@ export function AutonomySection() {
             <>
               <StatusHeader snapshot={snapshot} />
               <DaemonControls snapshot={snapshot} guard={guard} dispatchEnabled={dispatchEnabled} />
+              {/* The unattended lane, directly under the controls: arming it
+                  is the biggest single thing an operator does on this screen,
+                  and its halt must never be below the fold. */}
+              <OvernightPanel
+                read={overnight.data ?? null}
+                snapshot={snapshot}
+                guard={guard}
+                dispatchEnabled={dispatchEnabled}
+                loading={overnight.status === 'loading'}
+              />
               {/* The local fleet, in the order the questions arrive: can it
                   run, what is it allowed to reach, and what is it doing. */}
               <LocalRuntimePanel

@@ -1,0 +1,347 @@
+/**
+ * routes/verse/autonomy/overnight.module.css — the Overnight panel's own
+ * layout. Everything shared (panel frame, buttons, empty/error states, the
+ * action note) comes from autonomy.module.css, which this panel imports
+ * alongside this sheet; only the shapes that exist nowhere else live here.
+ *
+ * Same rules as the rest of the cockpit (docs/VERSE-DESIGN-V2.md): monochrome,
+ * hairlines instead of cards, no shadows, tight radii, the display face with
+ * tabular figures on every numeral, colour only where it carries meaning and
+ * always paired with a word.
+ *
+ * No literal px for anything that should scale. The Display-size setting
+ * multiplies the type, spacing, density and control ramps together
+ * (design/ui-scale.test.ts), so every measure here is a token or a `calc()`
+ * over one — including the `ch`/`em` measures, which follow the font size by
+ * definition. The one exception is the 2px engine-marker-style rule on
+ * `.authorisation`, which is a hairline accent: a hairline is one device pixel
+ * at every display size, exactly as tokens.css keeps `--space-px` at 1px.
+ */
+
+/* --- armed: the halt first, then everything there is to read ------------- */
+.armedTop {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.armedState {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.haltRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.haltNote {
+  margin-top: var(--space-3);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  max-width: 68ch;
+}
+
+/* The heavier control, named rather than duplicated. Quiet on purpose: it is
+   a signpost, not a second emergency stop. */
+.heavier {
+  margin-top: var(--space-4);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+  max-width: 68ch;
+}
+
+.heavier strong {
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-semibold);
+}
+
+/* --- what it is doing right now ----------------------------------------- */
+.facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-3) var(--space-5);
+  margin: var(--space-5) 0 0;
+}
+
+.fact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.factWide {
+  flex: 1 1 26ch;
+}
+
+.factLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.factValue {
+  margin: 0;
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.factMono {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+}
+
+/* --- how far to the stop condition -------------------------------------- */
+.stop {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-5);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.stopHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.stopHeadline {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+}
+
+.stopRemaining {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.stopDetail {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+  max-width: 68ch;
+}
+
+/* --- merged / discarded -------------------------------------------------- */
+.ledger {
+  margin-top: var(--space-5);
+}
+
+.ledgerTitle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-2);
+}
+
+.ledgerCount {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: normal;
+  color: var(--text-secondary);
+}
+
+.ledgerEmpty {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+.ledgerList {
+  display: flex;
+  flex-direction: column;
+  list-style: none;
+}
+
+.ledgerRow {
+  display: grid;
+  grid-template-columns: minmax(8ch, auto) minmax(0, 1fr);
+  gap: var(--space-1) var(--space-3);
+  align-items: baseline;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background-color var(--duration-fast) var(--ease-standard);
+}
+
+.ledgerRow:hover {
+  background: var(--bg-hover);
+}
+
+.ledgerRepo {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ledgerChange {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* The reason a change was thrown away, and the stamp. Column 2 so it sits
+   under the change it belongs to rather than under the repo name. */
+.ledgerMeta {
+  grid-column: 2;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* --- the arm form -------------------------------------------------------- */
+.form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--space-3) var(--space-5);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.fieldLabel {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.input {
+  min-height: var(--control-h);
+  min-width: 10ch;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--text-sm-size);
+}
+
+.input:focus-visible {
+  border-color: var(--border-focus);
+}
+
+.input:disabled {
+  color: var(--text-disabled);
+  background: var(--bg-canvas);
+  cursor: not-allowed;
+}
+
+.rulePreview {
+  margin-top: var(--space-3);
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+}
+
+.armRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-4);
+}
+
+/* --- what you are authorising ------------------------------------------- */
+/* Not an alert. This is the designed behaviour, stated plainly, so it wears
+   body copy and a neutral 2px marker — the same identity marker the seat rows
+   use — rather than the danger ground `.error` carries. */
+.authorisation {
+  margin-top: var(--space-5);
+  padding: var(--space-3) var(--space-4);
+  border-left: 2px solid var(--border-strong);
+  background: var(--bg-canvas);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.authorisationTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-tertiary);
+  margin-bottom: var(--space-2);
+}
+
+.authorisationBody {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-base-line);
+  color: var(--text-secondary);
+  max-width: 68ch;
+}
+
+.authorisationBody strong {
+  color: var(--text-primary);
+  font-weight: var(--font-weight-semibold);
+}
+
+.authorisationCaveat {
+  margin-top: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--status-warning-fg);
+  max-width: 68ch;
+}
+
+.authorisationCaveat strong {
+  font-weight: var(--font-weight-semibold);
+}
+
+/* Guarded the way the rest of the cockpit guards motion: appearance-store.ts
+   writes data-motion="full" so an operator can opt back in to animation over
+   the OS preference. Nothing here animates except this one hover tint, and
+   under reduced motion it simply switches instantly. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .ledgerRow {
+    transition: none;
+  }
+}
