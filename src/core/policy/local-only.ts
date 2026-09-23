@@ -236,8 +236,15 @@ export type EngineLocality = 'local' | 'cloud';
  */
 const LOCAL_CLI_AGENTS: ReadonlySet<string> = new Set(['ashlrcode', 'aw']);
 
-/** Provider ids served from this machine. Everything else is treated as cloud. */
-const LOCAL_PROVIDER_IDS: ReadonlySet<string> = new Set([
+/**
+ * Provider ids served from this machine. Everything else is treated as cloud.
+ *
+ * Exported so the consumer-parity suite can iterate the authority's OWN
+ * enumeration rather than restating it — a test carrying its own copy of this
+ * list would be the same duplication the module exists to prevent. Consumers
+ * ask `providerLocality`; nothing outside this file should read the set.
+ */
+export const LOCAL_PROVIDER_IDS: ReadonlySet<string> = new Set([
   'ollama',
   'lmstudio',
   'llama-server',

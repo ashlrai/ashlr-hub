@@ -50,6 +50,8 @@ import type { EngineId } from '../types.js';
 // M195: read RESOLVED engine tier (honors cfg.foundry.nim frontier promotion).
 // Imported from the registry (not sandboxed-engine.ts) to avoid an import cycle.
 import { resolveEngineSpec } from './engine-registry.js';
+// The ONE enumerator of what counts as local — see isCloudProvider below.
+import { providerLocality } from '../policy/local-only.js';
 // M240: learned-bias tie-breaker — reorders engine candidates by historical ship-rate.
 // Import is synchronous (no async); cold-start (empty ledger) = no-op.
 import {
@@ -88,15 +90,21 @@ const CLOUD_PROVIDER_ENV: Record<string, string> = {
   hermes_api: 'HERMES_API_KEY',
 };
 
-/** Known local (zero-cost) provider ids. */
-const LOCAL_PROVIDERS = new Set(['ollama', 'lmstudio']);
-
 /**
- * Returns true iff `provider` is a known cloud provider
- * (i.e. not a local provider).
+ * Returns true iff `provider` reaches inference over the network.
+ *
+ * Delegates to `src/core/policy/local-only.ts`, the ONE module that decides
+ * what counts as local. The private `LOCAL_PROVIDERS` set that used to live
+ * here named only 'ollama' and 'lmstudio', so this router called the local
+ * fleet runtime ('llama-server') and the in-process 'builtin' provider CLOUD —
+ * and then skipped them in the local failover chain below for being cloud
+ * entries, which is exactly backwards for the two most local things there are.
+ *
+ * Exported for the consumer-parity suite, which asserts this answer against the
+ * policy for every provider id the policy enumerates.
  */
-function isCloudProvider(id: string): boolean {
-  return !LOCAL_PROVIDERS.has(id.toLowerCase());
+export function isCloudProvider(id: string): boolean {
+  return providerLocality(id) === 'cloud';
 }
 
 // ---------------------------------------------------------------------------

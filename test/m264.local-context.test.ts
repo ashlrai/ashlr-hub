@@ -343,9 +343,54 @@ describe('M264 isLocalContextEnabled — local-only, flag-off no-op', () => {
     expect(isLocalContextEnabled('local-coder', cfg)).toBe(true);
   });
 
-  it('returns true for local-agent by default', () => {
+  it('returns true for llama-server by default (the other local api-model engine)', () => {
     const cfg = makeConfig();
-    expect(isLocalContextEnabled('local-agent', cfg)).toBe(true);
+    expect(isLocalContextEnabled('llama-server', cfg)).toBe(true);
+  });
+
+  it('returns false for local-agent — an engine that was specified and never built', () => {
+    // This assertion used to be `true`, from a hardcoded
+    // `new Set(['local-coder','local-agent'])` inside isLocalContextEnabled.
+    // 'local-agent' has never had a registry entry: it exists only in
+    // docs/SPEC-ELITE-ENGINE-UTILIZATION.md as the unbuilt M268 milestone
+    // ("add `local-agent` as a new engine backed by ashlrcode's `ac` CLI").
+    // The gate now resolves the registry, so it answers honestly about an
+    // engine nothing can dispatch to — and will say true on its own the day
+    // M268 registers it as a local api-model engine.
+    const cfg = makeConfig();
+    expect(isLocalContextEnabled('local-agent', cfg)).toBe(false);
+  });
+
+  it('picks up a local api-model engine an operator registers, with no edit here', () => {
+    // The point of driving off the registry: cfg.foundry.engines is enough.
+    const cfg = makeConfig({
+      engines: {
+        'shop-local-runtime': {
+          id: 'shop-local-runtime',
+          kind: 'api-model',
+          tier: 'mid',
+          api: {
+            envKey: '',
+            baseUrlEnv: 'SHOP_LOCAL_BASE_URL',
+            defaultBaseUrl: 'http://127.0.0.1:18080/v1',
+            defaultModel: 'shop',
+            protocol: 'openai',
+          },
+          capabilities: ['agent'],
+        },
+      },
+    });
+    expect(isLocalContextEnabled('shop-local-runtime', cfg)).toBe(true);
+  });
+
+  it('never injects into a LOCAL CLI AGENT — it writes its own system prompt', () => {
+    // 'ashlrcode' and 'aw' are local, and injection is still wrong for them:
+    // the bundle is a system-prompt prefix and only the in-process api-model
+    // path composes one. "local" alone would be too wide a gate.
+    const cfg = makeConfig();
+    expect(isLocalContextEnabled('ashlrcode', cfg)).toBe(false);
+    expect(isLocalContextEnabled('aw', cfg)).toBe(false);
+    expect(isLocalContextEnabled('builtin', cfg)).toBe(false);
   });
 
   it('returns false for claude (frontier — never injected)', () => {
@@ -368,9 +413,9 @@ describe('M264 isLocalContextEnabled — local-only, flag-off no-op', () => {
     expect(isLocalContextEnabled('local-coder', cfg)).toBe(false);
   });
 
-  it('flag-off: localContext: false → returns false for local-agent', () => {
+  it('flag-off: localContext: false → returns false for llama-server too', () => {
     const cfg = makeConfig({ localContext: false });
-    expect(isLocalContextEnabled('local-agent', cfg)).toBe(false);
+    expect(isLocalContextEnabled('llama-server', cfg)).toBe(false);
   });
 
   it('explicit true re-enables (default-on, truthy explicit is also on)', () => {
@@ -380,11 +425,13 @@ describe('M264 isLocalContextEnabled — local-only, flag-off no-op', () => {
 
   it('no foundry block → returns false (local engines require foundry presence)', () => {
     const cfg = { ...makeConfig(), foundry: undefined } as unknown as AshlrConfig;
-    // isLocalContextEnabled reads cfg.foundry; undefined foundry → not in LOCAL_ENGINES check
-    // since LOCAL_ENGINES.has still fires for name, but foundry check → undefined → !== false → true
-    // Actually: foundry absent means foundry?.['localContext'] is undefined, which !== false → enabled.
-    // The engine name gate is the primary guard for non-local engines.
+    // With no foundry block the flag reads undefined, which is !== false, so
+    // the flag half is ON by default. The ENGINE half is what refuses here:
+    // 'claude' resolves from the builtin registry as a cloud cli-agent.
     expect(isLocalContextEnabled('claude', cfg)).toBe(false);
+    // ...and the default registry still resolves, so a local api-model engine
+    // is enabled even with no foundry block at all.
+    expect(isLocalContextEnabled('local-coder', cfg)).toBe(true);
   });
 });
 

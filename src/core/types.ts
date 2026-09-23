@@ -2902,6 +2902,16 @@ export interface SwarmTaskRun {
   result?: string;
   /** Token/step usage attributed to this task. */
   usage?: RunUsage;
+  /**
+   * Provider id that actually served this task's inference (RunState.provider).
+   *
+   * Recorded so a swarm's LOCALITY can be derived from what ran, rather than
+   * inferred backwards from `usage.estCostUsd === 0` — cost is derived FROM
+   * locality, so reading locality back out of cost is circular. Absent on
+   * swarms persisted before this field existed, and on tasks that never
+   * reached a model call; 'none' is never stored.
+   */
+  provider?: string;
   /** Failure reason when status is 'failed', else absent. */
   error?: string;
   /**

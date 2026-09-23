@@ -745,6 +745,12 @@ async function executeTask(
         : 'failed';
     taskRun.result = taskResult.result;
     taskRun.usage = taskResult.usage;
+    // Record WHO served the inference, so the swarm's locality can be read off
+    // the provider instead of guessed from the cost it produced. 'none' is the
+    // orchestrator's "no provider was contacted" sentinel and is not a
+    // provider, so it is not stored.
+    const servedBy = taskResult.provider?.trim();
+    if (servedBy && servedBy !== 'none') taskRun.provider = servedBy;
     if (taskRun.status === 'cancelled') {
       taskRun.error = 'Cancelled by the swarm owner.';
     } else if (taskResult.status !== 'done') {
