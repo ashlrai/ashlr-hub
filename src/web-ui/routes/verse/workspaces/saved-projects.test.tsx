@@ -315,6 +315,31 @@ describe('SavedProjectDialog — priority', () => {
     expect(mutations.setVerseRootPriority).toHaveBeenCalledTimes(1);
   });
 
+  it('points the fleet at this section, and lets it be un-pointed', async () => {
+    const user = userEvent.setup();
+    const view = render(<SavedProjectDialog open workspace={workspace({ section: true })} focusSectionId={null} onClose={() => {}} />);
+    await user.click(screen.getByLabelText('Focus the fleet on this section'));
+    await user.click(screen.getByRole('button', { name: 'Save project' }));
+    await waitFor(() => expect(mutations.setVerseFocusSection).toHaveBeenCalledWith('w1'));
+
+    view.unmount();
+    mutations.setVerseFocusSection.mockClear();
+    const user2 = userEvent.setup();
+    render(<SavedProjectDialog open workspace={workspace({ section: true })} focusSectionId="w1" onClose={() => {}} />);
+    expect(screen.getByLabelText('Focus the fleet on this section')).toBeChecked();
+    await user2.click(screen.getByLabelText('Focus the fleet on this section'));
+    await user2.click(screen.getByRole('button', { name: 'Save project' }));
+    await waitFor(() => expect(mutations.setVerseFocusSection).toHaveBeenCalledWith(null));
+  });
+
+  it('leaves the focus alone when it was not touched', async () => {
+    const user = userEvent.setup();
+    render(<SavedProjectDialog open workspace={workspace({ section: true })} focusSectionId="w1" onClose={() => {}} />);
+    await user.click(screen.getByRole('button', { name: 'Save project' }));
+    await waitFor(() => expect(mutations.updateVerseWorkspace).toHaveBeenCalled());
+    expect(mutations.setVerseFocusSection).not.toHaveBeenCalled();
+  });
+
   it('offers no priority controls for a project that is not a section', () => {
     render(<SavedProjectDialog open workspace={workspace({ section: false })} onClose={() => {}} />);
     expect(screen.queryByLabelText('Priority for /repo/lib')).not.toBeInTheDocument();
