@@ -169,11 +169,70 @@ describe('local execution costs zero — drift guard', () => {
     expect(estCostUsd('nim', 1_000_000, 0)).toBeGreaterThan(0);
   });
 
+  it('the cache does not change any answer', () => {
+    const cfg = cfgWithFutureLocalEngine();
+    for (const id of ['claude', 'local-coder', FUTURE_LOCAL_ENGINE, 'ashlr-future-cloud', 'nim']) {
+      const first = estCostUsd(id, 1_000_000, 0, 0, 0, 0, { cfg });
+      const second = estCostUsd(id, 1_000_000, 0, 0, 0, 0, { cfg });
+      expect(second, id).toBe(first);
+      expect(second, id).toBe(engineLocality(id, cfg) === 'local' ? 0 : first);
+    }
+  });
+
   it('anyBillableSubject answers the daemon question about a whole tick', () => {
     expect(anyBillableSubject(['builtin', 'local-coder', 'llama-server'])).toBe(false);
     expect(anyBillableSubject(['builtin', 'claude'])).toBe(true);
     // Nothing to charge is not billable.
     expect(anyBillableSubject([])).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 1b. HOT PATH — locality is resolved once, not once per call
+// ---------------------------------------------------------------------------
+
+describe('estCostUsd is cheap enough to sit on a per-step path', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('asks the locality authority once per (config, id) — never once per call', async () => {
+    // The first version of this fix delegated to `engineLocality` uncached.
+    // Resolving the engine registry re-reads the llama-server ownership record
+    // from disk (statSync + readFileSync), so every model step paid for a
+    // filesystem round trip. That shifted concurrent best-of-N candidate timing
+    // enough to take test/m142.best-of-n.test.ts from a ~30% flake to a ~67%
+    // flake. An estimate function has no business doing I/O per step.
+    let resolutions = 0;
+    vi.doMock('../src/core/policy/local-only.js', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('../src/core/policy/local-only.js')>();
+      return {
+        ...actual,
+        engineLocality: (...args: Parameters<typeof actual.engineLocality>) => {
+          resolutions += 1;
+          return actual.engineLocality(...args);
+        },
+      };
+    });
+
+    const budgetModule = (await import(
+      '../src/core/run/budget.js?hotpath=' + randomUUID()
+    )) as typeof import('../src/core/run/budget.js');
+
+    const cfg = cfgWithFutureLocalEngine();
+    // Ids that actually reach `engineLocality` — 'builtin' and 'llama-server'
+    // are answered by the no-I/O `providerLocality` check before it.
+    const ids = ['claude', 'local-coder', FUTURE_LOCAL_ENGINE, 'nim'];
+
+    for (const id of ids) budgetModule.estCostUsd(id, 10, 10, 0, 0, 0, { cfg });
+    expect(resolutions).toBe(ids.length);
+
+    const afterWarmup = resolutions;
+    for (let i = 0; i < 200; i += 1) {
+      for (const id of ids) budgetModule.estCostUsd(id, 10, 10, 0, 0, 0, { cfg });
+    }
+    expect(resolutions).toBe(afterWarmup);
   });
 });
 
@@ -420,6 +479,24 @@ describe('budgetVerdict — a token-bounded run stops at the right point', () =>
   it('an Infinity ceiling never fires', () => {
     expect(budgetVerdict({ usage: usage(1e12, 1e12) }, budget()).exhausted).toBe(false);
   });
+
+  it('DRIVES A LOOP: a free local run spending 250 tokens a turn stops on turn 4 of 1000', () => {
+    // Not just "the predicate says true" — an actual loop, with every turn
+    // costing $0, halting on the exact turn the token ceiling binds.
+    const b = budget({ maxTokens: 1000 });
+    const live = usage(0, 0);
+    let turns = 0;
+    while (!budgetVerdict({ usage: live }, b).exhausted) {
+      turns += 1;
+      live.tokensIn += 150;
+      live.tokensOut += 100;
+      live.estCostUsd += estCostUsd('local-coder', 150, 100);
+      if (turns > 100) throw new Error('unbounded loop — the token ceiling did not bind');
+    }
+    expect(turns).toBe(4);                       // 4 x 250 = 1000, exactly the ceiling
+    expect(live.estCostUsd).toBe(0);             // and it cost nothing to get there
+    expect(budgetVerdict({ usage: live }, b).limiter).toBe('tokens');
+  });
 });
 
 describe('budgetVerdict — an iteration-bounded run stops at the right point', () => {
@@ -479,6 +556,20 @@ describe('budgetVerdict — a deadline-bounded run stops at the right point', ()
   it('maxWallClockMs without a startedAtMs cannot fire', () => {
     const b = budget({ maxWallClockMs: 1 });
     expect(budgetVerdict({ usage: usage(0, 0), nowMs: T0 }, b).exhausted).toBe(false);
+  });
+
+  it('DRIVES A LOOP: a free local run of 100ms turns stops on the turn that crosses the deadline', () => {
+    const b = budget({ deadlineEpochMs: T0 + 1000 });
+    let nowMs = T0;
+    let turns = 0;
+    while (!budgetVerdict({ usage: usage(0, 0), nowMs }, b).exhausted) {
+      turns += 1;
+      nowMs += 100;
+      if (turns > 100) throw new Error('unbounded loop — the deadline did not bind');
+    }
+    expect(turns).toBe(10);       // T0+1000 is the first `now` at the deadline
+    expect(nowMs).toBe(T0 + 1000);
+    expect(budgetVerdict({ usage: usage(0, 0), nowMs }, b).limiter).toBe('deadline');
   });
 
   it('is pure — no ambient clock, same inputs give the same answer', () => {

@@ -14,7 +14,7 @@
  */
 
 import type { RunUsage, RunBudget, AshlrConfig } from '../types.js';
-import { engineLocality, providerLocality } from '../policy/local-only.js';
+import { engineLocality, providerLocality, type EngineLocality } from '../policy/local-only.js';
 
 // ---------------------------------------------------------------------------
 // Static price table (rough $/M-token estimates for cloud providers).
@@ -97,8 +97,72 @@ const PRICE_OUT: Record<string, number> = {
 export function isFreeSubject(subject: string, cfg?: AshlrConfig): boolean {
   const id = subject.trim().toLowerCase();
   if (id.length === 0) return false;
+  // Cheap authority first: a set membership test, no I/O at all. This answers
+  // 'ollama', 'lmstudio', 'llama-server' and 'builtin' without touching the
+  // registry — which matters, because estCostUsd runs once per model step.
   if (providerLocality(id) === 'local') return true;
-  return engineLocality(id, cfg) === 'local';
+  return cachedEngineLocality(subject, id, cfg) === 'local';
+}
+
+/**
+ * Memoised `engineLocality`.
+ *
+ * WHY THIS CACHE EXISTS — it is not a micro-optimisation. `engineLocality`
+ * resolves the engine registry, and resolving it re-reads the llama-server
+ * ownership record from disk every time (`resolveEngineRegistry` →
+ * `applyLlamaServerConfig` → `resolveLlamaServerBaseUrl` → `readOwnershipRecord`,
+ * a `statSync` plus a `readFileSync`). `estCostUsd` sits on a per-model-step hot
+ * path — the orchestrator calls it from `onStep`, once per step, alongside a
+ * `saveRun` — so an uncached delegation puts a synchronous filesystem read in
+ * the middle of every step.
+ *
+ * That is not merely slow. The first version of this change did exactly that,
+ * and it shifted the timing of concurrent best-of-N candidate runs enough to
+ * take `test/m142.best-of-n.test.ts` from roughly a 30% flake to a 67% flake.
+ * The test has its own latent race, but the added I/O is what exposed it, and
+ * an estimate function has no business doing I/O per step.
+ *
+ * Caching is sound because locality is a property of the RESOLVED registry, and
+ * for a fixed config object that cannot change within a process. Keyed by the
+ * config's identity (a `WeakMap`, so configs stay collectable), with a separate
+ * map for the no-config case.
+ *
+ * The one thing it cannot see is a mid-process change to a base-URL environment
+ * variable under an unchanged config. Production reads that env once at startup,
+ * but a test that flips `OLLAMA_BASE_URL` or `LLAMA_SERVER_BASE_URL` must call
+ * `__resetBudgetLocalityCacheForTests()` — mirroring `__resetLocalOnlyLatchForTests`
+ * in the policy lane.
+ */
+const localityByCfg = new WeakMap<object, Map<string, EngineLocality>>();
+const localityNoCfg = new Map<string, EngineLocality>();
+
+function cachedEngineLocality(subject: string, id: string, cfg?: AshlrConfig): EngineLocality {
+  let bucket: Map<string, EngineLocality>;
+  if (cfg) {
+    const existing = localityByCfg.get(cfg);
+    if (existing) {
+      bucket = existing;
+    } else {
+      bucket = new Map<string, EngineLocality>();
+      localityByCfg.set(cfg, bucket);
+    }
+  } else {
+    bucket = localityNoCfg;
+  }
+
+  const hit = bucket.get(id);
+  if (hit !== undefined) return hit;
+
+  // `engineLocality` normalises the id itself but looks the registry up by the
+  // raw string, so pass the original rather than the lowercased key.
+  const answer = engineLocality(subject, cfg);
+  bucket.set(id, answer);
+  return answer;
+}
+
+/** Test-only: drop memoised locality so suites that flip env stay independent. */
+export function __resetBudgetLocalityCacheForTests(): void {
+  localityNoCfg.clear();
 }
 
 /**
