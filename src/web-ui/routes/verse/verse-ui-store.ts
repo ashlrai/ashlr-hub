@@ -17,6 +17,16 @@
  *     section consumes it by nonce.
  */
 
+/*
+ * NOT HERE: the APPEARANCE preferences — theme, accent, display size,
+ * density, radius, motion. This store holds the shell's LAYOUT state (which
+ * section is mounted, how wide the panes are); design-system preferences
+ * belong to data/appearance-store.ts, which is the single owner of the
+ * attributes and custom properties on <html>. Adding the display size here
+ * would have meant two stores writing the root element, which is the exact
+ * race the appearance store's header exists to warn about.
+ */
+
 export type VerseSectionId = 'chat' | 'autonomy' | 'approvals' | 'usage' | 'settings' | 'mcp';
 
 /**

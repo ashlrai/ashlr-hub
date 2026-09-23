@@ -52,6 +52,7 @@ describe('appearance-store', () => {
 
   it('applies defaults to the document element', () => {
     expect(root().getAttribute('data-density')).toBe('comfortable');
+    expect(root().getAttribute('data-ui-scale')).toBe('default');
     expect(root().getAttribute('data-radius')).toBe('default');
     expect(root().style.getPropertyValue('--accent-h')).toBe('245');
     expect(root().style.getPropertyValue('--accent-s')).toBe('72%');
@@ -78,6 +79,71 @@ describe('appearance-store', () => {
     expect(root().style.getPropertyValue('--font-display')).toBe('');
     // "full" is an explicit opt-out of the OS preference, not a no-op.
     expect(root().getAttribute('data-motion')).toBe('full');
+  });
+
+  /**
+   * The display size is the "make everything bigger" preference. It reaches
+   * the app the SAME way the theme, density and radius do — one attribute on
+   * the one element this store owns — so that tokens.css stays the only place
+   * that knows what "large" is worth in pixels.
+   */
+  it('stamps the display size on the document as an attribute', () => {
+    setAppearance({ uiScale: 'large' });
+    expect(root().getAttribute('data-ui-scale')).toBe('large');
+    expect(getAppearance().uiScale).toBe('large');
+
+    setAppearance({ uiScale: 'xlarge' });
+    expect(root().getAttribute('data-ui-scale')).toBe('xlarge');
+
+    // The numbers live in the stylesheet, not here: an inline --ui-scale
+    // would put half the design system in a TypeScript file and out-specify
+    // the [data-ui-scale] blocks that are supposed to own it.
+    expect(root().style.getPropertyValue('--ui-scale')).toBe('');
+    expect(root().style.getPropertyValue('--ui-text-scale')).toBe('');
+  });
+
+  it('round-trips the display size through localStorage', async () => {
+    setAppearance({ uiScale: 'xlarge' });
+    const stored = JSON.parse(localStorage.getItem(APPEARANCE_STORAGE_KEY) ?? '{}') as Record<string, unknown>;
+    expect(stored.uiScale).toBe('xlarge');
+
+    vi.resetModules();
+    const fresh = await import('./appearance-store.js');
+    expect(fresh.getAppearance().uiScale).toBe('xlarge');
+    // Applied at MODULE LOAD, before React's first render — otherwise the app
+    // paints one frame at the default size and visibly reflows.
+    expect(root().getAttribute('data-ui-scale')).toBe('xlarge');
+  });
+
+  it('coerces an unknown display size back to default', async () => {
+    localStorage.setItem(APPEARANCE_STORAGE_KEY, '{"uiScale":"gigantic"}');
+    vi.resetModules();
+    const fresh = await import('./appearance-store.js');
+    expect(fresh.getAppearance().uiScale).toBe('default');
+    expect(root().getAttribute('data-ui-scale')).toBe('default');
+  });
+
+  /**
+   * Display size and density are ORTHOGONAL axes, not two names for one
+   * slider: "large but tightly packed" is a real preference, and changing
+   * one must not silently move the other.
+   */
+  it('keeps display size and density independent', () => {
+    setAppearance({ uiScale: 'large' });
+    expect(getAppearance().density).toBe('comfortable');
+    setAppearance({ density: 'compact' });
+    expect(getAppearance().uiScale).toBe('large');
+    expect(root().getAttribute('data-ui-scale')).toBe('large');
+    expect(root().getAttribute('data-density')).toBe('compact');
+  });
+
+  it('counts the display size as a customization, and resets it', () => {
+    expect(isDefaultAppearance()).toBe(true);
+    setAppearance({ uiScale: 'large' });
+    expect(isDefaultAppearance()).toBe(false);
+    resetAppearance();
+    expect(getAppearance().uiScale).toBe('default');
+    expect(root().getAttribute('data-ui-scale')).toBe('default');
   });
 
   it('delegates the theme to theme-store rather than writing data-theme itself', () => {

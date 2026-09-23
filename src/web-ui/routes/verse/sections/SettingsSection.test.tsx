@@ -68,6 +68,51 @@ describe('SettingsSection', () => {
     expect(getAppearance().density).toBe('compact');
   });
 
+  /**
+   * The display-size control: reachable by its accessible name, labelled in
+   * words rather than multipliers, and LIVE — the whole point is that the app
+   * you are looking at is the preview, so a reload must not be part of it.
+   */
+  it('offers a labelled display-size control with all three steps', () => {
+    renderSettings();
+    const size = screen.getByRole('radiogroup', { name: 'Display size' });
+    expect(within(size).getByRole('radio', { name: 'Default' })).toBeInTheDocument();
+    expect(within(size).getByRole('radio', { name: 'Large' })).toBeInTheDocument();
+    expect(within(size).getByRole('radio', { name: 'Extra large' })).toBeInTheDocument();
+    expect(within(size).getByRole('radio', { name: 'Default' })).toBeChecked();
+  });
+
+  it('changes the live root attribute when the display size is used', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+    expect(root().getAttribute('data-ui-scale')).toBe('default');
+
+    const size = screen.getByRole('radiogroup', { name: 'Display size' });
+    await user.click(within(size).getByRole('radio', { name: 'Extra large' }));
+
+    expect(root().getAttribute('data-ui-scale')).toBe('xlarge');
+    expect(getAppearance().uiScale).toBe('xlarge');
+    // Live, with no save step: the control reflects the new state immediately.
+    expect(within(size).getByRole('radio', { name: 'Extra large' })).toBeChecked();
+  });
+
+  /**
+   * Display size sits beside Density, and the two are independent axes. If
+   * picking one reset the other the panel would be lying about what it does.
+   */
+  it('leaves density alone when the display size changes, and vice versa', async () => {
+    const user = userEvent.setup();
+    renderSettings();
+
+    const density = screen.getByRole('radiogroup', { name: 'Density' });
+    await user.click(within(density).getByRole('radio', { name: 'Compact' }));
+    const size = screen.getByRole('radiogroup', { name: 'Display size' });
+    await user.click(within(size).getByRole('radio', { name: 'Large' }));
+
+    expect(root().getAttribute('data-density')).toBe('compact');
+    expect(root().getAttribute('data-ui-scale')).toBe('large');
+  });
+
   it('writes the accent channels as the hue slider moves', () => {
     renderSettings();
     expect(root().style.getPropertyValue('--accent-h')).toBe('245');

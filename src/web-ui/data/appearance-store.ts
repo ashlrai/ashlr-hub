@@ -31,6 +31,24 @@ import {
 export type { ThemePreference };
 
 export type Density = 'comfortable' | 'compact';
+
+/**
+ * How large the whole interface is drawn. Scales TYPE AND SPACING TOGETHER
+ * (design/tokens.css multiplies its type ramp by --ui-text-scale and its
+ * spacing/geometry ramp by --ui-scale), because scaling type alone produces
+ * big text in cramped boxes — worse to read than the default, not better.
+ *
+ * ORTHOGONAL TO `density`, not a replacement for it: display size answers
+ * "how big is this interface", density answers "how tightly are its rows
+ * packed". They compose, which is why tokens.css expresses the scale as a
+ * multiplier rather than a second table of literal heights.
+ *
+ * There is no step below 'default' on purpose — see the [data-ui-scale]
+ * block in tokens.css for why (the 12px body floor, and Density already
+ * being the tightening control).
+ */
+export type UiScale = 'default' | 'large' | 'xlarge';
+
 /**
  * The operator's motion choice. Tri-state ON PURPOSE.
  *
@@ -58,6 +76,8 @@ export interface Appearance {
   /** Accent lightness, clamped to a readable band (%). */
   accentL: number;
   density: Density;
+  /** How large the whole interface is drawn. Type and spacing together. */
+  uiScale: UiScale;
   displayFont: DisplayFont;
   radius: RadiusScale;
   /** The stored choice: 'system' follows `prefers-reduced-motion`. */
@@ -133,6 +153,7 @@ export function defaultAppearance(): Appearance {
     accentS: DEFAULT_ACCENT.s,
     accentL: DEFAULT_ACCENT.l,
     density: 'comfortable',
+    uiScale: 'default',
     displayFont: 'grotesk',
     radius: 'default',
     motion: 'system',
@@ -153,6 +174,9 @@ const clamp = (n: number, min: number, max: number): number => Math.min(max, Mat
 
 function isDensity(v: unknown): v is Density {
   return v === 'comfortable' || v === 'compact';
+}
+function isUiScale(v: unknown): v is UiScale {
+  return v === 'default' || v === 'large' || v === 'xlarge';
 }
 function isDisplayFont(v: unknown): v is DisplayFont {
   return v === 'grotesk' || v === 'ui' || v === 'mono';
@@ -184,6 +208,7 @@ function normalize(base: Appearance, patch: Partial<Appearance> | Partial<Stored
       ? clamp(Math.round(merged.accentL), ACCENT_L_MIN, ACCENT_L_MAX)
       : DEFAULT_ACCENT.l,
     density: isDensity(merged.density) ? merged.density : 'comfortable',
+    uiScale: isUiScale(merged.uiScale) ? merged.uiScale : 'default',
     displayFont: isDisplayFont(merged.displayFont) ? merged.displayFont : 'grotesk',
     radius: isRadius(merged.radius) ? merged.radius : 'default',
     motion,
@@ -247,6 +272,12 @@ export function applyAppearance(value: Appearance): void {
   else root.style.setProperty('--font-display', font);
 
   root.setAttribute('data-density', value.density);
+  // The display size is an ATTRIBUTE, not an inline custom property, for the
+  // same reason the theme is: tokens.css owns the numbers, and a
+  // `[data-ui-scale]` block can be read, tested and retuned in the stylesheet
+  // that every other token lives in. Writing `--ui-scale` inline here would
+  // put half the design system in a TypeScript file.
+  root.setAttribute('data-ui-scale', value.uiScale);
   root.setAttribute('data-radius', value.radius);
   // 'system' removes the attribute so the `prefers-reduced-motion` media
   // queries decide on their own. "full" is meaningful, not a no-op: it opts an
@@ -319,6 +350,7 @@ export function isDefaultAppearance(value: Appearance = current): boolean {
     value.accentS === base.accentS &&
     value.accentL === base.accentL &&
     value.density === base.density &&
+    value.uiScale === base.uiScale &&
     value.displayFont === base.displayFont &&
     value.radius === base.radius &&
     value.motion === base.motion
