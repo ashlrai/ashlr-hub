@@ -79,7 +79,7 @@
     "lint:raycast": "ray lint"
   },
   "dependencies": {
-    "@raycast/api": "^1.70.0"
+    "@raycast/api": "^2.0.5"
   },
   "devDependencies": {
     "@raycast/eslint-config": "^1.0.8",
