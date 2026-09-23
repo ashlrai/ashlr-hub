@@ -6,13 +6,32 @@
  * badge that is always there is a badge nobody reads, and the capacity rides
  * in the row's `title` where it costs no pixels.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { VerseSeat, VerseSession } from '../../data/api-types.js';
+import type { VerseSearchResponse } from '../../../core/verse/types.js';
 import { CLAUDE_SEAT, bootstrap, session } from './fixtures.test-support.js';
 import { CLAUDE_MAX_SEAT } from './seat-fixtures.test-support.js';
 import { Sidebar } from './Sidebar.js';
+
+// Message search is the one network read the sidebar itself triggers; its
+// wire contract is pinned in context/context-queries.test.ts, so here it is
+// replaced by an in-memory answer.
+const search = vi.hoisted(() => ({ searchSessions: vi.fn() }));
+vi.mock('./context/context-queries.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./context/context-queries.js')>();
+  return { ...actual, ...search };
+});
+
+beforeEach(() => {
+  search.searchSessions.mockImplementation(async (q: string): Promise<VerseSearchResponse> => ({
+    query: q,
+    hits: [],
+    scannedSessions: 1,
+    truncated: false,
+  }));
+});
 
 /** Claude with its per-model week spent, under the session fixture's seat id. */
 const SPENT: VerseSeat = { ...CLAUDE_MAX_SEAT, id: CLAUDE_SEAT.id, accountId: CLAUDE_SEAT.accountId, models: CLAUDE_SEAT.models };
@@ -126,7 +145,7 @@ describe('Sidebar — the chat list after the title sweep', () => {
         onQuery={onQuery} onSelect={() => {}} onNew={() => {}} onRetry={() => {}}
         onCollapse={() => {}} onDisconnect={() => {}} />,
     );
-    expect(screen.getByText(/No chats match/)).toBeInTheDocument();
+    expect(screen.getByText(/No chat titles match/)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Clear search/ }));
     expect(onQuery).toHaveBeenCalledWith('');
   });
@@ -145,5 +164,59 @@ describe('Sidebar — the chat list after the title sweep', () => {
     // rule is keyed off the same attribute, so one assertion pins both.
     expect(screen.getByRole('button', { name: /The open chat/ })).toHaveAttribute('aria-current', 'true');
     expect(screen.getByRole('button', { name: /Another chat/ })).not.toHaveAttribute('aria-current');
+  });
+});
+
+describe('Sidebar — one search field, two answers', () => {
+  function mountWithQuery(query: string, onSelect = vi.fn()) {
+    const boot = bootstrap();
+    render(
+      <Sidebar sessions={[session({ id: 'vs_1', title: 'Fix the login bug' }), session({ id: 'vs_2', title: 'Payments webhooks' })]}
+        sessionsStatus="success" sessionsError={null} projects={boot.projects} seats={[CLAUDE_SEAT]} selectedId={null}
+        query={query} onQuery={() => {}} onSelect={onSelect} onNew={() => {}} onRetry={() => {}}
+        onCollapse={() => {}} onDisconnect={() => {}} />,
+    );
+    return { onSelect };
+  }
+
+  it('names the field for both things it searches', () => {
+    mountWithQuery('');
+    expect(screen.getByRole('searchbox', { name: 'Search chats and messages' })).toBeInTheDocument();
+  });
+
+  it('does not scan transcripts for an empty field', async () => {
+    mountWithQuery('');
+    await new Promise((r) => setTimeout(r, 350));
+    expect(search.searchSessions).not.toHaveBeenCalled();
+    expect(screen.queryByRole('region', { name: /In messages/ })).toBeNull();
+  });
+
+  it('lists chats whose MESSAGES match, below the title matches, and opens them', async () => {
+    search.searchSessions.mockResolvedValue({
+      query: 'backoff',
+      hits: [{
+        sessionId: 'vs_2', title: 'Payments webhooks', projectPath: '/Users/mason/dev/hub', engine: 'claude', seq: 7,
+        at: '2026-09-19T10:04:00.000Z', kind: 'assistant', snippet: 'Webhook retries use exponential backoff.', score: 3,
+      }],
+      scannedSessions: 2,
+      truncated: false,
+    });
+    const user = userEvent.setup();
+    const { onSelect } = mountWithQuery('backoff');
+    // No TITLE says "backoff" — the list is not a dead end, it points below.
+    expect(screen.getByText(/No chat titles match “backoff”/)).toBeInTheDocument();
+    const results = await screen.findByRole('region', { name: /In messages/ });
+    const row = await within(results).findByRole('button', { name: /Payments webhooks/ });
+    expect(row.querySelector('mark')).toHaveTextContent('backoff');
+    await user.click(row);
+    expect(onSelect).toHaveBeenCalledWith('vs_2');
+    expect(search.searchSessions).toHaveBeenCalledWith('backoff', expect.any(Number), expect.any(AbortSignal));
+  });
+
+  it('keeps instant title matches and adds message matches under them', async () => {
+    mountWithQuery('login');
+    const nav = screen.getByRole('navigation', { name: 'Chats' });
+    expect(within(nav).getByRole('button', { name: /Fix the login bug/ })).toBeInTheDocument();
+    expect(await screen.findByText('No messages match “login”.')).toBeInTheDocument();
   });
 });

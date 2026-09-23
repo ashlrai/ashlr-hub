@@ -191,11 +191,32 @@ describe('emergency authority release truth', () => {
     expect(team).toMatch(/refusal occurs before either value is applied or persisted/i);
     expect(team).not.toMatch(/setup` does not accept a `--user` flag/i);
 
-    expect(desktop).toMatch(/source-only Tauri v2 desktop draft/i);
+    // 1caef471 (Verse desktop) rewrote the README: the "desktop draft" that
+    // wrapped Mission Control became a source-only app that wraps Verse, and
+    // the tray lost its Start/Stop Daemon and Kill Switch rows. The authority
+    // facts this block guards are unchanged — still source-only, still not a
+    // public/commissioned product, still no installer, still never starts or
+    // activates the daemon — so they stay pinned against the current wording.
+    expect(desktop).toMatch(/source-only Tauri v2 desktop app/i);
+    expect(desktop).not.toMatch(/source-only Tauri v2 desktop draft/i);
     expect(normalizedDesktop).toMatch(/not a public or commissioned desktop product/i);
+    expect(normalizedDesktop).toMatch(/does not activate the dormant daemon/i);
+    expect(normalizedDesktop).toMatch(/Public desktop releases and installers: none/);
     expect(normalizedDesktop).toMatch(/setup --yes`[\s\S]{0,180}refuses before config/i);
-    expect(normalizedDesktop).toMatch(/daemon start`[\s\S]{0,180}refuses before effects/i);
+    expect(normalizedDesktop).toMatch(/No resident daemon is started/);
+    expect(normalizedDesktop).toMatch(/Daemon start\/stop and the kill switch are deliberately \*\*not\*\* here/);
+    expect(desktop).not.toMatch(/^\|\s*(?:Start|Stop) Daemon\s*\|/im);
     expect(desktop).not.toMatch(/manages the daemon lifecycle|daemon keeps running/i);
+
+    // Bind the README's tray table to the shipped tray, not just to prose:
+    // the tray builder creates exactly Show and Quit, and no menu item anywhere
+    // in the shell is wired to a daemon command.
+    const desktopMain = read('desktop/src-tauri/src/main.rs');
+    const trayItems = [...desktopMain.matchAll(/MenuItemBuilder::with_id\(\s*"(tray\.[^"]+)"/g)].map((match) => match[1]);
+    expect(trayItems).toEqual(['tray.show', 'tray.quit']);
+    for (const shellSource of [desktopMain, read('desktop/src-tauri/src/app_menu.rs')]) {
+      expect(shellSource).not.toMatch(/"daemon"\s*,\s*"start"|daemon start/);
+    }
 
     expect(loopSlashCommand).toMatch(/compiled conductor trust roots are empty/i);
     expect(loopSlashCommand).toMatch(/non-dry `ashlr loop`[\s\S]{0,100}refuse/i);

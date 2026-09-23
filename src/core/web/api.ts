@@ -723,28 +723,42 @@ function parseWindow(raw: string | undefined): '1d' | '7d' | '30d' {
   return '7d';
 }
 
+/** The default request-body cap every POST route shares. */
+export const DEFAULT_MAX_BODY_BYTES = 65_536;
+
 /**
- * Safely read the full request body as a string (bounded to 64 KB).
- * Rejects on oversized or errored requests.
+ * Safely read the full request body as a string (bounded to 64 KB unless a
+ * route passes its own cap). Rejects on oversized or errored requests.
  *
- * Exported so src/core/verse/verse-api.ts shares the exact same body cap.
+ * Exported so src/core/verse/verse-api.ts shares the exact same body cap. The
+ * `maxBytes` override exists for ONE route (POST /api/verse/memory), whose
+ * payload is a file that may itself be 64 KiB before JSON escaping; every
+ * other caller keeps the default.
+ *
+ * Chunks are kept as raw bytes and decoded ONCE at the end. Decoding each
+ * chunk on its own turns a multi-byte UTF-8 character that straddles a chunk
+ * boundary into two U+FFFD replacement characters — silent corruption that
+ * grows likelier the bigger the body (an em dash in a 100 KB memory file).
  */
-export function readBody(req: IncomingMessage): Promise<string> {
+export function readBody(req: IncomingMessage, maxBytes: number = DEFAULT_MAX_BODY_BYTES): Promise<string> {
   return new Promise<string>((resolve, reject) => {
-    const MAX_BYTES = 65_536;
-    let buf = '';
+    const chunks: Buffer[] = [];
     let total = 0;
+    let tooLarge = false;
 
     req.on('data', (chunk: Buffer | string) => {
-      const s = typeof chunk === 'string' ? chunk : chunk.toString('utf8');
-      total += Buffer.byteLength(s, 'utf8');
-      if (total > MAX_BYTES) {
+      if (tooLarge) return;
+      const b = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
+      total += b.length;
+      if (total > maxBytes) {
+        tooLarge = true;
+        chunks.length = 0;
         reject(new Error('request body too large'));
         return;
       }
-      buf += s;
+      chunks.push(b);
     });
-    req.on('end', () => resolve(buf));
+    req.on('end', () => { if (!tooLarge) resolve(Buffer.concat(chunks).toString('utf8')); });
     req.on('error', reject);
   });
 }

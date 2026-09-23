@@ -2,8 +2,12 @@
  * routes/verse/verse-model.ts — small pure helpers shared by the Verse
  * components (labels, grouping, health → tone). No React, no I/O.
  */
-import type { VerseEngine, VerseProject, VerseSeat, VerseSeatHealth, VerseSession } from '../../data/api-types.js';
+import type { VerseEngine, VerseModelOption, VerseProject, VerseSeat, VerseSeatHealth, VerseSession } from '../../data/api-types.js';
+import type { VerseContextMode, VerseWindowSource } from '../../../core/verse/types.js';
 import type { Tone } from '../../components/primitives/StatusBadge.js';
+// context-math is PURE and browser-safe by contract (its only import is
+// type-only), so a value import here does not drag node into the bundle.
+import { budgetFor, canonicalModelId, claudeAutocompactFlag, reconcileAutoCompactAt } from '../../../core/verse/context-math.js';
 
 export const ENGINE_ORDER: readonly VerseEngine[] = ['claude', 'codex', 'grok', 'local'];
 
@@ -37,11 +41,116 @@ export function modelLabel(seats: readonly VerseSeat[], session: Pick<VerseSessi
   return seat?.models.find((m) => m.id === session.model)?.label ?? session.model;
 }
 
-/** Context window for a session: the model's own figure when the seat knows it, else the seat default. */
-export function contextWindowFor(seats: readonly VerseSeat[], session: Pick<VerseSession, 'seatId' | 'model' | 'usage'>): number | null {
-  if (session.usage.contextWindow) return session.usage.contextWindow;
+/**
+ * The seat's catalog entry for a session's model. Exact id first; then the
+ * canonical form, because a session created before the alias fix stores
+ * `claude-opus-5.5` while today's catalog lists `claude-opus-5-5` (context-math
+ * `VERSE_MODEL_ID_ALIASES`) — the record keeps its id, the lookup must not miss.
+ */
+export function modelOptionFor(seats: readonly VerseSeat[], session: Pick<VerseSession, 'seatId' | 'model'>): VerseModelOption | null {
   const seat = seatById(seats, session.seatId);
-  return seat?.models.find((m) => m.id === session.model)?.contextWindow ?? seat?.contextWindow ?? null;
+  if (!seat) return null;
+  const exact = seat.models.find((m) => m.id === session.model);
+  if (exact) return exact;
+  const canonical = canonicalModelId(session.model);
+  return seat.models.find((m) => canonicalModelId(m.id) === canonical) ?? null;
+}
+
+/** Everything the meter, the composer's cost hint and the advice banners read. */
+export interface SessionContextBudget {
+  /** Live occupancy as stored — UNCLAMPED; only the drawing clamps. */
+  contextTokens: number;
+  contextWindow: number | null;
+  autoCompactAt: number | null;
+  /** False when `contextTokens` is an upper bound (codex before its rollout is read). */
+  exact: boolean;
+  /** Where `contextWindow` came from; null when nothing on the record says. */
+  source: VerseWindowSource | null;
+  mode: VerseContextMode;
+  /** The catalog option the session's model maps to on its seat, when listed. */
+  option: VerseModelOption | null;
+}
+
+function positive(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * The window a session is measured against, and where it compacts.
+ *
+ * Precedence (docs/VERSE-CONTEXT.md, "honesty rules"):
+ *
+ *  1. RUNTIME — the CLI reported the window for this session's last turn
+ *     (`usage.contextWindowSource === 'runtime'`). Nothing outranks what the
+ *     CLI said it is actually running with (e.g. Claude Code clamping a 1M
+ *     model to 200k when long-context credit runs out).
+ *  2. CATALOG — the seat's CURRENT option for the session's model, in the
+ *     session's mode. Current rather than stored so a corrected catalog (a
+ *     fixed window table, a mode switch) shows up without waiting for a turn.
+ *  3. STORED — whatever the record carries (every pre-3.9 session).
+ *  4. The seat's default window, marked `fallback`.
+ *
+ * A compaction point is only ever DERIVED from a window it belongs to: a
+ * runtime window without a stored point is reconciled with context-math's
+ * per-engine formula, never paired with a catalog point for another window.
+ */
+export function sessionContextBudget(
+  seats: readonly VerseSeat[],
+  session: Pick<VerseSession, 'seatId' | 'model' | 'usage' | 'engine' | 'contextMode'>,
+): SessionContextBudget {
+  const usage = session.usage;
+  const mode: VerseContextMode = session.contextMode ?? 'standard';
+  const option = modelOptionFor(seats, session);
+  const base = {
+    contextTokens: typeof usage.contextTokens === 'number' && Number.isFinite(usage.contextTokens) ? Math.max(0, usage.contextTokens) : 0,
+    exact: usage.contextTokensExact !== false,
+    mode,
+    option,
+  };
+  const catalog = budgetFor(option, mode);
+
+  const stored = positive(usage.contextWindow);
+  if (stored !== null && usage.contextWindowSource === 'runtime') {
+    const storedPoint = positive(usage.autoCompactAt ?? null);
+    const autoCompactAt = storedPoint ?? reconcileAutoCompactAt({
+      engine: session.engine,
+      runtimeWindow: stored,
+      budget: catalog,
+      autocompactWindow: session.engine === 'claude' ? claudeAutocompactFlag(option, mode) : null,
+      maxOutputTokens: option?.maxOutputTokens ?? null,
+    });
+    return { ...base, contextWindow: stored, autoCompactAt, source: 'runtime' };
+  }
+  if (catalog) {
+    return { ...base, contextWindow: catalog.contextWindow, autoCompactAt: catalog.autoCompactAt, source: option?.windowSource ?? 'fallback' };
+  }
+  if (stored !== null) {
+    return { ...base, contextWindow: stored, autoCompactAt: positive(usage.autoCompactAt ?? null), source: usage.contextWindowSource ?? null };
+  }
+  const seatWindow = positive(seatById(seats, session.seatId)?.contextWindow ?? null);
+  return { ...base, contextWindow: seatWindow, autoCompactAt: null, source: seatWindow !== null ? 'fallback' : null };
+}
+
+/** Context window for a session — see {@link sessionContextBudget} for the precedence. */
+export function contextWindowFor(
+  seats: readonly VerseSeat[],
+  session: Pick<VerseSession, 'seatId' | 'model' | 'usage' | 'engine' | 'contextMode'>,
+): number | null {
+  return sessionContextBudget(seats, session).contextWindow;
+}
+
+/** Plain words for a window's provenance — the meter's tooltip and the resources panel share them. */
+export const WINDOW_SOURCE_TEXT: Record<VerseWindowSource, string> = {
+  runtime: 'reported by the CLI on the last turn',
+  'provider-catalog': "from this seat's own model catalog",
+  'cli-catalog': "from the pinned CLI's built-in model table",
+  documented: "from the provider's published model table",
+  fallback: 'a default estimate — the CLI has not reported the real window yet',
+};
+
+/** The first model on a seat that can actually run (skips ones listed with an `unavailableReason`). */
+export function firstRunnableModel(seat: VerseSeat): VerseModelOption | null {
+  return seat.models.find((m) => !m.unavailableReason) ?? null;
 }
 
 export function healthTone(state: VerseSeatHealth['state']): Tone {

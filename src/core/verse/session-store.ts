@@ -36,10 +36,19 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 
 import {
+  VERSE_CONTEXT_MODES,
   VERSE_MAX_EVENTS_PER_SESSION,
   type VerseEvent,
   type VerseSession,
 } from './types.js';
+
+/**
+ * An event before `seq`/`at` are stamped. Distributive, so each member of the
+ * union keeps its own fields (plain `Omit` on a union collapses it to the
+ * common keys and rejects `{ type: 'user-message', text }`).
+ */
+type Unstamped<T> = T extends unknown ? Omit<T, 'seq' | 'at'> : never;
+export type VerseUnstampedEvent = Unstamped<VerseEvent>;
 
 const SESSION_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SESSION_SUFFIX = '.json';
@@ -48,6 +57,10 @@ const LAUNCH_SUFFIX = '.launch.json';
 
 const VERSE_STATUSES = new Set(['idle', 'running', 'error']);
 const VERSE_ENGINES = new Set(['claude', 'codex', 'grok', 'local']);
+const VERSE_CONTEXT_MODE_SET = new Set<string>(VERSE_CONTEXT_MODES);
+/** Mirrors `VerseWindowSource` in types.ts — the store is the gate that keeps a hand-edited record honest. */
+const VERSE_WINDOW_SOURCES = new Set(['runtime', 'provider-catalog', 'cli-catalog', 'documented', 'fallback']);
+const VERSE_COMPACTION_TRIGGERS = new Set(['auto', 'manual']);
 
 export function isValidSessionId(id: string): boolean {
   return SESSION_ID_RE.test(id);
@@ -85,6 +98,46 @@ function isStringArrayValue(value: unknown): boolean {
   return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
+function isOptionalBoolean(value: unknown): boolean {
+  return value === undefined || typeof value === 'boolean';
+}
+
+function isNullableNumber(value: unknown): boolean {
+  return value === null || isFiniteNumber(value);
+}
+
+function isOptionalNullableNumber(value: unknown): boolean {
+  return value === undefined || isNullableNumber(value);
+}
+
+/**
+ * V3.9 usage fields. Each is optional (absent on every record written before
+ * context orchestration) but, when PRESENT, must be exactly the documented
+ * shape: a record claiming `contextWindowSource: 'guess'` or a string
+ * `autoCompactAt` is corrupt, and a corrupt record is skipped rather than
+ * drawn with numbers nobody can vouch for.
+ */
+function isV39UsageValid(usage: Record<string, unknown>): boolean {
+  const source = usage['contextWindowSource'];
+  return (source === undefined || (typeof source === 'string' && VERSE_WINDOW_SOURCES.has(source)))
+    && isOptionalNullableNumber(usage['autoCompactAt'])
+    && isOptionalBoolean(usage['contextTokensExact']);
+}
+
+/** V3.9 session fields — same absent-or-exact rule as the usage fields above. */
+function isV39SessionValid(value: Record<string, unknown>): boolean {
+  const mode = value['contextMode'];
+  const count = value['compactionCount'];
+  const handoff = value['handoffFrom'];
+  return (mode === undefined || (typeof mode === 'string' && VERSE_CONTEXT_MODE_SET.has(mode)))
+    && (count === undefined || (isFiniteNumber(count) && count >= 0 && Number.isInteger(count)))
+    && (handoff === undefined
+      || (isObject(handoff)
+        && typeof handoff['sessionId'] === 'string' && handoff['sessionId'].length > 0
+        && typeof handoff['title'] === 'string'))
+    && isOptionalBoolean(value['memoryEnabled']);
+}
+
 function isSession(value: unknown): value is VerseSession {
   if (!isObject(value)) return false;
   const usage = value['usage'];
@@ -110,14 +163,40 @@ function isSession(value: unknown): value is VerseSession {
     && isFiniteNumber(usage['cacheCreationTokens'])
     && isFiniteNumber(usage['contextTokens'])
     && (usage['contextWindow'] === null || isFiniteNumber(usage['contextWindow']))
-    && (value['lastError'] === null || typeof value['lastError'] === 'string');
+    && isV39UsageValid(usage)
+    && (value['lastError'] === null || typeof value['lastError'] === 'string')
+    && isV39SessionValid(value);
 }
 
+/**
+ * Event shape check. The historical types stay LENIENT (seq/at/type only):
+ * tightening them now would silently drop lines from logs written by every
+ * earlier release. The two V3.9 types are checked in full, because their
+ * numbers feed the meter and the compaction count directly — a malformed line
+ * is dropped like any other garbage line rather than drawn.
+ */
 function isEvent(value: unknown): value is VerseEvent {
-  return isObject(value)
-    && isFiniteNumber(value['seq'])
-    && typeof value['at'] === 'string'
-    && typeof value['type'] === 'string';
+  if (!isObject(value)
+    || !isFiniteNumber(value['seq'])
+    || typeof value['at'] !== 'string'
+    || typeof value['type'] !== 'string') return false;
+  const turnId = value['turnId'];
+  switch (value['type']) {
+    case 'compaction':
+      return (turnId === null || typeof turnId === 'string')
+        && typeof value['trigger'] === 'string' && VERSE_COMPACTION_TRIGGERS.has(value['trigger'])
+        && isNullableNumber(value['preTokens'])
+        && isNullableNumber(value['postTokens'])
+        && isNullableNumber(value['durationMs']);
+    case 'context':
+      return (turnId === null || typeof turnId === 'string')
+        && isFiniteNumber(value['contextTokens']) && value['contextTokens'] >= 0
+        && isNullableNumber(value['contextWindow'])
+        && typeof value['exact'] === 'boolean'
+        && isOptionalNullableNumber(value['autoCompactAt']);
+    default:
+      return true;
+  }
 }
 
 function ensurePrivateDir(path: string): void {
@@ -168,7 +247,7 @@ export interface VerseSessionStore {
   /** Atomic write of the session record; updates the index. */
   save(session: VerseSession): void;
   /** Stamp seq/at and append one event line. Returns the stored event. */
-  appendEvent(id: string, event: Omit<VerseEvent, 'seq' | 'at'>, at: string): VerseEvent;
+  appendEvent(id: string, event: VerseUnstampedEvent, at: string): VerseEvent;
   /** Events with `seq > fromSeq`, capped to the newest VERSE_MAX_EVENTS_PER_SESSION. */
   readEvents(id: string, fromSeq?: number): VerseEvent[];
   /** Highest seq appended so far (0 when none). */
@@ -269,7 +348,7 @@ export function createVerseSessionStore(root: string): VerseSessionStore {
       index.set(session.id, session);
     },
 
-    appendEvent(id: string, event: Omit<VerseEvent, 'seq' | 'at'>, at: string): VerseEvent {
+    appendEvent(id: string, event: VerseUnstampedEvent, at: string): VerseEvent {
       assertSessionId(id);
       ensureDirs();
       const seq = currentSeq(id) + 1;

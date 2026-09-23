@@ -10,6 +10,9 @@ It is served by the normal `ashlr serve` server at `/verse/`, opened by
 
 - Build contracts: `docs/VERSE-CONTRACT-V1.md` (sessions) and
   `docs/VERSE-CONTRACT-V2.md` (redesign + control plane).
+- Context windows, compaction, modes, handoff and shared memory:
+  [`docs/VERSE-CONTEXT.md`](VERSE-CONTEXT.md) — the authority for every number
+  the context meter shows.
 - Design language: `docs/VERSE-DESIGN-V2.md`.
 - Shared types: `src/core/verse/types.ts` (V1, frozen) and
   `src/core/verse/control-types.ts` (V2).
@@ -62,7 +65,12 @@ A dot on the Approvals rail icon means something is waiting for you.
 
 Sessions are listed in the sidebar grouped by project, newest first, each with a
 2px engine marker, its title and a relative time. A running session shows a
-small pulsing dot.
+small pulsing dot. The sidebar's search box does two things with one query: it
+filters chat titles and project paths instantly, and, a moment later, lists the
+chats whose **messages** match — your messages and the assistant's, every word
+required, recent chats ranked higher — each with a snippet around the match.
+That second half is a bounded scan of Verse's own session files on this
+machine; nothing is sent to a model and nothing spends.
 
 The transcript is a single 720px reading column. There are no chat bubbles: your
 turn is indented behind a 2px rule in secondary text, the assistant's is plain
@@ -76,26 +84,87 @@ for the full input and output. Failures tint the left rule; nothing else
 changes colour.
 
 The composer grows to 40% of the viewport, gains the accent on focus, and docks
-at the bottom of the same 720px measure. Under the header strip there is a 2px
-context line rather than a labelled progress bar; the numbers (`18k / 66k`) sit
-next to it in Space Grotesk.
+at the bottom of the same 720px measure. Under the header strip there is a slim
+context meter rather than a labelled progress bar; its numbers
+(`142k / 1M · compacts ≈367k`) sit next to it in Space Grotesk.
 
 **How a turn actually runs.** Each turn spawns one vendor CLI process
 (`claude -p`, `codex exec`, `grok -p`) in the project directory with
 `--permission-mode acceptEdits` (or Codex's `workspace-write` sandbox), streams
 its output as normalized events, and exits. Nothing holds stdin open between
-turns; the vendor conversation is resumed by id on the next turn, so memory
-across turns is the vendor's own. **Stop** cancels the running turn (SIGINT to
-the process group, SIGKILL after 10 s). Turns also time out on their own.
+turns; the vendor conversation is resumed by id on the next turn, so the
+conversation's memory is the vendor's own. **Stop** cancels the running turn
+(SIGINT to the process group, SIGKILL after 10 s). Turns also time out on their
+own.
 
 Sessions persist in `~/.ashlr/verse/sessions/` (`<id>.json` plus an append-only
 `<id>.events.jsonl`) and reappear after a restart.
 
-**Context meter.** `contextTokens / contextWindow` — the prompt size of the most
-recent assistant call (input + cache-read + cache-creation tokens) against the
-seat's best-known window. Amber at ≥ 70 %, red at ≥ 90 %, `n/a` when the window
-is unknown. It moves after every turn's `usage` event, so you can see a long
-chat filling up and start a fresh session before the model starts truncating.
+**Context meter.** How full the conversation is: the prompt size of the most
+recent model call (input + cache-read + cache-creation tokens) drawn against
+the model's **whole** window, with a tick where the CLI will auto-compact —
+`142k / 1M · compacts ≈367k`. The window is the one the CLI actually reported
+for the last turn when it reports one, else the seat's catalog for that model
+and mode; hover the meter to see which, plus the mode and what compaction does.
+It turns amber at 80 % of the compaction point and red at 95 % — *before* the
+CLI compacts, not after — and shows a reading past the window as over-window
+rather than pinning at 100 %. `n/a` means the window is unknown, not zero.
+
+- **Codex** readings are exact once Verse has read the seat's own session file
+  (it re-reads it every 2 s during a turn). Until then the figure is an upper
+  bound and is prefixed `≤`.
+- When the CLI compacts, the transcript shows a divider —
+  `Auto-compacted 967k → 19k in 1m 58s` (Codex too, from the readings either side
+  of its compaction), or `Codex compacted its context` when there are no counts —
+  so the meter's drop is never unexplained.
+- **Compact now** (Claude and local sessions) asks the CLI to compact on demand by
+  sending `/compact` as an ordinary turn; the divider reads `Compacted on request …`.
+  It is free on a local seat, though slow on a large model (about 2½ minutes for a
+  15k context on a 27B tag). **On a paid seat it spends usage** — the CLI reads the
+  whole context to write its summary. It is not offered on Codex or Grok.
+
+**Context mode.** Next to the meter, on models that have one, a chip switches
+the session between **Standard** and **Expansive**, from the next turn:
+
+| Engine | Standard (default) | Expansive |
+|---|---|---|
+| Claude 1M models (Fable, Opus 5.x / 4.8, Sonnet 5) | compacts at ≈367k | compacts at ≈967k |
+| Codex GPT-6 / GPT-5.6 | 258.4k window, compacts at ≈245k | 828.4k window, compacts at ≈785k |
+| Grok, local, Claude 200k models, GPT-5.5 | their native window | not offered |
+
+Expansive costs more usage on **every** later turn, because each turn re-sends
+the whole conversation; it pays off for coupled, cross-cutting work that needs a
+lot in view at once. Verse may suggest it — after repeated compactions, or when
+the reachable code only fits expansive — but never switches it on for you. The
+new-chat dialog sets the mode for a new session and can make it the seat's
+default. Why the default is not the full window: `docs/VERSE-CONTEXT.md` §2.
+
+**Continue in a fresh chat.** When a session is near its compaction point, has
+compacted twice, or has sat idle for over an hour with a large context, a banner
+under the meter says so and offers **Continue in a fresh chat…**. That builds a
+handoff note from the session's own log — goal, latest asks, current state,
+files touched, commands, errors, each root's `git diff --stat` — with no model
+call. You can edit it, choose any seat, model and mode for the new session (a
+Claude chat can continue on Codex), and see whether the note fits. The optional
+**Ask *seat* to summarize first** button sends one ordinary — paid — turn to the
+current session and folds its reply in. Creating the new session is free: it opens with
+"Continued from …", the note is waiting in the composer, and nothing is sent
+until you press send.
+
+**Project memory.** Every seat working on a project shares one small memory
+directory outside the repository (`~/.ashlr/verse/memory/<project>-<hash>/`).
+Each session tells its agent where it is and asks it to keep `MEMORY.md` a
+short index of durable facts with their reasons — decisions, conventions,
+gotchas, plan status — and never secrets. Claude, Codex and local seats read
+and update the live file; Grok's CLI cannot be given the directory, so a Grok
+session sees the copy taken when the chat began and cannot change it. It is on
+by default; the Resources panel shows it and lets you edit, clear, or turn it
+off per project. A session keeps the memory setting it was created with.
+
+The Resources panel also shows the current session's efficiency: cache-hit
+ratio, average and peak context per turn, compactions, and a warning once the
+session has been idle past the one-hour prompt-cache lifetime — the next turn
+re-reads the whole context at full cost.
 
 **Dictation.** The microphone uses the browser's Web Speech API when the runtime
 provides it. WKWebView — which is what the desktop app is — does not, so there
@@ -108,20 +177,44 @@ Superwhisper, macOS dictation) into the composer, which is an ordinary textarea.
 
 A seat is one place a turn can run: an **engine** plus the **account** (or local
 model) it is pinned to. Sessions are seat-bound — changing the seat on an
-existing chat starts a new session.
+existing chat starts a new session. To carry the work across, use **Continue in
+a fresh chat** (above) rather than starting cold.
 
 ### Your subscriptions
 
 Seats come from `~/.ashlr/account-connections/connections.json` (the same file
 `ashlr` uses for native-profile launchers). Each account becomes one seat with
-`engine = provider`:
+`engine = provider`. Windows below are what each CLI measures against, and the
+point where it auto-compacts in standard mode; the full table, with where every
+number comes from, is `docs/VERSE-CONTEXT.md` §1.
 
-| Engine | Models offered | Context window | Identity colour |
-|--------|----------------|----------------|-----------------|
-| `claude` | `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001` | 200k | `#c96442` |
-| `codex` | `gpt-5.5`, `gpt-5.5-mini` | 272k | `#10a37f` |
-| `grok` | `grok-4`, `grok-4-fast` | 256k | `#6b7280` |
-| `local` | every Ollama coding tag | from the model | `#7c5cff` |
+| Engine | Models offered | Window · compacts at | Identity colour |
+|--------|----------------|----------------------|-----------------|
+| `claude` | Fable 5.1, Opus 5.5, Fable 5, Opus 5, Opus 4.8, Sonnet 5 | 1M · ≈367k (≈967k expansive) | `#c96442` |
+| `claude` | Opus 4.5, Haiku 4.5 | 200k · ≈167k | `#c96442` |
+| `codex` | the seat's own catalog — GPT-6 Astra / Sol / Luna, GPT-5.6 Sol / Terra / Luna, GPT-5.5 | 258.4k · ≈245k (828.4k · ≈785k expansive, not GPT-5.5) | `#10a37f` |
+| `grok` | the seat's own catalog — Grok 4.7, Grok 4.7 Fast, Grok 4.6, Grok 4.5 | 500k · 400k | `#6b7280` |
+| `local` | Ollama tags that support tool use | what the runner serves · window − 33k | `#7c5cff` |
+
+Codex and Grok models are read from the seat's **own** model catalog
+(`native-state/models_cache.json` beside its launcher), so a seat offers exactly
+what its account and CLI version serve. A Codex seat that has never run a turn
+has no catalog yet; it shows Verse's built-in list and says so.
+
+The model picker shows each model's window and compaction point. A model the
+seat cannot run is listed but disabled, with the reason — most often **binary
+skew**: a seat's launcher execs one pinned CLI binary, which never updates
+itself, so Opus 5.5 (which needs Claude Code 2.1.280) is disabled on a seat
+pinned to 2.1.257. The seat shows its CLI version and a note with the fix:
+`ashlr resources profile repin --directory <dir> --executable <path>`. Add
+`--dry-run` to see the change without writing; a real repin first saves the
+profile's three files as `.prev` copies, which together restore the old pin.
+(Verse 3.5–3.8 offered Opus 5.5 as `claude-opus-5.5`; the CLI resolved that id to
+Opus 5, so those sessions ran Opus 5. They keep their recorded id, but their next
+turns ask for the real Opus 5.5 — so on a seat still pinned below 2.1.280 Verse
+refuses the turn with the reason (`VERSE_MODEL_UNAVAILABLE`) instead of starting
+a CLI that cannot run it. Re-pin the seat, or continue the chat in a fresh session
+on another model.)
 
 These are your **subscriptions**, not API keys — the work runs through the
 vendor CLI signed in as that account, so it draws on the plan you already pay
@@ -141,10 +234,31 @@ turn.
 ### Local Ollama models
 
 If Ollama is reachable (`cfg.models.ollama`, default `http://127.0.0.1:11434`),
-every tag that looks like a coding model (`coder`, `code`, `qwen`, `deepseek`,
-`devstral`, `llama`) becomes a `local:<tag>` seat under the **Local** group. The
-context window is read from `/api/show` when the model reports it, else from a
-`:ctxNNk` suffix in the tag, else assumed to be 65,536 tokens.
+every tag whose `/api/show` capabilities include `tools` becomes a `local:<tag>`
+seat under the **Local** group — a model without tool use cannot drive an
+agentic session. (Only an older Ollama that reports no capabilities at all falls
+back to the name heuristic: `coder`, `code`, `qwen`, `deepseek`, `devstral`,
+`llama`.)
+
+The context window is the one the runner actually serves, resolved in this
+order (details and evidence in `docs/VERSE-CONTEXT.md` §1.5):
+
+1. on the llama-server lane, the per-slot window (`/props`), whatever the tag
+   says;
+2. a `num_ctx` pinned in the tag's Modelfile, capped at the model's trained
+   length;
+3. otherwise Ollama's own default — the loaded context from `/api/ps`, else
+   `OLLAMA_CONTEXT_LENGTH`, else the VRAM-based default in Ollama's server log —
+   which depends on the machine, so a tag that serves 256k here may serve far
+   less on a smaller Mac;
+4. only when `/api/show` fails, a `ctxNNk` suffix in the tag (`:ctx64k` or
+   `-ctx64k`), else 65,536 tokens.
+
+Verse passes that window to the CLI (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), which
+otherwise assumes 200k for a model it does not know and never compacts before a
+64k runner overflows. With it, a 64k seat compacts at ≈32.5k — its fixed prompt
+already takes roughly 18–23k, so pick a larger-window tag for long local
+sessions.
 
 Local seats run the plain `claude` binary with `ANTHROPIC_BASE_URL` pointed at
 Ollama's Anthropic-compatible endpoint — same transcript, tool cards and resume
@@ -258,7 +372,9 @@ repo and the kind of proposal, and shows what will happen before you click.
 One card per seat: engine marker, plan, window meters with reset times, and
 tokens used. Plus the local-vs-cloud split for the period, `localSavingsUsd`
 framed as money not spent, and dispatch-ledger usage against each configured
-per-engine limit.
+per-engine limit. Each seat card also aggregates its chat sessions' context
+efficiency — cache-hit ratio and compactions — computed in the browser from
+usage Verse already stores.
 
 Where a number does not exist, it says so. Claude has no local utilization
 signal and Grok's probe is not on `/api/usage`; both render as **unknown**
@@ -536,17 +652,28 @@ launches the staged sidecar, so run steps 1–2 first.
 ## Known limits
 
 **Chat**
-- One project per session, one seat per session. Switching either starts a new
-  chat. There is no cross-session memory beyond what the vendor CLI keeps.
+- One seat per session, and one primary project (a workspace adds extra roots).
+  Switching either starts a new chat; **Continue in a fresh chat** carries a
+  deterministic handoff note across. Beyond that note and the shared project
+  memory, a session knows only what its own vendor conversation holds.
 - Permission mode is fixed at `acceptEdits` / `workspace-write`. Verse does not
   surface per-tool approval prompts; use the CLI directly for stricter modes.
-- No virtualized transcript. Very long sessions render every event — start a new
-  session when the context meter is red anyway.
+- No virtualized transcript. Very long sessions render every event — continue in
+  a fresh chat when the handoff banner appears anyway.
+- Verse never compacts, summarizes or switches context mode on its own. The
+  CLIs compact themselves; Verse shows it. **Compact now** is the operator's, on
+  Claude and local sessions only; it was verified headless on a local seat and not
+  run on a paid one, where it spends.
+- Codex can compact somewhat before the meter's tick (its check also counts
+  tool output since the last call); the tick is a ceiling, not a promise.
+- The meter measures the prompt, not the reply. One very long reply can carry a
+  session past its compaction point within a single turn.
 - Grok and Codex resume rely on each vendor's `--resume` / `exec resume`
   behaviour; if a vendor CLI changes its JSON shapes the adapter needs updating
   (`src/core/verse/adapters/`).
 - Local seats need the `claude` binary on `PATH` and an Anthropic-compatible
-  Ollama; models without tool-use support will chat but not edit.
+  Ollama; models without tool-use support are not offered as seats, because
+  they could chat but never edit.
 - Dictation depends on the runtime. WKWebView has no `SpeechRecognition`; use
   system dictation in the desktop app.
 

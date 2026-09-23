@@ -18,6 +18,11 @@
  *   GET /api/usage               per-engine frontier usage (fallback + limits)
  *   GET /api/verse/bootstrap     the seat roster (fallback roster only)
  *
+ * V3.9 adds one panel computed entirely in the browser: CONTEXT EFFICIENCY
+ * per seat (cache-hit ratio, compactions, the fullest context), aggregated
+ * from the session records `bootstrap` already carries — no new route, no
+ * spend (usage/context-model.ts `seatEfficiency`).
+ *
  * The first three are owner T's and are landing in parallel. When they are
  * absent this section degrades to the pre-V2 sources through ONE card model
  * (see accounts-model.ts `buildFallbackAccountCards`) and says so in a banner
@@ -37,6 +42,8 @@ import { verseBootstrapQuery } from '../verse-queries.js';
 import { AccountCard } from '../usage/AccountCard.js';
 import { AccountDetail } from '../usage/AccountDetail.js';
 import { CapacityStrip } from '../usage/CapacityStrip.js';
+import { EfficiencyPanel } from '../usage/EfficiencyPanel.js';
+import { seatEfficiency } from '../usage/context-model.js';
 import { LimitsPanel } from '../usage/LimitsPanel.js';
 import { LocalCloudPanel } from '../usage/LocalCloudPanel.js';
 import { LocalCard, LocalModelsPanel } from '../usage/LocalModelsPanel.js';
@@ -286,6 +293,19 @@ export function UsageSection(): ReactNode {
     }
   }, [selectedAccountId]);
 
+  // Per-seat context efficiency, from the session records bootstrap already
+  // carries. Held back (with the reason) when the chat list never arrived:
+  // an empty table there would read "no chats" when the truth is "not read".
+  const efficiencyRows = useMemo(
+    () => seatEfficiency(bootstrap.data?.sessions ?? [], bootstrap.data?.seats ?? []),
+    [bootstrap.data],
+  );
+  const efficiencyUnavailable = bootstrap.data
+    ? null
+    : bootstrap.status === 'error'
+      ? `The chat list could not be read${bootstrap.error?.message ? ` (${bootstrap.error.message})` : ''}, so efficiency cannot be computed.`
+      : 'Reading the chat list…';
+
   const split = useMemo(() => buildLocalCloudSplit(control.data?.usage), [control.data]);
   const limitRows = useMemo(
     () => buildLimitRows(control.data?.limits, caps.foundryLimits),
@@ -486,6 +506,8 @@ export function UsageSection(): ReactNode {
               }
               loading={seriesRead.status === 'loading' || seriesRead.status === 'idle'}
             />
+
+            <EfficiencyPanel rows={efficiencyRows} unavailableReason={efficiencyUnavailable} />
 
             {split ? (
               <LocalCloudPanel split={split} savingsNote={LOCAL_SAVINGS_NOTE} />

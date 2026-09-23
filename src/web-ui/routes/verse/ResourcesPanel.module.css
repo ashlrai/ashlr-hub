@@ -295,6 +295,30 @@
   color: var(--text-primary);
 }
 
+/* V3.9 — the efficiency block under "This chat". A quiet sub-heading, not a
+   new section: it qualifies the same chat's numbers directly above it. */
+.subTitle {
+  margin: var(--space-3) 0 var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-regular, 400);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.usage + .muted { margin-top: var(--space-2); }
+.usage + .muted + .muted { margin-top: var(--space-1); }
+/* Idle past the prompt-cache lifetime. A status, in words, on the warning
+   hairline — the colour repeats the sentence, it never replaces it. */
+.idleWarn {
+  margin-top: var(--space-2);
+  padding-left: var(--space-2);
+  border-left: 2px solid var(--status-warning-solid);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--status-warning-fg);
+}
+
 @keyframes verse-pulse-res {
   0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-running-solid) 55%, transparent); }
   100% { box-shadow: 0 0 0 5px transparent; }

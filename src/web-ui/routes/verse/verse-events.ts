@@ -21,7 +21,13 @@ import { eventsUrl } from '../../data/client.js';
 import { applyVerseEvent, setVerseStreamState } from './verse-store.js';
 import { invalidateVerseLists, verseSessionPath } from './verse-queries.js';
 
-export const VERSE_EVENT_TYPES: readonly VerseEventType[] = [
+/**
+ * Every VerseEvent name the stream can carry. EventSource only dispatches
+ * NAMED events to listeners registered by name, so a type missing here is
+ * silently dropped — the check below turns a new union member into a compile
+ * error in this file instead of a meter that never moves.
+ */
+const EVENT_TYPES = [
   'user-message',
   'turn-started',
   'text-delta',
@@ -33,7 +39,17 @@ export const VERSE_EVENT_TYPES: readonly VerseEventType[] = [
   'turn-done',
   'error',
   'cancelled',
-];
+  // V3.9 — a server that predates them simply never sends these names.
+  'compaction',
+  'context',
+] as const satisfies readonly VerseEventType[];
+
+type UnlistedEventType = Exclude<VerseEventType, (typeof EVENT_TYPES)[number]>;
+// Fails to compile when VerseEventType gains a member EVENT_TYPES does not list.
+const EVENT_TYPES_EXHAUSTIVE: [UnlistedEventType] extends [never] ? true : never = true;
+void EVENT_TYPES_EXHAUSTIVE;
+
+export const VERSE_EVENT_TYPES: readonly VerseEventType[] = EVENT_TYPES;
 
 /** Per-session stream URL, carrying the client proof the way eventsUrl() does. */
 export function verseSessionEventsUrl(sessionId: string): string {
@@ -44,12 +60,34 @@ function backoffMs(attempt: number): number {
   return Math.min(1000 * 2 ** attempt, 15_000);
 }
 
-function parseEvent(raw: string): VerseEvent | null {
+const nullableCount = (v: unknown): boolean => v === null || (typeof v === 'number' && Number.isFinite(v) && v >= 0);
+
+/**
+ * The two V3.9 frames feed arithmetic (the meter, the compaction count), so a
+ * malformed one is dropped here rather than turning the meter into `NaN`.
+ * Older event types keep the original seq/type-only check.
+ */
+function v39FieldsValid(e: Record<string, unknown>): boolean {
+  if (e.type === 'context') {
+    return typeof e.contextTokens === 'number' && Number.isFinite(e.contextTokens) && e.contextTokens >= 0 &&
+      typeof e.exact === 'boolean' && nullableCount(e.contextWindow) &&
+      (e.autoCompactAt === undefined || nullableCount(e.autoCompactAt));
+  }
+  if (e.type === 'compaction') {
+    return (e.trigger === 'auto' || e.trigger === 'manual') &&
+      nullableCount(e.preTokens) && nullableCount(e.postTokens) && nullableCount(e.durationMs);
+  }
+  return true;
+}
+
+/** Exported for tests: one SSE frame's data → a VerseEvent, or null when malformed. */
+export function parseVerseEventFrame(raw: string): VerseEvent | null {
   try {
     const parsed = JSON.parse(raw) as unknown;
     if (!parsed || typeof parsed !== 'object') return null;
     const candidate = parsed as Partial<VerseEvent>;
     if (typeof candidate.seq !== 'number' || typeof candidate.type !== 'string') return null;
+    if (!v39FieldsValid(parsed as Record<string, unknown>)) return null;
     return parsed as VerseEvent;
   } catch {
     return null;
@@ -79,7 +117,7 @@ export function openVerseSessionStream(sessionId: string): () => void {
     };
     for (const type of VERSE_EVENT_TYPES) {
       es.addEventListener(type, (evt) => {
-        const event = parseEvent((evt as MessageEvent<string>).data);
+        const event = parseVerseEventFrame((evt as MessageEvent<string>).data);
         if (!event) return;
         applyVerseEvent(sessionId, event);
         if (event.type === 'turn-done' || event.type === 'cancelled' || event.type === 'error') invalidateVerseLists();

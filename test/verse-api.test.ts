@@ -10,6 +10,11 @@
  * 401 without the mutation token, POST 404 when dispatch is off, create 201,
  * turns 202 then 409 while running, session detail / rename / cancel /
  * delete, and the SSE tail with Last-Event-ID resume + live delivery.
+ *
+ * V3.9: the fake implements the widened handle (`createSession(req, launch,
+ * opts)`, `setContextMode`), create rejects unknown keys, and the private
+ * memory snapshot reaches the engine but never a response. The V3.9 routes
+ * themselves are covered in test/verse-api-context.test.ts.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as http from 'node:http';
@@ -18,12 +23,14 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig, WebServerOptions } from '../src/core/types.js';
 import type {
+  VerseContextMode,
   VerseCreateSessionRequest,
   VerseEvent,
   VerseSession,
   VerseUsage,
 } from '../src/core/verse/types.js';
-import type { VerseEngineHandle, VerseSeatLaunch } from '../src/core/verse/session-engine.js';
+import type { VerseParsedEvent } from '../src/core/verse/adapters/index.js';
+import type { VerseCreateOptions, VerseEngineHandle, VerseSeatLaunch } from '../src/core/verse/session-engine.js';
 import { resetVerseEngine, invalidateVerseSeatCache, expandHomePrefix } from '../src/core/verse/verse-api.js';
 import { readAuthHeaders, readSseAuth, startServer } from './helpers/authenticated-web-server.js';
 
@@ -45,7 +52,8 @@ function zeroUsage(): VerseUsage {
   return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: null };
 }
 
-type Draft = Omit<VerseEvent, 'seq' | 'at'>;
+/** An event before seq/at are stamped — the adapters' distributive Omit, so each variant keeps its own fields. */
+type Draft = VerseParsedEvent;
 
 class FakeEngine implements VerseEngineHandle {
   readonly sessions = new Map<string, VerseSession>();
@@ -54,6 +62,8 @@ class FakeEngine implements VerseEngineHandle {
   /** PRIVATE launches the API handed us — asserted on, never serialized. */
   readonly launches: VerseSeatLaunch[] = [];
   readonly createRequests: VerseCreateSessionRequest[] = [];
+  /** V3.9: what the API resolved server-side (memory snapshot, handoff provenance). */
+  readonly createOptions: Array<VerseCreateOptions | undefined> = [];
   closed = false;
   private counter = 0;
 
@@ -62,9 +72,10 @@ class FakeEngine implements VerseEngineHandle {
   getEvents(id: string, fromSeq = -1): VerseEvent[] {
     return (this.events.get(id) ?? []).filter((e) => e.seq > fromSeq);
   }
-  createSession(req: VerseCreateSessionRequest, launch: VerseSeatLaunch): VerseSession {
+  createSession(req: VerseCreateSessionRequest, launch: VerseSeatLaunch, opts?: VerseCreateOptions): VerseSession {
     this.createRequests.push(req);
     this.launches.push(launch);
+    this.createOptions.push(opts);
     const id = `s${++this.counter}`;
     const now = new Date().toISOString();
     const session: VerseSession = {
@@ -82,9 +93,22 @@ class FakeEngine implements VerseEngineHandle {
       turnCount: 0,
       usage: zeroUsage(),
       lastError: null,
+      // Spread-only-when-present, like the real engine.
+      ...(req.contextMode ? { contextMode: req.contextMode } : {}),
+      // Like the real engine: a snapshot pins memory on, an explicit `null`
+      // records the API's decision that it is off, absent says nothing.
+      ...(opts?.memory ? { memoryEnabled: true } : opts?.memory === null ? { memoryEnabled: false } : {}),
+      ...(opts?.handoffFrom ? { handoffFrom: opts.handoffFrom } : {}),
     };
     this.sessions.set(id, session);
     this.events.set(id, []);
+    return session;
+  }
+  setContextMode(id: string, mode: VerseContextMode): VerseSession {
+    const session = this.must(id);
+    if (session.status === 'running') throw new FakeVerseError('VERSE_SESSION_BUSY', 409, 'a turn is running');
+    session.contextMode = mode;
+    session.updatedAt = new Date().toISOString();
     return session;
   }
   sendTurn(id: string, text: string): { turnId: string; session: VerseSession } {
@@ -418,6 +442,32 @@ describe('POST /api/verse/sessions — gates', () => {
     expect((unknownSeat.json as { code: string; error: string }).error).toContain('unknown seat');
     expect(engine.sessions.size).toBe(0);
   });
+
+  it('400 on an unknown key or a client-supplied workspaceName — the engine is never called', async () => {
+    const { port, mutate } = await boot();
+    // A misspelt field must not "work" by being silently dropped.
+    const typo = await request(port, 'POST', '/api/verse/sessions', mutate, JSON.stringify({
+      projectPath: repo, seatId: 'claude', contextmode: 'expansive',
+    }));
+    expect(typo.status).toBe(400);
+    expect(typo.json).toEqual({ code: 'VERSE_INVALID', error: 'unknown key: contextmode' });
+
+    // SERVER-FILLED from the registry, never read off a body.
+    const named = await request(port, 'POST', '/api/verse/sessions', mutate, JSON.stringify({
+      projectPath: repo, seatId: 'claude', workspaceName: 'Spoofed',
+    }));
+    expect(named.status).toBe(400);
+    expect((named.json as { error: string }).error).toContain('workspaceName');
+
+    const badMode = await request(port, 'POST', '/api/verse/sessions', mutate, JSON.stringify({
+      projectPath: repo, seatId: 'claude', contextMode: 'huge',
+    }));
+    expect(badMode.status).toBe(400);
+    expect((badMode.json as { error: string }).error).toContain('contextMode must be one of');
+
+    expect(engine.createRequests).toHaveLength(0);
+    expect(engine.sessions.size).toBe(0);
+  });
 });
 
 describe('sessions lifecycle', () => {
@@ -437,10 +487,25 @@ describe('sessions lifecycle', () => {
     expect(engine.launches[0]?.seat.id).toBe('claude');
     expect(engine.launches[0]?.ollamaBaseUrl).toBe('http://127.0.0.1:1');
 
+    // V3.9: nothing the server resolves is taken from the body. Memory is on
+    // by default, so the engine is handed a PRIVATE snapshot — writable on a
+    // Claude seat — under the relocated ~/.ashlr/verse/memory.
+    expect(engine.createRequests[0]).not.toHaveProperty('handoffFromSessionId');
+    expect(engine.createRequests[0]).not.toHaveProperty('contextMode');
+    const memory = engine.createOptions[0]?.memory;
+    expect(memory?.writable).toBe(true);
+    expect(memory?.dir.startsWith(path.join(tmpHome, '.ashlr', 'verse', 'memory') + path.sep)).toBe(true);
+    expect(memory?.block.length ?? 0).toBeGreaterThan(0);
+    expect(engine.createOptions[0]).not.toHaveProperty('handoffFrom');
+    expect(session.memoryEnabled).toBe(true);
+
     const list = await request(port, 'GET', '/api/verse/sessions', read);
     expect(list.status).toBe(200);
     expect((list.json as VerseSession[]).map((s) => s.id)).toEqual(['s1']);
     for (const part of CLAUDE_COMMAND) expect(list.body).not.toContain(part);
+    // The memory directory and prompt block live in the launch record only.
+    expect(list.body).not.toContain('.ashlr/verse/memory');
+    expect(list.body).not.toContain(memory?.block.slice(0, 40) ?? '<no block>');
 
     const bootstrap = await request(port, 'GET', '/api/verse/bootstrap', read);
     const body = bootstrap.json as { sessions: VerseSession[]; projects: Array<{ path: string; enrolled: boolean }> };
@@ -527,6 +592,21 @@ describe('sessions lifecycle', () => {
 
     const unknownAction = await request(port, 'POST', `/api/verse/sessions/${session.id}/explode`, mutate, '{}');
     expect(unknownAction.status).toBe(404);
+  });
+
+  it('route shape: the V3.9 session actions are POST-only and nest no deeper', async () => {
+    const { port, read, mutate } = await boot();
+    const session = await createSession(port, mutate);
+    for (const action of ['context-mode', 'handoff-preview']) {
+      const get = await request(port, 'GET', `/api/verse/sessions/${session.id}/${action}`, read);
+      expect(get.status).toBe(404);
+      const deeper = await request(port, 'POST', `/api/verse/sessions/${session.id}/${action}/x`, mutate, '{}');
+      expect(deeper.status).toBe(404);
+    }
+    // And they exist as POSTs: a well-formed call answers 200 on the fake.
+    const mode = await request(port, 'POST', `/api/verse/sessions/${session.id}/context-mode`, mutate, JSON.stringify({ mode: 'expansive' }));
+    expect(mode.status).toBe(200);
+    expect((mode.json as VerseSession).contextMode).toBe('expansive');
   });
 });
 

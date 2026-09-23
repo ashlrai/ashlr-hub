@@ -49,14 +49,34 @@
  * Local seats are deliberately NOT given this treatment: they have no
  * subscription, no quota and no bill. They get their readiness and their
  * model, and nothing that implies a meter exists.
+ *
+ * V3.9 — CONTEXT, NOT JUST QUOTA (docs/VERSE-CONTEXT.md).
+ *
+ *  5. A seat row now names the CLI version it is pinned to and carries the
+ *     seat's own context notes (binary skew, catalog not fetched yet) ahead
+ *     of the capacity notes — a pinned binary is WHY a model is missing.
+ *  6. "This chat" reads its window through the same precedence as the meter
+ *     (runtime → the seat's current catalog for the model and mode → stored),
+ *     says where that window came from, and marks an upper-bound occupancy
+ *     "≤" instead of printing it as a measurement. It used to print the raw
+ *     creation-time window — 200k for a 1M model, 256k for a 500k Grok.
+ *  7. An EFFICIENCY block: cache-hit ratio (none reported ≠ 0%), average and
+ *     peak context per turn from this chat's own log, compactions, the mode,
+ *     and a warning once the chat has sat idle past the prompt-cache
+ *     lifetime — the next turn then re-reads the whole context uncached,
+ *     which is the single most expensive thing an idle long chat can do.
+ *  8. The chat's project memory (MemoryPanel, its own section) is mounted
+ *     under it, and "This chat" says whether THIS chat's agent was given that
+ *     memory at creation (it is pinned per chat, like the roots).
  */
 import { useEffect, useState } from 'react';
-import type { VerseBootstrap, VerseEngine, VerseSeat, VerseSession } from '../../data/api-types.js';
+import type { VerseBootstrap, VerseEngine, VerseEvent, VerseSeat, VerseSession } from '../../data/api-types.js';
 import { RefreshIndicator } from '../../components/primitives/RefreshIndicator.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { StatusBadge } from '../../components/primitives/StatusBadge.js';
 import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { useQuery, useRefresh } from '../../data/hooks.js';
+import { MemoryPanel } from './context/MemoryPanel.js';
 import { CapacityChip, SeatWindowMeter } from './SeatCapacity.js';
 import { SessionRoots } from './SessionRoots.js';
 import {
@@ -70,7 +90,18 @@ import {
   type ResourcesCollapseState,
 } from './resources-collapse.js';
 import { evidenceNote, seatSubscription, seatSubscriptionSentence, type SeatSubscriptionView } from './seat-subscription.js';
-import { ENGINE_LABEL, formatClock, formatElapsed, groupSeats, projectName } from './verse-model.js';
+import {
+  CONTEXT_MODE_LABEL,
+  formatRatio,
+  idleCacheWarning,
+  modelUnavailableReason,
+  reportedCacheHitRatio,
+  seatCliLine,
+  seatContextNotes,
+  sessionContext,
+  turnContextStats,
+} from './usage/context-model.js';
+import { ENGINE_LABEL, WINDOW_SOURCE_TEXT, formatClock, formatElapsed, groupSeats, projectName } from './verse-model.js';
 import { verseBootstrapQuery } from './verse-queries.js';
 import { formatTokens } from './verse-store.js';
 import styles from './ResourcesPanel.module.css';
@@ -82,15 +113,24 @@ export interface ResourcesPanelProps {
   onStop: (sessionId: string) => void;
   onOpen: (sessionId: string) => void;
   onClose: () => void;
+  /**
+   * The open chat's event log (verse-store), for the per-turn context
+   * statistics. Absent → those two figures read "—"; nothing is guessed.
+   */
+  events?: readonly VerseEvent[];
 }
 
-function useNow(active: boolean): number {
+/** How often "idle for …" is re-evaluated. The threshold is an hour; a half-minute tick is plenty. */
+const IDLE_TICK_MS = 30_000;
+
+function useNow(active: boolean, intervalMs = 1000): number {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     if (!active) return;
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    setNow(Date.now());
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
     return () => clearInterval(id);
-  }, [active]);
+  }, [active, intervalMs]);
   return now;
 }
 
@@ -136,11 +176,20 @@ function SeatDetails({ seat, view }: { seat: VerseSeat; view: SeatSubscriptionVi
   const bars = reportedLimitBars(view);
   const sentence = seatSubscriptionSentence(seat, view);
   const ctx = seat.contextWindow === null ? 'ctx n/a' : `${formatTokens(seat.contextWindow)} ctx`;
-  const models = `${seat.models.length} model${seat.models.length === 1 ? '' : 's'}`;
+  // Models the pinned CLI cannot run are counted, not hidden: "8 models, 1
+  // unavailable" is the prompt to open the picker and read why. On a seat
+  // that is itself unreachable every model is, and that is already said.
+  const unavailable = seat.health.state === 'unavailable'
+    ? 0
+    : seat.models.filter((m) => modelUnavailableReason(seat, m) !== null).length;
+  const models = `${seat.models.length} model${seat.models.length === 1 ? '' : 's'}${unavailable > 0 ? `, ${unavailable} unavailable` : ''}`;
+  const cli = seatCliLine(seat);
   // Provenance is a note too: a reading served from another process's shared
-  // file is not a live probe and must not be presented as one.
+  // file is not a live probe and must not be presented as one. The seat's own
+  // context notes lead: a binary skew explains a missing model before any
+  // quota caveat explains a number.
   const provenance = evidenceNote(view.evidenceSource);
-  const notes = provenance === null ? view.notes : [...view.notes, provenance];
+  const notes = [...seatContextNotes(seat), ...view.notes, ...(provenance === null ? [] : [provenance])];
 
   return (
     <>
@@ -151,6 +200,7 @@ function SeatDetails({ seat, view }: { seat: VerseSeat; view: SeatSubscriptionVi
         <span>{models}</span>
         <span aria-hidden="true">·</span>
         <span className={styles.num}>{ctx}</span>
+        {cli === null ? null : <><span aria-hidden="true">·</span><span className={styles.num}>{cli}</span></>}
       </div>
 
       {view.kind === 'local' || bars.length === 0 ? (
@@ -243,9 +293,103 @@ function SeatRow({
   );
 }
 
-export function ResourcesPanel({ bootstrap, sessions, current, onStop, onOpen, onClose }: ResourcesPanelProps) {
+/**
+ * The open chat's usage and context efficiency. Every figure is derived from
+ * the session record and its own event log — no request, no spend.
+ */
+function ChatUsage({
+  session,
+  seats,
+  events,
+  now,
+}: {
+  session: VerseSession;
+  seats: readonly VerseSeat[];
+  events: readonly VerseEvent[] | undefined;
+  now: number;
+}) {
+  const usage = session.usage;
+  const ctx = sessionContext(session, seats);
+  const stats = turnContextStats(events ?? []);
+  const promptTokens = usage.inputTokens + usage.cacheReadTokens + usage.cacheCreationTokens;
+  const hit = reportedCacheHitRatio(usage);
+  // The record's count is the durable one (a long log may be truncated); the
+  // log's own count stands in only when the record predates the field.
+  const compactions = session.compactionCount ?? stats.compactions;
+  const idle = idleCacheWarning(session, ctx.tokens, now);
+  const bound = ctx.exact ? '' : '≤';
+  const statBound = stats.exact ? '' : '≤';
+
+  return (
+    <>
+      <dl className={styles.usage}>
+        <div><dt>Input</dt><dd>{formatTokens(usage.inputTokens)}</dd></div>
+        <div><dt>Output</dt><dd>{formatTokens(usage.outputTokens)}</dd></div>
+        <div><dt>Cache read</dt><dd>{formatTokens(usage.cacheReadTokens)}</dd></div>
+        <div><dt>Cache write</dt><dd>{formatTokens(usage.cacheCreationTokens)}</dd></div>
+        <div><dt>Turns</dt><dd>{session.turnCount}</dd></div>
+        <div>
+          <dt>Context</dt>
+          <dd title={ctx.exact ? undefined : 'An upper bound: the CLI reported only the turn total, which sums every call.'}>
+            {bound}{formatTokens(ctx.tokens)}{ctx.window === null ? '' : ` / ${formatTokens(ctx.window)}`}
+          </dd>
+        </div>
+      </dl>
+
+      <h4 className={styles.subTitle}>Efficiency</h4>
+      <dl className={styles.usage} aria-label="Context efficiency">
+        <div>
+          <dt>Cache hit</dt>
+          <dd title="Share of prompt tokens served from the provider's cache: cache read ÷ (input + cache read + cache write).">
+            {hit !== null ? formatRatio(hit) : promptTokens > 0 ? 'none reported' : '—'}
+          </dd>
+        </div>
+        <div><dt>Compactions</dt><dd>{compactions}</dd></div>
+        <div>
+          <dt>Avg context / turn</dt>
+          <dd>{stats.average === null ? '—' : `${statBound}${formatTokens(stats.average)}`}</dd>
+        </div>
+        <div>
+          <dt>Peak context</dt>
+          <dd>{stats.peak === null ? '—' : `${statBound}${formatTokens(stats.peak)}`}</dd>
+        </div>
+        <div><dt>Mode</dt><dd>{CONTEXT_MODE_LABEL[ctx.mode]}</dd></div>
+        <div>
+          <dt>Compacts at</dt>
+          <dd>{ctx.autoCompactAt === null ? '—' : `≈${formatTokens(ctx.autoCompactAt)}`}</dd>
+        </div>
+      </dl>
+      <p className={styles.muted}>
+        {ctx.source !== null
+          ? `Window ${WINDOW_SOURCE_TEXT[ctx.source]}.`
+          : ctx.window !== null
+            ? 'Window as stored when this chat was created; how it was known was not recorded.'
+            : 'Window unknown for this chat.'}
+        {stats.turns > 0 && !stats.exact ? ' Figures marked ≤ are upper bounds: the CLI reported only turn totals.' : ''}
+      </p>
+      {/* Pinned per chat at creation, like its roots: the memory panel below
+          edits the PROJECT's file, not what this conversation was offered. */}
+      <p className={styles.muted}>
+        {session.memoryEnabled === true
+          ? 'Shared project memory was given to this chat’s agent when it started.'
+          : 'This chat started without shared project memory.'}
+      </p>
+      {idle === null ? null : (
+        <p role="status" className={styles.idleWarn}>
+          {idle.local
+            ? `Idle for ${formatElapsed(idle.idleMs)}: the local model has likely dropped this chat from its cache, so the next turn re-processes ~${formatTokens(idle.tokens)} tokens before it replies — time, not spend.`
+            : `Idle for ${formatElapsed(idle.idleMs)}, past the ~1 h prompt-cache lifetime: the next turn likely re-reads ~${formatTokens(idle.tokens)} tokens uncached, at full price.`}
+        </p>
+      )}
+    </>
+  );
+}
+
+export function ResourcesPanel({ bootstrap, sessions, current, onStop, onOpen, onClose, events }: ResourcesPanelProps) {
   const running = sessions.filter((s) => s.status === 'running');
   const now = useNow(running.length > 0);
+  // A slower clock for the idle-cache warning: it only has to notice an hour passing.
+  const idleNow = useNow(current !== null, IDLE_TICK_MS);
   const groups = bootstrap ? groupSeats(bootstrap.seats) : [];
   const local = bootstrap?.localRuntime.ollama;
 
@@ -363,17 +507,15 @@ export function ResourcesPanel({ bootstrap, sessions, current, onStop, onOpen, o
 
         <section className={styles.section} aria-labelledby="verse-res-usage">
           <h3 id="verse-res-usage" className={styles.sectionTitle}>This chat</h3>
-          {!current ? <p className={styles.muted}>Select a chat to see its usage.</p> : (
-            <dl className={styles.usage}>
-              <div><dt>Input</dt><dd>{formatTokens(current.usage.inputTokens)}</dd></div>
-              <div><dt>Output</dt><dd>{formatTokens(current.usage.outputTokens)}</dd></div>
-              <div><dt>Cache read</dt><dd>{formatTokens(current.usage.cacheReadTokens)}</dd></div>
-              <div><dt>Cache write</dt><dd>{formatTokens(current.usage.cacheCreationTokens)}</dd></div>
-              <div><dt>Turns</dt><dd>{current.turnCount}</dd></div>
-              <div><dt>Context</dt><dd>{formatTokens(current.usage.contextTokens)}{current.usage.contextWindow ? ` / ${formatTokens(current.usage.contextWindow)}` : ''}</dd></div>
-            </dl>
-          )}
+          {!current
+            ? <p className={styles.muted}>Select a chat to see its usage.</p>
+            : <ChatUsage session={current} seats={bootstrap?.seats ?? []} events={events} now={idleNow} />}
         </section>
+
+        {/* Shared project memory for the open chat's project — its own
+            section (MemoryPanel owns its heading, scope copy and controls).
+            `turnCount` re-reads it: agents write MEMORY.md during turns. */}
+        <MemoryPanel projectPath={current?.projectPath ?? null} refreshKey={current?.turnCount ?? 0} />
       </div>
     </aside>
   );

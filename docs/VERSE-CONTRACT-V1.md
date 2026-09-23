@@ -38,11 +38,18 @@ docs/VERSE.md              [D] user guide
 - Read `~/.ashlr/account-connections/connections.json` (path overridable via `cfg.verse?.accountsRoot`, default that dir).
   Each account → one seat: `id=account.id`, `engine=account.provider` (`codex|claude|grok`), `label=account.label`,
   `accountId=account.id`, launcher `command` kept privately (NOT exposed in the API).
-- Models per engine: claude → `[claude-opus-5, claude-sonnet-5, claude-haiku-4-5-20251001]` (window 200k, 1m variant not listed);
-  codex → `[gpt-5.5, gpt-5.5-mini]` (272k); grok → `[grok-4, grok-4-fast]` (256k). Keep the lists in one const so they are easy to edit.
+- Models per engine. *The V1 lists (`gpt-5.5-mini`, `grok-4`, 200k for every Claude model, 256k for Grok) were wrong and are
+  superseded by V3.9* — see [the V3.9 section](#v39-additive-contract--context-orchestration) and `docs/VERSE-CONTEXT.md` §1:
+  claude from `model-windows.ts` `VERSE_CLAUDE_MODEL_SPECS` (per-model window, max output and `minCliVersion`, checked against
+  the seat's pinned CLI version); codex from the seat's own `native-state/models_cache.json` (visible slugs; a documented
+  fallback list when the seat has no catalog yet); grok from the seat's own catalog, `.info` only (500k).
 - Local seats: `GET <ollama>/api/tags` (base from `cfg.models.ollama` or `http://127.0.0.1:11434`, 2s timeout). One seat per tag whose
-  name matches `/coder|code|qwen|deepseek|devstral|llama/i` (others hidden), `id=local:<tag>`, `engine=local`, `accountId=local`,
-  contextWindow from `/api/show` `model_info["<arch>.context_length"]` when available, else the `:ctxNNk` suffix if present, else 65536.
+  `/api/show` capabilities include `tools` (the name regex `/coder|code|qwen|deepseek|devstral|llama/i` is only a fallback for an
+  Ollama that reports no capabilities), `id=local:<tag>`, `engine=local`, `accountId=local`. contextWindow (V3.9): the llama-server
+  per-slot `n_ctx` on that lane, else `min(num_ctx, native)` when `num_ctx` is pinned, else `min(server default, native)` with the
+  server default taken from the resident `/api/ps` context → `OLLAMA_CONTEXT_LENGTH` → the running server's `server.log` config
+  line → its VRAM-default line, else the trained length marked `fallback`; only when `/api/show` failed, the `ctxNNk` tag suffix
+  (`/(?:^|[:_-])ctx(\d+)k$/i`), else 65536 — `docs/VERSE-CONTEXT.md` §1.5.
 - Health: if `observations.json` exists and has an entry for the account, map `health`+`windows` into `VerseSeatHealth`; else `unknown`.
   Additionally for claude, use `src/core/fabric/claude-usage.ts` rolling-window token counts to fill `summary` when available.
 
@@ -70,19 +77,33 @@ Events omit `seq`/`at` (engine stamps them). Parsers must never throw on garbage
     '--permission-mode', 'acceptEdits', '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}']`
   plus `['--resume', nativeSessionId]` when `session.turnCount > 0` else `['--session-id', nativeSessionId]`.
   local env: `ANTHROPIC_BASE_URL=<ollama base without /v1>`, `ANTHROPIC_AUTH_TOKEN=ollama`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`.
+  V3.9 adds: `--model` is the canonical id (`canonicalModelId`); claude seats pass `--autocompact <400000|auto>` per the session's
+  mode; local adds env `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<session window>` and `--exclude-dynamic-system-prompt-sections`; when the
+  launch record carries memory, `--add-dir <dir>` (when the snapshot is writable) and `--append-system-prompt=<block>` — the same
+  snapshotted block every turn.
   Parse: `stream_event` with `content_block_delta.text_delta` → `text-delta`; `assistant` message content blocks → `assistant-message`
   (text) / `tool-use`; `user` message `tool_result` blocks → `tool-result`; `result` → `usage` (input_tokens + cache_read + cache_creation
-  = contextTokens) and `ok = subtype==='success'`. Ignore `system` except `init` (log model).
+  = contextTokens; V3.9: `contextWindow` from `result.modelUsage`) and `ok = subtype==='success'`. Ignore `system` except `init`
+  (log model) and, V3.9, `compact_boundary` → `compaction`.
 - **codex**: first turn argv = `[...launcher, 'exec', '--json', '--model', model, '--cd', cwd, '--sandbox', 'workspace-write', '-']`
   with prompt on stdin; later turns `[...launcher, 'exec', 'resume', nativeSessionId, '--json', '-']` + stdin.
   Parse codex JSONL (see `src/core/run/engines.ts` normaliseEngineOutputLine and `src/core/resources/worker.ts` parseCodex for the shapes):
   `thread.started.thread_id` → captured nativeSessionId (emit via `turn-done.nativeSessionId`); `item.started/completed` with
   `agent_message` → `assistant-message`; `command_execution`/`file_change`/`mcp_tool_call` items → `tool-use` + `tool-result`;
-  `turn.completed.usage` → `usage`.
+  `turn.completed.usage` → `usage` (V3.9: the parser HOLDS it and `afterTurn` emits the turn's single `usage` event from the
+  rollout — see below; `contextTokensExact: false` when no rollout reading exists, because the turn total is an upper bound). V3.9 expansive mode adds `-c model_context_window=<providerWindow>` and
+  `-c model_auto_compact_token_limit=<autoCompactAt>`, always together, on both `exec` and `exec resume`. Memory (V3.9) rides
+  `-c` too — the directory in `sandbox_workspace_write.writable_roots`, the block as `developer_instructions` — because
+  `exec resume` accepts `-c` but not `--add-dir`. On `exec resume`, `turn.completed.usage` is the THREAD's running total (codex
+  seeds its counter from the rollout), so the turn's usage comes from the rollout: its per-turn `token_usage_record` (0.149+),
+  else the sum of the turn's calls, else the printed figure converted to a delta.
 - **grok**: argv = `[...launcher, '-p', text, '--output-format', 'streaming-messages-json', '--include-partial-messages',
   '--cwd', cwd, '--model', model, '--permission-mode', 'acceptEdits']` + (`['--resume', id]` after first turn else `['--session-id', id]`).
   Parse Anthropic Messages wire format lines (same block/delta shapes as claude stream-json without the outer `stream_event` wrapper —
-  handle both). Usage from `message_delta.usage` / `message_start.message.usage`.
+  handle both). Usage from `message_delta.usage` / `message_start.message.usage`. V3.9: `contextWindow` from the single
+  `result.modelUsage` row carrying a numeric `contextWindow` (its key can differ from the CLI id); `compact_boundary` →
+  `compaction`; no mode flags (Grok has no per-invocation compaction setting); memory as `--rules=<block>` (Grok's append-to-system-
+  prompt flag), read-only because Grok can reach nothing beyond `--cwd`.
 
 ### API (`verse-api.ts`) — mounted in `handleApi` before the 404 fallthrough; GETs use the read session, POSTs use `passesMutationGate` + `ctx.allowDispatch` (404 when off) exactly like existing mutating routes
 - `GET  /api/verse/bootstrap` → `VerseBootstrap`
@@ -95,8 +116,10 @@ Events omit `seq`/`at` (engine stamps them). Parsers must never throw on garbage
 - `POST /api/verse/sessions/:id/rename` `{ title }` → `VerseSession`
 - `GET  /api/verse/sessions/:id/events` → SSE; event name = `VerseEvent.type`, `id` = seq, data = the event JSON; honors `Last-Event-ID`;
   15s `: keepalive` comments; requires the read *session* (cookie) like `/api/events`.
-Errors: `{ error, code? }` via `sendJson`. Codes: `VERSE_SESSION_NOT_FOUND` 404, `VERSE_SESSION_BUSY` 409, `VERSE_INVALID` 400, `VERSE_TOO_LARGE` 413.
+Errors: `{ error, code? }` via `sendJson`. Codes: `VERSE_SESSION_NOT_FOUND` 404, `VERSE_SESSION_BUSY` 409, `VERSE_INVALID` 400, `VERSE_TOO_LARGE` 413. V3.9 adds `VERSE_MODEL_UNAVAILABLE` 409 (a turn on a model the seat lists as unavailable).
 Also add `verse` to the `/api/events` `emitUpdate` poll: emit `verse-sessions` (list digest) when it changes, so the sidebar refreshes.
+V3.9 adds context-mode, handoff-preview, preferences, context-fit, search and memory routes — listed in
+[the V3.9 section](#v39-additive-contract--context-orchestration).
 
 ### CLI (`src/cli/verse.ts`)
 `ashlr verse [--port N] [--no-open] [--json]` → `startServer` with `allowDispatch: true`, prints
@@ -120,7 +143,9 @@ Layout (three columns, resizable like WorkspaceView):
    dictation button (Web Speech API `webkitSpeechRecognition`/`SpeechRecognition` when present: toggles listening, interim results shown
    in the textarea; when unavailable render a tooltip "Use Wispr Flow / Superwhisper — system dictation works in this box"), send/stop button
    (stop → cancel). Composer disabled while `status==='running'` except stop.
-   **Context meter**: `contextTokens / contextWindow` as a slim bar under the header with % and "123k / 200k"; amber ≥70%, red ≥90%; unknown window → "n/a".
+   **Context meter** (V3.9 — supersedes the V1 "amber ≥70%, red ≥90% of the window"): full-window track with a compaction tick,
+   label "142k / 1M · compacts ≈367k", tone from context-math `occupancy` (warn at 80 %, danger at 95 % of the compaction point,
+   `over` past the window), "≤" when the reading is not exact, unknown window → "n/a". See `docs/VERSE-CONTEXT.md`.
 3. **Resources panel** (right, 320px, collapsible): seats with health state, usage windows (meter per window), local runtime status (Ollama reachable, models),
    running sessions with elapsed time and stop buttons, cumulative usage for the current session (input/output/cache).
 
@@ -140,6 +165,111 @@ context meter thresholds; dictation button fallback when no SpeechRecognition; s
   have `lib.rs` inject them via `window.__ASHLR_TOKENS__` init script (Tauri `initialization_script`). SessionGate must accept `window.__ASHLR_TOKENS__`
   when present (owner C exposes a tiny hook; owner D wires Rust side).
 - `docs/VERSE.md`: what it is, `ashlr verse`, seats, local models, dictation note, macOS build steps, known limits.
+
+## V3.9 additive contract — context orchestration
+
+Everything below is **optional and additive**: a record, fixture or client written before V3.9 keeps validating and behaves as
+before (absent `contextMode` = `standard`, absent `contextTokensExact` = exact, absent memory = off). New fields are spread onto
+records only when present, so an ordinary session's on-disk shape does not change. The GET `/api/verse/bootstrap` key set is
+unchanged. The authority for every number and rule is `docs/VERSE-CONTEXT.md`; the arithmetic lives in one browser-safe module,
+`src/core/verse/context-math.ts`, used by the server and the UI alike.
+
+### Types (`src/core/verse/types.ts`)
+
+| Shape | New optional fields |
+|---|---|
+| `VerseSeat` | `cliVersion` (the pinned CLI binary's version), `notes: string[]` (binary skew, catalog not yet fetched, …) |
+| `VerseModelOption` | `autoCompactAt` (standard), `expansive: VerseContextBudget \| null` (present only when real), `maxOutputTokens`, `windowSource: VerseWindowSource`, `minCliVersion`, `unavailableReason` (non-null = listed but not runnable) |
+| `VerseUsage` | `contextWindowSource`, `autoCompactAt`, `contextTokensExact` (false = upper bound). `contextTokens` is now stored **unclamped** |
+| `VerseSession` | `contextMode: 'standard' \| 'expansive'`, `compactionCount`, `handoffFrom: { sessionId, title }`, `memoryEnabled` |
+| `VerseCreateSessionRequest` | `contextMode` (absent → the seat's preferred mode, else standard), `handoffFromSessionId` (the server resolves the title) |
+| `VerseSeatLaunch` (private launch record, `session-engine.ts`) | `memory: { dir, block, writable }` — snapshotted at creation; the same block every turn |
+
+New types: `VerseWindowSource` (`runtime` · `provider-catalog` · `cli-catalog` · `documented` · `fallback`), `VerseContextMode` /
+`VERSE_CONTEXT_MODES`, `VerseContextBudget { contextWindow, autoCompactAt, providerWindow? }`, `VersePreferences`,
+`VersePreferencesUpdate`, `VerseContextModeRequest`, `VerseHandoffPreviewRequest`, `VerseHandoffPreview`, `VerseContextFit`,
+`VerseContextFitRoot`, `VerseFitVerdict`, `VerseSearchHit`, `VerseSearchResponse`, `VerseProjectMemory`,
+`VerseProjectMemoryWrite`. Constants: `VERSE_HANDOFF_MAX_CHARS = 12_000`, `VERSE_MEMORY_MAX_BYTES = 64 KiB`, and
+`VERSE_DEFAULT_CONTEXT_WINDOWS` = `{ claude: 200_000, codex: 258_400, grok: 500_000, local: 65_536 }` (last-resort fallbacks only;
+every known model carries its own window).
+
+### Events
+
+Both are persisted and flow through the normal emit / SSE path (event name = `type`, id = `seq`):
+
+- `compaction { turnId, trigger: 'auto' | 'manual', preTokens, postTokens, durationMs }` — the CLI compacted its conversation
+  (claude/grok `system/compact_boundary`, `manual` for an operator's **Compact now** `/compact` turn; codex rollout `compacted`,
+  trigger `auto`, with `preTokens` / `postTokens` from the bracketing `token_count` readings — the last before the line and the
+  first after it — and `durationMs` null; a codex event can arrive mid-turn from `pollTelemetry`). The comment on the frozen
+  `types.ts` declaration still says codex counts are null; the codex adapter fills them when the readings exist, null otherwise.
+  The engine increments `session.compactionCount`.
+- `context { turnId, contextTokens, contextWindow, exact, autoCompactAt? }` — an occupancy **reading** (codex rollout
+  `token_count`: `info.last_token_usage.total_tokens` against `info.model_context_window`), not a usage delta: it replaces `contextTokens` / the window and is never summed. The engine fills `autoCompactAt`
+  for the window in force.
+- `usage` is unchanged in shape; its `contextWindow` is now the CLI's runtime figure when the CLI reports one (claude/grok
+  `result.modelUsage` — the window only: its token counts accumulate across `--resume`). Codex emits exactly one `usage` per turn
+  from `afterTurn`, not the parser: `exec resume`'s printed `turn.completed` usage is thread-cumulative, so the figure comes from
+  the rollout (the CLI's 0.149+ per-turn record, else the sum of this turn's calls, else the printed figure as a delta), and
+  falls back to the printed figure with `contextTokensExact: false` when no rollout is readable.
+
+### Adapters (`src/core/verse/adapters/index.ts`)
+
+`VerseAdapter` gains two optional hooks, the one place an adapter may read the filesystem (bounded, synchronous, never throwing):
+`pollTelemetry(ctx)` every `VERSE_TELEMETRY_POLL_MS` (2 s) while a turn runs, and `afterTurn(ctx)` once after the process exits,
+after the parser's `finish()` events are applied and before `turn-done`. `ctx: VerseAdapterTurnContext` carries the session, the
+launch record, the turn id, the spawn time, the native id seen so far, the turn's parser and a per-turn `state` scratch object.
+Codex implements both (its rollout); claude and grok need neither.
+
+### Engine (`src/core/verse/session-engine.ts`)
+
+- `createSession(req, launch, opts?: VerseCreateOptions)` — `opts.memory` / `opts.handoffFrom` are resolved by the API from
+  preferences and the source session, never read off a request body. Rejects (`VERSE_INVALID`) a `contextMode` the model has no
+  budget for and a model whose option carries an `unavailableReason` (the reason is in the message). Stores the mode's budget on
+  `session.usage` (`contextWindow`, `autoCompactAt`, `contextWindowSource`). `opts.memory` is always passed on V3.9 creates — a
+  snapshot, or `null` when memory is off or could not be set up, which the engine records as `memoryEnabled: false`.
+- Turns: `POST /sessions/:id/turns` is refused with 409 `VERSE_MODEL_UNAVAILABLE` (the reason in the message) when the session's
+  seat currently lists its model as unavailable — e.g. a stored `claude-opus-5.5` session on a seat pinned below 2.1.280 — before
+  any CLI is spawned.
+- `setContextMode(id, mode): VerseSession` — new on `VerseEngineHandle`; applies from the next turn.
+- Usage: a runtime window wins (source `runtime`, compaction point recomputed by `reconcileAutoCompactAt`) except on engine
+  `local`, where Verse sets the window itself. Stored sessions whose model is an alias (`claude-opus-5.5`) keep their stored id.
+
+### Routes (all under `/api/verse`, same gates as V1: POSTs 404 unless `allowDispatch` — including `handoff-preview`, so a
+read-only server answers 404 there — then `passesMutationGate` + the 64 KiB JSON body cap (`POST /memory` alone: 2 × 64 KiB +
+8 KiB = 139,264 bytes, so a full 64 KiB file survives JSON escaping; its content cap stays `VERSE_MEMORY_MAX_BYTES`); an unknown
+body key **or an unknown or duplicated query parameter** is a 400, never ignored; every response through `sendJson` →
+`sanitizePublicJson`. None of these routes starts a model call — the only spend is still `POST /sessions/:id/turns`, which also
+carries an operator's **Compact now** (`/compact` as the turn text, claude and local seats only))
+
+| Route | Body / query | Response |
+|---|---|---|
+| `POST /sessions` | V1 body plus optional `contextMode`, `handoffFromSessionId`. Now **strict**: any key outside `projectPath`, `seatId`, `model`, `title`, `extraRoots`, `workspaceId`, `contextMode`, `handoffFromSessionId` is a 400; a client-sent `workspaceName` is refused with its own message (the server fills it from `workspaceId`); a requested `claude-opus-5.5` is rewritten to `claude-opus-5-5` | `VerseSession` (201), with `memoryEnabled` always set |
+| `POST /sessions/:id/context-mode` | `VerseContextModeRequest { mode }` | `VerseSession`; 409 `VERSE_SESSION_BUSY` while a turn runs, 400 `VERSE_INVALID` for a mode the model lacks |
+| `POST /sessions/:id/handoff-preview` | `VerseHandoffPreviewRequest { includeLastAssistant?, focus? }` | `VerseHandoffPreview` — a POST because it runs `git`; spends nothing |
+| `GET /preferences` | — | `VersePreferences` |
+| `POST /preferences` | `VersePreferencesUpdate` — exactly one of `{seatId, contextMode}`, `{memoryEnabled}`, `{projectPath, memoryEnabled}` | `VersePreferences` |
+| `GET /context-fit` | `?workspaceId=…` or `?projectPath=…[&extraRoots=…]…` — `extraRoots` repeats (a comma is legal in a path); never both forms; paths validated with the same rules as `createSession` | `VerseContextFit` |
+| `GET /search` | `?q=…&limit=…` (limit ≤ 50) | `VerseSearchResponse` |
+| `GET /memory` | `?projectPath=…` | `VerseProjectMemory` |
+| `POST /memory` | `VerseProjectMemoryWrite { projectPath, content }` (≤ `VERSE_MEMORY_MAX_BYTES`) | `VerseProjectMemory` |
+
+### Files
+
+```
+src/core/verse/
+  context-math.ts        [contract — frozen] budgets, compaction formulas, occupancy, fit verdict, advice (browser-safe)
+  model-windows.ts       Claude spec table, seat-catalog readers (codex/grok), local option builder, CLI version helpers
+  codex-rollout.ts       bounded rollout tail reads: token_count, compacted, task_started
+  session-handoff.ts     buildHandoffPreview — deterministic handoff note
+  context-fit.ts         estimateContextFit — git ls-files sizes, bytes/4, 60 s cache
+  session-search.ts      searchSessions — bounded keyword scan of the session store
+  project-memory.ts      memory dir, block, read/write
+  preferences.ts         ~/.ashlr/verse/preferences.json (0600, atomic)
+src/web-ui/routes/verse/context/   context-queries.ts, HandoffDialog, MemoryPanel, SessionSearch
+```
+
+Private state: `~/.ashlr/verse/preferences.json` (0600) and `~/.ashlr/verse/memory/<slug>-<sha256(realpath)[0:12]>/` (0700, files
+0600). Neither is ever inside a repository.
 
 ## Definition of done
 - `npm run typecheck && npm run typecheck:web && npm run lint && npm run test:web && npx vitest run test/verse*.test.ts` green.

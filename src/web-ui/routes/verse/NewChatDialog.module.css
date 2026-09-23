@@ -100,3 +100,78 @@
 
 .removeRoot:hover,
 .addRoot:hover { border-color: var(--border-strong, var(--border-subtle)); }
+
+/* ---- V3.9 context --------------------------------------------------------
+   The chosen model's context budget, mode, fit and seat facts. Hung off the
+   same hairline as the capacity note above it: both are commentary on the
+   seat field, not new fields of their own. */
+.context {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border-default);
+}
+.contextHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.contextBudget {
+  font-family: var(--font-display);
+  font-size: var(--text-sm-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+/* A model the pinned CLI cannot run: it blocks "Start chat", so it reads as a
+   warning, in words — the disabled button alone would not say why. */
+.warn {
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--status-warning-solid);
+  color: var(--status-warning-fg);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.fit { display: grid; gap: var(--space-1); min-width: 0; }
+.fitLine {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+/* The verdict is a WORD first; the tint only repeats it (DESIGN-V2 §6). */
+.fitBadge {
+  flex: none;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  line-height: 18px;
+  white-space: nowrap;
+  color: var(--text-secondary);
+}
+.fitBadge[data-fit='fits'] { border-color: var(--status-success-solid); color: var(--status-success-fg); background: var(--status-success-bg); }
+.fitBadge[data-fit='tight'] { border-color: var(--status-warning-solid); color: var(--status-warning-fg); background: var(--status-warning-bg); }
+.fitBadge[data-fit='expansive'] { border-color: var(--status-info-solid); color: var(--status-info-fg); background: var(--status-info-bg); }
+.fitBadge[data-fit='split'] { border-color: var(--status-danger-solid); color: var(--status-danger-fg); background: var(--status-danger-bg); }
+/* The seat's own facts: its pinned CLI and any note it carries (binary skew,
+   catalog not fetched yet). Same quiet treatment as the resources panel. */
+.seatFacts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+.seatFacts li {
+  font-size: var(--text-2xs-size, 11px);
+  line-height: var(--text-2xs-line, 14px);
+  color: var(--text-tertiary);
+  overflow-wrap: anywhere;
+}

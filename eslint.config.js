@@ -10,6 +10,12 @@ export default tseslint.config(
   {
     ignores: [
       '.ashlr/**',
+      // Claude Code's per-checkout state. `.claude/worktrees/*` holds full
+      // agent worktree copies of this repo (every src/ test/ desktop/ file
+      // again, at other commits), so without this `npx eslint .` lints the
+      // tree N+1 times and reports errors from checkouts nobody is editing.
+      // `.claude/commands/*.md` is prose, never linted.
+      '.claude/**',
       '.m262-wip/**',
       'desktop/src-tauri/gen/**',
       'desktop/src-tauri/target/**',

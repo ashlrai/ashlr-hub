@@ -14,6 +14,7 @@
  * `tool-use` and `tool-result` pair up by toolUseId into one card.
  */
 import type { VerseEvent, VerseSession, VerseUsage } from '../../data/api-types.js';
+import { reconcileAutoCompactAt } from '../../../core/verse/context-math.js';
 
 export type VerseStreamState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'closed';
 
@@ -157,9 +158,10 @@ export function setVerseSessionStatus(sessionId: string, status: VerseSession['s
 /**
  * Apply one live event. Duplicates (a fresh SSE connection replays from the
  * start) are dropped by seq; out-of-order arrivals are inserted in place.
- * Session-level side effects: `usage` updates the live context meter,
- * `turn-started` flips status to running, `turn-done`/`cancelled`/`error`
- * settle it, and a codex `turn-done.nativeSessionId` is captured.
+ * Session-level side effects: `usage` and `context` update the live context
+ * meter, `compaction` counts a native compaction, `turn-started` flips
+ * status to running, `turn-done`/`cancelled`/`error` settle it, and a codex
+ * `turn-done.nativeSessionId` is captured.
  */
 export function applyVerseEvent(sessionId: string, event: VerseEvent): boolean {
   const current = entryFor(sessionId);
@@ -173,21 +175,16 @@ export function applyVerseEvent(sessionId: string, event: VerseEvent): boolean {
         session = { ...session, status: 'running', lastError: null, updatedAt: event.at };
         break;
       case 'usage':
-        // The frame carries THIS turn's counts; the record keeps the session
-        // totals (server: session-engine applyUsage). Context occupancy and
-        // the window are live values, not sums.
-        session = {
-          ...session,
-          usage: {
-            inputTokens: session.usage.inputTokens + event.usage.inputTokens,
-            outputTokens: session.usage.outputTokens + event.usage.outputTokens,
-            cacheReadTokens: session.usage.cacheReadTokens + event.usage.cacheReadTokens,
-            cacheCreationTokens: session.usage.cacheCreationTokens + event.usage.cacheCreationTokens,
-            contextTokens: event.usage.contextTokens,
-            contextWindow: event.usage.contextWindow ?? session.usage.contextWindow,
-          },
-          updatedAt: event.at,
-        };
+        session = { ...session, usage: applyUsageFrame(session, event.usage), updatedAt: event.at };
+        break;
+      case 'context':
+        session = { ...session, usage: applyContextReading(session, event), updatedAt: event.at };
+        break;
+      case 'compaction':
+        // Counted exactly as the server counts it (session-engine), so a reload
+        // shows the same number the live stream did. Occupancy is NOT touched
+        // here: the next `usage`/`context` reading is the measurement.
+        session = { ...session, compactionCount: (session.compactionCount ?? 0) + 1, updatedAt: event.at };
         break;
       case 'turn-done':
         session = {
@@ -210,6 +207,78 @@ export function applyVerseEvent(sessionId: string, event: VerseEvent): boolean {
   }
   patch(sessionId, { events, lastSeq: Math.max(current.lastSeq, event.seq), session });
   return true;
+}
+
+/**
+ * Fold one `usage` frame into the session record. The frame carries THIS
+ * turn's counts; the record keeps the session totals (server: session-engine
+ * applyUsage). Occupancy and the window are live values, not sums.
+ *
+ * V3.9 fields are adopted only when the frame carries them (spread-when-
+ * present), so a pre-3.9 server's frames leave the record's shape unchanged.
+ * The one exception is a local seat: Verse SETS that window
+ * (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), so a window a frame reports without
+ * provenance is not allowed to replace it — the server ignores runtime
+ * windows on local for the same reason.
+ */
+export function applyUsageFrame(session: VerseSession, frame: VerseUsage): VerseUsage {
+  const prev = session.usage;
+  const next: VerseUsage = {
+    ...prev,
+    inputTokens: prev.inputTokens + frame.inputTokens,
+    outputTokens: prev.outputTokens + frame.outputTokens,
+    cacheReadTokens: prev.cacheReadTokens + frame.cacheReadTokens,
+    cacheCreationTokens: prev.cacheCreationTokens + frame.cacheCreationTokens,
+    contextTokens: frame.contextTokens,
+  };
+  const frameWindow = typeof frame.contextWindow === 'number' && frame.contextWindow > 0 ? frame.contextWindow : null;
+  const trusted = frame.contextWindowSource !== undefined || session.engine !== 'local';
+  if (frameWindow !== null && trusted) next.contextWindow = frameWindow;
+  if (frame.contextWindowSource !== undefined) next.contextWindowSource = frame.contextWindowSource;
+  if (frame.autoCompactAt !== undefined) next.autoCompactAt = frame.autoCompactAt;
+  // The server marks an EXACT reading by OMITTING the key (it only writes
+  // `false`), so a resolved frame without it must clear an earlier "≤" — a
+  // frame from a pre-3.9 server (no V3.9 fields at all) leaves it alone.
+  if (frame.contextTokensExact === false) next.contextTokensExact = false;
+  else if (frame.contextWindowSource !== undefined) delete next.contextTokensExact;
+  return next;
+}
+
+/**
+ * Apply a `context` reading: it REPLACES occupancy (never summed) and, when it
+ * names a window, that window is a runtime measurement. The engine fills
+ * `autoCompactAt` for the window in force; a frame without it (an older
+ * server) is reconciled from the previous budget rather than left pointing at
+ * a compaction point that belonged to a different window.
+ */
+export function applyContextReading(
+  session: VerseSession,
+  event: Extract<VerseEvent, { type: 'context' }>,
+): VerseUsage {
+  const prev = session.usage;
+  const next: VerseUsage = {
+    ...prev,
+    contextTokens: Math.max(0, Math.floor(event.contextTokens)),
+    contextTokensExact: event.exact,
+  };
+  const window = typeof event.contextWindow === 'number' && event.contextWindow > 0 ? event.contextWindow : null;
+  // Local windows are set by Verse, not measured (see applyUsageFrame).
+  if (window === null || session.engine === 'local') {
+    if (event.autoCompactAt !== undefined && event.autoCompactAt !== null) next.autoCompactAt = event.autoCompactAt;
+    return next;
+  }
+  next.contextWindow = window;
+  next.contextWindowSource = 'runtime';
+  if (event.autoCompactAt !== undefined) {
+    next.autoCompactAt = event.autoCompactAt;
+  } else if (window !== prev.contextWindow) {
+    next.autoCompactAt = reconcileAutoCompactAt({
+      engine: session.engine,
+      runtimeWindow: window,
+      budget: prev.contextWindow ? { contextWindow: prev.contextWindow, autoCompactAt: prev.autoCompactAt ?? null } : null,
+    });
+  }
+  return next;
 }
 
 export function forgetVerseSession(sessionId: string): void {
@@ -251,6 +320,17 @@ export type TranscriptItem =
       durationMs: number | null;
     }
   | { kind: 'error'; key: string; turnId: string | null; at: string; message: string }
+  | {
+      /** V3.9: the CLI compacted its own context. Counts are null when the CLI does not report them (codex). */
+      kind: 'compaction';
+      key: string;
+      turnId: string | null;
+      at: string;
+      trigger: 'auto' | 'manual';
+      preTokens: number | null;
+      postTokens: number | null;
+      durationMs: number | null;
+    }
   | { kind: 'cancelled'; key: string; turnId: string; at: string }
   | { kind: 'turn-done'; key: string; turnId: string; at: string; ok: boolean; durationMs: number };
 
@@ -342,6 +422,21 @@ export function buildTranscript(events: VerseEvent[]): Transcript {
       }
       case 'usage':
         usage = e.usage;
+        break;
+      case 'compaction':
+        // Deliberately NO flushPending: CLIs compact between model calls, and
+        // flushing a streamed bubble here would leave it in the list when the
+        // complete `assistant-message` arrives — the same reply twice.
+        items.push({
+          kind: 'compaction',
+          key: `k-${e.seq}`,
+          turnId: e.turnId,
+          at: e.at,
+          trigger: e.trigger,
+          preTokens: e.preTokens,
+          postTokens: e.postTokens,
+          durationMs: e.durationMs,
+        });
         break;
       case 'error':
         flushPending(false);

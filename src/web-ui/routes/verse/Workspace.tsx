@@ -6,7 +6,7 @@
  *
  * THE HEADER READS LEFT TO RIGHT, in the order a person asks the questions:
  *
- *   [ project      ]  [ seat · model ]  ……  [ meter ] [ delete ] │ [ ⬓ ⬔ ]
+ *   [ project      ]  [ seat · model ]  ……  [ meter ] [ mode ] [ delete ] │ [ ⬓ ⬔ ]
  *   [ Chat title   ]
  *
  *  1. WHERE AM I — a two-line lockup: the project above, the chat title
@@ -15,8 +15,22 @@
  *     project path can shove the actions off the end.
  *  2. WHAT IS IT RUNNING ON — the seat pill, which is now seat · model ONLY.
  *     The project moved up into the lockup rather than being said twice.
- *  3. WHAT CAN I DO — stream state, context numbers and the destructive
+ *  3. WHAT CAN I DO — stream state, context numbers, the context-mode chip
+ *     (only for a model with a real expansive budget) and the destructive
  *     action, then a hairline, then the two pane toggles as a matched pair.
+ *
+ * UNDER THE STRIP (V3.9), never in it — the strip is one fixed-height row —
+ * sit the context-advice notes: "continue in a fresh chat" when handoffAdvice
+ * says so, and "expansive mode could help" when expansiveAdvice does. Both
+ * are suggestions with their reasons and costs stated; neither acts on its
+ * own. The handoff dialog creates a chat and pre-fills its composer; the
+ * operator's Send is the first spend.
+ *
+ * "Compact now…" (claude and local engines only — see canCompactNow) opens a
+ * confirm panel in the same place, reached from the mode menu and from the
+ * handoff note. It sends `/compact [focus]` through `onSend`, the composer's
+ * own path, so it is an ordinary turn in every respect that matters: token
+ * gate, running state, transcript entry, local-only chokepoint.
  *
  * With nothing selected the strip is NOT empty: the lockup says "Chat / No
  * chat selected", so the header still answers "where am I" — which the old
@@ -33,16 +47,25 @@
  *    spent. Quietly: a healthy seat adds nothing to the strip, because a
  *    badge that is always there is a badge nobody reads.
  */
-import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
-import type { VerseProject, VerseSeat } from '../../data/api-types.js';
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import type { VerseContextMode, VerseProject, VerseSeat, VerseSession } from '../../data/api-types.js';
+import { engineSupportsModes, hasExpansiveMode } from '../../../core/verse/context-math.js';
+import { saveDraft } from './chat/composer-state.js';
 import { Composer } from './Composer.js';
-import { ContextMeter } from './ContextMeter.js';
+import { MutationTokenDialog } from '../../components/auth/MutationTokenDialog.js';
+import { setSessionContextMode } from './context/context-queries.js';
+import { HandoffDialog } from './context/HandoffDialog.js';
+import { describeContextError, useTokenGate } from './context/use-token-gate.js';
+import { canCompactNow, CompactPanel, ContextAdvice, ContextMeter, ContextModeControl } from './ContextMeter.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { Transcript } from './Transcript.js';
 import { PanelIcon, SidebarIcon, TrashIcon, VerseMark } from './verse-icons.js';
 import { CapacityChip } from './SeatCapacity.js';
 import { seatSubscription, seatSubscriptionSentence, worthFlagging } from './seat-subscription.js';
-import { contextWindowFor, projectName, seatById, seatPillLabel } from './verse-model.js';
+import { projectName, seatById, seatPillLabel, sessionContextBudget } from './verse-model.js';
+import { invalidateVerseLists } from './verse-queries.js';
+import { setVerseSession } from './verse-store.js';
+import { rememberVerseSeat } from './verse-ui-store.js';
 import { useSeatsRefresh } from './useSeatsRefresh.js';
 import type { VerseSessionView } from './useVerseSession.js';
 import styles from './Workspace.module.css';
@@ -65,16 +88,28 @@ export interface WorkspaceProps {
   onToggleSidebar: () => void;
   resourcesOpen: boolean;
   onToggleResources: () => void;
+  /**
+   * V3.9. Switch the Chat section to another chat — the handoff flow lands
+   * on the chat it just created, and "Continued from …" links back. Absent →
+   * the new chat is announced and left for the operator to open.
+   */
+  onOpenSession?: (sessionId: string) => void;
 }
 
 export function Workspace(props: WorkspaceProps) {
   const { view, seats, projects, dispatchEnabled, locked, hasAnySessions, onSend, onStop, onRename, onDelete,
-    onSeatChange, onNew, onRetry, sidebarCollapsed, onToggleSidebar, resourcesOpen, onToggleResources } = props;
+    onSeatChange, onNew, onRetry, sidebarCollapsed, onToggleSidebar, resourcesOpen, onToggleResources,
+    onOpenSession } = props;
   const session = view.session;
   const [editing, setEditing] = useState(false);
   const [draftTitle, setDraftTitle] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [modeState, setModeState] = useState<{ busy: boolean; error: string | null }>({ busy: false, error: null });
+  const [handoffOpen, setHandoffOpen] = useState(false);
+  const [compactOpen, setCompactOpen] = useState(false);
+  /** Set when a handoff chat was created but there is no host callback to switch to it. */
+  const [handoffCreated, setHandoffCreated] = useState<{ title: string } | null>(null);
   const titleInput = useRef<HTMLInputElement>(null);
   const headingId = useId();
 
@@ -85,7 +120,53 @@ export function Workspace(props: WorkspaceProps) {
   useEffect(() => {
     setEditing(false);
     setConfirmDelete(false);
+    setModeState({ busy: false, error: null });
+    setHandoffOpen(false);
+    setCompactOpen(false);
+    setHandoffCreated(null);
   }, [view.sessionId]);
+
+  // The mode switch is a write: without a held token it parks, asks for the
+  // token with a reason, and runs once unlocked — the same hand-off the Chat
+  // section's own actions use, owned here because the chip lives here.
+  const gate = useTokenGate();
+  const gateRun = gate.run;
+
+  const sessionId = view.session?.id ?? null;
+  /**
+   * Standard ⇄ expansive. Explicit only — the suggestion chip calls this too,
+   * on a click, never on its own — and it applies from the next turn. The
+   * server answers with the updated record (budget fields recomputed for the
+   * new mode), which replaces the store's copy so the meter moves at once.
+   */
+  const changeMode = useCallback(async (mode: VerseContextMode) => {
+    if (!sessionId) return;
+    setModeState({ busy: true, error: null });
+    try {
+      const updated = await gateRun('Changing the context mode changes the compaction flag this chat runs with from its next turn.',
+        () => setSessionContextMode(sessionId, mode));
+      if (updated) setVerseSession(updated.id, updated);
+      setModeState({ busy: false, error: null });
+    } catch (err) {
+      setModeState({ busy: false, error: describeContextError(err) });
+    }
+  }, [sessionId, gateRun]);
+
+  /**
+   * The handoff dialog created a chat. Its first message is NOT sent: the
+   * note goes into the new chat's composer draft (composer-state, the same
+   * per-session draft store the composer restores on mount), and the operator
+   * reads it and presses Send — that press is the first spend.
+   */
+  const onHandoffCreated = useCallback((created: VerseSession, text: string) => {
+    saveDraft(created.id, text);
+    rememberVerseSeat(created.projectPath, { seatId: created.seatId, model: created.model });
+    setVerseSession(created.id, created);
+    invalidateVerseLists();
+    setHandoffOpen(false);
+    if (onOpenSession) onOpenSession(created.id);
+    else setHandoffCreated({ title: created.title });
+  }, [onOpenSession]);
 
   useEffect(() => {
     if (editing) titleInput.current?.select();
@@ -158,7 +239,13 @@ export function Workspace(props: WorkspaceProps) {
   }
 
   const running = session?.status === 'running';
-  const contextWindow = session ? contextWindowFor(seats, session) : null;
+  const budget = session ? sessionContextBudget(seats, session) : null;
+  const mode: VerseContextMode = session?.contextMode ?? 'standard';
+  // The chip only offers what the CLI can do: a model with a real expansive
+  // budget on an engine that takes a per-invocation budget — or a session
+  // already in expansive, which must always be able to switch back.
+  const modesAvailable = session !== null && budget !== null && engineSupportsModes(session.engine) &&
+    (hasExpansiveMode(budget.option) || mode === 'expansive');
   const activeSeat = session ? seatById(seats, session.seatId) ?? null : null;
   const capacity = activeSeat === null ? null : seatSubscription(activeSeat);
   // The pill's tooltip is the whole story — seat, plan, verdict, evidence,
@@ -169,6 +256,11 @@ export function Workspace(props: WorkspaceProps) {
       ? seatPillLabel(seats, session)
       : seatSubscriptionSentence(activeSeat, capacity)} · ${session.projectPath}`;
   const disabledReason = !dispatchEnabled ? 'Sending is disabled: this server was started without dispatch.' : null;
+  // The engine answers 409 to a mode change while a turn runs, so the chip is
+  // disabled for the turn's length rather than offering a choice that fails.
+  const modeDisabledReason = disabledReason ?? (running ? 'Available when the current turn finishes — the mode cannot change mid-turn.' : null);
+  const compactable = session !== null && canCompactNow(session.engine);
+  const openCompact = compactable ? () => { setHandoffCreated(null); setCompactOpen(true); } : undefined;
 
   return (
     <section className={styles.workspace} aria-labelledby={headingId}>
@@ -221,7 +313,16 @@ export function Workspace(props: WorkspaceProps) {
             the actions can never be pushed past the strip's right edge. */}
         <div className={styles.actions}>
           {view.stream === 'reconnecting' ? <span className={styles.streamState} role="status">reconnecting…</span> : null}
-          {session ? <ContextMeter contextTokens={session.usage.contextTokens} contextWindow={contextWindow} /> : null}
+          {session && budget ? (
+            <ContextMeter contextTokens={budget.contextTokens} contextWindow={budget.contextWindow} autoCompactAt={budget.autoCompactAt}
+              exact={budget.exact} source={budget.source} mode={modesAvailable ? mode : null} engine={session.engine}
+              compactionCount={session.compactionCount ?? 0} />
+          ) : null}
+          {session && budget && modesAvailable ? (
+            <ContextModeControl mode={mode} option={budget.option} busy={modeState.busy} error={modeState.error}
+              disabled={!dispatchEnabled || running} disabledReason={modeDisabledReason}
+              onChange={(next) => { void changeMode(next); }} onCompact={openCompact} />
+          ) : null}
 
           {session ? (
             confirmDelete ? (
@@ -252,14 +353,43 @@ export function Workspace(props: WorkspaceProps) {
         </div>
       </header>
 
-      <Transcript transcript={view.transcript} loaded={view.loaded} loadError={view.loadError} onRetry={onRetry} />
+      {session && budget ? (
+        <ContextAdvice session={session} budget={budget} modesAvailable={modesAvailable} dispatchEnabled={dispatchEnabled}
+          modeBusy={modeState.busy} onHandoff={() => { setHandoffCreated(null); setHandoffOpen(true); }}
+          onSwitchExpansive={() => { void changeMode('expansive'); }} onCompact={openCompact} />
+      ) : null}
+      {session && budget && compactable && compactOpen ? (
+        <div className={styles.advice}>
+          <CompactPanel engine={session.engine} budget={budget} running={running} dispatchEnabled={dispatchEnabled}
+            empty={session.turnCount === 0} onSend={onSend} onClose={() => setCompactOpen(false)} />
+        </div>
+      ) : null}
+      {handoffCreated ? (
+        <div className={styles.advice}>
+          <p className={styles.adviceStatus} role="status">
+            Started “{handoffCreated.title}” — open it from the chat list; the handoff note is waiting in its message box.
+          </p>
+        </div>
+      ) : null}
+
+      <Transcript transcript={view.transcript} loaded={view.loaded} loadError={view.loadError} onRetry={onRetry}
+        engine={session?.engine} handoffFrom={session?.handoffFrom ?? null} onOpenSession={onOpenSession} />
 
       {session ? (
         <Composer key={session.id} sessionId={session.id} seats={seats} seat={{ seatId: session.seatId, model: session.model }}
           engine={session.engine} running={running} disabled={!dispatchEnabled} disabledReason={disabledReason} locked={locked}
-          hintSeen={session.turnCount > 0} contextTokens={session.usage.contextTokens} contextWindow={contextWindow}
+          hintSeen={session.turnCount > 0} contextTokens={budget?.contextTokens ?? null} contextWindow={budget?.contextWindow ?? null}
+          autoCompactAt={budget?.autoCompactAt ?? null} contextExact={budget?.exact ?? true}
+          handoffDraft={session.handoffFrom !== undefined && session.turnCount === 0}
           onSend={onSend} onStop={onStop} onSeatChange={onSeatChange} autoFocus />
       ) : null}
+
+      {/* Mounted only while open: the dialog fetches a preview (git diff
+          --stat on the server) and nothing should run for a closed one. */}
+      {session && handoffOpen ? (
+        <HandoffDialog session={session} seats={seats} open onClose={() => setHandoffOpen(false)} onCreated={onHandoffCreated} />
+      ) : null}
+      <MutationTokenDialog {...gate.dialog} tokenLabel="Mutation token" tokenHelp="the mutation token ashlr verse printed" />
     </section>
   );
 }

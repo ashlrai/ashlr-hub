@@ -46,12 +46,95 @@ export interface VerseSeat {
    * at all — `health.state` says what it does know.
    */
   capacity?: VerseSeatCapacity;
+  /**
+   * V3.9 ADDITIVE. The version of the CLI binary this seat is PINNED to (its
+   * native-profile launcher execs one exact file). Absent when unknown and on
+   * local seats. A pinned binary never updates itself, so a model that needs a
+   * newer CLI is listed with `unavailableReason` rather than silently failing.
+   */
+  cliVersion?: string;
+  /**
+   * V3.9 ADDITIVE. Plain-language facts about this seat's context setup the UI
+   * must show rather than imply (binary skew, catalog not yet fetched, …).
+   * Absent when there is nothing to say, so ordinary seats keep their shape.
+   */
+  notes?: string[];
+}
+
+/**
+ * Where a context-window figure came from, so nothing on screen implies more
+ * certainty than it has (docs/VERSE-CONTEXT.md §1).
+ *
+ * - `runtime`          — the CLI reported it for THIS turn (claude/grok
+ *                        `result.modelUsage.<m>.contextWindow`, codex rollout
+ *                        `token_count.info.model_context_window`, Ollama
+ *                        `/api/ps`). Wins over everything else.
+ * - `provider-catalog` — the seat's own served catalog on disk (codex/grok
+ *                        `native-state/models_cache.json`).
+ * - `cli-catalog`      — read out of the pinned CLI binary's embedded catalog
+ *                        and recorded here with the version it was read from.
+ * - `documented`       — the provider's published model table.
+ * - `fallback`         — a named default; the UI marks it as an estimate.
+ */
+export type VerseWindowSource = 'runtime' | 'provider-catalog' | 'cli-catalog' | 'documented' | 'fallback';
+
+/**
+ * How much context a session is allowed to accumulate before the CLI compacts.
+ *
+ * - `standard`  — the default. Evidence-based budget per engine: Claude 1M
+ *                 models compact near 400k instead of ~967k; Codex, Grok and
+ *                 local run their native windows.
+ * - `expansive` — opt-in. Claude runs its full native window (CLI `auto`),
+ *                 Codex raises `model_context_window` to the model's catalog
+ *                 maximum (872k on GPT-6 / GPT-5.6). Costs more usage per turn,
+ *                 buys simultaneous visibility for coupled, cross-cutting work.
+ *
+ * A mode that does not exist for a model (Grok, local, 200k Claude models,
+ * GPT-5.5) is simply absent from that model's option — never faked.
+ */
+export type VerseContextMode = 'standard' | 'expansive';
+
+export const VERSE_CONTEXT_MODES: readonly VerseContextMode[] = ['standard', 'expansive'];
+
+/** One mode's budget for a model on a seat. */
+export interface VerseContextBudget {
+  /** The window the CLI measures against in this mode (the meter's denominator). */
+  contextWindow: number;
+  /** Token count at which the CLI auto-compacts in this mode; null when unknown. */
+  autoCompactAt: number | null;
+  /**
+   * The RAW window value the CLI must be TOLD to reach this budget, when that
+   * differs from `contextWindow` — codex measures against 95% of the window it
+   * is configured with, so expansive GPT-6 is `providerWindow: 872_000`
+   * (`-c model_context_window=872000`) but `contextWindow: 828_400`.
+   */
+  providerWindow?: number | null;
 }
 
 export interface VerseModelOption {
   id: string;
   label: string;
+  /** Standard-mode window the CLI measures against (codex: the 95% effective window). */
   contextWindow: number | null;
+  /**
+   * V3.9 ADDITIVE — every field below is optional so records and fixtures
+   * written before it keep validating. Absent means "not known", never zero.
+   */
+  /** Standard-mode auto-compaction point. */
+  autoCompactAt?: number | null;
+  /** Present ONLY when this model on this seat has a real expansive mode. */
+  expansive?: VerseContextBudget | null;
+  /** The CLI's default max output for this model, when known. */
+  maxOutputTokens?: number | null;
+  windowSource?: VerseWindowSource;
+  /** Minimum CLI version that knows this model id (e.g. '2.1.280'); null when any. */
+  minCliVersion?: string | null;
+  /**
+   * Why this model cannot run on this seat right now, in plain language (e.g.
+   * "needs Claude Code 2.1.280; this seat runs 2.1.257"). Null/absent = runnable.
+   * Listed rather than hidden so the operator learns WHY a model is missing.
+   */
+  unavailableReason?: string | null;
 }
 
 export interface VerseSeatHealth {
@@ -390,9 +473,23 @@ export interface VerseUsage {
   outputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
-  /** Prompt size of the most recent assistant call = live context occupancy. */
+  /**
+   * Prompt size of the most recent assistant call = live context occupancy.
+   * Stored UNCLAMPED: a reading above the window is information (the CLI is
+   * about to compact or overflow), and only the UI decides how to draw it.
+   */
   contextTokens: number;
   contextWindow: number | null;
+  /** V3.9 ADDITIVE. Where `contextWindow` came from; absent on old records. */
+  contextWindowSource?: VerseWindowSource;
+  /** V3.9 ADDITIVE. Auto-compaction point for the session's current mode. */
+  autoCompactAt?: number | null;
+  /**
+   * V3.9 ADDITIVE. False when `contextTokens` is an UPPER BOUND rather than a
+   * measurement (codex before its rollout is readable: the turn total sums
+   * every model call). Absent means exact.
+   */
+  contextTokensExact?: boolean;
 }
 
 export interface VerseSession {
@@ -432,6 +529,23 @@ export interface VerseSession {
   turnCount: number;
   usage: VerseUsage;
   lastError: string | null;
+  /**
+   * V3.9 ADDITIVE. The session's context budget. Absent = `standard`, which
+   * is exactly how every record written before modes existed behaves.
+   * Changeable mid-session (POST /sessions/:id/context-mode); it only changes
+   * CLI flags, never prompt content, so switching does not break the cache.
+   */
+  contextMode?: VerseContextMode;
+  /** V3.9 ADDITIVE. Native compactions observed so far (claude/grok compact_boundary, codex rollout `compacted`). */
+  compactionCount?: number;
+  /** V3.9 ADDITIVE. Set when this session was started as a handoff from another. */
+  handoffFrom?: { sessionId: string; title: string };
+  /**
+   * V3.9 ADDITIVE. Shared project memory was offered to this session's CLI at
+   * creation. Pinned, like the roots: a conversation must not silently gain a
+   * writable directory because a preference moved underneath it.
+   */
+  memoryEnabled?: boolean;
 }
 
 /** Normalized event stream. `seq` is monotonic per session and is the SSE id. */
@@ -446,7 +560,42 @@ export type VerseEvent =
   | { seq: number; at: string; type: 'usage'; turnId: string; usage: VerseUsage }
   | { seq: number; at: string; type: 'turn-done'; turnId: string; ok: boolean; nativeSessionId: string | null; durationMs: number }
   | { seq: number; at: string; type: 'error'; turnId: string | null; message: string }
-  | { seq: number; at: string; type: 'cancelled'; turnId: string };
+  | { seq: number; at: string; type: 'cancelled'; turnId: string }
+  /**
+   * V3.9. The CLI compacted its own conversation. Token counts are the CLI's
+   * own (`compact_metadata.pre_tokens/post_tokens` on claude/grok). Codex
+   * rollouts mark only THAT a compaction happened, so its counts are the last
+   * `token_count` reading before the marker and the first one after it —
+   * measured, but by Verse, not stated by the CLI; its `durationMs` is null.
+   * Any count may be null when no reading brackets the compaction.
+   */
+  | {
+    seq: number;
+    at: string;
+    type: 'compaction';
+    turnId: string | null;
+    trigger: 'auto' | 'manual';
+    preTokens: number | null;
+    postTokens: number | null;
+    durationMs: number | null;
+  }
+  /**
+   * V3.9. A context-occupancy READING that is not a usage delta — e.g. codex's
+   * rollout `token_count` (exact last-call prompt size and the window the CLI
+   * measured it against), polled mid-turn and read again after it. Replaces
+   * the session's `contextTokens`; never summed. The engine fills
+   * `autoCompactAt` for the window in force.
+   */
+  | {
+    seq: number;
+    at: string;
+    type: 'context';
+    turnId: string | null;
+    contextTokens: number;
+    contextWindow: number | null;
+    exact: boolean;
+    autoCompactAt?: number | null;
+  };
 
 export type VerseEventType = VerseEvent['type'];
 
@@ -536,6 +685,18 @@ export interface VerseCreateSessionRequest {
    * from.
    */
   workspaceName?: string;
+  /**
+   * V3.9 ADDITIVE. Absent → the seat's preferred mode (preferences.json), else
+   * `standard`. `expansive` on a model with no expansive budget is rejected.
+   */
+  contextMode?: VerseContextMode;
+  /**
+   * V3.9 ADDITIVE. Start this session as a handoff from an existing one. The
+   * server resolves the source's title itself (never from the body) and pins
+   * `handoffFrom`; the handoff TEXT is sent by the client as turn 1, after the
+   * operator has read it — nothing is spent on their behalf.
+   */
+  handoffFromSessionId?: string;
 }
 
 /** POST /api/verse/sessions/:id/turns */
@@ -566,9 +727,157 @@ export interface VerseTurnLaunch {
 export const VERSE_MAX_TURN_TEXT_BYTES = 64 * 1024;
 export const VERSE_MAX_EVENTS_PER_SESSION = 20_000;
 export const VERSE_TURN_TIMEOUT_MS = 30 * 60 * 1000;
+/**
+ * LAST-RESORT fallbacks, used only when neither the runtime, the seat's own
+ * catalog, nor the verified per-model table (core/verse/model-windows.ts) knows
+ * the model. Each mirrors what the CLI ITSELF assumes for an unknown id, so the
+ * meter never claims more than the CLI will allow:
+ *
+ * - claude 200_000 — Claude Code's `Mg()` default for an unrecognized model.
+ *   Every KNOWN Claude id carries its real window (1M for the 5.x family,
+ *   Opus 4.8 and Sonnet 5) in the per-model table instead.
+ * - codex 258_400  — 272_000 × the 95% `effective_context_window_percent`
+ *   every codex catalog entry carries; the figure codex's own rollouts report
+ *   as `model_context_window` (65,440 of 65,440 observed events).
+ * - grok 500_000   — `context_window` for every grok-4.x id in the seat catalog.
+ * - local 65_536   — the num_ctx the default local tag pins.
+ */
 export const VERSE_DEFAULT_CONTEXT_WINDOWS: Record<string, number> = {
   claude: 200_000,
-  codex: 272_000,
-  grok: 256_000,
+  codex: 258_400,
+  grok: 500_000,
   local: 65_536,
 };
+
+// ---------------------------------------------------------------------------
+// V3.9 context orchestration — request/response shapes (docs/VERSE-CONTEXT.md)
+// ---------------------------------------------------------------------------
+
+/** GET /api/verse/preferences — the operator's standing context choices. */
+export interface VersePreferences {
+  version: 1;
+  /** Per-seat default context mode for NEW sessions. Absent = `standard`. */
+  seats: Record<string, { contextMode?: VerseContextMode }>;
+  /** Shared project memory. On by default; listed canonical paths opt out. */
+  memory: { enabled: boolean; disabledProjects: string[] };
+}
+
+/**
+ * POST /api/verse/preferences — exactly ONE of the three forms per request, so
+ * a body can never change more than the operator clicked.
+ */
+export type VersePreferencesUpdate =
+  | { seatId: string; contextMode: VerseContextMode }
+  | { memoryEnabled: boolean }
+  | { projectPath: string; memoryEnabled: boolean };
+
+/** POST /api/verse/sessions/:id/context-mode */
+export interface VerseContextModeRequest {
+  mode: VerseContextMode;
+}
+
+/** POST /api/verse/sessions/:id/handoff-preview */
+export interface VerseHandoffPreviewRequest {
+  /**
+   * Include the latest assistant message verbatim (capped) as the agent's own
+   * summary — used after "Ask this seat to summarize" produced one.
+   */
+  includeLastAssistant?: boolean;
+  /** Optional operator focus line, e.g. "finish the migration of X". ≤ 500 chars. */
+  focus?: string;
+}
+
+/** Deterministic, zero-spend handoff note built from the session's event log. */
+export interface VerseHandoffPreview {
+  sourceSessionId: string;
+  sourceTitle: string;
+  /** The exact text to send as turn 1 of the new session. ≤ VERSE_HANDOFF_MAX_CHARS. */
+  text: string;
+  stats: {
+    chars: number;
+    /** chars / 4, rounded up — the same estimator the fit badges use. */
+    estTokens: number;
+    turnsCovered: number;
+    filesTouched: number;
+    /** Sections dropped to respect the cap, by name; empty when nothing was cut. */
+    truncated: string[];
+  };
+}
+
+export const VERSE_HANDOFF_MAX_CHARS = 12_000;
+
+/** GET /api/verse/context-fit — how big the reachable code is, in tokens. */
+export interface VerseContextFitRoot {
+  path: string;
+  /** Tracked text files counted (git ls-files, binaries and >1 MB files skipped). */
+  files: number;
+  bytes: number;
+  estTokens: number;
+  /** True when the scan hit its file or time cap; estTokens is then a floor. */
+  truncated: boolean;
+}
+
+export interface VerseContextFit {
+  roots: VerseContextFitRoot[];
+  totalEstTokens: number;
+  /** Always 'bytes/4' today; named so a better estimator can be introduced honestly. */
+  estimator: 'bytes/4';
+  sampledAt: string;
+}
+
+/**
+ * Per-model verdict for a working set (see context-math.ts `fitVerdict`):
+ * fits in standard, tight in standard, fits only in expansive, or too big for
+ * any single context (split the work).
+ */
+export type VerseFitVerdict = 'fits' | 'tight' | 'expansive' | 'split';
+
+/** GET /api/verse/search?q=&limit= — keyword search over past sessions. Zero spend. */
+export interface VerseSearchHit {
+  sessionId: string;
+  title: string;
+  projectPath: string;
+  engine: VerseEngine;
+  seq: number;
+  at: string;
+  kind: 'user' | 'assistant';
+  /** ≤ 240 chars around the first match, whitespace-collapsed. */
+  snippet: string;
+  score: number;
+}
+
+export interface VerseSearchResponse {
+  query: string;
+  hits: VerseSearchHit[];
+  /** Sessions actually scanned (the scan is bounded; see session-search.ts). */
+  scannedSessions: number;
+  truncated: boolean;
+}
+
+/** GET/POST /api/verse/memory — shared project memory for one project. */
+export interface VerseProjectMemory {
+  projectPath: string;
+  enabled: boolean;
+  /** Contents of MEMORY.md ('' when absent). */
+  content: string;
+  bytes: number;
+  updatedAt: string | null;
+  /** Other files the agents created in the memory directory (names only). */
+  files: string[];
+  /**
+   * Present (true) only when `content` as SENT differs from the bytes on disk:
+   * the public-JSON sanitizer rewrote the home path to `~` or replaced a
+   * secret-looking value with `[REDACTED]`. The file itself is untouched; a
+   * save that would write placeholders over real values is refused (409
+   * VERSE_MEMORY_REDACTED), so the editor must say so before the operator types.
+   */
+  contentSanitized?: boolean;
+}
+
+/** POST /api/verse/memory */
+export interface VerseProjectMemoryWrite {
+  projectPath: string;
+  content: string;
+}
+
+export const VERSE_MEMORY_MAX_BYTES = 64 * 1024;

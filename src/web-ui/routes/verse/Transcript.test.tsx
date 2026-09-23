@@ -1,8 +1,8 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ev } from './fixtures.test-support.js';
-import { Transcript } from './Transcript.js';
+import { describeCompaction, Transcript } from './Transcript.js';
 import { buildTranscript } from './verse-store.js';
 
 describe('Transcript', () => {
@@ -204,5 +204,61 @@ describe('Transcript — agentic reading', () => {
     // Plain arrows work once a turn itself has focus.
     await user.keyboard('{ArrowUp}');
     expect(turns[0]).toHaveFocus();
+  });
+});
+
+describe('Transcript — V3.9 compaction and handoff', () => {
+  it('draws a compaction as a divider with the CLI\'s own numbers', () => {
+    const transcript = buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'keep going' }),
+      ev(2, 'compaction', { turnId: 't1', trigger: 'auto', preTokens: 812_000, postTokens: 41_000, durationMs: 118_000 }),
+      ev(3, 'assistant-message', { turnId: 't1', text: 'Continuing.' }),
+    ]);
+    render(<Transcript transcript={transcript} loaded loadError={null} engine="claude" />);
+    const divider = screen.getByRole('log').querySelector('[data-kind="compaction"]') as HTMLElement;
+    expect(divider).not.toBeNull();
+    expect(divider).toHaveTextContent('Auto-compacted 812k → 41k in 1m 58s');
+    expect(divider).toHaveTextContent('Earlier turns now reach the agent only as a summary');
+  });
+
+  it('says only what the CLI recorded when it gives no counts (codex rollouts)', () => {
+    expect(describeCompaction({ trigger: 'auto', preTokens: null, postTokens: null, durationMs: null }, 'codex')).toBe('Codex compacted its context');
+    expect(describeCompaction({ trigger: 'auto', preTokens: null, postTokens: null, durationMs: null })).toBe('The CLI compacted its context');
+    expect(describeCompaction({ trigger: 'manual', preTokens: 300_000, postTokens: null, durationMs: 4_000 }, 'grok')).toBe('Compacted on request at 300k in 4.0s');
+    expect(describeCompaction({ trigger: 'auto', preTokens: 967_391, postTokens: 19_001, durationMs: null }, 'claude')).toBe('Auto-compacted 967k → 19k');
+  });
+
+  it('does not let a compaction between Stop and turn-done turn the stop into a failure', () => {
+    const transcript = buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'go' }),
+      ev(2, 'cancelled', { turnId: 't1' }),
+      ev(3, 'compaction', { turnId: 't1', trigger: 'auto', preTokens: null, postTokens: null, durationMs: null }),
+      ev(4, 'turn-done', { turnId: 't1', ok: false, nativeSessionId: null, durationMs: 100 }),
+    ]);
+    render(<Transcript transcript={transcript} loaded loadError={null} engine="codex" />);
+    expect(screen.queryByText(/Turn ended without a result/)).not.toBeInTheDocument();
+    expect(screen.getByText('Codex compacted its context')).toBeInTheDocument();
+  });
+
+  it('opens a handoff chat with "Continued from <source>", linking back', async () => {
+    const user = userEvent.setup();
+    const onOpenSession = vi.fn();
+    render(<Transcript transcript={buildTranscript([])} loaded loadError={null}
+      handoffFrom={{ sessionId: 'vs_src', title: 'Migrate the billing tables' }} onOpenSession={onOpenSession} />);
+    const log = screen.getByRole('log');
+    expect(within(log).getByText('Continued from')).toBeInTheDocument();
+    // An empty handoff chat explains the pre-filled draft and that nothing was spent.
+    expect(within(log).getByText('Review the handoff, then send it.')).toBeInTheDocument();
+    expect(log).toHaveTextContent('nothing is sent until you press Send');
+    await user.click(within(log).getByRole('button', { name: 'Migrate the billing tables' }));
+    expect(onOpenSession).toHaveBeenCalledWith('vs_src');
+  });
+
+  it('names the source without a link when there is nowhere to open it', () => {
+    render(<Transcript transcript={buildTranscript([ev(1, 'user-message', { turnId: 't1', text: 'hi' })])} loaded loadError={null}
+      handoffFrom={{ sessionId: 'vs_src', title: 'Old chat' }} />);
+    expect(screen.getByText('Old chat')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Old chat' })).toBeNull();
+    expect(screen.queryByText('Review the handoff, then send it.')).toBeNull();
   });
 });

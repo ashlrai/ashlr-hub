@@ -12,6 +12,14 @@
  * writes deliberately, and it is the only place in the console that creates
  * one.
  *
+ * ONE SEARCH FIELD, TWO ANSWERS (V3.9). The field filters titles and project
+ * paths instantly, on the client, exactly as before; underneath the matching
+ * chats, `SessionSearch` lists chats whose MESSAGES match the same words
+ * (GET /api/verse/search — a scan of the transcripts on this machine, nothing
+ * sent to a model). One box rather than two because two stacked search fields
+ * in a narrow column make the operator guess which one to type in; the title
+ * answer stays instant and the message answer arrives a debounce later.
+ *
  * Seat health and the local runtime live in the resources panel, and the
  * theme toggle lives in the shell rail, so nothing competes with the list.
  *
@@ -31,6 +39,7 @@ import { PlusIcon, SearchIcon, SidebarIcon } from './verse-icons.js';
 import { seatSubscription } from './seat-subscription.js';
 import { formatRelative, groupSessions, seatById, seatPillLabel } from './verse-model.js';
 import { SavedProjects } from './workspaces/SavedProjects.js';
+import { SessionSearch } from './context/SessionSearch.js';
 import styles from './Sidebar.module.css';
 
 export interface SidebarProps {
@@ -65,7 +74,7 @@ export function Sidebar(props: SidebarProps) {
         <div className={styles.headDragStrip} aria-hidden="true" />
         <label className={styles.search} htmlFor={searchId}>
           <span className={styles.searchIcon} aria-hidden="true"><SearchIcon /></span>
-          <span className="visually-hidden">Search chats</span>
+          <span className="visually-hidden">Search chats and messages</span>
           <input id={searchId} type="search" value={query} placeholder="Search chats" autoComplete="off"
             onChange={(event) => onQuery(event.target.value)} />
         </label>
@@ -102,11 +111,11 @@ export function Sidebar(props: SidebarProps) {
             <button type="button" onClick={onRetry}>Retry</button>
           </div>
         ) : groups.length === 0 ? (
-          <div className={styles.empty}>
+          <div className={query ? `${styles.empty} ${styles.emptyCompact}` : styles.empty}>
             {query ? (
               <>
-                <p className={styles.emptyTitle}>No chats match “{query}”</p>
-                <p>Search covers chat titles and the project each one is on.</p>
+                <p className={styles.emptyTitle}>No chat titles match “{query}”</p>
+                <p>Titles and projects match as you type. Chats whose messages match, if any, are listed below.</p>
                 {/* A dead end needs a way out. Without this the only exit is
                     to find the field again and clear it by hand. */}
                 <button type="button" className={styles.emptyAction} onClick={() => onQuery('')}>
@@ -180,6 +189,10 @@ export function Sidebar(props: SidebarProps) {
             </ul>
           </section>
         ))}
+        {/* Message matches for the same words. Renders nothing until the query
+            is long enough to be worth a scan, and nothing at all on a server
+            that has no search route — the title list above still answers. */}
+        {query.trim() ? <SessionSearch query={query} onOpenSession={onSelect} selectedId={selectedId} /> : null}
       </div>
 
       <footer className={styles.footer}>

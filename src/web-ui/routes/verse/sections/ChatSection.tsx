@@ -365,18 +365,24 @@ export function ChatSection() {
           hasAnySessions={sessions.length > 0} onSend={send} onStop={() => stop()} onRename={rename} onDelete={remove}
           onSeatChange={changeSeat} onNew={() => openNewChat()} onRetry={() => setReload((n) => n + 1)}
           sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setVerseSidebarCollapsed(!sidebarCollapsed)}
-          resourcesOpen={resourcesOpen} onToggleResources={() => setVerseResourcesOpen(!resourcesOpen)} />
+          resourcesOpen={resourcesOpen} onToggleResources={() => setVerseResourcesOpen(!resourcesOpen)}
+          // V3.9: a handoff lands on the chat it created, and "Continued from …"
+          // opens the source — both are ordinary selections.
+          onOpenSession={setSelectedId} />
       </div>
       {resourcesOpen ? (
         <>
           <ChatResizer side="resources" label="Resize resources panel" className={styles.resize} />
-          <ResourcesPanel bootstrap={bootstrap.data} sessions={sessions} current={view.session} onStop={(id) => stop(id)}
-            onOpen={setSelectedId} onClose={() => setVerseResourcesOpen(false)} />
+          <ResourcesPanel bootstrap={bootstrap.data} sessions={sessions} current={view.session} events={view.events}
+            onStop={(id) => stop(id)} onOpen={setSelectedId} onClose={() => setVerseResourcesOpen(false)} />
         </>
       ) : null}
 
       <NewChatDialog open={newChat.open} onClose={() => setNewChat({ open: false })} projects={projects} seats={seats} workspaces={workspaces}
-        initialProjectPath={newChat.projectPath ?? null} initialSeat={newChat.seat ?? null} busy={creating} error={createError} onCreate={create} />
+        initialProjectPath={newChat.projectPath ?? null} initialSeat={newChat.seat ?? null} busy={creating} error={createError} onCreate={create}
+        // The dialog's one write of its own (a seat's default context mode)
+        // goes through the same token guard as every other chat mutation.
+        runMutation={withToken} />
       <QuickSwitcher open={switcherOpen} onClose={() => setSwitcherOpen(false)} sessions={sessions} seats={seats} projects={projects}
         onSelectSession={setSelectedId} onNewChat={(seat) => openNewChat({ projectPath: view.session?.projectPath ?? null, seat })} />
       <MutationTokenDialog open={tokenPrompt.open} reason={tokenPrompt.reason} tokenLabel="Mutation token"

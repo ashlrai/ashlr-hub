@@ -36,11 +36,27 @@ beforeEach(() => {
 });
 
 describe('package.json publish shape', () => {
-  it('is the public scoped package with provenance', () => {
+  it('is the public scoped package; provenance is never baked into publishConfig', () => {
     expect(pkg['name']).toBe('@ashlr/hub');
     expect(pkg['private']).toBeUndefined();
-    expect((pkg['publishConfig'] as Record<string, unknown>)['access']).toBe('public');
-    expect((pkg['publishConfig'] as Record<string, unknown>)['provenance']).toBe(true);
+    // e24a7dae removed `publishConfig.provenance: true` on purpose. GitHub
+    // Actions is disabled on this repository, and npm can only mint a
+    // provenance attestation from a supported CI provider, so the baked-in
+    // flag made EVERY local publish die with "Automatic provenance generation
+    // not supported for provider: null". Exact shape, not just "no
+    // provenance key": a re-added flag (or any other publish-time switch)
+    // should be a deliberate edit to this test, not a silent regression.
+    expect(pkg['publishConfig']).toEqual({ access: 'public' });
+    // Provenance is requested per publish instead, and only where it can be
+    // honoured: the (currently disabled) release workflow passes
+    // `--provenance` on its own `npm publish` line — asserted in the release
+    // workflow suite below.
+    // The tradeoff is documented rather than silent: a local publish carries
+    // no signed attestation and nothing replaces it.
+    const releasingLocally = readFileSync(join(REPO_ROOT, 'docs', 'RELEASING-LOCALLY.md'), 'utf8');
+    expect(releasingLocally).toContain('publishConfig.provenance: true');
+    expect(releasingLocally).toContain('Automatic provenance generation not supported for provider: null');
+    expect(releasingLocally.replace(/\s+/g, ' ')).toMatch(/no longer carry a signed attestation/);
   });
 
   it('gates publish behind the full verification suite', () => {

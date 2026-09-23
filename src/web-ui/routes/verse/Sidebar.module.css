@@ -129,6 +129,10 @@
   line-height: var(--text-sm-line);
 }
 .emptyTitle { color: var(--text-secondary); font-weight: var(--font-weight-medium); margin-bottom: var(--space-1); }
+/* A title search with no title matches is not the end of the list: message
+   matches follow directly below (context/SessionSearch.tsx), so the note is
+   compact instead of centring itself in a screen-tall void. */
+.emptyCompact { padding: var(--space-4) var(--space-3) 0; }
 /* An empty list is a dead end unless it carries the way out of itself. Same
    shape as .error button, so the two read as one control vocabulary. */
 .emptyAction {

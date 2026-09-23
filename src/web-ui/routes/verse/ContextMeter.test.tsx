@@ -1,41 +1,461 @@
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
-import { ContextMeter, contextTone } from './ContextMeter.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import {
+  canCompactNow,
+  COMPACT_FOCUS_MAX,
+  compactCommand,
+  compactCostCopy,
+  CompactPanel,
+  ContextAdvice,
+  ContextMeter,
+  ContextModeControl,
+  describeContext,
+  expansiveCostRatio,
+  sessionHandoffAdvice,
+} from './ContextMeter.js';
+import { CLAUDE_1M_SEAT, CLAUDE_SEAT, CODEX_EXPANSIVE_SEAT, GROK_SEAT, LOCAL_SEAT, session } from './fixtures.test-support.js';
+import { contextWindowFor, modelOptionFor, sessionContextBudget } from './verse-model.js';
+import { resetVerseUi } from './verse-ui-store.js';
 
-describe('ContextMeter', () => {
-  it('maps percentages to the 70/90 thresholds', () => {
-    expect(contextTone(0)).toBe('ok');
-    expect(contextTone(69)).toBe('ok');
-    expect(contextTone(70)).toBe('warn');
-    expect(contextTone(89)).toBe('warn');
-    expect(contextTone(90)).toBe('danger');
-    expect(contextTone(100)).toBe('danger');
-    expect(contextTone(null)).toBe('unknown');
+const OPUS_1M = CLAUDE_1M_SEAT.models[0]!;
+const GPT6 = CODEX_EXPANSIVE_SEAT.models[0]!;
+
+describe('ContextMeter — a full-window track with the compaction point marked', () => {
+  it('labels "142k / 1M · compacts ≈367k", with the tick at the compaction point', () => {
+    render(<ContextMeter contextTokens={142_000} contextWindow={1_000_000} autoCompactAt={367_000} mode="standard" engine="claude" source="cli-catalog" />);
+    const meter = screen.getByRole('meter', { name: 'Context window' });
+    expect(meter).toHaveTextContent('142k / 1M');
+    expect(meter).toHaveTextContent('· compacts ≈367k');
+    expect(meter).toHaveTextContent('14%');
+    expect(meter).toHaveAttribute('aria-valuenow', '14');
+    expect(meter).toHaveAttribute('data-tone', 'ok');
+    const tick = within(meter).getByTestId('compaction-tick');
+    expect(tick.style.left).toBe('36.7%');
   });
 
-  it('renders "123k / 200k" with the percent and an ok tone below 70%', () => {
-    render(<ContextMeter contextTokens={123_000} contextWindow={200_000} />);
-    const meter = screen.getByRole('meter', { name: 'Context window' });
+  it('takes its tone from the COMPACTION point, not the window (warn 80%, danger 95%)', () => {
+    const { rerender } = render(<ContextMeter contextTokens={250_000} contextWindow={1_000_000} autoCompactAt={367_000} />);
+    // 25% of the window — but 68% of the way to compaction: still ok.
+    expect(screen.getByRole('meter')).toHaveAttribute('data-tone', 'ok');
+    rerender(<ContextMeter contextTokens={300_000} contextWindow={1_000_000} autoCompactAt={367_000} />);
+    // Only 30% of the window, yet 82% of the way to compaction: warn BEFORE the CLI compacts.
+    expect(screen.getByRole('meter')).toHaveAttribute('data-tone', 'warn');
+    rerender(<ContextMeter contextTokens={350_000} contextWindow={1_000_000} autoCompactAt={367_000} />);
+    expect(screen.getByRole('meter')).toHaveAttribute('data-tone', 'danger');
+  });
+
+  it('never clamps: a reading past the window is an `over` state, said in words', () => {
+    render(<ContextMeter contextTokens={1_050_000} contextWindow={1_000_000} autoCompactAt={967_000} />);
+    const meter = screen.getByRole('meter');
+    expect(meter).toHaveAttribute('data-tone', 'over');
+    expect(meter).toHaveTextContent('105%');
+    // aria-valuenow stays inside its declared range; the text carries the overflow.
+    expect(meter).toHaveAttribute('aria-valuenow', '100');
+    expect(meter.getAttribute('aria-valuetext')).toContain('past the window');
+    expect(meter.getAttribute('title')).toContain('Past the window');
+  });
+
+  it('marks an upper-bound reading with ≤ and says why in the tooltip', () => {
+    render(<ContextMeter contextTokens={180_000} contextWindow={258_400} autoCompactAt={244_800} exact={false} engine="codex" />);
+    const meter = screen.getByRole('meter');
+    expect(meter).toHaveTextContent('≤180k / 258k');
+    expect(meter).toHaveAttribute('data-exact', 'false');
+    expect(meter.getAttribute('title')).toContain('Upper bound');
+    expect(meter.getAttribute('title')).toContain('When it compacts, Codex replaces the earlier conversation');
+  });
+
+  it('falls back to the window when the compaction point is unknown, and says so', () => {
+    const { rerender } = render(<ContextMeter contextTokens={123_000} contextWindow={200_000} />);
+    const meter = screen.getByRole('meter');
     expect(meter).toHaveAttribute('aria-valuenow', '62');
     expect(meter).toHaveAttribute('data-tone', 'ok');
-    expect(meter).toHaveTextContent('62%');
     expect(meter).toHaveTextContent('123k / 200k');
-  });
-
-  it('turns amber at 70% and red at 90%', () => {
-    const { rerender } = render(<ContextMeter contextTokens={140_000} contextWindow={200_000} />);
+    expect(meter).not.toHaveTextContent('compacts');
+    expect(within(meter).queryByTestId('compaction-tick')).toBeNull();
+    expect(meter.getAttribute('title')).toContain('compaction point is unknown');
+    rerender(<ContextMeter contextTokens={170_000} contextWindow={200_000} />);
     expect(screen.getByRole('meter')).toHaveAttribute('data-tone', 'warn');
-    rerender(<ContextMeter contextTokens={180_000} contextWindow={200_000} />);
+    rerender(<ContextMeter contextTokens={190_000} contextWindow={200_000} />);
     expect(screen.getByRole('meter')).toHaveAttribute('data-tone', 'danger');
-    expect(screen.getByRole('meter')).toHaveAttribute('aria-valuenow', '90');
   });
 
-  it('shows n/a when the window is unknown', () => {
+  it('shows n/a when the window is unknown, never a guessed percentage', () => {
     render(<ContextMeter contextTokens={5000} contextWindow={null} />);
     const meter = screen.getByRole('meter');
     expect(meter).toHaveAttribute('data-tone', 'unknown');
     expect(meter).not.toHaveAttribute('aria-valuenow');
-    expect(meter).toHaveTextContent('n/a');
     expect(meter).toHaveTextContent('5k / n/a');
+    expect(meter).toHaveTextContent('n/a');
+  });
+
+  it('names the window source, the mode and the compaction count in the tooltip', () => {
+    const d = describeContext({ contextTokens: 100_000, contextWindow: 1_000_000, autoCompactAt: 967_000, mode: 'expansive', engine: 'claude', source: 'runtime', compactionCount: 3 });
+    expect(d.title).toContain('Context: 100,000 of 1,000,000 tokens (10%).');
+    expect(d.title).toContain('Auto-compacts at ≈967,000 tokens (Expansive mode) — ≈867,000 left.');
+    expect(d.title).toContain('When it compacts, Claude Code replaces');
+    expect(d.title).toContain('Compacted 3 times so far.');
+    expect(d.title).toContain('Window: reported by the CLI on the last turn.');
+    const old = describeContext({ contextTokens: 1, contextWindow: 200_000 });
+    expect(old.title).toContain('source not recorded');
+  });
+
+  it('draws no tick when the compaction point is the window itself', () => {
+    expect(describeContext({ contextTokens: 0, contextWindow: 65_536, autoCompactAt: 65_536 }).tickPercent).toBeNull();
+    expect(describeContext({ contextTokens: 0, contextWindow: 500_000, autoCompactAt: 400_000 }).tickPercent).toBe(80);
+  });
+});
+
+describe('sessionContextBudget — runtime → catalog (mode) → stored → seat', () => {
+  it('uses the current catalog budget for the model and mode when the CLI has not reported one', () => {
+    const s = session({ seatId: 'claude-a', model: 'claude-opus-5', usage: { ...session().usage, contextWindow: 200_000 } });
+    const standard = sessionContextBudget([CLAUDE_1M_SEAT], s);
+    expect(standard).toMatchObject({ contextWindow: 1_000_000, autoCompactAt: 367_000, source: 'cli-catalog', mode: 'standard' });
+    const expansive = sessionContextBudget([CLAUDE_1M_SEAT], { ...s, contextMode: 'expansive' });
+    expect(expansive).toMatchObject({ contextWindow: 1_000_000, autoCompactAt: 967_000, mode: 'expansive' });
+  });
+
+  it('lets a runtime window win, and reconciles its compaction point when none is stored', () => {
+    // Claude Code clamped this 1M model to 200k (long-context credit ran out).
+    const s = session({
+      seatId: 'claude-a',
+      model: 'claude-opus-5',
+      usage: { ...session().usage, contextWindow: 200_000, contextWindowSource: 'runtime' },
+    });
+    const b = sessionContextBudget([CLAUDE_1M_SEAT], s);
+    expect(b.contextWindow).toBe(200_000);
+    expect(b.source).toBe('runtime');
+    // min(200k runtime, --autocompact 400k) − 20k − 13k.
+    expect(b.autoCompactAt).toBe(167_000);
+    const stored = sessionContextBudget([CLAUDE_1M_SEAT], { ...s, usage: { ...s.usage, autoCompactAt: 150_000 } });
+    expect(stored.autoCompactAt).toBe(150_000);
+  });
+
+  it('finds an aliased model id (claude-opus-5.5 → claude-opus-5-5) without rewriting it', () => {
+    const s = session({ seatId: 'claude-a', model: 'claude-opus-5.5' });
+    expect(modelOptionFor([CLAUDE_1M_SEAT], s)?.id).toBe('claude-opus-5-5');
+    expect(s.model).toBe('claude-opus-5.5');
+  });
+
+  it('falls back to the stored record, then to the seat default marked `fallback`', () => {
+    const unknownModel = session({ seatId: 'claude-a', model: 'claude-future-9', usage: { ...session().usage, contextWindow: 300_000, autoCompactAt: 250_000 } });
+    expect(sessionContextBudget([CLAUDE_1M_SEAT], unknownModel)).toMatchObject({ contextWindow: 300_000, autoCompactAt: 250_000, source: null });
+    const bare = session({ seatId: 'claude-a', model: 'claude-future-9', usage: { ...session().usage, contextWindow: null } });
+    expect(sessionContextBudget([CLAUDE_1M_SEAT], bare)).toMatchObject({ contextWindow: 1_000_000, autoCompactAt: null, source: 'fallback' });
+    expect(contextWindowFor([], bare)).toBeNull();
+  });
+
+  it('carries the exact flag and never clamps occupancy', () => {
+    const s = session({ engine: 'codex', seatId: 'codex-b', model: 'gpt-6-astra', usage: { ...session().usage, contextTokens: 400_000, contextTokensExact: false } });
+    const b = sessionContextBudget([CODEX_EXPANSIVE_SEAT], s);
+    expect(b.contextTokens).toBe(400_000);
+    expect(b.exact).toBe(false);
+    expect(b.contextWindow).toBe(258_400);
+    expect(b.autoCompactAt).toBe(244_800);
+  });
+});
+
+describe('ContextModeControl', () => {
+  it('states both budgets and the cost, and switches only on a click', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<ContextModeControl mode="standard" option={OPUS_1M} onChange={onChange} />);
+    const chip = screen.getByRole('button', { name: 'Context mode: Standard' });
+    expect(onChange).not.toHaveBeenCalled();
+    await user.click(chip);
+    const menu = screen.getByRole('menu', { name: 'Context mode' });
+    const standard = within(menu).getByRole('menuitemradio', { name: /Standard/ });
+    const expansive = within(menu).getByRole('menuitemradio', { name: /Expansive/ });
+    expect(standard).toHaveAttribute('aria-checked', 'true');
+    expect(standard).toHaveTextContent('compacts ≈367k of 1M');
+    expect(expansive).toHaveTextContent('compacts ≈967k of 1M');
+    expect(menu).toHaveTextContent('up to ≈2.6× near the expansive limit');
+    expect(menu).toHaveTextContent('Applies from the next turn');
+    // Re-choosing the current mode is a no-op.
+    await user.click(standard);
+    expect(onChange).not.toHaveBeenCalled();
+    await user.click(expansive);
+    expect(onChange).toHaveBeenCalledWith('expansive');
+  });
+
+  it('keeps expansive listed but disabled when the model has no expansive budget, so a session can always switch back', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<ContextModeControl mode="expansive" option={CODEX_EXPANSIVE_SEAT.models[1]!} onChange={onChange} />);
+    await user.click(screen.getByRole('button', { name: 'Context mode: Expansive' }));
+    expect(screen.getByRole('menuitemradio', { name: /Expansive/ })).toBeDisabled();
+    await user.click(screen.getByRole('menuitemradio', { name: /Standard/ }));
+    expect(onChange).toHaveBeenCalledWith('standard');
+  });
+
+  it('opens itself to show an error, and closes on Escape', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ContextModeControl mode="standard" option={GPT6} onChange={vi.fn()} />);
+    rerender(<ContextModeControl mode="standard" option={GPT6} onChange={vi.fn()} error="Unlock actions with the mutation token first." />);
+    expect(screen.getByRole('alert')).toHaveTextContent('Unlock actions with the mutation token first.');
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+
+  it('shows busy and disabled states', () => {
+    const { rerender } = render(<ContextModeControl mode="standard" option={GPT6} busy onChange={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Context mode: Standard' })).toHaveTextContent('Switching…');
+    rerender(<ContextModeControl mode="standard" option={GPT6} disabled disabledReason="Sending is disabled" onChange={vi.fn()} />);
+    const chip = screen.getByRole('button', { name: 'Context mode: Standard' });
+    expect(chip).toBeDisabled();
+    expect(chip).toHaveAttribute('title', 'Sending is disabled');
+  });
+
+  it('closes an open menu when it becomes disabled — a turn started under it', async () => {
+    const user = userEvent.setup();
+    const { rerender } = render(<ContextModeControl mode="standard" option={OPUS_1M} onChange={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Context mode: Standard' }));
+    expect(screen.getByRole('menu')).toBeInTheDocument();
+    rerender(<ContextModeControl mode="standard" option={OPUS_1M} disabled disabledReason="Available when the current turn finishes" onChange={vi.fn()} />);
+    expect(screen.queryByRole('menu')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Context mode: Standard' })).toHaveAttribute('title', 'Available when the current turn finishes');
+  });
+
+  it('offers "Compact now…" only when given the action, and closes the menu to open it', async () => {
+    const user = userEvent.setup();
+    const onCompact = vi.fn();
+    const { unmount } = render(<ContextModeControl mode="standard" option={OPUS_1M} onChange={vi.fn()} />);
+    await user.click(screen.getByRole('button', { name: 'Context mode: Standard' }));
+    expect(screen.queryByRole('menuitem', { name: /Compact now/ })).toBeNull();
+    unmount();
+
+    const onChange = vi.fn();
+    render(<ContextModeControl mode="standard" option={OPUS_1M} onChange={onChange} onCompact={onCompact} />);
+    await user.click(screen.getByRole('button', { name: 'Context mode: Standard' }));
+    // Arrow keys reach it after the two radios.
+    await user.keyboard('{ArrowDown}{ArrowDown}');
+    expect(screen.getByRole('menuitem', { name: /Compact now/ })).toHaveFocus();
+    await user.click(screen.getByRole('menuitem', { name: /Compact now/ }));
+    expect(onCompact).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole('menu')).toBeNull();
+  });
+});
+
+describe('expansiveCostRatio', () => {
+  it('is the ratio of the two compaction points, and null without a real expansive mode', () => {
+    expect(expansiveCostRatio(OPUS_1M)).toBe(2.6); // 967k / 367k
+    expect(expansiveCostRatio(GPT6)).toBe(3.2); // 784.8k / 244.8k
+    expect(expansiveCostRatio(CODEX_EXPANSIVE_SEAT.models[1])).toBeNull();
+    expect(expansiveCostRatio(GROK_SEAT.models[0])).toBeNull();
+    expect(expansiveCostRatio(null)).toBeNull();
+  });
+});
+
+describe('ContextAdvice', () => {
+  beforeEach(() => resetVerseUi());
+
+  const NOW = Date.parse('2026-09-23T12:00:00.000Z');
+  function near(over: Parameters<typeof session>[0] = {}) {
+    return session({
+      id: 'vs_near',
+      seatId: 'claude-a',
+      model: 'claude-opus-5',
+      updatedAt: '2026-09-23T11:59:00.000Z',
+      usage: { ...session().usage, contextTokens: 300_000 },
+      ...over,
+    });
+  }
+
+  function renderAdvice(s = near(), extra: Partial<Parameters<typeof ContextAdvice>[0]> = {}) {
+    const onHandoff = vi.fn();
+    const onSwitchExpansive = vi.fn();
+    const budget = sessionContextBudget([CLAUDE_1M_SEAT], s);
+    const view = render(<ContextAdvice session={s} budget={budget} modesAvailable dispatchEnabled now={NOW}
+      onHandoff={onHandoff} onSwitchExpansive={onSwitchExpansive} {...extra} />);
+    return { view, onHandoff, onSwitchExpansive, budget };
+  }
+
+  it('says nothing for a comfortable session', () => {
+    const { view } = renderAdvice(near({ usage: { ...session().usage, contextTokens: 40_000 } }));
+    expect(view.container).toBeEmptyDOMElement();
+  });
+
+  it('suggests a fresh chat near the compaction point, lists why, and opens the handoff on click', async () => {
+    const user = userEvent.setup();
+    const { onHandoff } = renderAdvice();
+    const note = screen.getByRole('region', { name: 'Context advice' });
+    expect(note).toHaveAttribute('data-level', 'suggest');
+    expect(note).toHaveTextContent('Consider continuing in a fresh chat');
+    expect(note).toHaveTextContent('About 67k tokens left before the CLI auto-compacts.');
+    expect(note).toHaveTextContent('free. Nothing is sent until you press Send');
+    await user.click(within(note).getByRole('button', { name: 'Continue in a fresh chat…' }));
+    expect(onHandoff).toHaveBeenCalledTimes(1);
+  });
+
+  it('urges past the window, and cannot hand off mid-turn', () => {
+    renderAdvice(near({ status: 'running', usage: { ...session().usage, contextTokens: 1_100_000 } }));
+    const note = screen.getByRole('region', { name: 'Context advice' });
+    expect(note).toHaveAttribute('data-level', 'urge');
+    expect(note).toHaveTextContent('Time to continue in a fresh chat');
+    expect(within(note).getByRole('button', { name: 'Continue in a fresh chat…' })).toBeDisabled();
+  });
+
+  it('flags an idle session whose prompt cache has expired', () => {
+    renderAdvice(near({ updatedAt: '2026-09-23T10:30:00.000Z', usage: { ...session().usage, contextTokens: 150_000 } }));
+    const note = screen.getByRole('region', { name: 'Context advice' });
+    expect(note).toHaveTextContent('Idle over an hour');
+    expect(note).toHaveTextContent('re-reads the whole context at full cost');
+  });
+
+  it('"Not now" hides a note until its evidence escalates', async () => {
+    const user = userEvent.setup();
+    const { view } = renderAdvice();
+    await user.click(screen.getByRole('button', { name: 'Not now' }));
+    expect(screen.queryByRole('region', { name: 'Context advice' })).toBeNull();
+    // Same evidence on a later render: still dismissed.
+    const again = near();
+    view.rerender(<ContextAdvice session={again} budget={sessionContextBudget([CLAUDE_1M_SEAT], again)} modesAvailable dispatchEnabled now={NOW}
+      onHandoff={vi.fn()} onSwitchExpansive={vi.fn()} />);
+    expect(screen.queryByRole('region', { name: 'Context advice' })).toBeNull();
+    // Escalated to urge: it comes back.
+    const over = near({ usage: { ...session().usage, contextTokens: 1_200_000 } });
+    view.rerender(<ContextAdvice session={over} budget={sessionContextBudget([CLAUDE_1M_SEAT], over)} modesAvailable dispatchEnabled now={NOW}
+      onHandoff={vi.fn()} onSwitchExpansive={vi.fn()} />);
+    expect(screen.getByRole('region', { name: 'Context advice' })).toHaveAttribute('data-level', 'urge');
+  });
+
+  it('suggests expansive after repeated compaction — with the cost — and never switches by itself', async () => {
+    const user = userEvent.setup();
+    const { onSwitchExpansive } = renderAdvice(near({ compactionCount: 2, usage: { ...session().usage, contextTokens: 20_000 } }));
+    const chip = screen.getByRole('region', { name: 'Expansive mode suggestion' });
+    expect(chip).toHaveTextContent('This session has compacted 2 times');
+    expect(chip).toHaveTextContent('up to ≈2.6×');
+    expect(onSwitchExpansive).not.toHaveBeenCalled();
+    await user.click(within(chip).getByRole('button', { name: 'Switch to expansive' }));
+    expect(onSwitchExpansive).toHaveBeenCalledTimes(1);
+  });
+
+  it('cannot switch to expansive mid-turn — the engine answers 409 to a mode change while a turn runs', () => {
+    renderAdvice(near({ status: 'running', compactionCount: 2, usage: { ...session().usage, contextTokens: 20_000 } }));
+    const chip = screen.getByRole('region', { name: 'Expansive mode suggestion' });
+    const button = within(chip).getByRole('button', { name: 'Switch to expansive' });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', 'Available when the current turn finishes');
+  });
+
+  it('offers "Compact now…" beside the handoff only when given the action, and not mid-turn', async () => {
+    const user = userEvent.setup();
+    const { view } = renderAdvice();
+    expect(screen.queryByRole('button', { name: 'Compact now…' })).toBeNull();
+    view.unmount();
+
+    const onCompact = vi.fn();
+    const second = renderAdvice(near(), { onCompact });
+    await user.click(within(screen.getByRole('region', { name: 'Context advice' })).getByRole('button', { name: 'Compact now…' }));
+    expect(onCompact).toHaveBeenCalledTimes(1);
+    second.view.unmount();
+
+    renderAdvice(near({ status: 'running' }), { onCompact });
+    expect(screen.getByRole('button', { name: 'Compact now…' })).toBeDisabled();
+  });
+
+  it('offers no expansive chip where the mode control does not exist', () => {
+    renderAdvice(near({ compactionCount: 2, usage: { ...session().usage, contextTokens: 20_000 } }), { modesAvailable: false });
+    expect(screen.queryByRole('region', { name: 'Expansive mode suggestion' })).toBeNull();
+    // The handoff note (two compactions) still stands on its own.
+    expect(screen.getByRole('region', { name: 'Context advice' })).toHaveTextContent('Compacted 2 times');
+  });
+
+  it('computes the handoff verdict from the same budget the meter draws', () => {
+    const s = near();
+    const budget = sessionContextBudget([CLAUDE_1M_SEAT], s);
+    expect(sessionHandoffAdvice(s, budget, NOW).level).toBe('suggest');
+    // Against the stored 200k window a 300k reading would be `over`; the catalog budget says otherwise.
+    expect(sessionHandoffAdvice(s, budget, NOW).reasons.join(' ')).not.toContain('past the');
+  });
+});
+
+describe('fixtures carry honest v3.9 budgets', () => {
+  it('matches the context-math formulas for each engine', () => {
+    expect(CLAUDE_SEAT.models[0]!.autoCompactAt).toBe(167_000);
+    expect(OPUS_1M.autoCompactAt).toBe(367_000);
+    expect(OPUS_1M.expansive?.autoCompactAt).toBe(967_000);
+    expect(GPT6.contextWindow).toBe(258_400);
+    expect(GPT6.expansive).toEqual({ contextWindow: 828_400, autoCompactAt: 784_800, providerWindow: 872_000 });
+    expect(LOCAL_SEAT.models[0]!.contextWindow).toBe(65_536);
+  });
+});
+
+describe('Compact now', () => {
+  it('is offered only where the CLI compacts on request: Claude Code, including the local lane', () => {
+    expect(canCompactNow('claude')).toBe(true);
+    expect(canCompactNow('local')).toBe(true);
+    // codex exec has no compact verb; grok's headless /compact is unverified.
+    expect(canCompactNow('codex')).toBe(false);
+    expect(canCompactNow('grok')).toBe(false);
+    expect(canCompactNow(null)).toBe(false);
+  });
+
+  it('builds the slash command, folding the focus to one line', () => {
+    expect(compactCommand('')).toBe('/compact');
+    expect(compactCommand('   ')).toBe('/compact');
+    expect(compactCommand('  keep the login fix\n\nand its TODOs ')).toBe('/compact keep the login fix and its TODOs');
+    expect(compactCommand('x'.repeat(COMPACT_FOCUS_MAX + 50))).toBe(`/compact ${'x'.repeat(COMPACT_FOCUS_MAX)}`);
+  });
+
+  it('states the cost honestly per engine', () => {
+    expect(compactCostCopy('claude', '≈300k')).toBe('Spends usage on this seat: one summarization call that reads the whole current context (≈300k tokens) and writes the summary.');
+    expect(compactCostCopy('local', '≈40k')).toMatch(/^Free — it runs on the local model — but .* can take minutes/);
+  });
+
+  const BUDGET = { contextTokens: 300_000, autoCompactAt: 367_000, exact: true };
+
+  it('sends /compact with the focus through onSend and closes once accepted', async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn(async () => true);
+    const onClose = vi.fn();
+    render(<CompactPanel engine="claude" budget={BUDGET} running={false} dispatchEnabled empty={false} onSend={onSend} onClose={onClose} />);
+    const panel = screen.getByRole('region', { name: 'Compact this chat' });
+    expect(panel).toHaveTextContent('Claude Code replaces the conversation so far with a summary');
+    expect(panel).toHaveTextContent('at ≈367k');
+    expect(panel).toHaveTextContent('Spends usage on this seat');
+    expect(panel).toHaveTextContent('(≈300k tokens)');
+    await user.type(screen.getByLabelText('Keep in focus (optional)'), 'the auth refactor');
+    expect(panel).toHaveTextContent('Sent as the message /compact the auth refactor');
+    await user.click(screen.getByRole('button', { name: 'Compact now' }));
+    expect(onSend).toHaveBeenCalledWith('/compact the auth refactor');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays open when the send is not accepted (token dialog dismissed, refusal)', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    render(<CompactPanel engine="local" budget={BUDGET} running={false} dispatchEnabled empty={false} onSend={vi.fn(async () => false)} onClose={onClose} />);
+    await user.click(screen.getByRole('button', { name: 'Compact now' }));
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Compact now' })).toBeEnabled();
+  });
+
+  it('says a local compaction is free but slow, and marks an upper-bound size with ≤', () => {
+    render(<CompactPanel engine="local" budget={{ ...BUDGET, contextTokens: 40_000, exact: false }} running={false} dispatchEnabled empty={false}
+      onSend={vi.fn(async () => true)} onClose={vi.fn()} />);
+    const panel = screen.getByRole('region', { name: 'Compact this chat' });
+    expect(panel).toHaveTextContent('Claude Code (driving the local model) replaces');
+    expect(panel).toHaveTextContent('Free — it runs on the local model');
+    expect(panel).toHaveTextContent('≤40k tokens');
+    expect(panel).not.toHaveTextContent('Spends usage');
+  });
+
+  it('is disabled mid-turn, on a read-only server and on a chat with no turns — and sends nothing', async () => {
+    const user = userEvent.setup();
+    const onSend = vi.fn(async () => true);
+    const { rerender } = render(<CompactPanel engine="claude" budget={BUDGET} running dispatchEnabled empty={false} onSend={onSend} onClose={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Compact now' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('Available when the current turn finishes.');
+    rerender(<CompactPanel engine="claude" budget={BUDGET} running={false} dispatchEnabled={false} empty={false} onSend={onSend} onClose={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Compact now' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('started without dispatch');
+    rerender(<CompactPanel engine="claude" budget={BUDGET} running={false} dispatchEnabled empty onSend={onSend} onClose={vi.fn()} />);
+    expect(screen.getByRole('button', { name: 'Compact now' })).toBeDisabled();
+    expect(screen.getByRole('status')).toHaveTextContent('Nothing to compact yet');
+    // Enter in the focus field submits the form — and must be refused too.
+    await user.type(screen.getByLabelText('Keep in focus (optional)'), 'x{Enter}');
+    expect(onSend).not.toHaveBeenCalled();
   });
 });
