@@ -1822,7 +1822,7 @@ export async function runEngineSandboxed(
         hasReportedUsage = true;
         usage.tokensIn += res.usage.tokensIn;
         usage.tokensOut += res.usage.tokensOut;
-        usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut);
+        usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut, 0, 0, 0, cfg);
       }
 
       // Persist one fixed-schema row per actual retry attempt. Raw prompt/argv,
@@ -2158,7 +2158,7 @@ export async function runEngineSandboxed(
                     hasReportedUsage = true;
                     usage.tokensIn += r.usage.tokensIn;
                     usage.tokensOut += r.usage.tokensOut;
-                    usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut);
+                    usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut, 0, 0, 0, cfg);
                   }
                   if (processCleanupUnconfirmed(r)) processCleanupFailure = r;
                   return { ok: r.ok };
@@ -3058,7 +3058,7 @@ export async function runApiModelSandboxed(
 
     const finalUsage: RunUsage = {
       ...usage,
-      estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut),
+      estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut, 0, 0, 0, cfg),
     };
     setRunActionCount(actionCounts, 'modelSteps', steps.filter((step) => step.kind === 'model').length);
     setRunActionCount(actionCounts, 'toolSteps', steps.filter((step) => step.kind === 'tool').length);

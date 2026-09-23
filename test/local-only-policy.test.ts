@@ -317,11 +317,28 @@ describe('the permission verdict', () => {
     expect(v.mode.enabled).toBe(true);
   });
 
-  it('still permits local engines when the mode is ON', () => {
-    for (const e of ['builtin', 'local-coder', 'llama-server', 'ashlrcode', 'aw']) {
+  it('still permits FREE engines when the mode is ON', () => {
+    // Free, not merely local. `ashlrcode` and `aw` are local PROCESSES and were
+    // permitted here until docs/LOCALITY-VS-SPEND.md separated the two axes —
+    // see the next test and test/local-only-consumer-parity.test.ts.
+    for (const e of ['builtin', 'local-coder', 'llama-server']) {
       const v = enginePermitted(e, localOnlyCfg(), NO_ENV);
       expect(v.permitted, `${e} should be permitted under local-only`).toBe(true);
       expect(v.reason).toBeNull();
+    }
+  });
+
+  it('refuses the local CLI agents that can still spend', () => {
+    // The hub hands every cli-agent spawn CLAUDE_CODE_OAUTH_TOKEN /
+    // ANTHROPIC_AUTH_TOKEN and the config dirs holding subscription auth
+    // (run/sandboxed-engine.ts:782 + its env builder), then controls nothing.
+    // Running on this machine is not the same claim as costing nothing.
+    for (const e of ['ashlrcode', 'aw']) {
+      const v = enginePermitted(e, localOnlyCfg(), NO_ENV);
+      expect(v.permitted, `${e} can spend and must be refused`).toBe(false);
+      expect(v.reason).toContain(`'${e}'`);
+      // ...while the LOCALITY axis still, correctly, calls them local.
+      expect(engineLocality(e, localOnlyCfg(), NO_ENV)).toBe('local');
     }
   });
 
@@ -418,9 +435,12 @@ describe('binPermitted / engineIdForBin', () => {
     expect(v.reason).toContain("'claude'");
   });
 
-  it('permits a local agent binary under local-only', () => {
-    expect(binPermitted('ac', cfg).permitted).toBe(true);
-    expect(binPermitted('aw', cfg).permitted).toBe(true);
+  it('refuses a SPENDABLE agent binary under local-only, however local it runs', () => {
+    // This is the hole run/engines.ts:455 was standing in: `ac` resolved to
+    // 'ashlrcode', 'ashlrcode' was local, the spawn was permitted — and the
+    // very next thing the spawn did was hand it working paid credentials.
+    expect(binPermitted('ac', cfg).permitted).toBe(false);
+    expect(binPermitted('aw', cfg).permitted).toBe(false);
   });
 
   it('permits an unrecognised binary — it is not a hub-managed agent', () => {
@@ -493,8 +513,13 @@ describe('localOnlyPolicySnapshot', () => {
     for (const cloud of ['claude', 'codex', 'nim', 'kimi', 'grok']) {
       expect(engines, `${cloud} missing from the refusal preview`).toContain(cloud);
     }
-    for (const local of ['builtin', 'local-coder', 'llama-server', 'ashlrcode', 'aw']) {
-      expect(engines, `${local} must not be listed as refused`).not.toContain(local);
+    // The panel must list what the DISPATCHER refuses, or "nothing can spend
+    // money while this is on" is false in the one place anyone checks it.
+    for (const spendable of ['ashlrcode', 'aw']) {
+      expect(engines, `${spendable} must be listed as refused`).toContain(spendable);
+    }
+    for (const free of ['builtin', 'local-coder', 'llama-server']) {
+      expect(engines, `${free} must not be listed as refused`).not.toContain(free);
     }
     expect(snap.refuses.find((r) => r.engine === 'claude')?.reason).toContain("'claude'");
   });

@@ -25,6 +25,20 @@
  * make impossible, so `test/local-only-dispatch-paths.test.ts` enumerates every
  * known path and asserts it refuses.
  *
+ * TWO AXES, ONE PREDICATE (docs/LOCALITY-VS-SPEND.md)
+ * --------------------------------------------------
+ * This module answers two different questions and must not confuse them:
+ *
+ *   `EngineLocality`  'local' | 'cloud'              — where does the process run?
+ *   `Meteredness`     'free' | 'metered' | 'unknown' — can this spend money?
+ *
+ * `decidePermission` reads METEREDNESS and refuses anything that is not provably
+ * `'free'`, `'unknown'` included. Locality is still published, unchanged, for the
+ * consumers that genuinely mean "on this machine" — local-fleet membership, pool
+ * tiering, local-context injection. They are not interchangeable: `ashlrcode` is
+ * a local process that this hub hands paid credentials, and reading its locality
+ * as permission is exactly how it kept them.
+ *
  * MODE RESOLUTION (config + env, env can only ENABLE)
  * --------------------------------------------------
  *   persisted : cfg.foundry.localOnly === true   (canonical)
@@ -236,8 +250,16 @@ export type EngineLocality = 'local' | 'cloud';
  */
 const LOCAL_CLI_AGENTS: ReadonlySet<string> = new Set(['ashlrcode', 'aw']);
 
-/** Provider ids served from this machine. Everything else is treated as cloud. */
-const LOCAL_PROVIDER_IDS: ReadonlySet<string> = new Set([
+/**
+ * Provider ids served from this machine. Everything else is treated as cloud.
+ *
+ * Exported so the parity suite can iterate the authority's OWN enumeration
+ * rather than restating it — a test carrying its own copy of this list would be
+ * the duplication this module exists to prevent. Consumers ask
+ * `providerLocality` / `providerMeteredness`; nothing outside this file should
+ * read the set to make a decision.
+ */
+export const LOCAL_PROVIDER_IDS: ReadonlySet<string> = new Set([
   'ollama',
   'lmstudio',
   'llama-server',
@@ -329,6 +351,166 @@ export function providerLocality(providerId: string): EngineLocality {
   return LOCAL_PROVIDER_IDS.has(providerId.trim().toLowerCase()) ? 'local' : 'cloud';
 }
 
+// ---------------------------------------------------------------------------
+// Meteredness classification — THE SPEND AXIS
+// ---------------------------------------------------------------------------
+
+/**
+ * Can this subject bill you?
+ *
+ * SEPARATE FROM `EngineLocality` ON PURPOSE (docs/LOCALITY-VS-SPEND.md). Those
+ * two questions —
+ *
+ *   locality:    where does the inference run?  (processes and endpoints)
+ *   meteredness: can this spend money?          (credentials and billing)
+ *
+ * — coincide for every subject except CLI agents, which is why one answer served
+ * both for as long as it did. For `ashlrcode` they do not: it is a local PROCESS
+ * that this hub hands `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_AUTH_TOKEN` and the
+ * config dirs where subscription auth lives (`run/sandboxed-engine.ts:782` and
+ * its env builder), after which the hub controls nothing. Local, and spendable.
+ *
+ * Reclassifying it as `'cloud'` would fix spend and break locality: local-fleet
+ * membership, pool tiering and local-context injection all legitimately want
+ * "runs on this machine". So this is a SECOND axis, never a rename of the first.
+ *
+ * `'unknown'` is a real answer, not a placeholder. A policy whose purpose is
+ * preventing spend cannot treat "I cannot tell" as "safe" — that is precisely
+ * how the `ashlrcode` gap survived. `decidePermission` refuses anything that is
+ * not provably `'free'`, `'unknown'` included.
+ */
+export type Meteredness = 'free' | 'metered' | 'unknown';
+
+/**
+ * Meteredness of every cli-agent the hub ships, stated EXPLICITLY.
+ *
+ * A cli-agent is the one engine kind whose spend the hub cannot read off an
+ * endpoint: the binary chooses its own backend after the spawn. So each one is
+ * classified by hand here, and `test/local-only-consumer-parity.test.ts` fails
+ * if a new cli-agent reaches the registry without an entry.
+ *
+ *   claude / codex / hermes / opencode — reach a vendor over the network. Metered.
+ *
+ *   ashlrcode — METERED. `docs/ECOSYSTEM-MAP.md:151`: consumes `@anthropic-ai/sdk`
+ *     + OpenAI (routing xAI/DeepSeek/Groq/Ollama) — cloud inference BY DEFAULT —
+ *     and the hub hands every cli-agent spawn working subscription credentials.
+ *     There is no flag the hub passes and `ac` honours, and no probe the hub can
+ *     read, so "pointed at Ollama" is not a claim this process can verify.
+ *     Owner decision (docs/LOCALITY-VS-SPEND.md, Option A). Option B — classify
+ *     it `'free'` only when an ashlrcode-side local mode is CONFIRMED — stays the
+ *     target, and must not ship before its enforcement exists.
+ *
+ *   aw — UNKNOWN, not metered. `docs/ECOSYSTEM-MAP.md:155` describes a
+ *     fully-local agent fleet where "no data leaves the machine unless cloud
+ *     fallback is opted into". That opt-in lives in aw's own `.env` and agent
+ *     configs, which this hub neither reads nor controls — so the honest answer
+ *     is that we do not know, and `'unknown'` says exactly that. It is refused
+ *     under local-only and priced as spend, identically to `'metered'`; the
+ *     distinction is truthfulness in the refusal, not a difference in effect.
+ *     Calling it `'metered'` would assert a fact about a third-party config we
+ *     have not read, which is the same mistake in the opposite direction.
+ */
+export const CLI_AGENT_METEREDNESS: Readonly<Record<string, Meteredness>> = Object.freeze({
+  claude: 'metered',
+  codex: 'metered',
+  hermes: 'metered',
+  opencode: 'metered',
+  ashlrcode: 'metered',
+  aw: 'unknown',
+});
+
+/**
+ * Meteredness of a raw endpoint. A loopback URL genuinely cannot bill anyone.
+ *
+ * An absent or unparseable URL is `'unknown'` rather than `'metered'`: we are
+ * not asserting it costs money, we are saying we cannot tell. Both are refused.
+ */
+export function endpointMeteredness(baseUrl: string | undefined): Meteredness {
+  if (typeof baseUrl !== 'string' || baseUrl.trim().length === 0) return 'unknown';
+  try {
+    new URL(baseUrl.trim());
+  } catch {
+    return 'unknown';
+  }
+  return isLoopbackEndpoint(baseUrl) ? 'free' : 'metered';
+}
+
+/**
+ * Meteredness of a provider id. The free set is the same roster as
+ * `LOCAL_PROVIDER_IDS` — for a PROVIDER the two axes really do coincide, because
+ * a provider id names a serving runtime rather than an agent that picks its own
+ * backend. Everything else in the provider id space is a billed vendor.
+ */
+export function providerMeteredness(providerId: string): Meteredness {
+  return LOCAL_PROVIDER_IDS.has(providerId.trim().toLowerCase()) ? 'free' : 'metered';
+}
+
+/**
+ * Meteredness of an engine id.
+ *
+ *   builtin           — in-process, no model call. Free.
+ *   cli-agent         — `CLI_AGENT_METEREDNESS`; an agent registered through
+ *                       `cfg.foundry.engines` that nobody classified is 'unknown'.
+ *   api-model         — the resolved base URL decides, exactly as locality does:
+ *                       a self-hosted endpoint behind an API key is still free if
+ *                       it answers on loopback. No resolvable URL ⇒ 'unknown'.
+ *   absent from registry — 'unknown', except `llama-server`, which older builds
+ *                       synthesise inline in `run/engines.ts`.
+ */
+export function engineMeteredness(
+  engine: string,
+  cfg?: AshlrConfig,
+  env: EnvLike = process.env,
+): Meteredness {
+  const id = engine.trim().toLowerCase();
+  if (id === ALWAYS_PERMITTED_ENGINE) return 'free';
+
+  const spec = resolveEngineSpec(engine as EngineId, cfg);
+  if (!spec) {
+    if (id === 'llama-server') return endpointMeteredness(llamaServerBaseUrl(cfg, env));
+    return 'unknown';
+  }
+  if (spec.kind === 'builtin') return 'free';
+  if (spec.kind === 'cli-agent') return CLI_AGENT_METEREDNESS[id] ?? 'unknown';
+
+  const api = spec.api;
+  const fromEnv = api?.baseUrlEnv ? env[api.baseUrlEnv]?.trim() : undefined;
+  const baseUrl = (fromEnv && fromEnv.length > 0 ? fromEnv : undefined) ?? api?.defaultBaseUrl;
+  return endpointMeteredness(baseUrl);
+}
+
+/**
+ * Meteredness of an id that may come from EITHER id space.
+ *
+ * `run/budget.ts` documents a provider id but `run/sandboxed-engine.ts` calls it
+ * with an engine id (`:1825`, `:2161`, `:3061`). Rather than leave that mismatch
+ * load-bearing, this resolver names the ambiguity and settles it by ASKING WHICH
+ * SPACE THE ID IS IN, in this order:
+ *
+ *   1. a free provider id (`ollama`, `lmstudio`, …) → free;
+ *   2. an id the engine registry resolves → `engineMeteredness` is authoritative,
+ *      so `'local-coder'` (loopback, absent from the provider roster) is free and
+ *      `'aw'` keeps its honest `'unknown'` instead of being flattened to metered;
+ *   3. anything else → the provider id space, where "not in the free set" means a
+ *      billed vendor, so `'anthropic'` is metered rather than being mistaken for
+ *      an unclassified engine.
+ */
+export function subjectMeteredness(
+  id: string,
+  cfg?: AshlrConfig,
+  env: EnvLike = process.env,
+): Meteredness {
+  const key = id.trim().toLowerCase();
+  if (key.length === 0) return 'unknown';
+  if (LOCAL_PROVIDER_IDS.has(key)) return 'free';
+  const isEngineId =
+    key === ALWAYS_PERMITTED_ENGINE ||
+    key === 'llama-server' || // may be synthesised inline rather than registered
+    resolveEngineSpec(id as EngineId, cfg) !== undefined;
+  if (isEngineId) return engineMeteredness(id, cfg, env);
+  return providerMeteredness(id);
+}
+
 /**
  * Resolve the engine id behind an executable name.
  *
@@ -368,7 +550,13 @@ export interface LocalOnlySubject {
   kind: LocalOnlySubjectKind;
   /** Engine id, provider id, or base URL — whatever the operator would recognise. */
   id: string;
+  /**
+   * Where the inference runs. Carried for diagnostics and for the consumers
+   * that legitimately ask "on this machine?" — NOT what the permission turns on.
+   */
   locality: EngineLocality;
+  /** Whether this subject can spend. THIS is what `decidePermission` reads. */
+  meteredness: Meteredness;
 }
 
 export interface LocalOnlyVerdict {
@@ -398,7 +586,10 @@ export function decidePermission(
   env: EnvLike = process.env,
 ): LocalOnlyVerdict {
   const mode = resolveLocalOnlyMode(cfg, env);
-  if (!mode.enabled || subject.locality === 'local') {
+  // THE RULE: refuse anything not PROVABLY free. Reading `locality` here is
+  // what let `ashlrcode` — a local process holding paid credentials — through,
+  // and treating 'unknown' as permitted is the same mistake one step removed.
+  if (!mode.enabled || subject.meteredness === 'free') {
     return { permitted: true, subject, mode, reason: null };
   }
   return { permitted: false, subject, mode, reason: refusalReason(subject, mode) };
@@ -411,9 +602,20 @@ export function decidePermission(
  */
 function refusalReason(subject: LocalOnlySubject, mode: LocalOnlyMode): string {
   const noun = SUBJECT_NOUN[subject.kind];
+  // 'unknown' gets its own sentence on purpose. Told "refusing to dispatch to
+  // cloud engine 'aw'" an operator reads a misclassification and goes to turn
+  // the mode off; told the hub cannot verify it is free, they get the truth.
+  const head =
+    subject.meteredness === 'unknown'
+      ? `local-only: refusing to dispatch to ${noun} '${subject.id}' — the hub cannot verify it is free. ` +
+        `It may reach a paid backend after dispatch and nothing here would see it, so it is not provably free and is refused. `
+      : `local-only: refusing to dispatch to cloud ${noun} '${subject.id}'. `;
+  const tail =
+    subject.meteredness === 'unknown'
+      ? ''
+      : `No cloud ${noun} is reachable while local-only is on — `;
   return (
-    `local-only: refusing to dispatch to cloud ${noun} '${subject.id}'. ${mode.detail} ` +
-    `No cloud ${noun} is reachable while local-only is on — ` +
+    `${head}${mode.detail} ${tail}` +
     `run this work on a local engine (builtin, local-coder, llama-server), or turn the mode off with ` +
     `cfg.foundry.localOnly=false (and unset ${LOCAL_ONLY_ENV_VAR}).`
   );
@@ -426,7 +628,12 @@ export function enginePermitted(
   env: EnvLike = process.env,
 ): LocalOnlyVerdict {
   return decidePermission(
-    { kind: 'engine', id: engine, locality: engineLocality(engine, cfg, env) },
+    {
+      kind: 'engine',
+      id: engine,
+      locality: engineLocality(engine, cfg, env),
+      meteredness: engineMeteredness(engine, cfg, env),
+    },
     cfg,
     env,
   );
@@ -439,7 +646,12 @@ export function providerPermitted(
   env: EnvLike = process.env,
 ): LocalOnlyVerdict {
   return decidePermission(
-    { kind: 'provider', id: providerId, locality: providerLocality(providerId) },
+    {
+      kind: 'provider',
+      id: providerId,
+      locality: providerLocality(providerId),
+      meteredness: providerMeteredness(providerId),
+    },
     cfg,
     env,
   );
@@ -456,6 +668,7 @@ export function endpointPermitted(
       kind: 'endpoint',
       id: baseUrl,
       locality: isLoopbackEndpoint(baseUrl) ? 'local' : 'cloud',
+      meteredness: endpointMeteredness(baseUrl),
     },
     cfg,
     env,
@@ -469,7 +682,12 @@ export function endpointPermitted(
  * engine id. A binary that maps to no known engine is permitted — it is not a
  * hub-managed agent, and refusing every unrecognised executable would break
  * phantom wrapping and local tooling. Every engine the hub can actually route
- * to IS in the registry, so a cloud seat always resolves.
+ * to IS in the registry, so a spendable seat always resolves.
+ *
+ * THIS IS THE SITE THE METEREDNESS SPLIT WAS FOR. `ac` resolves to `ashlrcode`,
+ * which was classified local and therefore permitted — and then handed
+ * `CLAUDE_CODE_OAUTH_TOKEN` by the very next call. It now resolves to `metered`
+ * and is refused, with no change needed at `run/engines.ts:455` itself.
  */
 export function binPermitted(
   bin: string,
@@ -480,7 +698,10 @@ export function binPermitted(
   if (id === undefined) {
     return {
       permitted: true,
-      subject: { kind: 'engine', id: bin, locality: 'local' },
+      // Deliberate: an executable no engine claims is outside the roster this
+      // policy governs, so it is 'free' in the only sense that applies — the
+      // hub is not handing it a seat, or credentials, or work.
+      subject: { kind: 'engine', id: bin, locality: 'local', meteredness: 'free' },
       mode: resolveLocalOnlyMode(cfg, env),
       reason: null,
     };
@@ -499,7 +720,7 @@ export function cloudSubjectPermitted(
   cfg?: AshlrConfig,
   env: EnvLike = process.env,
 ): LocalOnlyVerdict {
-  return decidePermission({ kind, id, locality: 'cloud' }, cfg, env);
+  return decidePermission({ kind, id, locality: 'cloud', meteredness: 'metered' }, cfg, env);
 }
 
 // ---------------------------------------------------------------------------
@@ -538,7 +759,13 @@ export function assertPermitted(verdict: LocalOnlyVerdict): void {
 // Routing helpers
 // ---------------------------------------------------------------------------
 
-/** Keep only engines permitted under the current mode. */
+/**
+ * Keep only engines permitted under the current mode.
+ *
+ * Delegates to `enginePermitted` rather than re-deriving the answer: a filter
+ * that reached for `engineLocality` would hand the routers a set the dispatcher
+ * then refuses, which is the "mysteriously worse result" this module forbids.
+ */
 export function filterPermittedEngines<T extends string>(
   engines: readonly T[],
   cfg?: AshlrConfig,
@@ -546,7 +773,7 @@ export function filterPermittedEngines<T extends string>(
 ): T[] {
   const mode = resolveLocalOnlyMode(cfg, env);
   if (!mode.enabled) return [...engines];
-  return engines.filter((e) => engineLocality(e, cfg, env) === 'local');
+  return engines.filter((e) => enginePermitted(e, cfg, env).permitted);
 }
 
 /**
@@ -575,7 +802,8 @@ export function permittedEnginesAtTier(
  * and no endpoint credentials — only the subject id and the mode source.
  */
 export function localOnlyReasonTag(verdict: LocalOnlyVerdict): string {
-  return `local-only(${verdict.mode.source}): cloud ${SUBJECT_NOUN[verdict.subject.kind]} '${verdict.subject.id}' refused`;
+  const adjective = verdict.subject.meteredness === 'unknown' ? 'unclassified' : 'cloud';
+  return `local-only(${verdict.mode.source}): ${adjective} ${SUBJECT_NOUN[verdict.subject.kind]} '${verdict.subject.id}' refused`;
 }
 
 // ---------------------------------------------------------------------------
@@ -637,10 +865,19 @@ export function localOnlyPolicySnapshot(
   ids.add('llama-server'); // may be synthesised inline rather than registered
   const refuses: LocalOnlyEngineRefusal[] = [];
   for (const id of [...ids].sort()) {
-    if (engineLocality(id, cfg, env) !== 'cloud') continue;
+    // The list the UI renders MUST be the set the dispatcher refuses, so it is
+    // computed from meteredness — the same axis `decidePermission` reads. A
+    // panel filtered by locality would omit `ashlrcode` while the dispatcher
+    // refused it, and "Nothing can spend money while this is on" would be false
+    // in the one place an operator goes to check it.
+    const meteredness = engineMeteredness(id, cfg, env);
+    if (meteredness === 'free') continue;
     refuses.push({
       engine: id,
-      reason: refusalReason({ kind: 'engine', id, locality: 'cloud' }, asIfEnabled),
+      reason: refusalReason(
+        { kind: 'engine', id, locality: engineLocality(id, cfg, env), meteredness },
+        asIfEnabled,
+      ),
     });
   }
 
