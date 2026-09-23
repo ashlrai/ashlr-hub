@@ -1,0 +1,125 @@
+/* Deliberately the same field/label/button vocabulary as
+   NewChatDialog.module.css: the two dialogs sit one click apart and a second
+   visual language between them would read as a second application. */
+.width { width: min(620px, calc(100vw - 32px)); }
+
+.form { display: grid; gap: var(--space-4); }
+.field { display: grid; gap: var(--space-1); min-width: 0; }
+.label {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.select,
+.input {
+  width: 100%;
+  min-height: var(--control-h);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  text-overflow: ellipsis;
+  transition: border-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
+}
+.input::placeholder { color: var(--text-tertiary); }
+.select:hover:not(:disabled),
+.input:hover:not(:disabled) { border-color: var(--border-strong); }
+.select:focus-visible,
+.input:focus-visible { border-color: var(--border-focus); box-shadow: var(--shadow-focus-ring); }
+
+.hint { font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-tertiary); }
+.error {
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--status-danger-solid);
+  color: var(--status-danger-fg);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+/* One folder: path, then its controls. Wraps rather than shrinking the path
+   field to nothing at narrow widths. */
+.rootRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  align-items: center;
+  margin-top: var(--space-2);
+}
+.rootRow .input { flex: 1 1 220px; min-width: 0; }
+
+.rowButton,
+.addRoot {
+  flex: none;
+  min-height: var(--control-h-sm);
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--surface-raised);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  transition: border-color var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.rowButton:hover:not(:disabled),
+.addRoot:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.rowButton:disabled { opacity: 0.4; cursor: not-allowed; }
+.addRoot { margin-top: var(--space-2); justify-self: start; }
+
+.checkbox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm-size);
+  color: var(--text-secondary);
+}
+
+.priorityRow {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+  margin-top: var(--space-2);
+}
+.priorityPath {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+.priorityRow .select { flex: 0 0 auto; width: auto; min-width: 120px; }
+
+.actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+.spacer { flex: 1 1 auto; }
+.confirm { font-size: var(--text-xs-size); color: var(--text-secondary); }
+
+.cancel,
+.save,
+.remove,
+.danger {
+  min-height: var(--control-h);
+  padding: 0 var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.cancel,
+.remove { color: var(--text-secondary); }
+.cancel:hover,
+.remove:hover { background: var(--bg-hover); color: var(--text-primary); }
+.danger { color: var(--status-danger-fg); border-color: var(--status-danger-solid); }
+.danger:hover:not(:disabled) { background: var(--bg-hover); }
+.save { background: var(--accent-600); color: var(--accent-contrast); }
+.save:hover:not(:disabled) { background: var(--accent-700); }
+.save:disabled,
+.danger:disabled,
+.remove:disabled { opacity: 0.4; cursor: not-allowed; }

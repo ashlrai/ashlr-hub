@@ -1,0 +1,77 @@
+/* The Projects section sits above the chat groups and borrows their type
+   scale exactly, so it reads as one more group heading rather than a second
+   kind of list. */
+.projects {
+  flex-shrink: 0;
+  padding: var(--space-3) 0 var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.head {
+  font-family: var(--font-display);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-2) var(--space-1) var(--space-3);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: 1.4;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.headText { flex: 1 1 auto; min-width: 0; }
+
+.add {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--control-h-xs, 20px);
+  height: var(--control-h-xs, 20px);
+  border-radius: var(--radius-sm);
+  color: var(--text-tertiary);
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.add:hover { color: var(--text-primary); background: var(--bg-hover); }
+.add:active { background: var(--bg-active); }
+
+.list { display: flex; flex-direction: column; list-style: none; margin: 0; padding: 0; }
+
+.project {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--density-row, 32px);
+  padding: 0 var(--space-3);
+  color: var(--text-secondary);
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.project:hover { background: var(--bg-hover); color: var(--text-primary); }
+.project:active { background: var(--bg-active); }
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.summary {
+  flex: none;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  color: var(--text-tertiary);
+}
+.project:hover .summary { color: var(--text-secondary); }
+
+.empty {
+  padding: var(--space-1) var(--space-3) var(--space-1);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}

@@ -5,6 +5,13 @@
  * spinner (DESIGN §4) — a spinner claims the UI is busy; the dot says the
  * agent is.
  *
+ * Above the chats sits the SAVED PROJECTS list. The chat groups below it are
+ * derived from history — a folder appears only once something has been
+ * started on it — so they cannot answer "reopen what I was working on before
+ * I ever sent a message". The projects section is the registry the operator
+ * writes deliberately, and it is the only place in the console that creates
+ * one.
+ *
  * Seat health and the local runtime live in the resources panel, and the
  * theme toggle lives in the shell rail, so nothing competes with the list.
  *
@@ -22,6 +29,7 @@ import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { PlusIcon, SearchIcon, SidebarIcon } from './verse-icons.js';
 import { seatSubscription } from './seat-subscription.js';
 import { formatRelative, groupSessions, seatById, seatPillLabel } from './verse-model.js';
+import { SavedProjects } from './workspaces/SavedProjects.js';
 import styles from './Sidebar.module.css';
 
 export interface SidebarProps {
@@ -70,6 +78,12 @@ export function Sidebar(props: SidebarProps) {
       </div>
 
       <div className={styles.scroll}>
+        {/* Saved projects, above the chats. A chat list groups only the
+            folders something has ALREADY been started on; this is the list of
+            folders the operator asked to keep, which is the one that answers
+            "open the thing I was working on yesterday". It reads and writes
+            the workspace registry itself — see workspaces/SavedProjects.tsx. */}
+        <SavedProjects />
         {loading ? (
           <div className={styles.skeleton} aria-busy="true">
             <SkeletonLine width="48%" /><SkeletonLine width="86%" /><SkeletonLine width="74%" />

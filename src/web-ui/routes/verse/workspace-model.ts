@@ -16,10 +16,12 @@
  *    workspace the operator chose.
  */
 import type {
+  VerseEngine,
   VerseRootPriority,
   VerseRootStatus,
   VerseSession,
   VerseWorkspace,
+  VerseWorkspaceRoot,
 } from '../../data/api-types.js';
 import { isAbsolutePath } from './verse-model.js';
 
@@ -111,6 +113,43 @@ export const ROOT_PRIORITY_ORDER: readonly VerseRootPriority[] =
 export const ROOT_PRIORITY_NOTE =
   'Priority orders the repositories the fleet already has. It never adds one — a repository that is not enrolled stays out of reach at every priority.';
 
+/**
+ * Sort weight; lower sorts first. Mirrors `VERSE_ROOT_PRIORITY_RANK` on the
+ * server so the list the operator re-ranks here and the list the autonomous
+ * lane walks cannot be ordered differently.
+ */
+export const ROOT_PRIORITY_RANK: Record<VerseRootPriority, number> = {
+  critical: 0,
+  high: 1,
+  normal: 2,
+  low: 3,
+};
+
+/** A path's priority, treating an absent key as `normal` (as the server does). */
+export function priorityOf(
+  path: string,
+  priorities: Readonly<Record<string, VerseRootPriority>> | undefined,
+): VerseRootPriority {
+  return priorities?.[path] ?? 'normal';
+}
+
+/**
+ * Paths most-important-first.
+ *
+ * STABLE: two paths at the same priority keep the order they were given, so
+ * re-ranking one repo never silently shuffles the rest. Ordering only — this
+ * neither adds nor removes a path.
+ */
+export function rankPathsByPriority(
+  paths: readonly string[],
+  priorities: Readonly<Record<string, VerseRootPriority>> | undefined,
+): string[] {
+  return paths
+    .map((path, index) => ({ path, index, rank: ROOT_PRIORITY_RANK[priorityOf(path, priorities)] }))
+    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .map((entry) => entry.path);
+}
+
 // ---------------------------------------------------------------------------
 // Root-set editing (the new-chat dialog and the workspace editor share this)
 // ---------------------------------------------------------------------------
@@ -164,4 +203,147 @@ export function workspaceSummary(workspace: VerseWorkspace): string {
   const extra = workspace.roots.length - 1;
   if (extra <= 0) return '1 folder';
   return `${workspace.roots.length} folders`;
+}
+
+/**
+ * A workspace's roots in SEND order: the primary first, then the rest as
+ * stored.
+ *
+ * `VerseWorkspace.roots` is documented primary-first, but the flag is the
+ * authority and an update replaces the set wholesale with "first entry is
+ * primary". Normalising here means a reorder can never accidentally demote
+ * the primary because a stored record listed it second.
+ */
+export function orderedWorkspaceRoots(workspace: VerseWorkspace): VerseWorkspaceRoot[] {
+  const primary = workspace.roots.find((r) => r.primary);
+  if (!primary) return [...workspace.roots];
+  return [primary, ...workspace.roots.filter((r) => r !== primary)];
+}
+
+/** The same order, as the bare paths `updateVerseWorkspace` takes. */
+export function workspaceRootPaths(workspace: VerseWorkspace): string[] {
+  return orderedWorkspaceRoots(workspace).map((r) => r.path);
+}
+
+// ---------------------------------------------------------------------------
+// Which engines reach more than the primary folder
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether this engine's CLI takes an additional-directory flag.
+ *
+ * Mirrors `engineSupportsExtraRoots` in src/core/verse/workspaces.ts. Grok
+ * exposes no such flag at all (checked on grok 0.2.118), so a Grok seat gets
+ * its primary root and nothing else — and the UI has to SAY that at the point
+ * the seat is chosen rather than let the operator discover it from a diff that
+ * never applies.
+ *
+ * `null` (no seat picked yet) reaches everything: there is nothing to warn
+ * about until a seat exists.
+ */
+export function engineReachesExtraRoots(engine: VerseEngine | null | undefined): boolean {
+  if (engine === null || engine === undefined) return true;
+  return engine === 'claude' || engine === 'codex' || engine === 'local';
+}
+
+export const EXTRA_ROOTS_REACHABLE_NOTE =
+  'The agent can read and write these folders for the life of this chat. Enrolment is separate — an unenrolled folder stays out of reach of the autonomous lane.';
+
+export const EXTRA_ROOTS_UNREACHABLE_NOTE =
+  'This seat’s CLI takes no additional-directory flag, so it will reach only the primary folder. The other folders will be unreachable — pick a Claude, Codex or local seat to use more than one.';
+
+/**
+ * The caveat for handing `rootCount` folders to a seat, or null when there is
+ * nothing to warn about. Only ever the BAD news, so a caller can render it as
+ * a warning without having to decide which sentence it got.
+ */
+export function extraRootsCaveat(
+  engine: VerseEngine | null | undefined,
+  rootCount: number,
+): string | null {
+  if (rootCount <= 1) return null;
+  return engineReachesExtraRoots(engine) ? null : EXTRA_ROOTS_UNREACHABLE_NOTE;
+}
+
+/** The full note for a multi-folder set: the caveat when there is one, the
+ *  enrolment reminder otherwise. Null when only one folder is in play. */
+export function extraRootsNote(
+  engine: VerseEngine | null | undefined,
+  rootCount: number,
+): string | null {
+  if (rootCount <= 1) return null;
+  return extraRootsCaveat(engine, rootCount) ?? EXTRA_ROOTS_REACHABLE_NOTE;
+}
+
+/** Said once wherever a multi-folder project is DEFINED, where no seat is
+ *  chosen yet and so no per-seat caveat can be given. */
+export const MULTI_ROOT_ENGINE_NOTE =
+  'Claude, Codex and local seats reach every folder here. A Grok seat reaches only the primary one.';
+
+// ---------------------------------------------------------------------------
+// Saved projects (the create/edit form behind the workspace routes)
+// ---------------------------------------------------------------------------
+
+/** The folder's own name, used when the operator names nothing. */
+export function defaultWorkspaceName(primaryPath: string): string {
+  const trimmed = primaryPath.trim().replace(/[/\\]+$/, '');
+  const base = trimmed.split(/[/\\]/).pop() ?? '';
+  return base.length > 0 ? base : trimmed;
+}
+
+export interface WorkspaceDraftValidation {
+  ok: boolean;
+  /** One message, or null when the draft is sendable. */
+  error: string | null;
+  /** The name as it would be sent — never empty when `ok`. */
+  name: string;
+  /** Trimmed, de-duplicated, primary first. */
+  roots: string[];
+}
+
+/**
+ * Validate a saved project before it is sent.
+ *
+ * COURTESY ONLY, exactly like `validateRootSet`: the server re-checks every
+ * path against the enrollment registry's deny roots and is the authority.
+ */
+export function validateWorkspaceDraft(
+  name: string,
+  roots: readonly string[],
+): WorkspaceDraftValidation {
+  const [primary = '', ...extras] = roots;
+  const set = validateRootSet(primary, extras);
+  if (!set.ok) return { ok: false, error: set.error, name: '', roots: [] };
+  const trimmed = name.trim();
+  const resolved = trimmed.length > 0 ? trimmed : defaultWorkspaceName(set.roots[0]!);
+  if (resolved.length === 0) {
+    return { ok: false, error: 'Give this project a name.', name: '', roots: [] };
+  }
+  return { ok: true, error: null, name: resolved, roots: set.roots };
+}
+
+/**
+ * Move one entry up or down by one place.
+ *
+ * Returns a NEW array, and returns the order unchanged when the move would
+ * fall off either end — so a caller can wire it to a button that is disabled
+ * at the ends without the two disagreeing.
+ */
+export function moveRoot<T>(roots: readonly T[], index: number, direction: 'up' | 'down'): T[] {
+  const next = [...roots];
+  const target = direction === 'up' ? index - 1 : index + 1;
+  if (index < 0 || index >= next.length || target < 0 || target >= next.length) return next;
+  const moved = next[index]!;
+  next[index] = next[target]!;
+  next[target] = moved;
+  return next;
+}
+
+/**
+ * How the first row must be described. The first root IS the primary — it is
+ * the session's cwd and the only folder a Grok seat reaches — so the reorder
+ * control is not cosmetic and the label has to say what it does.
+ */
+export function rootRowLabel(index: number): string {
+  return index === 0 ? 'Primary folder' : `Folder ${index + 1}`;
 }
