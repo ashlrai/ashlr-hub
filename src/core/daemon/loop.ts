@@ -96,7 +96,33 @@ import {
   upgradeLegacyDaemonSpendGuard,
 } from './state.js';
 import type { DaemonLock, SaveDaemonStateResult } from './state.js';
-import { daemonPaused } from './pause.js';
+import { daemonPaused, pauseDaemon } from './pause.js';
+// M-WINDOW: the bounded run window. Pure arithmetic — no I/O, no primitive.
+import {
+  evaluateRunWindow,
+  resolveRunWindow,
+  runWindowParkMs,
+  type ResolvedRunWindow,
+  type RunWindowStopRule,
+} from './run-window.js';
+// M-WINDOW: post-merge re-verification. Imports a VERIFY primitive and reads
+// git; it imports NO apply/merge/push primitive, so the `daemon-no-primitive`
+// contract (test/h4.proposal-only.test.ts 1.9) is untouched.
+import {
+  recordPostMergeHalt,
+  runPostMergeGate,
+  snapshotEnrolledHeads,
+  type PostMergeGateResult,
+  type RepoHeadSnapshot,
+} from './post-merge-halt.js';
+// M-WINDOW: the engine half of GET /api/verse/overnight. A durable status
+// record the route reads; this file never imports a web module.
+import {
+  armOvernightRun,
+  concludeOvernightRun,
+  recordOvernightActivity,
+  recordOvernightIteration,
+} from './overnight-status.js';
 // Type-only: erased at compile time, so this does NOT eagerly load
 // self-improve.js/post-merge-credit.js at module init (those are still
 // reached only via the lazy `await import(...)` calls in
@@ -1141,6 +1167,24 @@ interface TickOptions {
 interface DaemonRunOptions extends TickOptions {
   once: boolean;
   maxCycles?: number;
+  /**
+   * M-WINDOW: the BOUNDED RUN WINDOW — the stop rule for an unattended run.
+   * Absent = today's behaviour exactly (run until killed/paused/aborted).
+   *
+   * IN-PROCESS by necessity, not by preference: `StartCalendarInterval` appears
+   * nowhere in this repo and the two launch-trigger allowlists
+   * (runtime-activation-transaction.ts, resident-service-readiness.ts) reject
+   * an extra OS trigger, with tests locking that. See daemon/run-window.ts.
+   */
+  runWindow?: RunWindowStopRule;
+  /**
+   * M-WINDOW: re-run each landed-on repo's own suite AFTER a merge and HALT
+   * the run when it is red. Default ON whenever a run window is set — an
+   * unattended run is exactly the case that cannot afford to build iteration
+   * N+1 on a regression merged at iteration N. Set false only for a run being
+   * watched by a human. See daemon/post-merge-halt.ts.
+   */
+  postMergeHalt?: boolean;
 }
 
 /** Schedule advisory post-state work only after a durable resident tick returns. */
@@ -8836,6 +8880,15 @@ export async function runDaemon(
   }
 
   let terminalFailure: string | undefined;
+  /**
+   * M-WINDOW: why a bounded run ended, when it ended on its own terms.
+   *
+   * Deliberately NOT `terminalFailure`: `src/cli/daemon.ts` maps any
+   * terminalFailure to exit code 1, and a run window that elapsed exactly as
+   * asked is a SUCCESS. An overnight run that reaches 07:00 and parks must not
+   * look like a crash in the morning.
+   */
+  const runWindowConclusion: { value: { reason: string; summary: string } | null } = { value: null };
   try {
     if (opts.once) {
       // A permit is bound to the exact supplied config snapshot. Other manual
@@ -8881,11 +8934,139 @@ export async function runDaemon(
       // Same discipline for the serving runtime: audit the transition, not
       // every poll, so a runtime that is down for an hour writes two lines.
       let localFleetRuntimeDownAudited = false;
-      while (true) {
+
+      // ── M-WINDOW: arm the bounded run window ───────────────────────────────
+      // A refusal here does NOT start an unbounded run. An operator who asked
+      // for "stop at 07:00" and mistyped it gets a refusal, not a daemon that
+      // runs until someone notices — the failure direction for a bound on
+      // autonomous work is always "does not run".
+      let runWindow: ResolvedRunWindow | null = null;
+      let runWindowRefused = false;
+      if (opts.runWindow !== undefined) {
+        const resolved = resolveRunWindow(opts.runWindow);
+        if (!resolved.ok) {
+          runWindowRefused = true;
+          terminalFailure = 'daemon-run-window-invalid';
+          audit({
+            action: 'daemon:start',
+            repo: null,
+            sandboxId: null,
+            summary: `daemon run refused: ${resolved.reason}`,
+            result: 'refused',
+          });
+        } else {
+          runWindow = resolved.window;
+          audit({
+            action: 'daemon:run-window',
+            repo: null,
+            sandboxId: null,
+            summary: `run window armed — ${runWindow.describe}; it ends by PAUSING ` +
+              `(~/.ashlr/daemon.paused), never by the kill switch`,
+            result: 'ok',
+          });
+          // Publish the armed run for GET /api/verse/overnight. The gate's
+          // three pre-merge checks are structural (inbox/merge.verifyProposal
+          // runs typecheck + tests + lint and fails closed without them), so
+          // they are reported as true; autoMerge is tri-state because a config
+          // that does not say is not the same as a config that says no.
+          armOvernightRun(opts.runWindow, {
+            repos: snapshotEnrolledHeads().length,
+            gate: {
+              tests: true,
+              lint: true,
+              typecheck: true,
+              autoMerge: typeof cfg.foundry?.autoMerge?.enabled === 'boolean'
+                ? cfg.foundry.autoMerge.enabled
+                : null,
+              branch: null,
+            },
+          });
+        }
+      }
+      // Post-merge halt defaults ON for a bounded (i.e. unattended) run.
+      const postMergeHaltEnabled = opts.postMergeHalt ?? (runWindow !== null);
+      // TICKS, not loop iterations. `cyclesLeft` above decrements before the
+      // pause check, so a parked loop burns a "cycle" every second — that is
+      // fine for its purpose but is NOT what "stop after N iterations" means
+      // to an operator. This counts completed ticks only.
+      let completedTicks = 0;
+
+      /**
+       * End the run by PARKING, never by killing.
+       *
+       * `stopDaemon()` is `setKill(true)`, and `~/.ashlr/KILL` is also read by
+       * `assertMayMutate`, so it would refuse the operator's OWN MCP write
+       * tools the moment they sat down. The run window's whole promise is that
+       * "he's back" is a pause: reversible with one click, costing nothing to
+       * try. So the window concludes by engaging the daemon-scoped pause
+       * sentinel and breaking out of the loop.
+       */
+      /**
+       * Park for `ms`, but in chunks no longer than the window allows.
+       *
+       * `sleep()` is ONE `setTimeout`, and a suspended host does not fire
+       * timers on time — it fires them late, on wake. Batch mode's default
+       * park is 5 minutes and a suspend can stretch that to hours, which would
+       * carry a run well past its own end time. So the park is CHUNKED (never
+       * truncated: the total still adds up to `ms`, so tick cadence and the
+       * daily budget are unchanged) and each chunk is capped at
+       * RUN_WINDOW_MAX_PARK_MS, re-reading the wall clock in between. This is
+       * the same discipline `sleepUntilNextUtcBudgetDay` already uses.
+       *
+       * Returns false only when the sleep was aborted, matching `sleep()`.
+       */
+      const parkWithinWindow = async (ms: number): Promise<boolean> => {
+        if (runWindow === null) return sleep(ms, shutdown.signal);
+        const wakeAtMs = Date.now() + Math.max(0, ms);
+        while (true) {
+          const nowMs = Date.now();
+          if (nowMs >= wakeAtMs) return true;
+          // Window over? Stop parking immediately and let the loop-top check
+          // conclude the run — do not serve out the rest of the interval.
+          if (evaluateRunWindow(runWindow, { nowMs, iterations: completedTicks }).expired) return true;
+          const chunkMs = runWindowParkMs(runWindow, wakeAtMs - nowMs, nowMs);
+          if (chunkMs <= 0) return true;
+          if (!(await sleep(chunkMs, shutdown.signal))) return false;
+        }
+      };
+
+      const concludeByParking = (reason: string, summary: string): void => {
+        runWindowConclusion.value = { reason, summary };
+        // The record is KEPT, not cleared — the morning's first question is
+        // "what happened last night", and a status that erases itself on exit
+        // cannot answer it. `armed` goes false: the NEXT run is not armed.
+        try { concludeOvernightRun(`${reason} — ${summary}`); } catch { /* observability only */ }
+        const parked = pauseDaemon();
+        audit({
+          action: 'daemon:run-window',
+          repo: null,
+          sandboxId: null,
+          summary: `${summary} — daemon PARKED via ${parked.state.path} (${parked.reason}); ` +
+            `the global kill switch is NOT engaged`,
+          result: parked.ok ? 'ok' : 'error',
+        });
+      };
+
+      while (!runWindowRefused) {
         if (shutdown.signal.aborted) break;
         if (!ownsDaemonLock()) break;
         if (cyclesLeft-- <= 0) break;
         if (killSwitchOn() || shutdown.signal.aborted) break;
+
+        // ── M-WINDOW: is the window already over? ───────────────────────────
+        // Checked against an ABSOLUTE deadline and an ABSOLUTE `Date.now()`,
+        // never against accumulated elapsed time — so a host that suspended at
+        // 01:00 and woke at 09:00 finds its 07:00 window expired on the first
+        // look, rather than serving out a timer armed eight hours ago. Checked
+        // BEFORE the pause check below so an expired window concludes even if
+        // the operator happened to pause first.
+        if (runWindow !== null) {
+          const verdict = evaluateRunWindow(runWindow, { iterations: completedTicks });
+          if (verdict.expired) {
+            concludeByParking(`run-window-${verdict.reason}`, verdict.detail);
+            break;
+          }
+        }
 
         // M-PAUSE: the daemon-scoped pause PARKS the loop; it does not stop it.
         // Unlike the kill switch above (which breaks, letting the process exit
@@ -8933,6 +9114,15 @@ export async function runDaemon(
           });
           break;
         }
+        // ── M-WINDOW: what did each ENROLLED repo's head look like BEFORE? ──
+        // Repo-state truth, not a return value: anything that moves a default
+        // branch during this tick is caught, whoever moved it. Only enrolled
+        // repos are ever read (`listEnrolled()`), so a repo that is not
+        // enrolled is never touched by this gate in any way.
+        const headsBeforeTick: RepoHeadSnapshot[] = postMergeHaltEnabled && !opts.dryRun
+          ? snapshotEnrolledHeads()
+          : [];
+
         transitionActivity('tick');
         const tickResult = await tick(liveCfg, {
           dryRun: opts.dryRun,
@@ -8942,7 +9132,81 @@ export async function runDaemon(
           ownerLock: daemonLock,
           onOwnershipLost: requestOwnershipLoss,
         });
+        completedTicks++;
+        if (runWindow !== null) {
+          // Live progress for the cockpit. `iterationsDone` is a number the
+          // engine genuinely knows, so it is never reported as null here.
+          try {
+            recordOvernightActivity({
+              iterationsDone: completedTicks,
+              activity: `tick ${completedTicks} finished: ${tickResult.reason}` +
+                (tickResult.proposalsCreated > 0 ? `, ${tickResult.proposalsCreated} proposal(s) created` : ''),
+            });
+          } catch { /* observability only */ }
+        }
         await runOwnedPulseSync(liveCfg, tickResult, daemonLock, shutdown.signal, requestOwnershipLoss);
+
+        // ── M-WINDOW: THE POST-MERGE HALT ───────────────────────────────────
+        // The gate that makes an unattended night survivable. The PRE-merge
+        // gate (fleet/automerge-pass → inbox/merge) already proved this diff
+        // green in an isolated worktree before it landed; this proves the
+        // MERGED tree is still green, which is a different claim and the one
+        // that compounds. If it is red, the run ENDS HERE — iteration N+1 is
+        // never built on iteration N's regression, so the morning costs one
+        // revert (named in the halt record) instead of a bisect.
+        //
+        // Cheap when nothing merged: one `git rev-parse` per enrolled repo and
+        // an immediate 'no-landing'. The suite only runs when a head moved.
+        if (postMergeHaltEnabled && !opts.dryRun && ownsDaemonLock()) {
+          let postMerge: PostMergeGateResult | null = null;
+          try {
+            postMerge = await runPostMergeGate(
+              headsBeforeTick,
+              snapshotEnrolledHeads(),
+              liveCfg,
+              { signal: shutdown.signal },
+            );
+          } catch (error) {
+            // runPostMergeGate never throws by contract; this covers a thrown
+            // module-resolution path. An unprovable merge must still halt.
+            postMerge = null;
+            audit({
+              action: 'daemon:post-merge-halt',
+              repo: null,
+              sandboxId: null,
+              summary: `post-merge gate failed to run (${error instanceof Error ? error.message : String(error)}); halting rather than continuing unverified`,
+              result: 'error',
+            });
+            concludeByParking('post-merge-gate-failed', 'post-merge gate could not run');
+            break;
+          }
+          if (postMerge.verdict !== 'no-landing') {
+            audit({
+              action: 'daemon:post-merge-verify',
+              repo: postMerge.landings[0]?.repo ?? null,
+              sandboxId: null,
+              summary: `${postMerge.detail} (${postMerge.durationMs}ms)`,
+              result: postMerge.halt ? 'refused' : 'ok',
+            });
+          }
+          // Fold this iteration into the overnight record — what merged (with
+          // real commit OIDs) or what was discarded (with the gate's own
+          // specific sentence and the exact revert). Best-effort: a status
+          // write must never be the reason a run stops.
+          if (runWindow !== null && postMerge.verdict !== 'no-landing') {
+            try {
+              recordOvernightIteration(postMerge, { iterationsDone: completedTicks });
+            } catch { /* observability only */ }
+          }
+          if (postMerge.halt) {
+            recordPostMergeHalt(postMerge);
+            concludeByParking(
+              `post-merge-${postMerge.verdict}`,
+              `${postMerge.detail}; revert with: ${postMerge.revertPlan.join(' ; ') || '(see halt record)'}`,
+            );
+            break;
+          }
+        }
         // Dry-run is inherently a one-shot PLAN: it records spentUsd:0 forever,
         // so the budget break can never fire. Terminate after a single iteration
         // (matching --once semantics) so a dry-run loop is BOUNDED, not endless.
@@ -9065,10 +9329,10 @@ export async function runDaemon(
 
         if (afterLoopCfg.mode === 'continuous') {
           if (noWorkDispatched) {
-            if (!(await sleep(afterLoopCfg.idleBackoffMs ?? 5_000, shutdown.signal))) break;
+            if (!(await parkWithinWindow(afterLoopCfg.idleBackoffMs ?? 5_000))) break;
           }
         } else {
-          if (!(await sleep(afterLoopCfg.intervalMs, shutdown.signal))) break;
+          if (!(await parkWithinWindow(afterLoopCfg.intervalMs))) break;
         }
 
         if (!ownsDaemonLock()) break;
@@ -9124,7 +9388,11 @@ export async function runDaemon(
       action: 'daemon:stop',
       repo: null,
       sandboxId: null,
-      summary: 'daemon stopped',
+      // M-WINDOW: a bounded run says WHY it ended, so the morning does not have
+      // to infer it from a bare 'daemon stopped' and a timestamp.
+      summary: runWindowConclusion.value
+        ? `daemon stopped: ${runWindowConclusion.value.reason} — ${runWindowConclusion.value.summary}`
+        : 'daemon stopped',
       result: 'ok',
     });
   }
