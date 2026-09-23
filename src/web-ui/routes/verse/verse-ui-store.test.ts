@@ -26,11 +26,34 @@ beforeEach(() => {
 });
 
 describe('verse-ui-store', () => {
-  it('lists the five rail sections in ⌘1–⌘5 order with their module names', () => {
-    expect(VERSE_SECTIONS.map((s) => s.id)).toEqual(['chat', 'autonomy', 'approvals', 'usage', 'settings']);
+  it('lists the rail sections in ⌘1–⌘6 order with their module names', () => {
+    expect(VERSE_SECTIONS.map((s) => s.id)).toEqual([
+      'chat', 'autonomy', 'approvals', 'usage', 'settings', 'mcp',
+    ]);
     expect(VERSE_SECTIONS.map((s) => s.module)).toEqual([
       'ChatSection', 'AutonomySection', 'ApprovalsSection', 'UsageSection', 'SettingsSection',
+      'McpSection',
     ]);
+  });
+
+  it('keeps MCP registered, and keeps the first five bindings where they were', () => {
+    // REGRESSION. The MCP section shipped complete — component, queries,
+    // contract, tests and both server routes — and was unreachable for a
+    // whole release solely because it was missing from this list. Removing
+    // the entry is exactly how that happened, so it is pinned here as well
+    // as through the shell (VerseApp.test.tsx mounts every entry).
+    expect(VERSE_SECTIONS.find((s) => s.id === 'mcp')).toEqual({
+      id: 'mcp', label: 'MCP', module: 'McpSection',
+    });
+    // ⌘1–⌘5 are shipped muscle memory; MCP extends the scheme at ⌘6 rather
+    // than renumbering Settings out from under anyone.
+    expect(VERSE_SECTIONS[4]!.id).toBe('settings');
+    expect(VERSE_SECTIONS[5]!.id).toBe('mcp');
+  });
+
+  it('accepts mcp as a persisted section, so a reload lands back on it', () => {
+    setVerseSection('mcp');
+    expect(stored()).toMatchObject({ section: 'mcp' });
   });
 
   it('persists layout under ashlr.verse.ui.v2 and clamps widths to the design range', () => {

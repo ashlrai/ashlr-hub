@@ -1,5 +1,5 @@
 /**
- * routes/verse/verse-ui-store.ts — the shell's own state: which of the five
+ * routes/verse/verse-ui-store.ts — the shell's own state: which of the
  * rail sections is mounted, the chat sidebar's width / collapsed flag, and
  * the resources panel. Framework-free (one `useSyncExternalStore` hook at
  * the bottom), same split as verse-store.ts + useVerseSession.ts.
@@ -17,15 +17,27 @@
  *     section consumes it by nonce.
  */
 
-export type VerseSectionId = 'chat' | 'autonomy' | 'approvals' | 'usage' | 'settings';
+export type VerseSectionId = 'chat' | 'autonomy' | 'approvals' | 'usage' | 'settings' | 'mcp';
 
-/** Rail order is the ⌘1–⌘5 order. */
+/**
+ * Rail order is the ⌘1–⌘n order, and `module` is the file the shell's
+ * `import.meta.glob('./sections/*Section.tsx')` must find. Both halves matter:
+ * a section missing from this list is unreachable however complete it is, and
+ * a `module` that does not resolve renders `MissingSection` instead. MCP sat
+ * outside both for a whole release — see VerseApp.test.tsx, which mounts every
+ * entry here and fails if any of them falls back to the missing state.
+ *
+ * MCP is APPENDED rather than slotted in before Settings on purpose: the first
+ * five bindings are shipped muscle memory (⌘5 has meant Settings since v2), so
+ * the new section extends the scheme at ⌘6 instead of renumbering it.
+ */
 export const VERSE_SECTIONS: readonly { id: VerseSectionId; label: string; module: string }[] = [
   { id: 'chat', label: 'Chat', module: 'ChatSection' },
   { id: 'autonomy', label: 'Autonomy', module: 'AutonomySection' },
   { id: 'approvals', label: 'Approvals', module: 'ApprovalsSection' },
   { id: 'usage', label: 'Usage', module: 'UsageSection' },
   { id: 'settings', label: 'Settings', module: 'SettingsSection' },
+  { id: 'mcp', label: 'MCP', module: 'McpSection' },
 ];
 
 const SECTION_IDS = new Set<string>(VERSE_SECTIONS.map((s) => s.id));

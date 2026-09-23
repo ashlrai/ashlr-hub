@@ -8,11 +8,13 @@
  * equivalent there is an ALIAS of it, so the rail and the inbox cannot drift
  * to two different chat glyphs.
  *
- * Three icons stay drawn here because the shared set has no equivalent and
+ * Four icons stay drawn here because the shared set has no equivalent and
  * they are Verse-specific chrome, not general console vocabulary:
  * `PanelIcon` / `SidebarIcon` (the two pane toggles, which must read as
- * mirror images of each other) and `VerseMark` (the brand mark in the rail
- * head, which is 32px and never takes a color state).
+ * mirror images of each other), `VerseMark` (the brand mark in the rail
+ * head, which is 32px and never takes a color state) and `McpIcon` (a plug —
+ * the shared set has no connector glyph, and every candidate in it already
+ * means another rail section).
  */
 import type { ComponentType, ReactNode } from 'react';
 import {
@@ -80,6 +82,22 @@ export function SidebarIcon(props: IconProps) {
   return <Icon {...props}><rect x="2.5" y="3" width="11" height="10" rx="1.5" /><path d="M6 3v10" /></Icon>;
 }
 
+/**
+ * MCP — a plug in a socket. Drawn here rather than aliased: the shared set's
+ * nearest candidates (`IconCpu`, `IconSliders`, `IconKey`) are already the
+ * Autonomy, Settings and credential glyphs, and two rail items that read as
+ * the same picture is worse than one more 16px drawing.
+ */
+export function McpIcon(props: IconProps) {
+  return (
+    <Icon {...props}>
+      <path d="M6 1.8v3.2M10 1.8v3.2" />
+      <path d="M3.8 5h8.4v2.6a4.2 4.2 0 0 1-4.2 4.2 4.2 4.2 0 0 1-4.2-4.2V5Z" />
+      <path d="M8 11.8v2.4" />
+    </Icon>
+  );
+}
+
 /** The mark in the rail head. Not a section icon — it never gets a color state. */
 export function VerseMark(props: IconProps) {
   const { size = 20, ...rest } = props;
@@ -97,4 +115,5 @@ export const SECTION_ICON: Record<VerseSectionId, ComponentType<IconProps>> = {
   approvals: ApprovalsIcon,
   usage: UsageIcon,
   settings: SettingsIcon,
+  mcp: McpIcon,
 };
