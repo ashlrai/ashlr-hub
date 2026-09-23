@@ -171,14 +171,36 @@ function num(value: unknown, min: number, max: number): number | undefined {
  * and ~1s was prompt (473 tokens against a warm prefix cache). So `low` is
  * worth roughly 3.8x on the decode-bound part of a turn.
  *
- * It is still NOT the default here. Every task in that battery is a SINGLE
- * tool call, and single-call accuracy is not evidence about multi-step
- * debugging — which is the work the local lane actually has to do. Shipping a
- * global reduction in a reasoning model's thinking on single-call evidence is
- * the kind of over-claim this module's history is made of. The mechanism is
+ * It is still NOT the default here — and the multi-step battery that the
+ * paragraph above asked for has since been run, which CHANGES WHICH VALUE an
+ * operator should pick while leaving the default alone.
+ *
+ * 5 agentic tasks x 3 efforts x 3 trials, plus a long-horizon `api-migration`
+ * arm run separately at a 1500s budget:
+ *
+ *   arm      pass    mean decode           total wall
+ *   xhigh    15/15   1582                  4208s
+ *   medium   15/15    766  (2.07x fewer)   2545s
+ *   low      15/15   1061  (1.49x fewer)   2657s
+ *
+ * THE LADDER IS NOT MONOTONIC. `medium` beats `low` on decode AND wall-clock,
+ * on 5 of 6 tasks, and the mechanism is visible in the turn counts: `low`
+ * under-thinks per turn and pays it back in extra tool-calling round trips
+ * (`refuse-unsafe-delete` 3.0 -> 4.0 turns, `edge-case-parser` 5.0 -> 6.3, and
+ * one `api-migration` trial at 10 turns/806s against medium's worst of
+ * 8/413s). So the single-call result above — which ranked `low` best — does
+ * not survive multi-step work. Prefer `medium`.
+ *
+ * Quality remains a NON-RESULT, which is why the shipped default still does
+ * not move: every arm went 15/15, so there are no failures to compare. That
+ * BOUNDS the difference rather than measuring it — Wilson is [0.80, 1.00] per
+ * arm, so a regression under roughly 20 points would have been invisible, and
+ * separating 100% from 95% would need 100+ trials per arm. The mechanism is
  * here, the numbers are here, and the operator chooses:
  *
- *   "models": { "llamaServer": { "agentDefaults": { "reasoningEffort": "low" } } }
+ *   "models": { "llamaServer": { "agentDefaults": { "reasoningEffort": "medium" } } }
+ *
+ * Reports for every trial are in `baselines/` alongside this lane's others.
  *
  * SAMPLING is off for a different reason: it was measured and REJECTED. The
  * hypothesis was that llama-server's chat-tuned defaults (temperature 1.0,
