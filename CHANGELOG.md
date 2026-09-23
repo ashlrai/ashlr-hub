@@ -339,6 +339,57 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.5.1] — 2026-09-23 UTC — The dependency backlog, landed rather than deferred
+
+Four dependency PRs had been sitting open. None was a version bump; each needed
+real work, and that is why they had not landed.
+
+- **`marked` 17 → 18, and the audit policy digest moves with it.** marked 17
+  read the two tildes in a line like ``~24 bits of `Math.random` …
+  `~/.ashlr/swarms/<id>.json` `` as GFM strikethrough, which swallowed the
+  backticks between them and left `<id>` exposed as an inline HTML token. The
+  external-skill audit's raw-HTML gate then fired and the whole document lost
+  section credit. One file in 120 of this repository's own docs flips, and it is
+  a false positive being corrected — a code span outranks an emphasis run that
+  would cross it. The parser is part of the signed policy, so the digest moves
+  with it, and a test now pins the code-span behaviour directly rather than
+  leaving it implied by a version string.
+- **Four dev dependencies upgraded, three held with reasons.** `vite` 6 → 8,
+  `@types/node` 22 → 26, `@vitejs/plugin-react` 4 → 6,
+  `@testing-library/jest-dom` 6 → 7. TypeScript 7 is blocked upstream —
+  `typescript-eslint` peers on `>=4.8.4 <6.1.0`, so npm cannot resolve the tree
+  at all. ESLint 10 adds 173 errors from three newly-recommended rules, and
+  jsdom 30 changes accessible role/name computation. Each hold is recorded in
+  `dependabot.yml` with the condition that lifts it, so the group stops
+  regenerating weekly in a state that cannot install or cannot pass.
+- **Raycast: `@raycast/api` 2, and the flat-config migration it requires.**
+  `@raycast/eslint-config` 2.x exports a flat config array; passing that through
+  the existing `FlatCompat` wrapper throws *Converting circular structure to
+  JSON*. `ray build` compiles all seven entry points again.
+
+### Reasoning effort, settled on multi-step work
+
+`config.ts` had asked for this battery explicitly: the earlier numbers came from
+single tool calls, which say nothing about multi-step debugging. 5 agentic tasks
+× 3 efforts × 3 trials, plus a long-horizon arm:
+
+| arm | pass | mean decode | total wall |
+|---|---|---|---|
+| xhigh (ships today) | 15/15 | 1582 | 4208s |
+| **medium** | 15/15 | **766 — 2.07× fewer** | **2545s** |
+| low | 15/15 | 1061 — 1.49× fewer | 2657s |
+
+The ladder is not monotonic: `medium` beats `low` on decode *and* wall-clock, on
+5 of 6 tasks, because `low` under-thinks per turn and pays it back in extra
+tool-calling round trips. The shipped default does not move — every arm went
+15/15, so quality is *bounded*, not measured, and a sub-20-point regression
+would have been invisible. Operators wanting the 2× set
+`models.llamaServer.agentDefaults.reasoningEffort` to `"medium"`.
+
+### Repository
+
+62 open pull requests → 0.
+
 ## [3.5.0] — 2026-09-22 UTC — Ashlr Verse: the operator console, and a local model that keeps working
 
 Verse becomes the surface you drive the fleet from, and the local lane becomes
