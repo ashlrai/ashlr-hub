@@ -8,37 +8,97 @@
 }
 
 /* ---- header strip: 48px, hairline, ghost controls only ------------------ */
+/*
+ * Three flex clusters, in reading order: the identity lockup (the only one
+ * that shrinks), the seat pill, then the action cluster pinned right by
+ * .headerSpacer. Wrapping is never allowed — the strip is exactly one
+ * --strip-height row, which is the height the desktop shell's title-bar
+ * maths is written against.
+ */
 .header {
   position: relative; /* containing block for the 2px context line */
   flex-shrink: 0;
   display: flex;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-3);
   /* DESIGN-V2 §4: header strips are --strip-height, and the token is what the
      desktop shell's inset maths is written against. */
   height: var(--strip-height);
   padding: 0 var(--space-3);
   border-bottom: 1px solid var(--border-subtle);
 }
-.headerSpacer { flex: 1; min-width: var(--space-2); }
+.headerSpacer { flex: 1 1 var(--space-4); min-width: var(--space-2); }
 
-.title {
+/* ---- identity lockup: project over chat title --------------------------- */
+/*
+ * Two lines inside 48px: 11px/1.2 (~13px) over 15px/1.2 (~18px) plus a 1px
+ * gap is ~32px, which centres in the strip with room to spare. This is what
+ * makes the band a header rather than a rule with an icon on it — and it is
+ * the ONLY shrinkable item, so a 200-character title or a deep project path
+ * ellipsises here instead of displacing the actions.
+ */
+.identity {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  flex: 0 1 auto;
   min-width: 0;
-  /* The hover/press target is inset by --space-2 so the chip reads as a target,
-     but the TEXT must still line up with the header's padding edge. The pull-back
-     lives here, on the flex item, rather than on .titleButton: a negative margin on
-     the button shrinks the h1's max-content (the h1 sizes to its child's OUTER
-     width), and `.titleButton { max-width: 100% }` then re-clamps the button to that
-     reduced box — so the title lost exactly --space-2 of text to the ellipsis at
-     every width, even with 350px of empty header beside it ("New chat" → "New c…").
-     On the h1 the margin only shifts the item and its free-space contribution; the
-     button keeps its full content width. Optical alignment is identical. */
-  margin-left: calc(-1 * var(--space-2));
+  overflow: hidden;
+}
+.eyebrow {
+  max-width: 100%;
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: 1.2;
+  font-weight: var(--font-weight-medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.eyebrowSkeleton {
+  height: calc(var(--text-2xs-size, 11px) * 1.2);
+  width: 9ch;
+  border-radius: var(--radius-xs);
+}
+
+/* Both title variants share the type; only the inset BUTTON gets the
+   pull-back below. Grouping them keeps the two lines on one scale. */
+.title,
+.titleStatic {
+  min-width: 0;
+  max-width: 100%;
   font-family: var(--font-display);
   font-size: var(--text-md-size);
   line-height: 1.2;
   font-weight: var(--font-weight-medium);
   letter-spacing: var(--tracking-display, -0.02em);
+}
+/* The static variant is plain text — the skeleton bar and the no-chat state.
+   It sits flush at the header's padding edge with no pull-back to undo. */
+.titleStatic {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Nothing is selected: the line is a STATE, not a name, so it is quieter than
+   a real title while still being the thing the eye lands on. */
+.titleStatic[data-state='empty'] { color: var(--text-secondary); }
+
+.title {
+  /* The hover/press target is inset by --space-2 so the chip reads as a target,
+     but the TEXT must still line up with the header's padding edge (and with
+     the eyebrow directly above it). The pull-back lives here, on the flex item,
+     rather than on .titleButton: a negative margin on the button shrinks the
+     h1's max-content (the h1 sizes to its child's OUTER width), and
+     `.titleButton { max-width: 100% }` then re-clamps the button to that
+     reduced box — so the title lost exactly --space-2 of text to the ellipsis at
+     every width, even with 350px of empty header beside it ("New chat" → "New c…").
+     On the h1 the margin only shifts the item and its free-space contribution; the
+     button keeps its full content width. Optical alignment is identical. */
+  margin-left: calc(-1 * var(--space-2));
 }
 .titleButton {
   display: block;
@@ -57,9 +117,14 @@
 .titleButton:active:not(:disabled) { background: var(--bg-active); }
 .titleButton:disabled { cursor: default; }
 .titleInput {
-  width: 100%;
+  /* Same pull-back as .title, for the same reason — the text must not jump
+     --space-2 to the right the moment you click Rename. The extra width pays
+     for the margin, so the box still ends at the lockup's right edge instead
+     of being clipped by its overflow. */
+  width: calc(100% + var(--space-2));
   max-width: 48ch;
   padding: 2px var(--space-2);
+  margin-left: calc(-1 * var(--space-2));
   border: 1px solid var(--accent-500);
   border-radius: var(--radius-xs);
   background: var(--bg-input);
@@ -77,13 +142,16 @@
 }
 
 /* Seat pill: an engine-tinted dot and the seat name. The tint is identity,
-   never status — status is text or a glyph everywhere in this app. */
+   never status — status is text or a glyph everywhere in this app.
+   The PROJECT is no longer repeated here; it is the lockup's eyebrow. */
 .seatPill {
   display: inline-flex;
   align-items: center;
   gap: var(--space-2);
-  flex-shrink: 0;
-  max-width: 34ch;
+  /* Shrinkable, but only after the lockup has given up what it can: .seatText
+     has its own ellipsis, so this degrades rather than overflowing. */
+  flex: 0 1 auto;
+  max-width: 28ch;
   min-width: 0;
   padding: 0 var(--space-2);
   height: var(--control-h-xs);
@@ -96,7 +164,7 @@
    is allowed a few more characters exactly then — rather than reserving room
    on every chat for a word that is usually absent. The seat name still
    ellipsises first; the chip is the part worth keeping. */
-.seatPill[data-seat-capacity] { max-width: 46ch; }
+.seatPill[data-seat-capacity] { max-width: 40ch; }
 .engineDot {
   flex-shrink: 0;
   width: 5px;
@@ -111,21 +179,43 @@
   color: var(--text-primary);
   font-weight: var(--font-weight-medium);
 }
-.projectName {
-  flex-shrink: 0;
-  padding-left: var(--space-2);
-  border-left: 1px solid var(--border-default);
-  color: var(--text-tertiary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 .engine-claude { --verse-engine: var(--engine-claude, #c96442); }
 .engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
 .engine-grok { --verse-engine: var(--engine-grok, #6b7280); }
 .engine-local { --verse-engine: var(--engine-local, #7c5cff); }
 
 .streamState { flex-shrink: 0; font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
+
+/* ---- action cluster ----------------------------------------------------- */
+/*
+ * flex-shrink: 0 is the whole contract of this strip's truncation behaviour:
+ * whatever the title is, the controls keep their width and the lockup gives
+ * up its own instead.
+ */
+.actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+/* Hairline, not a gap: it separates "things that act on this chat" from
+   "things that move the panes", which is why the two toggles beside it read
+   as one control rather than as a stray icon. */
+.actionDivider {
+  flex-shrink: 0;
+  width: 1px;
+  height: var(--space-4);
+  margin: 0 var(--space-1);
+  background: var(--border-default);
+}
+/* Tighter than the cluster gap on purpose — proximity is what makes the two
+   toggles a pair. */
+.toggles {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
 
 .ghost,
 .ghostIcon,
@@ -151,12 +241,18 @@
 .ghost:active:not(:disabled) { background: var(--bg-active); }
 .ghostIcon:disabled,
 .ghost:disabled { opacity: 0.4; cursor: not-allowed; }
-.ghostIcon[aria-pressed='true'] { color: var(--text-primary); }
+/* A pressed toggle is the OPEN pane. Tinted background as well as colour, so
+   the pair reads as a two-state segmented control rather than two icons that
+   happen to sit together (§6: never state by colour alone — the state is also
+   in aria-pressed and in the tooltip). */
+.ghostIcon[aria-pressed='true'] { color: var(--text-primary); background: var(--bg-hover); }
+.ghostIcon[aria-pressed='true']:hover:not(:disabled) { background: var(--bg-active); }
+
 .danger { min-height: var(--control-h-xs); padding: 0 var(--space-2); color: var(--status-danger-fg); }
 .danger:hover:not(:disabled) { background: var(--status-danger-bg); }
 .danger:active:not(:disabled) { background: var(--status-danger-bg); border-color: var(--status-danger-solid); }
 .confirm { display: inline-flex; align-items: center; gap: var(--space-1); }
-.confirmText { font-size: var(--text-xs-size); color: var(--text-secondary); }
+.confirmText { flex-shrink: 0; font-size: var(--text-xs-size); color: var(--text-secondary); white-space: nowrap; }
 
 /* ---- context meter: a 2px line under the header, numbers alongside ------ */
 /* Two channels on purpose. --meter-color paints the 2px FILL, where a status
@@ -263,8 +359,14 @@
 }
 .emptyWarn code { font-size: var(--text-xs-size); color: var(--text-primary); }
 
+/* ---- narrow windows ----------------------------------------------------- */
+/* The window is resizable down to a phone-ish width, and the strip degrades
+   from the right-hand end inwards: the lockup and the pane toggles are the
+   last things standing, because they are "where am I" and "give me my space
+   back". */
 @media (max-width: 900px) {
-  .projectName { display: none; }
+  .seatPill { max-width: 20ch; }
+  .seatPill[data-seat-capacity] { max-width: 28ch; }
 }
 @media (max-width: 760px) {
   /* Only the token pair goes; the PERCENT stays. Hiding .meterText left the
@@ -275,7 +377,15 @@
      colour with text (§6) AND clears the 4.5:1 body-text floor in the same
      section — the status SOLIDS do not, which is why they stay on the fill. */
   .meterTokens { display: none; }
-  .seatPill { max-width: 18ch; }
+  .seatPill { max-width: 14ch; }
+  .seatPill[data-seat-capacity] { max-width: 22ch; }
+}
+@media (max-width: 620px) {
+  /* The seat is still one tap away — the composer names it and offers the
+     switch — so at phone width the strip keeps the title and the toggles
+     rather than three half-truncated things. */
+  .seatPill { display: none; }
+  .header { gap: var(--space-2); }
 }
 /* Guarded like every other animated surface here (tokens.css, global.css,
    Transcript, Sidebar, Composer, ResourcesPanel): appearance-store.ts writes
@@ -289,11 +399,20 @@
  * In the Tauri window the OS title bar overlays the top 48px and the macOS
  * traffic lights float over the top-LEFT 92px of the WINDOW. This strip does
  * not start at the window's left edge — the 56px rail does — so the inset it
- * owes is the overlap, never the full 92px. Both vars are absent in a
- * browser, where the expression floors to 0px and the layout is unchanged. */
+ * owes is the overlap, never the full 92px.
+ *
+ * The `+ var(--space-2)` is the lockup's optical pull-back paid back: .title
+ * and .titleInput sit --space-2 left of the padding edge so their TEXT lines
+ * up with the eyebrow, which would otherwise put the rename button's hit area
+ * (and the traffic lights) in the same 8px. Adding it here keeps every
+ * interactive thing clear of the lights instead of removing the alignment.
+ *
+ * Both vars are absent in a browser, where the whole calc floors to a negative
+ * number (0 - 56 + 8 = -48px), max() picks --space-3, and the layout is
+ * byte-for-byte what it was. */
 .header {
   padding-left: max(
     var(--space-3),
-    calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px))
+    calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px) + var(--space-2))
   );
 }
