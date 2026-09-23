@@ -21,7 +21,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { classifyTrial } from './classify.js';
-import { diagnoseTimeout, startTrace } from './trace.js';
+import { diagnoseTimeout, startTrace, type TraceHandle } from './trace.js';
 import type { TaskSpec, TimeoutDiagnosis, TrialResult, TrialTokens, TrialTrace } from './types.js';
 
 /** Directories that are never part of a fixture's observable state. */
@@ -238,10 +238,18 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
   // pointed at. A trial that produces no result JSON is otherwise a black box:
   // the CLI emits its usage and turn count once, at the end, so a kill at the
   // budget records zero tokens and zero turns no matter how much work happened.
-  const tracing = opts.trace !== false;
-  const trace = tracing
-    ? await startTrace({ upstream: opts.baseUrl, captureDir: join(trialDir, 'wire') })
-    : null;
+  //
+  // The tracer is an OBSERVER, so failing to start one must not fail the trial
+  // it was only watching. A benchmark that dies because its instrument could
+  // not bind a port has turned the instrument into the experiment.
+  let trace: TraceHandle | null = null;
+  if (opts.trace !== false) {
+    try {
+      trace = await startTrace({ upstream: opts.baseUrl, captureDir: join(trialDir, 'wire') });
+    } catch {
+      trace = null;
+    }
+  }
   const agentBaseUrl = trace?.baseUrl ?? opts.baseUrl;
 
   // Read at the kill, not after it: see `onTimeout`.
