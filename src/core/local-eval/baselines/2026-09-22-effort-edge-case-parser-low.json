@@ -1,0 +1,141 @@
+{
+  "configuration": {
+    "model": "qwen3.8:27b-ctx64k",
+    "modelPath": "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+    "quantization": "Q8_0",
+    "slots": 4,
+    "contextPerSlot": 65536,
+    "contextTotal": 262144,
+    "samplingParams": {
+      "temperature": 1,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "typical_p": 1,
+      "repeat_penalty": 1,
+      "repeat_last_n": 64,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "mirostat": 0,
+      "seed": 4294967295
+    },
+    "baseUrl": "http://127.0.0.1:8103",
+    "proxy": "on",
+    "proxyImplementation": "node /private/tmp/claude-501/-Users-masonwyatt-Desktop/9d28bdb1-37c3-419d-a2bc-f7e3fd7b72ef/scratchpad/effort-shim.mjs",
+    "agentCli": "claude 2.1.280 (Claude Code)",
+    "llamaServerArgv": [
+      "/opt/homebrew/bin/llama-server",
+      "-m",
+      "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8080",
+      "--parallel",
+      "4",
+      "-c",
+      "262144",
+      "--cont-batching",
+      "--cache-prompt"
+    ],
+    "capturedAt": "2026-09-23T01:33:08.553Z"
+  },
+  "trialsPerTask": 3,
+  "concurrency": 2,
+  "outcomes": [
+    {
+      "taskId": "edge-case-parser",
+      "why": "The second headroom task. A naive implementation passes the obvious cases and fails the boundaries, so it rewards an agent that RUNS the suite and iterates rather than one that writes plausible code and stops. Descending ranges and empty input are the two a first draft almost always misses, which makes this the task most likely to separate a good local configuration from a mediocre one.",
+      "expectation": "edit",
+      "trials": [
+        {
+          "taskId": "edge-case-parser",
+          "trial": 1,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 237096,
+          "tokens": {
+            "input": 2561,
+            "output": 1642,
+            "cacheRead": 13266,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": 7,
+          "note": ""
+        },
+        {
+          "taskId": "edge-case-parser",
+          "trial": 2,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 299703,
+          "tokens": {
+            "input": 2894,
+            "output": 1987,
+            "cacheRead": 10882,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": 7,
+          "note": ""
+        },
+        {
+          "taskId": "edge-case-parser",
+          "trial": 3,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 309478,
+          "tokens": {
+            "input": 1560,
+            "output": 2024,
+            "cacheRead": 10714,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": 5,
+          "note": ""
+        }
+      ],
+      "passes": 3,
+      "total": 3,
+      "passRate": 1,
+      "medianWallMs": 299703,
+      "meanWallMs": 282092,
+      "modes": []
+    }
+  ],
+  "overallPassRate": 1,
+  "totalPasses": 3,
+  "totalTrials": 3,
+  "startedAt": "2026-09-23T01:33:08.554Z",
+  "finishedAt": "2026-09-23T01:42:16.347Z",
+  "wallMs": 547793,
+  "experiment": {
+    "question": "does lowering Qwen3.8 reasoning effort hold the pass rate, and what does it cost",
+    "arm": "low",
+    "carrier": "chat_template_kwargs.reasoning_effort",
+    "injectedBy": "scratchpad effort-shim.mjs, a copy of the 8090 normalising shim plus the injection transcribed from local-runtime/llama/anthropic-shim.ts applyLocalAgentDefaults",
+    "injectedPort": 8103,
+    "controls": {
+      "templateReachability": "bogus effort -> HTTP 500 through the same shim, identical to high/none/off; low/medium/xhigh -> 200. The carrier provably reaches the template.",
+      "defaultEquivalence": "explicit xhigh produced byte-identical greedy output to sending no kwarg, so the xhigh arm is the live production default (config has no agentDefaults)."
+    },
+    "caveats": [
+      "sampling is the server default (temp 1.0, top_k 20), NOT greedy: these carry sampling noise that the earlier single-call battery did not.",
+      "harness at 6b89b5e5, before the tracing proxy landed; do not pool with traced runs."
+    ]
+  }
+}

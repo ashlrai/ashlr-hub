@@ -1,0 +1,425 @@
+{
+  "configuration": {
+    "model": "qwen3.8:27b-ctx64k",
+    "modelPath": "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+    "quantization": "Q8_0",
+    "slots": 4,
+    "contextPerSlot": 65536,
+    "contextTotal": 262144,
+    "samplingParams": {
+      "temperature": 1,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "typical_p": 1,
+      "repeat_penalty": 1,
+      "repeat_last_n": 64,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "mirostat": 0,
+      "seed": 4294967295
+    },
+    "baseUrl": "http://127.0.0.1:8103",
+    "proxy": "on",
+    "tracing": "on",
+    "proxyImplementation": "node /private/tmp/claude-501/-Users-masonwyatt-Desktop/9d28bdb1-37c3-419d-a2bc-f7e3fd7b72ef/scratchpad/effort-shim.mjs",
+    "agentCli": "claude 2.1.280 (Claude Code)",
+    "llamaServerArgv": [
+      "/opt/homebrew/bin/llama-server",
+      "-m",
+      "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8080",
+      "--parallel",
+      "4",
+      "-c",
+      "262144",
+      "--cont-batching",
+      "--cache-prompt"
+    ],
+    "capturedAt": "2026-09-23T02:20:49.071Z"
+  },
+  "trialsPerTask": 2,
+  "concurrency": 2,
+  "outcomes": [
+    {
+      "taskId": "api-migration",
+      "why": "Added after the first baseline returned 12/12, which proved the set had no headroom: a suite everything passes can detect a regression but never an improvement. This one compounds the earlier shapes instead of repeating them \u2014 the target signature must be READ from a file the prompt does not name, then applied across three call sites, one of which passes its arguments in a deliberately surprising order. Getting the rename right while transposing that call is the near-miss it exists to catch.",
+      "expectation": "edit",
+      "trials": [
+        {
+          "taskId": "api-migration",
+          "trial": 1,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 518839,
+          "tokens": {
+            "input": 2789,
+            "output": 2491,
+            "cacheRead": 13795,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": 7,
+          "note": "",
+          "timeoutDiagnosis": null,
+          "trace": {
+            "captureDir": "/var/folders/mm/kgqr1v8166dfg1rbpqq7vp6h0000gn/T/ashlr-local-eval-1790130049072/api-migration-1/wire",
+            "requests": 7,
+            "streams": [
+              {
+                "seq": 0,
+                "url": "/api/hello",
+                "status": 404,
+                "ended": "upstream-end",
+                "bytes": 0,
+                "events": {},
+                "sawTerminator": false,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": null,
+                "idleAtEndMs": null,
+                "durationMs": 7
+              },
+              {
+                "seq": 1,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 22078,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 3,
+                  "content_block_delta": 159,
+                  "content_block_stop": 3,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 7545,
+                "idleAtEndMs": 1,
+                "durationMs": 40883
+              },
+              {
+                "seq": 2,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 20934,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 2,
+                  "content_block_delta": 152,
+                  "content_block_stop": 2,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 3649,
+                "idleAtEndMs": 0,
+                "durationMs": 35360
+              },
+              {
+                "seq": 3,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 11590,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 2,
+                  "content_block_delta": 81,
+                  "content_block_stop": 2,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 1500,
+                "idleAtEndMs": 41,
+                "durationMs": 14941
+              },
+              {
+                "seq": 4,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 190667,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 3,
+                  "content_block_delta": 1482,
+                  "content_block_stop": 3,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 1381,
+                "idleAtEndMs": 1,
+                "durationMs": 302770
+              },
+              {
+                "seq": 5,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 12415,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 3,
+                  "content_block_delta": 86,
+                  "content_block_stop": 3,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 8398,
+                "idleAtEndMs": 91,
+                "durationMs": 32207
+              },
+              {
+                "seq": 6,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 41060,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 2,
+                  "content_block_delta": 331,
+                  "content_block_stop": 2,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 2246,
+                "idleAtEndMs": 2,
+                "durationMs": 87131
+              }
+            ],
+            "openStreams": [],
+            "stallMs": 120000
+          }
+        },
+        {
+          "taskId": "api-migration",
+          "trial": 2,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 805591,
+          "tokens": {
+            "input": 2885,
+            "output": 4110,
+            "cacheRead": 22867,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": 10,
+          "note": "",
+          "timeoutDiagnosis": null,
+          "trace": {
+            "captureDir": "/var/folders/mm/kgqr1v8166dfg1rbpqq7vp6h0000gn/T/ashlr-local-eval-1790130049072/api-migration-2/wire",
+            "requests": 8,
+            "streams": [
+              {
+                "seq": 0,
+                "url": "/api/hello",
+                "status": 404,
+                "ended": "upstream-end",
+                "bytes": 0,
+                "events": {},
+                "sawTerminator": false,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": null,
+                "idleAtEndMs": null,
+                "durationMs": 10
+              },
+              {
+                "seq": 1,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 18202,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 2,
+                  "content_block_delta": 131,
+                  "content_block_stop": 2,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 7538,
+                "idleAtEndMs": 8,
+                "durationMs": 29230
+              },
+              {
+                "seq": 2,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 27573,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 4,
+                  "content_block_delta": 199,
+                  "content_block_stop": 4,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 4201,
+                "idleAtEndMs": 3,
+                "durationMs": 50040
+              },
+              {
+                "seq": 3,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 71082,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 3,
+                  "content_block_delta": 542,
+                  "content_block_stop": 3,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 1739,
+                "idleAtEndMs": 0,
+                "durationMs": 98461
+              },
+              {
+                "seq": 4,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 219637,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 3,
+                  "content_block_delta": 1714,
+                  "content_block_stop": 3,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 4907,
+                "idleAtEndMs": 0,
+                "durationMs": 389499
+              },
+              {
+                "seq": 5,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 91845,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 3,
+                  "content_block_delta": 713,
+                  "content_block_stop": 3,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 3977,
+                "idleAtEndMs": 1,
+                "durationMs": 141961
+              },
+              {
+                "seq": 6,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 13415,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 2,
+                  "content_block_delta": 94,
+                  "content_block_stop": 2,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 5862,
+                "idleAtEndMs": 0,
+                "durationMs": 23895
+              },
+              {
+                "seq": 7,
+                "url": "/v1/messages?beta=true",
+                "status": 200,
+                "ended": "upstream-end",
+                "bytes": 53576,
+                "events": {
+                  "message_start": 1,
+                  "content_block_start": 2,
+                  "content_block_delta": 431,
+                  "content_block_stop": 2,
+                  "message_delta": 1,
+                  "message_stop": 1
+                },
+                "sawTerminator": true,
+                "upstreamComplete": true,
+                "waitedForFirstByteMs": 1569,
+                "idleAtEndMs": 0,
+                "durationMs": 65086
+              }
+            ],
+            "openStreams": [],
+            "stallMs": 120000
+          }
+        }
+      ],
+      "passes": 2,
+      "total": 2,
+      "passRate": 1,
+      "medianWallMs": 662215,
+      "meanWallMs": 662215,
+      "modes": []
+    }
+  ],
+  "overallPassRate": 1,
+  "totalPasses": 2,
+  "totalTrials": 2,
+  "startedAt": "2026-09-23T02:20:49.072Z",
+  "finishedAt": "2026-09-23T02:34:14.797Z",
+  "wallMs": 805725,
+  "experiment": {
+    "question": "does the medium-beats-low result hold on the long-horizon task",
+    "arm": "low",
+    "carrier": "chat_template_kwargs.reasoning_effort",
+    "injectedPort": 8103,
+    "budgetMs": 1500000,
+    "whyRaisedBudget": "a timeout on this task was traced to generating-at-cutoff \u2014 a DECODE BUDGET overrun, not a hang \u2014 and a killed trial records zero tokens because the CLI emits usage only in its final JSON. Raising the budget past the ~898s the task needs converts a dead trial into a real measurement on the axis under test.",
+    "xhighComparator": "baselines/2026-09-22-api-migration-traced.json (template default, concurrency 1): 1 overrun of 3, completions at 2771 and 3715 decode tokens.",
+    "caveats": [
+      "harness at fa1d62f5, WITH the tracing proxy; block-1 effort runs were at 6b89b5e5 without it. Do not pool the two sets.",
+      "concurrency 2 here vs concurrency 1 for the xhigh comparator: wall times are not comparable across that boundary, token counts are.",
+      "two trials per arm: a confirmation of the block-1 result, not an independent measurement."
+    ]
+  }
+}
