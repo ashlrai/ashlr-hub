@@ -44,7 +44,7 @@ describe('Sidebar — an exhausted seat under a running turn', () => {
     const row = within(nav).getByRole('button', { name: /Fix the login bug/ });
     expect(row).not.toHaveAttribute('title');
     await user.hover(row);
-    expect(screen.getByRole('tooltip')).toHaveTextContent('weekly fable window limit reached');
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('weekly fable window limit reached');
   });
 
   it('says nothing at all on a healthy seat', async () => {
@@ -54,7 +54,7 @@ describe('Sidebar — an exhausted seat under a running turn', () => {
     expect(within(nav).queryByRole('img', { name: /Seat limit reached/ })).not.toBeInTheDocument();
     const row = within(nav).getByRole('button', { name: /Fix the login bug/ });
     await user.hover(row);
-    expect(screen.getByRole('tooltip')).toHaveTextContent('Fix the login bug · Claude Max · Opus 5');
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Fix the login bug · Claude Max · Opus 5');
   });
 });
 
@@ -85,7 +85,7 @@ describe('Sidebar — the chat list after the title sweep', () => {
     expect(screen.queryByRole('tooltip')).toBeNull();
     button.focus();
     await waitFor(() => expect(screen.getByRole('tooltip')).toBeVisible());
-    const tip = screen.getByRole('tooltip');
+    const tip = await screen.findByRole('tooltip');
     expect(tip).toHaveTextContent('New chat');
     // The shortcut travels with the label rather than being folded into the
     // accessible name, where a screen reader would read it out as part of it.
@@ -113,7 +113,7 @@ describe('Sidebar — the chat list after the title sweep', () => {
     expect(text).toHaveTextContent(long);
 
     await user.hover(row);
-    expect(screen.getByRole('tooltip')).toHaveTextContent(long);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(long);
   });
 
   it('offers a way out of an empty search rather than a dead end', async () => {

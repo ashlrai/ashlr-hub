@@ -74,3 +74,10 @@
 :root[data-motion="reduce"] .bubble {
   animation: none;
 }
+
+/* A disabled trigger emits no pointer events, so the wrapper has to become a
+   real box to catch the hover. Only then — `display: contents` is the default
+   precisely so the wrapper never disturbs the trigger's flex/grid placement. */
+.wrapper[data-disabled-trigger='true'] {
+  display: inline-flex;
+}

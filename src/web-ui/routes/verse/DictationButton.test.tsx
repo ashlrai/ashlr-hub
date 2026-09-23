@@ -33,7 +33,7 @@ afterEach(() => {
 });
 
 describe('DictationButton', () => {
-  it('falls back to a disabled button with the Wispr Flow / Superwhisper hint when no recognizer exists', () => {
+  it('falls back to a disabled button with the Wispr Flow / Superwhisper hint when no recognizer exists', async () => {
     expect(getSpeechRecognition()).toBeNull();
     render(<DictationButton onInterim={() => {}} onFinal={() => {}} />);
     const button = screen.getByRole('button', { name: /dictation unavailable/i });
@@ -44,8 +44,10 @@ describe('DictationButton', () => {
     expect(screen.queryByRole('tooltip')).toBeNull();
     // Hovering the wrapper is what reveals it — `disabled` swallows pointer
     // events on the button itself, so the listener has to be outside it.
-    fireEvent.mouseEnter(button.parentElement as HTMLElement);
-    expect(screen.getByRole('tooltip')).toHaveTextContent(DICTATION_FALLBACK_HINT);
+    // mouseOver, not mouseEnter: React synthesises onMouseEnter from the
+    // bubbling mouseover, and a dispatched `mouseenter` never reaches it.
+    fireEvent.mouseOver(button.parentElement as HTMLElement);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(DICTATION_FALLBACK_HINT);
   });
 
   it('keeps an accessible name on the mic button and describes it without naming it', async () => {
@@ -65,7 +67,7 @@ describe('DictationButton', () => {
     expect(screen.queryByRole('tooltip')).toBeNull();
     await user.tab();
     expect(button).toHaveFocus();
-    const tip = screen.getByRole('tooltip');
+    const tip = await screen.findByRole('tooltip');
     expect(tip).toHaveTextContent('Dictate');
     // Described, not NAMED. This is the assertion that matters: whatever the
     // tooltip draws, the button's accessible name is still its aria-label and

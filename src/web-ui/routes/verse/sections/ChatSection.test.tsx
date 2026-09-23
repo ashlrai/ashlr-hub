@@ -67,9 +67,12 @@ describe('ChatSection bootstrap', () => {
     // read off an attribute.
     const row = within(nav).getByRole('button', { name: /Fix the login bug/ });
     expect(row).not.toHaveAttribute('title');
-    fireEvent.mouseEnter(row.parentElement as HTMLElement);
-    expect(screen.getByRole('tooltip')).toHaveTextContent('Claude Max');
-    fireEvent.mouseLeave(row.parentElement as HTMLElement);
+    // mouseOver, not mouseEnter: React synthesises onMouseEnter from the
+    // bubbling mouseover, and a dispatched `mouseenter` never reaches it.
+    // The tooltip also opens after a delay and portals on open, so findBy.
+    fireEvent.mouseOver(row);
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Claude Max');
+    fireEvent.mouseOut(row);
 
     // Resources panel lists every seat with its health and the local runtime.
     const resources = screen.getByRole('complementary', { name: 'Resources' });

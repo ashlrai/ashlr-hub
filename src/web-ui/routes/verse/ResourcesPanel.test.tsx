@@ -250,7 +250,7 @@ describe('ResourcesPanel — the seat row after the title sweep', () => {
     // a native `title` never managed.
     expect(screen.queryByRole('tooltip')).toBeNull();
     await user.hover(toggle);
-    expect(screen.getByRole('tooltip')).toHaveTextContent('Claude Max');
+    expect(await screen.findByRole('tooltip')).toHaveTextContent('Claude Max');
     // Naming is unchanged by the tooltip being open.
     expect(toggle).toHaveAccessibleName('Claude Max');
   });
@@ -261,6 +261,7 @@ describe('ResourcesPanel — the seat row after the title sweep', () => {
     const toggle = within(panel()).getByRole('button', { name: 'Claude Max' });
     await user.hover(toggle);
     // One row, one tooltip. It used to be on the label span AND the chip.
-    expect(screen.getAllByRole('tooltip')).toHaveLength(1);
+    // findAll, not getAll: the tooltip opens after a delay and portals on open.
+    expect(await screen.findAllByRole('tooltip')).toHaveLength(1);
   });
 });
