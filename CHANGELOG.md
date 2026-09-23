@@ -339,6 +339,62 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.8.0] — 2026-09-23 UTC — local-only actually prevents spend
+
+Two gates that make a promise the UI was already making. Both landed after the
+3.7.0 tag, so 3.7.0 shipped with local-only leaking in two places.
+
+### The Verse chat gate
+
+The Local-only panel said *"Nothing can spend money while this is on"* and
+*"cloud engines are unreachable"*. That was **false for Verse chat sessions**:
+`session-engine.ts` spawned the seat CLI with raw `child_process.spawn` and
+imported nothing from `policy/`, so an interactive Claude, Codex or Grok turn
+still ran and still spent.
+
+The daemon path was gated at seven chokepoints, and a structural test enumerated
+them — which is exactly why this survived. The test listed every chokepoint
+except this one, so the gap looked audited. Verse is now chokepoint 13, with a
+test asserting the gate sits inside `startTurn` *before* the `spawn(`.
+
+### Locality is not the same claim as spend
+
+`local-only.ts` answered one question — local or cloud — that was used to decide
+two: where inference runs, and whether something can bill you. Its purpose is the
+second. For every subject except CLI agents the answers coincide. For `ashlrcode`
+they did not: it is a local **process** whose inference is cloud by default, and
+`sandboxed-engine.ts` hands every cli-agent spawn `CLAUDE_CODE_OAUTH_TOKEN` /
+`ANTHROPIC_AUTH_TOKEN` plus the config dirs where subscription auth lives.
+
+Measured before the change: `enginePermitted('ashlrcode')`, `binPermitted('ac')`
+and `binPermitted('aw')` all **permitted** under local-only, and
+`estCostUsd('ashlrcode', 1M, 1M)` was **$18**.
+
+`Meteredness = 'free' | 'metered' | 'unknown'` now sits beside `EngineLocality`,
+which is unchanged — local-fleet membership, pool tiering and local-context
+injection all legitimately want "runs on this machine". **Local-only refuses
+anything not provably free, including `unknown`**: a spend policy cannot treat
+"I can't tell" as safe, which is how this survived. `estCostUsd` keys on
+meteredness, never locality, and does not report $0 for a metered agent — zero
+would be worse than wrong, because a wrong number invites scrutiny and a zero
+ends it.
+
+`ashlrcode` is `metered` by decision: its repo has not moved in three months and
+Qwen3.8 now drives the local lane, so refusing it under local-only costs nothing.
+`aw` is `unknown` rather than `metered` — its cloud fallback is opt-in, but that
+opt-in lives in aw's own config which the hub never reads, and asserting
+otherwise would be the same error mirrored.
+
+Three assertions in `local-only-policy.test.ts` had been **defending the bug** as
+expected behaviour. They were green on master.
+
+### Known residual
+
+`forceLocalOnly` — the autonomy director's cost-*pressure* switch — is a
+different mechanism from `cfg.foundry.localOnly` and still allows `ashlrcode`.
+Closing it is a decision about what the director should do when it is trying to
+save money rather than forbid spending it. See `docs/LOCALITY-VS-SPEND.md`.
+
 ## [3.7.0] — 2026-09-23 UTC — The console you can actually navigate, and a fleet that can be bounded
 
 ### Verse
