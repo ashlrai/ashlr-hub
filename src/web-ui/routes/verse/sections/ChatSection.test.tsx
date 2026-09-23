@@ -11,6 +11,8 @@
  *     assistant-message replaces the streaming turn
  *   - stop → POST …/cancel, and the transcript stays clean
  *   - mutation guard: no token → dialog, action runs once unlocked
+ *   - the panel resizers: their ARIA contract, keyboard steps, double-click
+ *     reset, and that a hidden panel leaves no handle behind
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -21,6 +23,7 @@ import { evictAll } from '../../../data/cache.js';
 import { ev, MockEventSource, verseFetch } from '../fixtures.test-support.js';
 import { resetVerseStore } from '../verse-store.js';
 import { resetVerseUi } from '../verse-ui-store.js';
+import { CHAT_PANEL_RANGES, CHAT_PANEL_SIZING_KEY, resetChatPanelSizing } from '../chat-panel-sizing.js';
 import { ChatSection } from './ChatSection.js';
 
 const TOKEN = 'b'.repeat(64);
@@ -35,6 +38,7 @@ beforeEach(() => {
   evictAll();
   resetVerseStore();
   resetVerseUi();
+  resetChatPanelSizing();
   clearMutationToken();
   MockEventSource.reset();
   vi.stubGlobal('EventSource', MockEventSource);
@@ -265,5 +269,194 @@ describe('ChatSection layout', () => {
     await user.click(screen.getByRole('button', { name: 'Resources' }));
     expect(screen.queryByRole('complementary', { name: 'Resources' })).not.toBeInTheDocument();
     expect(JSON.parse(localStorage.getItem('ashlr.verse.ui.v2') ?? '{}')).toMatchObject({ resourcesOpen: false });
+  });
+});
+
+describe('ChatSection resizers', () => {
+  const SIDE = CHAT_PANEL_RANGES.sidebar;
+  const RES = CHAT_PANEL_RANGES.resources;
+
+  /**
+   * jsdom implements no PointerEvent, so synthesise one. `pointerId` is the
+   * field the handle keys its drag on — a bare MouseEvent would silently
+   * fail that identity check and prove nothing.
+   */
+  function pointer(type: string, init: { pointerId: number; clientX: number; button?: number }): MouseEvent {
+    const event = new MouseEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      clientX: init.clientX,
+      button: init.button ?? 0,
+    });
+    Object.defineProperty(event, 'pointerId', { value: init.pointerId });
+    return event;
+  }
+
+  const stored = () => JSON.parse(localStorage.getItem(CHAT_PANEL_SIZING_KEY) ?? '{}') as Record<string, number>;
+
+  async function mounted() {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+  }
+
+  it('gives each inner edge a separator with the full window-splitter contract', async () => {
+    await mounted();
+
+    // NOT a pixel assertion — jsdom computes no layout, and none of this
+    // needs it. What is asserted is the contract a screen reader and a
+    // keyboard operator actually consume.
+    for (const [name, range] of [['Resize chat list', SIDE], ['Resize resources panel', RES]] as const) {
+      const handle = screen.getByRole('separator', { name });
+      expect(handle).toHaveAttribute('aria-orientation', 'vertical');
+      expect(handle).toHaveAttribute('aria-valuemin', String(range.min));
+      expect(handle).toHaveAttribute('aria-valuemax', String(range.max));
+      expect(handle).toHaveAttribute('aria-valuenow', String(range.def));
+      expect(handle).toHaveAttribute('tabindex', '0');
+    }
+  });
+
+  it('moves the width with the arrow keys and persists it under its own key', async () => {
+    await mounted();
+    const handle = screen.getByRole('separator', { name: 'Resize chat list' });
+    handle.focus();
+    expect(handle).toHaveFocus();
+
+    // The sidebar grows to the RIGHT; the resources panel is the mirror.
+    fireEvent.keyDown(handle, { key: 'ArrowRight' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def + 16));
+    // Shift asks for the coarse step.
+    fireEvent.keyDown(handle, { key: 'ArrowRight', shiftKey: true });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def + 16 + 64));
+    expect(stored().sidebar).toBe(SIDE.def + 16 + 64);
+    fireEvent.keyDown(handle, { key: 'ArrowLeft', shiftKey: true });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def + 16));
+
+    const resources = screen.getByRole('separator', { name: 'Resize resources panel' });
+    fireEvent.keyDown(resources, { key: 'ArrowLeft' });
+    expect(resources).toHaveAttribute('aria-valuenow', String(RES.def + 16));
+  });
+
+  it('clamps the keyboard to the range, and Home/End go to the extremes', async () => {
+    await mounted();
+    const handle = screen.getByRole('separator', { name: 'Resize chat list' });
+
+    fireEvent.keyDown(handle, { key: 'End' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.max));
+    // Past the end is not an error, it is simply the end.
+    fireEvent.keyDown(handle, { key: 'ArrowRight' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.max));
+
+    fireEvent.keyDown(handle, { key: 'Home' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.min));
+    fireEvent.keyDown(handle, { key: 'ArrowLeft' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.min));
+    expect(stored().sidebar).toBe(SIDE.min);
+
+    // A key the handle does not own is left to the page.
+    fireEvent.keyDown(handle, { key: 'a' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.min));
+  });
+
+  it('restores the default width on a double-click', async () => {
+    await mounted();
+    const handle = screen.getByRole('separator', { name: 'Resize resources panel' });
+    fireEvent.keyDown(handle, { key: 'End' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(RES.max));
+
+    fireEvent.doubleClick(handle);
+    expect(handle).toHaveAttribute('aria-valuenow', String(RES.def));
+    expect(stored().resources).toBe(RES.def);
+  });
+
+  it('drags from the pointer, suppresses selection, and releases outside the handle', async () => {
+    await mounted();
+    const handle = screen.getByRole('separator', { name: 'Resize chat list' });
+
+    fireEvent(handle, pointer('pointerdown', { pointerId: 7, clientX: 300 }));
+    expect(handle).toHaveAttribute('data-dragging', 'true');
+    // The app-wide selection guard: without it, dragging past the transcript
+    // selects it.
+    expect(document.body.dataset.verseResizing).toBe('true');
+
+    // Moves are listened for on the WINDOW, so a pointer that has left the
+    // 9px handle — which is every pointer, immediately — still resizes.
+    fireEvent(window, pointer('pointermove', { pointerId: 7, clientX: 340 }));
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def + 40));
+
+    // A stray pointer from another gesture must not hijack this drag.
+    fireEvent(window, pointer('pointermove', { pointerId: 99, clientX: 900 }));
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def + 40));
+
+    // Released over the document, not over the handle: the stuck-drag case.
+    fireEvent(window, pointer('pointerup', { pointerId: 7, clientX: 340 }));
+    expect(handle).not.toHaveAttribute('data-dragging');
+    expect(document.body.dataset.verseResizing).toBeUndefined();
+
+    // And the drag really is over — a later move changes nothing.
+    fireEvent(window, pointer('pointermove', { pointerId: 7, clientX: 900 }));
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def + 40));
+    expect(stored().sidebar).toBe(SIDE.def + 40);
+  });
+
+  it('abandons a drag on Escape and on the window losing focus', async () => {
+    await mounted();
+    const handle = screen.getByRole('separator', { name: 'Resize chat list' });
+
+    fireEvent(handle, pointer('pointerdown', { pointerId: 3, clientX: 300 }));
+    fireEvent(window, pointer('pointermove', { pointerId: 3, clientX: 380 }));
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def + 80));
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def));
+    expect(document.body.dataset.verseResizing).toBeUndefined();
+
+    // ⌘-tab mid-drag never delivers a pointerup.
+    fireEvent(handle, pointer('pointerdown', { pointerId: 4, clientX: 300 }));
+    expect(document.body.dataset.verseResizing).toBe('true');
+    fireEvent.blur(window);
+    expect(handle).not.toHaveAttribute('data-dragging');
+    expect(document.body.dataset.verseResizing).toBeUndefined();
+  });
+
+  it('ignores a non-primary button', async () => {
+    await mounted();
+    const handle = screen.getByRole('separator', { name: 'Resize chat list' });
+    fireEvent(handle, pointer('pointerdown', { pointerId: 5, clientX: 300, button: 2 }));
+    expect(handle).not.toHaveAttribute('data-dragging');
+    expect(document.body.dataset.verseResizing).toBeUndefined();
+  });
+
+  it('leaves no stranded handle when a panel is hidden, and brings it back', async () => {
+    const user = userEvent.setup();
+    await mounted();
+    expect(screen.getByRole('separator', { name: 'Resize chat list' })).toBeInTheDocument();
+    expect(screen.getByRole('separator', { name: 'Resize resources panel' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Hide chat list' }));
+    expect(screen.queryByRole('separator', { name: 'Resize chat list' })).not.toBeInTheDocument();
+    expect(screen.getByRole('separator', { name: 'Resize resources panel' })).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Resources' }));
+    expect(screen.queryByRole('complementary', { name: 'Resources' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('separator', { name: 'Resize resources panel' })).not.toBeInTheDocument();
+
+    // The show/hide toggles still work, and the handles come back with them.
+    await user.click(screen.getByRole('button', { name: 'Show chat list' }));
+    expect(screen.getByRole('separator', { name: 'Resize chat list' })).toBeInTheDocument();
+  });
+
+  it('keeps a chosen width across hiding and reshowing the panel', async () => {
+    const user = userEvent.setup();
+    await mounted();
+    const handle = screen.getByRole('separator', { name: 'Resize chat list' });
+    fireEvent.keyDown(handle, { key: 'ArrowRight' });
+    fireEvent.keyDown(handle, { key: 'ArrowRight' });
+    expect(stored().sidebar).toBe(SIDE.def + 32);
+
+    await user.click(screen.getByRole('button', { name: 'Hide chat list' }));
+    await user.click(screen.getByRole('button', { name: 'Show chat list' }));
+    expect(screen.getByRole('separator', { name: 'Resize chat list' }))
+      .toHaveAttribute('aria-valuenow', String(SIDE.def + 32));
   });
 });
