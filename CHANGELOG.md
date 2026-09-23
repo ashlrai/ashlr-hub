@@ -339,6 +339,50 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.7.0] — 2026-09-23 UTC — The console you can actually navigate, and a fleet that can be bounded
+
+### Verse
+
+- **The rail expands** (⌘\), with labels and ⌘-digits. Hover used to show the
+  *native browser tooltip* — unstyled, mouse-only, clipping against the sidebar.
+  There is now a real portalled Tooltip primitive, and adopting it fixed a live
+  accessibility defect: `aria-describedby` sat on a wrapper rather than the
+  focusable child, so nothing was ever announced. A **disabled** trigger emits no
+  pointer events, so its tooltip could never open — precisely the tooltip that
+  matters, since it explains why the control is disabled.
+- **The header earns its height.** It held one toggle floating at the right edge
+  with nothing anchoring the left, because the sidebar toggle only rendered while
+  the sidebar was collapsed.
+- **Display size** — Default / Large / Extra large, scaling type *and* spacing as
+  a multiplier rather than a second table of literals, because density and scale
+  have identical CSS specificity and two literal tables would let file order
+  decide what "Compact + Large" means. Rail width and strip height are pinned so
+  the traffic-light clearance cannot regress.
+- **Pane resizing** that survives a real drag: widths are a desired/effective
+  pair, so a wide sidebar narrows on a small window and springs back. It also
+  turned out the resize handle was eating 4px of the macOS window drag strip.
+- **Saved projects and a native folder picker**, and the MCP section is mounted.
+
+### Autonomy
+
+- **A bounded run window** — until paused, at a wall-clock time, or after N
+  iterations. The window is an absolute instant, never a countdown, so a host
+  suspended at 01:00 and opened at 09:00 finds its 07:00 window expired.
+- **The post-merge halt.** The pre-merge gate was already strict; *nothing re-ran
+  the suite after a merge*, so a regression merged at 01:00 compounded all night.
+  A dirty working tree halts too, as **unprovable** rather than *regressed* — a
+  run that measured uncommitted edits has proven nothing. Ignored files are not
+  dirt, or it would halt every night.
+
+### Corrections
+
+- A test guard was red, and a red guard protects nothing. The Anthropic shim is a
+  request normaliser, not a transport — its one `/chat/completions` is in a doc
+  comment recording a measurement.
+- `VerseApp.test.tsx` had been passing by luck of file ordering; the first test to
+  mount the shell paid ChatSection's cold transform cost inside its own 1000ms
+  assertion window.
+
 ## [3.6.0] — 2026-09-23 UTC — Open any project, from a real picker
 
 Verse could already drive any folder on the machine — the API accepted an
