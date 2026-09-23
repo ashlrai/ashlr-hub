@@ -339,6 +339,71 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.6.0] — 2026-09-23 UTC — Open any project, from a real picker
+
+Verse could already drive any folder on the machine — the API accepted an
+unenrolled path and both Grok and local seats ran in it. What it could not do was
+let you *choose* one. The only way in was typing an absolute path into a text
+box, and a folder you typed vanished from the list until a chat existed on it.
+This release is the door.
+
+### Any folder, from a native chooser
+
+- **A real macOS directory picker.** "Choose folder…" opens `NSOpenPanel`
+  through the Tauri dialog plugin. Detection is a call-time feature probe of the
+  injected shell global, not a build flag, because the same bundle is served
+  inside the desktop app and as a plain web UI — in a browser the button is
+  absent and the absolute-path input remains, which is never removed.
+- **Saved projects the console can actually create.** `createVerseWorkspace`,
+  `updateVerseWorkspace`, `deleteVerseWorkspace`, `setVerseRootPriority` and
+  `setVerseFocusSection` all existed with **zero callers**, so
+  `~/.ashlr/verse/workspaces.json` could only be written by hand. There is now a
+  Projects section in the sidebar: save, rename, add and remove folders, reorder
+  (the first folder is the primary — its directory is the chat's working
+  directory), and forget behind a two-step confirm that states existing chats
+  are untouched.
+- **Interactive and autonomous stay separate registries.** Saving a folder to
+  work in never enrols it for unattended work. A saved project can be *offered*
+  to the autonomous lane, but only by ticking that box.
+- **The Grok caveat travels with a saved project.** Grok takes no extra roots,
+  so a multi-root project picked with a Grok seat now says its extra folders are
+  unreachable. That case previously had no warning at all.
+
+### The MCP section exists again
+
+`McpSection.tsx` was complete — query layer, tested contract, complete server
+side — and unreachable: absent from `VERSE_SECTIONS`, no `'mcp'` member on
+`VerseSectionId`, and outside the glob that mounts sections. It is now ⌘6.
+⌘1–⌘5 keep their meanings.
+
+It also discloses a footgun nothing named before: Codex and Grok inherit MCP
+from their native profile config, so a turn on an unenrolled folder can reach an
+`ashlr__*` write tool and be refused by the enrollment gate — the turn fails on
+policy, not on the model. Claude and local seats are unaffected, because the
+adapter passes an empty `--mcp-config` under `--strict-mcp-config`.
+
+### One capability was widened, deliberately
+
+`dialog:allow-open` is granted to the remote Verse origin in
+`capabilities/verse-remote.json`, whose note said not to widen the list. It is
+the narrowest dialog permission: it shows a chooser the user must confirm and
+returns a path, reads no file contents, and no `fs:*` permission is granted
+anywhere in the app. `allow-save`, `allow-message`, `allow-ask` and
+`allow-confirm` stay ungranted so page code cannot forge a native prompt.
+
+It had to go in that file rather than `main.json`: the Verse window loads a
+remote origin, and a Tauri 2 capability without a `remote` block never reaches
+one — the grant would have looked correct in review and failed silently at
+runtime.
+
+### Verified in the built app, not only in tests
+
+The picker was driven end to end in a real build: the button renders inside the
+shell, `NSOpenPanel` opens, the chosen path lands in the field, "Start chat"
+enables, "Save as a project" persists and appears in the sidebar, and forget
+removes it. Separately, `POST /api/verse/workspaces` was confirmed against a
+live server to create a record on disk and list it back.
+
 ## [3.5.1] — 2026-09-23 UTC — The dependency backlog, landed rather than deferred
 
 Four dependency PRs had been sitting open. None was a version bump; each needed

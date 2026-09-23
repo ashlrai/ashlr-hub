@@ -48,6 +48,22 @@ npx vitest run \
   test/m482.release-artifact-contract.test.ts
 ```
 
+**There are TWO typecheck gates, and the root one covers less than it looks.**
+`tsconfig.json` has `"exclude": [..., "src/web-ui"]` and no DOM lib, so
+`tsc -p tsconfig.json` typechecks none of the web UI. Anything under
+`src/web-ui` needs the second one, which is what `npm run typecheck:web` runs:
+
+```sh
+npx tsc --noEmit -p tsconfig.json > /tmp/a.log 2>&1; echo $?
+npx tsc --noEmit -p src/web-ui/tsconfig.json > /tmp/b.log 2>&1; echo $?
+```
+
+**Never symlink `node_modules` into a scratch worktree to save an install.**
+It is the fastest way to verify a tree you are not actually shipping. Doing this
+hid a real `typecheck:web` break across several releases: the worktrees borrowed
+a `node_modules` holding `@types/node` 22 while the lockfile had moved to 26, and
+the failure only appeared on a clean `npm ci`. Run the install.
+
 **Check the real exit code.** `npx vitest run ... | tail -25` reports *tail's*
 status, not vitest's, and has already made a failing run look green in this
 repo. Redirect to a file and read `$?`:
