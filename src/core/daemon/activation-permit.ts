@@ -1326,6 +1326,125 @@ export function consumeDaemonActivationPermitForVerification(
 }
 
 // ---------------------------------------------------------------------------
+// Shared plumbing for sibling activation protocols.
+//
+// These are pure helpers: parsing, hashing, file pinning, receipt durability.
+// None of them grants authority, and none of them reads authority from the
+// environment, the config, or a writable file. A sibling protocol still has to
+// supply its own source-provisioned trust roots and its own signing domain.
+// ---------------------------------------------------------------------------
+
+export const DAEMON_ACTIVATION_MAX_VALIDITY_MS = MAX_VALIDITY_MS;
+export const DAEMON_ACTIVATION_MAX_FUTURE_SKEW_MS = MAX_FUTURE_SKEW_MS;
+export const DAEMON_ACTIVATION_LOCK_WAIT_MS = LOCK_WAIT_MS;
+export const DAEMON_ACTIVATION_DIGEST_RE = DIGEST_RE;
+export const DAEMON_ACTIVATION_ID_RE = ID_RE;
+export const DAEMON_ACTIVATION_KEY_ID_RE = KEY_ID_RE;
+
+/** @internal Shared with sibling activation protocols in this directory. */
+export type DaemonActivationPinnedFile = PinnedPermitFile;
+
+/** @internal */
+export function daemonActivationIsRecord(value: unknown): value is Record<string, unknown> {
+  return isRecord(value);
+}
+
+/** @internal */
+export function daemonActivationHasExactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): boolean {
+  return hasExactKeys(value, expected);
+}
+
+/** @internal */
+export function daemonActivationSha256(value: string | Buffer): string {
+  return sha256(value);
+}
+
+/** @internal */
+export function daemonActivationEqualCanonical(left: unknown, right: unknown): boolean {
+  return equalCanonical(left, right);
+}
+
+/** @internal */
+export function validDaemonActivationBindings(
+  value: unknown,
+): value is DaemonActivationPermitPayload['bindings'] {
+  return validBindings(value);
+}
+
+/** @internal Structural check only; it asserts nothing about authority. */
+export function validDaemonActivationRuntimeContext(
+  context: DaemonActivationRuntimeContext,
+): boolean {
+  return Number.isSafeInteger(context.nowMs)
+    && context.nowMs >= 0
+    && DIGEST_RE.test(context.configDigest)
+    && validBuildIdentity(context.buildIdentity)
+    && validFileBinding(context.executable)
+    && validFileBinding(context.entrypoint)
+    && validFileBinding(context.releaseTree)
+    && DIGEST_RE.test(context.authorityStateDigest)
+    && typeof context.killSwitchOff === 'boolean'
+    && typeof context.guardHealthHealthy === 'boolean';
+}
+
+/** @internal */
+export function daemonActivationTrustRootMap(
+  roots: readonly DaemonActivationTrustRoot[],
+): Map<string, KeyObject> | null {
+  return trustRootMap(roots);
+}
+
+/** @internal */
+export function openDaemonActivationPinnedFile(
+  path: string,
+  anchorPath: string,
+): DaemonActivationPinnedFile {
+  return openPinnedPermit(path, anchorPath);
+}
+
+/** @internal */
+export function assureDaemonActivationPrivateDirectory(path: string, anchorPath: string): void {
+  assurePrivateDirectory(path, anchorPath);
+}
+
+/** @internal */
+export function persistDaemonActivationReceipt(
+  path: string,
+  receipt: Record<string, unknown>,
+  anchorPath: string,
+): void {
+  persistReceipt(path, receipt, anchorPath);
+}
+
+/** @internal */
+export function daemonActivationPathEntryPresent(path: string): boolean {
+  return pathEntryPresent(path);
+}
+
+/** @internal */
+export function daemonActivationSameFileSnapshot(
+  left: BigIntStats,
+  right: BigIntStats,
+): boolean {
+  return sameFileSnapshot(left, right);
+}
+
+/** @internal */
+export function daemonActivationStrictConfigSnapshot(cfg: AshlrConfig): AshlrConfig {
+  return strictConfigSnapshot(cfg);
+}
+
+/** @internal */
+export function collectDaemonActivationRuntimeContext(
+  cfg: AshlrConfig,
+): DaemonActivationRuntimeContext {
+  return collectRuntimeContext(cfg);
+}
+
+// ---------------------------------------------------------------------------
 // Dormant signed one-shot goal-conductor authority.
 //
 // This is deliberately a separate protocol from M461. A daemon permit can
