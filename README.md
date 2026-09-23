@@ -7,6 +7,9 @@
 **[verse.ashlr.ai](https://verse.ashlr.ai)** — Ashlr Verse, the operator console: every account you own
 behind one surface, plus a local model that keeps working after the quota runs out.
 
+
+![Ashlr Verse — the operator console: an expandable section rail, a project sidebar, and every connected account with its live usage windows](docs/images/verse-console.png)
+
 [![npm](https://img.shields.io/npm/v/@ashlr/hub.svg?logo=npm&label=%40ashlr%2Fhub&color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![npm downloads](https://img.shields.io/npm/dm/@ashlr/hub.svg?color=cb3837)](https://www.npmjs.com/package/@ashlr/hub)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
