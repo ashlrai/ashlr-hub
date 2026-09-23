@@ -48,9 +48,14 @@
  *   2. daemon.perTickItems  — how many items one tick may claim
  *   3. localFleet.maxDispatchesPerDay — an explicit, durable, NON-monetary
  *                             daily ceiling on local dispatches, counted in
- *                             this module's own journal (default: unset, and
- *                             an unset ceiling is reported as unbounded rather
- *                             than quietly implied to be safe)
+ *                             this module's own journal. DEFAULT 400
+ *                             (DEFAULT_LOCAL_FLEET_MAX_DISPATCHES_PER_DAY) —
+ *                             a fleet with no ceiling at all is exactly the
+ *                             unbounded loop this section exists to refuse.
+ *                             `null` means unbounded, and it is honoured ONLY
+ *                             when the operator wrote null explicitly; an
+ *                             unbounded ceiling is reported as unbounded
+ *                             rather than quietly implied to be safe.
  *
  * No new runtime dependencies; Node builtins only. No public API throws.
  */

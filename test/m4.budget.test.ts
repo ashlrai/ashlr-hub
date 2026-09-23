@@ -185,9 +185,21 @@ describe('estCostUsd — local providers return 0', () => {
     expect(estCostUsd('lmstudio', 100_000, 50_000)).toBe(0);
   });
 
-  it('builtin costs 0 (local engine)', () => {
-    // 'builtin' is the local engine — cost is 0 or implementation-defined
-    expect(estCostUsd('builtin', 100_000, 50_000)).toBeGreaterThanOrEqual(0);
+  it('builtin costs exactly 0 (local engine)', () => {
+    // This assertion used to be `toBeGreaterThanOrEqual(0)`, which the name
+    // claimed was zero but which in fact permitted — and silently accepted —
+    // the $3/$15-per-Mtok frontier fallback that actually fired. 'builtin' is
+    // in-process: it costs nothing, and the test now says so.
+    // See test/local-cost-zero-budget.test.ts for the registry-driven guard.
+    expect(estCostUsd('builtin', 100_000, 50_000)).toBe(0);
+  });
+
+  it('every EngineId that runs locally costs exactly 0', () => {
+    // The daemon reaches estCostUsd through sandboxed-engine.ts with an
+    // EngineId, not a provider id. Each of these was priced as frontier.
+    for (const engine of ['local-coder', 'llama-server', 'aw', 'ashlrcode']) {
+      expect(estCostUsd(engine, 100_000, 50_000), engine).toBe(0);
+    }
   });
 
   it('empty string provider cost is non-negative', () => {

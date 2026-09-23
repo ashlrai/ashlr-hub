@@ -1822,7 +1822,11 @@ export async function runEngineSandboxed(
         hasReportedUsage = true;
         usage.tokensIn += res.usage.tokensIn;
         usage.tokensOut += res.usage.tokensOut;
-        usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut);
+        // `engine` is an EngineId, not a provider id. `cfg` is threaded so
+        // estCostUsd judges locality against the EFFECTIVE engine registry —
+        // without it a locally-served engine here priced at the $3/$15
+        // frontier fallback and spent a daily budget it never actually used.
+        usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut, 0, 0, 0, { cfg });
       }
 
       // Persist one fixed-schema row per actual retry attempt. Raw prompt/argv,
@@ -2158,7 +2162,9 @@ export async function runEngineSandboxed(
                     hasReportedUsage = true;
                     usage.tokensIn += r.usage.tokensIn;
                     usage.tokensOut += r.usage.tokensOut;
-                    usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut);
+                    // Same EngineId-not-provider contract as the spawn path
+                    // above: `cfg` keeps a local repair attempt free.
+                    usage.estCostUsd = estCostUsd(engine, usage.tokensIn, usage.tokensOut, 0, 0, 0, { cfg });
                   }
                   if (processCleanupUnconfirmed(r)) processCleanupFailure = r;
                   return { ok: r.ok };
@@ -3058,7 +3064,11 @@ export async function runApiModelSandboxed(
 
     const finalUsage: RunUsage = {
       ...usage,
-      estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut),
+      // api-model dispatch: `engine` is an EngineId ('local-coder',
+      // 'llama-server', an operator-added entry). Locality is decided by the
+      // resolved registry's ENDPOINT, so `cfg` has to come along — this is the
+      // figure the daemon's daily budget is debited against.
+      estCostUsd: estCostUsd(engine, usage.tokensIn, usage.tokensOut, 0, 0, 0, { cfg }),
     };
     setRunActionCount(actionCounts, 'modelSteps', steps.filter((step) => step.kind === 'model').length);
     setRunActionCount(actionCounts, 'toolSteps', steps.filter((step) => step.kind === 'tool').length);
