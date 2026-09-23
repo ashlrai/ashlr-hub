@@ -278,7 +278,12 @@ function buildTrace(args: {
   return {
     captureDir: args.captureDir,
     requests: args.finished.length + openStreams.length,
-    streams: args.finished,
+    // COPIED, not referenced. The runner reads the trace at the kill and then
+    // closes the proxy, which settles every in-flight stream — and a snapshot
+    // that aliased the live array would gain those entries afterwards, so the
+    // one stream the diagnosis is about would appear as both still-open and
+    // already-complete. A snapshot has to be a snapshot.
+    streams: [...args.finished],
     openStreams,
     stallMs: args.stallMs,
   };

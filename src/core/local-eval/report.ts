@@ -143,9 +143,12 @@ export function renderReport(report: EvalReport): string {
       lines.push(`  ${pad(`${task}#${trial.trial}`, 26)} ${d ? d.kind : 'UNDIAGNOSED (run without --no-trace)'}`);
       if (d) lines.push(`  ${' '.repeat(26)} ${d.detail}`);
       if (trial.trace) {
-        // Turns only: the CLI's connectivity probe and token counts are not
-        // SSE streams and would otherwise show up as terminator failures.
-        const turns = trial.trace.streams.filter((x) => (x.events['message_start'] ?? 0) > 0);
+        // Turns the SERVER finished. The CLI's connectivity probe and token
+        // counts are not SSE streams at all, and a turn the agent hung up on
+        // is not evidence about the runtime — counting either would report a
+        // terminator failure on every timeout.
+        const turns = trial.trace.streams.filter(
+          (x) => (x.events['message_start'] ?? 0) > 0 && x.ended === 'upstream-end');
         const unterminated = turns.filter((x) => !x.sawTerminator && x.ended === 'upstream-end').length;
         lines.push(`  ${' '.repeat(26)} ${turns.length} completed turn(s), `
           + `${unterminated} ended without a terminator; raw capture in ${trial.trace.captureDir}`);

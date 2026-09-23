@@ -139,6 +139,30 @@ describe('startTrace', () => {
     expect(readFileSync(join(captureDir, 'res-0000.sse'), 'utf8')).toBe(TERMINATED_SSE);
   });
 
+  // REGRESSION. The first cut returned the live array by reference, so a
+  // snapshot taken at the kill gained the very stream it was about as soon as
+  // the proxy closed — and the report then listed one stream as both in flight
+  // and complete, with the truncated turn counted in the turn-duration stats.
+  it('returns a snapshot that later streams cannot change', async () => {
+    const upstream = await fakeUpstream((_body, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(TERMINATED_SSE);
+    });
+    servers.push(upstream.server);
+    const handle = await startTrace({
+      upstream: upstream.origin, captureDir: mkdtempSync(join(tmpdir(), 'trace-')),
+    });
+    handles.push(handle);
+
+    await (await fetch(`${handle.baseUrl}/v1/messages`, { method: 'POST', body: '{}' })).text();
+    const early = handle.snapshot();
+    expect(early.streams).toHaveLength(1);
+
+    await (await fetch(`${handle.baseUrl}/v1/messages`, { method: 'POST', body: '{}' })).text();
+    expect(early.streams).toHaveLength(1);
+    expect(handle.snapshot().streams).toHaveLength(2);
+  });
+
   it('shows a stream still in flight, with how long since its last byte', async () => {
     let held: import('node:http').ServerResponse | null = null;
     const upstream = await fakeUpstream((_body, res) => {
