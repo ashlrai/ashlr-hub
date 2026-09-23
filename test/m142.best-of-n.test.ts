@@ -46,6 +46,9 @@ let testHome: string;
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'ashlr-best-of-n-m142-'));
   process.env.HOME = testHome;
+  // Module-level state: without this, proposals persisted by one case stay
+  // visible to the loadProposal mock of every later case in the file.
+  mockPersistedProposals.clear();
 });
 
 describe('M142 — durable candidate run observation', () => {
@@ -303,13 +306,27 @@ function makeSandboxMock(opts: {
   /** Throw on these indices. */
   throwAt?: number[];
 }) {
-  let callCount = 0;
+  // A candidate's identity MUST be derived from the runId runBestOfN assigns to
+  // that candidate, never from a call counter. runBestOfN dispatches its N
+  // candidates concurrently, so a counter reflects which async call landed
+  // first, not which candidate it is — the per-index fixtures below (proposal
+  // ids, diffs, throwAt/withProposalAt) would then attach to the wrong
+  // candidate whenever the candidates interleave, making this file flaky.
+  //
+  // The default runId is `best-of-n-<index>-<ts>-<rand>`, so the index is
+  // recoverable from it. When opts.attemptId is set the runId is instead a
+  // sha256-derived `attempt-<digest>` with no recoverable index — but every
+  // attemptId test in this file runs with n: 1, where the sole candidate is
+  // index 0 and no race is possible, so the fallback counter is exact there.
+  let fallbackCount = 0;
   return vi.fn(async (_engine: unknown, _goal: unknown, _cfg: unknown, runOpts: Record<string, unknown>) => {
-    const idx = callCount++;
+    const dispatchedRunId = runOpts['runId'] == null ? undefined : String(runOpts['runId']);
+    const indexFromRunId = /^best-of-n-(\d+)-/.exec(dispatchedRunId ?? '')?.[1];
+    const idx = indexFromRunId !== undefined ? Number(indexFromRunId) : fallbackCount++;
     if (opts.throwAt?.includes(idx)) throw new Error(`sandbox error at ${idx}`);
     const hasProposal = !opts.withProposalAt || opts.withProposalAt.includes(idx);
     const proposalId = hasProposal ? `proposal-${idx}` : undefined;
-    const runId = String(runOpts['runId'] ?? `run-${idx}`);
+    const runId = dispatchedRunId ?? `run-${idx}`;
     const proposalOutcome = proposalId
       ? {
           kind: 'filed' as const,
@@ -369,17 +386,32 @@ function makeSandboxMock(opts: {
   });
 }
 
+/**
+ * Register the sandbox + inbox-store mocks for one case.
+ *
+ * A module path must be registered with vi.doMock EXACTLY ONCE per case.
+ * Registering the same path twice (this helper first, then a case-specific
+ * override) resolves that mock path asynchronously twice over, and which
+ * registration ends up installed is a race — the override only wins most of
+ * the time. Cases needing different persisted bytes therefore pass a
+ * `loadProposal` here rather than issuing a second doMock of their own.
+ */
 function mockSandboxedEngine(
   apiSandboxMock: ReturnType<typeof vi.fn>,
   engineSandboxMock: ReturnType<typeof vi.fn> = vi.fn(),
+  storeOverrides: {
+    loadProposal?: (id: string) => import('../src/core/types.js').Proposal | null;
+  } = {},
 ) {
   mockPersistedProposals.clear();
+  const loadProposal = storeOverrides.loadProposal
+    ?? ((id: string) => mockPersistedProposals.get(id) ?? null);
   vi.doMock('../src/core/run/sandboxed-engine.js', () => ({
     runApiModelSandboxed: apiSandboxMock,
     runEngineSandboxed: engineSandboxMock,
   }));
   vi.doMock('../src/core/inbox/store.js', () => ({
-    loadProposal: vi.fn((id: string) => mockPersistedProposals.get(id) ?? null),
+    loadProposal: vi.fn(loadProposal),
   }));
 }
 
@@ -811,17 +843,16 @@ describe('M142 — daemon routing alignment', () => {
       wouldMerge: true,
     }));
 
-    mockSandboxedEngine(sandboxMock);
-    vi.doMock('../src/core/fleet/manager.js', () => ({
-      judgeProposal: judgeMock,
-    }));
-    vi.doMock('../src/core/inbox/store.js', () => ({
-      loadProposal: vi.fn((id: string) => {
+    mockSandboxedEngine(sandboxMock, undefined, {
+      loadProposal: (id: string) => {
         const persisted = mockPersistedProposals.get(id);
         return persisted && id === 'proposal-0'
           ? { ...persisted, diff: 'TAMPERED_PROPOSAL_DIFF' }
           : persisted ?? null;
-      }),
+      },
+    });
+    vi.doMock('../src/core/fleet/manager.js', () => ({
+      judgeProposal: judgeMock,
     }));
 
     const { runBestOfN } = await import('../src/core/run/best-of-n.js?realdiff=' + randomUUID());
