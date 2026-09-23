@@ -225,6 +225,17 @@ describe('diagnoseTimeout', () => {
     expect(verdict.kind).toBe('idle-between-turns');
   });
 
+  // NEGATIVE CONTROL. The CLI opens a warm-up completion and cancels it after
+  // about a second. A cancelled turn cannot carry a terminator, so reading one
+  // as a missing terminator would blame the runtime for the client's choice.
+  it('does not blame the server for a turn the agent cancelled', () => {
+    const cancelled = done({ seq: 0, ended: 'client-closed', sawTerminator: false, bytes: 1_412 });
+    expect(diagnoseTimeout(trace({ streams: [cancelled] })).kind)
+      .toBe('no-request-reached-the-model');
+    expect(diagnoseTimeout(trace({ streams: [done({ seq: 1 }), cancelled] })).kind)
+      .toBe('idle-between-turns');
+  });
+
   it('names a missing terminator when the last completed stream had none', () => {
     const verdict = diagnoseTimeout(trace({ streams: [done({ sawTerminator: false })] }));
     expect(verdict.kind).toBe('stream-ended-without-terminator');

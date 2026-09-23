@@ -334,12 +334,20 @@ export function diagnoseTimeout(trace: TrialTrace): TimeoutDiagnosis {
   // report a missing terminator on every single timeout — a diagnosis that
   // fires always is worth exactly as much as no diagnosis at all.
   const turns = trace.streams.filter((s) => (s.events['message_start'] ?? 0) > 0);
-  const last = turns[turns.length - 1];
+  // And only a turn the SERVER closed is evidence ABOUT the server. The CLI
+  // opens a warm-up completion and cancels it a second later; a cancelled turn
+  // has no terminator by construction, so reading one as a server fault would
+  // blame the runtime for the client's own choice.
+  const serverClosed = turns.filter((s) => s.ended === 'upstream-end');
+  const last = serverClosed[serverClosed.length - 1];
   if (!last) {
     return {
       kind: 'no-request-reached-the-model',
-      detail: `the agent never sent a completion request (${trace.requests} non-streaming request(s) seen) `
-        + '— the hang is on the client side of the proxy',
+      detail: turns.length > 0
+        ? `${turns.length} turn(s) were opened and the agent abandoned every one before the server `
+          + 'closed it — the hang is on the client side of the proxy'
+        : `the agent never sent a completion request (${trace.requests} non-streaming request(s) seen) `
+          + '— the hang is on the client side of the proxy',
       seq: null,
     };
   }
@@ -353,7 +361,7 @@ export function diagnoseTimeout(trace: TrialTrace): TimeoutDiagnosis {
   }
   return {
     kind: 'idle-between-turns',
-    detail: `every request completed — ${turns.length} turn(s), the last one terminated cleanly `
+    detail: `every request completed — ${serverClosed.length} turn(s), the last one terminated cleanly `
       + `${Math.round(last.durationMs / 1000)}s long — and the agent then stopped without sending another`,
     seq: last.seq,
   };
