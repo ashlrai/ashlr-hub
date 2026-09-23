@@ -117,6 +117,8 @@ export interface CaptureOptions {
   /** Origin llama-server itself is on, used for `/props`. */
   readonly upstreamOrigin: string;
   readonly agentCli: string;
+  /** Whether the run inserted the tracing proxy in front of `baseUrl`. */
+  readonly tracing: boolean;
 }
 
 /**
@@ -173,6 +175,7 @@ export async function captureConfiguration(opts: CaptureOptions): Promise<Harnes
     samplingParams: sampling,
     baseUrl: opts.baseUrl,
     proxy: proxyOn ? 'on' : 'off',
+    tracing: opts.tracing ? 'on' : 'off',
     proxyImplementation: proxyOn ? (proxyArgv.join(' ') || UNKNOWN) : 'none (direct to llama-server)',
     agentCli,
     llamaServerArgv: llamaArgv,

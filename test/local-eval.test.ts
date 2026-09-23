@@ -202,7 +202,7 @@ describe('summariseTask', () => {
     taskId: 't', trial: 1, mode: 'pass', passed: true, wallMs: 1000,
     tokens: { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 },
     agentExit: 0, verifyExit: 0, changedFiles: 1, claim: 'claims-change',
-    integrity: 'consistent', turns: 2, note: '', ...over,
+    integrity: 'consistent', turns: 2, note: '', timeoutDiagnosis: null, trace: null, ...over,
   });
 
   it('reports a pass rate and ranks failure modes by frequency', () => {

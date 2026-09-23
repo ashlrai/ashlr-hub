@@ -80,6 +80,87 @@ export type FailureMode =
   /** The CLI or the runtime errored — not the model's fault, and not a pass. */
   | 'harness-error';
 
+/**
+ * One request/response exchange between the agent and the runtime, as seen on
+ * the wire by the tracing proxy.
+ *
+ * `sawTerminator` is the field this whole record exists for. An SSE turn that
+ * closes without `message_stop` leaves the agent waiting on a socket the server
+ * already considers finished, and that is indistinguishable from a slow model
+ * to everything downstream — including the CLI's own result JSON, which an
+ * aborted turn is documented to report as COMPLETED.
+ */
+export interface StreamRecord {
+  readonly seq: number;
+  readonly url: string;
+  readonly status: number | null;
+  /** Which side ended it, and how. */
+  readonly ended: 'upstream-end' | 'upstream-aborted' | 'upstream-error' | 'client-closed';
+  readonly bytes: number;
+  /** SSE event names to counts, e.g. `{ content_block_delta: 512 }`. */
+  readonly events: Readonly<Record<string, number>>;
+  /** Whether a `message_stop` event ever arrived. */
+  readonly sawTerminator: boolean;
+  /** Node's own view of whether the response body arrived in full. */
+  readonly upstreamComplete: boolean;
+  readonly waitedForFirstByteMs: number | null;
+  /** Silence between the last byte and the close. Null when no byte arrived. */
+  readonly idleAtEndMs: number | null;
+  readonly durationMs: number;
+}
+
+/** A stream that had not finished when the trace was read. */
+export interface OpenStreamRecord {
+  readonly seq: number;
+  readonly url: string;
+  readonly status: number | null;
+  readonly bytes: number;
+  readonly events: Readonly<Record<string, number>>;
+  readonly openForMs: number;
+  /** Null when not one byte has arrived yet. */
+  readonly sinceLastByteMs: number | null;
+  readonly waitedForFirstByteMs: number | null;
+}
+
+/** Everything the tracing proxy saw during one trial. */
+export interface TrialTrace {
+  /** Where the raw request bodies and response streams were written. */
+  readonly captureDir: string;
+  readonly requests: number;
+  readonly streams: readonly StreamRecord[];
+  readonly openStreams: readonly OpenStreamRecord[];
+  /** Silence longer than this is reported as a stall rather than as slowness. */
+  readonly stallMs: number;
+}
+
+/**
+ * WHY a trial ran out of clock.
+ *
+ * Each value names a different thing to go and fix, which is the entire point:
+ * "timeout" alone is the same non-answer as a pass rate with no failure modes.
+ */
+export type TimeoutDiagnosisKind =
+  /** Tokens were still arriving when the budget expired. The model was working. */
+  | 'generating-at-cutoff'
+  /** A stream went silent and was never closed. The socket outlived the turn. */
+  | 'stream-stalled'
+  /** A request was accepted and never produced a single byte. */
+  | 'no-first-token'
+  /** The last stream closed with no `message_stop`; the agent waited forever. */
+  | 'stream-ended-without-terminator'
+  /** Every stream completed cleanly and the agent simply stopped. Client-side. */
+  | 'idle-between-turns'
+  /** The agent never reached the runtime at all. */
+  | 'no-request-reached-the-model';
+
+export interface TimeoutDiagnosis {
+  readonly kind: TimeoutDiagnosisKind;
+  /** One sentence naming the evidence, safe to print in a report. */
+  readonly detail: string;
+  /** The request the verdict is about, when there is one. */
+  readonly seq: number | null;
+}
+
 /** Token counts for one trial, as reported by the agent CLI. */
 export interface TrialTokens {
   readonly input: number;
@@ -110,6 +191,18 @@ export interface TrialResult {
   readonly turns: number | null;
   /** Short human-readable note, e.g. the first line of a crash. */
   readonly note: string;
+  /**
+   * What the wire was doing when the clock ran out. Null for every trial that
+   * did not time out — and never null for one that did, which is the guarantee
+   * this field was added to make.
+   */
+  readonly timeoutDiagnosis: TimeoutDiagnosis | null;
+  /**
+   * The wire summary, present whenever tracing was on. Kept on the trial rather
+   * than only in a log file so a recorded baseline stays diagnosable after the
+   * temporary directory it ran in is gone.
+   */
+  readonly trace: TrialTrace | null;
 }
 
 /** Every trial for one task, plus the aggregate that answers "did this help?". */
@@ -150,6 +243,14 @@ export interface HarnessConfiguration {
   readonly baseUrl: string;
   /** Whether that base URL is the normalising proxy or llama-server directly. */
   readonly proxy: 'on' | 'off';
+  /**
+   * Whether the tracing proxy was inserted in front of `baseUrl`.
+   *
+   * Recorded because it changes what a timed-out trial can say about itself,
+   * and a baseline that predates tracing must not be mistaken for one where
+   * tracing found nothing.
+   */
+  readonly tracing: 'on' | 'off';
   /** What is actually serving the proxy port, when that could be determined. */
   readonly proxyImplementation: string;
   readonly agentCli: string;
