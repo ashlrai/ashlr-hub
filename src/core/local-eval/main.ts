@@ -18,6 +18,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { captureConfiguration } from './configuration.js';
+import {
+  DEFAULT_ANTHROPIC_PROXY_PORT,
+  DEFAULT_LLAMA_HOST,
+  DEFAULT_LLAMA_PORT,
+} from '../local-runtime/llama/config.js';
 import { buildReport, renderReport, summariseTask } from './report.js';
 import { runTrial } from './runner.js';
 import { TASKS } from './tasks.js';
@@ -39,8 +44,20 @@ export function parseArgs(argv: readonly string[]): Args {
   const args: Args = {
     trials: 3,
     concurrency: 2,
-    baseUrl: process.env['ASHLR_EVAL_BASE_URL'] ?? 'http://127.0.0.1:8090',
-    upstream: process.env['ASHLR_EVAL_UPSTREAM'] ?? 'http://127.0.0.1:8080',
+    // These DEFAULT TO THE SHIPPING PORTS, derived from config.ts rather than
+    // written out, and that is the whole point. The previous default was
+    // `http://127.0.0.1:8090`, which is not a port anything in this repository
+    // ever binds — it was a hand-started scratch script outside the tree. A
+    // baseline measured against it therefore could not be reproduced from a
+    // clean checkout: the harness pointed at a port that, for anyone but the
+    // one machine the script was running on, had nothing behind it. Deriving
+    // both from the constants keeps the harness aimed at the lane the product
+    // actually serves.
+    baseUrl:
+      process.env['ASHLR_EVAL_BASE_URL']
+      ?? `http://${DEFAULT_LLAMA_HOST}:${DEFAULT_ANTHROPIC_PROXY_PORT}`,
+    upstream:
+      process.env['ASHLR_EVAL_UPSTREAM'] ?? `http://${DEFAULT_LLAMA_HOST}:${DEFAULT_LLAMA_PORT}`,
     // llama-server serves whatever is loaded and ignores this, but the CLI
     // stamps it into the result JSON, so it is the label the run is filed under.
     model: process.env['ASHLR_EVAL_MODEL'] ?? 'qwen3.8',

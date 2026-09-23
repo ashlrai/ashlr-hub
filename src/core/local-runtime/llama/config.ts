@@ -413,6 +413,49 @@ export function buildLlamaServerArgs(
     // sampling on a live launchd-managed server from anything that can reach
     // the port. Observability yes, remote mutation no.
     '--metrics',
+    // CORS. llama-server's default is `--cors-origins *`, and it announces the
+    // consequence itself at startup: "CORS is set to allow all origins ('*')
+    // and no API key is set / this can be a security risk (cross-origin
+    // attacks)". That warning is correct and it is not theoretical. MEASURED
+    // against the live loopback server with its shipping defaults:
+    //
+    //   GET /props, no Origin (control)      -> Access-Control-Allow-Origin: (empty)
+    //   GET /props, Origin: https://evil.example
+    //                                        -> Access-Control-Allow-Origin: https://evil.example
+    //   OPTIONS /v1/messages, same Origin    -> Allow-Origin: https://evil.example
+    //                                           Allow-Credentials: true
+    //                                           Allow-Methods: GET, POST, DELETE, OPTIONS
+    //                                           Allow-Headers: *
+    //
+    // The origin is ECHOED, so any page the operator visits in any browser can
+    // read the response: run inference on this machine, and read `/slots`,
+    // which carries the prompts of whatever the local lane is currently
+    // processing. Binding to loopback does not help — the browser is already
+    // on loopback. It mattered less when this was hand-started for an hour at
+    // a time; it is a KeepAlive launchd job now, up from login and restarted
+    // on crash.
+    //
+    // `localhost` is llama-server's own special value: reflect the Origin only
+    // when it is localhost. It closes the internet-origin hole completely.
+    //
+    // WHY THIS CANNOT BREAK THE LANE, measured rather than assumed: CORS is a
+    // browser mechanism and applies only to requests carrying an `Origin`
+    // header. A capture server put in llama-server's place recorded every
+    // request a real `claude` turn makes through this proxy — `HEAD
+    // /api/hello` and two `POST /v1/messages?beta=true` — and NONE of them
+    // carried an Origin. Nothing in the hub's own web UI fetches this port
+    // from a browser either; it renders status the hub server probed
+    // server-side. So no client of this runtime engages CORS at all.
+    //
+    // NOT `--api-key`, deliberately, and this was measured too. The same
+    // capture shows the lane sends `authorization: Bearer ollama` — the
+    // literal value of ANTHROPIC_AUTH_TOKEN that verse/adapters/claude.ts
+    // sets. llama-server's `--api-key` checks exactly that header, so turning
+    // it on would 401 every turn unless the proxy rewrote the header on the
+    // way through. That is a real change to the request path, not a flag, and
+    // it is not worth shipping untested alongside this one.
+    '--cors-origins',
+    'localhost',
     ...runtime.extraArgs,
   ];
 }
