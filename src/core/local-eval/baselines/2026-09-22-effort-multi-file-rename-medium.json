@@ -1,0 +1,141 @@
+{
+  "configuration": {
+    "model": "qwen3.8:27b-ctx64k",
+    "modelPath": "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+    "quantization": "Q8_0",
+    "slots": 4,
+    "contextPerSlot": 65536,
+    "contextTotal": 262144,
+    "samplingParams": {
+      "temperature": 1,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "typical_p": 1,
+      "repeat_penalty": 1,
+      "repeat_last_n": 64,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "mirostat": 0,
+      "seed": 4294967295
+    },
+    "baseUrl": "http://127.0.0.1:8102",
+    "proxy": "on",
+    "proxyImplementation": "node /private/tmp/claude-501/-Users-masonwyatt-Desktop/9d28bdb1-37c3-419d-a2bc-f7e3fd7b72ef/scratchpad/effort-shim.mjs",
+    "agentCli": "claude 2.1.280 (Claude Code)",
+    "llamaServerArgv": [
+      "/opt/homebrew/bin/llama-server",
+      "-m",
+      "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8080",
+      "--parallel",
+      "4",
+      "-c",
+      "262144",
+      "--cont-batching",
+      "--cache-prompt"
+    ],
+    "capturedAt": "2026-09-23T02:06:01.956Z"
+  },
+  "trialsPerTask": 3,
+  "concurrency": 2,
+  "outcomes": [
+    {
+      "taskId": "multi-file-rename",
+      "why": "A multi-file change. The definition is trivial to rename; the task is only passed by an agent that FINDS the two call sites it was not told about. Renaming just the definition leaves the project broken, and that is the common partial failure a one-file fixture cannot catch.",
+      "expectation": "edit",
+      "trials": [
+        {
+          "taskId": "multi-file-rename",
+          "trial": 1,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 77510,
+          "tokens": {
+            "input": 815,
+            "output": 507,
+            "cacheRead": 7794,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 3,
+          "claim": "claims-change",
+          "integrity": "consistent",
+          "turns": 5,
+          "note": ""
+        },
+        {
+          "taskId": "multi-file-rename",
+          "trial": 2,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 165415,
+          "tokens": {
+            "input": 1514,
+            "output": 1085,
+            "cacheRead": 15921,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 3,
+          "claim": "claims-change",
+          "integrity": "consistent",
+          "turns": 8,
+          "note": ""
+        },
+        {
+          "taskId": "multi-file-rename",
+          "trial": 3,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 87398,
+          "tokens": {
+            "input": 887,
+            "output": 528,
+            "cacheRead": 6236,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 3,
+          "claim": "claims-change",
+          "integrity": "consistent",
+          "turns": 4,
+          "note": ""
+        }
+      ],
+      "passes": 3,
+      "total": 3,
+      "passRate": 1,
+      "medianWallMs": 87398,
+      "meanWallMs": 110108,
+      "modes": []
+    }
+  ],
+  "overallPassRate": 1,
+  "totalPasses": 3,
+  "totalTrials": 3,
+  "startedAt": "2026-09-23T02:06:01.957Z",
+  "finishedAt": "2026-09-23T02:08:47.565Z",
+  "wallMs": 165608,
+  "experiment": {
+    "question": "does lowering Qwen3.8 reasoning effort hold the pass rate, and what does it cost",
+    "arm": "medium",
+    "carrier": "chat_template_kwargs.reasoning_effort",
+    "injectedBy": "scratchpad effort-shim.mjs, a copy of the 8090 normalising shim plus the injection transcribed from local-runtime/llama/anthropic-shim.ts applyLocalAgentDefaults",
+    "injectedPort": 8102,
+    "controls": {
+      "templateReachability": "bogus effort -> HTTP 500 through the same shim, identical to high/none/off; low/medium/xhigh -> 200. The carrier provably reaches the template.",
+      "defaultEquivalence": "explicit xhigh produced byte-identical greedy output to sending no kwarg, so the xhigh arm is the live production default (config has no agentDefaults)."
+    },
+    "caveats": [
+      "sampling is the server default (temp 1.0, top_k 20), NOT greedy: these carry sampling noise that the earlier single-call battery did not.",
+      "harness at 6b89b5e5, before the tracing proxy landed; do not pool with traced runs."
+    ]
+  }
+}

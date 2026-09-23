@@ -1,0 +1,141 @@
+{
+  "configuration": {
+    "model": "qwen3.8:27b-ctx64k",
+    "modelPath": "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+    "quantization": "Q8_0",
+    "slots": 4,
+    "contextPerSlot": 65536,
+    "contextTotal": 262144,
+    "samplingParams": {
+      "temperature": 1,
+      "top_k": 20,
+      "top_p": 0.949999988079071,
+      "min_p": 0.05000000074505806,
+      "typical_p": 1,
+      "repeat_penalty": 1,
+      "repeat_last_n": 64,
+      "presence_penalty": 0,
+      "frequency_penalty": 0,
+      "mirostat": 0,
+      "seed": 4294967295
+    },
+    "baseUrl": "http://127.0.0.1:8103",
+    "proxy": "on",
+    "proxyImplementation": "node /private/tmp/claude-501/-Users-masonwyatt-Desktop/9d28bdb1-37c3-419d-a2bc-f7e3fd7b72ef/scratchpad/effort-shim.mjs",
+    "agentCli": "claude 2.1.280 (Claude Code)",
+    "llamaServerArgv": [
+      "/opt/homebrew/bin/llama-server",
+      "-m",
+      "/Users/masonwyatt/.ollama/models/blobs/sha256-2bb22714289826d7b9e0ba376c3ce47d08bce39abe598745857c44d88c09bdbf",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      "8080",
+      "--parallel",
+      "4",
+      "-c",
+      "262144",
+      "--cont-batching",
+      "--cache-prompt"
+    ],
+    "capturedAt": "2026-09-23T01:01:44.901Z"
+  },
+  "trialsPerTask": 3,
+  "concurrency": 2,
+  "outcomes": [
+    {
+      "taskId": "failing-test",
+      "why": "A red-to-green loop with a real gate: the agent has to run the suite, read a failure it was not handed, and fix the source rather than the test. It is the closest thing in the set to ordinary day work, and it is the task most likely to expose an agent that stops after one edit without re-running anything.",
+      "expectation": "edit",
+      "trials": [
+        {
+          "taskId": "failing-test",
+          "trial": 1,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 168826,
+          "tokens": {
+            "input": 2484,
+            "output": 736,
+            "cacheRead": 7661,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": 5,
+          "note": ""
+        },
+        {
+          "taskId": "failing-test",
+          "trial": 2,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 195642,
+          "tokens": {
+            "input": 3464,
+            "output": 841,
+            "cacheRead": 11553,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": 6,
+          "note": ""
+        },
+        {
+          "taskId": "failing-test",
+          "trial": 3,
+          "mode": "pass",
+          "passed": true,
+          "wallMs": 155875,
+          "tokens": {
+            "input": 2013,
+            "output": 976,
+            "cacheRead": 10941,
+            "cacheCreation": 0
+          },
+          "agentExit": 0,
+          "verifyExit": 0,
+          "changedFiles": 1,
+          "claim": "unknown",
+          "integrity": "unknown",
+          "turns": 6,
+          "note": ""
+        }
+      ],
+      "passes": 3,
+      "total": 3,
+      "passRate": 1,
+      "medianWallMs": 168826,
+      "meanWallMs": 173448,
+      "modes": []
+    }
+  ],
+  "overallPassRate": 1,
+  "totalPasses": 3,
+  "totalTrials": 3,
+  "startedAt": "2026-09-23T01:01:44.905Z",
+  "finishedAt": "2026-09-23T01:07:10.049Z",
+  "wallMs": 325144,
+  "experiment": {
+    "question": "does lowering Qwen3.8 reasoning effort hold the pass rate, and what does it cost",
+    "arm": "low",
+    "carrier": "chat_template_kwargs.reasoning_effort",
+    "injectedBy": "scratchpad effort-shim.mjs, a copy of the 8090 normalising shim plus the injection transcribed from local-runtime/llama/anthropic-shim.ts applyLocalAgentDefaults",
+    "injectedPort": 8103,
+    "controls": {
+      "templateReachability": "bogus effort -> HTTP 500 through the same shim, identical to high/none/off; low/medium/xhigh -> 200. The carrier provably reaches the template.",
+      "defaultEquivalence": "explicit xhigh produced byte-identical greedy output to sending no kwarg, so the xhigh arm is the live production default (config has no agentDefaults)."
+    },
+    "caveats": [
+      "sampling is the server default (temp 1.0, top_k 20), NOT greedy: these carry sampling noise that the earlier single-call battery did not.",
+      "harness at 6b89b5e5, before the tracing proxy landed; do not pool with traced runs."
+    ]
+  }
+}
