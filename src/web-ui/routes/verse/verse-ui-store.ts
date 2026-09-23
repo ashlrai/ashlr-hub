@@ -53,6 +53,17 @@ export interface VerseCommand {
 
 export interface VerseUiState {
   section: VerseSectionId;
+  /**
+   * The rail shows labels beside its icons rather than icons alone.
+   *
+   * Persisted with the other layout preferences, and DEFAULTS TO COLLAPSED: a
+   * returning operator keeps the 56px rail they already have muscle memory
+   * for, and only a deliberate toggle widens it. Collapsed is also the state
+   * the desktop traffic-light maths was written against — see the
+   * `--rail-width` override in VerseApp.module.css for how the widened rail
+   * keeps every dependent `calc()` honest.
+   */
+  railExpanded: boolean;
   sidebarWidth: number;
   sidebarCollapsed: boolean;
   resourcesOpen: boolean;
@@ -68,6 +79,7 @@ const STORAGE_KEY = 'ashlr.verse.ui.v2';
 
 const DEFAULTS: VerseUiState = {
   section: 'chat',
+  railExpanded: false,
   sidebarWidth: VERSE_SIDEBAR.def,
   sidebarCollapsed: false,
   resourcesOpen: true,
@@ -83,7 +95,10 @@ export function clampWidth(value: unknown, range: { min: number; max: number; de
 }
 
 /** Persisted subset. `pendingApprovals`/`command` never round-trip. */
-type Persisted = Pick<VerseUiState, 'section' | 'sidebarWidth' | 'sidebarCollapsed' | 'resourcesOpen' | 'resourcesWidth'>;
+type Persisted = Pick<
+  VerseUiState,
+  'section' | 'railExpanded' | 'sidebarWidth' | 'sidebarCollapsed' | 'resourcesOpen' | 'resourcesWidth'
+>;
 
 function read(): VerseUiState {
   try {
@@ -93,6 +108,7 @@ function read(): VerseUiState {
     return {
       ...DEFAULTS,
       section: typeof parsed.section === 'string' && SECTION_IDS.has(parsed.section) ? (parsed.section as VerseSectionId) : DEFAULTS.section,
+      railExpanded: parsed.railExpanded === true,
       sidebarWidth: clampWidth(parsed.sidebarWidth, VERSE_SIDEBAR),
       sidebarCollapsed: parsed.sidebarCollapsed === true,
       resourcesOpen: parsed.resourcesOpen !== false,
@@ -110,6 +126,7 @@ const listeners = new Set<() => void>();
 function persist(next: VerseUiState): void {
   const payload: Persisted = {
     section: next.section,
+    railExpanded: next.railExpanded,
     sidebarWidth: next.sidebarWidth,
     sidebarCollapsed: next.sidebarCollapsed,
     resourcesOpen: next.resourcesOpen,
@@ -126,7 +143,7 @@ function persist(next: VerseUiState): void {
 function patch(delta: Partial<VerseUiState>): void {
   const next = { ...state, ...delta };
   if ((Object.keys(delta) as (keyof VerseUiState)[]).every((k) => Object.is(state[k], next[k]))) return;
-  const shouldPersist = (['section', 'sidebarWidth', 'sidebarCollapsed', 'resourcesOpen', 'resourcesWidth'] as const)
+  const shouldPersist = (['section', 'railExpanded', 'sidebarWidth', 'sidebarCollapsed', 'resourcesOpen', 'resourcesWidth'] as const)
     .some((k) => !Object.is(state[k], next[k]));
   state = next;
   if (shouldPersist) persist(next);
@@ -144,6 +161,14 @@ export function getVerseUiState(): VerseUiState {
 
 export function setVerseSection(section: VerseSectionId): void {
   patch({ section });
+}
+
+export function setVerseRailExpanded(expanded: boolean): void {
+  patch({ railExpanded: expanded });
+}
+
+export function toggleVerseRail(): void {
+  patch({ railExpanded: !state.railExpanded });
 }
 
 export function setVerseSidebarWidth(width: number): void {
