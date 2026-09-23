@@ -262,6 +262,52 @@ describe('W1 · B · a post-merge regression HALTS the run mid-flight', () => {
     expect(status.run!.discarded[0]!.id).toBe('p-42');
   }, 20_000);
 
+  it('B3b: an UNPROVABLE landing halts too, and says it could not prove — not that it was bad', async () => {
+    const cfg = fastCfg();
+    const repo = fx.makeRepo();
+    repo.enroll();
+    gateHarness.forced = {
+      verdict: 'unverifiable' as const,
+      halt: true,
+      landings: [{
+        repo: repo.dir,
+        beforeHead: 'a'.repeat(40),
+        afterHead: 'b'.repeat(40),
+        commits: [{ sha: 'b'.repeat(40), subject: 'ashlr: auto-merge proposal p-7', isMerge: false }],
+        revertCommand: `git revert --no-edit ${'b'.repeat(40)}`,
+      }],
+      failures: [{
+        repo: repo.dir,
+        kind: 'dirty-tree' as const,
+        command: 'git status --porcelain',
+        detail: 'the working tree holds 2 uncommitted changes, so a post-merge run there would ' +
+          'measure those and not the merge — the result cannot be trusted either way',
+      }],
+      ranCommands: 0,
+      detail: 'POST-MERGE UNPROVABLE: landing could not be verified in 1 repo(s) ' +
+        '(1 with a dirty working tree — the verdict would have measured uncommitted edits, ' +
+        'not the merge); run halted rather than built upon',
+      revertPlan: [`git revert --no-edit ${'b'.repeat(40)}`],
+      durationMs: 3,
+    };
+
+    const state = await runDaemon(cfg, {
+      once: false, dryRun: false, maxCycles: 20,
+      runWindow: { kind: 'after-iterations', iterations: 10 },
+    });
+
+    expect(state.ticks.length).toBe(1);        // it halted, exactly like a regression
+    expect(paused()).toBe(true);
+    expect(killEngaged()).toBe(false);
+
+    const reason = readOvernightStatus().run!.discarded[0]!.reason;
+    // The wording distinguishes "we could not prove it" from "it was bad".
+    expect(reason).toContain('could not be verified');
+    expect(reason).toContain('dirty-tree');
+    expect(reason).not.toContain('post-merge suite failed');
+    expect(reason).toContain('git revert');
+  }, 20_000);
+
   it('B4: a CLEAN post-merge gate does not stop the run', async () => {
     const cfg = fastCfg();
     const repo = fx.makeRepo();

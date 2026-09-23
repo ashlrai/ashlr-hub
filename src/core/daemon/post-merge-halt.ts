@@ -41,9 +41,29 @@
  * ── FAIL SAFE ──────────────────────────────────────────────────────────────
  * A landing that cannot be verified HALTS. Not "continue and hope": if the
  * repo declares no required verify command, or the command cannot be run, or
- * git cannot be read, the run ends and says why. That is the same direction
- * the pre-merge gate already fails (`allowWithoutVerification` defaults false)
- * and the same direction `daemonPaused()` projects an unreadable sentinel.
+ * git cannot be read, or THE WORKING TREE IS DIRTY, the run ends and says why.
+ * That is the same direction the pre-merge gate already fails
+ * (`allowWithoutVerification` defaults false) and the same direction
+ * `daemonPaused()` projects an unreadable sentinel.
+ *
+ * Those cases are reported as UNPROVABLE, never as a regression, and the
+ * distinction is deliberate. Not being overly critical governs how harshly a
+ * CHANGE is judged; it says nothing about whether the EVIDENCE is sound. A
+ * dirty tree means the post-merge run measured the operator's uncommitted
+ * edits instead of the merge — the gate is not being strict there, it is
+ * being honest that it proved nothing. That case matters more than the rest,
+ * because it is the only one where the gate would otherwise say GREEN and be
+ * wrong, and a false green is what the whole run window exists to prevent.
+ *
+ * ── FOLLOW-UP: THE MERGE COMMIT MESSAGE ────────────────────────────────────
+ * Each merge is already exactly one revertable commit, but its message names
+ * only the proposal: `ashlr: merge proposal branch ashlr/merge/<id>`
+ * (inbox/merge.ts:2843-2854) over `ashlr: auto-merge proposal <id>`
+ * (inbox/merge.ts:2690). It says WHAT, not WHY. Carrying the why into the
+ * commit means editing inbox/merge.ts, which 14 automerge suites pin; until
+ * that is worth doing, the why lives in the overnight status record
+ * (daemon/overnight-status.ts), keyed by the same proposal id, and in the
+ * halt record written below.
  *
  * ── HOW IT HALTS ───────────────────────────────────────────────────────────
  * By PARKING, never by killing. `stopDaemon()` is `setKill(true)`, which writes
@@ -120,7 +140,7 @@ export interface PostMergeFailure {
    * the distinction is what the operator reads at 07:00 to know whether they
    * are looking at a bad diff or a broken toolchain.
    */
-  readonly kind: VerifyCommand['kind'] | 'detection' | 'harness' | 'git';
+  readonly kind: VerifyCommand['kind'] | 'detection' | 'harness' | 'git' | 'dirty-tree';
   readonly command: string;
   readonly detail: string;
 }
@@ -167,7 +187,33 @@ const GIT_TIMEOUT_MS = 10_000;
 
 /** Failure kinds that mean "could not prove it", not "it is broken". */
 const NON_REGRESSION_KINDS: ReadonlySet<PostMergeFailure['kind']> =
-  new Set<PostMergeFailure['kind']>(['detection', 'harness', 'git']);
+  new Set<PostMergeFailure['kind']>(['detection', 'harness', 'git', 'dirty-tree']);
+
+/**
+ * Is the repo's working tree clean enough for a post-merge verdict to MEAN
+ * anything?
+ *
+ * Returns null when clean, or a short description of what is dirty.
+ * `git status --porcelain` already honours `.gitignore`, so build output and
+ * caches do not show up here — what does show up is a real uncommitted change
+ * or a real untracked, un-ignored file. Both change what the suite measures.
+ *
+ * An unreadable status is reported as dirty: the same fail-safe direction as
+ * everything else here. We are asking "can this verdict be trusted", and
+ * "I could not tell" is not a yes.
+ */
+function workingTreeDirt(repo: string): string | null {
+  const status = git(repo, ['status', '--porcelain', '--untracked-files=normal']);
+  if (status === null) return 'git status could not be read';
+  if (status.length === 0) return null;
+  const lines = status.split('\n').filter((line) => line.trim().length > 0);
+  const modified = lines.filter((line) => !line.startsWith('??')).length;
+  const untracked = lines.length - modified;
+  const parts: string[] = [];
+  if (modified > 0) parts.push(`${modified} uncommitted change${modified === 1 ? '' : 's'}`);
+  if (untracked > 0) parts.push(`${untracked} untracked file${untracked === 1 ? '' : 's'}`);
+  return parts.join(' and ');
+}
 
 /** Run git in `cwd`; trimmed stdout, or null on ANY failure. Never throws. */
 function git(cwd: string, args: string[]): string | null {
@@ -381,6 +427,35 @@ export async function runPostMergeGate(
       return finish('unverifiable', landings, failures, ranCommands, detail);
     }
 
+    // ── UNPROVABLE: a dirty tree ─────────────────────────────────────────
+    // Checked BEFORE the suite runs, because a suite run against a dirty tree
+    // is not cheap and not meaningful.
+    //
+    // The whole overnight safety property is "post-merge verification halts
+    // the run before a regression compounds". If that verification can be
+    // silently invalid, the property is void — and this is the one failure
+    // mode where the gate says GREEN and is wrong, which is strictly worse
+    // than a false halt. A tree carrying uncommitted edits measures the
+    // operator's work-in-progress, not the merge.
+    //
+    // This is NOT the gate being harsh about a change. Being un-harsh governs
+    // how we judge a diff; it says nothing about whether the evidence is
+    // sound. A dirty tree sits in the same category as a repo with no
+    // required verify command and a repo whose HEAD cannot be read: the gate
+    // is not refusing the change, it is refusing to pretend it proved one.
+    const dirt = workingTreeDirt(landing.repo);
+    if (dirt !== null) {
+      failures.push({
+        repo: landing.repo,
+        kind: 'dirty-tree',
+        command: 'git status --porcelain',
+        detail: `the working tree holds ${dirt}, so a post-merge run there would measure those ` +
+          `and not the merge — the result cannot be trusted either way`,
+      });
+      unverifiable = true;
+      continue;
+    }
+
     let commands: VerifyCommand[];
     try {
       commands = detect(landing.repo, 'merge');
@@ -454,9 +529,15 @@ export async function runPostMergeGate(
       `${new Set(red.map((f) => f.repo)).size} repo(s) after ${merged} landed commit(s); run halted`);
   }
   if (unverifiable) {
+    const dirty = failures.filter((f) => f.kind === 'dirty-tree');
     return finish('unverifiable', landings, failures, ranCommands,
-      `post-merge landing could not be verified in ` +
-      `${new Set(failures.map((f) => f.repo)).size} repo(s); run halted rather than built upon`);
+      `POST-MERGE UNPROVABLE: landing could not be verified in ` +
+      `${new Set(failures.map((f) => f.repo)).size} repo(s)` +
+      (dirty.length > 0
+        ? ` (${dirty.length} with a dirty working tree — the verdict would have measured ` +
+          `uncommitted edits, not the merge)`
+        : '') +
+      `; run halted rather than built upon`);
   }
   return finish('clean', landings, failures, ranCommands,
     `post-merge suite green: ${ranCommands} required check(s) across ` +

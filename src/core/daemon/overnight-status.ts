@@ -22,6 +22,25 @@
  * "typecheck failed" are answers; "rejected" is not. A quiet night has to be
  * legible in the morning or the run window is not worth having.
  *
+ * KNOWN GAP — `discarded[]` currently carries POST-merge halts only.
+ * Pre-merge discards already have specific per-proposal reasons: the pass
+ * returns them as `AutoMergePassResult.skipped[]`
+ * (`{ proposalId, check, reason }`, e.g. "verify-before-judge: known failed
+ * verification: typecheck") and as rejection details on `results[]`. They are
+ * lost on the way out: `autoMergeTickSummary` (daemon/loop.ts:1817) folds the
+ * pass result into `DaemonTick['autoMerge']` as COUNTS only, so by the time
+ * runDaemon can see it the reasons are gone.
+ *
+ * The fix, deliberately NOT made here because it edits a shared type while
+ * another agent is changing budget types in the same file:
+ *   1. add `skipped?: Array<{ proposalId: string; check: string; reason: string }>`
+ *      to `DaemonTick['autoMerge']` (src/core/types.ts:4678-4692);
+ *   2. stop dropping it in `autoMergeTickSummary` (daemon/loop.ts:1817-1847),
+ *      bounded to a sane number of entries so the tick record stays small;
+ *   3. in runDaemon's post-tick block, feed each entry to
+ *      {@link recordOvernightDiscard} with `reason` = the pass's own sentence.
+ * That is the whole change; nothing else needs to move.
+ *
  * `~/.ashlr/run-window/status.json`, written durably (exclusive tmp + atomic
  * rename). Metadata only — never a diff, a token, or command output.
  *

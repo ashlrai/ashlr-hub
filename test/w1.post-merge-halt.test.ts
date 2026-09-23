@@ -364,6 +364,110 @@ describe('W1 · D · what cannot be verified halts, it does not continue', () =>
     expect(result.detail).toContain('unproven');
   });
 
+  // ── The dirty working tree ──────────────────────────────────────────────
+  // The only failure mode where the gate would otherwise say GREEN and be
+  // wrong. A false halt costs one morning; a false green voids the entire
+  // overnight safety property, because every later iteration is built on a
+  // merge nothing actually checked.
+
+  it('D7: an UNCOMMITTED change makes the verdict unprovable — and no suite is run', async () => {
+    const repo = fx.makeRepo({ files: { 'README.md': '# r\n', 'src/a.ts': 'export const a = 1;\n' } });
+    repo.enroll();
+    const before = snapshotEnrolledHeads();
+    commit(repo.dir, 'b.txt', 'merged\n', 'ashlr: auto-merge proposal p-3');
+
+    // The operator left work in the tree. A post-merge suite here measures
+    // THEIR edit, not the merge.
+    repo.writeFile('src/a.ts', 'export const a = 2; // half-finished\n');
+    expect(repo.gitStatus()).not.toBe('');
+
+    const ran: VerifyCommand[] = [];
+    const result = await runPostMergeGate(
+      before, snapshotEnrolledHeads(), cfg, seams([TYPECHECK, TEST], passing, ran));
+
+    expect(result.verdict).toBe('unverifiable');
+    expect(result.halt).toBe(true);
+    // Not a regression — the change was never judged at all.
+    expect(result.failures.map((f) => f.kind)).toEqual(['dirty-tree']);
+    expect(result.failures[0]!.detail).toContain('uncommitted change');
+    expect(result.failures[0]!.detail).toContain('not the merge');
+    // Checked BEFORE the suite: a run against a dirty tree is neither cheap
+    // nor meaningful, so it never happens.
+    expect(ran).toEqual([]);
+    expect(result.ranCommands).toBe(0);
+    expect(result.detail).toContain('POST-MERGE UNPROVABLE');
+    expect(result.detail).toContain('dirty working tree');
+  });
+
+  it('D8: a dirty tree would otherwise have been a FALSE GREEN', async () => {
+    // The same landing, the same passing seam. Clean → clean. Dirty → halt.
+    // This is the hole, stated as a pair.
+    const repo = fx.makeRepo({ files: { 'README.md': '# r\n', 'src/a.ts': 'export const a = 1;\n' } });
+    repo.enroll();
+    const before = snapshotEnrolledHeads();
+    commit(repo.dir, 'b.txt', 'merged\n', 'merge');
+
+    const clean = await runPostMergeGate(
+      before, snapshotEnrolledHeads(), cfg, seams([TEST], passing));
+    expect(clean.verdict).toBe('clean');
+    expect(clean.halt).toBe(false);
+
+    repo.writeFile('src/a.ts', 'export const a = 2;\n');
+    const dirty = await runPostMergeGate(
+      before, snapshotEnrolledHeads(), cfg, seams([TEST], passing));
+    expect(dirty.verdict).toBe('unverifiable');
+    expect(dirty.halt).toBe(true);
+  });
+
+  it('D9: an UNTRACKED, un-ignored file is also unprovable', async () => {
+    const repo = fx.makeRepo();
+    repo.enroll();
+    const before = snapshotEnrolledHeads();
+    commit(repo.dir, 'b.txt', 'merged\n', 'merge');
+
+    repo.writeFile('stray.test.ts', 'it("fails", () => { throw new Error("x"); });\n');
+    const result = await runPostMergeGate(
+      before, snapshotEnrolledHeads(), cfg, seams([TEST], passing));
+
+    expect(result.verdict).toBe('unverifiable');
+    expect(result.failures[0]!.kind).toBe('dirty-tree');
+    expect(result.failures[0]!.detail).toContain('untracked file');
+  });
+
+  it('D10: an IGNORED file is not dirt — build output must not halt every night', async () => {
+    const repo = fx.makeRepo({ files: { 'README.md': '# r\n', '.gitignore': 'dist/\n*.log\n' } });
+    repo.enroll();
+    const before = snapshotEnrolledHeads();
+    commit(repo.dir, 'b.txt', 'merged\n', 'merge');
+
+    // Exactly the things a real repo accumulates between runs.
+    repo.writeFile('dist/bundle.js', '// built\n');
+    repo.writeFile('debug.log', 'noise\n');
+    expect(repo.gitStatus()).toBe('');
+
+    const result = await runPostMergeGate(
+      before, snapshotEnrolledHeads(), cfg, seams([TEST], passing));
+    expect(result.verdict).toBe('clean');
+    expect(result.halt).toBe(false);
+  });
+
+  it('D11: a dirty tree in a repo that took NO landing is irrelevant', async () => {
+    // Only a repo that actually received a merge is verified, so an operator
+    // editing an untouched repo never halts the run.
+    const landed = fx.makeRepo();
+    const editing = fx.makeRepo({ files: { 'README.md': '# r\n', 'src/a.ts': 'export const a = 1;\n' } });
+    landed.enroll();
+    editing.enroll();
+    const before = snapshotEnrolledHeads();
+    commit(landed.dir, 'b.txt', 'merged\n', 'merge');
+    editing.writeFile('src/a.ts', 'work in progress\n');
+
+    const result = await runPostMergeGate(
+      before, snapshotEnrolledHeads(), cfg, seams([TEST], passing));
+    expect(result.verdict).toBe('clean');
+    expect(result.halt).toBe(false);
+  });
+
   it('D6: the gate NEVER throws, whatever the seams do', async () => {
     const repo = fx.makeRepo();
     repo.enroll();
