@@ -361,6 +361,13 @@ describe('llama-server launch argv', () => {
       '--cont-batching',
       '--cache-prompt',
       '--metrics',
+      // Restricts CORS to localhost origins. llama-server's default is `*`,
+      // which it echoes back with Allow-Credentials: true — measured — so any
+      // web page the operator visits could run inference here and read
+      // /slots. The lane itself sends no Origin header, so this costs it
+      // nothing. See the note in buildLlamaServerArgs.
+      '--cors-origins',
+      'localhost',
     ]);
   });
 

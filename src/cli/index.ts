@@ -49,6 +49,7 @@ import { loadConfig, saveConfig, CONFIG_PATH } from '../core/config.js';
 import type { EffectiveConfigSnapshot, EffectiveConfigValue } from '../core/effective-config.js';
 import { buildIndex, loadIndex, writeIndex } from '../core/index-engine.js';
 import { PROBE_HELPER_FLAGS } from '../core/resources/probe-helper-invocation.js';
+import { ANTHROPIC_PROXY_HOST_FLAG } from '../core/local-runtime/llama/proxy-invocation.js';
 import { planTidy, applyTidy } from '../core/tidy.js';
 import { openInEditor } from './open.js';
 import { pick } from './picker.js';
@@ -1658,6 +1659,16 @@ async function main(): Promise<void> {
     }
     if (argv[0] === PROBE_HELPER_FLAGS.grok) {
       await import('../core/resources/grok-account-probe-process.js');
+      return;
+    }
+    // Same contract, same reason: inside a single-file binary the Anthropic
+    // proxy host has no sibling .js to spawn by path, so the binary re-enters
+    // itself on this flag. Operand-free like the probes — the port, host and
+    // upstream reach the child through the environment, because `node --eval`
+    // rejects a trailing operand tail and the three runtimes disagree about
+    // argv offsets. See `anthropicProxyHostEnvironment`.
+    if (argv[0] === ANTHROPIC_PROXY_HOST_FLAG) {
+      await import('../core/local-runtime/llama/anthropic-proxy-process.js');
       return;
     }
   }

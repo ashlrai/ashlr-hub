@@ -54,7 +54,10 @@ import {
   describeShape,
 } from '../core/local-runtime/llama/shapes.js';
 import {
+  anthropicProxyHostInvocation,
+  anthropicProxyLogPaths,
   buildLlamaServerArgs,
+  installAnthropicProxyAgent,
   installLaunchAgent,
   isLoopbackHost,
   launchAgentInstalled,
@@ -67,6 +70,7 @@ import {
   startLocalRuntime,
   statusLocalRuntime,
   stopLocalRuntime,
+  uninstallAnthropicProxyAgent,
   uninstallLaunchAgent,
 } from '../core/local-runtime/llama/index.js';
 import type {
@@ -399,19 +403,46 @@ async function cmdInstall(flags: ParsedFlags, runtime: LlamaRuntimeConfig): Prom
     resolverCommand: explicitModelPath ? null : selfResolverCommand(),
   });
 
+  // The Anthropic lane gets its OWN job. Without it a launchd-managed runtime
+  // serves the OpenAI-compatible lane and nothing else: the shim `exec`s
+  // llama-server and never re-enters the hub, so the proxy Claude Code needs
+  // has no host at all and `resolveLocalAnthropicBaseUrl` names a dead port.
+  // That gap is what a hand-started scratch script was filling.
+  const proxyInvocation = anthropicProxyHostInvocation({
+    host: runtime.host,
+    port: runtime.anthropicPort,
+    upstreamPort: runtime.port,
+  });
+  const proxyLogs = anthropicProxyLogPaths();
+  const proxyMutation = installAnthropicProxyAgent({
+    command: proxyInvocation.command,
+    args: proxyInvocation.args,
+    host: runtime.host,
+    port: runtime.anthropicPort,
+    upstreamPort: runtime.port,
+    workingDirectory: process.env['HOME'] ?? '/',
+    stdoutLog: proxyLogs.stdout,
+    stderrLog: proxyLogs.stderr,
+  });
+
   if (flags.json) {
-    console.log(JSON.stringify({ ...mutation, logs }, null, 2));
-    return mutation.ok ? 0 : 1;
+    console.log(JSON.stringify({ ...mutation, logs, proxy: { ...proxyMutation, logs: proxyLogs } }, null, 2));
+    return mutation.ok && proxyMutation.ok ? 0 : 1;
   }
 
   console.log(`${mutation.ok ? c.green('ok') : c.red('failed')}  ${mutation.detail}`);
+  console.log(`${proxyMutation.ok ? c.green('ok') : c.red('failed')}  ${proxyMutation.detail}`);
   console.log('');
-  console.log(c.yellow('This wrote a file OUTSIDE the repository, in your login configuration:'));
+  console.log(c.yellow('This wrote files OUTSIDE the repository, in your login configuration:'));
   console.log(`  ${mutation.plistPath}`);
-  console.log(c.dim('  Remove it with: ashlr local-runtime uninstall'));
+  console.log(`  ${proxyMutation.plistPath}`);
+  console.log(c.dim('  Remove them with: ashlr local-runtime uninstall'));
   console.log(c.dim(`  Logs:  ${logs.stdout}`));
   console.log(c.dim(`         ${logs.stderr}`));
-  return mutation.ok ? 0 : 1;
+  console.log(c.dim(`         ${proxyLogs.stdout}`));
+  console.log(c.dim(`         ${proxyLogs.stderr}`));
+  console.log(c.dim(`  Anthropic clients: http://${runtime.host}:${runtime.anthropicPort}/v1`));
+  return mutation.ok && proxyMutation.ok ? 0 : 1;
 }
 
 /**
@@ -478,14 +509,19 @@ function cmdResolveModel(flags: ParsedFlags, runtime: LlamaRuntimeConfig): numbe
 /** `uninstall` — boot the job out and delete the plist. */
 function cmdUninstall(flags: ParsedFlags): number {
   const mutation = uninstallLaunchAgent();
+  // Both jobs go, always. Leaving the proxy behind would keep a KeepAlive
+  // listener forwarding to a port whose llama-server was just removed.
+  const proxyMutation = uninstallAnthropicProxyAgent();
   if (flags.json) {
-    console.log(JSON.stringify(mutation, null, 2));
-    return mutation.ok ? 0 : 1;
+    console.log(JSON.stringify({ ...mutation, proxy: proxyMutation }, null, 2));
+    return mutation.ok && proxyMutation.ok ? 0 : 1;
   }
   const c = makeColors(isTty());
   console.log(`${mutation.ok ? c.green('ok') : c.red('failed')}  ${mutation.detail}`);
   console.log(c.dim(`  ${mutation.plistPath}`));
-  return mutation.ok ? 0 : 1;
+  console.log(`${proxyMutation.ok ? c.green('ok') : c.red('failed')}  ${proxyMutation.detail}`);
+  console.log(c.dim(`  ${proxyMutation.plistPath}`));
+  return mutation.ok && proxyMutation.ok ? 0 : 1;
 }
 
 /** `logs` — tail the runtime's stderr. */
