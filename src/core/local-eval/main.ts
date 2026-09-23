@@ -4,7 +4,7 @@
  *   npx tsx src/core/local-eval/main.ts [--trials N] [--concurrency N]
  *                                       [--base-url URL] [--upstream URL]
  *                                       [--model REF] [--timeout-ms N]
- *                                       [--task ID] [--out FILE]
+ *                                       [--task ID] [--out FILE] [--no-trace]
  *
  * CONCURRENCY DEFAULTS TO 2, NOT TO THE SLOT COUNT. The runtime is shared with
  * whatever else is using this machine. Saturating all four slots would make the
@@ -38,6 +38,8 @@ interface Args {
   timeoutMs: number;
   taskFilter: string | null;
   out: string | null;
+  /** Insert the tracing proxy. On by default; `--no-trace` turns it off. */
+  trace: boolean;
 }
 
 export function parseArgs(argv: readonly string[]): Args {
@@ -65,6 +67,7 @@ export function parseArgs(argv: readonly string[]): Args {
     timeoutMs: 900_000,
     taskFilter: null,
     out: null,
+    trace: true,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
@@ -79,6 +82,8 @@ export function parseArgs(argv: readonly string[]): Args {
       case '--timeout-ms': args.timeoutMs = Number(value); i += 1; break;
       case '--task': args.taskFilter = String(value); i += 1; break;
       case '--out': args.out = String(value); i += 1; break;
+      case '--no-trace': args.trace = false; break;
+      case '--trace': args.trace = true; break;
       default: break;
     }
   }
@@ -117,6 +122,7 @@ async function main(): Promise<void> {
     baseUrl: args.baseUrl,
     upstreamOrigin: args.upstream,
     agentCli: args.agentCli,
+    tracing: args.trace,
   });
 
   const root = join(tmpdir(), `ashlr-local-eval-${Date.now()}`);
@@ -137,9 +143,11 @@ async function main(): Promise<void> {
           model: args.model,
           agentCli: args.agentCli,
           timeoutMs: args.timeoutMs,
+          trace: args.trace,
         });
         console.error(`[local-eval] ${task.id}#${trial} ${result.mode} `
-          + `(${(result.wallMs / 1000).toFixed(0)}s)`);
+          + `(${(result.wallMs / 1000).toFixed(0)}s)`
+          + (result.timeoutDiagnosis ? ` — ${result.timeoutDiagnosis.kind}` : ''));
         return result;
       });
     }

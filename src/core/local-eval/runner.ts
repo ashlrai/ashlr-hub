@@ -21,7 +21,8 @@ import { createHash } from 'node:crypto';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join, relative } from 'node:path';
 import { classifyTrial } from './classify.js';
-import type { TaskSpec, TrialResult, TrialTokens } from './types.js';
+import { diagnoseTimeout, startTrace, type TraceHandle } from './trace.js';
+import type { TaskSpec, TimeoutDiagnosis, TrialResult, TrialTokens, TrialTrace } from './types.js';
 
 /** Directories that are never part of a fixture's observable state. */
 const SNAPSHOT_IGNORE: ReadonlySet<string> = new Set(['.git', 'node_modules', '.claude']);
@@ -36,6 +37,13 @@ export interface RunTrialOptions {
   readonly agentCli: string;
   /** Wall-clock budget for the agent turn. */
   readonly timeoutMs: number;
+  /**
+   * Insert the tracing proxy in front of `baseUrl`. Default on.
+   *
+   * Off is for proving the instrument innocent: if a result differs with
+   * tracing on and off, the instrument is the finding, not the model.
+   */
+  readonly trace?: boolean;
 }
 
 interface ChildOutcome {
@@ -56,7 +64,21 @@ interface ChildOutcome {
 function runChild(
   cmd: string,
   args: readonly string[],
-  opts: { cwd: string; env?: NodeJS.ProcessEnv; timeoutMs?: number },
+  opts: {
+    cwd: string;
+    env?: NodeJS.ProcessEnv;
+    timeoutMs?: number;
+    /**
+     * Called SYNCHRONOUSLY, immediately before the kill signal.
+     *
+     * This ordering is the whole point. Killing the agent closes its sockets,
+     * which makes every in-flight stream look like a client hang-up a
+     * millisecond later — destroying the one observation that says whether the
+     * model was still producing tokens. The evidence has to be read while the
+     * connection is still up.
+     */
+    onTimeout?: () => void;
+  },
 ): Promise<ChildOutcome> {
   return new Promise((resolve) => {
     const child = spawn(cmd, [...args], {
@@ -77,6 +99,7 @@ function runChild(
     const timer = opts.timeoutMs
       ? setTimeout(() => {
           timedOut = true;
+          try { opts.onTimeout?.(); } catch { /* forensics must never block the kill */ }
           try { process.kill(-child.pid!, 'SIGKILL'); } catch { child.kill('SIGKILL'); }
         }, opts.timeoutMs)
       : null;
@@ -211,18 +234,53 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
     '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
   ];
 
+  // The agent talks to the tracer, and the tracer talks to whatever the run was
+  // pointed at. A trial that produces no result JSON is otherwise a black box:
+  // the CLI emits its usage and turn count once, at the end, so a kill at the
+  // budget records zero tokens and zero turns no matter how much work happened.
+  //
+  // The tracer is an OBSERVER, so failing to start one must not fail the trial
+  // it was only watching. A benchmark that dies because its instrument could
+  // not bind a port has turned the instrument into the experiment.
+  let trace: TraceHandle | null = null;
+  if (opts.trace !== false) {
+    try {
+      trace = await startTrace({ upstream: opts.baseUrl, captureDir: join(trialDir, 'wire') });
+    } catch {
+      trace = null;
+    }
+  }
+  const agentBaseUrl = trace?.baseUrl ?? opts.baseUrl;
+
+  // Read at the kill, not after it: see `onTimeout`.
+  let traceAtTimeout: TrialTrace | null = null;
+
   const started = Date.now();
-  const agent = await runChild(opts.agentCli, args, {
-    cwd: work,
-    env: {
-      ...process.env,
-      ANTHROPIC_BASE_URL: opts.baseUrl,
-      ANTHROPIC_API_KEY: 'local-eval',
-      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
-    },
-    timeoutMs: opts.timeoutMs,
-  });
+  let agent: ChildOutcome;
+  try {
+    agent = await runChild(opts.agentCli, args, {
+      cwd: work,
+      env: {
+        ...process.env,
+        ANTHROPIC_BASE_URL: agentBaseUrl,
+        ANTHROPIC_API_KEY: 'local-eval',
+        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+      },
+      timeoutMs: opts.timeoutMs,
+      onTimeout: () => { traceAtTimeout = trace?.snapshot() ?? null; },
+    });
+  } finally {
+    await trace?.close().catch(() => undefined);
+  }
   const wallMs = Date.now() - started;
+
+  const finalTrace: TrialTrace | null = traceAtTimeout ?? trace?.snapshot() ?? null;
+  const timeoutDiagnosis: TimeoutDiagnosis | null =
+    agent.timedOut && finalTrace ? diagnoseTimeout(finalTrace) : null;
+  if (finalTrace) {
+    await writeFile(join(trialDir, 'wire.summary.json'),
+      JSON.stringify({ trace: finalTrace, timeoutDiagnosis }, null, 2), 'utf8');
+  }
 
   // Kept for forensics: a pass rate you cannot drill into is not evidence.
   await writeFile(join(trialDir, 'agent.stdout.json'), agent.stdout, 'utf8');
@@ -276,6 +334,14 @@ export async function runTrial(opts: RunTrialOptions): Promise<TrialResult> {
     claim: verdict.claim,
     integrity: verdict.integrity,
     turns: parsed.turns,
-    note: firstFailLine || (agent.timedOut ? 'killed at the wall-clock budget' : ''),
+    // A timeout's note is its diagnosis. "killed at the wall-clock budget"
+    // restates the classification and explains nothing; the whole reason the
+    // tracer exists is so this line names a thing to go and fix.
+    note: firstFailLine
+      || (agent.timedOut
+        ? (timeoutDiagnosis ? `${timeoutDiagnosis.kind}: ${timeoutDiagnosis.detail}` : 'killed at the wall-clock budget (untraced)')
+        : ''),
+    timeoutDiagnosis,
+    trace: finalTrace,
   };
 }

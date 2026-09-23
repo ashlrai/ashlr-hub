@@ -94,7 +94,10 @@ export function renderReport(report: EvalReport): string {
   lines.push(`  slots            ${c.slots}`);
   lines.push(`  context/slot     ${c.contextPerSlot.toLocaleString()} (total ${c.contextTotal.toLocaleString()})`);
   lines.push(`  sampling         ${JSON.stringify(c.samplingParams)}`);
-  lines.push(`  base url         ${c.baseUrl}  (proxy ${c.proxy})`);
+  // Baselines recorded before tracing existed have no such field, and printing
+  // `undefined` at them would read as a run that chose to turn it off.
+  const tracing: string = c.tracing ?? 'unknown (recorded before tracing existed)';
+  lines.push(`  base url         ${c.baseUrl}  (proxy ${c.proxy}, tracing ${tracing})`);
   lines.push(`  proxy impl       ${c.proxyImplementation}`);
   lines.push(`  agent cli        ${c.agentCli}`);
   lines.push(`  concurrency      ${report.concurrency} trial(s) at a time`);
@@ -128,6 +131,44 @@ export function renderReport(report: EvalReport): string {
   lines.push(`INTEGRITY FLAGS  ${flagged.length === 0 ? 'none' : flagged.join(', ')}`);
   lines.push('  claimed a change while the tree did not move — read the transcript before believing either side');
   lines.push('');
+
+  // A timeout used to be the end of the story: the CLI emits its result JSON
+  // once, at the end, so a killed trial recorded zero tokens, zero turns and no
+  // transcript. An outcome nobody can act on is the same failure as a false
+  // success, which is what this harness exists to catch — so every timeout now
+  // reports what the wire was doing when the clock ran out.
+  const timedOut = report.outcomes.flatMap((o) =>
+    o.trials.filter((t) => t.mode === 'timeout').map((t) => ({ task: o.taskId, trial: t })));
+  if (timedOut.length > 0) {
+    lines.push('TIMEOUTS, DIAGNOSED');
+    for (const { task, trial } of timedOut) {
+      const d = trial.timeoutDiagnosis;
+      lines.push(`  ${pad(`${task}#${trial.trial}`, 26)} `
+        + (d ? d.kind : 'UNDIAGNOSED — this run was not traced, so why it timed out is unrecoverable'));
+      if (d) lines.push(`  ${' '.repeat(26)} ${d.detail}`);
+      if (trial.trace) {
+        // Turns the SERVER finished. The CLI's connectivity probe and token
+        // counts are not SSE streams at all, and a turn the agent hung up on
+        // is not evidence about the runtime — counting either would report a
+        // terminator failure on every timeout.
+        const turns = trial.trace.streams.filter(
+          (x) => (x.events['message_start'] ?? 0) > 0 && x.ended === 'upstream-end');
+        const unterminated = turns.filter((x) => !x.sawTerminator && x.ended === 'upstream-end').length;
+        lines.push(`  ${' '.repeat(26)} ${turns.length} completed turn(s), `
+          + `${unterminated} ended without a terminator; raw capture in ${trial.trace.captureDir}`);
+        // Where the budget actually went. A single enormous turn and a long
+        // series of ordinary ones are different problems with different fixes,
+        // and the totals alone cannot tell them apart.
+        if (turns.length > 0) {
+          const longest = turns.reduce((a, b) => (a.durationMs >= b.durationMs ? a : b));
+          const spent = turns.reduce((n, t) => n + t.durationMs, 0);
+          lines.push(`  ${' '.repeat(26)} longest completed turn ${secs(longest.durationMs)} `
+            + `(#${longest.seq}), ${secs(spent)} across all completed turns`);
+        }
+      }
+    }
+    lines.push('');
+  }
 
   lines.push('TOKENS PER TRIAL (input / output / cache-read)');
   for (const o of report.outcomes) {
