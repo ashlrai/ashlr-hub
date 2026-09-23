@@ -13,7 +13,7 @@
  * MutationTokenDialog opens and the action re-runs once unlocked (the same
  * hand-off the command palette uses).
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { VerseCreateSessionRequest, VerseSession } from '../../../data/api-types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { useToast } from '../../../components/primitives/Toast.js';
@@ -44,12 +44,14 @@ import {
   lastVerseSeat,
   rememberVerseSeat,
   setVerseResourcesOpen,
-  setVerseResourcesWidth,
   setVerseSidebarCollapsed,
-  setVerseSidebarWidth,
-  VERSE_RESOURCES,
-  VERSE_SIDEBAR,
 } from '../verse-ui-store.js';
+// Panel widths are NOT in verse-ui-store: `ashlr.verse.ui.v2` is the shell
+// contract, and a resizable width is a pair (chosen / afforded) that key
+// cannot hold. Same precedent as resources-collapse.ts — its own module,
+// its own key. See chat-panel-sizing.ts.
+import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
+import { setChatPanelFit } from '../chat-panel-sizing.js';
 import { forgetComposerMemory } from '../chat/composer-state.js';
 import { forgetVerseSession, setVerseSession, setVerseSessionStatus } from '../verse-store.js';
 import { Workspace } from '../Workspace.js';
@@ -94,7 +96,8 @@ export function ChatSection() {
   const [reload, setReload] = useState(0);
   const [tokenPrompt, setTokenPrompt] = useState<{ open: boolean; reason: string }>({ open: false, reason: '' });
   const pendingAction = useRef<{ run: () => void; cancel: () => void } | null>(null);
-  const drag = useRef<{ id: number; x: number; start: number; side: 'sidebar' | 'resources' } | null>(null);
+  const chatRef = useRef<HTMLDivElement>(null);
+  const panels = useChatPanelSizing();
 
   const seats = useMemo(() => bootstrap.data?.seats ?? [], [bootstrap.data]);
   const projects = useMemo(() => bootstrap.data?.projects ?? [], [bootstrap.data]);
@@ -293,57 +296,43 @@ export function ChatSection() {
     clearVerseCommand();
   }, [ui.command, view.session, openNewChat]);
 
-  // ---- resize -------------------------------------------------------------
-  const applyWidth = useCallback((side: 'sidebar' | 'resources', value: number) => {
-    if (side === 'sidebar') setVerseSidebarWidth(value);
-    else setVerseResourcesWidth(value);
-  }, []);
-
-  function resizeKey(side: 'sidebar' | 'resources') {
-    return (event: KeyboardEvent<HTMLDivElement>) => {
-      const range = side === 'sidebar' ? VERSE_SIDEBAR : VERSE_RESOURCES;
-      const current = side === 'sidebar' ? ui.sidebarWidth : ui.resourcesWidth;
-      const grow = side === 'sidebar' ? event.key === 'ArrowRight' : event.key === 'ArrowLeft';
-      const shrink = side === 'sidebar' ? event.key === 'ArrowLeft' : event.key === 'ArrowRight';
-      const next = grow ? current + 20 : shrink ? current - 20 : event.key === 'Home' ? range.min : event.key === 'End' ? range.max : null;
-      if (next === null) return;
-      event.preventDefault();
-      applyWidth(side, next);
-    };
-  }
-
-  function separator(side: 'sidebar' | 'resources') {
-    const range = side === 'sidebar' ? VERSE_SIDEBAR : VERSE_RESOURCES;
-    const value = side === 'sidebar' ? ui.sidebarWidth : ui.resourcesWidth;
-    return (
-      <div className={styles.resize} role="separator" tabIndex={0} aria-orientation="vertical"
-        aria-label={side === 'sidebar' ? 'Resize chat list' : 'Resize resources panel'}
-        aria-valuemin={range.min} aria-valuemax={range.max} aria-valuenow={value} onKeyDown={resizeKey(side)}
-        onPointerDown={(event) => {
-          drag.current = { id: event.pointerId, x: event.clientX, start: value, side };
-          event.currentTarget.setPointerCapture?.(event.pointerId);
-        }}
-        onPointerMove={(event) => {
-          const d = drag.current;
-          if (!d || d.id !== event.pointerId) return;
-          const delta = event.clientX - d.x;
-          applyWidth(d.side, d.side === 'sidebar' ? d.start + delta : d.start - delta);
-        }}
-        onPointerUp={() => { drag.current = null; }} onPointerCancel={() => { drag.current = null; }} />
-    );
-  }
-
-  const style = {
-    '--verse-sidebar-width': `${ui.sidebarWidth}px`,
-    '--verse-resources-width': `${ui.resourcesWidth}px`,
-  } as CSSProperties;
-
   const dispatchOff = bootstrap.data ? !bootstrap.data.dispatchEnabled : false;
   const resourcesOpen = ui.resourcesOpen;
   const sidebarCollapsed = ui.sidebarCollapsed;
 
+  // ---- fit ----------------------------------------------------------------
+  // Tell the sizing store how much room the grid actually has, so a width
+  // chosen on a 1900px display cannot strand the transcript at 1100px. This
+  // never persists: the chosen width is remembered, the afforded width is
+  // recomputed, so widening the window gives the panel its size back.
+  useEffect(() => {
+    const node = chatRef.current;
+    if (!node) return undefined;
+    const measure = () => setChatPanelFit({
+      containerWidth: node.clientWidth,
+      sidebarVisible: !sidebarCollapsed,
+      resourcesVisible: resourcesOpen,
+    });
+    measure();
+    // ResizeObserver also catches the rail expanding, which moves this grid's
+    // width without a window resize. The listener is the fallback where it is
+    // missing (jsdom), where clientWidth is 0 and fitting is skipped anyway.
+    const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
+    observer?.observe(node);
+    window.addEventListener('resize', measure);
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', measure);
+    };
+  }, [sidebarCollapsed, resourcesOpen]);
+
+  const style = {
+    '--verse-sidebar-width': `${panels.effective.sidebar}px`,
+    '--verse-resources-width': `${panels.effective.resources}px`,
+  } as CSSProperties;
+
   return (
-    <div className={styles.chat} style={style}
+    <div ref={chatRef} className={styles.chat} style={style}
       data-sidebar={sidebarCollapsed ? 'collapsed' : 'open'} data-resources={resourcesOpen ? 'open' : 'closed'}>
       <Sidebar sessions={sessions} sessionsStatus={sessionsQuery.status} sessionsError={sessionsQuery.error?.message ?? null}
         projects={projects} seats={seats} selectedId={selectedId} query={query} onQuery={setQuery}
@@ -355,7 +344,9 @@ export function ChatSection() {
         onNew={() => openNewChat()}
         onRetry={() => { refetchSessions(); refetchBootstrap(); }}
         onCollapse={() => setVerseSidebarCollapsed(true)} onDisconnect={() => { void clearReadSession(); }} />
-      {separator('sidebar')}
+      {/* A hidden panel leaves no handle behind — and the grid templates in
+          ChatSection.module.css are written for exactly these item lists. */}
+      {sidebarCollapsed ? null : <ChatResizer side="sidebar" label="Resize chat list" className={styles.resize} />}
       {/* At phone width the sidebar floats over the transcript; the scrim dismisses it. */}
       <button type="button" className={styles.scrim} aria-label="Close chat list" tabIndex={-1}
         onClick={() => setVerseSidebarCollapsed(true)} />
@@ -378,7 +369,7 @@ export function ChatSection() {
       </div>
       {resourcesOpen ? (
         <>
-          {separator('resources')}
+          <ChatResizer side="resources" label="Resize resources panel" className={styles.resize} />
           <ResourcesPanel bootstrap={bootstrap.data} sessions={sessions} current={view.session} onStop={(id) => stop(id)}
             onOpen={setSelectedId} onClose={() => setVerseResourcesOpen(false)} />
         </>
