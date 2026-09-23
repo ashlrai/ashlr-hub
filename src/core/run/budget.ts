@@ -104,6 +104,25 @@ export function __resetBudgetMeterednessCacheForTests(): void {
   meterednessNoCfg.clear();
 }
 
+/**
+ * True when at least one of these subjects could actually bill someone.
+ *
+ * The daemon needs this to answer "can a dollar cap bound this tick at all?"
+ * before it consults one. Billable is the COMPLEMENT of provably free, so
+ * `'unknown'` counts as billable: a subject we cannot account for is charged,
+ * never assumed free — under-charging is how an unbounded loop hides.
+ *
+ * Note the axis. This asks METEREDNESS, never locality. `ashlrcode` runs on this
+ * machine and is billable; a self-hosted endpoint on loopback is free wherever
+ * the operator thinks it lives. Empty input is NOT billable — nothing to charge.
+ */
+export function anyBillableSubject(subjects: Iterable<string>, cfg?: AshlrConfig): boolean {
+  for (const subject of subjects) {
+    if (meterednessOf(subject, cfg) !== 'free') return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -133,6 +152,149 @@ export function addUsage(a: RunUsage, b: Partial<RunUsage>): RunUsage {
   return { tokensIn, tokensOut, steps, estCostUsd: estCostUsdVal };
 }
 
+// ---------------------------------------------------------------------------
+// Non-dollar ceilings — tokens, steps, iterations, time
+// ---------------------------------------------------------------------------
+
+/** Which ceiling stopped a run. */
+export type BudgetLimiter = 'tokens' | 'steps' | 'iterations' | 'deadline';
+
+/** The verdict from `budgetVerdict`. `limiter` is null iff `exhausted` is false. */
+export interface BudgetVerdict {
+  /** True when the run has hit at least one ceiling and must not continue. */
+  exhausted: boolean;
+  /** The FIRST ceiling that fired, in declaration order. Null when none did. */
+  limiter: BudgetLimiter | null;
+  /** One line naming the ceiling and the numbers behind it. */
+  reason: string;
+}
+
+/**
+ * Everything a budget check needs, PASSED IN.
+ *
+ * Nothing in this section calls `Date.now()`. A deadline check that reads the
+ * clock itself is neither pure nor testable — you cannot assert "stops at
+ * exactly T+5s" against an ambient clock without sleeping. The caller owns the
+ * clock.
+ */
+export interface RunProgress {
+  /** Token and step accounting so far. */
+  usage: RunUsage;
+  /** Completed iterations (outer ticks). Absent ⇒ `maxIterations` cannot fire. */
+  iterations?: number;
+  /** Wall-clock now, epoch ms. Absent ⇒ no time-based ceiling can fire. */
+  nowMs?: number;
+  /** When the run started, epoch ms. Required for `maxWallClockMs`. */
+  startedAtMs?: number;
+}
+
+const NOT_EXHAUSTED: BudgetVerdict = Object.freeze({
+  exhausted: false,
+  limiter: null,
+  reason: 'within budget',
+});
+
+/**
+ * A ceiling only binds when it is a real, finite number.
+ *
+ * `undefined` means the dimension is unused. `Infinity` means explicitly
+ * unbounded. `NaN` is nonsense and must not silently disable a ceiling in a way
+ * that reads as "unlimited" — but a NaN comparison is false anyway, so this
+ * makes that explicit rather than accidental.
+ */
+function binds(ceiling: number | undefined): ceiling is number {
+  return typeof ceiling === 'number' && Number.isFinite(ceiling);
+}
+
+/**
+ * The single pure predicate over every NON-MONETARY ceiling in `RunBudget`.
+ *
+ * WHY THIS EXISTS. A dollar cap cannot bound local work: a provably-free
+ * dispatch moves realized spend by $0, so a USD guard never fires and "bounded
+ * by budget" becomes a comfortable fiction wrapped around an unbounded loop.
+ * Every ceiling here is non-monetary and bounds a run whether it reached a
+ * frontier API or never left this machine.
+ *
+ * Checks, in order — the first to fire names the limiter:
+ *   1. tokens      — (tokensIn + tokensOut) >= maxTokens
+ *   2. steps       — steps                  >= maxSteps
+ *   3. iterations  — iterations             >= maxIterations
+ *   4. deadline    — nowMs                  >= deadlineEpochMs, or
+ *                    (nowMs - startedAtMs)  >= maxWallClockMs
+ *
+ * Every comparison is `>=`, not `>`: once the ceiling is reached we stop BEFORE
+ * attempting more work. That is the conservative reading and it matches the
+ * behaviour `overBudget` has always had.
+ *
+ * A dimension whose ceiling is absent, non-finite, or whose progress the caller
+ * did not supply simply does not fire. That is deliberate: an unbounded
+ * dimension must never be confused with an exhausted one.
+ */
+export function budgetVerdict(progress: RunProgress, budget: RunBudget): BudgetVerdict {
+  const { usage } = progress;
+
+  const totalTokens = usage.tokensIn + usage.tokensOut;
+  if (binds(budget.maxTokens) && totalTokens >= budget.maxTokens) {
+    return {
+      exhausted: true,
+      limiter: 'tokens',
+      reason: `token ceiling reached (${totalTokens}/${budget.maxTokens})`,
+    };
+  }
+
+  if (binds(budget.maxSteps) && usage.steps >= budget.maxSteps) {
+    return {
+      exhausted: true,
+      limiter: 'steps',
+      reason: `step ceiling reached (${usage.steps}/${budget.maxSteps})`,
+    };
+  }
+
+  // An ABSENT iteration count is an unsupplied dimension, not zero iterations.
+  // Defaulting it to 0 would make `maxIterations: 0` fire through `overBudget`
+  // — which carries no iteration count — while `maxIterations: 5` silently
+  // could not. Same rule as the clock below: no progress, no ceiling.
+  const iterations = progress.iterations;
+  if (
+    binds(budget.maxIterations) &&
+    typeof iterations === 'number' &&
+    Number.isFinite(iterations) &&
+    iterations >= budget.maxIterations
+  ) {
+    return {
+      exhausted: true,
+      limiter: 'iterations',
+      reason: `iteration ceiling reached (${iterations}/${budget.maxIterations})`,
+    };
+  }
+
+  const now = progress.nowMs;
+  if (typeof now === 'number' && Number.isFinite(now)) {
+    if (binds(budget.deadlineEpochMs) && now >= budget.deadlineEpochMs) {
+      return {
+        exhausted: true,
+        limiter: 'deadline',
+        reason: `deadline reached (${new Date(budget.deadlineEpochMs).toISOString()})`,
+      };
+    }
+    const startedAt = progress.startedAtMs;
+    if (
+      binds(budget.maxWallClockMs) &&
+      typeof startedAt === 'number' &&
+      Number.isFinite(startedAt) &&
+      now - startedAt >= budget.maxWallClockMs
+    ) {
+      return {
+        exhausted: true,
+        limiter: 'deadline',
+        reason: `wall-clock ceiling reached (${now - startedAt}ms/${budget.maxWallClockMs}ms)`,
+      };
+    }
+  }
+
+  return NOT_EXHAUSTED;
+}
+
 /**
  * Returns true when usage has EXCEEDED the budget.
  *
@@ -142,10 +304,15 @@ export function addUsage(a: RunUsage, b: Partial<RunUsage>): RunUsage {
  *
  * Using >= (not >) means: once we hit the ceiling we stop BEFORE attempting
  * another step, which is the conservative / safe behaviour.
+ *
+ * This is the token/step SLICE of `budgetVerdict` and is kept for the many
+ * existing callers that have only a `RunUsage` to hand. It carries no iteration
+ * count and no clock, so the iteration and deadline ceilings cannot fire through
+ * it — a caller that sets those must call `budgetVerdict` with the corresponding
+ * progress, or they are silently unenforced.
  */
 export function overBudget(usage: RunUsage, budget: RunBudget): boolean {
-  const totalTokens = usage.tokensIn + usage.tokensOut;
-  return totalTokens >= budget.maxTokens || usage.steps >= budget.maxSteps;
+  return budgetVerdict({ usage }, budget).exhausted;
 }
 
 /**
@@ -223,4 +390,152 @@ export function estCostUsd(
   const costCacheWrite5m = (cacheWrite5m / 1_000_000) * priceIn * CACHE_WRITE_5M_MULT;
   const costCacheWrite1h = (cacheWrite1h / 1_000_000) * priceIn * CACHE_WRITE_1H_MULT;
   return costIn + costOut + costCacheRead + costCacheWrite5m + costCacheWrite1h;
+}
+
+// ---------------------------------------------------------------------------
+// The dollar cap, and when it is not the thing that binds
+//
+// OWNERSHIP NOTE. Everything below is a pure predicate intended for
+// `src/core/daemon/loop.ts`, which this change does NOT edit. The loop owner
+// wires these in; see the call contract on each function.
+// ---------------------------------------------------------------------------
+
+/**
+ * What the daily USD cap means for the work about to be dispatched.
+ *
+ *  - `stopped`        — the operator set the cap to 0. An explicit STOP.
+ *  - `not-applicable` — the cap is positive but nothing about to run can bill
+ *                       anyone, so dollars cannot bound this work at all. The
+ *                       honest limiters are the non-monetary ones: serving
+ *                       slots, `perTickItems`, `localFleet.maxDispatchesPerDay`,
+ *                       and `RunBudget` through `budgetVerdict`.
+ *  - `enforced`       — the cap is positive and real spend is possible.
+ */
+export type DollarCapVerdict =
+  | { kind: 'stopped'; reason: string }
+  | { kind: 'not-applicable'; reason: string }
+  | { kind: 'enforced'; remainingUsd: number };
+
+/**
+ * Decide whether the dollar cap binds, and if so with how much headroom.
+ *
+ * ── ZERO IS STILL A CHOICE, NOT AN ABSENCE ─────────────────────────────────
+ * `loop.ts` deliberately preserves a stored `dailyBudgetUsd` of 0 instead of
+ * defaulting it, because the Verse control plane offers 0 as "stop the loop"
+ * and the cockpit states that as fact. Knowing that some work is free creates an
+ * obvious temptation: "it costs nothing, so a $0 cap shouldn't stop it." That
+ * temptation is the trap. Reinterpreting an explicit 0 would authorise
+ * autonomous work against a screen that says the loop is stopped.
+ *
+ * So `stopped` is checked FIRST, before billability is even considered, and it
+ * wins unconditionally. Free work is not exempted from a stop; it is given a
+ * DIFFERENT way to say "run without a dollar bound" — a positive cap that simply
+ * never binds because nothing is billable (`not-applicable`), with the real
+ * ceilings expressed in `RunBudget` and the fleet's own dispatch ledger. "Free"
+ * and "stopped" stay two different states.
+ *
+ * Negative and non-finite caps are nonsense; they are treated as `stopped`,
+ * which fails closed.
+ *
+ * CALL CONTRACT for `loop.ts`: replace the bare `remainingBudget <= 0` skip with
+ * a switch on this verdict. `billable` is
+ * `anyBillableSubject(enginesThisTick, cfg)` — a METEREDNESS question. Passing
+ * something derived from locality would reintroduce exactly the confusion
+ * `docs/LOCALITY-VS-SPEND.md` exists to prevent: `ashlrcode` runs here and
+ * still bills.
+ */
+export function dollarCapVerdict(input: {
+  /** The configured daily cap in USD. 0 means the operator stopped the loop. */
+  dailyBudgetUsd: number;
+  /** Realized spend so far today, in USD. */
+  spentUsd: number;
+  /** True when at least one subject this tick could bill someone. */
+  billable: boolean;
+}): DollarCapVerdict {
+  const { dailyBudgetUsd, spentUsd, billable } = input;
+
+  if (!Number.isFinite(dailyBudgetUsd) || dailyBudgetUsd <= 0) {
+    return {
+      kind: 'stopped',
+      reason: 'daily budget is 0 — the loop is stopped by operator choice',
+    };
+  }
+
+  if (!billable) {
+    return {
+      kind: 'not-applicable',
+      reason:
+        'nothing this tick can bill anyone — a dollar cap cannot bound free work; ' +
+        'serving slots, perTickItems, maxDispatchesPerDay and RunBudget bound it instead',
+    };
+  }
+
+  const spent = Number.isFinite(spentUsd) ? Math.max(0, spentUsd) : dailyBudgetUsd;
+  return { kind: 'enforced', remainingUsd: Math.max(0, dailyBudgetUsd - spent) };
+}
+
+/** The daemon's existing $/M-output assumption when slicing dollars into tokens. */
+export const DEFAULT_USD_PER_MTOKEN_OUT = 15.0;
+
+/** The daemon's existing floor: never hand an item a budget it cannot use. */
+export const MIN_PER_ITEM_MAX_TOKENS = 1000;
+
+/**
+ * Per-item token budget for one tick's items.
+ *
+ * ── WHY THIS MOVED OUT OF THE DOLLAR SLICE ─────────────────────────────────
+ * `loop.ts` derives `perItemMaxTokens` by dividing the REMAINING DOLLARS across
+ * items and converting at $15/Mtok. When a tick's work is provably free,
+ * realized spend never moves, so that derivation stops tracking anything: it
+ * pins to the full daily budget forever and reports a token ceiling derived from
+ * a dollar figure that has no relationship to the work. Dividing a number that
+ * cannot change is not a budget.
+ *
+ * So the derivation forks on the cap verdict:
+ *   - `enforced`       — unchanged arithmetic, unchanged floor. Existing
+ *                        behaviour for billable work is preserved exactly.
+ *   - `not-applicable` — the token ceiling comes from `RunBudget.maxTokens`,
+ *                        the dimension that actually bounds free work.
+ *   - `stopped`        — the floor. Nothing should dispatch under a stop; this
+ *                        returns a small, sane number rather than 0 (which a
+ *                        careless caller would read as "no budget, skip") or
+ *                        Infinity.
+ *
+ * NEITHER COLLAPSES NOR EXPLODES: the result is always a finite integer at or
+ * above `floor`. An unbounded or non-finite `maxTokens` yields the floor rather
+ * than Infinity, because "unbounded per item" is not a token cap any caller can
+ * act on.
+ *
+ * CALL CONTRACT for `loop.ts`: replace the inline `perItemUsdSlice` /
+ * `usdPerMTokenOut` block with a single call to this function.
+ */
+export function perItemMaxTokens(input: {
+  /** How many items this tick will work. Coerced to at least 1. */
+  items: number;
+  /** The run budget in force, read for `maxTokens` when dollars do not bind. */
+  budget: RunBudget;
+  /** The verdict from `dollarCapVerdict`. */
+  cap: DollarCapVerdict;
+  /** $/M output tokens used to convert dollars to tokens. */
+  usdPerMTokenOut?: number;
+  /** Lower bound on the result. */
+  floor?: number;
+}): number {
+  const floor = Math.max(1, Math.floor(input.floor ?? MIN_PER_ITEM_MAX_TOKENS));
+  const items = Math.max(1, Math.floor(Number.isFinite(input.items) ? input.items : 1));
+
+  if (input.cap.kind === 'stopped') return floor;
+
+  if (input.cap.kind === 'not-applicable') {
+    const maxTokens = input.budget.maxTokens;
+    if (!Number.isFinite(maxTokens) || maxTokens <= 0) return floor;
+    return Math.max(floor, Math.floor(maxTokens / items));
+  }
+
+  const rate = input.usdPerMTokenOut ?? DEFAULT_USD_PER_MTOKEN_OUT;
+  if (!Number.isFinite(rate) || rate <= 0) return floor;
+  const perItemUsdSlice = input.cap.remainingUsd / items;
+  const derived = Math.floor((perItemUsdSlice / rate) * 1_000_000);
+  if (!Number.isFinite(derived)) return floor;
+  return Math.max(floor, derived);
 }

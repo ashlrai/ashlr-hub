@@ -96,16 +96,30 @@ export function modelToProviderKey(model: string): string {
 }
 
 /**
- * True when `model` is served by a local provider (cost $0).
+ * True when `model` was served on THIS machine.
  *
  * The provider key is resolved here; whether that key is LOCAL is asked of
  * `src/core/policy/local-only.ts`, the ONE module that decides. The exported
  * `LOCAL_PROVIDER_KEYS` set that used to sit here held only 'ollama' and
  * 'lmstudio', so every token served by the local fleet runtime ('llama-server')
- * or the in-process 'builtin' provider was rolled up at the conservative
- * $3/$15-per-MTok cloud fallback — inflating the very savings figure this
- * module exists to report. Shared with forecast.ts and web/control.ts so the
- * local/cloud split stays consistent across rollup, savings and the cockpit.
+ * or the in-process 'builtin' provider was counted as cloud traffic — deflating
+ * the very savings figure this module exists to report. Shared with forecast.ts
+ * and web/control.ts so the split stays consistent across rollup, savings and
+ * the cockpit.
+ *
+ * LOCALITY IS THE RIGHT AXIS HERE, and deliberately so (docs/LOCALITY-VS-SPEND.md).
+ * What forecast.ts computes off this is a COUNTERFACTUAL — "what would these
+ * tokens have cost had they gone to a frontier API instead" — which is a
+ * question about where the weights ran, not a claim that any subject is
+ * unbillable. Whether something may actually charge you is METEREDNESS, and
+ * `run/budget.ts#estCostUsd` is the only authority on it. Do not reroute this to
+ * meteredness and do not let anything reroute a spend decision to here.
+ *
+ * (In the PROVIDER id space the two axes coincide today — `providerMeteredness`
+ * and `providerLocality` are both membership in `LOCAL_PROVIDER_IDS`, because a
+ * provider id names a serving runtime rather than an agent that picks its own
+ * backend. They are still asked separately, so that the day a local-but-metered
+ * provider id exists this stays a locality answer and spend stays a spend one.)
  */
 export function isLocalProviderModel(model: string): boolean {
   return providerLocality(modelToProviderKey(model)) === 'local';

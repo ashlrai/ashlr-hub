@@ -312,6 +312,9 @@ function buildUsage(cfg: AshlrConfig): ControlUsage {
 
     for (const mu of rollup.byModel) {
       const provKey = modelToProviderKey(mu.model);
+      // A WHERE-IT-RAN label for the cockpit, not a spend claim: `costUsd`
+      // below is carried over from the rollup's own estCostUsd and is never
+      // derived from this tier. See docs/LOCALITY-VS-SPEND.md.
       const tier: 'local' | 'cloud' = providerLocality(provKey);
       const tokens = mu.tokensIn + mu.tokensOut;
       const existing = providerMap.get(provKey);

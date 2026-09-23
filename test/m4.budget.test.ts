@@ -176,7 +176,7 @@ describe('overBudget — both limits exceeded simultaneously', () => {
 // estCostUsd — local providers always 0; cloud providers > 0
 // ---------------------------------------------------------------------------
 
-describe('estCostUsd — local providers return 0', () => {
+describe('estCostUsd — provably free subjects return 0', () => {
   it('ollama costs 0 regardless of tokens', () => {
     expect(estCostUsd('ollama', 100_000, 50_000)).toBe(0);
   });
@@ -185,9 +185,27 @@ describe('estCostUsd — local providers return 0', () => {
     expect(estCostUsd('lmstudio', 100_000, 50_000)).toBe(0);
   });
 
-  it('builtin costs 0 (local engine)', () => {
-    // 'builtin' is the local engine — cost is 0 or implementation-defined
-    expect(estCostUsd('builtin', 100_000, 50_000)).toBeGreaterThanOrEqual(0);
+  it('builtin costs exactly 0 (in-process, no model call)', () => {
+    // This assertion used to be `toBeGreaterThanOrEqual(0)`, which the test
+    // name claimed was zero but which in fact permitted — and silently
+    // accepted — the $3/$15-per-Mtok frontier fallback that actually fired.
+    // 'builtin' makes no model call at all: it costs nothing, and the test
+    // now says so. See test/local-cost-zero-budget.test.ts for the
+    // registry-driven guard over the whole roster.
+    expect(estCostUsd('builtin', 100_000, 50_000)).toBe(0);
+  });
+
+  it('the local serving runtimes cost exactly 0 by ENGINE id too', () => {
+    // The daemon reaches estCostUsd through sandboxed-engine.ts with an
+    // EngineId, not a provider id. These were priced as frontier.
+    //
+    // Deliberately NOT here: 'ashlrcode' and 'aw'. They run on this machine,
+    // but locality is not the spend axis — both are handed (or choose) paid
+    // backends this hub cannot verify, so both stay priced. See
+    // docs/LOCALITY-VS-SPEND.md and §1c of local-cost-zero-budget.test.ts.
+    for (const engine of ['local-coder', 'llama-server']) {
+      expect(estCostUsd(engine, 100_000, 50_000), engine).toBe(0);
+    }
   });
 
   it('empty string provider cost is non-negative', () => {

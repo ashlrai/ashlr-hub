@@ -1931,7 +1931,23 @@ export interface ToolsRegistry {
 // M4: local-first agent orchestrator (`ashlr run`) contract
 // ---------------------------------------------------------------------------
 
-/** Hard guardrails for a single run. Budget/steps abort the run when exceeded. */
+/**
+ * Hard guardrails for a single run. Budget/steps abort the run when exceeded.
+ *
+ * ── WHY NONE OF THESE ARE DOLLARS ──────────────────────────────────────────
+ * A dollar cap cannot bound work that cannot bill anyone. A provably-free
+ * dispatch costs $0, so a USD guard never fires and "bounded by budget" becomes
+ * a comfortable fiction wrapped around an unbounded loop —
+ * `src/core/daemon/local-fleet.ts` states this outright and names the honest
+ * limiters. Every ceiling here is therefore NON-MONETARY and bounds a run
+ * whether it reached a frontier API or never left this machine.
+ *
+ * The dimensions are INDEPENDENT and each is sufficient on its own: a run may be
+ * bounded by tokens, by steps, by iterations, by a deadline, or by any
+ * combination. An ABSENT optional ceiling means "this dimension does not bound
+ * the run" — it never means zero. `budgetVerdict()` in
+ * `src/core/run/budget.ts` is the single pure predicate that reads them.
+ */
 export interface RunBudget {
   /** Maximum total tokens (in + out) before the run aborts. */
   maxTokens: number;
@@ -1939,6 +1955,24 @@ export interface RunBudget {
   maxSteps: number;
   /** Whether cloud providers are permitted (default false = local-first refuse). */
   allowCloud: boolean;
+  /**
+   * Maximum COMPLETED iterations (daemon ticks / dispatch rounds) before the run
+   * stops. Distinct from `maxSteps`, which counts model invocations inside one
+   * run; this counts how many times an outer loop came back for more.
+   * Absent ⇒ iterations do not bound this run.
+   */
+  maxIterations?: number;
+  /**
+   * Absolute wall-clock stop time as epoch milliseconds. The run is exhausted at
+   * or after this instant. Absent ⇒ no absolute deadline.
+   */
+  deadlineEpochMs?: number;
+  /**
+   * Maximum wall-clock duration in milliseconds measured from the run's start.
+   * Requires the caller to supply `startedAtMs`; see `RunProgress` in
+   * `src/core/run/budget.ts`. Absent ⇒ no duration ceiling.
+   */
+  maxWallClockMs?: number;
 }
 
 /** Token + step accounting for a task or whole run. */
