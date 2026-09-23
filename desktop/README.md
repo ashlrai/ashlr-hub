@@ -698,3 +698,25 @@ Delete `~/.ashlr/desktop/window-state.json` and relaunch.
 **macOS: app quarantined after a local build**
 Expected without notarization — see
 [First open on an unsigned build](#first-open-on-an-unsigned-build-gatekeeper).
+
+## The open `glib` advisory, and why it stays open
+
+Dependabot reports a moderate advisory against `glib` 0.18.5 in
+`src-tauri/Cargo.lock` (unsoundness in the `Iterator` and `DoubleEndedIterator`
+impls for `glib::VariantStrIter`), fixed upstream in 0.20.0. It is left open
+deliberately, for two reasons that are worth writing down rather than
+rediscovering every time the alert resurfaces.
+
+**It is not reachable on macOS.** `glib` arrives through
+`gtk` → `libappindicator` → `tray-icon` → `tauri`, all of which are Linux-only.
+`cargo tree -i glib` on a Mac prints *nothing to print*; the crate has to be
+asked for with `--target all` before it appears at all. The bundle in
+`/Applications` never compiles it.
+
+**We cannot move it.** The `gtk-rs` 0.18 line pins `glib` to 0.18, so
+`cargo update -p glib` locks 0 packages and changes nothing. Reaching 0.20 means
+`gtk` 0.19+, which is `tauri`'s dependency to raise, not ours. The alert lifts
+when Tauri ships a release on the newer gtk-rs line.
+
+If a Linux desktop build is ever produced from this directory, re-check this
+first — the reasoning above stops holding the moment the Linux target is real.
