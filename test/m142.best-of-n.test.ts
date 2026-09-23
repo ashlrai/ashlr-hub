@@ -74,6 +74,7 @@ beforeAll(async () => {
 beforeEach(() => {
   testHome = mkdtempSync(join(tmpdir(), 'ashlr-best-of-n-m142-'));
   process.env.HOME = testHome;
+  mockPersistedProposals.clear();
 });
 
 describe('M142 — durable candidate run observation', () => {
@@ -331,13 +332,18 @@ function makeSandboxMock(opts: {
   /** Throw on these indices. */
   throwAt?: number[];
 }) {
-  let callCount = 0;
+  // Candidates run concurrently; derive their fixture identity from the
+  // assigned run ID instead of whichever mock call happens to arrive first.
+  let fallbackCount = 0;
   return vi.fn(async (_engine: unknown, _goal: unknown, _cfg: unknown, runOpts: Record<string, unknown>) => {
-    const idx = callCount++;
+    const dispatchedRunId = runOpts['runId'] == null ? undefined : String(runOpts['runId']);
+    const indexFromRunId = /^best-of-n-(\d+)-/.exec(dispatchedRunId ?? '')?.[1];
+    // Attempt-ID cases in this suite have one candidate, so the fallback is exact.
+    const idx = indexFromRunId !== undefined ? Number(indexFromRunId) : fallbackCount++;
     if (opts.throwAt?.includes(idx)) throw new Error(`sandbox error at ${idx}`);
     const hasProposal = !opts.withProposalAt || opts.withProposalAt.includes(idx);
     const proposalId = hasProposal ? `proposal-${idx}` : undefined;
-    const runId = String(runOpts['runId'] ?? `run-${idx}`);
+    const runId = dispatchedRunId ?? `run-${idx}`;
     const proposalOutcome = proposalId
       ? {
           kind: 'filed' as const,
