@@ -193,7 +193,11 @@ export function resetQueryGate(): void {
   for (const start of gateQueue.splice(0)) start();
 }
 
-/** Observability for the tests: what the gate is doing right now. */
+/**
+ * What the gate is doing right now. The tests read it, and so does the shell's
+ * idle warm-up (routes/verse/shell/warmup.ts): it starts nothing while any
+ * read is running or queued here.
+ */
 export function queryGateStats(): { active: number; queued: number; peak: number } {
   return { active: activeFetches, queued: gateQueue.length, peak: peakConcurrency };
 }
@@ -411,6 +415,23 @@ export function invalidate(key: string): void {
 export function invalidatePrefix(prefix: string): void {
   for (const key of store.keys()) {
     if (key.startsWith(prefix)) invalidate(key);
+  }
+}
+
+/**
+ * `invalidatePrefix`, but only for keys a mounted component is SUBSCRIBED to.
+ *
+ * The read-session renewal sweep (auth-store.ts) uses it. An entry nobody is
+ * reading — a surface the shell's idle warm-up fetched but the operator never
+ * opened, or one they left — is left exactly as it is: whoever mounts it next
+ * goes through `ensureQuery`, which re-reads it if it is older than that
+ * caller accepts or if it failed (a read that 401ed is 'error', never fresh).
+ * Re-running those fetchers on every 15-minute renewal was pure background
+ * traffic through the same gate as the chat reads waiting on their retry.
+ */
+export function invalidateObserved(prefix: string): void {
+  for (const [key, e] of store) {
+    if (e.subscribers.size > 0 && key.startsWith(prefix)) invalidate(key);
   }
 }
 

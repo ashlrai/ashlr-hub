@@ -30,6 +30,8 @@ import {
   readableTitle,
   repoName,
 } from '../approvals/approvals-model.js';
+import type { VerseSeat } from '../../../data/api-types.js';
+import { isVerseEngine, modelOptionFor, seatById } from '../verse-model.js';
 import type { NeedsYouSplit } from '../verse-ui-store.js';
 
 export const SPLIT_LABEL: Readonly<Record<NeedsYouSplit, string>> = {
@@ -237,4 +239,48 @@ export function until(iso: string, now: number = Date.now()): string {
   const h = Math.round(m / 60);
   if (h < 48) return `in ${h}h`;
   return `in ${Math.round(h / 24)}d`;
+}
+
+// ---------------------------------------------------------------------------
+// Seats and models, by name
+// ---------------------------------------------------------------------------
+
+/** A seat or model as the operator knows it; `raw` is the id as sent, for a tooltip, when the text differs. */
+export interface DisplayName {
+  text: string;
+  raw: string | undefined;
+}
+
+/**
+ * "Claude Max" for `claude-a`: the roster's label (bootstrap seats — the name
+ * the seat picker and Apps & Accounts use). An id the roster does not know is
+ * shown as sent: it is all there is.
+ */
+export function seatDisplayName(seats: readonly VerseSeat[], seatId: string): DisplayName {
+  const label = seatById(seats, seatId)?.label;
+  return label && label !== seatId ? { text: label, raw: seatId } : { text: seatId, raw: undefined };
+}
+
+/**
+ * "Fable 5.1" for a run's `claude:claude-fable-5-1`: the catalog label (the
+ * model picker's) on the item's own seat first, then on any seat of the run's
+ * engine — exact id, then canonical (verse-model `modelOptionFor`, so a
+ * pre-alias `claude-opus-5.5` still finds `claude-opus-5-5`). A model no
+ * catalog lists is shown as sent.
+ */
+export function runModelDisplayName(seats: readonly VerseSeat[], model: string, seatId: string | null): DisplayName {
+  const colon = model.indexOf(':');
+  const prefix = colon > 0 ? model.slice(0, colon) : '';
+  const engine = isVerseEngine(prefix) ? prefix : null;
+  // `local:qwen3.8:27b` keeps its tag: only a known engine prefix is split off.
+  const id = engine ? model.slice(colon + 1) : model;
+  const order = [
+    ...(seatId ? [seatId] : []),
+    ...seats.filter((seat) => seat.id !== seatId && (engine === null || seat.engine === engine)).map((seat) => seat.id),
+  ];
+  for (const candidate of order) {
+    const label = modelOptionFor(seats, { seatId: candidate, model: id })?.label;
+    if (label && label !== model) return { text: label, raw: model };
+  }
+  return { text: model, raw: undefined };
 }
