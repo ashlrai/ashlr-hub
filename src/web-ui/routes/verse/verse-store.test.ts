@@ -1,20 +1,36 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { VerseEvent } from '../../data/api-types.js';
 import { ev, session } from './fixtures.test-support.js';
 import { parseVerseEventFrame, VERSE_EVENT_TYPES } from './verse-events.js';
+import { bestOf, median, openLastTurn, realisticLog, stamp } from './verse-perf.test-support.js';
 import {
   applyContextReading,
   applyUsageFrame,
   applyVerseEvent,
+  applyVerseEvents,
   buildTranscript,
+  createTranscriptCache,
+  forgetVerseSession,
   formatTokens,
+  getVerseLive,
+  getVerseSessionHead,
   getVerseSessionState,
+  getVerseTranscript,
   groupTranscriptItems,
   lastTurnActivityAt,
   resetVerseStore,
   seedVerseSession,
   setVerseSession,
   settledStatus,
+  subscribeVerseSession,
+  subscribeVerseStore,
+  subscribeVerseStoreLifecycle,
 } from './verse-store.js';
+
+/** A transient frame: it carries the last PERSISTED seq (wire rule, core/verse/types.ts). */
+function transient(seq: number, e: Record<string, unknown>): VerseEvent {
+  return { seq, at: stamp(seq), ...e } as VerseEvent;
+}
 
 describe('buildTranscript', () => {
   it('accumulates text-deltas into a streaming bubble and replaces it with the assistant-message', () => {
@@ -351,5 +367,302 @@ describe('lastTurnActivityAt', () => {
     expect(lastTurnActivityAt(log)).toBe('2026-09-23T09:02:00.000Z');
     const withReading = [...log, at(5, '2026-09-23T11:30:00.000Z', 'context', { turnId: 't2', contextTokens: 6, contextWindow: 1_000_000, exact: true })];
     expect(lastTurnActivityAt(withReading)).toBe('2026-09-23T11:30:00.000Z');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V3.10 data path
+// ---------------------------------------------------------------------------
+
+describe('verse store — V3.10 batched, incremental apply', () => {
+  beforeEach(() => resetVerseStore());
+
+  it('appends past the newest seq, inserts an older gap in place, drops duplicates — and notifies once per batch', () => {
+    seedVerseSession('vs_1', session(), [ev(1, 'user-message', { turnId: 't1', text: 'hi' }), ev(4, 'turn-started', { turnId: 't1', pid: 1 })]);
+    const listener = vi.fn();
+    const off = subscribeVerseSession('vs_1', listener);
+    const result = applyVerseEvents('vs_1', [
+      ev(5, 'text-delta', { turnId: 't1', text: 'a' }),
+      ev(2, 'thinking', { turnId: 't1', text: 'late but real' }),
+      ev(4, 'turn-started', { turnId: 't1', pid: 1 }),
+      ev(6, 'text-delta', { turnId: 't1', text: 'b' }),
+      ev(5, 'text-delta', { turnId: 't1', text: 'a' }),
+    ]);
+    expect(result).toEqual({ applied: 3, settled: false, liveChanged: false });
+    expect(getVerseSessionState('vs_1').events.map((e) => e.seq)).toEqual([1, 2, 4, 5, 6]);
+    expect(getVerseSessionState('vs_1').lastSeq).toBe(6);
+    expect(listener).toHaveBeenCalledTimes(1);
+    // A batch of nothing new is not a change.
+    expect(applyVerseEvents('vs_1', [ev(6, 'text-delta', { turnId: 't1', text: 'b' })]).applied).toBe(0);
+    expect(listener).toHaveBeenCalledTimes(1);
+    off();
+  });
+
+  it('reports a settled turn so the stream can refresh the lists exactly then', () => {
+    seedVerseSession('vs_1', session(), []);
+    expect(applyVerseEvents('vs_1', [ev(1, 'user-message', { turnId: 't1', text: 'go' })]).settled).toBe(false);
+    expect(applyVerseEvents('vs_1', [ev(2, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 })]).settled).toBe(true);
+  });
+
+  it('keeps the HEAD stable across text-deltas, so nothing but the transcript re-renders per token', () => {
+    seedVerseSession('vs_1', session({ status: 'running' }), [ev(1, 'user-message', { turnId: 't1', text: 'go' })]);
+    const head = getVerseSessionHead('vs_1');
+    applyVerseEvent('vs_1', ev(2, 'text-delta', { turnId: 't1', text: 'to' }));
+    applyVerseEvent('vs_1', ev(3, 'text-delta', { turnId: 't1', text: 'ken' }));
+    expect(getVerseSessionHead('vs_1')).toBe(head);
+    const transcript = getVerseTranscript('vs_1');
+    expect(transcript.items.at(-1)).toMatchObject({ kind: 'assistant', text: 'token', streaming: false });
+    // A structural event republishes it, with the full log.
+    applyVerseEvent('vs_1', ev(4, 'tool-use', { turnId: 't1', toolUseId: 'x', name: 'Read', input: {} }));
+    expect(getVerseSessionHead('vs_1')).not.toBe(head);
+    expect(getVerseSessionHead('vs_1').events).toHaveLength(4);
+  });
+
+  it('notifies only the session that changed (plus the global channel)', () => {
+    seedVerseSession('vs_1', session(), []);
+    seedVerseSession('vs_2', session({ id: 'vs_2' }), []);
+    const one = vi.fn();
+    const two = vi.fn();
+    const all = vi.fn();
+    const offs = [subscribeVerseSession('vs_1', one), subscribeVerseSession('vs_2', two), subscribeVerseStore(all)];
+    applyVerseEvent('vs_2', ev(1, 'user-message', { turnId: 't', text: 'x' }));
+    expect(one).not.toHaveBeenCalled();
+    expect(two).toHaveBeenCalledTimes(1);
+    expect(all).toHaveBeenCalledTimes(1);
+    for (const off of offs) off();
+  });
+
+  it('does nothing — no notify, same arrays — when a refetch brings nothing new', () => {
+    const log = [ev(1, 'user-message', { turnId: 't1', text: 'hi' }), ev(2, 'assistant-message', { turnId: 't1', text: 'yo' })];
+    seedVerseSession('vs_1', session(), log);
+    const before = getVerseSessionState('vs_1');
+    const listener = vi.fn();
+    const off = subscribeVerseSession('vs_1', listener);
+    seedVerseSession('vs_1', session(), log.map((e) => ({ ...e })));
+    expect(listener).not.toHaveBeenCalled();
+    expect(getVerseSessionState('vs_1')).toBe(before);
+    off();
+  });
+
+  it('merges an out-of-order, duplicated detail into a sorted, unique log', () => {
+    seedVerseSession('vs_1', session(), [ev(5, 'user-message', { turnId: 't2', text: 'b' })]);
+    seedVerseSession('vs_1', session(), [
+      ev(3, 'assistant-message', { turnId: 't1', text: 'x' }),
+      ev(1, 'user-message', { turnId: 't1', text: 'a' }),
+      ev(3, 'assistant-message', { turnId: 't1', text: 'dup' }),
+      ev(6, 'assistant-message', { turnId: 't2', text: 'y' }),
+    ]);
+    const events = getVerseSessionState('vs_1').events;
+    expect(events.map((e) => e.seq)).toEqual([1, 3, 5, 6]);
+    expect((events[1] as Extract<VerseEvent, { type: 'assistant-message' }>).text).toBe('x');
+  });
+
+  it('forgetting a session tells lifecycle listeners (the stream registry closes its connection)', () => {
+    const seen = vi.fn();
+    const off = subscribeVerseStoreLifecycle(seen);
+    seedVerseSession('vs_1', session(), []);
+    forgetVerseSession('vs_1');
+    resetVerseStore();
+    expect(seen.mock.calls).toEqual([[{ kind: 'forget', sessionId: 'vs_1' }], [{ kind: 'reset' }]]);
+    off();
+  });
+});
+
+describe('verse store — V3.10 transient events', () => {
+  beforeEach(() => resetVerseStore());
+
+  function running() {
+    seedVerseSession('vs_1', session({ status: 'running' }), [
+      ev(1, 'user-message', { turnId: 't1', text: 'go' }),
+      { ...ev(2, 'turn-started', { turnId: 't1', pid: 1 }), at: '2026-09-20T09:00:00.000Z' },
+    ]);
+  }
+
+  it('never enters the log or moves the cursor — its seq is the last PERSISTED one', () => {
+    running();
+    const listener = vi.fn();
+    const off = subscribeVerseSession('vs_1', listener);
+    expect(applyVerseEvent('vs_1', transient(2, { type: 'thinking-delta', turnId: 't1', text: 'Let me ' }))).toBe(true);
+    expect(applyVerseEvent('vs_1', transient(2, { type: 'thinking-delta', turnId: 't1', text: 'check.' }))).toBe(true);
+    const state = getVerseSessionState('vs_1');
+    expect(state.events).toHaveLength(2);
+    expect(state.lastSeq).toBe(2);
+    expect(state.live.thinking).toMatchObject({ turnId: 't1', text: 'Let me check.', estimatedTokens: null });
+    expect(listener).toHaveBeenCalledTimes(2);
+    off();
+  });
+
+  it('seeds the live turn from a log opened mid-turn, timed from the turn\'s own stamp', () => {
+    running();
+    expect(getVerseLive('vs_1')).toMatchObject({ turnId: 't1', startedAt: Date.parse('2026-09-20T09:00:00.000Z') });
+  });
+
+  it('closes the streamed block when the persisted `thinking` lands, keeping what this tab measured', () => {
+    running();
+    const t0 = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(t0);
+    applyVerseEvent('vs_1', transient(2, { type: 'thinking-delta', turnId: 't1', text: 'hmm' }));
+    applyVerseEvent('vs_1', transient(2, { type: 'thinking-progress', turnId: 't1', estimatedTokens: 1800 }));
+    vi.spyOn(Date, 'now').mockReturnValue(t0 + 12_000);
+    applyVerseEvent('vs_1', ev(3, 'thinking', { turnId: 't1', text: 'hmm, the pager is off by one' }));
+    vi.restoreAllMocks();
+    expect(getVerseLive('vs_1').thinking).toBeNull();
+    const item = getVerseTranscript('vs_1').items.find((i) => i.kind === 'thinking');
+    expect(item).toMatchObject({ kind: 'thinking', durationMs: 12_000, estimatedTokens: 1800, redacted: false });
+  });
+
+  it('prefers the duration the event states, and marks a redacted block', () => {
+    running();
+    applyVerseEvent('vs_1', { ...ev(3, 'thinking', { turnId: 't1', text: '' }), redacted: true, durationMs: 4000, kind: 'summary' } as VerseEvent);
+    const item = getVerseTranscript('vs_1').items.find((i) => i.kind === 'thinking');
+    expect(item).toMatchObject({ redacted: true, durationMs: 4000, estimatedTokens: null, thinkingKind: 'summary' });
+  });
+
+  it('tracks progress and a notice, clears the notice when output resumes, and ends with the turn', () => {
+    running();
+    applyVerseEvent('vs_1', transient(2, { type: 'progress', turnId: 't1', phase: 'tool', tool: 'Bash', elapsedMs: 14_000, tokPerSec: 38 }));
+    applyVerseEvent('vs_1', transient(2, { type: 'status', turnId: 't1', kind: 'retry', message: 'API overloaded — attempt 2 of 10' }));
+    let live = getVerseLive('vs_1');
+    expect(live.progress).toMatchObject({ phase: 'tool', tool: 'Bash', elapsedMs: 14_000, tokPerSec: 38, outTokens: null });
+    expect(live.notice).toMatchObject({ kind: 'retry', message: 'API overloaded — attempt 2 of 10' });
+    // A progress tick is not output: the notice stays.
+    applyVerseEvent('vs_1', transient(2, { type: 'progress', turnId: 't1', phase: 'waiting', elapsedMs: 15_000 }));
+    expect(getVerseLive('vs_1').notice).not.toBeNull();
+    applyVerseEvent('vs_1', ev(3, 'text-delta', { turnId: 't1', text: 'ok' }));
+    expect(getVerseLive('vs_1').notice).toBeNull();
+    applyVerseEvent('vs_1', ev(4, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 20_000 }));
+    live = getVerseLive('vs_1');
+    expect(live).toMatchObject({ turnId: null, progress: null, thinking: null, notice: null, settledTurnId: 't1' });
+    // A late frame for the settled turn cannot bring the live line back.
+    expect(applyVerseEvent('vs_1', transient(4, { type: 'progress', turnId: 't1', phase: 'writing', elapsedMs: 21_000 }))).toBe(false);
+    expect(getVerseLive('vs_1').turnId).toBeNull();
+  });
+
+  it('a transient frame does not republish the head (the Chat section stays still)', () => {
+    running();
+    const head = getVerseSessionHead('vs_1');
+    applyVerseEvent('vs_1', transient(2, { type: 'progress', turnId: 't1', phase: 'thinking', elapsedMs: 1000 }));
+    expect(getVerseSessionHead('vs_1')).toBe(head);
+  });
+});
+
+describe('buildTranscript — V3.10 segments', () => {
+  it('matches the single-pass derivation item for item', () => {
+    const log = realisticLog(600);
+    // Leave the last turn open and streaming.
+    const open = openLastTurn(log).events;
+    for (const events of [log, open]) {
+      const segmented = buildTranscript(events);
+      const cached = buildTranscript(events, { cache: createTranscriptCache() });
+      expect(cached.items).toEqual(segmented.items);
+      expect(segmented.segments!.flatMap((s) => s.items)).toEqual(segmented.items);
+      expect(segmented.segments!.length).toBe(events.filter((e) => e.type === 'user-message').length);
+    }
+    expect(buildTranscript(open).live).toBe(true);
+    expect(buildTranscript(open).items.at(-1)).toMatchObject({ kind: 'assistant', streaming: true });
+  });
+
+  it('returns unchanged turns as the SAME objects on a cached rebuild', () => {
+    const cache = createTranscriptCache();
+    const log = realisticLog(200);
+    const first = buildTranscript(log, { cache });
+    const next = buildTranscript([...log, ev(10_000, 'user-message', { turnId: 'tx', text: 'more' }), ev(10_001, 'text-delta', { turnId: 'tx', text: 'a' })], { cache });
+    for (let i = 0; i < first.segments!.length; i++) expect(next.segments![i]).toBe(first.segments![i]);
+    expect(next.segments).toHaveLength(first.segments!.length + 1);
+  });
+
+  it('falls back to one pass when a result pairs with a call in an earlier turn (never silently different)', () => {
+    const t = buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'a' }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'late', name: 'Bash', input: { command: 'sleep 9' } }),
+      ev(3, 'user-message', { turnId: 't2', text: 'b' }),
+      ev(4, 'tool-result', { turnId: 't1', toolUseId: 'late', output: 'done', isError: false }),
+    ]);
+    expect(t.items.filter((i) => i.kind === 'tool')).toHaveLength(1);
+    expect(t.items[1]).toMatchObject({ kind: 'tool', result: { output: 'done', isError: false } });
+  });
+
+  it('carries the new persisted events and the error code into items', () => {
+    const t = buildTranscript([
+      ev(1, 'history-truncated', { turnId: null, droppedBefore: 900 }),
+      ev(2, 'user-message', { turnId: 't1', text: 'a' }),
+      ev(3, 'recovered', { turnId: 't1', how: 'handoff', message: 'Started a new Claude session from the handoff note.' }),
+      { ...ev(4, 'error', { turnId: 't1', message: 'No conversation found' }), code: 'native-thread-missing' } as VerseEvent,
+    ]);
+    expect(t.items.map((i) => i.kind)).toEqual(['truncated', 'user', 'recovered', 'error']);
+    expect(t.items[0]).toMatchObject({ droppedBefore: 900 });
+    expect(t.items[2]).toMatchObject({ how: 'handoff' });
+    expect(t.items[3]).toMatchObject({ code: 'native-thread-missing' });
+  });
+});
+
+describe('groupTranscriptItems — V3.10 reasoning placement', () => {
+  it('lifts the reasoning that ENDS a run out of the fold, and never folds reasoning alone', () => {
+    const t = buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'go' }),
+      ev(2, 'tool-use', { turnId: 't1', toolUseId: 'a', name: 'Read', input: {} }),
+      ev(3, 'thinking', { turnId: 't1', text: 'between calls' }),
+      ev(4, 'tool-use', { turnId: 't1', toolUseId: 'b', name: 'Read', input: {} }),
+      ev(5, 'thinking', { turnId: 't1', text: 'what to answer' }),
+      ev(6, 'assistant-message', { turnId: 't1', text: 'Done.' }),
+      ev(7, 'user-message', { turnId: 't2', text: 'again' }),
+      ev(8, 'thinking', { turnId: 't2', text: 'one' }),
+      ev(9, 'thinking', { turnId: 't2', text: 'two' }),
+    ]);
+    const grouped = groupTranscriptItems(t.items);
+    expect(grouped.map((i) => i.kind)).toEqual(['user', 'toolGroup', 'thinking', 'assistant', 'user', 'thinking', 'thinking']);
+    const group = grouped[1]!;
+    if (group.kind !== 'toolGroup') throw new Error('expected a group');
+    expect(group.items.map((i) => i.kind)).toEqual(['tool', 'thinking', 'tool']);
+    expect(grouped[2]).toMatchObject({ kind: 'thinking', text: 'what to answer' });
+  });
+});
+
+describe('client data path — §1 targets (best of several runs)', () => {
+  beforeEach(() => resetVerseStore());
+
+  /** Replay = what opening a chat or resuming a stream costs: the log in, the transcript out. */
+  function replay(events: VerseEvent[], mode: 'seed' | 'stream') {
+    resetVerseStore();
+    if (mode === 'seed') seedVerseSession('vs_bench', session({ id: 'vs_bench' }), events);
+    else {
+      seedVerseSession('vs_bench', session({ id: 'vs_bench' }), []);
+      // A server that ignores `after` replays everything in one burst — one frame.
+      applyVerseEvents('vs_bench', events);
+    }
+    getVerseTranscript('vs_bench');
+  }
+
+  it('replays 5k events in < 10 ms and 10k in < 25 ms (was 2.45 s / 17 s)', () => {
+    const five = realisticLog(5000);
+    const ten = realisticLog(10_000);
+    const results = {
+      seed5k: bestOf(7, () => replay(five, 'seed')),
+      stream5k: bestOf(7, () => replay(five, 'stream')),
+      seed10k: bestOf(7, () => replay(ten, 'seed')),
+      stream10k: bestOf(7, () => replay(ten, 'stream')),
+    };
+    console.info('[verse-perf] replay ms', { events: [five.length, ten.length], turns: getVerseTranscript('vs_bench').segments?.length },
+      Object.fromEntries(Object.entries(results).map(([k, v]) => [k, Number(v.toFixed(2))])));
+    expect(results.seed5k).toBeLessThan(10);
+    expect(results.stream5k).toBeLessThan(10);
+    expect(results.seed10k).toBeLessThan(25);
+    expect(results.stream10k).toBeLessThan(25);
+  });
+
+  it('applies a streamed delta at 5k events — store + transcript — in well under 1 ms', () => {
+    const { events: open, turnId } = openLastTurn(realisticLog(5000));
+    seedVerseSession('vs_bench', session({ id: 'vs_bench', status: 'running' }), open);
+    getVerseTranscript('vs_bench');
+    let seq = open[open.length - 1]!.seq + 1;
+    const samples: number[] = [];
+    for (let i = 0; i < 200; i++) {
+      const t0 = performance.now();
+      applyVerseEvents('vs_bench', [ev(seq++, 'text-delta', { turnId, text: 'tok ' })]);
+      getVerseTranscript('vs_bench');
+      samples.push(performance.now() - t0);
+    }
+    console.info('[verse-perf] store+derive per delta at 5k, median ms', Number(median(samples).toFixed(3)));
+    expect(median(samples)).toBeLessThan(1);
   });
 });

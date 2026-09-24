@@ -172,6 +172,9 @@ function usageOf(events: VerseParsedEvent[]): Extract<VerseParsedEvent, { type: 
 }
 
 /** Every `-c` assignment in an argv, as the launcher sees it. */
+/** V3.10: live reasoning is on by default, so every turn asks for detailed summaries (last override). */
+const REASONING = 'model_reasoning_summary="detailed"';
+
 function configAssignments(argv: string[]): string[] {
   const out: string[] = [];
   for (let i = 0; i < argv.length; i++) if (argv[i] === '-c') out.push(argv[i + 1]!);
@@ -183,13 +186,13 @@ function configAssignments(argv: string[]): string[] {
 // ---------------------------------------------------------------------------
 
 describe('buildLaunch', () => {
-  it('keeps the standard-mode argv exactly as before: no config overrides at all', () => {
+  it('standard mode: no context overrides — only the V3.10 reasoning summary and the git-repo skip', () => {
     const first = codexAdapter.buildLaunch(session(), 'hello', launch());
-    expect(first.argv).toEqual([process.execPath, launcher, 'exec', '--json', '--model', 'gpt-6-sol', '--cd', '/work/project', '--sandbox', 'workspace-write', '-']);
+    expect(first.argv).toEqual([process.execPath, launcher, 'exec', '-c', REASONING, '--skip-git-repo-check', '--json', '--model', 'gpt-6-sol', '--cd', '/work/project', '--sandbox', 'workspace-write', '-']);
     expect(first.stdin).toBe('hello');
     expect(first.env).toEqual({});
     const next = codexAdapter.buildLaunch(resumed(), 'again', launch());
-    expect(next.argv).toEqual([process.execPath, launcher, 'exec', 'resume', THREAD, '--json', '-']);
+    expect(next.argv).toEqual([process.execPath, launcher, 'exec', 'resume', THREAD, '-c', REASONING, '--skip-git-repo-check', '--json', '-']);
   });
 
   it('expansive mode sends the window AND the compaction limit together, on exec and on resume', () => {
@@ -256,7 +259,7 @@ describe('buildLaunch', () => {
   it('read-only project memory: instructions only, no writable grant', () => {
     const memory = { dir: '/home/u/.ashlr/verse/memory/p-abc', block: 'read me', writable: false };
     const config = configAssignments(codexAdapter.buildLaunch(session(), 'x', launch({ memory })).argv);
-    expect(config).toEqual(['developer_instructions="read me"']);
+    expect(config).toEqual(['developer_instructions="read me"', REASONING]);
   });
 
   it('DECISION: developer_instructions is resent on EVERY resume, not only turn 1', () => {
@@ -282,20 +285,20 @@ describe('buildLaunch', () => {
       const memory = { dir, block: 'b', writable } as unknown as NonNullable<VerseSeatLaunch['memory']>;
       for (const s of [session({ extraRoots: ['/work/lib'] }), session({ extraRoots: ['/work/lib'], nativeSessionId: THREAD, turnCount: 3 })]) {
         const config = configAssignments(codexAdapter.buildLaunch(s, 'x', launch({ memory })).argv);
-        expect(config).toEqual(['sandbox_workspace_write.writable_roots=["/work/lib"]', 'developer_instructions="b"']);
+        expect(config).toEqual(['sandbox_workspace_write.writable_roots=["/work/lib"]', 'developer_instructions="b"', REASONING]);
         expect(config.join('\n')).not.toContain(dir);
       }
     }
     const writable = { dir, block: 'b', writable: true };
     const resumedConfig = configAssignments(codexAdapter.buildLaunch(session({ nativeSessionId: THREAD, turnCount: 3 }), 'x', launch({ memory: writable })).argv);
-    expect(resumedConfig).toEqual([`sandbox_workspace_write.writable_roots=["${dir}"]`, 'developer_instructions="b"']);
+    expect(resumedConfig).toEqual([`sandbox_workspace_write.writable_roots=["${dir}"]`, 'developer_instructions="b"', REASONING]);
   });
 
   it('ignores a malformed memory snapshot rather than sending a broken override', () => {
     const bad = { dir: 'relative', block: 'x', writable: true };
-    expect(configAssignments(codexAdapter.buildLaunch(session(), 'x', launch({ memory: bad })).argv)).toEqual([]);
+    expect(configAssignments(codexAdapter.buildLaunch(session(), 'x', launch({ memory: bad })).argv)).toEqual([REASONING]);
     const empty = { dir: '/m', block: '   ', writable: true };
-    expect(configAssignments(codexAdapter.buildLaunch(session(), 'x', launch({ memory: empty })).argv)).toEqual([]);
+    expect(configAssignments(codexAdapter.buildLaunch(session(), 'x', launch({ memory: empty })).argv)).toEqual([REASONING]);
   });
 
   it('every override passes the native-profile launcher key check', () => {
@@ -308,7 +311,7 @@ describe('buildLaunch', () => {
       expect(match).not.toBeNull();
       return match![1]!;
     });
-    expect(keys).toEqual(['sandbox_workspace_write.writable_roots', 'model_context_window', 'model_auto_compact_token_limit', 'developer_instructions']);
+    expect(keys).toEqual(['sandbox_workspace_write.writable_roots', 'model_context_window', 'model_auto_compact_token_limit', 'developer_instructions', 'model_reasoning_summary']);
     expect(keys.every((key) => strictConfigVerified.includes(key))).toBe(true);
     expect(keys).not.toContain('cli_auth_credentials_store');
     expect(keys).not.toContain('forced_login_method');

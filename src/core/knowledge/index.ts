@@ -22,6 +22,7 @@ import crypto from 'node:crypto';
 import { homedir } from 'node:os';
 import type { KnowledgeChunk } from '../types.js';
 import { listEnrolled, isEnrolled } from '../sandbox/policy.js';
+import { scrubSecrets as scrubSharedSecrets } from '../util/scrub.js';
 
 // ---------------------------------------------------------------------------
 // Constants — bounds to keep indexing fast and private
@@ -133,12 +134,19 @@ export const SECRET_PATTERNS: RegExp[] = [
 /**
  * Scrub secret-shaped tokens from a chunk of text. Returns sanitized text.
  *
+ * 3.10: delegates to the SHARED scrubber (src/core/util/scrub.ts — Telegram,
+ * xAI, GitHub, Slack, PEM, env-var and quoted-key coverage) first, then applies
+ * this corpus's STRICTER SECRET_PATTERNS on top (32-hex, `/`-bearing base64,
+ * Stripe). The result is a superset of both — never weaker than either. The
+ * strict pass stays local because knowledge chunks are never identity-checked,
+ * whereas the shared default must keep git SHAs and ids intact.
+ *
  * EXPORTED (pure, read-only) so the H4 `ashlr verify-safety` self-check can
  * invoke the REAL redaction function — not a copy — against a synthesized
  * secret, so any weakening of the function body (or its pattern set) is caught.
  */
 export function scrubSecrets(text: string): string {
-  let out = text;
+  let out = scrubSharedSecrets(text);
   for (const pattern of SECRET_PATTERNS) {
     out = out.replace(pattern, '[REDACTED]');
   }

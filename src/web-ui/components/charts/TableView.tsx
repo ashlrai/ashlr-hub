@@ -19,11 +19,14 @@ export function TableView<T>({
   columns,
   rows,
   rowKey,
+  emptyMessage = 'No rows.',
 }: {
   caption: string;
   columns: TableColumn<T>[];
   rows: T[];
   rowKey: (row: T, index: number) => string;
+  /** Shown as a single full-width row when `rows` is empty (V3.10). */
+  emptyMessage?: string;
 }) {
   return (
     <table className={styles.table}>
@@ -38,6 +41,13 @@ export function TableView<T>({
         </tr>
       </thead>
       <tbody>
+        {rows.length === 0 ? (
+          <tr>
+            <td colSpan={Math.max(1, columns.length)} className={styles.empty}>
+              {emptyMessage}
+            </td>
+          </tr>
+        ) : null}
         {rows.map((row, i) => (
           <tr key={rowKey(row, i)}>
             {columns.map((c) => (

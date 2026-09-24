@@ -23,6 +23,16 @@
  * coexist with a spendable credit balance, so refusing the choice would be a
  * stronger claim than the data supports.
  *
+ * V3.10 — EXCEPT when the server's verdict IS a refusal. The session engine now
+ * refuses a turn on a seat whose `capacity.usability` is `exhausted` (every
+ * read window spent, no credits) or `signed-out` — the same rule, from the same
+ * function (core/verse/seat-readiness.ts `seatBlock`). Offering such a seat
+ * here would only move the failure from the picker to the first send, so its
+ * rows are disabled and say why, when it resets, and where to go instead
+ * ("unavailable: out of usage — resets Fri 2:25 PM · try Grok"). A seat that is
+ * merely `tight` (a spent window beside spendable credits, or a spent per-model
+ * window beside healthy account-wide ones) stays selectable, as before.
+ *
  * V3.9 — EVERY ROW SAYS WHAT CONTEXT IT BUYS. A row used to read "Claude Max —
  * Opus 5", and the only window anywhere near the picker was the seat's DEFAULT
  * model's (so "200k" for every 1M Claude model). Now each row carries its own
@@ -39,6 +49,8 @@
 import { useId } from 'react';
 import type { VerseModelOption, VerseSeat } from '../../data/api-types.js';
 import type { VerseContextMode } from '../../../core/verse/types.js';
+import type { SeatHealthReport } from '../../../core/verse/health-types.js';
+import { rankSeatAlternatives, seatBlock } from '../../../core/verse/seat-readiness.js';
 import { seatSubscription } from './seat-subscription.js';
 import {
   FIT_SHORT,
@@ -76,6 +88,11 @@ export interface SeatSelectorProps {
    * one the operator would actually get. Absent → standard for every row.
    */
   modeFor?: (seat: VerseSeat, model: VerseModelOption) => VerseContextMode;
+  /**
+   * V3.10. Live seat health (GET /api/verse/health). Optional: without it the
+   * seat's own `capacity.usability` still decides which seats are blocked.
+   */
+  healthReports?: readonly SeatHealthReport[] | null;
 }
 
 export function encodeSeatChoice(choice: SeatChoice): string {
@@ -100,15 +117,48 @@ export function decodeSeatChoice(value: string): SeatChoice | null {
  * unavailable one here as well means a stale or hand-built roster can never
  * make "Start chat" land on a model the pinned CLI would reject.
  */
-export function defaultSeatChoice(seats: readonly VerseSeat[]): SeatChoice | null {
+export function defaultSeatChoice(
+  seats: readonly VerseSeat[],
+  healthReports: readonly SeatHealthReport[] | null = null,
+): SeatChoice | null {
   for (const group of groupSeats(seats)) {
     for (const seat of group.seats) {
       if (seat.health.state === 'unavailable') continue;
+      // A seat the engine would refuse is never the default (V3.10).
+      if (seatBlock(seat, reportFor(healthReports, seat.id)) !== null) continue;
       const model = seat.models.find((m) => modelUnavailableReason(seat, m) === null);
       if (model) return { seatId: seat.id, model: model.id };
     }
   }
   return null;
+}
+
+function reportFor(reports: readonly SeatHealthReport[] | null | undefined, seatId: string): SeatHealthReport | null {
+  return reports?.find((report) => report.seatId === seatId) ?? null;
+}
+
+/**
+ * Why a seat is refused, as an inline note — "out of usage — resets Fri
+ * 2:25 PM · try Grok" / "signed out — reconnect it · try Grok" — or null when
+ * the engine would accept it. The seat's label is dropped (the row already
+ * leads with it) and the best alternative is named, so the row says where to
+ * go instead.
+ */
+export function seatBlockedNote(
+  seat: VerseSeat,
+  seats: readonly VerseSeat[],
+  healthReports: readonly SeatHealthReport[] | null = null,
+  now: number = Date.now(),
+): string | null {
+  const block = seatBlock(seat, reportFor(healthReports, seat.id), now);
+  if (block === null) return null;
+  const phrase = block.reason
+    .replace(`${seat.label} is `, '')
+    .replace(/ to use this seat\.$/, '')
+    .replace(/\.$/, '');
+  const best = rankSeatAlternatives(seat.id, seats, healthReports, now)[0];
+  const bestLabel = best === undefined ? null : seats.find((candidate) => candidate.id === best)?.label ?? null;
+  return bestLabel === null ? phrase : `${phrase} · try ${bestLabel}`;
 }
 
 /**
@@ -154,6 +204,7 @@ export function SeatSelector({
   compact = false,
   workingSetTokens = null,
   modeFor,
+  healthReports = null,
 }: SeatSelectorProps) {
   const generated = useId();
   const selectId = id ?? generated;
@@ -173,7 +224,8 @@ export function SeatSelector({
         {groups.map((group) => (
           <optgroup key={group.engine} label={ENGINE_LABEL[group.engine]}>
             {group.seats.flatMap((seat) => {
-              const seatReason = seatUnavailableReason(seat);
+              // Reachability first, then the engine's own refusal (V3.10).
+              const seatReason = seatUnavailableReason(seat) ?? seatBlockedNote(seat, seats, healthReports);
               const capacity = seatSubscription(seat);
               // `unread` is left unsaid: "no reading" on every Claude row
               // would be noise, and the absent figure already says it. A local

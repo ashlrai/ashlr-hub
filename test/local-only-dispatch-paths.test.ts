@@ -102,6 +102,8 @@ import {
   type VerseSeatLaunch,
 } from '../src/core/verse/session-engine.js';
 import type { VerseSeat } from '../src/core/verse/types.js';
+import { writeCapacitySnapshot } from '../src/core/routing/budget-store.js';
+import type { SeatCapacity } from '../src/core/routing/headroom.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -738,11 +740,72 @@ describe('§F sandboxed dispatch', () => {
 // ===========================================================================
 
 describe('§G local dispatch is unaffected when the mode is off', () => {
+  /**
+   * A fresh, low Claude reading in the Verse capacity snapshot.
+   *
+   * WHY this fixture exists: since 3.10 (unit A9) `subscriptionAllows` fails
+   * CLOSED — a subscription engine with no known, fresh usage reading is not
+   * available to autonomous routing ("unknown usage is not headroom"). Before
+   * 3.10 routeTask reached claude here only through the Claude fail-open. The
+   * §G premise is about the LOCAL-ONLY switch, not about usage: with the mode
+   * off and headroom KNOWN, routing must be exactly what it always was. So the
+   * test states the headroom explicitly instead of relying on the fail-open.
+   * Codex stays off for autonomy by default (Mason, 2026-09-24), which is why
+   * only a Claude seat is written.
+   */
+  function withKnownClaudeHeadroom<T>(fn: () => T): T {
+    return inFreshHome(() => {
+      const seat: SeatCapacity = {
+        seatId: 'claude',
+        engine: 'claude',
+        label: 'Claude Code',
+        free: false,
+        windows: [
+          { id: 'five_hour', usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false },
+          { id: 'seven_day', usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false },
+        ],
+        signedOut: false,
+        reachable: null,
+        contextWindow: 200_000,
+        observedAt: new Date().toISOString(),
+        spentTodayUsd: null,
+      };
+      writeCapacitySnapshot([seat]);
+      return fn();
+    });
+  }
+
+  /** A throwaway HOME, so no snapshot/budget from another suite can leak in. */
+  function inFreshHome<T>(fn: () => T): T {
+    const savedHome = process.env['HOME'];
+    const home = mkdtempSync(join(tmpdir(), 'local-only-g-'));
+    process.env['HOME'] = home;
+    try {
+      return fn();
+    } finally {
+      process.env['HOME'] = savedHome;
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
   it('routeTask picks the same engine it always did', () => {
     const item = makeItem({ source: 'issue' as WorkSource, effort: 5, score: 10 });
-    const d = routeTask(item, openCfg(), ALL_ENGINES_CTX);
-    // Hard issue → a frontier engine, exactly as before local-only existed.
+    const d = withKnownClaudeHeadroom(() => routeTask(item, openCfg(), ALL_ENGINES_CTX));
+    // Hard issue with known Claude headroom → a frontier engine, exactly as
+    // before local-only existed.
     expect(['claude', 'codex']).toContain(d.engine);
+    expect(d.reason).not.toContain('local-only');
+  });
+
+  it('with unknown frontier usage AUTONOMOUS routeTask falls back — for budget reasons, never local-only ones', () => {
+    // The 3.10 truth pinned: no reading → the frontier engines are held back
+    // by the fail-closed subscription gate, and the fallback is NOT attributed
+    // to the (off) local-only mode. V3.10 IB2: the fail-closed gate applies
+    // to AUTONOMOUS routes only (RoutingContext.autonomous); interactive
+    // routing keeps the pre-3.10 rule — see test/routing-interactive-scope.test.ts.
+    const item = makeItem({ source: 'issue' as WorkSource, effort: 5, score: 10 });
+    const d = inFreshHome(() => routeTask(item, openCfg(), { ...ALL_ENGINES_CTX, autonomous: true }));
+    expect(['claude', 'codex']).not.toContain(d.engine);
     expect(d.reason).not.toContain('local-only');
   });
 

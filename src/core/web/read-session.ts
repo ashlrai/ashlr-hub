@@ -38,6 +38,48 @@ function isSseQueryProofPath(pathname: string): boolean {
     || SSE_VERSE_EVENTS_PATH_RE.test(pathname);
 }
 
+/**
+ * V3.10: the DATA parameters an SSE path may carry beside its `client` proof.
+ *
+ * An EventSource cannot send headers, so everything a stream needs rides in
+ * the query next to the proof: `/api/events?topics=` (subscribe to a subset of
+ * groups — the Verse app needs only `verse-sessions`) and the Verse tail's
+ * `?after=<seq>` resume cursor. Before this list the boundary required the
+ * proof to be the ONLY parameter, so both features answered 401 to every
+ * browser.
+ *
+ * The proof itself is unchanged and not weakened: still exactly one `client`
+ * of exactly 64 hex characters, still refused alongside the header, and still
+ * worthless without the signed HttpOnly ticket that binds its digest. These
+ * parameters carry no authority. They are nonetheless allowed only on the
+ * path whose route reads them, at most once, and only in that route's own
+ * value grammar — so the query cannot become a place to smuggle a second
+ * proof, a duplicate that route and boundary would read differently, or an
+ * unbounded blob; anything else still fails closed.
+ */
+interface SseDataParam {
+  readonly name: string;
+  readonly valid: (value: string) => boolean;
+}
+
+/** `topics=a,b` — lowercase group names (web/api.ts `SSE_TOPICS`), ≤ 256 chars like its parser. */
+const SSE_TOPICS_PARAM: SseDataParam = {
+  name: 'topics',
+  valid: (value) => value.length <= 256 && /^[a-z][a-z-]{0,31}(?:,[a-z][a-z-]{0,31})*$/.test(value),
+};
+
+/** `after=<seq>` — verse-stream.ts's cursor grammar (1–15 digits). */
+const SSE_AFTER_PARAM: SseDataParam = {
+  name: 'after',
+  valid: (value) => /^\d{1,15}$/.test(value),
+};
+
+function sseDataParams(pathname: string): readonly SseDataParam[] {
+  if (pathname === '/api/events') return [SSE_TOPICS_PARAM];
+  if (SSE_VERSE_EVENTS_PATH_RE.test(pathname)) return [SSE_AFTER_PARAM];
+  return [];
+}
+
 export function isAllowedHost(host: string | undefined): boolean {
   if (!host) return false;
   return HOST_RE.test(host);
@@ -124,10 +166,21 @@ function readClientHeader(req: IncomingMessage): string {
 function readSessionClientProof(req: IncomingMessage, url: URL): string {
   if (isSseQueryProofPath(url.pathname)) {
     if (headerValue(req, READ_CLIENT_HEADER)) return '';
-    const entries = [...url.searchParams.entries()];
-    if (entries.length !== 1 || entries[0]?.[0] !== READ_CLIENT_QUERY) return '';
-    const value = entries[0]?.[1] ?? '';
-    return READ_CLIENT_RE.test(value) ? value : '';
+    const allowed = sseDataParams(url.pathname);
+    const seen = new Set<string>();
+    let proof: string | null = null;
+    for (const [name, value] of url.searchParams.entries()) {
+      // Any repeat — the proof or a data parameter — is ambiguous: fail closed.
+      if (seen.has(name)) return '';
+      seen.add(name);
+      if (name === READ_CLIENT_QUERY) {
+        proof = value;
+        continue;
+      }
+      const param = allowed.find((candidate) => candidate.name === name);
+      if (!param || !param.valid(value)) return '';
+    }
+    return proof !== null && READ_CLIENT_RE.test(proof) ? proof : '';
   }
 
   // The query proof is SSE-only. Other API routes must use the exact header;

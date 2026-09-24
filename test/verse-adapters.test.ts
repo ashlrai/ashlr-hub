@@ -21,7 +21,7 @@ import { createAnthropicStreamParser, anthropicEnvBaseUrl, runtimeContextWindow 
 import { createCodexParser } from '../src/core/verse/adapters/codex.js';
 import { claudeAutoCompactAt } from '../src/core/verse/context-math.js';
 import type { VerseSeatLaunch } from '../src/core/verse/session-engine.js';
-import type { VerseModelOption, VerseSeat, VerseSession } from '../src/core/verse/types.js';
+import { VERSE_TRANSIENT_EVENT_TYPES, type VerseModelOption, type VerseSeat, type VerseSession } from '../src/core/verse/types.js';
 
 let tmpHome = '';
 let prevHome: string | undefined;
@@ -122,6 +122,16 @@ function feed(parser: { push(l: string): unknown[]; finish(c: number | null): un
   }
   out.push(...(parser.finish(exitCode) as VerseParsedEvent[]));
   return out;
+}
+
+/**
+ * V3.10: parsers interleave TRANSIENT events (progress, thinking-delta, …)
+ * with the persisted ones. These tests pin the persisted sequence, which the
+ * transient events must never change; test/verse-adapters-reasoning.test.ts
+ * covers the transient ones.
+ */
+function persisted(events: VerseParsedEvent[]): VerseParsedEvent[] {
+  return events.filter((e) => !VERSE_TRANSIENT_EVENT_TYPES.has(e.type));
 }
 
 /** The value following the LAST occurrence of `flag`, or undefined. */
@@ -643,12 +653,14 @@ describe('codex adapter — buildLaunch', () => {
     const a = adapterFor('codex');
     const l = launch({ seat: CODEX_SEAT, launcher: ['/usr/local/bin/node', '/x/launcher.mjs'] });
     const first = a.buildLaunch(session({ engine: 'codex', seatId: 'codex-a', model: 'gpt-5.5', nativeSessionId: null }), 'do it', l);
-    expect(first.argv).toEqual(['/usr/local/bin/node', '/x/launcher.mjs', 'exec', '--json', '--model', 'gpt-5.5', '--cd', '/tmp/proj', '--sandbox', 'workspace-write', '-']);
+    // V3.10: detailed reasoning summaries (live reasoning is on by default) and
+    // no git-repo gate, on exec and resume alike.
+    expect(first.argv).toEqual(['/usr/local/bin/node', '/x/launcher.mjs', 'exec', '-c', 'model_reasoning_summary="detailed"', '--skip-git-repo-check', '--json', '--model', 'gpt-5.5', '--cd', '/tmp/proj', '--sandbox', 'workspace-write', '-']);
     expect(first.stdin).toBe('do it');
     expect(first.env).toEqual({});
 
     const second = a.buildLaunch(session({ engine: 'codex', seatId: 'codex-a', model: 'gpt-5.5', nativeSessionId: 'thread-9', turnCount: 1 }), 'more', l);
-    expect(second.argv).toEqual(['/usr/local/bin/node', '/x/launcher.mjs', 'exec', 'resume', 'thread-9', '--json', '-']);
+    expect(second.argv).toEqual(['/usr/local/bin/node', '/x/launcher.mjs', 'exec', 'resume', 'thread-9', '-c', 'model_reasoning_summary="detailed"', '--skip-git-repo-check', '--json', '-']);
     expect(second.stdin).toBe('more');
   });
 
@@ -656,7 +668,9 @@ describe('codex adapter — buildLaunch', () => {
     const a = adapterFor('codex');
     const l = launch({ seat: CODEX_SEAT, launcher: ['/x/launcher.mjs'] });
     const again = a.buildLaunch(session({ engine: 'codex', nativeSessionId: null, turnCount: 1, model: 'gpt-5.5' }), 'retry', l);
-    expect(again.argv.slice(1, 3)).toEqual(['exec', '--json']);
+    expect(again.argv[1]).toBe('exec');
+    expect(again.argv).not.toContain('resume');
+    expect(again.argv).toContain('--model');
   });
 });
 
@@ -679,7 +693,7 @@ const CODEX_TURN = [
 describe('codex adapter — parser', () => {
   it('captures thread_id and normalizes items into tool-use/result, thinking and message', () => {
     const parser = createCodexParser('c1');
-    const events = feed(parser, CODEX_TURN);
+    const events = persisted(feed(parser, CODEX_TURN));
     expect(parser.nativeSessionId()).toBe('thr_123');
 
     // No `usage` from the codex PARSER any more (V3.9): `exec resume` prints the
@@ -704,11 +718,11 @@ describe('codex adapter — parser', () => {
   });
 
   it('reports turn.failed as an error and a failed command as an error result', () => {
-    const failed = feed(createCodexParser('c2'), [
+    const failed = persisted(feed(createCodexParser('c2'), [
       { type: 'thread.started', thread_id: 't' },
       { type: 'item.completed', item: { id: 'i', type: 'command_execution', command: 'false', aggregated_output: '', exit_code: 1, status: 'completed' } },
       { type: 'turn.failed', error: { message: 'model overloaded' } },
-    ]);
+    ]));
     expect(failed.map((e) => e.type)).toEqual(['tool-use', 'tool-result', 'error']);
     expect(failed[1]).toMatchObject({ isError: true });
     expect((failed[2] as { message: string }).message).toBe('codex: model overloaded');
@@ -788,6 +802,8 @@ describe('grok adapter — buildLaunch', () => {
     const first = a.buildLaunch(grokSession(), 'yo', l);
     expect(first.argv).toEqual([
       '/usr/local/bin/node', '/g/launcher.mjs',
+      // V3.10: a seat turn never lets the pinned CLI update itself.
+      '--no-auto-update',
       '--output-format', 'streaming-messages-json',
       '--include-partial-messages',
       '--cwd', '/tmp/proj',
@@ -875,7 +891,7 @@ describe('grok adapter — parser', () => {
   it('parses bare Anthropic wire events and totals usage across API calls', () => {
     const a = adapterFor('grok');
     const parser = a.createParser('g1');
-    const events = feed(parser, GROK_TURN);
+    const events = persisted(feed(parser, GROK_TURN));
     expect(events.map((e) => e.type)).toEqual([
       'text-delta', 'text-delta', 'assistant-message',
       'tool-use',

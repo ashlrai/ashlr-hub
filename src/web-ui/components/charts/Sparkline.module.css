@@ -14,3 +14,16 @@
 .dot {
   fill: var(--chart-sequential);
 }
+
+.area {
+  fill: var(--chart-sequential);
+  opacity: 0.1;
+  stroke: none;
+}
+
+/* Fewer than two known points: a quiet dashed baseline, not an empty box. */
+.flat {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+}

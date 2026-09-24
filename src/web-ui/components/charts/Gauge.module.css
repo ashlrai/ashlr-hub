@@ -1,0 +1,46 @@
+.gauge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.readout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin-top: calc(-1 * var(--space-6));
+  text-align: center;
+}
+
+/* Proportional figures for a standalone number (tabular only in columns). */
+.value {
+  font-size: var(--text-2xl-size);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+}
+
+.unknownValue {
+  font-size: var(--text-lg-size, var(--text-sm-size));
+  font-weight: var(--font-weight-medium);
+  color: var(--status-unknown-fg);
+}
+
+.state {
+  font-size: var(--text-xs-size);
+  color: var(--text-secondary);
+}
+
+.gauge[data-severity='warn'] .state {
+  color: var(--status-warning-fg);
+}
+
+.gauge[data-severity='danger'] .state {
+  color: var(--status-danger-fg);
+}
+
+.caption {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}

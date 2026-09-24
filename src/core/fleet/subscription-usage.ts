@@ -15,27 +15,65 @@
  *  - When sharedQueue is off/absent or the path is unwritable, behavior is
  *    byte-identical to the M80 local-only logic. Never throws either way.
  *
- * Public API (all pure, never-throws):
+ * V3.10 (unit A9) — THE CLAUDE FAIL-OPEN IS CLOSED.
+ *  Before 3.10 `subscriptionAllows('claude')` returned allowed:true because
+ *  "no local signal" was read as "go ahead" — the exact path by which a lit
+ *  fleet would have burned the Claude headroom Mason needs for his own
+ *  sessions. Now:
+ *   - Unknown usage is NOT headroom. A subscription engine with no reading
+ *     (Claude with no Verse capacity snapshot, Codex with no session files),
+ *     a stale reading, or a check that throws → allowed:FALSE.
+ *   - Claude readings come from the Verse capacity snapshot
+ *     (~/.ashlr/routing/capacity.json, written by the Verse server from its
+ *     account collector — core/routing/budget-store.ts). Readings older than
+ *     HEADROOM_READING_MAX_AGE_MS are stale, i.e. unknown.
+ *   - The operator's budget policy (~/.ashlr/budget.json) is applied: a seat
+ *     switched off for autonomy, or at its reserve / 5-hour ceiling, blocks.
+ *     These gates only ever NARROW the old rule (known usage ≥ maxPercent
+ *     still blocks); nothing here can allow what 3.9 refused.
+ *   - When an engine has several seats (two Codex accounts), the fleet cannot
+ *     choose which account its CLI hits, so EVERY seat of that engine in the
+ *     snapshot must be eligible.
+ *
+ * Public API (all never-throw):
  *
  *   subscriptionUsage(engine, opts?)
  *     → { usedPercent, windowLabel, resetsAt? } | null
  *     Codex: real data from readCodexRateLimits() (higher of primary/secondary).
- *     Claude: null (no local utilization signal — don't block it proactively).
+ *     Claude: null — this is the LOCAL-signal reader, used for display by
+ *     frontier-usage.ts; it has no Claude signal and never invents one.
  *     Shared mode: also publishes the local reading to the shared ledger.
  *
  *   subscriptionAllows(engine, opts?)
  *     → { allowed: boolean; reason: string }
- *     false only when KNOWN utilization >= maxPercent (default 90).
- *     Shared mode: uses MAX across all non-expired ledger entries for the engine.
- *     allowed:true when utilization is unknown or under the cap.
+ *     Non-subscription engines: allowed. Subscription engines, AUTONOMOUS
+ *     (the default — opts.autonomous !== false): allowed ONLY when a known,
+ *     fresh reading is under maxPercent (default 90) AND the budget policy
+ *     leaves headroom. INTERACTIVE (opts.autonomous === false): the pre-3.10
+ *     rule — blocked only when a KNOWN window is at/above maxPercent; unknown
+ *     usage is allowed and the budget reserves do not apply (they exist to
+ *     keep headroom FOR interactive use). Shared mode: the MAX across
+ *     non-expired ledger READINGS governs (presence-only entries are not
+ *     readings).
  *
  *   isSubscriptionEngine(engine)
  *     → boolean
  *     True for frontier-tier CLI agents (claude / codex). Reuses engineTierOf.
  *
+ * Why the gate defaults to AUTONOMOUS while routing defaults to interactive
+ * (V3.10 integration, IB2): every direct caller of subscriptionAllows is a
+ * daemon / fleet / fabric-gateway dispatch gate, so a caller that forgets the
+ * flag must fail closed — forgetting it must never re-open the Claude
+ * fail-open. The one shared entry point, run/router.ts#routeTask, passes
+ * `autonomous: ctx.autonomous === true`, so plain `ashlr run` / goal / universe
+ * routing keeps the pre-3.10 behaviour for npm users without the Verse
+ * account collector.
+ *
  * Design constraints:
- *  - Never throws — all errors degrade to allowed:true (unknown → permissive).
- *  - Never blocks claude proactively (no local signal → assume allowed).
+ *  - Never throws — every error degrades to allowed:FALSE for a subscription
+ *    engine on the autonomous path (unknown → closed), allowed:true on the
+ *    interactive path (pre-3.10 contract), and allowed:true for a
+ *    non-subscription engine.
  *  - maxPercent is read defensively from cfg.foundry with a default of 90.
  *  - Separate-account-per-laptop = each points at no/its-own shared path → no
  *    contention. Shared mode only activates when explicitly configured.
@@ -43,6 +81,9 @@
 
 import * as os from 'node:os';
 import { readCodexRateLimits } from '../observability/codex-source.js';
+import { loadBudgetPolicy, readCapacitySnapshot } from '../routing/budget-store.js';
+import { assessSeat, type SeatCapacity } from '../routing/headroom.js';
+import { defaultSeatPolicy, effectiveSeatPolicy, engineOfSeatId } from '../routing/policy.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import type { EngineId } from '../types.js';
 import { SharedStore } from './shared-store.js';
@@ -195,29 +236,46 @@ export function subscriptionUsage(
 // ---------------------------------------------------------------------------
 
 /**
- * Decide whether the subscription window for `engine` permits a new dispatch.
+ * Decide whether the subscription window for `engine` permits a new
+ * AUTONOMOUS dispatch.
  *
- * Returns allowed:true in ALL ambiguous / unknown cases (fail-open):
- *  - Engine is not a subscription engine (no subscription window to check).
- *  - No local utilization signal (claude, or codex with no session files).
- *  - Data is stale / unreadable.
+ * Returns allowed:false (fail CLOSED) whenever usage is unknown:
+ *  - no reading at all (Claude without a Verse capacity snapshot, Codex with
+ *    no session files and no snapshot),
+ *  - a stale reading,
+ *  - an unexpected error.
  *
- * Returns allowed:false ONLY when a KNOWN window is at or above maxPercent.
+ * Returns allowed:false when a KNOWN window is at or above maxPercent, or when
+ * the budget policy (~/.ashlr/budget.json) holds the seat back (switched off,
+ * at its reserve, above its 5-hour ceiling, spent).
+ *
+ * Returns allowed:true only when every applicable reading is known, fresh,
+ * under maxPercent and inside the budget policy.
  *
  * M114: In shared mode, the effective usedPercent is the MAX across all
- * non-expired ledger entries for this engine (most-saturated machine governs).
- * Falls back to local-only decision when the shared read fails or ledger is empty.
+ * non-expired ledger READINGS for this engine (most-saturated machine governs).
  *
- * maxPercent defaults to DEFAULT_MAX_PERCENT (90). Can be overridden per call
- * or via cfg.foundry (read as `(cfg.foundry as any)?.subscriptionMaxPercent`
- * in the caller to avoid touching types.ts).
+ * `opts.autonomous === false` switches to the INTERACTIVE rule instead
+ * (`_interactiveAllows`: only a known window ≥ maxPercent blocks). Only
+ * run/router.ts#routeTask passes it, derived from RoutingContext.autonomous.
  *
  * Never throws.
  */
 export function subscriptionAllows(
   engine: EngineId,
-  opts?: { maxPercent?: number; cfg?: unknown },
+  opts?: {
+    maxPercent?: number;
+    cfg?: unknown;
+    nowMs?: number;
+    /**
+     * false = an INTERACTIVE dispatch (a person asked for it): pre-3.10 rule.
+     * Absent/true = AUTONOMOUS: fail closed on unknown usage + budget policy.
+     * See the module header for why the default is the closed one here.
+     */
+    autonomous?: boolean;
+  },
 ): SubscriptionAllowResult {
+  if (opts?.autonomous === false) return _interactiveAllows(engine, opts);
   try {
     if (!isSubscriptionEngine(engine)) {
       return {
@@ -227,6 +285,13 @@ export function subscriptionAllows(
     }
 
     const maxPct = opts?.maxPercent ?? DEFAULT_MAX_PERCENT;
+    const nowMs = opts?.nowMs ?? Date.now();
+
+    // V3.10: the Verse capacity snapshot + budget policy. Consulted first
+    // because it is the only source that knows Claude's windows, the
+    // operator's reserves, and whether the seat is switched off.
+    const budget = _budgetVerdict(engine, maxPct, nowMs);
+    if (budget && !budget.allowed) return budget;
 
     // M114: attempt cross-machine aggregation first.
     const aggregate = _aggregateSharedUsage(engine, opts?.cfg);
@@ -242,6 +307,9 @@ export function subscriptionAllows(
             ` (max ${maxPct}%, ${aggregate.windowLabel} window, cross-machine)${resetStr}`,
         };
       }
+      if (budget) return budget;
+      const gated = _localPolicyGate(engine, aggregate);
+      if (gated) return gated;
       return {
         allowed: true,
         reason:
@@ -254,14 +322,7 @@ export function subscriptionAllows(
     // NOTE: we call subscriptionUsage here for the local read AND side-effect publish.
     const usage = subscriptionUsage(engine, { cfg: opts?.cfg });
 
-    if (!usage) {
-      return {
-        allowed: true,
-        reason: `${engine} subscription usage unknown (no local signal) — allowing`,
-      };
-    }
-
-    if (usage.usedPercent >= maxPct) {
+    if (usage && usage.usedPercent >= maxPct) {
       const resetStr = usage.resetsAt
         ? ` (resets at ${new Date(usage.resetsAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
         : '';
@@ -273,6 +334,24 @@ export function subscriptionAllows(
       };
     }
 
+    // A fresh, in-policy snapshot reading is enough on its own (Claude has no
+    // local signal by construction).
+    if (budget) return budget;
+
+    if (!usage) {
+      return {
+        allowed: false,
+        reason:
+          `${engine} subscription usage unknown (no reading from the Verse account collector or local sessions) — ` +
+          'unknown usage is not headroom, so autonomy stays off this engine',
+      };
+    }
+
+    // Local reading known and under the cap, but no snapshot to apply the
+    // budget policy to: apply what can be applied without seat ids.
+    const gated = _localPolicyGate(engine, usage);
+    if (gated) return gated;
+
     return {
       allowed: true,
       reason:
@@ -280,12 +359,154 @@ export function subscriptionAllows(
         ` (max ${maxPct}%, ${usage.windowLabel} window) — within limit`,
     };
   } catch {
-    // Never block on an unexpected error — fail open.
+    // Unknown is not headroom: an unexpected error closes a subscription engine.
     return {
-      allowed: true,
-      reason: `${engine} subscription check failed unexpectedly — allowing`,
+      allowed: false,
+      reason: `${engine} subscription check failed unexpectedly — blocking (unknown usage is not headroom)`,
     };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Interactive gate — the pre-3.10 rule, kept for dispatches a person asked for
+// ---------------------------------------------------------------------------
+
+/**
+ * The pre-3.10 subscription rule, for INTERACTIVE dispatch only.
+ *
+ * Blocks only when a KNOWN window (cross-machine ledger reading, else the
+ * local Codex session reading) is at or above maxPercent; unknown usage and
+ * errors allow. The budget policy and the capacity snapshot are deliberately
+ * NOT consulted: the reserves exist to keep headroom for exactly this kind of
+ * dispatch, and a missing snapshot (no Verse collector — every plain npm
+ * install) must not turn `ashlr run` into a builtin-only tool.
+ *
+ * The one difference from 3.9: shared-ledger presence entries (Claude's
+ * 0%-"unknown" markers) are not readings — `_aggregateSharedUsage` filters
+ * them. They could never block (0 < maxPercent), so allow/block decisions are
+ * identical to 3.9; only the wording of an unknown-usage reason changes.
+ *
+ * Never throws.
+ */
+function _interactiveAllows(
+  engine: EngineId,
+  opts: { maxPercent?: number; cfg?: unknown },
+): SubscriptionAllowResult {
+  try {
+    if (!isSubscriptionEngine(engine)) {
+      return { allowed: true, reason: `${engine} is not a subscription engine` };
+    }
+    const maxPct = opts.maxPercent ?? DEFAULT_MAX_PERCENT;
+    const known = _aggregateSharedUsage(engine, opts.cfg) ?? subscriptionUsage(engine, { cfg: opts.cfg });
+    if (!known) {
+      return {
+        allowed: true,
+        reason: `${engine} subscription usage unknown — allowing (interactive dispatch; autonomy would stay off)`,
+      };
+    }
+    if (known.usedPercent >= maxPct) {
+      const resetStr = known.resetsAt
+        ? ` (resets at ${new Date(known.resetsAt * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`
+        : '';
+      return {
+        allowed: false,
+        reason:
+          `${engine} subscription window ${known.usedPercent}% used` +
+          ` (max ${maxPct}%, ${known.windowLabel} window)${resetStr}`,
+      };
+    }
+    return {
+      allowed: true,
+      reason: `${engine} subscription window ${known.usedPercent}% used (max ${maxPct}%, ${known.windowLabel} window) — within limit`,
+    };
+  } catch {
+    // Pre-3.10 contract for a person-initiated dispatch: an unexpected error
+    // in the usage READER is not evidence the window is full. (A throw one
+    // layer up, in engineAvailable, still closes — that is a bug, not usage.)
+    return { allowed: true, reason: `${engine} subscription check failed unexpectedly — allowing (interactive)` };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// V3.10 budget gate (Verse capacity snapshot + operator budget policy)
+// ---------------------------------------------------------------------------
+
+/** Engines whose seats appear in the Verse capacity snapshot. */
+function _snapshotEngine(engine: EngineId): 'claude' | 'codex' | null {
+  return engine === 'claude' || engine === 'codex' ? engine : null;
+}
+
+/**
+ * The budget verdict for `engine` from the capacity snapshot, or null when
+ * the snapshot has no seat of that engine (the caller then decides from the
+ * local signal — and fails closed if there is none).
+ *
+ * allowed:true means EVERY seat of the engine is eligible for autonomy under
+ * the current policy AND its binding reading is under maxPercent.
+ */
+function _budgetVerdict(engine: EngineId, maxPct: number, nowMs: number): SubscriptionAllowResult | null {
+  const snapEngine = _snapshotEngine(engine);
+  if (!snapEngine) return null;
+  const snapshot = readCapacitySnapshot();
+  const seats: SeatCapacity[] = snapshot ? snapshot.seats.filter((s) => s.engine === snapEngine) : [];
+  if (seats.length === 0) return null;
+  const policy = loadBudgetPolicy();
+  const parts: string[] = [];
+  for (const seat of seats) {
+    const assessed = assessSeat(seat, effectiveSeatPolicy(policy, seat.seatId, seat.engine), { nowMs });
+    const h = assessed.headroom;
+    if (!h.eligibleForAutonomy) {
+      return {
+        allowed: false,
+        reason: `${engine} seat ${seat.seatId} is held back by the ${policy.mode} budget: ${h.reasons[0] ?? 'not eligible'}`,
+      };
+    }
+    const used = Math.max(h.sessionUsedPercent ?? 0, h.weeklyUsedPercent ?? 0);
+    if (used >= maxPct) {
+      return {
+        allowed: false,
+        reason: `${engine} seat ${seat.seatId} window ${Math.round(used)}% used (max ${maxPct}%)`,
+      };
+    }
+    parts.push(`${seat.seatId}: ${h.reasons[0] ?? 'eligible'}`);
+  }
+  return {
+    allowed: true,
+    reason: `${engine} within the ${policy.mode} budget — ${parts.join('; ')}`,
+  };
+}
+
+/**
+ * The budget policy applied to a LOCAL reading when there is no capacity
+ * snapshot (the Verse server is not running). Seat ids are unknown here, so
+ * the engine's seats are judged together, conservatively: any stored seat of
+ * this engine switched off closes it, and with no stored seat the mode's
+ * default for the engine decides (Codex is OFF by default — Mason, 2026-09-24).
+ * The strictest stored reserve applies to the local reading.
+ */
+function _localPolicyGate(engine: EngineId, usage: SubscriptionUsage): SubscriptionAllowResult | null {
+  const snapEngine = _snapshotEngine(engine);
+  if (!snapEngine) return null;
+  const policy = loadBudgetPolicy();
+  const stored = Object.values(policy.seats).filter((p) => engineOfSeatId(p.seatId) === snapEngine);
+  const applicable = stored.length > 0 ? stored : [defaultSeatPolicy(policy.mode, snapEngine, snapEngine)];
+  if (applicable.some((p) => !p.enabled)) {
+    return {
+      allowed: false,
+      reason: `${engine} is switched off for autonomy in the ${policy.mode} budget (Verse → Budget)`,
+    };
+  }
+  const reserve = Math.max(...applicable.map((p) => p.reservePercent));
+  const ceiling = 100 - reserve;
+  if (usage.usedPercent >= ceiling) {
+    return {
+      allowed: false,
+      reason:
+        `${engine} subscription window ${usage.usedPercent}% used; the ${policy.mode} budget keeps ${reserve}% ` +
+        `for interactive use, so autonomy stops at ${ceiling}%`,
+    };
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -342,7 +563,15 @@ function _aggregateSharedUsage(engine: EngineId, cfg: unknown): SubscriptionUsag
     if (!sq || sq.mode !== 'filesystem' || !sq.path || sq.trustedCoherentStorage !== true) return null;
 
     const store = new SharedStore(sq.path);
-    const entries = store.readUsageEntries(engine, { maxAgeMs: DEFAULT_LEDGER_MAX_AGE_MS });
+    // V3.10: an entry with no window label is a PRESENCE marker (published
+    // for claude, or codex with no sessions, as usedPercent 0). Zero there is
+    // "no reading", not "0% used" — letting it govern re-opened the fail-open.
+    // Claude never publishes a reading at all (it has no local signal), so no
+    // claude ledger entry can be one — whatever label a sibling wrote.
+    if (engine === 'claude') return null;
+    const entries = store.readUsageEntries(engine, { maxAgeMs: DEFAULT_LEDGER_MAX_AGE_MS })
+      .filter((e) => typeof e.windowLabel === 'string' && e.windowLabel.length > 0 && e.windowLabel !== 'unknown'
+        && typeof e.usedPercent === 'number');
 
     if (entries.length === 0) return null;
 

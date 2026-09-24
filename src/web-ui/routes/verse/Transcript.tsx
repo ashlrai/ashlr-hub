@@ -23,28 +23,46 @@
  * context"), and a chat started as a handoff opens with "Continued from
  * <source>", which links back to the chat it continues.
  *
+ * V3.10 — live reasoning and a transcript that costs one turn per frame:
+ *
+ *   - the model's reasoning streams in a ThinkingBlock ("Thinking · 12s ·
+ *     ~1.8k tok"), and the caret that used to be the only sign of life is a
+ *     LiveStatus line ("Running · 14s · npm test", "Writing · 38 tok/s",
+ *     Stop) with the engine's retry / preflight / watchdog notices under it;
+ *   - the store hands the transcript over in turn SEGMENTS that keep their
+ *     identity while unchanged; each segment's turn model is derived once
+ *     and every finished turn is a memoized TurnView, so a streamed token
+ *     re-renders the one live turn — not the session. Finished turns also
+ *     get `content-visibility: auto`, so the browser skips laying out the
+ *     ones scrolled out of view;
+ *   - a restored conversation (`recovered`) and a trimmed log
+ *     (`history-truncated`) say so in the transcript.
+ *
  * Follows the newest message unless the operator scrolled up, in which case
  * a "Jump to latest" control appears.
  */
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { VerseEngine, VerseSession } from '../../data/api-types.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { FileActivity } from './chat/FileActivity.js';
+import { derivePhaseFromTranscript, LiveStatus } from './chat/LiveStatus.js';
+import { ThinkingBlock } from './chat/ThinkingBlock.js';
 import { TranscriptNav } from './chat/TranscriptNav.js';
 import { toolAnchorId, type ToolFacts } from './chat/tool-semantics.js';
-import { buildTurns, createTurnCache, noteAnchorId, searchTurns, turnAnchorId } from './chat/turn-model.js';
+import { buildTurns, createTurnCache, noteAnchorId, searchTurns, turnAnchorId, type TurnBlock, type TurnCache } from './chat/turn-model.js';
 import { MessageMarkdown } from './MessageMarkdown.js';
-import { ToolUseCard } from './ToolUseCard.js';
+import { ToolUseCard, type ToolUseCardProps } from './ToolUseCard.js';
 import { ArrowDownIcon } from './verse-icons.js';
 import { ENGINE_LABEL, formatDuration } from './verse-model.js';
 import {
   formatTokens,
   groupTranscriptItems,
   type ToolGroupItem,
-  type ToolGroupMember,
   type Transcript as TranscriptModel,
   type TranscriptItem,
   type TranscriptRenderItem,
+  type TranscriptSegment,
+  type VerseLiveState,
 } from './verse-store.js';
 import styles from './Transcript.module.css';
 
@@ -60,6 +78,10 @@ export interface TranscriptProps {
   handoffFrom?: VerseSession['handoffFrom'] | null;
   /** Opens another chat (the handoff source). Absent → the source is named but not a link. */
   onOpenSession?: (sessionId: string) => void;
+  /** V3.10: transient signals of the running turn (streaming reasoning, progress, notices). */
+  live?: VerseLiveState | null;
+  /** V3.10: Stop on the live line. Absent → the line shows no Stop (the composer still has one). */
+  onStop?: () => void;
 }
 
 type CompactionItem = Extract<TranscriptItem, { kind: 'compaction' }>;
@@ -81,13 +103,60 @@ export function describeCompaction(item: Pick<CompactionItem, 'trigger' | 'preTo
   return `${who} compacted its context${took}`;
 }
 
+/**
+ * What an error `code` (V3.10, VERSE_ERROR_CODES) means for the operator.
+ * The message itself is the CLI's own words; this is the "so what now".
+ */
+export function errorCodeHint(code: string | null): string | null {
+  switch (code) {
+    case 'native-thread-missing':
+      return 'The CLI no longer has this chat’s saved conversation (it may have expired). Continue in a fresh chat — the transcript here is intact.';
+    case 'session-in-use':
+      return 'The CLI says this chat’s native session is still held by another process. Wait for it to finish, or continue in a fresh chat.';
+    default:
+      return null;
+  }
+}
+
 const FOLLOW_THRESHOLD_PX = 48;
 /** Below this the session is short enough to scroll; chrome would be noise. */
 const NAV_MIN_TURNS = 3;
 /** How long a jumped-to element keeps its locator tint. */
 const FLASH_MS = 1400;
 
-export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, engine, handoffFrom = null, onOpenSession }: TranscriptProps) {
+/** One segment's derived turns — computed once per segment object. */
+interface SegmentModel {
+  turns: TurnBlock[];
+  facts: Map<string, ToolFacts>;
+  errorAnchors: string[];
+  /** turn-done items already explained by a preceding Stop / error in the same turn. */
+  explained: ReadonlySet<string>;
+}
+
+function explainedKeys(items: readonly TranscriptItem[]): Set<string> {
+  // A `turn-done ok:false` that follows the same turn's `cancelled`/`error`
+  // note is already explained; a second red "ended without a result" line
+  // would make every Stop look like a failure.
+  const out = new Set<string>();
+  let last: { turnId: string | null; kind: string } | null = null;
+  for (const item of items) {
+    // A compaction between a Stop and its turn-done explains nothing and
+    // hides nothing; it must not break the pairing.
+    if (item.kind === 'compaction') continue;
+    if (item.kind === 'turn-done' && !item.ok && last && last.turnId === item.turnId && (last.kind === 'cancelled' || last.kind === 'error')) {
+      out.add(item.key);
+    }
+    last = { turnId: item.turnId, kind: item.kind };
+  }
+  return out;
+}
+
+function deriveSegment(segment: TranscriptSegment, cache: TurnCache): SegmentModel {
+  const model = buildTurns(groupTranscriptItems(segment.items), cache);
+  return { turns: model.turns, facts: model.facts, errorAnchors: model.errorAnchors, explained: explainedKeys(segment.items) };
+}
+
+export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, engine, handoffFrom = null, onOpenSession, live = null, onStop }: TranscriptProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const turnNodes = useRef(new Map<string, HTMLElement>());
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -96,38 +165,43 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   const [query, setQuery] = useState('');
   const [matchIndex, setMatchIndex] = useState(-1);
   const [focusToken, setFocusToken] = useState(0);
-  const lastCount = useRef(0);
+  const lastVersion = useRef('');
 
-  // `transcript.items` is a fresh array on every streamed token, so both memos
-  // below miss on every frame. The cache is what keeps that from meaning "and
-  // therefore re-derive every tool call in the session, LCS diffs included".
-  // It is keyed by `toolUseId`, which outlives the rebuilt item objects.
+  // Per-segment derivation. The store returns an unchanged segment as the
+  // SAME object, so only the live turn's segment misses this cache while a
+  // reply streams; the tool-facts cache below additionally keeps a rebuilt
+  // segment from re-deriving tool calls whose results already landed.
   const turnCache = useRef(createTurnCache());
-  const rendered = useMemo(() => groupTranscriptItems(transcript.items), [transcript.items]);
-  const model = useMemo(() => buildTurns(rendered, turnCache.current), [rendered]);
-  const matches = useMemo(
-    () => searchTurns(model.turns, query, turnCache.current),
-    [model.turns, query],
+  const segmentModels = useRef(new WeakMap<TranscriptSegment, SegmentModel>());
+  const segments = useMemo<TranscriptSegment[]>(
+    () => transcript.segments ?? [{ key: 'all', items: transcript.items }],
+    [transcript],
   );
-  const matchKeys = useMemo(() => new Set(matches.map((m) => m.turnKey)), [matches]);
-
-  // A `turn-done ok:false` that follows the same turn's `cancelled`/`error`
-  // note is already explained; a second red "ended without a result" line
-  // would make every Stop look like a failure.
-  const explained = useMemo(() => {
-    const out = new Set<string>();
-    let last: { turnId: string | null; kind: string } | null = null;
-    for (const item of transcript.items) {
-      // A compaction between a Stop and its turn-done explains nothing and
-      // hides nothing; it must not break the pairing.
-      if (item.kind === 'compaction') continue;
-      if (item.kind === 'turn-done' && !item.ok && last && last.turnId === item.turnId && (last.kind === 'cancelled' || last.kind === 'error')) {
-        out.add(item.key);
-      }
-      last = { turnId: item.turnId, kind: item.kind };
+  const perSegment = useMemo(() => segments.map((segment) => {
+    let model = segmentModels.current.get(segment);
+    if (!model) {
+      model = deriveSegment(segment, turnCache.current);
+      segmentModels.current.set(segment, model);
+    }
+    return model;
+  }), [segments]);
+  const turns = useMemo(() => perSegment.flatMap((m) => m.turns), [perSegment]);
+  /** Index of each segment's first turn in `turns` (for the per-turn ordinal). */
+  const turnOffsets = useMemo(() => {
+    const out: number[] = [];
+    let n = 0;
+    for (const m of perSegment) {
+      out.push(n);
+      n += m.turns.length;
     }
     return out;
-  }, [transcript.items]);
+  }, [perSegment]);
+  const errorAnchors = useMemo(() => perSegment.flatMap((m) => m.errorAnchors), [perSegment]);
+  const matches = useMemo(
+    () => searchTurns(turns, query, turnCache.current),
+    [turns, query],
+  );
+  const matchKeys = useMemo(() => new Set(matches.map((m) => m.turnKey)), [matches]);
 
   const scrollToBottom = useCallback((behavior: ScrollBehavior = 'auto') => {
     const node = scroller.current;
@@ -180,9 +254,14 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   const jumpToTool = useCallback((toolUseId: string) => jumpToAnchor(toolAnchorId(toolUseId)), [jumpToAnchor]);
 
   const jumpToFirstError = useCallback(() => {
-    const anchor = model.errorAnchors[0];
+    const anchor = errorAnchors[0];
     if (anchor) jumpToAnchor(anchor);
-  }, [model.errorAnchors, jumpToAnchor]);
+  }, [errorAnchors, jumpToAnchor]);
+
+  const registerTurn = useCallback((key: string, node: HTMLElement | null) => {
+    if (node) turnNodes.current.set(key, node);
+    else turnNodes.current.delete(key);
+  }, []);
 
   const stepMatch = useCallback((delta: number) => {
     if (matches.length === 0) return;
@@ -195,30 +274,36 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
 
   useEffect(() => { setMatchIndex(-1); }, [query]);
 
+  // Read through a ref so the handlers below stay stable while a reply
+  // streams (`turns` is a new array every frame); otherwise the document
+  // keydown listener would be torn down and re-added per token.
+  const turnsRef = useRef(turns);
+  turnsRef.current = turns;
+
   /** Move focus n turns from whichever turn currently holds it. */
   const stepTurn = useCallback((delta: number) => {
-    const turns = model.turns;
-    if (turns.length === 0) return;
+    const list = turnsRef.current;
+    if (list.length === 0) return;
     const active = scroller.current?.ownerDocument?.activeElement;
     const currentKey = active instanceof HTMLElement ? active.getAttribute('data-turn-key') : null;
-    const index = currentKey ? turns.findIndex((t) => t.key === currentKey) : -1;
+    const index = currentKey ? list.findIndex((t) => t.key === currentKey) : -1;
     const next = index < 0
-      ? (delta > 0 ? 0 : turns.length - 1)
-      : Math.max(0, Math.min(turns.length - 1, index + delta));
-    jumpToTurn(turns[next]!.key);
-  }, [model.turns, jumpToTurn]);
+      ? (delta > 0 ? 0 : list.length - 1)
+      : Math.max(0, Math.min(list.length - 1, index + delta));
+    jumpToTurn(list[next]!.key);
+  }, [jumpToTurn]);
 
   // ⌘F focuses the in-chat search; Alt+↑/↓ steps turns from anywhere EXCEPT a
   // text field, where the OS already owns those chords for word/paragraph
   // movement and the composer must keep them.
   useEffect(() => {
-    if (model.turns.length === 0) return;
+    if (turns.length === 0) return;
     const onKey = (event: globalThis.KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing = target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement
         || target?.isContentEditable === true;
       if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'f') {
-        if (model.turns.length < NAV_MIN_TURNS) return;
+        if (turns.length < NAV_MIN_TURNS) return;
         event.preventDefault();
         setFocusToken((n) => n + 1);
         return;
@@ -230,7 +315,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [model.turns.length, stepTurn]);
+  }, [turns.length, stepTurn]);
 
   /** Plain ↑/↓ once a turn container itself has focus. */
   function onListKeyDown(event: KeyboardEvent<HTMLOListElement>) {
@@ -238,20 +323,32 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     if (!target?.hasAttribute('data-turn-key')) return;
     if (event.key === 'ArrowDown') { event.preventDefault(); stepTurn(1); }
     else if (event.key === 'ArrowUp') { event.preventDefault(); stepTurn(-1); }
-    else if (event.key === 'Home') { event.preventDefault(); jumpToTurn(model.turns[0]!.key); }
-    else if (event.key === 'End') { event.preventDefault(); jumpToTurn(model.turns[model.turns.length - 1]!.key); }
+    else if (event.key === 'Home') { event.preventDefault(); jumpToTurn(turns[0]!.key); }
+    else if (event.key === 'End') { event.preventDefault(); jumpToTurn(turns[turns.length - 1]!.key); }
   }
 
-  // Auto-follow new content only while pinned to the bottom.
+  // ---- live turn -----------------------------------------------------------
+  const running = transcript.live;
+  const liveThinking = running && live?.thinking && live.thinking.turnId === live.turnId ? live.thinking : null;
+  const lastSegmentItems = segments.length > 0 ? segments[segments.length - 1]!.items : transcript.items;
+  const derivedPhase = useMemo(
+    () => derivePhaseFromTranscript(lastSegmentItems, { thinking: liveThinking }),
+    [lastSegmentItems, liveThinking],
+  );
+  const liveState = useMemo<VerseLiveState>(() => live ?? {
+    turnId: null, startedAt: null, progress: null, thinking: null, notice: null, settledTurnId: null,
+  }, [live]);
+
+  // Auto-follow new content only while pinned to the bottom. "New content"
+  // includes the live parts: streamed reasoning and a notice appearing.
+  const lastItem = transcript.items[transcript.items.length - 1];
+  const version = `${transcript.items.length}:${lastItem?.kind === 'assistant' ? lastItem.text.length : 0}:${liveThinking?.text.length ?? -1}:${live?.notice?.receivedAt ?? 0}:${running ? 1 : 0}`;
   useLayoutEffect(() => {
-    const count = transcript.items.length;
-    const lastItem = transcript.items[count - 1];
-    const grew = count !== lastCount.current || lastItem?.kind === 'assistant' && lastItem.streaming;
-    lastCount.current = count;
-    if (!grew) return;
+    if (version === lastVersion.current) return;
+    lastVersion.current = version;
     if (following) scrollToBottom();
     else setUnseen(true);
-  }, [transcript, following, scrollToBottom]);
+  }, [version, following, scrollToBottom]);
 
   useEffect(() => {
     if (loaded) scrollToBottom();
@@ -285,9 +382,9 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
 
   return (
     <div className={styles.transcriptWrap}>
-      {model.turns.length >= NAV_MIN_TURNS ? (
-        <TranscriptNav turns={model.turns} query={query} onQuery={setQuery} matches={matches} matchIndex={matchIndex}
-          onStepMatch={stepMatch} errorCount={model.errorAnchors.length} onJumpError={jumpToFirstError}
+      {turns.length >= NAV_MIN_TURNS ? (
+        <TranscriptNav turns={turns} query={query} onQuery={setQuery} matches={matches} matchIndex={matchIndex}
+          onStepMatch={stepMatch} errorCount={errorAnchors.length} onJumpError={jumpToFirstError}
           onJumpTurn={jumpToTurn} focusToken={focusToken} />
       ) : null}
       <div ref={scroller} className={styles.transcript} onScroll={onScroll} role="log" aria-live="polite" aria-relevant="additions text">
@@ -302,7 +399,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
             ) : <span className={styles.continuedTitle}>{handoffFrom.title || 'Untitled chat'}</span>}
           </p>
         ) : null}
-        {transcript.items.length === 0 ? (
+        {transcript.items.length === 0 && !running ? (
           <div className={styles.empty}>
             <p className={styles.emptyTitle}>{handoffFrom ? 'Review the handoff, then send it.' : 'Say something to begin.'}</p>
             <p className={styles.emptyBody}>{emptyHint ?? (handoffFrom
@@ -311,37 +408,22 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
           </div>
         ) : null}
         <ol className={styles.list} onKeyDown={onListKeyDown}>
-          {model.turns.map((turn, index) => (
-            <li
-              key={turn.key}
-              id={turnAnchorId(turn.key)}
-              ref={(node) => {
-                if (node) turnNodes.current.set(turn.key, node);
-                else turnNodes.current.delete(turn.key);
-              }}
-              className={styles.turn}
-              data-turn-key={turn.key}
-              data-status={turn.status}
-              data-match={matchKeys.has(turn.key) ? (turn.key === activeMatchKey ? 'active' : 'true') : undefined}
-              tabIndex={-1}
-              aria-label={`Turn ${index + 1} of ${model.turns.length}`}
-            >
-              <ol className={styles.turnItems}>
-                {turn.items.map((item) => renderItem(item, model.facts, explained, engine))}
-              </ol>
-              {turn.files.length > 0 ? <FileActivity files={turn.files} onJump={jumpToTool} /> : null}
-              {turn.errorCount > 0 && turn.firstErrorAnchor ? (
-                <button type="button" className={styles.turnErrorJump}
-                  onClick={() => jumpToAnchor(turn.firstErrorAnchor!)}>
-                  {turn.errorCount} failure{turn.errorCount === 1 ? '' : 's'} in this turn — jump to the first
-                </button>
-              ) : null}
+          {perSegment.map((segment, s) => segment.turns.map((turn, t) => (
+            <TurnView key={turn.key} turn={turn} index={turnOffsets[s]! + t} facts={segment.facts} explained={segment.explained}
+              engine={engine} match={matchKeys.has(turn.key) ? (turn.key === activeMatchKey ? 'active' : 'true') : undefined}
+              onJumpTool={jumpToTool} onJumpAnchor={jumpToAnchor} registerNode={registerTurn} />
+          )))}
+          {/* The reasoning streaming right now — it becomes an ordinary
+              thinking item the moment its persisted block lands. */}
+          {liveThinking ? (
+            <li className={styles.item} data-kind="thinking-live">
+              <ThinkingBlock key={`live-${liveThinking.startedAt}`} text={liveThinking.text} streaming startedAt={liveThinking.startedAt}
+                estimatedTokens={liveThinking.estimatedTokens} defaultOpen />
             </li>
-          ))}
-          {/* Waiting for the first token: the caret alone. No skeletons mid-stream (DESIGN §5). */}
-          {transcript.live && !transcript.items.some((i) => i.kind === 'assistant' && i.streaming) ? (
-            <li className={`${styles.item} ${styles.assistant}`} data-kind="pending" aria-label="Waiting for the agent">
-              <span className={styles.caret} aria-hidden="true" />
+          ) : null}
+          {running ? (
+            <li className={styles.item} data-kind="live-status" aria-label="The agent is working">
+              <LiveStatus live={liveState} derived={derivedPhase} onStop={onStop} />
             </li>
           ) : null}
         </ol>
@@ -356,7 +438,68 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   );
 }
 
-function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, explained: Set<string>, engine?: VerseEngine) {
+// ---------------------------------------------------------------------------
+// One turn
+// ---------------------------------------------------------------------------
+
+interface TurnViewProps {
+  turn: TurnBlock;
+  index: number;
+  facts: Map<string, ToolFacts>;
+  explained: ReadonlySet<string>;
+  engine?: VerseEngine;
+  match: 'active' | 'true' | undefined;
+  onJumpTool: (toolUseId: string) => void;
+  onJumpAnchor: (id: string) => void;
+  registerNode: (key: string, node: HTMLElement | null) => void;
+}
+
+/**
+ * Memoized on its props, all of which are stable for a finished turn: the
+ * TurnBlock comes from a cached segment model, the callbacks are stable, and
+ * `match` only changes for turns a search touches. So a streamed token
+ * re-renders exactly one TurnView.
+ */
+const TurnView = memo(function TurnView({ turn, index, facts, explained, engine, match, onJumpTool, onJumpAnchor, registerNode }: TurnViewProps) {
+  const running = turn.status === 'running';
+  return (
+    <li
+      id={turnAnchorId(turn.key)}
+      ref={(node) => registerNode(turn.key, node)}
+      // A settled turn no longer changes: let the browser skip its layout
+      // and paint while it is off screen (Transcript.module.css .turnSettled).
+      className={`${styles.turn} ${running ? '' : styles.turnSettled}`}
+      data-turn-key={turn.key}
+      data-status={turn.status}
+      data-match={match}
+      tabIndex={-1}
+      aria-label={`Turn ${index + 1}`}
+    >
+      <ol className={styles.turnItems}>
+        {turn.items.map((item) => renderItem(item, facts, explained, running, engine))}
+      </ol>
+      {turn.files.length > 0 ? <FileActivity files={turn.files} onJump={onJumpTool} /> : null}
+      {turn.errorCount > 0 && turn.firstErrorAnchor ? (
+        <button type="button" className={styles.turnErrorJump}
+          onClick={() => onJumpAnchor(turn.firstErrorAnchor!)}>
+          {turn.errorCount} failure{turn.errorCount === 1 ? '' : 's'} in this turn — jump to the first
+        </button>
+      ) : null}
+    </li>
+  );
+});
+
+/**
+ * A tool card re-renders only when what it shows changed. `result` is a
+ * fresh object on every rebuild of the live turn, so identity is not enough;
+ * `input` and `facts` are stable (the event's own object, the facts cache).
+ */
+const MemoToolUseCard = memo(ToolUseCard, (a: ToolUseCardProps, b: ToolUseCardProps) =>
+  a.name === b.name && a.input === b.input && a.toolUseId === b.toolUseId && a.durationMs === b.durationMs &&
+  a.facts === b.facts && a.result?.output === b.result?.output && a.result?.isError === b.result?.isError &&
+  (a.result === null) === (b.result === null));
+
+function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, explained: ReadonlySet<string>, running: boolean, engine?: VerseEngine) {
   switch (item.kind) {
     case 'user':
       return (
@@ -373,13 +516,17 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
     case 'thinking':
       return (
         <li key={item.key} className={styles.item} data-kind="thinking">
-          <ThinkingBlock item={item} />
+          <ThinkingBlock text={item.text} redacted={item.redacted} durationMs={item.durationMs}
+            estimatedTokens={item.estimatedTokens} kind={item.thinkingKind}
+            // Open while its turn runs (it continues what the operator just
+            // watched stream); a finished turn's reasoning starts folded.
+            defaultOpen={running} stateKey={`thinking:${item.key}`} />
         </li>
       );
     case 'tool':
       return (
         <li key={item.key} className={styles.item} data-kind="tool">
-          <ToolUseCard name={item.name} input={item.input} result={item.result} toolUseId={item.toolUseId}
+          <MemoToolUseCard name={item.name} input={item.input} result={item.result} toolUseId={item.toolUseId}
             durationMs={item.durationMs} facts={facts.get(item.toolUseId)} />
         </li>
       );
@@ -389,12 +536,17 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
           <ToolGroup item={item} facts={facts} />
         </li>
       );
-    case 'error':
+    case 'error': {
+      const hint = errorCodeHint(item.code);
       return (
-        <li key={item.key} className={styles.item} data-kind="error">
-          <div id={noteAnchorId(item.key)} role="alert" className={`${styles.note} ${styles.noteError}`}>{item.message}</div>
+        <li key={item.key} className={styles.item} data-kind="error" data-code={item.code ?? undefined}>
+          <div id={noteAnchorId(item.key)} role="alert" className={`${styles.note} ${styles.noteError}`}>
+            {item.message}
+            {hint ? <span className={styles.noteHint}>{hint}</span> : null}
+          </div>
         </li>
       );
+    }
     case 'compaction':
       // A divider, not a message: the conversation continues on both sides of
       // it, but the agent sees everything above it only as a summary.
@@ -406,6 +558,26 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
             <span className={styles.compactionNote}>Earlier turns now reach the agent only as a summary; the full transcript stays here.</span>
           </span>
           <span className={styles.compactionRule} aria-hidden="true" />
+        </li>
+      );
+    case 'truncated':
+      return (
+        <li key={item.key} className={`${styles.item} ${styles.compaction}`} data-kind="history-truncated">
+          <span className={styles.compactionRule} aria-hidden="true" />
+          <span className={styles.compactionText}>
+            <span className={styles.compactionTitle}>Older history trimmed</span>
+            <span className={styles.compactionNote}>This chat’s log reached its size cap, so its oldest turns were dropped here. The agent’s own conversation is unaffected.</span>
+          </span>
+          <span className={styles.compactionRule} aria-hidden="true" />
+        </li>
+      );
+    case 'recovered':
+      return (
+        <li key={item.key} className={styles.item} data-kind="recovered">
+          <div className={`${styles.note} ${styles.noteRecovered}`} role="status">
+            <span className={styles.noteLead}>{item.how === 'handoff' ? 'Recovered from the handoff note' : 'Recovered in a new session'}</span>
+            {' — '}{item.message}
+          </div>
         </li>
       );
     case 'cancelled':
@@ -432,20 +604,29 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
   }
 }
 
-function ThinkingBlock({ item }: { item: Extract<ToolGroupMember, { kind: 'thinking' }> }) {
-  return (
-    <details className={styles.thinking} data-state-key={`thinking:${item.key}`}>
-      <summary className={styles.thinkingSummary}>Thinking</summary>
-      <div className={styles.thinkingBody}>{item.text}</div>
-    </details>
-  );
+function sameMembers(a: ToolGroupItem, b: ToolGroupItem, fa: Map<string, ToolFacts>, fb: Map<string, ToolFacts>): boolean {
+  if (a === b) return fa === fb || a.items.every((m) => m.kind !== 'tool' || fa.get(m.toolUseId) === fb.get(m.toolUseId));
+  if (a.key !== b.key || a.items.length !== b.items.length || a.errorCount !== b.errorCount || a.pending !== b.pending ||
+    a.spanMs !== b.spanMs || a.summary !== b.summary) return false;
+  for (let i = 0; i < a.items.length; i += 1) {
+    const x = a.items[i]!;
+    const y = b.items[i]!;
+    if (x.key !== y.key || x.kind !== y.kind) return false;
+    if (x.kind === 'tool' && y.kind === 'tool') {
+      if (x.result?.output !== y.result?.output || x.result?.isError !== y.result?.isError || x.durationMs !== y.durationMs) return false;
+      if (fa.get(x.toolUseId) !== fb.get(y.toolUseId)) return false;
+    } else if (x.kind === 'thinking' && y.kind === 'thinking') {
+      if (x.text !== y.text || x.durationMs !== y.durationMs || x.estimatedTokens !== y.estimatedTokens) return false;
+    }
+  }
+  return true;
 }
 
 /**
  * The folded run: `6 tools · Read ×4, Edit ×2 · 12s`. Failures tint the left
  * rule and say so in words — never the colour on its own (DESIGN §6).
  */
-function ToolGroup({ item, facts }: { item: ToolGroupItem; facts: Map<string, ToolFacts> }) {
+const ToolGroup = memo(function ToolGroup({ item, facts }: { item: ToolGroupItem; facts: Map<string, ToolFacts> }) {
   const state = item.pending
     ? 'running'
     : item.errorCount > 0
@@ -467,13 +648,14 @@ function ToolGroup({ item, facts }: { item: ToolGroupItem; facts: Map<string, To
           {item.items.map((member) => (
             <li key={member.key} data-member={member.kind}>
               {member.kind === 'tool'
-                ? <ToolUseCard name={member.name} input={member.input} result={member.result}
+                ? <MemoToolUseCard name={member.name} input={member.input} result={member.result}
                     toolUseId={member.toolUseId} durationMs={member.durationMs} facts={facts.get(member.toolUseId)} />
-                : <ThinkingBlock item={member} />}
+                : <ThinkingBlock text={member.text} redacted={member.redacted} durationMs={member.durationMs}
+                    estimatedTokens={member.estimatedTokens} kind={member.thinkingKind} stateKey={`thinking:${member.key}`} />}
             </li>
           ))}
         </ol>
       </div>
     </details>
   );
-}
+}, (a, b) => sameMembers(a.item, b.item, a.facts, b.facts));

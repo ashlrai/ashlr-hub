@@ -1,0 +1,101 @@
+/**
+ * Reasoning reads as a quieter voice beside the answer: tertiary text, a
+ * 2px rule, no box (DESIGN §5 — role is weight and rule, never a card).
+ * While it streams the glyph breathes in the running colour; the label's
+ * figures are tabular so a ticking clock does not jitter the line.
+ */
+.thinking {
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  min-width: 0;
+}
+
+.summary,
+.line {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-xs);
+  max-width: 100%;
+}
+.summary {
+  cursor: pointer;
+  list-style: none;
+  border-radius: var(--radius-xs);
+  padding-right: var(--space-2);
+  transition: color var(--duration-fast) var(--ease-standard);
+}
+.summary::-webkit-details-marker { display: none; }
+.summary:hover { color: var(--text-secondary); }
+
+.chevron {
+  display: inline-block;
+  width: 0.5em;
+  flex: none;
+}
+.chevron::before {
+  content: '›';
+  display: inline-block;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+.thinking[open] .chevron::before { transform: rotate(90deg); }
+
+.glyph {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+}
+.glyph[data-live] {
+  background: var(--status-running-solid);
+  animation: thinking-breathe 1.6s var(--ease-standard) infinite;
+}
+
+.label {
+  font-family: var(--font-display);
+  font-variant-numeric: tabular-nums;
+  font-style: italic;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.kind,
+.hidden {
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.kind {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+}
+
+.body {
+  margin-top: var(--space-2);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--border-subtle);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: var(--text-sm-line-relaxed);
+  color: var(--text-secondary);
+  /* A long chain of thought scrolls inside itself instead of pushing the
+     answer a screen away. */
+  max-height: min(40vh, 480px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.thinking[data-streaming] .body { border-left-color: var(--status-running-solid); }
+
+@keyframes thinking-breathe { 50% { opacity: 0.35; } }
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .glyph[data-live] { animation: none; }
+  :root:not([data-motion="full"]) .chevron::before { transition: none; }
+}
+:root[data-motion="reduce"] .glyph[data-live] { animation: none; }
+:root[data-motion="reduce"] .chevron::before { transition: none; }

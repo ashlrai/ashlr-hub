@@ -111,6 +111,44 @@ function withFoundry(foundry: NonNullable<AshlrConfig['foundry']>): AshlrConfig 
   return { ...baseCfg(), foundry };
 }
 
+/**
+ * V3.10: the fabric gateway is an AUTONOMOUS dispatch path (daemon +
+ * concurrent fleet dispatch), so its subscription gate fails closed on
+ * unknown usage and applies the operator budget — whose default keeps Codex
+ * OFF for autonomy (Mason, 2026-09-24). Tests about RESOURCE demotion (not
+ * about the unknown-usage gate) therefore grant explicit autonomy headroom in
+ * the tmp HOME: a budget that switches Codex on at 0% reserve, plus a fresh,
+ * low reading for Claude and Codex in the Verse capacity snapshot — exactly
+ * what the account collector writes. Without it the gateway correctly
+ * throttles both frontiers and the demotion under test is never reached.
+ */
+async function grantAutonomyHeadroom(): Promise<void> {
+  mkdirSync(join(tmpHome, '.ashlr'), { recursive: true, mode: 0o700 });
+  writeFileSync(join(tmpHome, '.ashlr', 'budget.json'), JSON.stringify({
+    mode: 'balanced',
+    seats: { codex: { seatId: 'codex', enabled: true, reservePercent: 0 } },
+    updatedAt: '2026-09-24T00:00:00.000Z',
+  }), { mode: 0o600 });
+  const { writeCapacitySnapshot } = await import('../src/core/routing/budget-store.js');
+  const now = new Date();
+  const seat = (seatId: 'claude' | 'codex', windowIds: string[]) => ({
+    seatId,
+    engine: seatId,
+    label: seatId,
+    free: false,
+    windows: windowIds.map((id) => ({ id, usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false })),
+    signedOut: false,
+    reachable: null,
+    contextWindow: 200_000,
+    observedAt: now.toISOString(),
+    spentTodayUsd: null,
+  });
+  writeCapacitySnapshot([
+    seat('claude', ['five_hour', 'seven_day']),
+    seat('codex', ['codex_codex_primary']),
+  ], now);
+}
+
 let _seq = 0;
 const FIXED_TS = '2026-06-29T00:00:00.000Z';
 
@@ -795,6 +833,9 @@ describe('M252 Gateway — resource-aware demote', () => {
   });
 
   it('resourceAware=true with unknown claude demotes to sensed open codex', async () => {
+    // "unknown claude" here is the RESOURCE monitor's view (stale stats-cache);
+    // the subscription gate needs its own fresh readings — see grantAutonomyHeadroom.
+    await grantAutonomyHeadroom();
     writeFileSync(
       join(tmpHome, '.claude', 'stats-cache.json'),
       JSON.stringify({
@@ -836,6 +877,7 @@ describe('M252 Gateway — resource-aware demote', () => {
   });
 
   it('resourceAware=true routes generated capture repairs around exhausted frontier capacity', async () => {
+    await grantAutonomyHeadroom(); // V3.10 autonomy gate — see helper
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue(null),
     }));
@@ -1062,6 +1104,7 @@ describe('M252 Gateway — resource-aware demote', () => {
   });
 
   it('final resource guard re-senses after m53 invalidates resource cache', async () => {
+    await grantAutonomyHeadroom(); // V3.10 autonomy gate — see helper
     vi.doMock('../src/core/observability/codex-source.js', () => ({
       readCodexRateLimits: vi.fn().mockReturnValue({
         primary: { usedPercent: 20, windowMinutes: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
@@ -1122,6 +1165,76 @@ describe('M252 Gateway — resource-aware demote', () => {
     const badCfg = { foundry: { fabric: { gateway: true, resourceAware: true } } } as unknown as AshlrConfig;
 
     await expect(decide(makeItem('issue'), badCfg)).resolves.toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 6b. V3.10 — the gateway is autonomous: unknown usage + budget modes close it
+// ---------------------------------------------------------------------------
+
+describe('M252 Gateway — V3.10 autonomy subscription gate', () => {
+  async function decideHardItemOn(engine: 'claude' | 'codex') {
+    vi.doMock('../src/core/run/engines.js', async () => ({
+      ...(await vi.importActual<typeof import('../src/core/run/engines.js')>(
+        '../src/core/run/engines.js',
+      )),
+      engineInstalled: () => true,
+    }));
+    const { decide } = await import('../src/core/fabric/gateway.js');
+    const cfg = withFoundry({
+      allowedBackends: ['builtin', engine] as EngineId[],
+      fabric: { gateway: true },
+    });
+    return decide(makeItem('security', { effort: 5, score: 10 }), cfg);
+  }
+
+  it('no capacity snapshot → claude is throttled as unknown usage (fail closed)', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+    const decision = await decideHardItemOn('claude');
+    expect(decision.backend).toBe('claude');
+    expect(decision.reason).toMatch(/^throttled: subscription window/);
+    expect(decision.reason).toContain('unknown usage is not headroom');
+    expect(decision.trace.some((t) => t.stage === 'subscriptionThrottle')).toBe(true);
+  });
+
+  it('balanced budget: a fresh claude reading above the 70% five-hour ceiling is throttled', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue(null),
+    }));
+    const { writeCapacitySnapshot } = await import('../src/core/routing/budget-store.js');
+    const now = new Date();
+    writeCapacitySnapshot([{
+      seatId: 'claude',
+      engine: 'claude',
+      label: 'Claude Code',
+      free: false,
+      windows: [
+        { id: 'five_hour', usedPercent: 80, resetsAt: null, resetDescription: null, limitReached: false },
+        { id: 'seven_day', usedPercent: 10, resetsAt: null, resetDescription: null, limitReached: false },
+      ],
+      signedOut: false,
+      reachable: null,
+      contextWindow: 200_000,
+      observedAt: now.toISOString(),
+      spentTodayUsd: null,
+    }], now);
+    const decision = await decideHardItemOn('claude');
+    expect(decision.reason).toMatch(/^throttled: subscription window/);
+    expect(decision.reason).toContain('balanced budget');
+  });
+
+  it('default budget: codex is OFF for autonomy even with a fresh, low local reading', async () => {
+    vi.doMock('../src/core/observability/codex-source.js', () => ({
+      readCodexRateLimits: vi.fn().mockReturnValue({
+        primary: { usedPercent: 5, windowMinutes: 300, resetsAt: Math.floor(Date.now() / 1000) + 3600 },
+      }),
+    }));
+    const decision = await decideHardItemOn('codex');
+    expect(decision.backend).toBe('codex');
+    expect(decision.reason).toMatch(/^throttled: subscription window/);
+    expect(decision.reason).toContain('switched off for autonomy');
   });
 });
 

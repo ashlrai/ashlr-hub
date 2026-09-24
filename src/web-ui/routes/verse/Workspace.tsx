@@ -51,8 +51,13 @@
  *  - The header's seat pill carries the seat's capacity when it is tight or
  *    spent. Quietly: a healthy seat adds nothing to the strip, because a
  *    badge that is always there is a badge nobody reads.
+ *  - V3.10: the SEAT HEALTH banner (routes/verse/health, unit A2) sits under
+ *    the strip, selected chat or not — a signed-out or exhausted seat is news
+ *    before you pick a chat, not only once a send is refused. It takes no
+ *    room while every seat is fine. The Composer's ComposerSeatBlock is the
+ *    per-chat half: it blocks a send on THIS chat's seat and offers others.
  */
-import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type KeyboardEvent, type ReactNode } from 'react';
 import type { VerseContextMode, VerseProject, VerseSeat, VerseSession } from '../../data/api-types.js';
 import { engineSupportsModes, hasExpansiveMode } from '../../../core/verse/context-math.js';
 import { saveDraft } from './chat/composer-state.js';
@@ -66,13 +71,16 @@ import type { SeatChoice } from './SeatSelector.js';
 import { Transcript } from './Transcript.js';
 import { PanelIcon, SidebarIcon, TrashIcon, VerseMark } from './verse-icons.js';
 import { CapacityChip } from './SeatCapacity.js';
+import { seatHealthIssues } from './health/health-model.js';
+import { SeatHealthBannerView } from './health/SeatHealthBanner.js';
+import { useSeatHealth } from './health/useSeatHealth.js';
 import { seatSubscription, seatSubscriptionSentence, worthFlagging } from './seat-subscription.js';
 import { projectName, seatById, seatPillLabel, sessionContextBudget } from './verse-model.js';
 import { invalidateVerseLists } from './verse-queries.js';
 import { lastTurnActivityAt, setVerseSession } from './verse-store.js';
 import { rememberVerseSeat } from './verse-ui-store.js';
 import { useSeatsRefresh } from './useSeatsRefresh.js';
-import type { VerseSessionView } from './useVerseSession.js';
+import { useVerseLive, useVerseTranscript, type VerseSessionView } from './useVerseSession.js';
 import styles from './Workspace.module.css';
 
 export interface WorkspaceProps {
@@ -177,6 +185,10 @@ export function Workspace(props: WorkspaceProps) {
     if (editing) titleInput.current?.select();
   }, [editing]);
 
+  // Above the no-selection early return (hooks run unconditionally). The head's
+  // `events` only changes on structural events, so this is not per token.
+  const lastTurnAtMemo = useMemo(() => lastTurnActivityAt(view.events), [view.events]);
+
   /**
    * The two pane toggles — always both rendered, always adjacent, so they
    * read as one control for "which panes are open" rather than as whichever
@@ -204,6 +216,7 @@ export function Workspace(props: WorkspaceProps) {
           <div className={styles.headerSpacer} />
           <div className={styles.actions}>{toggles}</div>
         </header>
+        <WorkspaceSeatHealth seats={seats} />
         <div className={styles.emptyState}>
           <span className={styles.emptyMark} aria-hidden="true"><VerseMark size={36} /></span>
           <h1 className={styles.emptyTitle}>{hasAnySessions ? 'Pick a chat, or start a new one' : 'No chats yet — ⌘N'}</h1>
@@ -269,7 +282,7 @@ export function Workspace(props: WorkspaceProps) {
   const compactUnavailableReason = session !== null && session.turnCount === 0 ? 'nothing to compact yet — this chat has no turns' : null;
   // Idle-cache advice is timed from the last PROVIDER round trip in the log,
   // never from `updatedAt`, which a rename or mode switch also moves.
-  const lastTurnAt = lastTurnActivityAt(view.events);
+  const lastTurnAt = lastTurnAtMemo;
 
   return (
     <section className={styles.workspace} aria-labelledby={headingId}>
@@ -364,6 +377,7 @@ export function Workspace(props: WorkspaceProps) {
         </div>
       </header>
 
+      <WorkspaceSeatHealth seats={seats} />
       {session && budget ? (
         <ContextAdvice session={session} budget={budget} modesAvailable={modesAvailable} dispatchEnabled={dispatchEnabled}
           modeBusy={modeState.busy} onHandoff={() => { setHandoffCreated(null); setHandoffOpen(true); }}
@@ -383,8 +397,9 @@ export function Workspace(props: WorkspaceProps) {
         </div>
       ) : null}
 
-      <Transcript transcript={view.transcript} loaded={view.loaded} loadError={view.loadError} onRetry={onRetry}
-        engine={session?.engine} handoffFrom={session?.handoffFrom ?? null} onOpenSession={onOpenSession} />
+      <LiveTranscript sessionId={view.sessionId} transcriptOverride={view.transcript} loaded={view.loaded} loadError={view.loadError}
+        onRetry={onRetry} engine={session?.engine} handoffFrom={session?.handoffFrom ?? null} onOpenSession={onOpenSession}
+        onStop={running ? onStop : undefined} />
 
       {session ? (
         <Composer key={session.id} sessionId={session.id} seats={seats} seat={{ seatId: session.seatId, model: session.model }}
@@ -402,6 +417,42 @@ export function Workspace(props: WorkspaceProps) {
       ) : null}
       <MutationTokenDialog {...gate.dialog} tokenLabel="Mutation token" tokenHelp="the mutation token ashlr verse printed" />
     </section>
+  );
+}
+
+/**
+ * The transcript, subscribed on its own (V3.10). Everything above re-renders
+ * when the session HEAD changes (status, usage, title); only this subtree
+ * re-renders as tokens and reasoning stream in — at most once per animation
+ * frame, because the stream batches its frames.
+ *
+ * `transcriptOverride` is the hand-built transcript a test or preview view
+ * carries (VerseSessionView.transcript); the live app never sets it.
+ */
+function LiveTranscript({ sessionId, transcriptOverride, ...props }: {
+  sessionId: string;
+  transcriptOverride: VerseSessionView['transcript'];
+} & Omit<ComponentProps<typeof Transcript>, 'transcript' | 'live'>) {
+  const transcript = useVerseTranscript(sessionId);
+  const live = useVerseLive(sessionId);
+  return <Transcript {...props} transcript={transcriptOverride ?? transcript} live={live} />;
+}
+
+/**
+ * The seat health banner in the transcript's reading column. The wrapper
+ * (`.advice`, the same column the context notes use) is rendered only when
+ * there is something to say, so a healthy roster leaves no padding behind.
+ * Polls /api/verse/health every 30 s while visible (a cached read on the
+ * server; the sweep itself runs there every 10 min).
+ */
+function WorkspaceSeatHealth({ seats }: { seats: readonly VerseSeat[] }) {
+  const health = useSeatHealth();
+  const reports = health.data?.seats ?? [];
+  if (seatHealthIssues(reports, seats).length === 0) return null;
+  return (
+    <div className={styles.advice}>
+      <SeatHealthBannerView reports={reports} seats={seats} />
+    </div>
   );
 }
 

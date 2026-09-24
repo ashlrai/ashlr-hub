@@ -37,9 +37,10 @@
  * fixed sentence, not a passthrough of whatever the tool printed.
  */
 
-import { spawnSync } from 'node:child_process';
-import { statSync } from 'node:fs';
-import { basename, isAbsolute } from 'node:path';
+import { execFile, spawnSync } from 'node:child_process';
+import { readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { basename, isAbsolute, join, resolve as resolvePath } from 'node:path';
 
 import { defaultBranch, isRepo, resolveGitHubOriginAuthority } from '../git.js';
 import type {
@@ -405,19 +406,220 @@ function emptySnapshot(
   };
 }
 
+// ---------------------------------------------------------------------------
+// PERF (3.10): caches
+// ---------------------------------------------------------------------------
+//
+// `GET /api/verse/github` froze the single-threaded server for ~0.5 s (five
+// synchronous `git` spawns per root for identity) and `?repo=` for ~0.7 s
+// (plus two `gh` network calls, 8 s ceiling). Two caches, used ONLY with the
+// real git/gh runners — an injected probe or runner (tests) is always called:
+//
+//   identity  (isRepo, default branch, nameWithOwner) — reused while a stat
+//             fingerprint of every file those answers read is unchanged
+//             (HEAD, config, origin/HEAD, packed-refs, the user's gitconfig),
+//             and for at most IDENTITY_MAX_AGE_MS in case of a config source
+//             the fingerprint cannot see (system config, XDG, includes).
+//   lists     (the two `gh` reads) — stale-while-revalidate: fresh for
+//             LIST_FRESH_MS; then the last answer is served, marked by its
+//             own `observedAt`, while ONE async refresh runs; past
+//             LIST_MAX_STALE_MS the caller waits for a live read.
+
+const IDENTITY_MAX_AGE_MS = 5 * 60_000;
+const LIST_FRESH_MS = 60_000;
+const LIST_MAX_STALE_MS = 10 * 60_000;
+const MAX_CACHED_ROOTS = 256;
+
+interface RootIdentity {
+  isRepo: boolean;
+  defaultBranch: string | null;
+  nameWithOwner: string | null;
+}
+
+interface ListsResult {
+  prRaw: unknown;
+  issueRaw: unknown;
+  observedAt: string;
+}
+
+const identityCache = new Map<string, { signature: string; at: number; identity: RootIdentity }>();
+const listCache = new Map<string, { value: ListsResult; at: number }>();
+const listInFlight = new Map<string, Promise<ListsResult>>();
+
+function boundedSet<V>(map: Map<string, V>, key: string, value: V): void {
+  if (!map.has(key) && map.size >= MAX_CACHED_ROOTS) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
+}
+
+function statToken(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${st.ino}:${st.size}:${st.mtimeMs}`;
+  } catch {
+    return '-';
+  }
+}
+
+/** Fingerprint of every local file the three identity answers depend on. */
+function identitySignature(path: string): string {
+  const dotGit = join(path, '.git');
+  let gitDir = dotGit;
+  try {
+    if (statSync(dotGit).isFile()) {
+      const m = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, 'utf8'));
+      if (m) gitDir = isAbsolute(m[1]!.trim()) ? m[1]!.trim() : resolvePath(path, m[1]!.trim());
+    }
+  } catch {
+    // Missing .git: the fingerprint still changes if one appears.
+  }
+  let commonDir = gitDir;
+  try {
+    const rel = readFileSync(join(gitDir, 'commondir'), 'utf8').trim();
+    if (rel) commonDir = isAbsolute(rel) ? rel : resolvePath(gitDir, rel);
+  } catch {
+    // Not a linked worktree.
+  }
+  return [
+    statToken(dotGit),
+    statToken(join(gitDir, 'HEAD')),
+    statToken(join(commonDir, 'config')),
+    statToken(join(gitDir, 'config.worktree')),
+    statToken(join(commonDir, 'refs', 'remotes', 'origin', 'HEAD')),
+    statToken(join(commonDir, 'packed-refs')),
+    statToken(join(homedir(), '.gitconfig')),
+    statToken(join(homedir(), '.config', 'git', 'config')),
+  ].join('|');
+}
+
+function probeIdentity(path: string, git: VerseGithubGitProbe): RootIdentity {
+  let repoIsGit = false;
+  try {
+    repoIsGit = git.isRepo(path);
+  } catch {
+    repoIsGit = false;
+  }
+  if (!repoIsGit) return { isRepo: false, defaultBranch: null, nameWithOwner: null };
+  let branch: string | null = null;
+  try {
+    branch = git.defaultBranch(path);
+  } catch {
+    branch = null;
+  }
+  let nameWithOwner: string | null = null;
+  try {
+    nameWithOwner = git.nameWithOwner(path);
+  } catch {
+    nameWithOwner = null;
+  }
+  return { isRepo: true, defaultBranch: branch, nameWithOwner };
+}
+
+function rootIdentity(path: string, opts: VerseGithubReadOptions): RootIdentity {
+  if (opts.git) return probeIdentity(path, opts.git);
+  const signature = identitySignature(path);
+  const hit = identityCache.get(path);
+  if (hit && hit.signature === signature && Date.now() - hit.at < IDENTITY_MAX_AGE_MS) return hit.identity;
+  const identity = probeIdentity(path, realGit);
+  boundedSet(identityCache, path, { signature, at: Date.now(), identity });
+  return identity;
+}
+
+function listKey(path: string, prLimit: number, issueLimit: number): string {
+  return `${path}\0${prLimit}\0${issueLimit}`;
+}
+
+/** Async twin of realGh — same binary, args, env and failure contract. */
+function realGhAsync(cwd: string, args: readonly string[]): Promise<string | null> {
+  return new Promise((resolveOut) => {
+    try {
+      execFile(GH_BIN, [...args], {
+        cwd,
+        timeout: TIMEOUT_MS,
+        encoding: 'utf8',
+        maxBuffer: MAX_LIST_JSON_LENGTH * 2,
+        windowsHide: true,
+        env: {
+          ...process.env,
+          GH_HOST: 'github.com',
+          GH_NO_UPDATE_NOTIFIER: '1',
+          GH_PROMPT_DISABLED: '1',
+          NO_COLOR: '1',
+        },
+      }, (err, stdout) => {
+        if (err || typeof stdout !== 'string') resolveOut(null);
+        else resolveOut(stdout.trim());
+      });
+    } catch {
+      resolveOut(null);
+    }
+  });
+}
+
+function listArgs(kind: 'pr' | 'issue', fields: string, limit: number): string[] {
+  return [kind, 'list', '--state', 'open', '--limit', String(limit), '--json', fields];
+}
+
+/** gh answered but the payload is not a list: unavailable, never "nothing open". */
+function asList(raw: string | null): unknown {
+  if (raw === null) return null;
+  const parsed = safeJson(raw);
+  return Array.isArray(parsed) ? parsed : null;
+}
+
+/** One async refresh per root+limits, shared by every concurrent caller. */
+function refreshListsAsync(path: string, prLimit: number, issueLimit: number, now: () => Date): Promise<ListsResult> {
+  const key = listKey(path, prLimit, issueLimit);
+  const running = listInFlight.get(key);
+  if (running) return running;
+  const job = Promise.all([
+    realGhAsync(path, listArgs('pr', PR_JSON_FIELDS, prLimit)),
+    realGhAsync(path, listArgs('issue', ISSUE_JSON_FIELDS, issueLimit)),
+  ]).then(([pr, issue]) => {
+    const value: ListsResult = { prRaw: asList(pr), issueRaw: asList(issue), observedAt: now().toISOString() };
+    boundedSet(listCache, key, { value, at: Date.now() });
+    return value;
+  }).finally(() => {
+    listInFlight.delete(key);
+  });
+  listInFlight.set(key, job);
+  return job;
+}
+
 /**
- * Read one workspace root. Never throws, never returns a remote URL, and never
- * mutates anything — the only subprocesses are `git` reads via core/git.ts and
- * two `gh` list reads.
+ * Cached lists for the real runner: fresh → cached; stale → cached + one
+ * background refresh; cold or too old → null (the caller does a live read).
  */
-export function readVerseGithubRepo(
-  path: string,
-  opts: VerseGithubReadOptions = {},
-): VerseGithubRepoSnapshot {
+function cachedLists(path: string, prLimit: number, issueLimit: number, now: () => Date): ListsResult | null {
+  const key = listKey(path, prLimit, issueLimit);
+  const hit = listCache.get(key);
+  if (!hit) return null;
+  const age = Date.now() - hit.at;
+  if (age < LIST_FRESH_MS) return hit.value;
+  if (age < LIST_MAX_STALE_MS) {
+    void refreshListsAsync(path, prLimit, issueLimit, now).catch(() => { /* keep the last answer */ });
+    return hit.value;
+  }
+  return null;
+}
+
+/** Drop the identity and list caches (tests; after `gh auth login`). */
+export function invalidateVerseGithubCache(): void {
+  identityCache.clear();
+  listCache.clear();
+  listInFlight.clear();
+}
+
+type Prepared =
+  | { done: VerseGithubRepoSnapshot }
+  | { path: string; remote: VerseGithubRemote; observedAt: string; prLimit: number; issueLimit: number; now: () => Date };
+
+/** Validation + identity: everything except the two list reads. */
+function prepareRoot(path: string, opts: VerseGithubReadOptions): Prepared {
   const now = opts.now ?? (() => new Date());
   const observedAt = now().toISOString();
-  const gh = opts.gh ?? realGh;
-  const git = opts.git ?? realGit;
   const isDirectory = opts.isDirectory ?? realIsDirectory;
   const prLimit = clampLimit(opts.prLimit, DEFAULT_PR_LIMIT);
   const issueLimit = clampLimit(opts.issueLimit, DEFAULT_ISSUE_LIMIT);
@@ -429,83 +631,123 @@ export function readVerseGithubRepo(
   };
 
   if (typeof path !== 'string' || path.length === 0 || path.length > MAX_PATH_CHARS) {
-    return emptySnapshot(typeof path === 'string' ? path : '', notARepo, observedAt, 'invalid path');
+    return { done: emptySnapshot(typeof path === 'string' ? path : '', notARepo, observedAt, 'invalid path') };
   }
   if (!isAbsolute(path)) {
-    return emptySnapshot(path, notARepo, observedAt, 'path is not absolute');
+    return { done: emptySnapshot(path, notARepo, observedAt, 'path is not absolute') };
   }
   if (!isDirectory(path)) {
-    return emptySnapshot(path, notARepo, observedAt, 'not a directory');
+    return { done: emptySnapshot(path, notARepo, observedAt, 'not a directory') };
   }
 
-  let repoIsGit = false;
-  try {
-    repoIsGit = git.isRepo(path);
-  } catch {
-    repoIsGit = false;
+  const identity = rootIdentity(path, opts);
+  if (!identity.isRepo) {
+    return { done: emptySnapshot(path, notARepo, observedAt, 'not a git repository') };
   }
-  if (!repoIsGit) {
-    return emptySnapshot(path, notARepo, observedAt, 'not a git repository');
-  }
-
-  let branch: string | null = null;
-  try {
-    branch = git.defaultBranch(path);
-  } catch {
-    branch = null;
-  }
-
-  let nameWithOwner: string | null = null;
-  try {
-    nameWithOwner = git.nameWithOwner(path);
-  } catch {
-    nameWithOwner = null;
-  }
-
-  if (!nameWithOwner) {
-    return emptySnapshot(
-      path,
-      { state: 'not-github', nameWithOwner: null, defaultBranch: branch },
-      observedAt,
-      'origin does not resolve to a single GitHub repository',
-    );
+  if (!identity.nameWithOwner) {
+    return {
+      done: emptySnapshot(
+        path,
+        { state: 'not-github', nameWithOwner: null, defaultBranch: identity.defaultBranch },
+        observedAt,
+        'origin does not resolve to a single GitHub repository',
+      ),
+    };
   }
 
   const remote: VerseGithubRemote = {
     state: 'github',
-    nameWithOwner,
-    defaultBranch: branch,
+    nameWithOwner: identity.nameWithOwner,
+    defaultBranch: identity.defaultBranch,
   };
 
   if (opts.includeLists === false) {
-    return emptySnapshot(
-      path,
-      remote,
-      observedAt,
-      'pull requests and issues not requested for this root',
-    );
+    return {
+      done: emptySnapshot(
+        path,
+        remote,
+        observedAt,
+        'pull requests and issues not requested for this root',
+      ),
+    };
   }
+  return { path, remote, observedAt, prLimit, issueLimit, now };
+}
 
-  const prRaw = runList(gh, path, 'pr', PR_JSON_FIELDS, prLimit);
-  const issueRaw = runList(gh, path, 'issue', ISSUE_JSON_FIELDS, issueLimit);
-
-  const prsAvailable = prRaw !== null;
-  const issuesAvailable = issueRaw !== null;
-  const prs = prsAvailable ? parsePrList(prRaw) : [];
-  const issues = issuesAvailable ? parseIssueList(issueRaw) : [];
-
+function assemble(
+  prepared: Exclude<Prepared, { done: VerseGithubRepoSnapshot }>,
+  lists: ListsResult,
+): VerseGithubRepoSnapshot {
+  const prsAvailable = lists.prRaw !== null;
+  const issuesAvailable = lists.issueRaw !== null;
+  const prs = prsAvailable ? parsePrList(lists.prRaw) : [];
+  const issues = issuesAvailable ? parseIssueList(lists.issueRaw) : [];
   return {
-    path,
-    name: basename(path) || path,
-    remote,
+    path: prepared.path,
+    name: basename(prepared.path) || prepared.path,
+    remote: prepared.remote,
     prs,
     issues,
     listsRequested: true,
     prsAvailable,
     issuesAvailable,
-    observedAt,
+    // A cached answer carries the time gh actually answered, never "now".
+    observedAt: lists.observedAt,
     detail: describe(prsAvailable, issuesAvailable, prs.length, issues.length),
   };
+}
+
+/**
+ * Read one workspace root. Never throws, never returns a remote URL, and never
+ * mutates anything — the only subprocesses are `git` reads via core/git.ts and
+ * two `gh` list reads. With the real runners, identity and lists come from the
+ * caches above when they can; a cold list read is a live synchronous `gh`
+ * call (use readVerseGithubRepoAsync on request paths).
+ */
+export function readVerseGithubRepo(
+  path: string,
+  opts: VerseGithubReadOptions = {},
+): VerseGithubRepoSnapshot {
+  const prepared = prepareRoot(path, opts);
+  if ('done' in prepared) return prepared.done;
+  if (opts.gh) {
+    return assemble(prepared, {
+      prRaw: runList(opts.gh, prepared.path, 'pr', PR_JSON_FIELDS, prepared.prLimit),
+      issueRaw: runList(opts.gh, prepared.path, 'issue', ISSUE_JSON_FIELDS, prepared.issueLimit),
+      observedAt: prepared.observedAt,
+    });
+  }
+  const cached = cachedLists(prepared.path, prepared.prLimit, prepared.issueLimit, prepared.now);
+  if (cached) return assemble(prepared, cached);
+  const lists: ListsResult = {
+    prRaw: runList(realGh, prepared.path, 'pr', PR_JSON_FIELDS, prepared.prLimit),
+    issueRaw: runList(realGh, prepared.path, 'issue', ISSUE_JSON_FIELDS, prepared.issueLimit),
+    observedAt: prepared.observedAt,
+  };
+  boundedSet(listCache, listKey(prepared.path, prepared.prLimit, prepared.issueLimit), { value: lists, at: Date.now() });
+  return assemble(prepared, lists);
+}
+
+/**
+ * readVerseGithubRepo without blocking the event loop on `gh`: the two list
+ * reads are async spawns (run in parallel), deduplicated across concurrent
+ * callers and cached as above. Identity is still the cached synchronous git
+ * probe (local, ~no cost once warm). Never throws.
+ */
+export async function readVerseGithubRepoAsync(
+  path: string,
+  opts: VerseGithubReadOptions = {},
+): Promise<VerseGithubRepoSnapshot> {
+  const prepared = prepareRoot(path, opts);
+  if ('done' in prepared) return prepared.done;
+  if (opts.gh) return readVerseGithubRepo(path, opts);
+  const cached = cachedLists(prepared.path, prepared.prLimit, prepared.issueLimit, prepared.now);
+  if (cached) return assemble(prepared, cached);
+  try {
+    return assemble(prepared, await refreshListsAsync(prepared.path, prepared.prLimit, prepared.issueLimit, prepared.now));
+  } catch {
+    return assemble(prepared, { prRaw: null, issueRaw: null, observedAt: prepared.observedAt });
+  }
 }
 
 /** One `gh <kind> list` read. Null (not []) when gh could not answer. */
@@ -516,21 +758,7 @@ function runList(
   fields: string,
   limit: number,
 ): unknown {
-  const raw = gh(cwd, [
-    kind,
-    'list',
-    '--state',
-    'open',
-    '--limit',
-    String(limit),
-    '--json',
-    fields,
-  ]);
-  if (raw === null) return null;
-  const parsed = safeJson(raw);
-  // gh answered but the payload is not a list: treat as unavailable rather
-  // than as "nothing open", which would be a lie the UI cannot detect.
-  return Array.isArray(parsed) ? parsed : null;
+  return asList(gh(cwd, listArgs(kind, fields, limit)));
 }
 
 function describe(
@@ -560,6 +788,27 @@ export function readVerseGithubSnapshot(
     if (typeof path !== 'string' || seen.has(path)) continue;
     seen.add(path);
     repos.push(readVerseGithubRepo(path, opts));
+  }
+  return { repos, observedAt: now().toISOString() };
+}
+
+/**
+ * Async readVerseGithubSnapshot for request handlers: roots are read in
+ * order, yielding to the event loop between roots so a cold identity probe
+ * for one root never stacks with the next, and list reads never block.
+ */
+export async function readVerseGithubSnapshotAsync(
+  paths: readonly string[],
+  opts: VerseGithubReadOptions = {},
+): Promise<VerseGithubSnapshot> {
+  const now = opts.now ?? (() => new Date());
+  const seen = new Set<string>();
+  const repos: VerseGithubRepoSnapshot[] = [];
+  for (const path of paths) {
+    if (typeof path !== 'string' || seen.has(path)) continue;
+    seen.add(path);
+    repos.push(await readVerseGithubRepoAsync(path, opts));
+    await new Promise<void>((resolveTurn) => setImmediate(resolveTurn));
   }
   return { repos, observedAt: now().toISOString() };
 }

@@ -14,11 +14,18 @@
  * Sessions are seat-bound, so the seat pill is read-only: its menu says what
  * this chat runs on and offers "New chat on …" per seat, which asks the
  * parent to start a new chat rather than mutating this one.
+ *
+ * V3.10: above the box sits the seat-health block (routes/verse/health,
+ * unit A2). When the chat's seat cannot run a turn — signed out, spent,
+ * pinned to a skewed CLI — it says why, when it resets, offers Reconnect,
+ * and ranks the seats that CAN run it, before a message is typed into a
+ * dead end. It renders nothing for a ready seat.
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { VerseSeat } from '../../data/api-types.js';
 import { costHint, loadDraft, loadHistory, pushHistory, saveDraft, type CostHint } from './chat/composer-state.js';
 import { DictationButton } from './DictationButton.js';
+import { ComposerSeatBlock } from './health/ComposerSeatBlock.js';
 import type { SeatChoice } from './SeatSelector.js';
 import { firstRunnableModel, seatCapacity, SEAT_CAPACITY_WORD, seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-store.js';
@@ -280,6 +287,8 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
 
   return (
     <form ref={form} className={styles.composer} onSubmit={(event) => { event.preventDefault(); void submit(); }} aria-describedby={helpId}>
+      {/* A read-only server cannot send anyway; the block would only add a second reason. */}
+      {disabled ? null : <ComposerSeatBlock seats={seats} seatId={seat.seatId} onSeatChange={onSeatChange} />}
       <div className={`${styles.box} ${listening ? styles.boxListening : ''}`}>
         <textarea ref={textarea} className={styles.textarea} value={text} rows={1} placeholder={placeholder}
           aria-label="Message" disabled={disabled}

@@ -14,7 +14,7 @@
  *   GET  /api/verse/seats                    → VerseSeatsResponse (pollable)
  *   GET  /api/verse/sessions                 → VerseSession[]
  *   POST /api/verse/sessions                 → VerseSession (201)
- *   GET  /api/verse/sessions/:id             → VerseSessionDetail
+ *   GET  /api/verse/sessions/:id[?after=N]   → VerseSessionDetail (V3.10: events with seq > N)
  *   POST /api/verse/sessions/:id/turns       → VerseTurnResponse (202)
  *   POST /api/verse/sessions/:id/cancel      → { ok: true }
  *   POST /api/verse/sessions/:id/delete      → { ok: true }
@@ -30,12 +30,24 @@
  *   GET  /api/verse/search                   → VerseSearchResponse
  *   GET  /api/verse/memory                   → VerseProjectMemory (+ contentSanitized?)
  *   POST /api/verse/memory                   → VerseProjectMemory (+ contentSanitized?)
+ *  V3.10 mounted modules (api-modules.ts; each family's routes are owned and
+ *  documented by its module — this file only mounts them, in this order):
+ *   /api/verse/health*        → health-api.ts          (VerseHealthResponse)
+ *   /api/reasoning/*          → reasoning/reasoning-api.ts (digest, steps)
+ *   fleet history             → fleet-history.ts
+ *   /api/verse/budget*        → routing/budget-api.ts  (BudgetResponse)
+ *  They are consulted only after every V1 route above has declined, every
+ *  non-GET to them passes the V1 dispatch + mutation gate first, and a module
+ *  that fails to load turns an otherwise-unmatched path into a 503
+ *  (API_MODULE_UNAVAILABLE), never a misleading 404.
  *
  * Errors: { error, code? } with VERSE_SESSION_NOT_FOUND 404,
  * VERSE_SESSION_BUSY 409, VERSE_INVALID 400, VERSE_TOO_LARGE 413, and two
  * route-local 409s: VERSE_MODEL_UNAVAILABLE (turns: the session's model is
  * listed but unrunnable on its seat) and VERSE_MEMORY_REDACTED (memory: the
- * content would write redaction placeholders over real values).
+ * content would write redaction placeholders over real values). V3.10: the
+ * engine's readiness refusal is a 409 `SeatNotReadyResponse`
+ * ({ error, code: 'seat-not-ready', readiness }, health-types.ts).
  *
  * STRICT BODIES AND QUERIES (V3.9 routes and POST /sessions): an unknown body
  * key or query parameter is a 400, never silently ignored — a misspelt
@@ -61,10 +73,11 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AshlrConfig } from '../types.js';
-import { passesMutationGate, readBody, sendJson } from '../web/api.js';
+import { notifyVerseSessionsChanged, passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { sanitizePublicJson } from '../util/public-json.js';
 import { budgetFor, canonicalModelId, hasExpansiveMode } from './context-math.js';
 import { estimateContextFit } from './context-fit.js';
+import { SEAT_NOT_READY_CODE } from './health-types.js';
 import { checkWorkspaceRootPath, expandHomePrefix } from './path-guard.js';
 import {
   loadVersePreferences,
@@ -75,7 +88,7 @@ import {
 } from './preferences.js';
 import { prepareProjectMemory, readProjectMemory, writeProjectMemory } from './project-memory.js';
 import { discoverProjects } from './projects.js';
-import { discoverSeats, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
+import { discoverSeats, getSeatReadiness, refreshSeatTelemetry, type VerseSeatDiscovery } from './seats.js';
 import { buildHandoffPreview } from './session-handoff.js';
 import { searchSessions } from './session-search.js';
 import {
@@ -117,6 +130,8 @@ import {
   VERSE_MEMORY_BODY_MAX_BYTES,
 } from './types.js';
 import { handleVerseEventsSse, VERSE_EVENTS_PATH_RE, VERSE_SESSION_ID_RE } from './verse-stream.js';
+import type { ApiModule } from './api-modules.js';
+import { REASONING_API_PREFIX } from '../reasoning/types.js';
 
 // ---------------------------------------------------------------------------
 // Route matching
@@ -124,8 +139,144 @@ import { handleVerseEventsSse, VERSE_EVENTS_PATH_RE, VERSE_SESSION_ID_RE } from 
 
 export const VERSE_API_PREFIX = '/api/verse';
 
+/**
+ * Every prefix this handler answers for. `/api/reasoning` is here — not in a
+ * handleApi branch of its own — because it is a mounted module family (see
+ * MOUNTED_API_MODULES) and handleApi (core/web/api.ts) reaches this file
+ * only through isVerseApiPath(). Widening the predicate is what mounts the
+ * family without a second edit to api.ts; its read-session and mutation
+ * posture is identical to /api/verse/* either way.
+ */
+const MOUNTED_PREFIXES: readonly string[] = [VERSE_API_PREFIX, REASONING_API_PREFIX];
+
 export function isVerseApiPath(path: string): boolean {
-  return path === VERSE_API_PREFIX || path.startsWith(`${VERSE_API_PREFIX}/`);
+  // Exact prefix or prefix + '/': `/api/reasoningX` must stay handleApi's 404.
+  return MOUNTED_PREFIXES.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+}
+
+// ---------------------------------------------------------------------------
+// Mounted route modules (V3.10 — api-modules.ts contract)
+// ---------------------------------------------------------------------------
+
+/** Stable ids, in mount order. */
+export type MountedApiModuleId = 'health' | 'reasoning' | 'fleet-history' | 'budget';
+
+export interface MountedApiModule {
+  id: MountedApiModuleId;
+  /** Resolve the module's handler. Called at most once per success (memoized). */
+  load: () => Promise<ApiModule>;
+}
+
+/**
+ * The route families other units own, mounted in a FIXED order: health,
+ * reasoning, fleet history, budget. Each module answers true for its own
+ * paths and false for everything else (api-modules.ts), so the order only
+ * decides who is asked first; it can never make one family shadow another
+ * unless two claim the same path — which the mount test forbids.
+ *
+ * LAZY, with literal specifiers. Literal because `bun build --compile` (the
+ * desktop sidecar) only bundles imports it can see; lazy because the V1 hot
+ * paths — bootstrap, seats, sessions, SSE — are matched BEFORE any module is
+ * consulted (see handleVerseApi) and must not pay four modules' load and
+ * evaluation cost on the first request of a cold server. It also keeps this
+ * file free of load-time cycles: every module imports VerseApiContext from
+ * here.
+ */
+const DEFAULT_API_MODULES: readonly MountedApiModule[] = [
+  { id: 'health', load: async () => (await import('./health-api.js')).handleHealthApi },
+  { id: 'reasoning', load: async () => (await import('../reasoning/reasoning-api.js')).handleReasoningApi },
+  { id: 'fleet-history', load: async () => (await import('./fleet-history.js')).handleFleetHistoryApi },
+  { id: 'budget', load: async () => (await import('../routing/budget-api.js')).handleBudgetApi },
+];
+
+let mountedModules: readonly MountedApiModule[] = DEFAULT_API_MODULES;
+/** Memoized successful loads, keyed by the mount entry (so a test swap never sees stale handlers). */
+const loadedModules = new WeakMap<MountedApiModule, ApiModule>();
+/** Ids whose most recent load attempt failed — surfaced as a 503, never as a silent 404. */
+const failedModuleIds = new Set<MountedApiModuleId>();
+
+/** The mount table in order — for the mount test and diagnostics. */
+export function mountedApiModules(): readonly MountedApiModule[] {
+  return mountedModules;
+}
+
+/**
+ * Test hook: replace the mount table (fakes, a failing loader), or pass null
+ * to restore the real one. Clears memoized handlers and failure marks.
+ */
+export function setMountedApiModulesForTest(next: readonly MountedApiModule[] | null): void {
+  mountedModules = next ?? DEFAULT_API_MODULES;
+  failedModuleIds.clear();
+}
+
+/**
+ * Resolve one module's handler. A failed load is NOT memoized: the next
+ * request tries again (a module that throws at evaluation is a bug to fix,
+ * but a dev server mid-rebuild should recover without a restart). The error
+ * itself is dropped — its message can carry absolute paths — and only the
+ * module id is reported.
+ */
+async function loadMountedModule(entry: MountedApiModule): Promise<ApiModule | null> {
+  const cached = loadedModules.get(entry);
+  if (cached) return cached;
+  try {
+    const handler = await entry.load();
+    if (typeof handler !== 'function') throw new TypeError(`module ${entry.id} exports no handler`);
+    loadedModules.set(entry, handler);
+    failedModuleIds.delete(entry.id);
+    return handler;
+  } catch {
+    failedModuleIds.add(entry.id);
+    return null;
+  }
+}
+
+/**
+ * Offer the request to every mounted module in order. Returns true once one
+ * has responded.
+ *
+ * Every non-GET is gated HERE, before any module sees it, with the exact V1
+ * posture: 404 unless the server allows dispatch, then the constant-time
+ * mutation token + JSON Content-Type (passesMutationGate). Modules may gate
+ * again — it is idempotent — but a module that forgets cannot expose a
+ * mutation. HEAD and every other verb count as non-GET on purpose: server.ts
+ * puts only GET behind the read-session boundary, so a module that answered
+ * HEAD like GET would otherwise serve reads to anyone on loopback.
+ */
+async function dispatchMountedModules(
+  ctx: VerseApiContext,
+  req: IncomingMessage,
+  res: ServerResponse,
+  path: string,
+  method: string,
+): Promise<boolean> {
+  if (method !== 'GET') {
+    if (!ctx.allowDispatch) {
+      sendJson(res, 404, { error: `not found: ${method} ${path}` });
+      return true;
+    }
+    if (!passesMutationGate(req, res, ctx.token)) return true;
+  }
+  const unavailable: MountedApiModuleId[] = [];
+  for (const entry of mountedModules) {
+    const handler = await loadMountedModule(entry);
+    if (!handler) {
+      unavailable.push(entry.id);
+      continue;
+    }
+    if (await handler(ctx, req, res, path, method)) return true;
+  }
+  if (unavailable.length > 0) {
+    // The path may well belong to a module that failed to load; a 404 would
+    // tell the client the route does not exist, which is the wrong fix.
+    sendJson(res, 503, {
+      code: 'API_MODULE_UNAVAILABLE',
+      error: 'a route module failed to load',
+      unavailable,
+    });
+    return true;
+  }
+  return false;
 }
 
 export interface VerseApiContext {
@@ -156,7 +307,18 @@ export async function getVerseEngine(): Promise<VerseEngineHandle> {
   if (!enginePending) {
     enginePending = import('./session-engine.js')
       .then((mod) => {
-        const created = mod.createVerseEngine({ root: join(homedir(), '.ashlr', 'verse') });
+        const created = mod.createVerseEngine({
+          root: join(homedir(), '.ashlr', 'verse'),
+          // Explicit, not the engine's lazy default: until that dynamic import
+          // resolved, the gate was open and a turn on a signed-out seat could
+          // slip through as the server's very first request.
+          readiness: getSeatReadiness,
+          // Turn start/end change the sidebar with no HTTP request to mark
+          // them; push the list now instead of on the next /api/events tick.
+          // notifyVerseSessionsChanged is coalesced and a no-op with no
+          // stream open, so calling it on every change is cheap.
+          onSessionChange: () => { notifyVerseSessionsChanged(); },
+        });
         engineSingleton = created;
         return created;
       })
@@ -297,8 +459,33 @@ function isVerseErrorCode(value: unknown): value is VerseErrorCode {
 /**
  * Duck-typed (not instanceof) so a VerseError thrown by another module
  * instance — or a test fake — still maps to the contract's status codes.
+ *
+ * V3.10: a readiness refusal (VERSE_SEAT_NOT_READY) is answered in the frozen
+ * `SeatNotReadyResponse` shape by the engine's own `seatNotReadyResponse`, so
+ * the 409 carries the ranked alternatives the composer offers. The engine
+ * module is imported on this path only (this file keeps no load-time edge on
+ * it — see ENGINE LIFETIME); an error of that code can only come from the
+ * engine, so the import is already cached. A refusal whose `readiness` is
+ * malformed still gets its 409 and code, without the alternatives — never the
+ * 500 it used to become.
  */
-function sendVerseError(res: ServerResponse, err: unknown): void {
+async function sendVerseError(res: ServerResponse, err: unknown): Promise<void> {
+  if (isSeatNotReadyError(err)) {
+    try {
+      const mod = await import('./session-engine.js');
+      const mapped = mod.seatNotReadyResponse(err);
+      if (mapped) {
+        sendJson(res, mapped.status, mapped.body);
+        return;
+      }
+    } catch {
+      // Fall through to the bare 409 below.
+    }
+    if (res.headersSent) return;
+    const message = err instanceof Error ? err.message : 'seat is not ready';
+    sendJson(res, 409, { code: SEAT_NOT_READY_CODE, error: message });
+    return;
+  }
   if (err && typeof err === 'object') {
     const code = (err as { code?: unknown }).code;
     if (isVerseErrorCode(code)) {
@@ -308,6 +495,10 @@ function sendVerseError(res: ServerResponse, err: unknown): void {
     }
   }
   sendJson(res, 500, { code: 'INTERNAL_ERROR', error: 'internal server error' });
+}
+
+function isSeatNotReadyError(err: unknown): boolean {
+  return err !== null && typeof err === 'object' && (err as { code?: unknown }).code === 'VERSE_SEAT_NOT_READY';
 }
 
 function sendInvalid(res: ServerResponse, message: string): void {
@@ -412,6 +603,18 @@ function readQuery(
     }
   }
   return params;
+}
+
+/**
+ * `?after=` → the seq to return events AFTER: null when absent, undefined when
+ * malformed. The grammar is verse-stream.ts's cursor (1–15 digits, a safe
+ * integer), so the JSON route and the SSE tail accept exactly the same values.
+ */
+function parseAfterCursor(raw: string | null): number | null | undefined {
+  if (raw === null) return null;
+  if (!/^\d{1,15}$/.test(raw)) return undefined;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : undefined;
 }
 
 function isContextMode(value: unknown): value is VerseContextMode {
@@ -1487,15 +1690,31 @@ export async function handleVerseApi(
         return true;
       }
 
-      // GET /api/verse/sessions/:id
+      // GET /api/verse/sessions/:id[?after=<seq>]
+      //
+      // `after` (V3.10) returns only events with seq > after — the same
+      // cursor the SSE tail takes — so a client that already holds a chat
+      // resumes with what it lacks instead of re-downloading (and
+      // re-rendering) a 5k-event log. Absent = the whole log, as before.
+      // STRICT like the V3.9 routes: a malformed or repeated cursor is a 400,
+      // never silently "from the start", which would double every event the
+      // client already has.
       if (method === 'GET' && action === '') {
+        const params = readQuery(req, res, ['after']);
+        if (!params) return true;
+        const after = parseAfterCursor(params.get('after'));
+        if (after === undefined) {
+          sendInvalid(res, 'after must be a non-negative integer seq');
+          return true;
+        }
         const engine = await getVerseEngine();
         const session = engine.getSession(id);
         if (!session) {
           sendJson(res, 404, { code: 'VERSE_SESSION_NOT_FOUND', error: `session not found: ${id}` });
           return true;
         }
-        const detail: VerseSessionDetail = { session, events: engine.getEvents(id) };
+        const events = after === null ? engine.getEvents(id) : engine.getEvents(id, after);
+        const detail: VerseSessionDetail = { session, events };
         sendJson(res, 200, detail);
         return true;
       }
@@ -1635,10 +1854,17 @@ export async function handleVerseApi(
       return true;
     }
 
+    // ── mounted modules: health, reasoning, fleet history, budget (V3.10) ─
+    // LAST, after every V1 route: a V1 path never loads a module, and no
+    // module can shadow a V1 route. AWAITED inside this try so a module that
+    // throws gets the same error mapping (VerseError codes → 4xx, anything
+    // else → a message-free 500) as the V1 routes.
+    if (await dispatchMountedModules(ctx, req, res, path, method)) return true;
+
     sendJson(res, 404, { error: `not found: ${method} ${path}` });
     return true;
   } catch (err) {
-    if (!res.headersSent) sendVerseError(res, err);
+    if (!res.headersSent) await sendVerseError(res, err);
     else if (!res.writableEnded) {
       try { res.end(); } catch { /* already gone */ }
     }

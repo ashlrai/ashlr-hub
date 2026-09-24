@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { mergeClaudeResourceObservation, normalizeCodexResourceObservation } from '../src/core/resources/provider-observations.js';
 import { RESOURCE_OBSERVATION_OVERFLOW, planResourceAssignment, validateResourceObservations,
   type ResourceObservation, type ResourcePool } from '../src/core/resources/pool-policy.js';
+import { deriveVerseAccountRecord } from '../src/core/verse/accounts.js';
+import type { ResourceAccountConnection } from '../src/core/resources/connection-types.js';
 
 const NOW = Date.parse('2026-09-07T16:00:00.000Z');
 const RESET = NOW / 1000 + 3600;
@@ -385,5 +387,69 @@ describe('normalized evidence admission compatibility', () => {
     expect(plan.selectedWorkerId).toBeNull();
     expect(plan.exclusions[0]?.reasons).toContain('worker-unavailable');
     expect(plan.exclusions[0]?.reasons).toContain('quota-reserve-reached');
+  });
+});
+
+// 3.10: the provider's own "limit reached" flag must survive from the Codex
+// normalizer, through the key-exact validator, to Verse's account record —
+// otherwise a flagged denial and a measured 100% are byte-identical downstream.
+describe('Codex rateLimitReachedType provenance (limitReached)', () => {
+  const codexPool: ResourcePool = { schemaVersion: 1, id: 'test-pool', workers: [{ id: 'codex-worker', provider: 'codex',
+    model: 'fixture', maxConcurrent: 1, reservePercent: 5, maxTasksPerWindow: 5, taskWindowMs: 60_000, priority: 0 }] };
+  const flagged = () => normalize({ rateLimits: { limitId: 'codex', primary: window(40), secondary: window(10), rateLimitReachedType: 'primary' } })!;
+
+  it('marks the flagged sentinel window, and only that one', () => {
+    expect(flagged().windows).toEqual([
+      { id: 'codex_codex_primary', usedPercent: 100, resetsAt: timestamp(RESET * 1000), limitReached: true },
+      { id: 'codex_codex_secondary', usedPercent: 10, resetsAt: timestamp(RESET * 1000) },
+    ]);
+  });
+
+  it('a MEASURED 100 (even clamped from above) carries no flag', () => {
+    const measured = normalize({ rateLimits: { limitId: 'codex', primary: window(120), secondary: null } })!;
+    expect(measured.windows).toEqual([{ id: 'codex_codex_primary', usedPercent: 100, resetsAt: timestamp(RESET * 1000) }]);
+    expect(Object.hasOwn(measured.windows[0]!, 'limitReached')).toBe(false);
+  });
+
+  it('never carries the provider free-text reached type', () => {
+    const value = normalize({ rateLimits: { limitId: 'codex', primary: {}, secondary: null, rateLimitReachedType: 'private_kind' } })!;
+    expect(JSON.stringify(value)).not.toContain('private_kind');
+  });
+
+  it('survives the key-exact validator and still denies admission', () => {
+    const value = flagged();
+    const [validated] = validateResourceObservations([value], codexPool);
+    expect(validated).toEqual(value);
+    expect(validated!.windows[0]).toMatchObject({ limitReached: true });
+    const plan = planResourceAssignment({ pool: codexPool, observations: [value], allowedWorkerIds: ['codex-worker'],
+      activeCounts: {}, taskReservationCounts: {}, nowMs: NOW });
+    expect(plan.selectedWorkerId).toBeNull();
+    expect(plan.exclusions[0]?.reasons).toContain('quota-reserve-reached');
+  });
+
+  it.each([
+    ['false', { limitReached: false, usedPercent: 100 }],
+    ['a string', { limitReached: 'primary', usedPercent: 100 }],
+    ['a flag off the sentinel', { limitReached: true, usedPercent: 40 }],
+    ['a flag on unknown usage', { limitReached: true, usedPercent: null }],
+  ])('the validator refuses %s', (_label, patch) => {
+    const value = flagged();
+    const bad = { ...value, windows: [{ ...value.windows[0]!, ...patch }] };
+    expect(() => validateResourceObservations([bad], codexPool)).toThrow(/quota windows/);
+  });
+
+  it('an unflagged window keeps its exact three-key shape through validation', () => {
+    const [validated] = validateResourceObservations([normalize(codex())!], codexPool);
+    for (const w of validated!.windows) expect(Object.keys(w).sort()).toEqual(['id', 'resetsAt', 'usedPercent']);
+  });
+
+  it('reaches the Verse account record as limitReached, not a measured 100', () => {
+    const value = flagged();
+    const connection: ResourceAccountConnection = { id: 'codex-worker', label: 'Codex', provider: 'codex', state: 'observed',
+      authentication: 'signed-in', health: 'reachable', planType: 'plus', observedAt: value.observedAt,
+      expiresAt: value.expiresAt, windows: value.windows, reason: 'probe-observed', onDemandEnabled: null, executionSupported: true };
+    const record = deriveVerseAccountRecord(connection);
+    expect(record.windows[0]).toMatchObject({ id: 'codex_codex_primary', usedPercent: 100, limitReached: true, measured: false });
+    expect(record.windows[1]).toMatchObject({ limitReached: false, measured: true });
   });
 });

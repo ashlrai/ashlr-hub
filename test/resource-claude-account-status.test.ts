@@ -231,4 +231,15 @@ describe('configuration and real inert execution', () => {
     const value = JSON.parse(readFileSync(receipt, 'utf8'));
     expect(existsSync(value.cwd)).toBe(false); expect(() => process.kill(value.pid, 0)).toThrow();
   });
+  it('reads the Claude Code 2.1.280 auth-status shape (V3.10 seat health depends on it) without keeping identity', async () => {
+    // Field set captured from a real 2.1.280 `auth status --json` on 2026-09-23;
+    // identity values replaced with markers.
+    mock({ loggedIn: true, authMethod: 'claude.ai', apiProvider: 'firstParty', analyticsDisabled: true,
+      projectsDirectory: 'PRIVATE_PATH', configDirectory: 'PRIVATE_PATH', email: 'PRIVATE_EMAIL', orgId: 'PRIVATE_ORG',
+      orgName: 'PRIVATE_ORG_NAME', subscriptionType: 'max' });
+    const report = await probeClaudeAccountStatus(options());
+    expect(report).toMatchObject({ status: 'observed', reason: 'status-login-observed', loggedIn: true,
+      authMethod: 'claude.ai', subscriptionType: 'max' });
+    expect(JSON.stringify(report)).not.toContain('PRIVATE');
+  });
 });

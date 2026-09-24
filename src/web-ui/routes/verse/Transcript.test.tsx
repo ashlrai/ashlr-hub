@@ -1,9 +1,26 @@
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { ev } from './fixtures.test-support.js';
+import type { VerseEvent } from '../../data/api-types.js';
+import { ev, session } from './fixtures.test-support.js';
+import { appendInlineText, splitStreamingBlocks } from './MessageMarkdown.js';
 import { describeCompaction, Transcript } from './Transcript.js';
-import { buildTranscript } from './verse-store.js';
+import { useVerseLive, useVerseTranscript } from './useVerseSession.js';
+import { cpuMs, median, openLastTurn, realisticLog, stamp } from './verse-perf.test-support.js';
+import { applyVerseEvent, applyVerseEvents, buildTranscript, resetVerseStore, seedVerseSession, type VerseLiveState } from './verse-store.js';
+
+const NO_LIVE: VerseLiveState = { turnId: null, startedAt: null, progress: null, thinking: null, notice: null, settledTurnId: null };
+
+/** The transcript wired to the store the way Workspace wires it (useVerseTranscript + useVerseLive). */
+function LiveHarness({ sessionId, onStop }: { sessionId: string; onStop?: () => void }) {
+  const transcript = useVerseTranscript(sessionId);
+  const live = useVerseLive(sessionId);
+  return <Transcript transcript={transcript} live={live} loaded loadError={null} onStop={onStop} />;
+}
+
+function transient(seq: number, e: Record<string, unknown>): VerseEvent {
+  return { seq, at: stamp(seq), ...e } as VerseEvent;
+}
 
 describe('Transcript', () => {
   it('renders exactly one quiet note after Stop, not a red failure line', () => {
@@ -261,4 +278,193 @@ describe('Transcript — V3.9 compaction and handoff', () => {
     expect(screen.queryByRole('button', { name: 'Old chat' })).toBeNull();
     expect(screen.queryByText('Review the handoff, then send it.')).toBeNull();
   });
+});
+
+describe('Transcript — V3.10 live turn', () => {
+  beforeEach(() => resetVerseStore());
+
+  function startTurn() {
+    seedVerseSession('vs_1', session({ status: 'running' }), [
+      ev(1, 'user-message', { turnId: 't1', text: 'run the tests' }),
+      { ...ev(2, 'turn-started', { turnId: 't1', pid: 1 }), at: new Date(Date.now() - 14_000).toISOString() },
+    ]);
+  }
+
+  it('replaces the bare caret with a live line — phase, elapsed, and the command a pending tool runs — and a Stop', async () => {
+    const user = userEvent.setup();
+    const onStop = vi.fn();
+    startTurn();
+    render(<LiveHarness sessionId="vs_1" onStop={onStop} />);
+    const line = screen.getByRole('listitem', { name: 'The agent is working' });
+    expect(line).toHaveTextContent(/Waiting·1[45]s/);
+
+    act(() => { applyVerseEvent('vs_1', ev(3, 'tool-use', { turnId: 't1', toolUseId: 'b', name: 'Bash', input: { command: 'npm test' } })); });
+    expect(line).toHaveTextContent('Running');
+    expect(line).toHaveTextContent('npm test');
+    expect(within(line).getByRole('status')).toHaveTextContent('Running: npm test');
+
+    await user.click(within(line).getByRole('button', { name: 'Stop this turn' }));
+    expect(onStop).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the server\'s progress figures and a retry notice, and drops the line when the turn ends', () => {
+    startTurn();
+    render(<LiveHarness sessionId="vs_1" />);
+    act(() => {
+      applyVerseEvents('vs_1', [
+        ev(3, 'text-delta', { turnId: 't1', text: 'Tests ' }),
+        transient(3, { type: 'progress', turnId: 't1', phase: 'writing', elapsedMs: 63_000, tokPerSec: 38.4 }),
+        transient(3, { type: 'status', turnId: 't1', kind: 'retry', message: 'The API is overloaded — retrying (2 of 10).' }),
+      ]);
+    });
+    const line = screen.getByRole('listitem', { name: 'The agent is working' });
+    expect(line).toHaveTextContent('Writing');
+    expect(line).toHaveTextContent('1m 3s');
+    expect(line).toHaveTextContent('38 tok/s');
+    expect(line).toHaveTextContent('RetryingThe API is overloaded — retrying (2 of 10).');
+
+    act(() => { applyVerseEvent('vs_1', ev(4, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 64_000 })); });
+    expect(screen.queryByRole('listitem', { name: 'The agent is working' })).not.toBeInTheDocument();
+  });
+
+  it('streams reasoning in an open block that becomes the persisted "Thought …" block', () => {
+    startTurn();
+    render(<LiveHarness sessionId="vs_1" />);
+    act(() => {
+      applyVerseEvents('vs_1', [
+        transient(2, { type: 'thinking-delta', turnId: 't1', text: 'The pager looks ' }),
+        transient(2, { type: 'thinking-delta', turnId: 't1', text: 'off by one.' }),
+        transient(2, { type: 'thinking-progress', turnId: 't1', estimatedTokens: 1840 }),
+      ]);
+    });
+    const live = document.querySelector('[data-kind="thinking-live"] details') as HTMLDetailsElement;
+    expect(live.open).toBe(true);
+    expect(live).toHaveTextContent('The pager looks off by one.');
+    expect(live.querySelector('summary')).toHaveTextContent(/^Thinking · (<1|\d+)s · ~1\.8k tok$/);
+    expect(screen.getByRole('listitem', { name: 'The agent is working' })).toHaveTextContent('Thinking');
+
+    act(() => { applyVerseEvent('vs_1', { ...ev(3, 'thinking', { turnId: 't1', text: 'The pager looks off by one.' }), durationMs: 12_000 } as VerseEvent); });
+    expect(document.querySelector('[data-kind="thinking-live"]')).toBeNull();
+    const done = document.querySelector('[data-kind="thinking"] details') as HTMLDetailsElement;
+    expect(done.querySelector('summary')).toHaveTextContent('Thought 12s · ~1.8k tok');
+    // Still open while its turn runs — it is what the operator was reading.
+    expect(done.open).toBe(true);
+  });
+
+  it('says so when the provider withheld the reasoning text', () => {
+    render(<Transcript loaded loadError={null} live={NO_LIVE} transcript={buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'q' }),
+      { ...ev(2, 'thinking', { turnId: 't1', text: '' }), redacted: true, durationMs: 9000 } as VerseEvent,
+      ev(3, 'assistant-message', { turnId: 't1', text: 'a' }),
+    ])} />);
+    const block = document.querySelector('[data-kind="thinking"]')!;
+    expect(block).toHaveTextContent('Thought 9s');
+    expect(block).toHaveTextContent('reasoning hidden by the provider');
+    expect(block.querySelector('details')).toBeNull();
+  });
+
+  it('shows recovery, a trimmed log, and what an error code means', () => {
+    render(<Transcript loaded loadError={null} transcript={buildTranscript([
+      ev(1, 'history-truncated', { turnId: null, droppedBefore: 900 }),
+      ev(2, 'user-message', { turnId: 't1', text: 'continue' }),
+      { ...ev(3, 'error', { turnId: 't1', message: 'No conversation found with session ID abc' }), code: 'native-thread-missing' } as VerseEvent,
+      ev(4, 'recovered', { turnId: 't1', how: 'handoff', message: 'Started a new native session seeded with the handoff note.' }),
+    ])} />);
+    const log = screen.getByRole('log');
+    expect(within(log).getByText('Older history trimmed')).toBeInTheDocument();
+    const error = log.querySelector('[data-kind="error"]')!;
+    expect(error).toHaveAttribute('data-code', 'native-thread-missing');
+    expect(error).toHaveTextContent('No conversation found with session ID abc');
+    expect(error).toHaveTextContent('Continue in a fresh chat');
+    expect(log.querySelector('[data-kind="recovered"]')).toHaveTextContent('Recovered from the handoff note — Started a new native session seeded with the handoff note.');
+  });
+});
+
+describe('MessageMarkdown — V3.10 streaming', () => {
+  it('cuts streamed text at blank lines outside code fences', () => {
+    expect(splitStreamingBlocks('# Title\n\nPara one\n\nTail')).toEqual({ done: ['# Title', 'Para one'], tail: 'Tail', tailInFence: false });
+    expect(splitStreamingBlocks('Intro\n\n```ts\nconst a = 1;\n\nconst b')).toEqual({ done: ['Intro'], tail: '```ts\nconst a = 1;\n\nconst b', tailInFence: true });
+    expect(splitStreamingBlocks('```\nx\n```\n\nafter')).toEqual({ done: ['```\nx\n```'], tail: 'after', tailInFence: false });
+    // A closing fence still arriving does not close anything yet.
+    expect(splitStreamingBlocks('```\nx\n``').tailInFence).toBe(true);
+  });
+
+  it('builds the tail from text nodes and inline marks only — never markup from the model', () => {
+    const p = document.createElement('p');
+    appendInlineText(p, 'Use `npm test` for **all** of it, *not* <img src=x onerror=alert(1)> snake_case_name');
+    expect(p.querySelector('code')).toHaveTextContent('npm test');
+    expect(p.querySelector('strong')).toHaveTextContent('all');
+    expect(p.querySelector('em')).toHaveTextContent('not');
+    expect(p.querySelector('img')).toBeNull();
+    expect(p.textContent).toBe('Use npm test for all of it, not <img src=x onerror=alert(1)> snake_case_name');
+  });
+
+  it('renders completed blocks as Markdown and the unfinished tail as text, then the whole reply once', () => {
+    const text = '# Plan\n\n1. read\n2. fix\n\nNow running **the** ```';
+    const { rerender } = render(<Transcript loaded loadError={null} live={NO_LIVE} transcript={buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'go' }),
+      ev(2, 'turn-started', { turnId: 't1', pid: 1 }),
+      ev(3, 'text-delta', { turnId: 't1', text }),
+    ])} />);
+    const bubble = document.querySelector('[data-kind="assistant"][data-streaming]')!;
+    expect(bubble.querySelector('h1')).toHaveTextContent('Plan');
+    expect(bubble.querySelectorAll('ol li')).toHaveLength(2);
+    const tail = bubble.querySelector('[data-stream-tail]')!;
+    expect(tail.tagName).toBe('P');
+    expect(tail.querySelector('strong')).toHaveTextContent('the');
+
+    rerender(<Transcript loaded loadError={null} live={NO_LIVE} transcript={buildTranscript([
+      ev(1, 'user-message', { turnId: 't1', text: 'go' }),
+      ev(2, 'turn-started', { turnId: 't1', pid: 1 }),
+      ev(3, 'text-delta', { turnId: 't1', text }),
+      ev(4, 'assistant-message', { turnId: 't1', text: '# Plan\n\n1. read\n2. fix\n\nDone.' }),
+      ev(5, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 1 }),
+    ])} />);
+    const final = document.querySelector('[data-kind="assistant"]')!;
+    expect(final).not.toHaveAttribute('data-streaming');
+    expect(final.querySelector('[data-stream-tail]')).toBeNull();
+    expect(final.querySelector('h1')).toHaveTextContent('Plan');
+  });
+});
+
+describe('Transcript — §1 target: ≤ 4 ms per streamed delta at 5k events', () => {
+  beforeEach(() => resetVerseStore());
+
+  it('re-renders only the live turn while a reply streams', () => {
+    // Open the last turn: drop its reply, usage and turn-done so it streams.
+    const { events: open, turnId } = openLastTurn(realisticLog(5000));
+    seedVerseSession('vs_perf', session({ id: 'vs_perf', status: 'running' }), open);
+    const t0 = performance.now();
+    render(<LiveHarness sessionId="vs_perf" onStop={() => {}} />);
+    const mountMs = performance.now() - t0;
+
+    let seq = open[open.length - 1]!.seq + 1;
+    let n = 0;
+    const round = () => {
+      const wall: number[] = [];
+      const cpu: number[] = [];
+      for (let i = 0; i < 30; i++) {
+        const start = performance.now();
+        const word = `word${n++}`;
+        cpu.push(cpuMs(() => act(() => {
+          applyVerseEvents('vs_perf', [ev(seq++, 'text-delta', { turnId, text: `${word} ` })]);
+        })));
+        wall.push(performance.now() - start);
+      }
+      return { wall: median(wall), cpu: median(cpu) };
+    };
+    // One warm-up round pays for JIT; then the best of three steady-state
+    // medians, because a timing taken while the rest of the suite competes
+    // for the same cores measures the machine, not this code.
+    round();
+    const rounds = [round(), round(), round()];
+    const perDelta = Math.min(...rounds.map((r) => r.wall));
+    console.info('[verse-perf] transcript at 5k events', {
+      mountMs: Number(mountMs.toFixed(0)),
+      perDeltaWallMedianMs: rounds.map((r) => Number(r.wall.toFixed(2))),
+      perDeltaCpuMedianMs: rounds.map((r) => Number(r.cpu.toFixed(2))),
+    });
+    expect(document.querySelector('[data-kind="assistant"][data-streaming] [data-stream-tail]')?.textContent).toContain(`word${n - 1}`);
+    expect(perDelta).toBeLessThanOrEqual(4);
+  }, 60_000);
 });

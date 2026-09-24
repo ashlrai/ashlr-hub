@@ -8,8 +8,9 @@
  *      ASHLR_WEB_PUBLIC to the sibling `public/` dir before importing the CLI.
  *      This means the compiled binary self-configures the asset path at runtime
  *      without any external launcher wrapper needed.
- *   3. Writes a sibling read-worker shim with the same build identity, then
- *      compiles both entrypoints → dist-bin/ashlr via `bun build --compile`.
+ *   3. Writes sibling worker shims (read projections, engineering, fleet
+ *      history) with the same build identity, then compiles every entrypoint
+ *      → dist-bin/ashlr via `bun build --compile`.
  *   4. Copies dist/core/web/public/ → dist-bin/public/ so the binary and its
  *      assets are co-located.
  *
@@ -42,6 +43,11 @@ const entry   = join(distBin, '_entry.js');
 const workerEntry = join(distBin, 'read-projection-worker.js');
 const engineeringWorkerEntry = join(distBin, 'engineering-background-worker.js');
 const engineeringReadWorkerEntry = join(distBin, 'engineering-successor-read-worker.js');
+// V3.10: fleet-history.ts resolves `./fleet-history-worker.js` next to the main
+// entry, like read-projections.ts does. Without this sibling the bundled
+// binary cannot start the worker and runs the scorecard snapshot inline
+// (~1.6 s blocking once a day).
+const fleetHistoryWorkerEntry = join(distBin, 'fleet-history-worker.js');
 const outBin  = join(distBin, process.platform === 'win32' ? 'ashlr.exe' : 'ashlr');
 const pubDest = join(distBin, 'public');
 const buildIdentityPath = join(repoRoot, 'dist', 'build-identity.json');
@@ -97,11 +103,26 @@ await import('../dist/core/resources/engineering-successor-read-worker.js');
 `;
 }
 
-export function createSeaCompileArgs({ entry, workerEntry, engineeringWorkerEntry, engineeringReadWorkerEntry, outBin }) {
+export function createSeaFleetHistoryWorkerShim({ buildIdentityJson }) {
+  return `// Fixed read-mostly fleet-history worker (scorecard snapshot + trends).
+// Worker globals are separate, so embed the same trusted artifact identity.
+Reflect.set(globalThis, Symbol.for('ashlr.build-identity.v1'), ${javascriptStringLiteral(buildIdentityJson)});
+await import('../dist/core/verse/fleet-history-worker.js');
+`;
+}
+
+/**
+ * @param {{ entry: string, workerEntry: string, engineeringWorkerEntry?: string,
+ *   engineeringReadWorkerEntry?: string, fleetHistoryWorkerEntry?: string, outBin: string }} args
+ */
+export function createSeaCompileArgs({
+  entry, workerEntry, engineeringWorkerEntry, engineeringReadWorkerEntry, fleetHistoryWorkerEntry, outBin,
+}) {
   // Bun does not discover Worker URLs automatically. All shims must be
   // siblings: bundled import.meta.url resolves relative to the main entry.
   return ['build', '--compile', entry, workerEntry, ...(engineeringWorkerEntry ? [engineeringWorkerEntry] : []),
-    ...(engineeringReadWorkerEntry ? [engineeringReadWorkerEntry] : []), '--outfile', outBin];
+    ...(engineeringReadWorkerEntry ? [engineeringReadWorkerEntry] : []),
+    ...(fleetHistoryWorkerEntry ? [fleetHistoryWorkerEntry] : []), '--outfile', outBin];
 }
 
 async function main() {
@@ -161,6 +182,7 @@ writeFileSync(entry, shimSrc, 'utf8');
 writeFileSync(workerEntry, createSeaWorkerShim({ buildIdentityJson }), 'utf8');
 writeFileSync(engineeringWorkerEntry, createSeaEngineeringWorkerShim({ buildIdentityJson }), 'utf8');
 writeFileSync(engineeringReadWorkerEntry, createSeaEngineeringReadWorkerShim({ buildIdentityJson }), 'utf8');
+writeFileSync(fleetHistoryWorkerEntry, createSeaFleetHistoryWorkerShim({ buildIdentityJson }), 'utf8');
 console.log(`[build-sea] Wrote shim entry: ${entry}`);
 
 // ── 3. bun build --compile ───────────────────────────────────────────────────
@@ -170,7 +192,7 @@ if (existsSync(outBin)) rmSync(outBin);
 console.log(`[build-sea] Compiling → ${outBin} …`);
 const result = spawnSync(
   BUN,
-  createSeaCompileArgs({ entry, workerEntry, engineeringWorkerEntry, engineeringReadWorkerEntry, outBin }),
+  createSeaCompileArgs({ entry, workerEntry, engineeringWorkerEntry, engineeringReadWorkerEntry, fleetHistoryWorkerEntry, outBin }),
   { cwd: repoRoot, encoding: 'utf8' },
 );
 if (result.stdout) process.stdout.write(result.stdout);

@@ -60,7 +60,10 @@ export default defineConfig({
     // ignores $HOME natively). Without this, every HOME-isolated test resolves
     // to the developer's REAL ~/.ashlr on Windows — and the H1 fixture's
     // relocation guard throws, aborting the test. See test/setup/home.ts.
-    setupFiles: ['./vitest.config.ts', './test/setup/home.ts'],
+    // home-isolation-guard.ts runs AFTER home.ts (it reads the real home that
+    // home.ts captured) and blocks + fails any fs write under the REAL
+    // ~/.ashlr, including writers that swallow their own errors.
+    setupFiles: ['./vitest.config.ts', './test/setup/home.ts', './test/setup/home-isolation-guard.ts'],
     clearMocks: true,
     pool: 'forks',
     exclude: BASE_EXCLUDE,

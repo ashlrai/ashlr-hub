@@ -17,7 +17,20 @@ export interface ResourceWorker {
 }
 
 export interface ResourcePool { schemaVersion: 1; id: string; workers: ResourceWorker[] }
-export interface ResourceQuotaWindow { id: string; usedPercent: number | null; resetsAt: string | null }
+export interface ResourceQuotaWindow {
+  id: string;
+  usedPercent: number | null;
+  resetsAt: string | null;
+  /**
+   * Present (and only ever `true`) when the provider itself FLAGGED the limit
+   * — Codex's classified `rateLimitReachedType`. `usedPercent` is then the
+   * sentinel 100, not a measurement. Absent means "not flagged", so every
+   * unflagged window keeps its exact pre-3.10 three-key shape on disk.
+   * WHY here: this validator is key-exact, and Verse's exhaustion rule
+   * (seats.ts / accounts.ts `limitReached`) needs the flag to survive it.
+   */
+  limitReached?: true;
+}
 export interface ResourceObservation {
   workerId: string;
   observedAt: string;
@@ -182,12 +195,18 @@ export function validateResourceObservations(value: unknown, pool: ResourcePool)
     const windowIds = new Set<string>(); const windows: ResourceQuotaWindow[] = [];
     const buckets = resourceQuotaBuckets(definition.workers.find((worker) => worker.id === observation.workerId)!);
     for (const window of observation.windows) {
-      if (!object(window) || !exact(window, ['id', 'usedPercent', 'resetsAt']) || !identifier(window.id) ||
+      if (!object(window) || !exact(window, ['id', 'usedPercent', 'resetsAt'], ['limitReached']) || !identifier(window.id) ||
           windowIds.has(window.id) || (window.usedPercent !== null && !percent(window.usedPercent)) ||
-          (window.resetsAt !== null && !timestamp(window.resetsAt))) {
+          (window.resetsAt !== null && !timestamp(window.resetsAt)) ||
+          // A flag is only ever the literal `true` riding the denial sentinel:
+          // a flagged window that is not at 100 would let the flag and the
+          // number disagree about whether the account can admit work.
+          (Object.hasOwn(window, 'limitReached') && (window.limitReached !== true || window.usedPercent !== 100))) {
         throw new Error('Invalid resource observations: unique bounded quota windows required');
       }
-      windowIds.add(window.id); windows.push({ id: window.id, usedPercent: window.usedPercent, resetsAt: window.resetsAt });
+      windowIds.add(window.id);
+      windows.push({ id: window.id, usedPercent: window.usedPercent, resetsAt: window.resetsAt,
+        ...(window.limitReached === true ? { limitReached: true as const } : {}) });
       if (buckets && !buckets.some((bucket) => window.id === `codex_${bucket}_primary` || window.id === `codex_${bucket}_secondary`)) {
         throw new Error('Invalid resource observations: window outside pinned quota scope');
       }

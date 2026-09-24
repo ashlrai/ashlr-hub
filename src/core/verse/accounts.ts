@@ -177,6 +177,13 @@ const MAX_CREDIT_FILES = 8;
 
 export type VerseAccountProvider = 'codex' | 'claude' | 'grok';
 
+/** Display names used in plain-language notes. */
+const VERSE_PROVIDER_NAME: Readonly<Record<VerseAccountProvider, string>> = {
+  claude: 'Claude Code',
+  codex: 'Codex',
+  grok: 'Grok',
+};
+
 export interface VerseAccountWindow {
   id: string;
   /** Provider-reported percent, or null for NO SIGNAL (which is not zero). */
@@ -192,10 +199,10 @@ export interface VerseAccountWindow {
   /**
    * TRUE only when the provider explicitly FLAGGED the limit (Codex's
    * classified `rateLimitReachedType`) and that flag survived to this module.
-   * It is never inferred from `usedPercent === 100`: the upstream normalizer
-   * writes the flag as the sentinel 100 and then drops it, so a bare 100 is
-   * indistinguishable from a measured 100 by the time it arrives. See
-   * `windowLimitReached`.
+   * It is never inferred from `usedPercent === 100`: since V3.10 the upstream
+   * normalizer writes the flag as the sentinel 100 AND keeps
+   * `limitReached: true` beside it, so a bare 100 is a measured 100 (or a
+   * pre-3.10 row that lost the flag). See `windowLimitReached`.
    */
   limitReached: boolean;
   /** False when `usedPercent` is a flagged sentinel rather than a reading. */
@@ -277,6 +284,8 @@ export interface VerseAccountObservation {
     usedPercent: number | null;
     resetsAt: string | null;
     nativeReport?: { source: 'claude-usage'; resetDescription: string | null };
+    /** Only ever the literal `true`, and only when the provider flagged it (see `windowLimitReached`). */
+    limitReached?: true;
   }>;
   observedAt: string | null;
 }
@@ -423,7 +432,13 @@ function toObservationMap(rows: ResourceObservation[]): Map<string, VerseAccount
   for (const row of rows) {
     out.set(row.workerId, {
       health: row.health,
-      windows: row.windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent, resetsAt: w.resetsAt })),
+      // V3.10 — KEEP THE FLAG. This is the evidence path (in-process collector
+      // and the shared ledger file); rebuilding the window as the old
+      // three-key shape silently turned a provider DENIAL back into an
+      // unexplained measured 100, so `seatUsability` could not see Codex as
+      // exhausted here even though the live connection path could.
+      windows: row.windows.map((w) => ({ id: w.id, usedPercent: w.usedPercent, resetsAt: w.resetsAt,
+        ...(w.limitReached ? { limitReached: true as const } : {}) })),
       observedAt: row.observedAt,
     });
   }
@@ -659,24 +674,21 @@ function codexSessionRoots(config: ResourceConnectionConfig): Map<string, string
  * from a window that measured 100%.
  *
  * This used to be inferred as `provider === 'codex' && usedPercent === 100`.
- * That inference cannot be made here, because the distinguishing field is
- * destroyed upstream: `normalizeCodexResourceObservation`
- * (core/resources/provider-observations.ts) writes a classified
- * `rateLimitReachedType` as `usedPercent: 100` and then DROPS the flag, while
- * `codexWindow()` clamps a genuine reading with `Math.min(100, raw)`. By the
- * time a window reaches this module the two are byte-identical — and the
- * telemetry doc's own verified Codex payload
+ * That inference is wrong: `codexWindow()` clamps a genuine reading with
+ * `Math.min(100, raw)`, and the telemetry doc's own verified Codex payload
  * (docs/VERSE-TELEMETRY-V2.md:40-43) is a MEASURED `used_percent: 100.0` with
- * no `rateLimitReachedType`, i.e. exactly the case the old inference got
- * backwards. It then suppressed the number and printed prose asserting a
- * provenance nothing here can witness.
+ * no `rateLimitReachedType` — exactly the case the old inference got
+ * backwards, suppressing the number behind prose asserting a provenance
+ * nothing here witnessed.
  *
- * So this reads a flag it was GIVEN and never derives one. The window type
- * carries `limitReached` for the day the upstream threads it through
- * (`ResourceQuotaWindow` is key-exact-validated in `pool-policy.ts`, so adding
- * the field is a change to the shared resource subsystem, not to Verse); until
- * then a bare 100 renders as the measured 100% it is under both provenances,
- * and `providerNotes` states plainly that the distinction is not recoverable.
+ * So this reads a flag it was GIVEN and never derives one. Since V3.10 the
+ * flag is threaded end to end: `normalizeCodexResourceObservation`
+ * (core/resources/provider-observations.ts) keeps `limitReached: true` beside
+ * the sentinel 100, `ResourceQuotaWindow` (pool-policy.ts) validates and keeps
+ * it, and `toObservationMap` here preserves it on the evidence path. A bare
+ * 100 therefore renders as the measured 100% it is; the only rows where the
+ * provenance is still ambiguous are ones written by a pre-3.10 build (or a
+ * hand-seeded `observations.json`), which `providerNotes` says plainly.
  */
 function windowLimitReached(window: { limitReached?: boolean }): boolean {
   return window.limitReached === true;
@@ -764,15 +776,16 @@ function providerNotes(
     if (record.windows.some((w) => w.limitReached)) {
       notes.push('The provider flagged this Codex window as "limit reached" — that flag is a denial, not a measurement.');
     } else if (record.windows.some((w) => w.usedPercent === 100)) {
-      // Honest about what this layer can and cannot witness: the upstream
-      // normalizer writes a classified `rateLimitReachedType` as 100 and
-      // discards the flag, so a window that reads exactly 100 may be either
-      // provenance. The number is reported as given; the provenance is not
-      // claimed in either direction.
+      // Honest about what this layer can and cannot witness. Since V3.10 a
+      // flagged denial arrives WITH `limitReached`, so an unflagged 100 is
+      // most likely measured — but a row persisted by a pre-3.10 build, or
+      // hand-seeded in observations.json, still carries a flagged 100 with
+      // the flag stripped. The number is reported as given; the provenance
+      // is not claimed in either direction.
       notes.push(
-        'A Codex window reads exactly 100%. The upstream normalizer writes both a measured 100% and a flagged ' +
-        '"limit reached" as the same 100 and does not keep the flag, so this surface reports the number it was ' +
-        'given and does not claim which of the two it is.',
+        'A Codex window reads exactly 100% with no "limit reached" flag. Current builds keep that flag when ' +
+        'the provider sets it, but rows written by an older build or seeded by hand may have lost it, so this ' +
+        'surface reports the number it was given and does not claim which of the two it is.',
       );
     }
     if (record.credits?.hasCredits) {
@@ -783,15 +796,17 @@ function providerNotes(
   }
   if (provider === 'grok') {
     notes.push('Grok is absent from frontier-usage.ts, so /api/usage never carries it; this probe is its only source.');
-    if (record.state === 'signed-out') {
-      // The literal reconnect command IS the pinned launcher invocation, which
-      // is the account's identity and must never be serialized. Name the
-      // command GROUP and say plainly why the rest is withheld.
-      notes.push(
-        'Grok is signed out. Re-authenticate its pinned Grok profile through `ashlr resources` before this seat ' +
-        'can be used; the profile path is withheld from this payload on purpose.',
-      );
-    }
+  }
+  if (record.state === 'signed-out') {
+    // The literal reconnect command IS the pinned launcher invocation, which
+    // is the account's identity and must never be serialized. Name the remedy
+    // (V3.10: Verse's Reconnect runs that command server-side, in Terminal)
+    // and say plainly why the rest is withheld.
+    notes.push(
+      `${VERSE_PROVIDER_NAME[provider]} is signed out. Re-authenticate it with Reconnect in Verse, which opens this ` +
+      "profile's own sign-in in Terminal, before this seat can be used; the profile path is withheld from this " +
+      'payload on purpose.',
+    );
   }
   return notes;
 }

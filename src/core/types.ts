@@ -1650,6 +1650,20 @@ export interface AshlrConfig {
      */
     pulseOtlpUrl?: string;
   };
+  /**
+   * V3.10 reasoning store (src/core/reasoning/). Stored reasoning is scrubbed,
+   * local-only, 0600, and never replayed into prompts.
+   */
+  reasoning?: {
+    /**
+     * Also ingest Mason's INTERACTIVE Codex Desktop rollouts, not just
+     * non-interactive `codex exec` ones. Default false (unset): those are
+     * personal sessions, so they need explicit opt-in. The env var
+     * `ASHLR_REASONING_CODEX_DESKTOP=1` turns it on too
+     * (see reasoning/ingest-codex.ts).
+     */
+    codexDesktop?: boolean;
+  };
 }
 
 // ---------------------------------------------------------------------------

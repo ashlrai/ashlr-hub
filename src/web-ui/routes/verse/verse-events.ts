@@ -1,25 +1,26 @@
 /**
- * routes/verse/verse-events.ts — the two live channels the Verse console
- * owns, since scoped consoles never join data/sse.ts's global feed:
+ * routes/verse/verse-events.ts — the Verse console's SSE vocabulary and its
+ * sidebar channel, since scoped consoles never join data/sse.ts's global feed:
  *
- *   1. One EventSource per OPEN session against
- *      GET /api/verse/sessions/:id/events. Event name = VerseEvent.type,
- *      id = seq (so the browser's own Last-Event-ID reconnect resumes where
- *      it left off); each frame is applied to verse-store, which drops
- *      anything already seen by seq — a fresh connection replays from the
- *      start, exactly like src/core/web/run-stream.ts.
- *   2. One EventSource against /api/events for the `verse-sessions` list
- *      digest, which just invalidates the sidebar's cache keys.
+ *   - VERSE_EVENT_TYPES + parseVerseEventFrame: every VerseEvent name a
+ *     session stream can carry, and the frame validation both streams share.
+ *     The per-session stream itself (resume by `?after=`, one store update
+ *     per animation frame, ref-counted connections) lives in
+ *     session-stream.ts (V3.10); the replay-from-zero opener that used to sit
+ *     here had no callers left and was removed.
+ *   - openVerseListChannel: one EventSource against /api/events for the
+ *     `verse-sessions` list digest, which just invalidates the sidebar's
+ *     cache keys. It subscribes with `?topics=verse-sessions` (V3.10) so the
+ *     server skips the dashboard snapshot and the other groups this console
+ *     would only discard.
  *
- * Both carry the per-tab client proof as `?client=` — the same construction
- * data/client.ts's eventsUrl() uses, because EventSource cannot send the
- * proof as a header (see server.ts readSessionClientProof).
+ * Every URL carries the per-tab client proof as `?client=` — the same
+ * construction data/client.ts's eventsUrl() uses, because EventSource cannot
+ * send the proof as a header (see read-session.ts readSessionClientProof).
  */
 import type { VerseEvent, VerseEventType } from '../../data/api-types.js';
 import { getAuthSnapshot, getReadClientProof } from '../../data/auth-store.js';
-import { eventsUrl } from '../../data/client.js';
-import { applyVerseEvent, setVerseStreamState } from './verse-store.js';
-import { invalidateVerseLists, verseSessionPath } from './verse-queries.js';
+import { invalidateVerseLists } from './verse-queries.js';
 
 /**
  * Every VerseEvent name the stream can carry. EventSource only dispatches
@@ -42,6 +43,16 @@ const EVENT_TYPES = [
   // V3.9 — a server that predates them simply never sends these names.
   'compaction',
   'context',
+  // V3.10 transient (SSE only, never replayed — see VERSE_TRANSIENT_EVENT_TYPES
+  // in core/verse/types.ts). They carry the last PERSISTED seq, so a store that
+  // dedupes by seq and does not know them yet simply drops them.
+  'thinking-delta',
+  'thinking-progress',
+  'progress',
+  'status',
+  // V3.10 persisted.
+  'recovered',
+  'history-truncated',
 ] as const satisfies readonly VerseEventType[];
 
 type UnlistedEventType = Exclude<VerseEventType, (typeof EVENT_TYPES)[number]>;
@@ -50,11 +61,6 @@ const EVENT_TYPES_EXHAUSTIVE: [UnlistedEventType] extends [never] ? true : never
 void EVENT_TYPES_EXHAUSTIVE;
 
 export const VERSE_EVENT_TYPES: readonly VerseEventType[] = EVENT_TYPES;
-
-/** Per-session stream URL, carrying the client proof the way eventsUrl() does. */
-export function verseSessionEventsUrl(sessionId: string): string {
-  return `${verseSessionPath(sessionId, '/events')}?client=${encodeURIComponent(getReadClientProof())}`;
-}
 
 function backoffMs(attempt: number): number {
   return Math.min(1000 * 2 ** attempt, 15_000);
@@ -80,6 +86,32 @@ function v39FieldsValid(e: Record<string, unknown>): boolean {
   return true;
 }
 
+const optionalCount = (v: unknown): boolean => v === undefined || (typeof v === 'number' && Number.isFinite(v) && v >= 0);
+
+/**
+ * V3.10 frames that feed arithmetic or a live label (elapsed, tok/s, token
+ * estimate) — same rule as v39FieldsValid: malformed → dropped, never NaN.
+ */
+function v310FieldsValid(e: Record<string, unknown>): boolean {
+  switch (e.type) {
+    case 'thinking-delta':
+      return typeof e.text === 'string';
+    case 'thinking-progress':
+      return e.estimatedTokens !== undefined && optionalCount(e.estimatedTokens);
+    case 'progress':
+      return (e.phase === 'thinking' || e.phase === 'tool' || e.phase === 'writing' || e.phase === 'waiting') &&
+        typeof e.elapsedMs === 'number' && Number.isFinite(e.elapsedMs) && e.elapsedMs >= 0 &&
+        (e.tool === undefined || typeof e.tool === 'string') &&
+        optionalCount(e.outTokens) && optionalCount(e.tokPerSec);
+    case 'status':
+      return (e.kind === 'retry' || e.kind === 'preflight' || e.kind === 'watchdog') && typeof e.message === 'string';
+    case 'history-truncated':
+      return typeof e.droppedBefore === 'number' && Number.isFinite(e.droppedBefore);
+    default:
+      return true;
+  }
+}
+
 /** Exported for tests: one SSE frame's data → a VerseEvent, or null when malformed. */
 export function parseVerseEventFrame(raw: string): VerseEvent | null {
   try {
@@ -88,71 +120,41 @@ export function parseVerseEventFrame(raw: string): VerseEvent | null {
     const candidate = parsed as Partial<VerseEvent>;
     if (typeof candidate.seq !== 'number' || typeof candidate.type !== 'string') return null;
     if (!v39FieldsValid(parsed as Record<string, unknown>)) return null;
+    if (!v310FieldsValid(parsed as Record<string, unknown>)) return null;
     return parsed as VerseEvent;
   } catch {
     return null;
   }
 }
 
+/** The only /api/events group the Verse console listens to. */
+export const VERSE_LIST_TOPICS = 'verse-sessions';
+
 /**
- * Open the live stream for one session. Returns a disposer; reconnects with
- * backoff on error while the session is still open and the read session is
- * still authenticated.
+ * The sidebar channel's URL. `topics` narrows the server to the one group
+ * this console listens to; `client` stays last, as in eventsUrl(). Without
+ * `topics` the server sends every group — the historical request, which is
+ * also what the refusal fallback below falls back to.
  */
-export function openVerseSessionStream(sessionId: string): () => void {
-  let source: EventSource | null = null;
-  let timer: ReturnType<typeof setTimeout> | null = null;
-  let attempt = 0;
-  let disposed = false;
+export function verseListEventsUrl(withTopics = true): string {
+  const topics = withTopics ? `topics=${VERSE_LIST_TOPICS}&` : '';
+  return `/api/events?${topics}client=${encodeURIComponent(getReadClientProof())}`;
+}
 
-  const connect = () => {
-    if (disposed || typeof EventSource === 'undefined') return;
-    if (getAuthSnapshot().phase !== 'authenticated') return;
-    setVerseStreamState(sessionId, attempt === 0 ? 'connecting' : 'reconnecting');
-    const es = new EventSource(verseSessionEventsUrl(sessionId), { withCredentials: true });
-    source = es;
-    es.onopen = () => {
-      attempt = 0;
-      setVerseStreamState(sessionId, 'open');
-    };
-    for (const type of VERSE_EVENT_TYPES) {
-      es.addEventListener(type, (evt) => {
-        const event = parseVerseEventFrame((evt as MessageEvent<string>).data);
-        if (!event) return;
-        applyVerseEvent(sessionId, event);
-        if (event.type === 'turn-done' || event.type === 'cancelled' || event.type === 'error') invalidateVerseLists();
-      });
-    }
-    es.onerror = (evt) => {
-      // A server-sent event NAMED `error` (a VerseEvent.type) also dispatches
-      // through onerror because onerror is the handler for event type "error".
-      // It arrives as a MessageEvent with data; a real transport failure does
-      // not. Without this guard every vendor error replayed on reconnect would
-      // tear the stream down again, forever.
-      if (typeof MessageEvent !== 'undefined' && evt instanceof MessageEvent) return;
-      es.close();
-      if (source === es) source = null;
-      if (disposed) return;
-      setVerseStreamState(sessionId, 'reconnecting');
-      if (getAuthSnapshot().phase !== 'authenticated') return;
-      timer = setTimeout(() => {
-        timer = null;
-        attempt += 1;
-        connect();
-      }, backoffMs(attempt));
-    };
-  };
+/**
+ * Set once this page has PROVEN that the server refuses `?topics=`: a
+ * connection with it failed before it ever opened, and the same channel
+ * without it then opened. The read-session boundary on SSE paths used to
+ * answer 401 to any parameter besides `client`, and a sidebar that never
+ * updates is far worse than one that is sent (and discards) extra groups.
+ * Page-lifetime only — the same rule session-stream.ts applies to `?after=`:
+ * a server that gains support is used again after a reload.
+ */
+let topicsRefused = false;
 
-  connect();
-
-  return () => {
-    disposed = true;
-    if (timer) clearTimeout(timer);
-    timer = null;
-    source?.close();
-    source = null;
-    setVerseStreamState(sessionId, 'closed');
-  };
+/** Tests: forget a proven refusal. */
+export function resetVerseListChannelCapabilities(): void {
+  topicsRefused = false;
 }
 
 /**
@@ -164,20 +166,39 @@ export function openVerseListChannel(): () => void {
   let timer: ReturnType<typeof setTimeout> | null = null;
   let attempt = 0;
   let disposed = false;
+  /** This connection is the no-`topics` retry that tests whether `topics` was refused. */
+  let probing = false;
 
   const connect = () => {
     if (disposed || typeof EventSource === 'undefined') return;
     if (getAuthSnapshot().phase !== 'authenticated') return;
-    const es = new EventSource(eventsUrl(), { withCredentials: true });
+    const withTopics = !topicsRefused && !probing;
+    const es = new EventSource(verseListEventsUrl(withTopics), { withCredentials: true });
+    let opened = false;
     source = es;
     es.onopen = () => {
+      opened = true;
       attempt = 0;
+      if (probing) {
+        topicsRefused = true;
+        probing = false;
+      }
     };
     es.addEventListener('verse-sessions', () => invalidateVerseLists());
     es.onerror = () => {
       es.close();
       if (source === es) source = null;
       if (disposed || getAuthSnapshot().phase !== 'authenticated') return;
+      if (!opened && withTopics) {
+        // Refused before it opened, with `topics`: find out at once whether
+        // the parameter is what was refused (see topicsRefused). One probe,
+        // no delay — a real outage fails the probe too and falls through to
+        // the ordinary backoff below.
+        probing = true;
+        connect();
+        return;
+      }
+      probing = false;
       timer = setTimeout(() => {
         timer = null;
         attempt += 1;

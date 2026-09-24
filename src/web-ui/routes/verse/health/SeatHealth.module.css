@@ -1,0 +1,148 @@
+/* routes/verse/health — seat health banner + Composer block (V3.10, unit A2).
+   Tokens only (design/tokens.css), so both themes and compact density follow. */
+
+.banner {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-left-width: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  max-width: 100%;
+  min-width: 0;
+}
+
+.banner[data-tone='danger'] { border-left-color: var(--status-danger-solid); }
+.banner[data-tone='warning'] { border-left-color: var(--status-warning-solid); }
+.banner[data-tone='neutral'] { border-left-color: var(--status-neutral-solid); }
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.headline {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: var(--font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.rowHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-2);
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  align-self: center;
+  border-radius: 50%;
+  background: var(--status-neutral-solid);
+}
+
+.row[data-tone='danger'] .dot { background: var(--status-danger-solid); }
+.row[data-tone='warning'] .dot { background: var(--status-warning-solid); }
+.row[data-tone='success'] .dot { background: var(--status-success-solid); }
+
+.label { font-weight: var(--font-weight-medium); }
+
+.word { color: var(--text-secondary); }
+.row[data-tone='danger'] .word { color: var(--status-danger-fg); }
+.row[data-tone='warning'] .word { color: var(--status-warning-fg); }
+
+.reset {
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.detail {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.command {
+  flex: 1 1 16rem;
+  min-width: 0;
+  padding: 2px var(--space-1);
+  border-radius: var(--radius-xs);
+  background: var(--bg-code);
+  font-size: var(--text-xs-size);
+  overflow-wrap: anywhere;
+}
+
+.status {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+
+.status[data-error='true'] { color: var(--status-danger-fg); }
+
+/* Composer block: sits directly above the message box. */
+.block {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--status-danger-solid);
+  border-radius: var(--radius-sm);
+  background: var(--status-danger-bg);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  min-width: 0;
+}
+
+.blockReason {
+  margin: 0;
+  font-weight: var(--font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.alternatives {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.alternativesLabel {
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+}
+
+@media (max-width: 480px) {
+  .banner,
+  .block { padding: var(--space-2); }
+  .command { flex-basis: 100%; }
+}

@@ -28,12 +28,42 @@
  * `run/engines.spawnEngine`, this module is a SECOND subprocess funnel and none
  * of the daemon's gates cover it. It therefore carries its own call to the one
  * shared predicate (`policy/local-only.decidePermission`, reached through its
- * published wrappers) at the top of `startTurn` — see `verseSeatPermitted`.
+ * published wrappers) at the top of `startTurn` — see `verseSeatPermitted` —
+ * and (V3.10) re-asks it while a turn runs, so switching Local-only on stops a
+ * vendor turn already in flight.
+ *
+ * RELIABILITY (V3.10, r2/reliability.md):
+ *   - TRANSIENT events (thinking-delta, thinking-progress, progress, status)
+ *     are fanned out to live listeners only, stamped with the last PERSISTED
+ *     seq, and never reach the log (`emitTransient`).
+ *   - At turn end the log is compacted: delta runs folded into what the
+ *     transcript renders, whole turns archived past the cap (session-store).
+ *   - Every storage write is contained: a failed append stops the turn with a
+ *     `storage` error instead of throwing out of a stdout listener (which was
+ *     an uncaught exception that took the whole server down).
+ *   - Launched process groups are recorded in `running.json`; the next engine
+ *     reaps the ones a crashed server left running (process-registry.ts).
+ *   - A turn whose native conversation vanished (`native-thread-missing`) or
+ *     whose native id is locked (`session-in-use`) is retried ONCE on a new
+ *     native session seeded with the handoff note, recorded as `recovered`.
+ *   - A no-output watchdog posts a `status` notice after 3 minutes of silence
+ *     (the turn keeps running; Stop is the operator's call).
+ *   - Local seats get a <100 ms endpoint preflight, so a dead Ollama fails the
+ *     turn at once instead of spinning through the CLI's retry loop.
+ *   - A readiness gate (account-health's `getSeatReadiness`) refuses a turn on
+ *     a signed-out or exhausted seat with 409 + ranked alternatives.
+ *   - Only PERSISTED events count as "the CLI engaged" (turnCount); a batch of
+ *     transient retry/progress notices does not.
+ *   - `onSessionChange` announces status/title/turnCount changes (turn start
+ *     and end included) so the sidebar is pushed instead of polled.
+ *   - `close` and `interruptAll` deliver pending reasoning taps and flush the
+ *     reasoning store before the process goes away.
  */
 
 import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
+import { connect as netConnect } from 'node:net';
 import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, sep } from 'node:path';
 
@@ -46,6 +76,7 @@ import {
 import type { AshlrConfig } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 
+import { classifyVerseCliError } from './adapters/claude.js';
 import {
   adapterFor as defaultAdapterFor,
   VERSE_TELEMETRY_POLL_MS,
@@ -65,26 +96,39 @@ import {
   hasExpansiveMode,
   reconcileAutoCompactAt,
 } from './context-math.js';
+import type { SeatReadiness } from './health-types.js';
 import { legacyModelOptionFallback } from './model-windows.js';
+import {
+  argvMarkers,
+  createProcessRegistry,
+  type ProcessRegistryOptions,
+  type VerseProcessRegistry,
+} from './process-registry.js';
 import { stripUnsafeControlChars } from './project-memory.js';
+import { buildHandoffPreview } from './session-handoff.js';
 import { createVerseSessionStore, isVerseWindowSource, type VerseSessionStore } from './session-store.js';
 import {
+  isTransientVerseEvent,
   VERSE_CONTEXT_MODES,
   VERSE_DEFAULT_CONTEXT_WINDOWS,
+  VERSE_ERROR_CODES,
   VERSE_MAX_TURN_TEXT_BYTES,
   VERSE_MAX_WORKSPACE_ROOTS,
   VERSE_TURN_TIMEOUT_MS,
   type VerseContextMode,
   type VerseCreateSessionRequest,
   type VerseEngine,
+  type VerseErrorCode as VerseEventErrorCode,
   type VerseEvent,
   type VerseModelOption,
+  type VerseRecoveryHow,
   type VerseSeat,
   type VerseSession,
   type VerseTurnLaunch,
   type VerseUsage,
   type VerseWindowSource,
 } from './types.js';
+import { appendVerseLog, type VerseLogLevel } from './verse-log.js';
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -94,25 +138,61 @@ export type VerseErrorCode =
   | 'VERSE_SESSION_NOT_FOUND'
   | 'VERSE_SESSION_BUSY'
   | 'VERSE_INVALID'
-  | 'VERSE_TOO_LARGE';
+  | 'VERSE_TOO_LARGE'
+  /** V3.10. The seat's readiness gate refused the turn; `readiness` carries the alternatives. */
+  | 'VERSE_SEAT_NOT_READY';
 
 const VERSE_ERROR_STATUS: Record<VerseErrorCode, 404 | 409 | 400 | 413> = {
   VERSE_SESSION_NOT_FOUND: 404,
   VERSE_SESSION_BUSY: 409,
   VERSE_INVALID: 400,
   VERSE_TOO_LARGE: 413,
+  VERSE_SEAT_NOT_READY: 409,
 };
 
 export class VerseError extends Error {
   readonly code: VerseErrorCode;
   readonly status: 404 | 409 | 400 | 413;
+  /** Present only on VERSE_SEAT_NOT_READY. */
+  readonly readiness?: SeatReadiness;
 
-  constructor(code: VerseErrorCode, message: string) {
+  constructor(code: VerseErrorCode, message: string, extra: { readiness?: SeatReadiness } = {}) {
     super(message);
     this.name = 'VerseError';
     this.code = code;
     this.status = VERSE_ERROR_STATUS[code];
+    if (extra.readiness) this.readiness = extra.readiness;
   }
+}
+
+/**
+ * V3.10. The HTTP answer for a readiness refusal, in the frozen
+ * `SeatNotReadyResponse` shape (health-types.ts), for the API layer's error
+ * mapper: `{ status: 409, body: { error, code: 'seat-not-ready', readiness } }`.
+ * Null for any other error. Duck-typed like the API's own mapper, so an error
+ * from another module instance still maps.
+ */
+export function seatNotReadyResponse(err: unknown): { status: 409; body: { error: string; code: 'seat-not-ready'; readiness: SeatReadiness } } | null {
+  if (!isObject(err) && !(err instanceof Error)) return null;
+  const e = err as { code?: unknown; message?: unknown; readiness?: unknown };
+  if (e.code !== 'VERSE_SEAT_NOT_READY' || !isReadiness(e.readiness)) return null;
+  return {
+    status: 409,
+    body: {
+      error: typeof e.message === 'string' ? e.message : `seat ${e.readiness.seatId} is not ready`,
+      code: 'seat-not-ready',
+      readiness: e.readiness,
+    },
+  };
+}
+
+function isReadiness(value: unknown): value is SeatReadiness {
+  return isObject(value)
+    && typeof value['seatId'] === 'string'
+    && typeof value['ready'] === 'boolean'
+    && (value['reason'] === null || typeof value['reason'] === 'string')
+    && Array.isArray(value['alternatives'])
+    && value['alternatives'].every((alt) => typeof alt === 'string');
 }
 
 // ---------------------------------------------------------------------------
@@ -195,10 +275,71 @@ export interface VerseEngineHandle {
   cancelTurn(id: string): boolean;
   deleteSession(id: string): void;
   renameSession(id: string, title: string): VerseSession;
-  /** Replays stored events with `seq > fromSeq`, then delivers live ones. Returns the unsubscribe function. */
+  /**
+   * Replays stored events with `seq > fromSeq`, then delivers live ones —
+   * persisted AND transient (V3.10). A transient event carries the last
+   * persisted seq and is never replayed. Returns the unsubscribe function.
+   */
   subscribe(id: string, fromSeq: number, listener: (event: VerseEvent) => void): () => void;
   /** Kills running turns and drops listeners. */
   close(): void;
+  /**
+   * V3.10 crash path. SIGKILL every running turn's process group and settle
+   * each turn SYNCHRONOUSLY as failed (`turn interrupted: <reason>`), so the
+   * log and records are closed out before the process exits. Returns how many
+   * turns were interrupted. The engine stays usable (unlike `close`).
+   * Optional on the interface so test fakes and older handles still conform.
+   */
+  interruptAll?(reason: string): number;
+}
+
+/** V3.10. Result of the local-endpoint preflight. */
+export type VersePreflightResult =
+  | { ok: true; ms: number }
+  /** The endpoint did not answer within the budget; the turn proceeds with a notice. */
+  | { ok: 'slow'; ms: number }
+  | { ok: false; ms: number; reason: string };
+
+/** Errnos that prove nothing is listening; anything else (a timeout) is not proof. */
+const PREFLIGHT_DEAD_CODES = new Set(['ECONNREFUSED', 'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH', 'EADDRNOTAVAIL', 'EAI_AGAIN']);
+export const VERSE_PREFLIGHT_TIMEOUT_MS = 1_500;
+
+/**
+ * V3.10. Is anything listening at a local seat's dispatch address? A bare TCP
+ * connect: it works for both lanes (Ollama and the llama-server proxy, which
+ * share no HTTP route), costs < 1 ms on loopback, and sends nothing. Only a
+ * definite refusal fails the turn — a slow answer is reported, not fatal.
+ */
+export function preflightLocalEndpoint(url: string, timeoutMs = VERSE_PREFLIGHT_TIMEOUT_MS): Promise<VersePreflightResult> {
+  const started = Date.now();
+  let host: string;
+  let port: number;
+  try {
+    const parsed = new URL(url);
+    host = parsed.hostname.replace(/^\[|\]$/g, '');
+    port = parsed.port ? Number(parsed.port) : parsed.protocol === 'https:' ? 443 : 80;
+  } catch {
+    return Promise.resolve({ ok: false, ms: 0, reason: 'the local endpoint address is not a valid URL' });
+  }
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (result: VersePreflightResult): void => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(result);
+    };
+    const socket = netConnect({ host, port });
+    const timer = setTimeout(() => finish({ ok: 'slow', ms: Date.now() - started }), timeoutMs);
+    socket.once('connect', () => finish({ ok: true, ms: Date.now() - started }));
+    socket.once('error', (err: NodeJS.ErrnoException) => {
+      const code = err.code ?? 'EUNKNOWN';
+      finish(PREFLIGHT_DEAD_CODES.has(code)
+        ? { ok: false, ms: Date.now() - started, reason: `nothing is listening at ${host}:${port} (${code})` }
+        : { ok: 'slow', ms: Date.now() - started });
+    });
+  });
 }
 
 export interface VerseEngineOptions {
@@ -227,6 +368,61 @@ export interface VerseEngineOptions {
   adapterFor?: (engine: VerseEngine) => VerseAdapter;
   /** Telemetry poll interval for adapters with `pollTelemetry`. Default VERSE_TELEMETRY_POLL_MS. */
   telemetryPollMs?: number;
+  /**
+   * V3.10 readiness gate. `null` disables it. Default: account-health's
+   * `getSeatReadiness` from seats.ts, resolved lazily (the gate is open until
+   * it loads — an unknown readiness never refuses). Must be SYNCHRONOUS: the
+   * refusal is the HTTP answer (409) to the turn request. A seat is refused
+   * only on an explicit `ready: false`.
+   */
+  readiness?: ((seatId: string) => SeatReadiness | null | undefined) | null;
+  /**
+   * V3.10 local-seat endpoint preflight, run in parallel with the spawn; a
+   * definite refusal stops the turn. `null` disables it. Default
+   * `preflightLocalEndpoint`.
+   */
+  preflight?: ((url: string) => Promise<VersePreflightResult>) | null;
+  /** V3.10 no-output watchdog threshold. Default 3 minutes. */
+  watchdogMs?: number;
+  /** V3.10 how often a running turn is checked (watchdog + live local-only). Default 30 s. */
+  watchdogPollMs?: number;
+  /** V3.10 orphan registry (`<root>/running.json`). `false` disables it. */
+  processRegistry?: ProcessRegistryOptions | false;
+  /**
+   * V3.10 reasoning tap: called (deferred, in order, never inside the turn's
+   * I/O path) with EVERY persisted event and a snapshot of its session — the
+   * reasoning store needs the whole turn (user message, tool calls, outcome)
+   * around each thinking block, not just the blocks. Transient events are
+   * never tapped. `null` disables it. Default: the reasoning store's
+   * `recordVerseReasoning` (core/reasoning/ingest-verse.ts), resolved lazily
+   * — absent module = no tap.
+   */
+  reasoningTap?: ((event: VerseEvent, session: VerseSession) => void) | null;
+  /**
+   * V3.10 flush for the reasoning tap's write batches, called by `close()`
+   * and `interruptAll()` after every tap still pending has been delivered.
+   * The reasoning store batches live steps (250 ms / 64 steps), so without
+   * this a crash or shutdown drops the tail of the last turn's reasoning —
+   * exactly the turn that was running when things went wrong. `null`
+   * disables it. Default: the reasoning store's `flushVerseReasoning`,
+   * resolved lazily with the default tap (only when `reasoningTap` is left
+   * undefined — an injected tap brings its own flush or none).
+   */
+  reasoningFlush?: (() => void) | null;
+  /**
+   * V3.10 session-list hook: called with the session id whenever a session's
+   * status, title or turn count changes, and when a session is created or
+   * deleted — the fields the sidebar lists. Turn start and end happen inside
+   * the engine with no HTTP request to mark them, so without this the sidebar
+   * learns of them only on the next /api/events poll tick. Called
+   * synchronously from the write path: it must be cheap and must not throw
+   * (a throw is logged and swallowed). Default: none.
+   */
+  onSessionChange?: ((sessionId: string) => void) | null;
+  /** V3.10 retry a turn once on a new native session when the old one is lost. Default true. */
+  recoverNativeThreads?: boolean;
+  /** V3.10 diagnostic sink. Default: `<root>/verse.log` (verse-log.ts). */
+  log?: (level: VerseLogLevel, message: string) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -325,8 +521,44 @@ const REDACT_LAUNCHER_MIN_CHARS = 4;
 const REDACT_ENV_MIN_CHARS = 8;
 const INTERRUPTED_MESSAGE = 'turn interrupted: server restarted';
 const INTERRUPTED_LAST_ERROR = 'interrupted by server restart';
+const DEFAULT_WATCHDOG_MS = 3 * 60_000;
+const DEFAULT_WATCHDOG_POLL_MS = 30_000;
+/** Module the default reasoning tap is loaded from (A7). A variable, so a missing module is a runtime miss, not a build error. */
+const REASONING_INGEST_MODULE = '../reasoning/ingest-verse.js';
 
-type TerminationReason = 'cancelled' | 'timeout' | 'closed';
+/**
+ * Fallback classification of vendor failure text, for when the adapter did
+ * not set `error.code` itself (and for a stderr-only failure — claude's
+ * "already in use" never reaches stdout, so no parser can see it).
+ *
+ * DELEGATES to the adapters' `classifyVerseCliError` (adapters/claude.ts)
+ * rather than keeping a second phrase list here: the two lists had already
+ * drifted — grok's "No session found with id …" was recognised by the
+ * adapters but not by this fallback, so a grok thread lost between turns
+ * failed for good instead of recovering on a new native session. One list,
+ * captured from the real binaries, is the only way the engine and the
+ * parsers agree on what is recoverable.
+ */
+export function classifyVerseFailure(text: string): VerseEventErrorCode | null {
+  return classifyVerseCliError(text);
+}
+
+function knownErrorCode(value: unknown): VerseEventErrorCode | null {
+  return typeof value === 'string' && (VERSE_ERROR_CODES as readonly string[]).includes(value)
+    ? value as VerseEventErrorCode
+    : null;
+}
+
+/**
+ * Why the ENGINE ended a turn. `cancelled`/`closed` are Stop (not failures);
+ * the rest are failures with an engine-authored message:
+ *   timeout      the wall-clock limit;
+ *   policy       Local-only was switched on while a vendor turn ran;
+ *   storage      the session log could not be written;
+ *   interrupted  the server is going down (crash handler);
+ *   preflight    a local seat's endpoint refused the connection.
+ */
+type TerminationReason = 'cancelled' | 'timeout' | 'closed' | 'policy' | 'storage' | 'interrupted' | 'preflight';
 
 /** A string that must never reach a durable event, with the placeholder that replaces it. */
 interface Redaction {
@@ -356,7 +588,26 @@ interface RunningTurn {
   escalationTimer: ReturnType<typeof setTimeout> | null;
   drainTimer: ReturnType<typeof setTimeout> | null;
   pollTimer: ReturnType<typeof setInterval> | null;
+  /** V3.10 watchdog + live local-only check. */
+  watchTimer: ReturnType<typeof setInterval> | null;
+  /** Epoch ms of the last stdout/stderr byte. */
+  lastOutputAt: number;
+  /** The watchdog already warned about the current silence. */
+  watchdogWarned: boolean;
+  /** The failure the CLI reported that a new native session can fix. */
+  recoverable: VerseEventErrorCode | null;
+  /** The seat launch this turn was started from (live local-only re-check, recovery). */
+  seatLaunch: VerseSeatLaunch;
+  /** The operator's text for this turn (a recovery re-sends it). */
+  text: string;
+  /** Seq of this turn's `user-message` (events before it seed a recovery's handoff). */
+  userSeq: number;
+  /** This attempt IS the one recovery; it never recovers again. */
+  isRecovery: boolean;
+  /** Engine-authored failure text for policy / storage / interrupted terminations. */
+  terminationMessage: string | null;
 }
+
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -685,10 +936,62 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   const loadCfg = opts.loadConfig ?? readConfigForPolicy;
   const adapterFor = opts.adapterFor ?? defaultAdapterFor;
   const telemetryPollMs = positiveInt(opts.telemetryPollMs) ?? VERSE_TELEMETRY_POLL_MS;
+  const watchdogMs = positiveInt(opts.watchdogMs) ?? DEFAULT_WATCHDOG_MS;
+  const watchdogPollMs = positiveInt(opts.watchdogPollMs) ?? DEFAULT_WATCHDOG_POLL_MS;
+  const recoverNativeThreads = opts.recoverNativeThreads !== false;
+  const preflight = opts.preflight === undefined ? preflightLocalEndpoint : opts.preflight;
+  const log = opts.log ?? ((level: VerseLogLevel, message: string): void => { appendVerseLog(level, message, { root }); });
   const store: VerseSessionStore = createVerseSessionStore(root);
   const running = new Map<string, RunningTurn>();
   const listeners = new Map<string, Set<(event: VerseEvent) => void>>();
+  /** Sessions whose log write already failed this turn (one notice, not one per event). */
+  const storageFailed = new Set<string>();
+  /** Reasoning taps waiting for the next drain (see `tapReasoning`). */
+  const pendingTaps: Array<() => void> = [];
+  let tapDrainScheduled = false;
+  /**
+   * The last `status|title|turnCount` each session was announced with (see
+   * `noteListing`), so the list hook fires on a change the sidebar can show
+   * and not on every usage reading that also saves the record.
+   */
+  const listingKeys = new Map<string, string>();
   let closed = false;
+
+  // ---- lazily-bound collaborators (V3.10) ----------------------------------
+  //
+  // Both live in modules built by other units and loaded at runtime, so this
+  // engine never has a hard import edge on them: account health (seats.ts)
+  // and the reasoning store. Until they resolve, the gate is open and the tap
+  // is off — neither may ever block or fail a turn.
+  let readiness: ((seatId: string) => unknown) | null = opts.readiness ?? null;
+  if (opts.readiness === undefined) {
+    void import('./seats.js')
+      .then((mod) => {
+        const fn = (mod as unknown as Record<string, unknown>)['getSeatReadiness'];
+        if (typeof fn === 'function' && readiness === null) readiness = fn as (seatId: string) => unknown;
+      })
+      .catch(() => { /* no account health: the gate stays open */ });
+  }
+  let reasoningTap: ((event: VerseEvent, session: VerseSession) => void) | null = opts.reasoningTap ?? null;
+  let reasoningFlush: (() => void) | null = opts.reasoningFlush ?? null;
+  if (opts.reasoningTap === undefined) {
+    const specifier: string = REASONING_INGEST_MODULE;
+    void (import(specifier) as Promise<unknown>)
+      .then((mod) => {
+        const fn = isObject(mod) ? mod['recordVerseReasoning'] : undefined;
+        if (typeof fn === 'function' && reasoningTap === null) reasoningTap = fn as (event: VerseEvent, session: VerseSession) => void;
+        const flush = isObject(mod) ? mod['flushVerseReasoning'] : undefined;
+        if (opts.reasoningFlush === undefined && typeof flush === 'function' && reasoningFlush === null) {
+          reasoningFlush = flush as () => void;
+        }
+      })
+      .catch(() => { /* reasoning store not present: no tap */ });
+  }
+  const onSessionChange = opts.onSessionChange ?? null;
+
+  const registry: VerseProcessRegistry | null = opts.processRegistry === false
+    ? null
+    : createProcessRegistry(root, { log, ...(opts.processRegistry ?? {}) });
 
   function nowIso(): string {
     return now().toISOString();
@@ -776,21 +1079,170 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     return { sessionId: source.id, title: source.title };
   }
 
-  function emit(id: string, event: VerseParsedEvent): VerseEvent {
-    const stored = store.appendEvent(id, event, nowIso());
+  function fanOut(id: string, event: VerseEvent): void {
     const subs = listeners.get(id);
-    if (subs) {
-      for (const listener of [...subs]) {
-        try { listener(stored); } catch { /* a bad listener never breaks the turn */ }
-      }
+    if (!subs) return;
+    for (const listener of [...subs]) {
+      try { listener(event); } catch { /* a bad listener never breaks the turn */ }
     }
+  }
+
+  /**
+   * Live-only delivery. The seq is the last PERSISTED one (the counter does
+   * not move), so the stored log stays the single source of seqs and a
+   * restart can never reissue a seq a client already saw; verse-stream omits
+   * the SSE `id:` line for these, so a resume cursor never points at one.
+   */
+  function emitTransient(id: string, event: VerseParsedEvent): void {
+    if (!listeners.get(id)?.size) return;
+    let seq = 0;
+    try { seq = store.lastSeq(id); } catch { seq = 0; }
+    fanOut(id, { ...event, seq, at: nowIso() } as VerseEvent);
+  }
+
+  /**
+   * Persist + fan out. Returns null when the event was transient (delivered
+   * live only) or could not be written — a storage failure is CONTAINED here:
+   * it is reported, the running turn is stopped, and nothing is thrown into
+   * the stdout listener / timer that called us.
+   */
+  function emit(id: string, event: VerseParsedEvent): VerseEvent | null {
+    if (isTransientVerseEvent(event as VerseEvent)) {
+      emitTransient(id, event);
+      return null;
+    }
+    let stored: VerseEvent;
+    try {
+      stored = store.appendEvent(id, event, nowIso());
+    } catch (err) {
+      onStorageFailure(id, err, event);
+      return null;
+    }
+    fanOut(id, stored);
+    if (reasoningTap) tapReasoning(id, stored);
     return stored;
   }
 
+  function tapReasoning(id: string, event: VerseEvent): void {
+    const tap = reasoningTap;
+    const session = store.get(id);
+    if (!tap || !session) return;
+    const snapshot = cloneSession(session);
+    // Deferred: the reasoning store does its own file I/O and must never add
+    // latency to (or throw into) the turn's stdout path. QUEUED (one drain per
+    // tick, in order) rather than one setImmediate per event, so the crash and
+    // shutdown paths can deliver what is still pending SYNCHRONOUSLY
+    // (`drainReasoningTaps`) — a process about to exit never reaches the next
+    // tick, and the turn it interrupts is the one worth keeping.
+    pendingTaps.push(() => {
+      try { tap(event, snapshot); } catch (err) {
+        log('warn', `reasoning tap failed for session ${id}: ${errorCode(err) || (err instanceof Error ? err.name : 'error')}`);
+      }
+    });
+    if (!tapDrainScheduled) {
+      tapDrainScheduled = true;
+      setImmediate(drainReasoningTaps);
+    }
+  }
+
+  function drainReasoningTaps(): void {
+    tapDrainScheduled = false;
+    // Spliced first: a tap that (indirectly) queues another is delivered on
+    // the next drain, never re-entrantly inside this loop.
+    for (const run of pendingTaps.splice(0)) run();
+  }
+
+  /**
+   * Deliver every queued tap, then flush the reasoning store's own batches.
+   * Crash/shutdown only; never throws (the process is on its way out).
+   */
+  function flushReasoning(): void {
+    try { drainReasoningTaps(); } catch { /* each tap already guards itself */ }
+    const flush = reasoningFlush;
+    if (!flush) return;
+    try { flush(); } catch (err) {
+      log('warn', `reasoning flush failed: ${errorCode(err) || (err instanceof Error ? err.name : 'error')}`);
+    }
+  }
+
+  function onStorageFailure(id: string, err: unknown, event: VerseParsedEvent): void {
+    const code = errorCode(err) || 'EIO';
+    const message = `storage error (${code}): this session's log could not be written, so the turn was stopped`;
+    if (storageFailed.has(id)) return;
+    storageFailed.add(id);
+    log('error', `session ${id}: event log write failed (${code}) on a ${event.type} event; stopping its turn`);
+    const session = store.get(id);
+    if (session) {
+      session.status = 'error';
+      session.lastError = message;
+      try { store.save(session); } catch { /* the same disk; the in-memory record still says error */ }
+      noteListing(session);
+    }
+    // Live-only notice (it could not be stored). Carries the last persisted
+    // seq, like a transient event, so it never becomes a resume cursor.
+    let seq = 0;
+    try { seq = store.lastSeq(id); } catch { seq = 0; }
+    const turnId = 'turnId' in event && typeof event.turnId === 'string' ? event.turnId : null;
+    fanOut(id, { seq, at: nowIso(), type: 'error', turnId, message, code: 'storage' });
+    const turn = running.get(id);
+    if (turn && !turn.settled && turn.termination === null) {
+      turn.terminationMessage = message;
+      requestTermination(id, turn, 'storage');
+    }
+  }
+
+  /**
+   * Write the record. A failure is logged, not thrown: the in-memory record
+   * (which every read serves) is already updated, and throwing here would
+   * escape from a child-process `close` handler as an uncaught exception.
+   */
   function save(session: VerseSession): VerseSession {
     session.updatedAt = nowIso();
-    store.save(session);
+    try {
+      store.save(session);
+    } catch (err) {
+      log('error', `session ${session.id}: record write failed (${errorCode(err) || 'EIO'})`);
+    }
+    // Announced even when the write failed: every read serves the in-memory
+    // record, so that is what the sidebar will show.
+    noteListing(session);
     return session;
+  }
+
+  /**
+   * Fire `onSessionChange` when a field the session list shows (status,
+   * title, turn count) differs from what was last announced. Usage and
+   * context readings save the record many times per turn; announcing each
+   * would push the whole list to every open tab for nothing. A session's
+   * first save in this process always announces (nothing to compare with),
+   * which costs at most one extra coalesced push.
+   */
+  function noteListing(session: VerseSession): void {
+    if (!onSessionChange) return;
+    const key = `${session.status}\u0000${session.title}\u0000${session.turnCount}`;
+    if (listingKeys.get(session.id) === key) return;
+    listingKeys.set(session.id, key);
+    announce(session.id);
+  }
+
+  function announce(id: string): void {
+    const hook = onSessionChange;
+    if (!hook) return;
+    try { hook(id); } catch (err) {
+      log('warn', `session-change hook failed for session ${id}: ${errorCode(err) || (err instanceof Error ? err.name : 'error')}`);
+    }
+  }
+
+  /** Fold / cap the log after a turn settles. Best effort; the log is untouched on failure. */
+  function compactLog(id: string): void {
+    try {
+      const result = store.compactEvents(id);
+      if (result.archived > 0) {
+        log('info', `session ${id}: event log passed its cap; ${result.archived} events of whole turns moved to the archive`);
+      }
+    } catch (err) {
+      log('warn', `session ${id}: event log compaction failed (${errorCode(err) || 'EIO'}); the log is unchanged`);
+    }
   }
 
   /**
@@ -819,6 +1271,17 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     session.status = 'error';
     session.lastError = INTERRUPTED_LAST_ERROR;
     save(session);
+    compactLog(session.id);
+  }
+
+  // Orphans FIRST: a turn's process group a dead server left behind is
+  // stopped before its session is settled as interrupted.
+  if (registry) {
+    try {
+      registry.reapOrphans();
+    } catch (err) {
+      log('error', `orphan reaping failed: ${errorCode(err) || (err instanceof Error ? err.name : 'error')}`);
+    }
   }
 
   for (const session of store.list()) {
@@ -851,6 +1314,8 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     }
     if (turn.pollTimer !== null) clearInterval(turn.pollTimer);
     turn.pollTimer = null;
+    if (turn.watchTimer !== null) clearInterval(turn.watchTimer);
+    turn.watchTimer = null;
   }
 
   function beginDrain(id: string, turn: RunningTurn): void {
@@ -1070,17 +1535,37 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
    * rest of a poll's readings would then land AFTER `turn-done`. The parser's
    * final flush and `afterTurn` deliberately run while settled, so they omit it.
    */
-  function applyEvents(id: string, turn: RunningTurn, events: VerseParsedEvent[], untilSettled = false): void {
+  function applyEvents(
+    id: string,
+    turn: RunningTurn,
+    events: VerseParsedEvent[],
+    untilSettled = false,
+    countsAsOutput = false,
+  ): void {
     const session = store.get(id);
     // No record, no events: appending would re-create the log of a session
     // that is gone, and `save` its record — a deleted chat back as an orphan.
     if (!session) return;
-    for (const event of events) {
+    for (let event of events) {
       if (untilSettled && turn.settled) return;
-      if (event.type === 'error') turn.sawError = true;
+      if (isTransientVerseEvent(event as VerseEvent)) {
+        emitTransient(id, event);
+        continue;
+      }
+      if (event.type === 'error') {
+        turn.sawError = true;
+        // The adapter's code wins; otherwise recognise the CLI's own phrase,
+        // and stamp the code on the stored event so the UI can act on it.
+        const code = knownErrorCode(event.code) ?? classifyVerseFailure(event.message);
+        if (code) {
+          turn.recoverable = code;
+          if (event.code !== code) event = { ...event, code };
+        }
+      }
       const enriched = applyUsage(session, turn.option, event, turn.turnId);
       if (enriched === null) continue;
-      emit(id, enriched);
+      const stored = emit(id, enriched);
+      if (countsAsOutput && stored !== null) turn.sawOutput = true;
       // Deleted by a subscriber of the event just emitted: neither `save` nor
       // the rest of the batch may write the record or log back.
       if (store.get(id) !== session) return;
@@ -1088,10 +1573,17 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     }
   }
 
+  /**
+   * `sawOutput` ("the CLI engaged, count the turn") is set only by an event
+   * that was PERSISTED. Since 3.10 a batch can be all transient — progress
+   * ticks, `status` retry notices, thinking deltas — and a turn that produced
+   * nothing but "retrying (1/10)" before failing has not created anything on
+   * the vendor side worth a turnCount; counting it would make the next launch
+   * `--resume` a conversation that never existed.
+   */
   function handleParsed(id: string, turn: RunningTurn, events: VerseParsedEvent[]): void {
     if (events.length === 0) return;
-    turn.sawOutput = true;
-    applyEvents(id, turn, events);
+    applyEvents(id, turn, events, false, true);
   }
 
   /**
@@ -1148,6 +1640,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     turn.settled = true;
     clearTimers(turn);
     running.delete(id);
+    registry?.remove(id, turn.turnId);
 
     if (turn.stdoutBuf.trim()) {
       const rest = turn.stdoutBuf;
@@ -1193,6 +1686,11 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       ok = false;
       lastError = `turn timed out after ${turnTimeoutMs}ms`;
       emit(id, { type: 'error', turnId: turn.turnId, message: lastError });
+    } else if (turn.termination !== null) {
+      // policy / storage / interrupted: the engine ended it, with its own words.
+      ok = false;
+      lastError = turn.terminationMessage ?? `turn stopped (${turn.termination})`;
+      emit(id, { type: 'error', turnId: turn.turnId, message: lastError });
     } else if (!ok) {
       // The tail is scrubbed of the launcher/binary/env before it is durable.
       // `scrubSecrets` runs too, because this string is persisted to the 0600
@@ -1200,11 +1698,24 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       // would scrub a forwarded CLAUDE_CODE_OAUTH_TOKEN, on the disk path
       // nothing did.
       const tail = scrubSecrets(redact(turn.stderrTail.join('\n'), turn.redactions)).trim().slice(-STDERR_TAIL_CHARS);
+      const code = turn.recoverable ?? (tail ? classifyVerseFailure(tail) : null);
+      // A lost / locked native conversation: one retry on a fresh native
+      // session, inside the SAME turn. On success nothing below runs for
+      // this attempt — the retry's own finalize closes the turn.
+      if (code && recoverNativeThreads && !turn.isRecovery && !closed && attemptRecovery(id, turn, session, code)) {
+        detachChild(turn);
+        return;
+      }
       lastError = exitCode === null
         ? 'process ended without an exit code'
         : `process exited with code ${exitCode}`;
       if (!turn.sawError) {
-        emit(id, { type: 'error', turnId: turn.turnId, message: tail ? `${lastError}: ${tail}` : lastError });
+        emit(id, {
+          type: 'error',
+          turnId: turn.turnId,
+          message: tail ? `${lastError}: ${tail}` : lastError,
+          ...(code ? { code } : {}),
+        });
       }
     }
 
@@ -1233,8 +1744,73 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     session.status = ok || stopped ? 'idle' : 'error';
     session.lastError = ok || stopped ? null : (lastError ?? session.lastError ?? 'turn failed');
     save(session);
+    compactLog(id);
 
     detachChild(turn);
+  }
+
+  /**
+   * Retry a failed turn ONCE on a new native session.
+   *
+   * The vendor conversation is gone (`native-thread-missing`: Claude deletes
+   * transcripts after 30 idle days, a codex rollout was pruned) or its id is
+   * locked (`session-in-use`: a Stop before the first reply left the id
+   * claimed). Both used to break the chat for good. Instead: mint a fresh
+   * native id, and — when the chat has history — seed the retry with the
+   * deterministic handoff note built from this session's own log (zero
+   * spend, no git subprocess), followed by the operator's text. A `recovered`
+   * event records it. The adapter is handed the session with turnCount 0, so
+   * every CLI starts a NEW conversation (`--session-id` / fresh `exec`).
+   *
+   * Returns false (and changes nothing) when a retry cannot be launched; the
+   * caller then reports the original failure.
+   */
+  function attemptRecovery(id: string, turn: RunningTurn, session: VerseSession, code: VerseEventErrorCode): boolean {
+    try {
+      const prior = store.readEvents(id).filter((event) => event.seq < turn.userSeq);
+      const hadConversation = prior.some((event) => event.type === 'assistant-message'
+        || (event.type === 'turn-done' && event.ok));
+      let how: VerseRecoveryHow = 'new-native-session';
+      let text = turn.text;
+      if (hadConversation) {
+        try {
+          const note = buildHandoffPreview(session, prior, { gitDiffStat: () => null }).text;
+          const seeded = `${note}\n\n---\n\n${turn.text}`;
+          if (Buffer.byteLength(seeded, 'utf8') <= VERSE_MAX_TURN_TEXT_BYTES) {
+            text = seeded;
+            how = 'handoff';
+          }
+        } catch {
+          // No note: a bare new session still beats a dead chat.
+        }
+      }
+      const nativeSessionId = session.engine === 'codex' ? null : randomUUID();
+      const fresh: VerseSession = { ...cloneSession(session), nativeSessionId, turnCount: 0 };
+      const turnLaunch = adapterFor(session.engine).buildLaunch(fresh, text, turn.seatLaunch);
+      const lost = code === 'native-thread-missing'
+        ? 'the native conversation no longer exists'
+        : 'the native session id was locked';
+      emit(id, {
+        type: 'recovered',
+        turnId: turn.turnId,
+        how,
+        message: how === 'handoff'
+          ? `${lost}; retried on a new native session seeded with a handoff note from this chat`
+          : `${lost}; retried on a new native session`,
+      });
+      session.nativeSessionId = nativeSessionId;
+      save(session);
+      log('warn', `session ${id}: ${code}; recovered on a new native session (${how})`);
+      startTurn(session, turn.turnId, turn.seatLaunch, turnLaunch, redactionsFor(turn.seatLaunch, turnLaunch), {
+        text: turn.text,
+        userSeq: turn.userSeq,
+        isRecovery: true,
+      });
+      return true;
+    } catch (err) {
+      log('warn', `session ${id}: recovery from ${code} could not start (${errorCode(err) || (err instanceof Error ? err.name : 'error')})`);
+      return false;
+    }
   }
 
   function detachChild(turn: RunningTurn): void {
@@ -1253,6 +1829,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     seatLaunch: VerseSeatLaunch,
     launch: VerseTurnLaunch,
     redactions: Redaction[],
+    turnCtx: { text: string; userSeq: number; isRecovery: boolean },
   ): void {
     const id = session.id;
 
@@ -1341,12 +1918,37 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       escalationTimer: null,
       drainTimer: null,
       pollTimer: null,
+      watchTimer: null,
+      lastOutputAt: startedAt,
+      watchdogWarned: false,
+      recoverable: null,
+      seatLaunch,
+      text: turnCtx.text,
+      userSeq: turnCtx.userSeq,
+      isRecovery: turnCtx.isRecovery,
+      terminationMessage: null,
     };
     running.set(id, turn);
+    if (registry && turn.pgid !== null && typeof child.pid === 'number') {
+      registry.add({
+        sessionId: id,
+        turnId,
+        pid: child.pid,
+        pgid: turn.pgid,
+        markers: argvMarkers(launch.argv, session.engine === 'local' ? 'claude' : session.engine),
+        spawnedAt: startedAt,
+      });
+    }
     emit(id, { type: 'turn-started', turnId, pid: typeof child.pid === 'number' ? child.pid : null });
+
+    const sawBytes = (): void => {
+      turn.lastOutputAt = Date.now();
+      turn.watchdogWarned = false;
+    };
 
     child.stdout?.setEncoding('utf8');
     child.stdout?.on('data', (chunk: string | Buffer) => {
+      sawBytes();
       turn.stdoutBuf += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       let nl: number;
       while ((nl = turn.stdoutBuf.indexOf('\n')) !== -1) {
@@ -1359,6 +1961,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     let stderrBuf = '';
     child.stderr?.setEncoding('utf8');
     child.stderr?.on('data', (chunk: string | Buffer) => {
+      sawBytes();
       stderrBuf += typeof chunk === 'string' ? chunk : chunk.toString('utf8');
       let nl: number;
       while ((nl = stderrBuf.indexOf('\n')) !== -1) {
@@ -1404,6 +2007,109 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       }, telemetryPollMs);
       if (turn.pollTimer.unref) turn.pollTimer.unref();
     }
+
+    const engineId = session.engine;
+    turn.watchTimer = setInterval(() => watchTurn(id, turn, engineId), watchdogPollMs);
+    if (turn.watchTimer.unref) turn.watchTimer.unref();
+
+    if (engineId === 'local' && preflight !== null && !turnCtx.isRecovery) preflightTurn(id, turn, seatLaunch);
+  }
+
+  /**
+   * LOCAL preflight, in PARALLEL with the spawn (never in front of it: a
+   * local turn gains no latency, and the spawn stays synchronous with the
+   * request). Runs only after the local-only gate admitted the seat, so a
+   * refused remote endpoint is never even connected to. A definite refusal
+   * (nothing listening) stops the turn with a plain sentence at once —
+   * without it the CLI sits in its own retry loop for minutes with nothing
+   * on screen (r2/reliability.md #7). A slow answer only posts a notice.
+   */
+  function preflightTurn(id: string, turn: RunningTurn, seatLaunch: VerseSeatLaunch): void {
+    const url = seatLaunch.anthropicBaseUrl?.trim() || seatLaunch.ollamaBaseUrl;
+    let check: Promise<VersePreflightResult>;
+    try {
+      check = (preflight as (url: string) => Promise<VersePreflightResult>)(url);
+    } catch {
+      return;
+    }
+    void check.then((result) => {
+      if (turn.settled || turn.termination !== null) return;
+      if (result.ok === false) {
+        turn.terminationMessage = `local model server unreachable: ${result.reason}. Start it (e.g. \`ollama serve\`) and send again.`;
+        log('warn', `session ${id}: local preflight failed in ${result.ms}ms: ${result.reason}`);
+        requestTermination(id, turn, 'preflight');
+        return;
+      }
+      if (result.ok === 'slow') {
+        emitTransient(id, {
+          type: 'status',
+          turnId: turn.turnId,
+          kind: 'preflight',
+          message: 'The local model server is slow to answer; the turn is running anyway.',
+        });
+      }
+    }, () => { /* an unknown answer is not a refusal */ });
+  }
+
+  /**
+   * Periodic check of a running turn (every `watchdogPollMs`):
+   *  - LOCAL-ONLY, live. The gate at spawn is not enough: the operator can
+   *    switch the mode on while a vendor turn is already spending. The same
+   *    predicate is re-asked; a refusal stops the turn with the policy's own
+   *    sentence.
+   *  - NO-OUTPUT WATCHDOG. After `watchdogMs` without a byte on stdout or
+   *    stderr, one `status` notice (transient) says so. The turn keeps
+   *    running — a long tool call is legitimate; Stop is the operator's call.
+   * Wrapped whole: this runs from a timer, where a throw is process-fatal.
+   */
+  function watchTurn(id: string, turn: RunningTurn, engineId: VerseEngine): void {
+    try {
+      if (turn.settled || turn.termination !== null) return;
+      const verdict = verseSeatPermitted(engineId, turn.seatLaunch, loadCfg());
+      if (!verdict.permitted) {
+        turn.terminationMessage = verdict.reason ?? 'local-only: refused';
+        log('warn', `session ${id}: local-only switched on during a vendor turn; stopping it`);
+        requestTermination(id, turn, 'policy');
+        return;
+      }
+      const silentMs = Date.now() - turn.lastOutputAt;
+      if (silentMs >= watchdogMs && !turn.watchdogWarned) {
+        turn.watchdogWarned = true;
+        const minutes = Math.max(1, Math.round(silentMs / 60_000));
+        emitTransient(id, {
+          type: 'status',
+          turnId: turn.turnId,
+          kind: 'watchdog',
+          message: `No output for ${minutes} min — the turn is still running. Stop it if it looks stuck.`,
+        });
+      }
+    } catch {
+      // Best effort: a failed check never ends a turn.
+    }
+  }
+
+  function isBusy(id: string): boolean {
+    return running.has(id);
+  }
+
+  /** Throws VERSE_SEAT_NOT_READY on an explicit refusal; admits on anything else. */
+  function admitSeat(seatId: string): void {
+    const fn = readiness;
+    if (!fn) return;
+    let verdict: unknown;
+    try {
+      verdict = fn(seatId);
+    } catch (err) {
+      log('warn', `readiness check for seat ${seatId} threw (${err instanceof Error ? err.name : 'error'}); admitting`);
+      return;
+    }
+    // An async answer cannot become this request's 409; unknown → admit.
+    if (isObject(verdict) && typeof verdict['then'] === 'function') return;
+    if (!isReadiness(verdict) || verdict.ready) return;
+    const reason = verdict.reason?.trim() || `seat ${seatId} is not ready`;
+    throw new VerseError('VERSE_SEAT_NOT_READY', scrubSecrets(reason), {
+      readiness: { seatId: verdict.seatId, ready: false, reason: scrubSecrets(reason), alternatives: [...verdict.alternatives] },
+    });
   }
 
   // ---- handle -----------------------------------------------------------------
@@ -1560,6 +2266,9 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         // same bytes every turn (prompt-cache stable).
         ...(memory ? { memory } : {}),
       } satisfies VerseSeatLaunch);
+      // After the launch record: a listener that reacts by reading the new
+      // session finds it complete.
+      noteListing(session);
       return cloneSession(session);
     },
 
@@ -1570,7 +2279,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       if (Buffer.byteLength(text, 'utf8') > VERSE_MAX_TURN_TEXT_BYTES) {
         throw new VerseError('VERSE_TOO_LARGE', `text exceeds ${VERSE_MAX_TURN_TEXT_BYTES} bytes`);
       }
-      if (running.has(id)) {
+      if (isBusy(id)) {
         throw new VerseError('VERSE_SESSION_BUSY', 'a turn is already running');
       }
       // `running` on disk with no live process is stale (see reconcileInterrupted), not busy.
@@ -1579,6 +2288,11 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       if (!isSeatLaunch(launch)) {
         throw new VerseError('VERSE_INVALID', 'session launch record is missing or unreadable');
       }
+      // READINESS GATE (V3.10). Before anything is recorded: a refused turn
+      // leaves no trace in the chat — the 409 (with ranked alternatives) is
+      // the whole answer. Only an explicit `ready: false` refuses; a seat
+      // account health knows nothing about is admitted.
+      admitSeat(session.seatId);
       // A memory snapshot pinned before control characters were stripped can
       // hold a NUL, which no OS accepts inside an argv entry — the session
       // could never start again. Repair the in-memory copy for this launch;
@@ -1589,7 +2303,13 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
 
       const turnId = randomUUID();
       if (session.turnCount === 0 && session.title === DEFAULT_TITLE) session.title = autoTitle(text);
-      emit(id, { type: 'user-message', turnId, text });
+      storageFailed.delete(id);
+      const userMessage = emit(id, { type: 'user-message', turnId, text });
+      if (!userMessage) {
+        // The log cannot be written (onStorageFailure already recorded it):
+        // a turn nobody can ever see must not spend.
+        throw new Error('verse session log could not be written');
+      }
       session.status = 'running';
       session.lastError = null;
       save(session);
@@ -1606,7 +2326,11 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         save(session);
         return { turnId, session: cloneSession(session) };
       }
-      startTurn(session, turnId, launch, turnLaunch, redactionsFor(launch, turnLaunch));
+      startTurn(session, turnId, launch, turnLaunch, redactionsFor(launch, turnLaunch), {
+        text,
+        userSeq: userMessage.seq,
+        isRecovery: false,
+      });
       return { turnId, session: cloneSession(store.get(id) ?? session) };
     },
 
@@ -1616,7 +2340,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       if (!isContextMode(mode)) {
         throw new VerseError('VERSE_INVALID', `mode must be one of: ${VERSE_CONTEXT_MODES.join(', ')}`);
       }
-      if (running.has(id)) {
+      if (isBusy(id)) {
         throw new VerseError('VERSE_SESSION_BUSY', 'the context mode can change between turns; wait for this turn to finish or stop it');
       }
       const launch = store.loadLaunch(id);
@@ -1654,7 +2378,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
       const session = require(id);
       if (session.engine !== 'local') return cloneSession(session);
-      if (running.has(id)) {
+      if (isBusy(id)) {
         throw new VerseError('VERSE_SESSION_BUSY', 'the window can change between turns; wait for this turn to finish or stop it');
       }
       if (!isObject(option) || typeof option.id !== 'string' || canonicalModelId(option.id) !== canonicalModelId(session.model)) {
@@ -1700,6 +2424,8 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       }
       listeners.delete(id);
       store.remove(id);
+      listingKeys.delete(id);
+      announce(id);
     },
 
     renameSession(id: string, title: string): VerseSession {
@@ -1750,7 +2476,30 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         signalGroup(turn, 'SIGKILL');
         finalize(id, turn, null);
       }
+      // After the turns settle (their close-out events are tapped too), before
+      // the store goes: shutdown is the last chance to write them.
+      flushReasoning();
       listeners.clear();
+      store.close();
+    },
+
+    interruptAll(reason: string): number {
+      const why = typeof reason === 'string' && reason.trim() ? reason.trim() : 'server stopping';
+      const message = `turn interrupted: ${why}`;
+      let count = 0;
+      for (const [id, turn] of [...running.entries()]) {
+        if (turn.settled) continue;
+        turn.termination = 'interrupted';
+        turn.terminationMessage = message;
+        signalGroup(turn, 'SIGKILL');
+        finalize(id, turn, null);
+        count += 1;
+      }
+      if (count > 0) log('error', `${count} running turn(s) interrupted: ${why}`);
+      // The crash path exits right after this returns, so nothing deferred
+      // would ever run: deliver pending taps and flush the store's batch now.
+      flushReasoning();
+      return count;
     },
   };
 }

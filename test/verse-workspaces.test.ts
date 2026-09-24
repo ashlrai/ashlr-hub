@@ -185,6 +185,8 @@ describe('claude adapter — extra roots', () => {
 });
 
 describe('codex adapter — extra roots', () => {
+  const writableRootOverrides = (argv: readonly string[]): string[] =>
+    valuesFor(argv, '-c').filter((v) => v.startsWith('sandbox_workspace_write.writable_roots='));
   const OVERRIDE = (roots: string[]) =>
     `sandbox_workspace_write.writable_roots=[${roots.map((r) => JSON.stringify(r)).join(',')}]`;
 
@@ -193,7 +195,11 @@ describe('codex adapter — extra roots', () => {
       session({ engine: 'codex', nativeSessionId: null, extraRoots: [repoB, repoC] }),
       'hello', launch(),
     );
-    expect(valuesFor(turn.argv, '-c')).toEqual([OVERRIDE([repoB, repoC])]);
+    // WHY filter: since 3.10 (A4) every codex turn may also carry
+    // `-c model_reasoning_summary="detailed"` (live reasoning, on by default).
+    // This test pins the WRITE SET, so it looks only at writable_roots
+    // assignments — exactly one, holding both extra roots.
+    expect(writableRootOverrides(turn.argv)).toEqual([OVERRIDE([repoB, repoC])]);
     expect(valuesFor(turn.argv, '--cd')).toEqual([repoA]);
     expect(valuesFor(turn.argv, '--sandbox')).toEqual(['workspace-write']);
   });
@@ -214,12 +220,22 @@ describe('codex adapter — extra roots', () => {
     expect(resumed.argv).toContain('resume');
   });
 
-  it('a single-root codex session emits no config override at all', () => {
+  it('a single-root codex session emits no writable-roots override', () => {
+    // WHY not "no -c at all" any more: 3.10 (A4) sends
+    // `-c model_reasoning_summary="detailed"` on every turn while live
+    // reasoning is on, so `-c` alone no longer implies extra roots. What must
+    // stay true is that a single-root session widens nothing.
     const turn = adapterFor('codex').buildLaunch(
       session({ engine: 'codex', nativeSessionId: null }), 'hi', launch(),
     );
-    expect(turn.argv).not.toContain('-c');
-    expect(turn.argv).not.toContain('writable_roots');
+    expect(writableRootOverrides(turn.argv)).toEqual([]);
+    expect(turn.argv.some((p) => p.includes('writable_roots'))).toBe(false);
+    // With live reasoning off the argv is back to carrying no override at all.
+    const quiet = adapterFor('codex').buildLaunch(
+      session({ engine: 'codex', nativeSessionId: null }), 'hi',
+      { ...launch(), thinkingDisplay: false } as VerseSeatLaunch,
+    );
+    expect(quiet.argv).not.toContain('-c');
   });
 
   it('TOML-escapes a root containing a quote or a backslash', () => {

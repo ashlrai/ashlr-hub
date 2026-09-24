@@ -1,0 +1,48 @@
+.scroller {
+  position: relative;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.band {
+  fill: var(--chart-grid);
+  opacity: 0.35;
+}
+
+.bar {
+  cursor: default;
+}
+
+/* Running on disk but silent for a long time: faded, and said in words in
+   the tooltip and table — the fade is never the only signal. */
+.stale {
+  opacity: 0.4;
+}
+
+.open {
+  /* Square corners on open-ended work: a rounded end reads as "finished". */
+  rx: 0;
+}
+
+.now {
+  stroke: var(--text-tertiary);
+  stroke-width: 1;
+  stroke-dasharray: 2 3;
+}
+
+.laneStops {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  pointer-events: none;
+}
+
+.laneStop {
+  position: absolute;
+  left: 0;
+  right: 0;
+}

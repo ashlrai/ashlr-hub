@@ -30,6 +30,9 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   'onboard', 'demo', 'orient', 'docs', 'completions', 'plugins', 'x', 'comms',
   'director', 'best-of-n', 'invent', 'resources', 'usage', 'version', 'help',
   'skills', 'universe', 'runtime',
+  // Dispatched by index.ts but previously missing here, so completion and
+  // "did you mean" were blind to them (caught by cli-registry-drift).
+  'verse', 'local-runtime',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -80,6 +83,8 @@ const SUBCOMMANDS: Record<string, string[]> = {
   plugins: ['init', 'list', 'info', 'enable', 'disable'],
   skills: ['audit'],
   runtime: ['install', 'status', 'rollback', 'run'],
+  // Mirrors the verb switch in src/cli/local-runtime.ts (cmdLocalRuntime).
+  'local-runtime': ['status', 'start', 'stop', 'restart', 'reshape', 'install', 'uninstall', 'logs', 'resolve-model'],
   universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'integration', 'deliver', 'deliveries', 'graph', 'compare', 'help'],
 };
 

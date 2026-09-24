@@ -71,4 +71,17 @@
   --chart-surface: var(--bg-surface);
   --chart-tooltip-bg: var(--bg-surface-raised);
   --chart-tooltip-border: var(--border-default);
+
+  /* V3.10 — sequential heat ramp (CalendarHeatmap): ONE hue, light → dark,
+     mixed toward the chart surface so every step is re-derived per theme
+     from the same tokens. Step 0 is a TRUE ZERO; "no data" is drawn as an
+     outlined empty cell instead, never as a colour on this ramp. */
+  --chart-heat-0: var(--chart-grid);
+  --chart-heat-1: color-mix(in oklab, var(--chart-sequential) 28%, var(--chart-surface));
+  --chart-heat-2: color-mix(in oklab, var(--chart-sequential) 52%, var(--chart-surface));
+  --chart-heat-3: color-mix(in oklab, var(--chart-sequential) 76%, var(--chart-surface));
+  --chart-heat-4: var(--chart-sequential);
+
+  /* Gauge/meter track: a lighter step of the fill's own ramp. */
+  --chart-track: color-mix(in oklab, var(--chart-sequential) 16%, var(--chart-surface));
 }

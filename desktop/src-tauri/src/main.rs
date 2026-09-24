@@ -19,6 +19,11 @@
 //!      closes.
 //!   5. The sidecar is killed on every exit path, not just the tray's Quit —
 //!      including signals and a previous run's crash (see `sidecar_guard`).
+//!   6. While the window is open the sidecar is SUPERVISED: an unexpected exit
+//!      restarts it with backoff and hands the new tokens to the live page
+//!      (`sidecar_supervisor`), orphaned sidecars from earlier runs are swept at
+//!      startup by argv + start time, and seat health is polled every 30 s for
+//!      native notifications (`health_watch`).
 
 use std::{
     net::TcpStream,
@@ -46,12 +51,15 @@ use tauri_plugin_shell::{
 use tauri_plugin_updater::UpdaterExt;
 
 mod app_menu;
+mod health_watch;
 mod launch_state;
 mod shell_contract;
 mod sidecar_guard;
+mod sidecar_supervisor;
 mod window_state;
 
 use launch_state::{LaunchFailure, LaunchPayload, LaunchPhase};
+use sidecar_supervisor::{RestartDecision, RestartPolicy};
 use window_state::{MonitorRect, ShellTheme, WindowState};
 
 // ── constants ────────────────────────────────────────────────────────────────
@@ -81,6 +89,10 @@ const STATE_FLUSH_THROTTLE_MS: u64 = 400;
 const LAUNCH_ACTION_EVENT: &str = "splash-action";
 /// Event the launch page listens for to render its state.
 const LAUNCH_STATE_EVENT: &str = "launch-state";
+/// DOM event dispatched in the Verse page after a restarted sidecar's tokens
+/// were handed over, so the page can re-establish its session right away
+/// instead of on its next 401.
+const SIDECAR_RESTARTED_DOM_EVENT: &str = "ashlr:sidecar-restarted";
 
 // ── shared state ─────────────────────────────────────────────────────────────
 
@@ -101,7 +113,26 @@ struct AppState {
     /// Incremented on every start attempt so a stale watcher cannot report a
     /// failure for a sequence the user has already retried past.
     attempt: AtomicU64,
+    /// Source of sidecar generations (one per spawn).
+    next_generation: AtomicU64,
+    /// Generation of the sidecar we currently intend to be running; 0 = none.
+    ///
+    /// This is how a `Terminated` event tells a crash from a kill we asked for:
+    /// every intentional stop (quit, "Try again", a replacement spawn) moves
+    /// this away from the dying child's generation BEFORE signalling it, so only
+    /// a child that is still the live generation when it exits has crashed.
+    live_generation: AtomicU64,
+    /// Set once the app is quitting. Nothing restarts after this.
+    exiting: AtomicBool,
+    /// Backoff + crash budget for unexpected sidecar exits.
+    restart: Mutex<RestartPolicy>,
+    /// The live sidecar's READ token, for the health poll only. Never logged,
+    /// never forwarded; cleared whenever that sidecar stops.
+    read_token: Mutex<Option<ReadToken>>,
 }
+
+/// A read token held for the health poll. Deliberately no `Debug`.
+struct ReadToken(String);
 
 /// Which sidecar command is backing the window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -230,6 +261,40 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Lock a mutex, recovering the data from a poisoned lock (a panic elsewhere
+/// must not take the exit path's reaping down with it).
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// Where `tauri-plugin-shell` resolves the `ashlr` sidecar: next to our own
+/// executable (`…/Ashlr.app/Contents/MacOS/ashlr` in the bundle). The orphan
+/// sweep compares argv against exactly this path.
+fn sidecar_binary_path() -> Option<String> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let name = if cfg!(windows) { "ashlr.exe" } else { "ashlr" };
+    Some(dir.join(name).to_string_lossy().into_owned())
+}
+
+/// Mark the app as quitting: from here on no exit is a crash, and nothing
+/// restarts.
+fn mark_exiting(handle: &AppHandle) {
+    if let Some(state) = handle.try_state::<AppState>() {
+        state.exiting.store(true, Ordering::SeqCst);
+    }
+}
+
+fn is_exiting(handle: &AppHandle) -> bool {
+    handle
+        .try_state::<AppState>()
+        .map(|state| state.exiting.load(Ordering::SeqCst))
+        .unwrap_or(true)
 }
 
 /// Locate the SPA assets the sidecar server should serve (`index.html`,
@@ -683,10 +748,17 @@ fn run_first_time_setup(app: &tauri::App) {
 // ── sidecar server ───────────────────────────────────────────────────────────
 
 /// Kill the running sidecar, if any.
+///
+/// Every caller means it (quit, "Try again", closing the launch window), so the
+/// live generation is dropped FIRST: the child's `Terminated` event then reads
+/// as the stop we asked for, not a crash, and any restart still waiting out its
+/// backoff sees that it is no longer wanted.
 fn reap_sidecar(handle: &AppHandle) {
     let Some(state) = handle.try_state::<AppState>() else {
         return;
     };
+    state.live_generation.store(0, Ordering::SeqCst);
+    *lock(&state.read_token) = None;
     let mut guard = match state.sidecar.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
@@ -734,6 +806,11 @@ fn start_sequence(handle: AppHandle) {
     set_launch_phase(&handle, &LaunchPhase::Starting);
 
     reap_sidecar(&handle);
+    // A boot the operator asked for is a fresh start: a crash budget spent by a
+    // previous sidecar must not stop this one from being supervised.
+    if let Some(state) = handle.try_state::<AppState>() {
+        lock(&state.restart).reset();
+    }
 
     // A previous run that was SIGKILLed (or crashed) never got to reap its
     // sidecar, which is then still holding the port. Without this the app is
@@ -753,6 +830,12 @@ fn start_sequence(handle: AppHandle) {
         sidecar_guard::Reclaim::StaleRecordCleared | sidecar_guard::Reclaim::NothingRecorded => {}
     }
 
+    // The record above names ONE sidecar. Anything else this bundle spawned
+    // and lost track of (a fallback or a retry overwrote the record, two
+    // crashes in a row) is found by what it is: parent gone, argv exactly ours,
+    // start time unchanged at the moment of the kill.
+    sweep_orphans();
+
     // A port that is already open means our own bind will fail. Say so now
     // rather than after a 30s spinner.
     if port_is_open() {
@@ -764,7 +847,35 @@ fn start_sequence(handle: AppHandle) {
         return;
     }
 
-    spawn_server_sidecar(handle, SidecarMode::Verse, attempt);
+    spawn_server_sidecar(handle, SidecarMode::Verse, attempt, SpawnKind::Boot);
+}
+
+/// Reap this bundle's orphaned sidecars and log (pids and ports only) any
+/// other Ashlr servers, which are the operator's to stop.
+fn sweep_orphans() {
+    let Some(bin) = sidecar_binary_path() else {
+        return;
+    };
+    let arg_sets = [SidecarMode::Verse.args(), SidecarMode::Serve.args()];
+    let report = sidecar_supervisor::sweep_orphaned_sidecars(&bin, &arg_sets, None);
+    for pid in &report.reaped {
+        eprintln!("[ashlr-desktop] reaped an orphaned sidecar (pid {pid}) left by an earlier run");
+    }
+    for pid in &report.skipped_changed {
+        eprintln!("[ashlr-desktop] left pid {pid} alone: it changed identity before it could be verified");
+    }
+    for (pid, port) in &report.foreign {
+        match port {
+            Some(port) => eprintln!(
+                "[ashlr-desktop] note: another Ashlr server is running (pid {pid}, port {port}) — not ours, left running"
+            ),
+            None => eprintln!("[ashlr-desktop] note: another Ashlr server is running (pid {pid}) — not ours, left running"),
+        }
+    }
+    if !report.reaped.is_empty() {
+        // Same reason as after `reclaim_orphan`: let the socket go.
+        thread::sleep(Duration::from_millis(PORT_PROBE_MS));
+    }
 }
 
 /// True when `attempt` is still the live boot attempt (the user has not
@@ -777,6 +888,18 @@ fn attempt_is_current(handle: &AppHandle, attempt: u64) -> bool {
         }
         None => false,
     }
+}
+
+/// Why a sidecar is being spawned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpawnKind {
+    /// Part of a boot sequence (launch or "Try again"): failures go to the
+    /// launch window, and a Verse-mode exit before readiness falls back to Serve.
+    Boot,
+    /// Replacing a sidecar that stopped unexpectedly while the window was open:
+    /// the new tokens go to the live page without stealing focus, and a failure
+    /// is just another exit for the restart policy.
+    Restart,
 }
 
 /// Spawn the sidecar server in `mode`, watch its stdout for the startup JSON,
@@ -796,8 +919,16 @@ fn attempt_is_current(handle: &AppHandle, attempt: u64) -> bool {
 /// If the sidecar exits before printing the record (e.g. a CLI without the
 /// `verse` command), `Verse` falls back to `Serve` once; if that also fails the
 /// launch window explains why.
-fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
-    eprintln!("[ashlr-desktop] starting sidecar: {}", mode.label());
+///
+/// Once a sidecar has served, an exit nobody asked for (see
+/// `AppState::live_generation`) goes to [`handle_unexpected_exit`], which
+/// restarts it with backoff.
+fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64, kind: SpawnKind) {
+    eprintln!(
+        "[ashlr-desktop] {} sidecar: {}",
+        if kind == SpawnKind::Restart { "restarting" } else { "starting" },
+        mode.label()
+    );
 
     let mut command = handle
         .shell()
@@ -819,6 +950,17 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("[ashlr-desktop] failed to spawn {}: {e}", mode.label());
+            if kind == SpawnKind::Restart {
+                // No new generation was taken, so the crashed one is still the
+                // live one and the policy decides whether to try again.
+                if let Some(state) = handle.try_state::<AppState>() {
+                    let generation = state.live_generation.load(Ordering::SeqCst);
+                    if generation != 0 && !is_exiting(&handle) {
+                        handle_unexpected_exit(&handle, mode, attempt, generation, Duration::ZERO);
+                    }
+                }
+                return;
+            }
             if attempt_is_current(&handle, attempt) {
                 set_launch_phase(
                     &handle,
@@ -830,18 +972,22 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
             return;
         }
     };
+    let spawned_at = Instant::now();
+    let pid = child.pid();
 
     // Record who owns this sidecar before anything else can go wrong, so a
     // crash from here on is repairable by the next launch.
-    sidecar_guard::record(child.pid(), SERVE_PORT, mode.args());
+    sidecar_guard::record(pid, SERVE_PORT, mode.args());
 
-    // Store the child so we can kill it on exit (replacing a dead one on fallback).
-    match handle.try_state::<AppState>() {
+    // Take a generation and store the child so we can kill it on exit
+    // (replacing a previous one on fallback).
+    let generation = match handle.try_state::<AppState>() {
         Some(state) => {
-            let mut guard = match state.sidecar.lock() {
-                Ok(guard) => guard,
-                Err(poisoned) => poisoned.into_inner(),
-            };
+            let generation = state.next_generation.fetch_add(1, Ordering::SeqCst) + 1;
+            // Live BEFORE the previous child is signalled below, so its
+            // Terminated event reads as a replacement, not a crash.
+            state.live_generation.store(generation, Ordering::SeqCst);
+            let mut guard = lock(&state.sidecar);
             if let Some(previous) = guard.take() {
                 // Same ordering rule as `reap_sidecar`: the tree has to be
                 // walked while the parent is alive, or `pgrep -P` finds nothing.
@@ -850,19 +996,27 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
                 let _ = previous.kill();
             }
             *guard = Some(child);
+            generation
         }
-        None => eprintln!(
-            "[ashlr-desktop] app state slot missing — child will not be reaped on quit"
-        ),
-    }
+        None => {
+            eprintln!("[ashlr-desktop] app state slot missing — child will not be reaped on quit");
+            0
+        }
+    };
 
     let ready = Arc::new(AtomicBool::new(false));
+    // True once this sidecar has actually served (a startup record, or a
+    // listening port the watchdog opened the window on). Only a sidecar that
+    // served is restarted on exit; one that never came up is a boot failure
+    // and belongs to the launch window.
+    let served = Arc::new(AtomicBool::new(false));
 
     // Watchdog: if nothing reports readiness in time, say what we observed
     // instead of leaving a spinner up forever.
     {
         let handle = handle.clone();
         let ready = ready.clone();
+        let served = served.clone();
         thread::spawn(move || {
             let listening = wait_for_server();
             thread::sleep(Duration::from_millis(HEALTH_POLL_MS * 4));
@@ -879,6 +1033,7 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
                 if ready.swap(true, Ordering::SeqCst) {
                     return;
                 }
+                served.store(true, Ordering::SeqCst);
                 if let Some(state) = handle.try_state::<AppState>() {
                     state.opened.store(true, Ordering::SeqCst);
                 }
@@ -902,6 +1057,21 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
                     let text = String::from_utf8_lossy(&line).into_owned();
                     match route_stdout_line(&text, &ready) {
                         StdoutRoute::Startup { startup, first } => {
+                            served.store(true, Ordering::SeqCst);
+                            if let Some(state) = handle.try_state::<AppState>() {
+                                // Only the live sidecar's token may be polled with.
+                                if state.live_generation.load(Ordering::SeqCst) == generation {
+                                    *lock(&state.read_token) = Some(ReadToken(startup.read_token.clone()));
+                                }
+                            }
+                            if kind == SpawnKind::Restart {
+                                eprintln!(
+                                    "[ashlr-desktop] restarted {} is ready — handing its new tokens to the open window",
+                                    mode.label()
+                                );
+                                hand_tokens_to_open_window(&handle, &startup);
+                                continue; // never forward the token line
+                            }
                             eprintln!(
                                 "[ashlr-desktop] {} is ready (dispatch {}) — {}",
                                 mode.label(),
@@ -948,26 +1118,59 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
                         mode.label(),
                         status.code
                     );
-                    // Disarm the guard: this pid is dead. Without this,
-                    // `SIDECAR_PID` kept pointing at it for the rest of the
-                    // app's life — the common case, since the app then parks on
-                    // the "sidecar stopped while starting" screen — and a later
-                    // SIGTERM/SIGINT/SIGHUP ran `terminate_handler`, which
-                    // signals unconditionally with no argv check. Once the
-                    // kernel recycled that pid, the victim was a stranger's
-                    // process. `reclaim_orphan` goes to real trouble to prove a
-                    // pid is ours before killing it; the warm paths cannot, so
-                    // they must not stay armed on a pid known to be gone.
-                    //
-                    // The fallback below re-`record()`s via
-                    // `spawn_server_sidecar`, so the Serve child stays covered.
-                    sidecar_guard::clear();
-                    if !ready.load(Ordering::SeqCst) && mode == SidecarMode::Verse {
+                    // Was this the sidecar we meant to be running? If not, it
+                    // was reaped or replaced on purpose and everything below
+                    // belongs to whoever did that.
+                    let was_live = match handle.try_state::<AppState>() {
+                        Some(state) if generation != 0 => {
+                            let live = state.live_generation.load(Ordering::SeqCst) == generation;
+                            if live {
+                                // Drop the handle to the dead child: its pid can
+                                // be recycled, and the replacement path above
+                                // would otherwise signal whatever inherits it.
+                                let mut guard = lock(&state.sidecar);
+                                if guard.as_ref().map(|c| c.pid()) == Some(pid) {
+                                    guard.take();
+                                }
+                                drop(guard);
+                                *lock(&state.read_token) = None;
+                            }
+                            live
+                        }
+                        _ => true,
+                    };
+                    if was_live {
+                        // Disarm the guard: this pid is dead. Without this,
+                        // `SIDECAR_PID` kept pointing at it for the rest of the
+                        // app's life — the common case, since the app then parks
+                        // on the "sidecar stopped while starting" screen — and a
+                        // later SIGTERM/SIGINT/SIGHUP ran `terminate_handler`,
+                        // which signals unconditionally with no argv check. Once
+                        // the kernel recycled that pid, the victim was a
+                        // stranger's process. `reclaim_orphan` goes to real
+                        // trouble to prove a pid is ours before killing it; the
+                        // warm paths cannot, so they must not stay armed on a pid
+                        // known to be gone.
+                        //
+                        // ONLY when live: a reaped or replaced child's late
+                        // Terminated must not wipe the record and armed pid of
+                        // the sidecar that replaced it.
+                        //
+                        // The fallback below re-`record()`s via
+                        // `spawn_server_sidecar`, so the Serve child stays covered.
+                        sidecar_guard::clear();
+                    }
+                    if !was_live || is_exiting(&handle) {
+                        break;
+                    }
+                    if served.load(Ordering::SeqCst) || kind == SpawnKind::Restart {
+                        handle_unexpected_exit(&handle, mode, attempt, generation, spawned_at.elapsed());
+                    } else if !ready.load(Ordering::SeqCst) && mode == SidecarMode::Verse {
                         eprintln!(
                             "[ashlr-desktop] `ashlr verse` unavailable in this build — falling back to `ashlr serve --allow-dispatch`"
                         );
                         ready.store(true, Ordering::SeqCst);
-                        spawn_server_sidecar(handle.clone(), SidecarMode::Serve, attempt);
+                        spawn_server_sidecar(handle.clone(), SidecarMode::Serve, attempt, SpawnKind::Boot);
                     } else if !ready.load(Ordering::SeqCst) && attempt_is_current(&handle, attempt) {
                         set_launch_phase(
                             &handle,
@@ -979,6 +1182,176 @@ fn spawn_server_sidecar(handle: AppHandle, mode: SidecarMode, attempt: u64) {
                     break;
                 }
                 _ => {}
+            }
+        }
+    });
+}
+
+/// A sidecar that had served stopped without being asked to: restart it with
+/// backoff, or — past the crash budget — stop trying and say so natively.
+///
+/// `generation` is the crashed sidecar's; it stays the live generation until a
+/// replacement spawns, which is how the delayed restart knows it is still
+/// wanted (a quit or "Try again" in the meantime resets it).
+fn handle_unexpected_exit(handle: &AppHandle, mode: SidecarMode, attempt: u64, generation: u64, uptime: Duration) {
+    let Some(state) = handle.try_state::<AppState>() else {
+        return;
+    };
+    let decision = lock(&state.restart).on_unexpected_exit(Instant::now(), uptime);
+    match decision {
+        RestartDecision::Restart { delay, streak } => {
+            eprintln!(
+                "[ashlr-desktop] the sidecar stopped unexpectedly after {}s — restart #{streak} in {} ms",
+                uptime.as_secs(),
+                delay.as_millis()
+            );
+            let handle = handle.clone();
+            thread::spawn(move || {
+                if !sleep_while_restart_wanted(&handle, generation, delay) {
+                    eprintln!("[ashlr-desktop] pending sidecar restart cancelled");
+                    return;
+                }
+                if port_is_open() {
+                    // Something else took 7777 while ours was down. Spawning
+                    // would only fail to bind; treat it as another exit so the
+                    // budget still bounds how long we keep checking.
+                    eprintln!("[ashlr-desktop] {SERVE_HOST}:{SERVE_PORT} was taken while the sidecar was down — not restarting yet");
+                    handle_unexpected_exit(&handle, mode, attempt, generation, Duration::ZERO);
+                    return;
+                }
+                spawn_server_sidecar(handle, mode, attempt, SpawnKind::Restart);
+            });
+        }
+        RestartDecision::GiveUp { exits_in_window } => {
+            eprintln!(
+                "[ashlr-desktop] the sidecar stopped {exits_in_window} times in {} minutes — not restarting it again",
+                sidecar_supervisor::RESTART_WINDOW.as_secs() / 60
+            );
+            let body = format!(
+                "It stopped {exits_in_window} times in {} minutes, so Ashlr stopped restarting it. Quit and reopen Ashlr.",
+                sidecar_supervisor::RESTART_WINDOW.as_secs() / 60
+            );
+            // Off the caller's thread: this can run inside the async runtime,
+            // and delivering a notification shells out.
+            thread::spawn(move || health_watch::notify("Ashlr: the local server keeps stopping", &body));
+        }
+    }
+}
+
+/// Sleep `delay` in short slices. False as soon as the restart is no longer
+/// wanted: the app is quitting, or the live generation moved (reaped, retried,
+/// or already replaced).
+fn sleep_while_restart_wanted(handle: &AppHandle, generation: u64, delay: Duration) -> bool {
+    let deadline = Instant::now() + delay;
+    loop {
+        let Some(state) = handle.try_state::<AppState>() else {
+            return false;
+        };
+        if state.exiting.load(Ordering::SeqCst) || state.live_generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return true;
+        }
+        thread::sleep((deadline - now).min(Duration::from_millis(100)));
+    }
+}
+
+/// The script that gives a restarted sidecar's tokens to the live page.
+///
+/// Only the token half of the shell contract: re-evaluating the whole init
+/// script would stack another drag-region MutationObserver on the page for
+/// every restart. Same guarantees as `shell_contract::init_script` — gated to
+/// the sidecar origin, and every value JSON-encoded into a literal, never
+/// interpolated as text.
+fn token_handoff_script(startup: &SidecarStartup) -> String {
+    let tokens = serde_json::to_string(&startup.as_shell_tokens()).unwrap_or_else(|_| "null".to_string());
+    let origin = serde_json::to_string(SERVE_ORIGIN).unwrap_or_else(|_| "\"\"".to_string());
+    let event = serde_json::to_string(SIDECAR_RESTARTED_DOM_EVENT).unwrap_or_else(|_| "\"\"".to_string());
+    format!(
+        "(function () {{ if (window.location.origin !== {origin}) return; var t = {tokens}; if (!t) return; \
+         try {{ window.__ASHLR_TOKENS__ = Object.freeze(t); }} catch (_) {{}} \
+         try {{ window.dispatchEvent(new CustomEvent({event})); }} catch (_) {{}} }})();"
+    )
+}
+
+/// Give a restarted sidecar's tokens to the page that is already open.
+///
+/// Unlike `create_main_window`'s existing-window branch this never shows or
+/// focuses the window: a restart happens in the background, often while the
+/// window is hidden in the tray, and must not pop it up. The page's old cookie
+/// died with the old server; its next 401 re-runs adoption, which reads the
+/// fresh `window.__ASHLR_TOKENS__` set here, and the DOM event lets it do that
+/// immediately instead.
+///
+/// Known limit: the window's INITIALIZATION script still carries the first
+/// sidecar's tokens, so a manual reload after a restart falls back to the
+/// SessionGate prompt. Rebuilding the window would fix that at the cost of the
+/// page's in-memory state, which is the worse trade for a background restart.
+fn hand_tokens_to_open_window(handle: &AppHandle, startup: &SidecarStartup) {
+    let script = token_handoff_script(startup);
+    let handle2 = handle.clone();
+    let result = handle.run_on_main_thread(move || match handle2.get_webview_window(MAIN_WINDOW_LABEL) {
+        Some(window) => {
+            if let Err(e) = window.eval(&script) {
+                eprintln!("[ashlr-desktop] could not hand the restarted sidecar's tokens to the window: {e}");
+            }
+        }
+        None => eprintln!("[ashlr-desktop] no Verse window to hand the restarted sidecar's tokens to"),
+    });
+    if let Err(e) = result {
+        eprintln!("[ashlr-desktop] could not schedule the token handoff: {e}");
+    }
+}
+
+// ── seat health ──────────────────────────────────────────────────────────────
+
+/// Poll `/api/verse/health` every 30 s for the app's lifetime and raise a
+/// native notification when a seat newly becomes signed-out, expiring or
+/// exhausted (see `health_watch`).
+///
+/// Idle while there is no read token — before the first startup record, while
+/// a crashed sidecar restarts, or when the window adopted a server we did not
+/// start (its token is not ours to know).
+fn start_health_watch(handle: AppHandle) {
+    thread::spawn(move || {
+        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], SERVE_PORT));
+        let mut alerts = health_watch::AlertState::default();
+        let mut last_error: Option<String> = None;
+        loop {
+            let deadline = Instant::now() + health_watch::POLL_INTERVAL;
+            while Instant::now() < deadline {
+                if is_exiting(&handle) {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
+            let token = match handle.try_state::<AppState>() {
+                Some(state) => lock(&state.read_token).as_ref().map(|t| t.0.clone()),
+                None => return,
+            };
+            let Some(token) = token else {
+                continue;
+            };
+            match health_watch::poll_once(addr, &token) {
+                Ok(seats) => {
+                    last_error = None;
+                    let fresh = alerts.update(&seats);
+                    if let Some((title, body)) = health_watch::notification_text(&fresh, now_ms() as i64) {
+                        eprintln!("[ashlr-desktop] seat health: {title}");
+                        health_watch::notify(&title, &body);
+                    }
+                }
+                Err(e) => {
+                    // Log a failure once per kind, not every 30 s. `FetchError`
+                    // carries no token or body text, so this is safe to print.
+                    let text = format!("{e:?}");
+                    if last_error.as_deref() != Some(text.as_str()) {
+                        eprintln!("[ashlr-desktop] seat health poll failed ({text}) — will keep trying");
+                        last_error = Some(text);
+                    }
+                }
             }
         }
     });
@@ -1069,6 +1442,7 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 "use-running" => adopt_running_server(&handle),
                 "quit" => {
+                    mark_exiting(&handle);
                     reap_sidecar(&handle);
                     handle.exit(0);
                 }
@@ -1112,7 +1486,16 @@ fn setup(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // ── spawn `ashlr verse`; the Verse window opens once it is ready ─────────
-    start_sequence(handle.clone());
+    // Off the main thread: the boot sequence now sweeps the process table and
+    // may wait out an orphan's shutdown grace, and the launch window must keep
+    // painting meanwhile. "Try again" already runs it on a thread.
+    {
+        let handle = handle.clone();
+        thread::spawn(move || start_sequence(handle));
+    }
+
+    // ── seat health → native notifications (idle until a token exists) ───────
+    start_health_watch(handle.clone());
 
     // ── tray icon ────────────────────────────────────────────────────────────
     build_tray(app)?;
@@ -1199,6 +1582,7 @@ fn handle_tray_event(app: &AppHandle, id: &str) {
         "tray.quit" => {
             // The Exit handler reaps the sidecar; do it here too so the child is
             // gone before the event loop starts tearing down.
+            mark_exiting(app);
             reap_sidecar(app);
             app.exit(0);
         }
@@ -1239,6 +1623,7 @@ fn on_window_event(window: &tauri::Window, event: &WindowEvent) {
                 .map(|s| s.opened.load(Ordering::SeqCst))
                 .unwrap_or(false);
             if !opened {
+                mark_exiting(&handle);
                 reap_sidecar(&handle);
                 handle.exit(0);
             }
@@ -1282,7 +1667,7 @@ fn main() {
         // reject every call at runtime — silently, from the page's side.
         .plugin(tauri_plugin_dialog::init())
         .setup(setup)
-        .on_window_event(|window, event| on_window_event(window, event))
+        .on_window_event(on_window_event)
         .build(tauri::generate_context!())
         .expect("error building Ashlr desktop app");
 
@@ -1292,6 +1677,9 @@ fn main() {
         // processes off the machine.
         RunEvent::ExitRequested { .. } | RunEvent::Exit => {
             eprintln!("[ashlr-desktop] exiting — reaping the sidecar");
+            // Before the reap: the sidecar's Terminated event must read as the
+            // quit it is, never as a crash to restart.
+            mark_exiting(handle);
             if let Some(state) = handle.try_state::<AppState>() {
                 if let Some(win) = handle.get_webview_window(MAIN_WINDOW_LABEL) {
                     if let Ok(mut guard) = state.window.lock() {
@@ -1441,6 +1829,58 @@ mod tests {
 
         let (_, starting) = launch_window_size(&LaunchPhase::Starting.payload(&[]));
         assert!(starting < short, "the starting state is the smallest window");
+    }
+
+    #[test]
+    fn the_restart_token_handoff_is_origin_gated_json_encoded_and_token_only() {
+        let startup = parse_startup_line("{\"readToken\":\"aa11\\\"</script>\",\"token\":\"bb22\"}")
+            .expect("record");
+        let script = token_handoff_script(&startup);
+        assert!(script.contains("if (window.location.origin !== \"http://127.0.0.1:7777\") return;"));
+        assert!(script.contains("var t = {\"readToken\":\"aa11\\\"</script>\",\"token\":\"bb22\"};"));
+        assert!(script.contains("window.__ASHLR_TOKENS__ = Object.freeze(t)"));
+        assert!(script.contains("new CustomEvent(\"ashlr:sidecar-restarted\")"));
+        // Only the token half: no second drag-region observer per restart.
+        assert!(!script.contains("MutationObserver"));
+
+        let read_only = parse_startup_line("{\"readToken\":\"aa11\"}").expect("record");
+        assert!(token_handoff_script(&read_only).contains("\"token\":null"));
+    }
+
+    #[test]
+    fn the_orphan_sweep_recognises_exactly_the_argument_lists_we_spawn() {
+        let bin = "/Applications/Ashlr.app/Contents/MacOS/ashlr";
+        let arg_sets = [SidecarMode::Verse.args(), SidecarMode::Serve.args()];
+        for mode in [SidecarMode::Verse, SidecarMode::Serve] {
+            let row = sidecar_supervisor::ProcInfo {
+                pid: 500,
+                ppid: 1,
+                started: "Wed Sep 23 21:22:29 2026".to_string(),
+                args: format!("{bin} {}", mode.args().join(" ")),
+            };
+            assert!(
+                sidecar_supervisor::is_orphaned_sidecar(&row, bin, 42, &arg_sets),
+                "{:?} must be recognised as ours",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn the_sidecar_path_is_our_own_executables_sibling() {
+        let path = PathBuf::from(sidecar_binary_path().expect("path"));
+        let exe = std::env::current_exe().expect("exe");
+        assert_eq!(path.parent(), exe.parent());
+        let expected = if cfg!(windows) { "ashlr.exe" } else { "ashlr" };
+        assert_eq!(path.file_name().and_then(|n| n.to_str()), Some(expected));
+    }
+
+    #[test]
+    fn a_fresh_app_state_has_nothing_live_and_nothing_to_poll_with() {
+        let state = AppState::default();
+        assert_eq!(state.live_generation.load(Ordering::SeqCst), 0);
+        assert!(!state.exiting.load(Ordering::SeqCst));
+        assert!(lock(&state.read_token).is_none());
     }
 
     #[test]

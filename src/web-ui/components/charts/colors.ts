@@ -34,3 +34,20 @@ export const CHART_DIVERGING_MID = 'var(--chart-diverging-mid)';
 
 export const CHART_GRID = 'var(--chart-grid)';
 export const CHART_AXIS = 'var(--chart-axis)';
+
+/** Status tones (the StatusBadge vocabulary). Status colours carry STATE, never
+ * identity, and always travel with a text label (legend, tooltip, table). */
+export type ChartTone = 'neutral' | 'info' | 'running' | 'success' | 'warning' | 'danger' | 'unknown';
+
+export function toneColor(tone: ChartTone): string {
+  return `var(--status-${tone}-solid)`;
+}
+
+/** Sequential heat steps 0..4 (0 = a true zero, not "no data"). */
+export function heatColor(step: number): string {
+  const n = Math.max(0, Math.min(4, Math.round(step)));
+  return `var(--chart-heat-${n})`;
+}
+
+/** Unfilled meter/gauge track: a light step of the sequential ramp, not a gray. */
+export const CHART_TRACK = 'var(--chart-track)';

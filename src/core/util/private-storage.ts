@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { lstatSync } from 'node:fs';
 import { userInfo } from 'node:os';
 import { posix, win32 } from 'node:path';
 
@@ -277,6 +278,11 @@ export interface PrivateStorageTestControl {
   runner?: PrivateStorageRunner;
   observeInvocation?: (invocation: PrivateStorageInvocation) => void;
   waitForRetry?: (delayMs: number, reason: string) => void;
+  /**
+   * Keep the Darwin verdict cache on while this control is installed. Off by
+   * default so tests that count or script adapter invocations see every one.
+   */
+  enableVerdictCache?: boolean;
 }
 
 interface PrivateStorageTestControlState extends PrivateStorageTestControl {
@@ -313,6 +319,7 @@ export function _setPrivateStorageTestControlForTest(
   }
   if (control === undefined) {
     Reflect.deleteProperty(globalThis, PRIVATE_STORAGE_TEST_CONTROL_STATE);
+    darwinVerdicts.clear();
     return;
   }
   if (!isVitestContext()) {
@@ -327,12 +334,67 @@ export function _setPrivateStorageTestControlForTest(
   if (control.waitForRetry !== undefined && typeof control.waitForRetry !== 'function') {
     throw new TypeError('Private-storage retry waiter must be a function');
   }
+  if (control.enableVerdictCache !== undefined && typeof control.enableVerdictCache !== 'boolean') {
+    throw new TypeError('Private-storage verdict cache flag must be a boolean');
+  }
+  darwinVerdicts.clear();
   Reflect.set(globalThis, PRIVATE_STORAGE_TEST_CONTROL_STATE, Object.freeze({
     sentinel: PRIVATE_STORAGE_TEST_CONTROL,
     runner: control.runner,
     observeInvocation: control.observeInvocation,
     waitForRetry: control.waitForRetry,
+    enableVerdictCache: control.enableVerdictCache,
   } satisfies PrivateStorageTestControlState));
+}
+
+// ---------------------------------------------------------------------------
+// Darwin verdict cache
+// ---------------------------------------------------------------------------
+//
+// PERF (3.10): every private read/write re-ran `/bin/ls -lde` over the whole
+// path chain — 7 spawns per seat-telemetry read, one every second from the
+// account collector's evidence heartbeat, 62 in the first control snapshot —
+// ~3 ms of frozen event loop each. A verdict is now reused while EVERY path in
+// the chain still has the same (dev, ino, mode, uid, gid, ctime) as when it
+// was checked, for at most DARWIN_VERDICT_TTL_MS.
+//
+// Why that key is sound: on APFS/HFS+ any ACL edit (`chmod +a/-a/=a`), mode
+// change, chown, or rename-over replaces the inode or bumps its ctime, which
+// lstat reports at nanosecond resolution. Only SAFE verdicts are cached — a
+// refusal is always re-checked, so a transient failure never sticks — and
+// the TTL bounds how long even an undetectable change could be missed.
+
+const DARWIN_VERDICT_TTL_MS = 30_000;
+const DARWIN_VERDICT_MAX_ENTRIES = 512;
+
+interface DarwinVerdict {
+  fingerprint: string;
+  checkedAt: number;
+}
+
+const darwinVerdicts = new Map<string, DarwinVerdict>();
+
+/** lstat fingerprint of the whole chain, or null when any link is unreadable. */
+function darwinChainFingerprint(paths: readonly string[]): string | null {
+  const parts: string[] = [];
+  for (const candidate of paths) {
+    try {
+      const st = lstatSync(candidate, { bigint: true });
+      parts.push(`${st.dev}:${st.ino}:${st.mode}:${st.uid}:${st.gid}:${st.ctimeNs}`);
+    } catch {
+      return null;
+    }
+  }
+  return parts.join('|');
+}
+
+function darwinVerdictCacheEnabled(testControl: PrivateStorageTestControlState | undefined): boolean {
+  return testControl === undefined || testControl.enableVerdictCache === true;
+}
+
+/** Drop every cached Darwin verdict (tests; after a deliberate permission change). */
+export function clearPrivateStorageVerdictCache(): void {
+  darwinVerdicts.clear();
 }
 
 const FAILURE_REASONS = new Set([
@@ -490,6 +552,16 @@ function assureDarwinPrivateStoragePath(
     env: { LC_ALL: 'C', LANG: 'C' },
   };
   const testControl = activePrivateStorageTestControl();
+  // A caller-supplied runner is a one-off probe; never answer it from cache.
+  const cacheable = options.runner === undefined && darwinVerdictCacheEnabled(testControl);
+  const cacheKey = `${kind}\0${anchorPath}\0${privatePath}`;
+  const before = cacheable ? darwinChainFingerprint(paths) : null;
+  if (before !== null) {
+    const cached = darwinVerdicts.get(cacheKey);
+    if (cached && cached.fingerprint === before && Date.now() - cached.checkedAt < DARWIN_VERDICT_TTL_MS) {
+      return { ok: true, reason: 'darwin-acl-safe' };
+    }
+  }
   try {
     testControl?.observeInvocation?.({
       ...invocation,
@@ -502,7 +574,22 @@ function assureDarwinPrivateStoragePath(
     if (!stdout || Buffer.byteLength(stdout, 'utf8') > DARWIN_MAX_OUTPUT_BYTES) {
       return { ok: false, reason: 'invalid-output' };
     }
-    return inspectDarwinAclOutput(stdout, paths, kind);
+    const verdict = inspectDarwinAclOutput(stdout, paths, kind);
+    if (verdict.ok && before !== null) {
+      // Remember the verdict only if nothing in the chain moved while `ls`
+      // ran; otherwise the output may describe a different chain.
+      const after = darwinChainFingerprint(paths);
+      if (after === before) {
+        if (!darwinVerdicts.has(cacheKey) && darwinVerdicts.size >= DARWIN_VERDICT_MAX_ENTRIES) {
+          const oldest = darwinVerdicts.keys().next().value;
+          if (oldest !== undefined) darwinVerdicts.delete(oldest);
+        }
+        darwinVerdicts.set(cacheKey, { fingerprint: before, checkedAt: Date.now() });
+      }
+    } else if (!verdict.ok) {
+      darwinVerdicts.delete(cacheKey);
+    }
+    return verdict;
   } catch {
     return { ok: false, reason: 'adapter-failed' };
   }

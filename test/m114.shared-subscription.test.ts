@@ -12,7 +12,8 @@
  *     - Expired entries (resetsAt in the past) are NOT used for aggregation.
  *     - Stale entries (older than maxAgeMs) are NOT used for aggregation.
  *     - Claude activity (no local %) is published with usedPercent=0 and is
- *       visible to siblings (but doesn't trigger a block on its own).
+ *       visible to siblings. V3.10: that 0 is PRESENCE, not a reading — it
+ *       never makes Claude "known under the cap" (the fail-open is closed).
  *     - Unwritable path: subscriptionAllows falls back to local decision and
  *       never throws.
  *
@@ -109,15 +110,31 @@ function seedEntry(
 // ---------------------------------------------------------------------------
 
 let tmpDir: string;
+// V3.10: subscriptionAllows applies ~/.ashlr/budget.json, whose default keeps
+// Codex OFF for autonomy. These M114 cases test cross-machine WINDOW logic, so
+// each runs under a fresh HOME whose budget switches Codex on with no reserve.
+let testHome: string;
+let savedHome: string | undefined;
 
 beforeEach(() => {
   mockRateLimitsReturn = null;
   vi.clearAllMocks();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m114-'));
+  savedHome = process.env['HOME'];
+  testHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-m114-home-'));
+  process.env['HOME'] = testHome;
+  fs.mkdirSync(path.join(testHome, '.ashlr'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(testHome, '.ashlr', 'budget.json'), JSON.stringify({
+    mode: 'balanced',
+    seats: { codex: { seatId: 'codex', enabled: true, reservePercent: 0 } },
+    updatedAt: '2026-09-24T00:00:00.000Z',
+  }), { mode: 0o600 });
 });
 
 afterEach(() => {
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+  process.env['HOME'] = savedHome;
+  try { fs.rmSync(testHome, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
 // ===========================================================================
@@ -150,9 +167,9 @@ describe('flag-off: no sharedQueue cfg → local-only behavior (byte-identical t
     expect(result.allowed).toBe(true);
   });
 
-  it('subscriptionAllows: allows claude (no local signal) with no cfg', () => {
+  it('V3.10: subscriptionAllows blocks claude with no reading (fail-open closed) with no cfg', () => {
     const result = subscriptionAllows('claude');
-    expect(result.allowed).toBe(true);
+    expect(result.allowed).toBe(false);
     expect(result.reason).toContain('unknown');
   });
 
@@ -324,7 +341,7 @@ describe('shared mode: claude activity published (usedPercent=0)', () => {
     expect(entry?.usedPercent).toBe(0);
   });
 
-  it('claude 0% entry from sibling does not block dispatch', () => {
+  it('V3.10: a sibling claude 0% presence entry is not a reading — claude stays closed', () => {
     const store = new SharedStore(tmpDir);
     seedEntry(
       store,
@@ -336,9 +353,10 @@ describe('shared mode: claude activity published (usedPercent=0)', () => {
     );
 
     const cfg = sharedCfg(tmpDir, 'machine-B');
-    // Claude has no local signal — should still allow.
+    // Presence (usedPercent 0, no real window) must not read as "0% used".
     const result = subscriptionAllows('claude', { maxPercent: 80, cfg });
-    expect(result.allowed).toBe(true);
+    expect(result.allowed).toBe(false);
+    expect(result.reason).toContain('unknown');
   });
 });
 
