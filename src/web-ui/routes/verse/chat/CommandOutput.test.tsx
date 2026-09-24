@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { getDockSnapshot, resetDockStore } from '../dock/dock-store.js';
 import { CommandOutput } from './CommandOutput.js';
 
 const ESC = '\u001B';
@@ -61,5 +62,25 @@ describe('CommandOutput', () => {
     expect(screen.getByText('exit 0')).toBeInTheDocument();
     expect(screen.getByText('diff goes here')).toBeInTheDocument();
     expect(document.querySelector('pre')).toBeNull();
+  });
+});
+
+describe('CommandOutput — Run in terminal (3.10)', () => {
+  it('pastes the command into the dock\'s Terminal and never runs it', async () => {
+    localStorage.clear();
+    resetDockStore();
+    const user = userEvent.setup();
+    render(<CommandOutput command={{ command: 'npm test -- --run', exitCode: 1 }} output="1 failed" isError pending={false} terminalAvailable />);
+    await user.click(screen.getByRole('button', { name: 'Run in terminal' }));
+    const snap = getDockSnapshot();
+    expect(snap.state).toMatchObject({ open: true, active: 'terminal' });
+    // A paste, not a run: the request carries text for the prompt and nothing else.
+    expect(snap.requests.terminal).toMatchObject({ paste: 'npm test -- --run' });
+    expect(Object.keys(snap.requests.terminal!).sort()).toEqual(['nonce', 'paste']);
+  });
+
+  it('is not offered until the Terminal pane is in the build', () => {
+    render(<CommandOutput command={{ command: 'ls', exitCode: 0 }} output="a" isError={false} pending={false} terminalAvailable={false} />);
+    expect(screen.queryByRole('button', { name: 'Run in terminal' })).toBeNull();
   });
 });

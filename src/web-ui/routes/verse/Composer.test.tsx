@@ -56,7 +56,7 @@ describe('Composer', () => {
     expect(screen.getByRole('button', { name: 'Send message' })).toBeInTheDocument();
   });
 
-  it('shows the bound seat as a read-only pill whose menu starts a new chat on another seat', async () => {
+  it('shows the bound seat as a chip whose menu starts a new chat on another seat', async () => {
     const user = userEvent.setup();
     const p = props();
     render(<Composer {...p} />);
@@ -170,7 +170,7 @@ describe('Composer — depth for a long day', () => {
     const view = render(<Composer {...p} />);
     await user.keyboard('{Meta>}.{/Meta}');
     expect(p.onStop).toHaveBeenCalledTimes(1);
-    expect(screen.getByRole('button', { name: /Stop the running turn/ })).toHaveAttribute('title', 'Stop the running turn (⌘.)');
+    expect(screen.getByRole('button', { name: /Stop the running turn/ })).toHaveAttribute('title', 'Stop the running turn (⌘. or Esc from an empty box)');
 
     // Never armed on an idle chat.
     view.rerender(<Composer {...props({ sessionId: 'vs_1', running: false, onStop: p.onStop })} />);

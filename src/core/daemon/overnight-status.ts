@@ -22,24 +22,23 @@
  * "typecheck failed" are answers; "rejected" is not. A quiet night has to be
  * legible in the morning or the run window is not worth having.
  *
- * KNOWN GAP — `discarded[]` currently carries POST-merge halts only.
- * Pre-merge discards already have specific per-proposal reasons: the pass
- * returns them as `AutoMergePassResult.skipped[]`
- * (`{ proposalId, check, reason }`, e.g. "verify-before-judge: known failed
- * verification: typecheck") and as rejection details on `results[]`. They are
- * lost on the way out: `autoMergeTickSummary` (daemon/loop.ts:1817) folds the
- * pass result into `DaemonTick['autoMerge']` as COUNTS only, so by the time
- * runDaemon can see it the reasons are gone.
+ * PRE-MERGE DISCARDS (V3.10, unit U5). Under a standing grant — the only
+ * mode in which a resident run merges anything — every gate writes a row to
+ * the authority ledger (`gate:result`, with the gate's own code and sentence),
+ * and every landing and revert is a ledger row too. runDaemon folds the rows
+ * each tick appended into the live run with {@link recordOvernightLedgerRows}:
+ * a landing becomes `merged[]` (real merge SHA), a refusal at a gate that
+ * judges the work and a revert become `discarded[]`, each with the specific
+ * sentence the gate or the watch wrote. (Outside a standing grant the resident
+ * loop is proposal-only and merges nothing, so the local post-merge gate's
+ * repository-truth rows above remain the only source.)
  *
- * The fix, deliberately NOT made here because it edits a shared type while
- * another agent is changing budget types in the same file:
- *   1. add `skipped?: Array<{ proposalId: string; check: string; reason: string }>`
- *      to `DaemonTick['autoMerge']` (src/core/types.ts:4678-4692);
- *   2. stop dropping it in `autoMergeTickSummary` (daemon/loop.ts:1817-1847),
- *      bounded to a sane number of entries so the tick record stays small;
- *   3. in runDaemon's post-tick block, feed each entry to
- *      {@link recordOvernightDiscard} with `reason` = the pass's own sentence.
- * That is the whole change; nothing else needs to move.
+ * ARMING FROM THE API (U5). `POST /api/verse/overnight {action:'arm'}` records
+ * a PENDING run ({@link requestOvernightRun}: armed, `startedAt: null`). The
+ * resident loop — under launchd it is always running — adopts it at the top
+ * of its next iteration ({@link adoptOvernightRun}) and from then on it is
+ * exactly a `--until` / `--iterations` run. A pending run is honest about it:
+ * no start time, no iteration count, until a daemon has actually taken it.
  *
  * `~/.ashlr/run-window/status.json`, written durably (exclusive tmp + atomic
  * rename). Metadata only — never a diff, a token, or command output.
@@ -54,6 +53,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { RunWindowStopRule } from './run-window.js';
 import type { PostMergeGateResult } from './post-merge-halt.js';
+import type { LedgerEntry } from '../authority/types.js';
 
 // ---------------------------------------------------------------------------
 // The wire shapes — shared verbatim with the client's overnight-contract.ts
@@ -350,5 +350,146 @@ export function concludeOvernightRun(summary: string): OvernightStatus {
   return updateOvernightStatus({
     armed: false,
     run: current.run ? { ...current.run, activity: summary } : null,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// V3.10 (unit U5): arming from the API, adoption by a resident loop
+// ---------------------------------------------------------------------------
+
+/**
+ * The armed run a daemon has not adopted yet (`armed`, `startedAt: null`),
+ * or null.
+ */
+export function pendingOvernightRun(status: OvernightStatus = readOvernightStatus()): OvernightRun | null {
+  return status.armed && status.run !== null && status.run.startedAt === null && status.run.stopRule !== null
+    ? status.run
+    : null;
+}
+
+/** True while an armed run has been adopted and has not concluded. */
+export function overnightRunInProgress(status: OvernightStatus = readOvernightStatus()): boolean {
+  return status.armed && status.run !== null && status.run.startedAt !== null;
+}
+
+/**
+ * Arm the NEXT run from the API. It stays pending until a daemon adopts it:
+ * no start time and no iteration count are claimed before one has.
+ */
+export function requestOvernightRun(
+  stopRule: RunWindowStopRule,
+  opts: { repos?: number | null; gate?: OvernightGate | null; runId?: string } = {},
+): OvernightStatus {
+  return updateOvernightStatus({
+    armed: true,
+    repos: opts.repos ?? null,
+    gate: opts.gate ?? null,
+    run: {
+      runId: opts.runId ?? randomUUID(),
+      startedAt: null,
+      stopRule,
+      iterationsDone: null,
+      repo: null,
+      activity: 'armed; waiting for the daemon to take it (it does on its next cycle)',
+      merged: [],
+      discarded: [],
+    },
+  });
+}
+
+/**
+ * A resident loop took the pending run: from now it has a start time and
+ * counts iterations. Returns null when there was no pending run.
+ */
+export function adoptOvernightRun(opts: { now?: () => number; pid?: number } = {}): OvernightStatus | null {
+  const current = readOvernightStatus();
+  const pending = pendingOvernightRun(current);
+  if (!pending) return null;
+  const nowMs = (opts.now ?? Date.now)();
+  return updateOvernightStatus({
+    run: {
+      ...pending,
+      startedAt: new Date(nowMs).toISOString(),
+      iterationsDone: 0,
+      activity: `taken by the daemon${typeof opts.pid === 'number' ? ` (pid ${opts.pid})` : ''}; waiting for the first tick`,
+    },
+  });
+}
+
+/** Refuse a pending run a daemon could not adopt, saying why; the record is kept. */
+export function refuseOvernightRun(reason: string): OvernightStatus {
+  const current = readOvernightStatus();
+  return updateOvernightStatus({
+    armed: false,
+    run: current.run ? { ...current.run, activity: `not started: ${reason}` } : null,
+  });
+}
+
+/** Gates whose refusal throws the work away (the same set backpressure counts). */
+const DISCARDING_GATES = new Set(['G1b', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7']);
+
+/**
+ * Fold authority-ledger rows from a standing tick into the live run:
+ * `merge:landed` → merged[] (the merge SHA), a refusal at a work-judging gate
+ * and `revert:landed` → discarded[] with the gate's / watch's own sentence.
+ * Idempotent per row (a row already folded is skipped). No-op without a run
+ * in progress.
+ */
+export function recordOvernightLedgerRows(
+  rows: readonly LedgerEntry[],
+  opts: { titleOf?: (proposalId: string) => string | null; iterationsDone?: number } = {},
+): OvernightStatus {
+  const current = readOvernightStatus();
+  if (!overnightRunInProgress(current) || !current.run) return current;
+  const merged: OvernightMergedItem[] = [...current.run.merged];
+  const discarded: OvernightDiscardedItem[] = [...current.run.discarded];
+  const seenMerged = new Set(merged.map((m) => `${m.repo}|${m.id}|${m.commit ?? ''}`));
+  const seenDiscarded = new Set(discarded.map((d) => `${d.repo}|${d.id}|${d.reason}`));
+  const title = (proposalId: string | null, fallback: string): string => {
+    if (!proposalId) return fallback;
+    try {
+      return opts.titleOf?.(proposalId) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  };
+  let lastRepo: string | null = null;
+  for (const row of rows) {
+    if (row.kind === 'merge:landed') {
+      const rec = row.data;
+      const id = rec.proposalId ?? rec.id;
+      const key = `${rec.repo}|${id}|${rec.mergeSha}`;
+      if (seenMerged.has(key)) continue;
+      seenMerged.add(key);
+      merged.push({ id, repo: rec.repo, title: title(rec.proposalId, `PR #${rec.prNumber}`), at: rec.landedAt, commit: rec.mergeSha });
+      lastRepo = rec.repo;
+    } else if (row.kind === 'gate:result') {
+      const rec = row.data;
+      if (rec.verdict !== 'refuse' || !DISCARDING_GATES.has(rec.gate)) continue;
+      const reason = `${rec.gate} refused it: ${rec.reason}`;
+      const key = `${rec.repo}|${rec.proposalId}|${reason}`;
+      if (seenDiscarded.has(key)) continue;
+      seenDiscarded.add(key);
+      discarded.push({ id: rec.proposalId, repo: rec.repo, title: title(rec.proposalId, rec.proposalId), at: rec.at, reason });
+      lastRepo = rec.repo;
+    } else if (row.kind === 'revert:landed') {
+      const rec = row.data;
+      const id = rec.revertsLandingId ?? rec.id;
+      const reason = `reverted after a red post-merge check (revert PR #${rec.prNumber}, ${rec.mergeSha.slice(0, 12)})`;
+      const key = `${rec.repo}|${id}|${reason}`;
+      if (seenDiscarded.has(key)) continue;
+      seenDiscarded.add(key);
+      discarded.push({ id, repo: rec.repo, title: title(null, `landing ${id}`), at: rec.landedAt, reason });
+      lastRepo = rec.repo;
+    }
+  }
+  return updateOvernightStatus({
+    run: {
+      ...current.run,
+      iterationsDone: opts.iterationsDone ?? current.run.iterationsDone,
+      repo: lastRepo ?? current.run.repo,
+      merged,
+      discarded,
+    },
   });
 }

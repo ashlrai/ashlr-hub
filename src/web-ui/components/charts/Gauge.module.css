@@ -44,3 +44,11 @@
   font-size: var(--text-xs-size);
   color: var(--text-tertiary);
 }
+
+/* V3.10: the measuring box — full card width, so the arc can size to it. */
+.fit {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+}

@@ -5,6 +5,14 @@
  *                                       [--base-url URL] [--upstream URL]
  *                                       [--model REF] [--timeout-ms N]
  *                                       [--task ID] [--out FILE] [--no-trace]
+ *                                       [--set core|heldout]
+ *   npx tsx src/core/local-eval/main.ts --experiments [--fleet-busy]
+ *
+ * `--set heldout` runs the held-out set (tasks-heldout.ts) that harness
+ * experiments are scored on. `--experiments` drains the harness-experiment
+ * queue (learn/experiments.ts) one experiment at a time, each a paired
+ * campaign on the held-out set, printing every verdict; `--fleet-busy` holds
+ * it to one local slot as the daemon does while fleet work is queued.
  *
  * CONCURRENCY DEFAULTS TO 2, NOT TO THE SLOT COUNT. The runtime is shared with
  * whatever else is using this machine. Saturating all four slots would make the
@@ -26,7 +34,8 @@ import {
 import { buildReport, renderReport, summariseTask } from './report.js';
 import { runTrial } from './runner.js';
 import { TASKS } from './tasks.js';
-import type { TaskOutcome, TrialResult } from './types.js';
+import { HELD_OUT_TASKS } from './tasks-heldout.js';
+import type { TaskOutcome, TaskSpec, TrialResult } from './types.js';
 
 interface Args {
   trials: number;
@@ -40,6 +49,12 @@ interface Args {
   out: string | null;
   /** Insert the tracing proxy. On by default; `--no-trace` turns it off. */
   trace: boolean;
+  /** Which task set: the core set (default) or the held-out experiment set. */
+  set: 'core' | 'heldout';
+  /** Drain the harness-experiment queue instead of running a plain baseline. */
+  experiments: boolean;
+  /** With --experiments: use one local slot, as the daemon does while fleet work waits. */
+  fleetBusy: boolean;
 }
 
 export function parseArgs(argv: readonly string[]): Args {
@@ -68,6 +83,9 @@ export function parseArgs(argv: readonly string[]): Args {
     taskFilter: null,
     out: null,
     trace: true,
+    set: 'core',
+    experiments: false,
+    fleetBusy: false,
   };
   for (let i = 0; i < argv.length; i += 1) {
     const flag = argv[i];
@@ -84,6 +102,9 @@ export function parseArgs(argv: readonly string[]): Args {
       case '--out': args.out = String(value); i += 1; break;
       case '--no-trace': args.trace = false; break;
       case '--trace': args.trace = true; break;
+      case '--set': args.set = value === 'heldout' ? 'heldout' : 'core'; i += 1; break;
+      case '--experiments': args.experiments = true; break;
+      case '--fleet-busy': args.fleetBusy = true; break;
       default: break;
     }
   }
@@ -109,9 +130,40 @@ export async function pool<T>(
   return results;
 }
 
+/** The task list a run uses: the chosen set, optionally narrowed to one task. */
+export function selectTasks(args: Pick<Args, 'set' | 'taskFilter'>): readonly TaskSpec[] {
+  const set = args.set === 'heldout' ? HELD_OUT_TASKS : TASKS;
+  return args.taskFilter ? set.filter((t) => t.id === args.taskFilter) : set;
+}
+
+/**
+ * Drain the experiment queue. Imported lazily: learn/experiments.ts imports
+ * this module (for `parseArgs`), and a static import back would be a cycle.
+ */
+async function runExperimentQueue(args: Args): Promise<void> {
+  const { localEvalExecutor, runNextExperiment } = await import('../learn/experiments.js');
+  const { renderExperimentResult } = await import('./report.js');
+  const executor = await localEvalExecutor({
+    baseUrl: args.baseUrl, model: args.model, agentCli: args.agentCli, timeoutMs: args.timeoutMs, trace: args.trace,
+  });
+  for (;;) {
+    const result = await runNextExperiment({ executor, fleetQueueDepth: () => (args.fleetBusy ? 1 : 0) });
+    if (result.ran === null) {
+      console.error(`[local-eval] experiments: ${result.reason}`);
+      return;
+    }
+    console.log(renderExperimentResult(result.ran));
+    console.log('');
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
-  const tasks = args.taskFilter ? TASKS.filter((t) => t.id === args.taskFilter) : TASKS;
+  if (args.experiments) {
+    await runExperimentQueue(args);
+    return;
+  }
+  const tasks = selectTasks(args);
   if (tasks.length === 0) {
     console.error(`no task matched ${args.taskFilter}`);
     process.exitCode = 2;

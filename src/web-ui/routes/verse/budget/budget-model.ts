@@ -67,6 +67,19 @@ export const BUDGET_MODE_OPTIONS: ReadonlyArray<{ value: BudgetMode; label: stri
   { value: 'all-in', label: 'All-in', description: MODE_DESCRIPTIONS['all-in'] },
 ];
 
+/**
+ * Whether `mode` is above a grant's ceiling. Rank is the order of
+ * BUDGET_MODE_OPTIONS (reserve < balanced < all-in) — the same order as
+ * core/authority BUDGET_MODE_RANK, restated here so the budget panel does not
+ * import the authority module into the web bundle. No ceiling (null) = no
+ * mode is above it.
+ */
+export function modeAboveCeiling(mode: BudgetMode, ceiling: BudgetMode | null | undefined): boolean {
+  if (!ceiling) return false;
+  const rank = (m: BudgetMode) => BUDGET_MODE_OPTIONS.findIndex((o) => o.value === m);
+  return rank(mode) > rank(ceiling);
+}
+
 function round(n: number): number {
   return Math.round(n);
 }

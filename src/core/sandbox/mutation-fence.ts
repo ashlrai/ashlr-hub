@@ -15,6 +15,20 @@ import { assurePrivateStoragePath } from '../util/private-storage.js';
  * Lock order is proposal mutation lock -> outward mutation fence. Policy
  * writers acquire only this fence, so kill/unenrollment cannot deadlock on a
  * proposal while still linearizing against every outward effect.
+ *
+ * V3.10 U6 — WHAT THIS FENCE NO LONGER COVERS. It is exclusive and
+ * machine-wide, so it must only ever be held for SHORT sections: the policy
+ * gate, worktree creation, proposal filing, cleanup. Agents do not hold it
+ * across inference any more; they hold a shared execution lease
+ * (execution-leases.ts) that kill / unenroll abort and drain before they
+ * report quiescence. Full lock order:
+ *
+ *   repo lease → verification slot → proposal lock → this fence
+ *
+ * Prefer `acquireOutwardMutationFenceAsync` anywhere an in-process holder may
+ * exist: with agents running concurrently, the holder is usually another
+ * agent in the same process, and the synchronous spin below can never let it
+ * finish.
  */
 export type OutwardMutationFence = Readonly<LocalStoreLock>;
 

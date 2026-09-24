@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { Swimlane, VIRTUALIZE_AFTER, ROW_H, type SwimlaneLane } from './Swimlane.js';
+import { showTable } from './chart-test-support.js';
 
 const H = 3_600_000;
 const FROM = Date.parse('2026-09-20T00:00:00Z');
@@ -33,7 +34,7 @@ describe('Swimlane', () => {
     const { container } = render(<Swimlane title="Runs" width={800} from={FROM} to={TO} now={FROM + 10 * H} lanes={lanes} />);
     const bar = container.querySelector('rect[data-item="r"]')!;
     expect(bar.getAttribute('data-open')).toBe('true');
-    fireEvent.click(screen.getByRole('radio', { name: 'Table' }));
+    showTable();
     expect(screen.getByRole('cell', { name: 'running (stale)' })).toBeInTheDocument();
     expect(screen.getByRole('cell', { name: '10h 0m+' })).toBeInTheDocument();
   });
@@ -68,5 +69,43 @@ describe('spanTickFormatter', () => {
     expect(long).toMatch(/^[A-Z][a-z]{2} \d{1,2}$/);
     const short = spanTickFormatter(FROM, FROM + 6 * H)(FROM);
     expect(short).toMatch(/\d{1,2}:\d{2}\s?[AP]M/);
+  });
+});
+
+describe('Swimlane V3.10', () => {
+  it('draws the engine tick + monogram beside a lane and names the engine in words', () => {
+    const lanes: SwimlaneLane[] = [
+      { id: 'g', label: 'grok-cli · 1', engine: 'grok', items: [{ id: 'a', start: FROM, end: FROM + H, status: 'done' }] },
+      { id: 'l', label: 'local · 1', engine: 'local', items: [{ id: 'b', start: FROM, end: FROM + H, status: 'done' }] },
+    ];
+    const { container } = render(<Swimlane title="Live" width={800} from={FROM} to={TO} lanes={lanes} />);
+    const tick = container.querySelector('[data-engine="grok"]')!;
+    expect(tick.querySelector('rect')!.getAttribute('fill')).toBe('var(--engine-grok)');
+    expect(tick.querySelector('text')!.textContent).toBe('G');
+    expect(screen.getByRole('listitem', { name: 'grok-cli · 1 (grok): 1 run (1 done)' })).toBeInTheDocument();
+  });
+
+  it('draws queued / parked as an outline with no fill, and an unknown status as the hatch', () => {
+    const lanes: SwimlaneLane[] = [{
+      id: 'a', label: 'a', items: [
+        { id: 'q', start: FROM, end: FROM + H, status: 'queued' },
+        { id: 'p', start: FROM + 2 * H, end: FROM + 3 * H, status: 'parked' },
+        { id: 'u', start: FROM + 4 * H, end: FROM + 5 * H, status: 'mystery' },
+      ],
+    }];
+    const { container } = render(<Swimlane title="Live" width={800} from={FROM} to={TO} lanes={lanes} />);
+    const q = container.querySelector('rect[data-item="q"]')!;
+    expect(q.getAttribute('data-style')).toBe('outline');
+    expect(q.getAttribute('fill')).toBe('none');
+    expect(q.getAttribute('stroke')).toBe('var(--chart-queued-outline)');
+    expect(container.querySelector('rect[data-item="u"]')!.getAttribute('fill')).toMatch(/^url\(#chart-hatch-/);
+    expect(screen.getByText('parked / queued', { selector: 'li' })).toBeInTheDocument();
+  });
+
+  it('renders inside 375 px', () => {
+    const { container } = render(<Swimlane title="Live" width={375} from={FROM} to={TO} lanes={[{ ...lane('alpha'), engine: 'claude' }]} />);
+    for (const bar of container.querySelectorAll('rect[data-item]')) {
+      expect(Number(bar.getAttribute('x')) + Number(bar.getAttribute('width'))).toBeLessThanOrEqual(375);
+    }
   });
 });

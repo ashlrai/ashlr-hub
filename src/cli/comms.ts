@@ -11,7 +11,7 @@
  *   cycle                            Run one runCommsCycle (send pending + poll replies).
  *   ask "<text>" -o "a" -o "b"       Post a test question with numbered options.
  *   digest                           Build oversight snapshot + send summary.
- *   ask-vision                       Run strategist + post elon-vision question.
+ *   ask-vision                       Leader tick + post the latest Leader memo.
  *   ask-merges                       Post ship proposals for approval + run cycle.
  *   setup-telegram                   Print Telegram setup steps + discover chat id.
  *
@@ -25,7 +25,7 @@ import { listRequests, outstanding, postRequest } from '../core/comms/requests.j
 import { runCommsCycle } from '../core/comms/dispatch.js';
 import { registerCommsHandlers } from '../core/comms/handlers.js';
 import { buildOversightSnapshot } from '../core/fleet/oversight-export.js';
-import { runStrategist, loadLatestBriefing } from '../core/vision/strategist.js';
+import { scrubSecrets } from '../core/util/scrub.js';
 import { judgeHealth } from '../core/fleet/judge-calibration.js';
 import { existsSync, readFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -164,33 +164,59 @@ async function sendDigest(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<
   });
 }
 
-async function sendAskVision(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<void> {
-  let briefing = loadLatestBriefing();
-  if (!briefing) {
-    briefing = await runStrategist(cfg);
-  }
+/**
+ * The comms kind for the Leader's briefing question. `elon-vision` is a
+ * PERSISTED wire value (rows in ~/.ashlr/comms/requests.jsonl and the
+ * resolution-handler registry key in comms/handlers.ts), kept so requests
+ * already posted still resolve. It is an identifier only: nothing shown to
+ * Mason (message text, options, CLI output) names a real person.
+ */
+export const LEADER_BRIEFING_KIND = 'elon-vision';
 
-  const topDirection = briefing.recommendedDirection[0] ?? 'no specific direction proposed';
-  const questionLines: string[] = [
-    `State: ${briefing.currentState}`,
-    `Gap: ${briefing.gapToVision}`,
-    `Top direction: ${topDirection}`,
-  ];
-  if (briefing.questionsForMason.length > 0) {
-    questionLines.push(`Open question: ${briefing.questionsForMason[0]}`);
-  }
-  const text = questionLines.join(' | ');
+export type LeaderBriefingOutcome = 'posted' | 'already-posted' | 'no-memo';
+
+function clipText(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/**
+ * V3.10: the daily "vision question" is the Leader's, not the legacy
+ * Strategist's. It runs the SAME path as `ashlr leader tick` — due class-B
+ * actions apply, due moves are graded, and a Leader run starts only when one
+ * is due (06:30 cadence / merge, revert, seat-reset, insight triggers; at
+ * most 3 a day; skipped when the evidence has not changed; routed seat, no
+ * cloud fallback, dry run without a grant). The legacy runStrategist path
+ * went to the Claude CLI first with no budget gate; it is no longer reached
+ * from comms.
+ *
+ * Then the newest successful memo is posted once (deduped by memo id):
+ * Keep it / Veto this memo / Show full memo.
+ */
+export async function sendLeaderBriefing(cfg: Awaited<ReturnType<typeof loadConfig>>): Promise<LeaderBriefingOutcome> {
+  const leader = await import('../core/vision/leader.js');
+  const deps = await leader.loadDefaultLeaderRunDeps(cfg);
+  await leader.leaderTick(deps, { awaitRun: true });
+  const memo = leader.buildLeaderState(Date.now()).latest;
+  if (!memo || memo.status !== 'ok') return 'no-memo';
+  if (listRequests({ kind: LEADER_BRIEFING_KIND }).some((r) => r.meta?.['memoId'] === memo.id)) return 'already-posted';
+
+  const parts: string[] = [`Leader memo${memo.dryRun ? ' (dry run)' : ''}`];
+  if (memo.bottleneck) parts.push(`Bottleneck: ${clipText(memo.bottleneck.statement, 240)}`);
+  if (memo.move) parts.push(`Move: ${clipText(memo.move.statement, 240)}`);
+  const live = memo.actions.filter((a) => a.status === 'applied' || a.status === 'scheduled').length;
+  if (live > 0) parts.push(`${live} action(s) applied or waiting on their veto window`);
+  if (memo.questionsForMason.length > 0) parts.push(`Question: ${clipText(memo.questionsForMason[0]!, 240)}`);
 
   postRequest({
-    kind: 'elon-vision',
+    kind: LEADER_BRIEFING_KIND,
     type: 'question',
-    text,
-    options: ['Approve & create goals', 'Hold', 'Show full briefing'],
-    meta: {
-      source: 'ask-vision',
-      briefingGeneratedAt: briefing.generatedAt,
-    },
+    // Model-authored text on its way to Mason's phone: scrubbed like every outbound message.
+    text: scrubSecrets(parts.join(' | ')),
+    options: ['Keep it', 'Veto this memo', 'Show full memo'],
+    meta: { source: 'leader', memoId: memo.id },
   });
+  return 'posted';
 }
 
 function parseArgs(args: string[]): { sub: string; text: string; options: string[] } {
@@ -329,9 +355,11 @@ async function cmdCycle(): Promise<number> {
 
     if (isDue('last-askvision', askVisionIntervalHours)) {
       try {
-        await sendAskVision(cfg);
+        const outcome = await sendLeaderBriefing(cfg);
+        // Checked once per interval whatever the outcome: a missing memo is
+        // not retried every poll (the daemon's own tick runs the Leader).
         writeLastSent('last-askvision', Date.now());
-        console.log('cycle: ask-vision queued');
+        console.log(outcome === 'posted' ? 'cycle: leader memo queued' : `cycle: leader memo not queued (${outcome})`);
       } catch {
         // never-throws — ask-vision failure must not break the poll cycle
       }
@@ -382,7 +410,7 @@ async function cmdDigest(): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// M138: ask-vision — run strategist → post elon-vision question
+// ask-vision — a Leader tick, then post the latest Leader memo (V3.10)
 // ---------------------------------------------------------------------------
 
 async function cmdAskVision(): Promise<number> {
@@ -393,25 +421,29 @@ async function cmdAskVision(): Promise<number> {
     return 1;
   }
 
-  if (!loadLatestBriefing()) {
-    console.log('No cached briefing — running strategist (this may take a moment)...');
-  }
-
   try {
-    await sendAskVision(cfg);
-
-    const pending = listRequests({ kind: 'elon-vision', status: 'pending' });
-    const id = pending[pending.length - 1]?.id ?? '(unknown)';
-    console.log(`posted vision question: ${id}`);
+    console.log('Running a Leader tick (a due run on a local model can take several minutes)…');
+    const outcome = await sendLeaderBriefing(cfg);
+    if (outcome === 'no-memo') {
+      console.error('No Leader memo yet — run `ashlr leader run` (or wait for the 06:30 run), then try again.');
+      return 1;
+    }
+    if (outcome === 'already-posted') console.log('The latest Leader memo was already sent; sending anything still pending.');
+    else {
+      const pending = listRequests({ kind: LEADER_BRIEFING_KIND, status: 'pending' });
+      console.log(`posted Leader memo: ${pending[pending.length - 1]?.id ?? '(unknown)'}`);
+    }
     registerCommsHandlers(cfg);
     const result = await runCommsCycle(cfg);
     console.log(`cycle: sent=${result.sent} resolved=${result.resolved}`);
 
-    if (result.sent > 0) {
-      const dest = telegramEnabled(cfg)
-        ? `Telegram (chat ${cfg.comms?.telegram?.chatId ?? '?'})`
-        : cfg.comms?.imessageHandle ?? '?';
-      console.log(`Vision question sent to ${dest}. Reply 1/2/3 (or tap a button on Telegram).`);
+    if (outcome === 'already-posted' || result.sent > 0) {
+      if (result.sent > 0) {
+        const dest = telegramEnabled(cfg)
+          ? `Telegram (chat ${cfg.comms?.telegram?.chatId ?? '?'})`
+          : cfg.comms?.imessageHandle ?? '?';
+        console.log(`Leader memo sent to ${dest}. Reply 1/2/3 (or tap a button on Telegram).`);
+      }
       return 0;
     } else {
       console.error('Send failed — check channel config or an existing outstanding question may be blocking.');
@@ -479,7 +511,7 @@ function printCommsHelp(): void {
   console.log('    cycle                        run one send-pending + poll-replies pass');
   console.log('    ask "<text>" -o a -o b       post a question with numbered options');
   console.log('    digest                       build oversight snapshot + send summary');
-  console.log('    ask-vision                   run strategist + post an elon-vision question');
+  console.log('    ask-vision                   run a Leader tick + post the latest Leader memo');
   console.log('    ask-merges                   post ship proposals for approval + run cycle');
   console.log('    setup-telegram               print Telegram setup steps + discover chat id');
   console.log('');

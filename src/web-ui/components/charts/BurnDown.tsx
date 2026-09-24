@@ -65,6 +65,14 @@ export function burnVerdict(
   formatTime: (ms: number) => string,
   reserveLabel?: string,
 ): { text: string; severity: 'ok' | 'warn' | 'danger' | 'unknown' } {
+  // Already past a line: say where it IS, not a "projection" to a moment
+  // that has passed (a used-up seat is not "running out at 3:02").
+  if (projection.from && projection.from.remaining <= 0) {
+    return { text: `Used up — resets ${formatTime(resetAt)}.`, severity: 'danger' };
+  }
+  if (projection.from && reserveLabel !== undefined && projection.reserveAt !== null && projection.reserveAt <= projection.from.t) {
+    return { text: `Inside ${reserveLabel.toLowerCase()} — autonomy has stopped using this window until ${formatTime(resetAt)}.`, severity: 'warn' };
+  }
   if (projection.slopePerMs === null) return { text: 'Not enough readings to project this window yet.', severity: 'unknown' };
   if (projection.exhaustAt !== null) {
     return {
@@ -179,7 +187,13 @@ export function BurnDown({
           {reserve ? (
             <g data-role="reserve">
               <line className={plot.reference} x1={padL} x2={padL + plotW} y1={ys(reserve.value)} y2={ys(reserve.value)} />
-              <text className={plot.tick} x={padL + 4} y={ys(reserve.value) - 4}>{reserve.label} · {formatValue(reserve.value)}</text>
+              {/* Above-left of the line, over a surface halo (SPEC-310C §6): the
+                  window's start is the one place the remaining line is always
+                  high, and the projection only ever runs to the right, so the
+                  label never sits on the data. */}
+              <text data-role="reserve-label" className={`${plot.tick} ${plot.halo}`} x={padL + 4} y={ys(reserve.value) - 5} textAnchor="start">
+                {reserve.label} · {formatValue(reserve.value)}
+              </text>
             </g>
           ) : null}
           {now > start && now < xEnd ? (

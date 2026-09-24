@@ -69,6 +69,8 @@ import { legacyModelOptionFallback } from '../model-windows.js';
 import { verseSessionRoots, type VerseModelOption, type VerseSession, type VerseTurnLaunch, type VerseUsage } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter, VerseAdapterTurnContext, VerseParsedEvent, VerseTurnParser } from './index.js';
+import { turnAttachmentImages } from './turn-extras.js';
+import { codexEffortArgs, codexPermission } from '../session-controls.js';
 import { cliErrorEvent, classifyVerseCliError, nativeSessionOverride, parseJsonObjectLine, thinkingDisplayEnabled } from './claude.js';
 import type { VerseProgressPhase } from '../types.js';
 
@@ -302,20 +304,42 @@ export function codexResumes(session: Pick<VerseSession, 'nativeSessionId' | 'tu
   return override === 'resume' || session.turnCount > 0;
 }
 
+/**
+ * V3.10 (unit C3) controls and attachments, layered so an UNTOUCHED chat's
+ * argv is exactly the 3.9 one:
+ *  - effort → `-c model_reasoning_effort="…"` (config, so exec and resume
+ *    carry it the same way);
+ *  - permission → `--sandbox <mode>` on a new thread, `-c sandbox_mode=…` on
+ *    resume (which has no `--sandbox`), or
+ *    `--dangerously-bypass-approvals-and-sandbox` (both forms accept it);
+ *  - the model → `--model` on BOTH forms. A chat's model can change between
+ *    turns (⌘⇧I); `exec resume` lists `-m, --model` on 0.136 and 0.155, and
+ *    without it a resumed thread keeps whatever model it started on while the
+ *    picker claims otherwise;
+ *  - attached images → one `--image=<path>` each, placed BEFORE another flag
+ *    so the variadic option can never swallow the stdin marker `-`. Other
+ *    attachments need no grant: both sandbox modes read the whole disk, and
+ *    the message carries the file's path.
+ */
 function buildCodexLaunch(session: VerseSession, text: string, launch: VerseSeatLaunch): VerseTurnLaunch {
   const prefix = launch.launcher ? [...launch.launcher] : ['codex'];
   const memory = memoryOverrides(launch);
+  const permission = codexPermission(session);
+  const images = turnAttachmentImages(launch).map((path) => `--image=${path}`);
   const config = [
     ...writableRootsOverride([...verseSessionRoots(session).slice(1), ...memory.writableRoots]),
     ...codexContextOverrides(session, launch),
     ...memory.config,
     ...codexReasoningOverrides(launch),
+    ...codexEffortArgs(session),
   ];
+  // Always the CANONICAL id: a stored alias (e.g. a pre-3.9 record) must
+  // reach the CLI as the model the label promised.
+  const model = canonicalModelId(session.model);
   const argv = codexResumes(session, launch) && session.nativeSessionId
-    ? [...prefix, 'exec', 'resume', session.nativeSessionId, ...config, CODEX_SKIP_GIT_CHECK, '--json', '-']
-    // Always the CANONICAL id: a stored alias (e.g. a pre-3.9 record) must
-    // reach the CLI as the model the label promised.
-    : [...prefix, 'exec', ...config, CODEX_SKIP_GIT_CHECK, '--json', '--model', canonicalModelId(session.model), '--cd', session.projectPath, '--sandbox', 'workspace-write', '-'];
+    ? [...prefix, 'exec', 'resume', session.nativeSessionId, ...config, ...permission.resume, ...permission.bypass, ...images, CODEX_SKIP_GIT_CHECK, '--model', model, '--json', '-']
+    : [...prefix, 'exec', ...config, ...permission.bypass, ...images, CODEX_SKIP_GIT_CHECK, '--json', '--model', model, '--cd', session.projectPath,
+      ...(permission.sandbox !== null ? ['--sandbox', permission.sandbox] : []), '-'];
   return { argv, cwd: session.projectPath, env: {}, stdin: text };
 }
 

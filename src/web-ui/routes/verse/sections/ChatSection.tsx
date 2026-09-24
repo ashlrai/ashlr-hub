@@ -1,30 +1,62 @@
 /**
- * routes/verse/sections/ChatSection.tsx — the Chat section of the Verse
- * shell: sidebar · workspace (720px transcript + docked composer) ·
- * resources panel, plus the new-chat dialog, the ⌘K switcher, and every
- * mutation the chat surface makes.
+ * routes/verse/sections/ChatSection.tsx — the Chat surface (⌘5):
  *
- * Takes NO props (VERSE-CONTRACT-V2 shell contract): the shell lazily
- * mounts it and hands over ⌘N / ⌘K as one-shot commands through
- * verse-ui-store, because only this section knows which chat is open and
- * therefore what those shortcuts should pre-fill.
+ *   [sessions 264 | transcript ≤720 | dock 440 (tabs, or two panes split)]
+ *
+ * plus the new-chat dialog, the delete confirmation, and every mutation the
+ * chat surface makes (SPEC-310C §2–§3, unit C2).
+ *
+ * Takes NO props (the shell contract): the shell lazily mounts it. The ways
+ * INTO it from elsewhere in the workbench arrive two ways, both C1's:
+ *   - the shell's one-shot command (verse-ui-store): `new-chat` (⌘N, "New
+ *     chat on…", with a seat or project), `open-session` (a Needs-you item, a
+ *     notification, ⌃Tab, ⌘[ / ⌘]), `focus-composer` (⌃⌥Space);
+ *   - the command bus (shell/command-bus.ts): this section serves the
+ *     catalog's chat-scope commands — `dock.*`, `chat.sidebar`, `chat.find`,
+ *     `chat.turn-prev/next` — for the palette, the native menu and keys.
+ * And it reports which chat is open (setVerseActiveSession), which feeds
+ * ⌃Tab's recent list and back/forward.
+ *
+ * 3.10 changes, briefly:
+ *   - the resources column became the DOCK (dock/Dock.tsx): Terminal,
+ *     Preview and Review through C0's slots, Tasks and Context of its own;
+ *     below 1024px it is a sheet, below 480px a bottom sheet;
+ *   - the chat list gained filters, pins, archive, unread and a live second
+ *     line (C1's activity + session-meta routes, tolerated when absent);
+ *   - the ⌘K chat switcher is gone — ⌘K is the shell's command palette;
+ *   - the chat-scope keys (⌘\ ⌃` ⌃⇧` ⇧⌘B ⇧⌘D ⌘B) run the same handlers,
+ *     matched from C0's catalog while this surface is visible — and only when
+ *     the shell's own key handler has not already taken the event.
  *
  * Mutations go through one guard: if no mutation token is held,
- * MutationTokenDialog opens and the action re-runs once unlocked (the same
- * hand-off the command palette uses).
+ * MutationTokenDialog opens and the action re-runs once unlocked.
  */
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type { VerseCreateSessionRequest, VerseSession } from '../../../data/api-types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
+import { Button } from '../../../components/primitives/Button.js';
+import { Dialog } from '../../../components/primitives/Dialog.js';
 import { useToast } from '../../../components/primitives/Toast.js';
 import { clearReadSession } from '../../../data/auth-store.js';
 import { ApiError, DispatchDisabledError } from '../../../data/client.js';
 import { useMutationHold, useQuery, useRefresh } from '../../../data/hooks.js';
-import { NewChatDialog } from '../NewChatDialog.js';
-import { QuickSwitcher } from '../QuickSwitcher.js';
-import { ResourcesPanel } from '../ResourcesPanel.js';
+import { insertIntoComposer } from '../chat/composer-bridge.js';
+import { forgetComposerMemory } from '../chat/composer-state.js';
+import { otherRunningChats } from '../chat/tasks-model.js';
+import { lastTurnFiles } from '../chat/turn-files.js';
+import { requestTranscriptFind, requestTranscriptStep } from '../chat/transcript-jump.js';
+import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
+import { useSessionRoots } from '../chat/use-session-roots.js';
+import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
+import { CHAT_PANEL_RANGES, MIN_TRANSCRIPT_WIDTH, setChatPanelFit } from '../chat-panel-sizing.js';
+import { clearDockRequests, requestTerminal, toggleDock, toggleDockPane, useDock } from '../dock/dock-store.js';
 import type { SeatChoice } from '../SeatSelector.js';
-import { Sidebar } from '../Sidebar.js';
+import { clampDockWidth, DOCK_LAYOUT, dockPresentation } from '../shell/dock-catalog.js';
+import { useCommandHandler } from '../shell/command-bus.js';
+import { matchCommand } from '../shell/command-catalog.js';
+import { useSectionVisible } from '../shell/section-visibility.js';
+import type { TurnFileChange } from '../shell/slots.js';
+import { Sidebar, type SidebarRowActions } from '../Sidebar.js';
 import { useVerseSession } from '../useVerseSession.js';
 import { useVerseUi } from '../useVerseUi.js';
 import { openVerseListChannel } from '../verse-events.js';
@@ -34,28 +66,29 @@ import {
   deleteVerseSession,
   renameVerseSession,
   sendVerseTurn,
+  setVerseSessionMeta,
   verseBootstrapQuery,
   verseSessionsQuery,
   verseWorkspacesQuery,
   VerseMutationLockedError,
 } from '../verse-queries.js';
+import { forgetVerseSession, setVerseSession, setVerseSessionStatus } from '../verse-store.js';
 import {
   clearVerseCommand,
   lastVerseSeat,
   rememberVerseSeat,
-  setVerseResourcesOpen,
+  setVerseActiveSession,
+  setVerseSection,
   setVerseSidebarCollapsed,
 } from '../verse-ui-store.js';
-// Panel widths are NOT in verse-ui-store: `ashlr.verse.ui.v2` is the shell
-// contract, and a resizable width is a pair (chosen / afforded) that key
-// cannot hold. Same precedent as resources-collapse.ts — its own module,
-// its own key. See chat-panel-sizing.ts.
-import { ChatResizer, useChatPanelSizing } from '../ChatResizer.js';
-import { setChatPanelFit } from '../chat-panel-sizing.js';
-import { forgetComposerMemory } from '../chat/composer-state.js';
-import { forgetVerseSession, setVerseSession, setVerseSessionStatus } from '../verse-store.js';
+import { firstRunnableModel, seatById } from '../verse-model.js';
 import { Workspace } from '../Workspace.js';
 import styles from './ChatSection.module.css';
+
+// Loaded on first use, not with the chat: the dock starts closed and the
+// new-chat dialog opens on request (SPEC-310C budget: chat critical JS).
+const DockHost = lazy(() => import('../dock/DockHost.js').then((m) => ({ default: m.DockHost })));
+const NewChatDialog = lazy(() => import('../NewChatDialog.js').then((m) => ({ default: m.NewChatDialog })));
 
 const SELECTED_KEY = 'ashlr.verse.selected.v1';
 
@@ -72,11 +105,9 @@ function loadSelected(): string | null {
  * before its status.
  *
  * A 409 is not always "busy": POST …/turns also answers 409
- * VERSE_MODEL_UNAVAILABLE when the chat's model cannot run on its seat (e.g.
- * an old `claude-opus-5.5` chat on a seat pinned below Claude Code 2.1.280).
+ * VERSE_MODEL_UNAVAILABLE when the chat's model cannot run on its seat.
  * Mapping every 409 to "a turn is already running" told the operator to press
- * a Stop that does nothing, on every retry, with the server's actual reason
- * thrown away.
+ * a Stop that does nothing, with the server's actual reason thrown away.
  */
 export function describeChatError(err: unknown): string {
   if (err instanceof DispatchDisabledError) return 'This server was started without dispatch — run `ashlr verse` to chat.';
@@ -88,10 +119,34 @@ export function describeChatError(err: unknown): string {
     if (err.status === 409 && (err.code === null || err.code === 'VERSE_SESSION_BUSY')) return 'A turn is already running in this chat. Stop it first.';
     if (err.status === 413) return 'That message is too large (64 KB max).';
     if (err.status === 401) return 'Mutation token was rejected. Unlock again with the token ashlr verse printed.';
-    // Any other refusal: the sentence the route author wrote for a person.
     return err.detail ?? err.message;
   }
   return err instanceof Error ? err.message : 'Something went wrong.';
+}
+
+/** The window's width, for the dock's presentation and its 60% cap. */
+function useWindowWidth(): number {
+  const [width, setWidth] = useState(() => (typeof window === 'undefined' ? 1440 : window.innerWidth || 1440));
+  useEffect(() => {
+    const onResize = () => setWidth(window.innerWidth || 1440);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
+  return width;
+}
+
+/** ⌃⌥Space: the composer's message box, focused (C3's `aria-label="Message"`). */
+function focusComposer(): void {
+  // After the section has painted (the command may be what mounted it).
+  requestAnimationFrame(() => {
+    const box = document.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]');
+    box?.focus();
+  });
+}
+
+/** Is the key event aimed at an overlay that owns its own keys (a dialog, a menu, the palette)? */
+function inOverlay(target: EventTarget | null): boolean {
+  return target instanceof Element && target.closest('[role="dialog"], [role="menu"], [role="listbox"], [aria-modal="true"]') !== null;
 }
 
 export function ChatSection() {
@@ -102,29 +157,36 @@ export function ChatSection() {
   const hold = useMutationHold();
   const toast = useToast();
   const ui = useVerseUi();
+  const visible = useSectionVisible();
+  const dock = useDock();
+  const chatActivity = useChatActivity();
+  const windowWidth = useWindowWidth();
+  const deleteTitleId = useId();
 
   const [selectedId, setSelectedIdState] = useState<string | null>(loadSelected);
   const [query, setQuery] = useState('');
   const [newChat, setNewChat] = useState<{ open: boolean; projectPath?: string | null; seat?: SeatChoice | null }>({ open: false });
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
-  const [switcherOpen, setSwitcherOpen] = useState(false);
   const [reload, setReload] = useState(0);
   const [tokenPrompt, setTokenPrompt] = useState<{ open: boolean; reason: string }>({ open: false, reason: '' });
+  const [handoffFor, setHandoffFor] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<VerseSession | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [chatWidth, setChatWidth] = useState(0);
   const pendingAction = useRef<{ run: () => void; cancel: () => void } | null>(null);
   const chatRef = useRef<HTMLDivElement>(null);
   const panels = useChatPanelSizing();
 
   const seats = useMemo(() => bootstrap.data?.seats ?? [], [bootstrap.data]);
   const projects = useMemo(() => bootstrap.data?.projects ?? [], [bootstrap.data]);
-  // Workspaces come from their own route, not bootstrap: the dialog wants the
-  // live per-root status alongside the list, and bootstrap's key set is a
-  // frozen contract asserted by test/verse-api.test.ts.
+  // Workspaces come from their own route (live per-root status for the dialog).
   const workspacesQuery = useQuery(verseWorkspacesQuery);
   const workspaces = useMemo(() => workspacesQuery.data?.workspaces ?? [], [workspacesQuery.data]);
   const dispatchEnabled = bootstrap.data?.dispatchEnabled ?? true;
 
   const view = useVerseSession(selectedId, reload);
+  const roots = useSessionRoots(view.session);
 
   // Sidebar list: the sessions query, else bootstrap's copy, with the live
   // store record overlaid for the open chat so its running dot is immediate.
@@ -154,9 +216,30 @@ export function ChatSection() {
   // Sidebar digest channel (verse-sessions on /api/events).
   useEffect(() => openVerseListChannel(), []);
 
-  // ---- mutation guard -----------------------------------------------------
-  // Runs `action` now when a token is held; otherwise opens the token dialog
-  // and runs it once unlocked. Resolves null when the dialog is dismissed.
+  // ---- recency + read state -------------------------------------------------
+  // Pane requests (a pasted command, a diff to open) belong to the chat they
+  // were raised in: switching chats drops them. A SWITCH only — the first run
+  // of this effect is the section mounting, and that is exactly when Apps'
+  // [Launch ▸] (raised on another surface, which then brings Chat forward)
+  // has a terminal request waiting; clearing it here left an empty dock.
+  const requestsFor = useRef(selectedId);
+  useEffect(() => {
+    setVerseActiveSession(selectedId);
+    if (requestsFor.current !== selectedId) {
+      requestsFor.current = selectedId;
+      clearDockRequests();
+    }
+  }, [selectedId]);
+
+  // Reading a chat — its turns up to now — while this surface is on screen.
+  const openTurnCount = view.session?.turnCount ?? null;
+  useEffect(() => {
+    if (!visible || !selectedId || openTurnCount === null) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    noteSessionSeen(selectedId, openTurnCount);
+  }, [visible, selectedId, openTurnCount]);
+
+  // ---- mutation guard ---------------------------------------------------------
   const withToken = useCallback(<T,>(reason: string, action: () => Promise<T>): Promise<T | null> => {
     if (hold.hasHold) return action();
     return new Promise<T | null>((resolve, reject) => {
@@ -175,25 +258,18 @@ export function ChatSection() {
     toast.show(describeChatError(err), 'danger');
   }, [toast]);
 
-  // ---- actions ------------------------------------------------------------
+  // ---- actions ----------------------------------------------------------------
   /**
-   * ONE resolution of what "new chat" pre-fills, for every entry point.
-   *
-   * The sidebar "+", ⌘N, the empty-state button and the quick switcher all
-   * land here, so they cannot drift apart again: an explicit prefill wins, the
-   * open session is next, and the per-project seat memory is the floor. Only
-   * when nothing has ever been started does it fall through to the dialog's
-   * `defaultSeatChoice()` — which walks ENGINE_ORDER and lands on Claude, the
-   * scarcest account, picked by alphabet rather than intent.
+   * ONE resolution of what "new chat" pre-fills, for every entry point (the
+   * sidebar "+", ⌘N, the empty state, the palette's "New chat on…"): an
+   * explicit prefill wins, the open session is next, and the per-project
+   * seat memory is the floor.
    */
   const openNewChat = useCallback((prefill: { projectPath?: string | null; seat?: SeatChoice | null } = {}) => {
     setCreateError(null);
     const current = view.session;
-    const projectPath = prefill.projectPath !== undefined
-      ? prefill.projectPath
-      : current?.projectPath ?? null;
-    // The open session's seat only carries forward onto its OWN project;
-    // switching projects asks that project's memory instead.
+    const projectPath = prefill.projectPath !== undefined ? prefill.projectPath : current?.projectPath ?? null;
+    // The open session's seat only carries forward onto its OWN project.
     const fromCurrent = current && projectPath === current.projectPath
       ? { seatId: current.seatId, model: current.model }
       : null;
@@ -207,8 +283,6 @@ export function ChatSection() {
       setCreateError(null);
       try {
         const session = await createVerseSession(req);
-        // Remember what this project was actually started on, so the NEXT new
-        // chat here opens on it instead of resetting to the default engine.
         rememberVerseSeat(session.projectPath, { seatId: session.seatId, model: session.model });
         setVerseSession(session.id, session);
         setNewChat({ open: false });
@@ -229,9 +303,8 @@ export function ChatSection() {
       setVerseSessionStatus(id, 'running');
       try {
         const response = await sendVerseTurn(id, text);
-        // The turn may already have settled (spawn failure, fast vendor error)
-        // by the time the 202 is applied; the store checks the log for this
-        // turnId before trusting the `running` snapshot.
+        // The turn may already have settled by the time the 202 is applied;
+        // the store checks the log for this turnId before trusting `running`.
         setVerseSession(id, response.session, response.turnId);
         return true;
       } catch (err) {
@@ -254,9 +327,7 @@ export function ChatSection() {
     });
   }, [selectedId, withToken, fail]);
 
-  const rename = useCallback(async (title: string) => {
-    const id = selectedId;
-    if (!id) return false;
+  const renameChat = useCallback(async (id: string, title: string) => {
     const result = await withToken('Renaming a chat.', async () => {
       try {
         const session = await renameVerseSession(id, title);
@@ -268,11 +339,9 @@ export function ChatSection() {
       }
     });
     return result === true;
-  }, [selectedId, withToken, fail]);
+  }, [withToken, fail]);
 
-  const remove = useCallback(async () => {
-    const id = selectedId;
-    if (!id) return false;
+  const removeChat = useCallback(async (id: string) => {
     const result = await withToken('Deleting a chat removes its transcript from disk.', async () => {
       try {
         await deleteVerseSession(id);
@@ -280,7 +349,7 @@ export function ChatSection() {
         // The transcript is gone from disk; the verbatim prompts must not
         // survive it in browser storage under a dead session id.
         forgetComposerMemory(id);
-        setSelectedId(null);
+        if (id === selectedId) setSelectedId(null);
         toast.show('Chat deleted.', 'neutral');
         return true;
       } catch (err) {
@@ -289,7 +358,17 @@ export function ChatSection() {
       }
     });
     return result === true;
-  }, [selectedId, withToken, fail, setSelectedId, toast]);
+  }, [withToken, fail, setSelectedId, toast, selectedId]);
+
+  const setMeta = useCallback((id: string, update: { pinned?: boolean; archived?: boolean }, reason: string) => {
+    void withToken(reason, async () => {
+      try {
+        await setVerseSessionMeta(id, update);
+      } catch (err) {
+        fail(err);
+      }
+    });
+  }, [withToken, fail]);
 
   /** Sessions are seat-bound: a different seat means a new chat on the same project. */
   const changeSeat = useCallback((choice: SeatChoice) => {
@@ -299,42 +378,144 @@ export function ChatSection() {
     toast.show('Chats are bound to one seat — starting a new chat on the same project.', 'neutral');
   }, [view.session, openNewChat, toast]);
 
-  // ---- shell commands (⌘N / ⌘K) -------------------------------------------
-  // The rail owns the shortcuts; this section owns what they mean. Each
-  // command is consumed once, by nonce, then cleared.
+  const requestDelete = useCallback((id: string) => {
+    const target = sessions.find((s) => s.id === id) ?? null;
+    if (target) setDeleteTarget(target);
+  }, [sessions]);
+
+  const startHandoff = useCallback((id: string) => {
+    if (id !== selectedId) setSelectedId(id);
+    setHandoffFor(id);
+  }, [selectedId, setSelectedId]);
+
+  const selectFromList = useCallback((id: string) => {
+    setSelectedId(id);
+    // At phone width the list floats over the chat; picking a chat closes it.
+    if (window.matchMedia?.('(max-width: 760px)')?.matches === true) setVerseSidebarCollapsed(true);
+  }, [setSelectedId]);
+
+  // ---- commands: the shell's hand-offs, the bus, and the chat's own keys ------
+  const toggleSidebar = useCallback(() => setVerseSidebarCollapsed(!ui.sidebarCollapsed), [ui.sidebarCollapsed]);
+  // ⌃` : a terminal, focused — the active tab, else one at the chat's root
+  // (TerminalPane resolves an empty request that way). Pressed again while
+  // Terminal is on screen it hides it, like every editor's ⌃`.
+  const terminalShown = dock.state.open && (dock.state.active === 'terminal' || dock.state.splitWith === 'terminal');
+  const openTerminal = useCallback(() => {
+    if (terminalShown) toggleDockPane('terminal');
+    else requestTerminal({});
+  }, [terminalShown]);
+  // ⌃⇧` : always a NEW tab, in the active tab's root (else the chat's primary).
+  const newTerminalTab = useCallback(() => requestTerminal({ newTab: true }), []);
+
+  // The shell's one-shot command, consumed once by nonce.
   const handledCommand = useRef(0);
   useEffect(() => {
     const command = ui.command;
     if (!command || command.nonce === handledCommand.current) return;
     handledCommand.current = command.nonce;
-    if (command.name === 'quick-switcher') setSwitcherOpen(true);
-    // ⌘N and the sidebar "+" both call this with no prefill: openNewChat owns
-    // the resolution, so the two affordances cannot mean different things.
-    else openNewChat();
+    switch (command.name) {
+      case 'open-session':
+        if (command.sessionId) setSelectedId(command.sessionId);
+        break;
+      case 'focus-composer':
+        focusComposer();
+        break;
+      case 'new-chat': {
+        // "New chat on…" carries a seat (and maybe a project); ⌘N carries neither.
+        const seat = command.seatId ? seatById(seats, command.seatId) : undefined;
+        // The model this project last used on that seat, else the seat's first runnable one.
+        const remembered = lastVerseSeat(command.projectPath ?? null);
+        const model = !seat ? undefined : remembered?.seatId === seat.id ? remembered.model : firstRunnableModel(seat)?.id;
+        openNewChat({
+          ...(command.projectPath !== undefined ? { projectPath: command.projectPath } : {}),
+          ...(seat && model ? { seat: { seatId: seat.id, model } } : {}),
+        });
+        break;
+      }
+      default:
+        // 'quick-switcher' (pre-3.10): ⌘K is the shell's palette now.
+        break;
+    }
     clearVerseCommand();
-  }, [ui.command, view.session, openNewChat]);
+  }, [ui.command, openNewChat, seats, setSelectedId]);
+
+  // The catalog's chat-scope commands, for the palette, the menu and keys.
+  const handlers: ReadonlyArray<[string, () => void | boolean]> = [
+    ['chat.sidebar', toggleSidebar],
+    ['chat.find', () => requestTranscriptFind()],
+    ['chat.turn-prev', () => requestTranscriptStep(-1)],
+    ['chat.turn-next', () => requestTranscriptStep(1)],
+    ['dock.toggle', toggleDock],
+    ['dock.terminal', openTerminal],
+    ['dock.terminal-new', newTerminalTab],
+    ['dock.preview', () => toggleDockPane('preview')],
+    ['dock.diff', () => toggleDockPane('diff')],
+  ];
+  const handlerMap = new Map(handlers);
+  useCommandHandler('chat.sidebar', handlerMap.get('chat.sidebar')!);
+  useCommandHandler('chat.find', handlerMap.get('chat.find')!);
+  useCommandHandler('chat.turn-prev', handlerMap.get('chat.turn-prev')!);
+  useCommandHandler('chat.turn-next', handlerMap.get('chat.turn-next')!);
+  useCommandHandler('dock.toggle', handlerMap.get('dock.toggle')!);
+  useCommandHandler('dock.terminal', handlerMap.get('dock.terminal')!);
+  useCommandHandler('dock.terminal-new', handlerMap.get('dock.terminal-new')!);
+  useCommandHandler('dock.preview', handlerMap.get('dock.preview')!);
+  useCommandHandler('dock.diff', handlerMap.get('dock.diff')!);
+
+  // Keys, as a fallback: the shell's handler routes catalog keys through the
+  // bus and marks the event handled (preventDefault); this listener acts only
+  // on an event nobody took, and only while the surface is visible and no
+  // overlay (a dialog, a menu, the palette) owns the keyboard. ⌘F and ⌥↑/↓
+  // are the transcript's own listeners, which follow the same rule.
+  const handlerRef = useRef(handlerMap);
+  handlerRef.current = handlerMap;
+  useEffect(() => {
+    if (!visible) return undefined;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || inOverlay(event.target)) return;
+      const command = matchCommand(event, ['chat']);
+      if (!command || command.scope !== 'chat') return;
+      if (command.id === 'chat.find' || command.id === 'chat.turn-prev' || command.id === 'chat.turn-next') return;
+      const run = handlerRef.current.get(command.id);
+      if (!run) return;
+      event.preventDefault();
+      run();
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [visible]);
 
   const dispatchOff = bootstrap.data ? !bootstrap.data.dispatchEnabled : false;
-  const resourcesOpen = ui.resourcesOpen;
   const sidebarCollapsed = ui.sidebarCollapsed;
 
-  // ---- fit ----------------------------------------------------------------
-  // Tell the sizing store how much room the grid actually has, so a width
-  // chosen on a 1900px display cannot strand the transcript at 1100px. This
-  // never persists: the chosen width is remembered, the afforded width is
-  // recomputed, so widening the window gives the panel its size back.
+  // ---- layout -------------------------------------------------------------------
+  const presentation = dockPresentation(windowWidth);
+  const dockOpen = dock.state.open && dock.state.tabs.length > 0;
+  const dockColumn = dockOpen && presentation === 'column';
+  // The dock yields before the transcript does: never past the window's 60%,
+  // and never so wide that the transcript (plus the chat list, when shown at
+  // its minimum) drops under its floor. The floor for the dock is its 320px.
+  const sidebarFloor = sidebarCollapsed ? 0 : CHAT_PANEL_RANGES.sidebar.min;
+  const dockWidth = dockColumn
+    ? Math.max(DOCK_LAYOUT.minWidth, Math.min(
+      clampDockWidth(dock.state.width, windowWidth),
+      chatWidth > 0 ? chatWidth - MIN_TRANSCRIPT_WIDTH - sidebarFloor : Number.POSITIVE_INFINITY,
+    ))
+    : 0;
+
   useEffect(() => {
     const node = chatRef.current;
     if (!node) return undefined;
-    const measure = () => setChatPanelFit({
-      containerWidth: node.clientWidth,
-      sidebarVisible: !sidebarCollapsed,
-      resourcesVisible: resourcesOpen,
-    });
+    const measure = () => {
+      setChatWidth(node.clientWidth);
+      setChatPanelFit({
+        // The dock's column is not the sidebar's to spend.
+        containerWidth: Math.max(0, node.clientWidth - dockWidth),
+        sidebarVisible: !sidebarCollapsed,
+        resourcesVisible: false,
+      });
+    };
     measure();
-    // ResizeObserver also catches the rail expanding, which moves this grid's
-    // width without a window resize. The listener is the fallback where it is
-    // missing (jsdom), where clientWidth is 0 and fitting is skipped anyway.
     const observer = typeof ResizeObserver === 'function' ? new ResizeObserver(measure) : null;
     observer?.observe(node);
     window.addEventListener('resize', measure);
@@ -342,28 +523,38 @@ export function ChatSection() {
       observer?.disconnect();
       window.removeEventListener('resize', measure);
     };
-  }, [sidebarCollapsed, resourcesOpen]);
+  }, [sidebarCollapsed, dockWidth]);
 
   const style = {
     '--verse-sidebar-width': `${panels.effective.sidebar}px`,
-    '--verse-resources-width': `${panels.effective.resources}px`,
+    '--verse-dock-width': `${dockWidth}px`,
   } as CSSProperties;
+
+  // ---- dock data ------------------------------------------------------------------
+  const otherRunning = useMemo(
+    () => otherRunningChats(sessions, chatActivity.activity, selectedId),
+    [sessions, chatActivity.activity, selectedId],
+  );
+  const turnFiles = useMemo<TurnFileChange[]>(() => lastTurnFiles(view.events, roots.roots), [roots.roots, view.events]);
+
+  const actions: SidebarRowActions = {
+    setPinned: (id, pinned) => setMeta(id, { pinned }, pinned ? 'Pinning a chat.' : 'Unpinning a chat.'),
+    setArchived: (id, archived) => setMeta(id, { archived }, archived ? 'Archiving a chat.' : 'Unarchiving a chat.'),
+    rename: renameChat,
+    handoff: startHandoff,
+    requestDelete,
+    dispatchEnabled,
+  };
 
   return (
     <div ref={chatRef} className={styles.chat} style={style}
-      data-sidebar={sidebarCollapsed ? 'collapsed' : 'open'} data-resources={resourcesOpen ? 'open' : 'closed'}>
+      data-sidebar={sidebarCollapsed ? 'collapsed' : 'open'} data-dock={dockColumn ? 'open' : 'closed'}>
       <Sidebar sessions={sessions} sessionsStatus={sessionsQuery.status} sessionsError={sessionsQuery.error?.message ?? null}
         projects={projects} seats={seats} selectedId={selectedId} query={query} onQuery={setQuery}
-        onSelect={(id) => { setSelectedId(id); if (window.matchMedia?.('(max-width: 760px)')?.matches === true) setVerseSidebarCollapsed(true); }}
-        // Identical to ⌘N by construction: both hand the decision to
-        // openNewChat, which carries the open session's seat forward and, when
-        // there is no open session, falls back to this project's remembered
-        // seat rather than to defaultSeatChoice's alphabetical Claude.
-        onNew={() => openNewChat()}
+        onSelect={selectFromList} onNew={() => openNewChat()}
         onRetry={() => { refetchSessions(); refetchBootstrap(); }}
-        onCollapse={() => setVerseSidebarCollapsed(true)} onDisconnect={() => { void clearReadSession(); }} />
-      {/* A hidden panel leaves no handle behind — and the grid templates in
-          ChatSection.module.css are written for exactly these item lists. */}
+        onCollapse={() => setVerseSidebarCollapsed(true)} onDisconnect={() => { void clearReadSession(); }}
+        activity={chatActivity.activity} meta={chatActivity.meta} localSeen={chatActivity.localSeen} actions={actions} />
       {sidebarCollapsed ? null : <ChatResizer side="sidebar" label="Resize chat list" className={styles.resize} />}
       {/* At phone width the sidebar floats over the transcript; the scrim dismisses it. */}
       <button type="button" className={styles.scrim} aria-label="Close chat list" tabIndex={-1}
@@ -380,29 +571,56 @@ export function ChatSection() {
           </div>
         ) : null}
         <Workspace view={view} seats={seats} projects={projects} dispatchEnabled={dispatchEnabled} locked={!hold.hasHold}
-          hasAnySessions={sessions.length > 0} onSend={send} onStop={() => stop()} onRename={rename} onDelete={remove}
+          hasAnySessions={sessions.length > 0} onSend={send} onStop={() => stop()}
+          onRename={(title) => (selectedId ? renameChat(selectedId, title) : Promise.resolve(false))}
+          onRequestDelete={() => { if (selectedId) requestDelete(selectedId); }}
           onSeatChange={changeSeat} onNew={() => openNewChat()} onRetry={() => setReload((n) => n + 1)}
           sidebarCollapsed={sidebarCollapsed} onToggleSidebar={() => setVerseSidebarCollapsed(!sidebarCollapsed)}
-          resourcesOpen={resourcesOpen} onToggleResources={() => setVerseResourcesOpen(!resourcesOpen)}
-          // V3.9: a handoff lands on the chat it created, and "Continued from …"
-          // opens the source — both are ordinary selections.
-          onOpenSession={setSelectedId} />
+          onOpenSession={setSelectedId}
+          handoffOpen={handoffFor !== null && handoffFor === selectedId}
+          onHandoffOpenChange={(open) => setHandoffFor(open ? selectedId : null)}
+          otherRunning={otherRunning} />
       </div>
-      {resourcesOpen ? (
-        <>
-          <ChatResizer side="resources" label="Resize resources panel" className={styles.resize} />
-          <ResourcesPanel bootstrap={bootstrap.data} sessions={sessions} current={view.session} events={view.events}
-            onStop={(id) => stop(id)} onOpen={setSelectedId} onClose={() => setVerseResourcesOpen(false)} />
-        </>
+      {dockOpen ? (
+        <Suspense fallback={null}>
+          <DockHost presentation={presentation} windowWidth={windowWidth} columnWidth={dockWidth} session={view.session} seats={seats}
+            events={view.events} roots={roots.roots} rootsData={roots.data} rootsError={roots.error} turnFiles={turnFiles}
+            otherRunning={otherRunning} dispatchEnabled={dispatchEnabled} onOpenSession={setSelectedId}
+            onHandoff={(id) => setHandoffFor(id)}
+            // Accounts & capacity live in Apps & Accounts (C6) since 3.10.
+            onOpenAccounts={() => setVerseSection('apps')}
+            onSendToChat={(text) => { if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to send this to it.', 'neutral'); }}
+            onAddToMessage={(text) => { if (!selectedId || !insertIntoComposer(selectedId, text)) toast.show('Open a chat to add this to its message.', 'neutral'); }} />
+        </Suspense>
       ) : null}
 
-      <NewChatDialog open={newChat.open} onClose={() => setNewChat({ open: false })} projects={projects} seats={seats} workspaces={workspaces}
-        initialProjectPath={newChat.projectPath ?? null} initialSeat={newChat.seat ?? null} busy={creating} error={createError} onCreate={create}
-        // The dialog's one write of its own (a seat's default context mode)
-        // goes through the same token guard as every other chat mutation.
-        runMutation={withToken} />
-      <QuickSwitcher open={switcherOpen} onClose={() => setSwitcherOpen(false)} sessions={sessions} seats={seats} projects={projects}
-        onSelectSession={setSelectedId} onNewChat={(seat) => openNewChat({ projectPath: view.session?.projectPath ?? null, seat })} />
+      {newChat.open ? (
+        <Suspense fallback={null}>
+          <NewChatDialog open onClose={() => setNewChat({ open: false })} projects={projects} seats={seats} workspaces={workspaces}
+            initialProjectPath={newChat.projectPath ?? null} initialSeat={newChat.seat ?? null} busy={creating} error={createError} onCreate={create}
+            // The dialog's one write of its own (a seat's default context mode)
+            // goes through the same token guard as every other chat mutation.
+            runMutation={withToken} />
+        </Suspense>
+      ) : null}
+      <Dialog open={deleteTarget !== null} onClose={() => { if (!deleting) setDeleteTarget(null); }} titleId={deleteTitleId}
+        title="Delete this chat?"
+        description={deleteTarget ? `“${deleteTarget.title || 'Untitled chat'}” and its transcript are removed from this machine. This cannot be undone.` : undefined}>
+        <div className={styles.dialogActions}>
+          <Button variant="ghost" onClick={() => setDeleteTarget(null)} disabled={deleting}>Keep</Button>
+          <Button variant="danger" busy={deleting} onClick={async () => {
+            const target = deleteTarget;
+            if (!target) return;
+            setDeleting(true);
+            try {
+              await removeChat(target.id);
+            } finally {
+              setDeleting(false);
+              setDeleteTarget(null);
+            }
+          }}>Delete</Button>
+        </div>
+      </Dialog>
       <MutationTokenDialog open={tokenPrompt.open} reason={tokenPrompt.reason} tokenLabel="Mutation token"
         tokenHelp="the mutation token ashlr verse printed"
         onClose={() => {

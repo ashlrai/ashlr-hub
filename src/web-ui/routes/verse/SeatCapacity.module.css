@@ -21,7 +21,8 @@
 }
 .chipGlyph {
   font-family: var(--font-ui);
-  font-size: 10px;
+  /* The 11px floor (DESIGN §13.3): a token, so the display-size setting reaches it. */
+  font-size: var(--text-2xs-size);
   line-height: 1;
   letter-spacing: 0;
 }

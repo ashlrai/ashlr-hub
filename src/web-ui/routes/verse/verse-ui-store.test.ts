@@ -1,197 +1,272 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+/**
+ * verse-ui-store — the 3.10 shell state (unit C1).
+ *
+ * Pinned here:
+ *   - the v2 → v3 storage migration (autonomy → Fleet, approvals → Command
+ *     with the drawer open, mcp → Apps), and the "Chat moved" announcement
+ *     only for someone who actually had v2;
+ *   - the launch rule: the first launch of a local day opens Command (when
+ *     Command exists in the build), later launches keep the last surface;
+ *   - keep-alive: three recent surfaces plus Chat once visited;
+ *   - back / forward through surfaces AND chats, ⌃Tab through recent chats;
+ *   - the one v3 blob: its own fields, plus C2's dock folded in;
+ *   - total loads: garbage in storage never breaks the shell.
+ */
+import { beforeEach, describe, expect, it } from 'vitest';
+import { openDockPane, resetDockStore } from './dock/dock-store.js';
 import {
-  clampWidth,
+  acknowledgeChatMoved,
   clearVerseCommand,
-  dismissVerseAdvice,
-  isVerseAdviceDismissed,
+  cycleVerseRecentChat,
   getVerseUiState,
+  KEEP_ALIVE_SURFACES,
+  landedModule,
+  localDay,
+  openVerseNeedsYou,
+  openVerseSession,
+  RAIL_SECTIONS,
+  recordVerseAction,
+  reloadVerseUiForTest,
   requestVerseCommand,
   resetVerseUi,
-  setVersePendingApprovals,
-  setVerseRailExpanded,
-  setVerseResourcesOpen,
+  setVerseActiveSession,
   setVerseSection,
   setVerseSidebarWidth,
-  subscribeVerseUi,
+  stepVerseHistory,
+  toggleVerseOverlay,
   toggleVerseRail,
-  toggleVerseSidebar,
+  TRAY_SECTIONS,
+  VERSE_ANCHOR_EVENT,
   VERSE_SECTIONS,
   VERSE_SIDEBAR,
   VERSE_UI_STORAGE_KEY,
+  VERSE_UI_STORAGE_KEY_V2,
 } from './verse-ui-store.js';
+
+const NOON = new Date(2026, 8, 24, 12, 0, 0).getTime();
+const EVERYTHING_LANDED = () => true;
+const NOTHING_LANDED = () => false;
 
 function stored(): Record<string, unknown> {
   return JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}') as Record<string, unknown>;
 }
 
-/**
- * The store's own `read()` is module-private and runs ONCE at import, so a
- * restore cannot be re-triggered from a test. This mirrors the one guard the
- * restore applies to `railExpanded` — strict `=== true` — which is what makes
- * a missing key (every payload written before the rail could expand) and a
- * corrupt one both land on the collapsed default.
- */
-function readPersisted(): { railExpanded: boolean } {
-  const parsed = JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}') as Record<string, unknown>;
-  return { railExpanded: parsed.railExpanded === true };
-}
-
 beforeEach(() => {
   localStorage.clear();
+  resetDockStore();
   resetVerseUi();
 });
 
-describe('verse-ui-store', () => {
-  it('lists the rail sections in ⌘1–⌘6 order with their module names', () => {
-    expect(VERSE_SECTIONS.map((s) => s.id)).toEqual([
-      'chat', 'autonomy', 'approvals', 'usage', 'settings', 'mcp',
-    ]);
-    expect(VERSE_SECTIONS.map((s) => s.module)).toEqual([
-      'ChatSection', 'AutonomySection', 'ApprovalsSection', 'UsageSection', 'SettingsSection',
-      'McpSection',
-    ]);
+describe('sections', () => {
+  it('puts the five surfaces on the rail in ⌘1–⌘5 order and the rest in the tray', () => {
+    expect(RAIL_SECTIONS.map((s) => s.id)).toEqual(['command', 'fleet', 'growth', 'mind', 'chat']);
+    expect(TRAY_SECTIONS.map((s) => s.id)).toEqual(['settings', 'apps', 'usage']);
+    for (const entry of VERSE_SECTIONS) expect(entry.module).toMatch(/Section$/);
   });
 
-  it('keeps MCP registered, and keeps the first five bindings where they were', () => {
-    // REGRESSION. The MCP section shipped complete — component, queries,
-    // contract, tests and both server routes — and was unreachable for a
-    // whole release solely because it was missing from this list. Removing
-    // the entry is exactly how that happened, so it is pinned here as well
-    // as through the shell (VerseApp.test.tsx mounts every entry).
-    expect(VERSE_SECTIONS.find((s) => s.id === 'mcp')).toEqual({
-      id: 'mcp', label: 'MCP', module: 'McpSection',
-    });
-    // ⌘1–⌘5 are shipped muscle memory; MCP extends the scheme at ⌘6 rather
-    // than renumbering Settings out from under anyone.
-    expect(VERSE_SECTIONS[4]!.id).toBe('settings');
-    expect(VERSE_SECTIONS[5]!.id).toBe('mcp');
+  it('falls back to the legacy panels until the new surface lands', () => {
+    const only = (...names: string[]) => (m: string) => names.includes(m);
+    expect(landedModule('fleet', only('AutonomySection'))).toBe('AutonomySection');
+    expect(landedModule('fleet', only('FleetSection', 'AutonomySection'))).toBe('FleetSection');
+    // Apps never falls back to the MCP page: AppsSection folds MCP in (C6).
+    expect(landedModule('apps', only('McpSection'))).toBeNull();
+    expect(landedModule('apps', only('AppsSection', 'McpSection'))).toBe('AppsSection');
+    expect(landedModule('command', only('McpSection'))).toBeNull();
   });
 
-  it('accepts mcp as a persisted section, so a reload lands back on it', () => {
-    setVerseSection('mcp');
-    expect(stored()).toMatchObject({ section: 'mcp' });
-  });
-
-  it('persists layout under ashlr.verse.ui.v2 and clamps widths to the design range', () => {
-    setVerseSection('usage');
-    setVerseSidebarWidth(4000);
-    setVerseResourcesOpen(false);
-    toggleVerseSidebar();
-    expect(stored()).toEqual({
-      section: 'usage',
-      railExpanded: false,
-      sidebarWidth: VERSE_SIDEBAR.max,
-      sidebarCollapsed: true,
-      resourcesOpen: false,
-      resourcesWidth: getVerseUiState().resourcesWidth,
-    });
-    expect(clampWidth(10, VERSE_SIDEBAR)).toBe(VERSE_SIDEBAR.min);
-    expect(clampWidth('nonsense', VERSE_SIDEBAR)).toBe(VERSE_SIDEBAR.def);
-  });
-
-  it('round-trips the rail width preference through ashlr.verse.ui.v2', () => {
-    // The rail's two states are a PREFERENCE, so they ride the same key and
-    // the same persist path as the sidebar's collapsed flag — not a second
-    // storage mechanism, and not session-only state that resets on reload.
-    expect(getVerseUiState().railExpanded).toBe(false);
-
-    toggleVerseRail();
-    expect(getVerseUiState().railExpanded).toBe(true);
-    expect(stored()).toMatchObject({ railExpanded: true });
-
-    setVerseRailExpanded(false);
-    expect(stored()).toMatchObject({ railExpanded: false });
-
-    // Collapsed is the default, so anything that is not an explicit `true`
-    // — a missing key from a pre-rail payload, or a corrupt one — reads as
-    // collapsed rather than surprising a returning operator with a wide rail.
-    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ section: 'chat' }));
-    expect(readPersisted().railExpanded).toBe(false);
-    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ railExpanded: 'yes' }));
-    expect(readPersisted().railExpanded).toBe(false);
-    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ railExpanded: true }));
-    expect(readPersisted().railExpanded).toBe(true);
-  });
-
-  it('keeps the pending-approval count and the ⌘N/⌘K command out of storage', () => {
-    setVersePendingApprovals(7);
-    requestVerseCommand('new-chat');
-    expect(getVerseUiState().pendingApprovals).toBe(7);
-    expect(getVerseUiState().command).toEqual({ name: 'new-chat', nonce: expect.any(Number) });
-    // A stale count restored from disk would claim work is waiting when it is not.
-    expect(stored()).not.toHaveProperty('pendingApprovals');
-    expect(stored()).not.toHaveProperty('command');
-    // Negative / non-finite counts mean "unknown", which is no dot.
-    setVersePendingApprovals(Number.NaN);
-    expect(getVerseUiState().pendingApprovals).toBe(0);
-  });
-
-  it('routes a command to Chat and gives each one a fresh nonce', () => {
-    setVerseSection('settings');
-    requestVerseCommand('quick-switcher');
-    const first = getVerseUiState();
-    expect(first.section).toBe('chat');
-    clearVerseCommand();
-    expect(getVerseUiState().command).toBeNull();
-    requestVerseCommand('quick-switcher');
-    expect(getVerseUiState().command?.nonce).toBeGreaterThan(first.command!.nonce);
-  });
-
-  it('only notifies subscribers when something actually changed', () => {
-    const listener = vi.fn();
-    const unsubscribe = subscribeVerseUi(listener);
-    setVerseSection('usage');
-    expect(listener).toHaveBeenCalledTimes(1);
-    const snapshot = getVerseUiState();
-    setVerseSection('usage');
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(getVerseUiState()).toBe(snapshot);
-    unsubscribe();
-    setVerseSection('chat');
-    expect(listener).toHaveBeenCalledTimes(1);
-  });
-
-  it('ignores an unknown or corrupt persisted section rather than mounting nothing', () => {
-    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ section: 'wormhole', sidebarWidth: -3 }));
-    // read() runs at module load, so exercise it through the same guard clamp.
-    expect(clampWidth(-3, VERSE_SIDEBAR)).toBe(VERSE_SIDEBAR.def);
-    localStorage.setItem(VERSE_UI_STORAGE_KEY, '{not json');
-    expect(() => resetVerseUi()).not.toThrow();
+  it('carries an anchor to the shell as a one-shot window event, never as persisted state', () => {
+    const seen: unknown[] = [];
+    const listener = (event: Event) => seen.push((event as CustomEvent).detail);
+    window.addEventListener(VERSE_ANCHOR_EVENT, listener);
+    try {
+      setVerseSection('mind', 'memo:m-7');
+      setVerseSection('fleet');
+    } finally {
+      window.removeEventListener(VERSE_ANCHOR_EVENT, listener);
+    }
+    expect(seen).toEqual([{ section: 'mind', anchor: 'memo:m-7' }]);
+    expect(getVerseUiState().section).toBe('fleet');
+    expect(stored()).not.toHaveProperty('anchor');
   });
 });
 
-describe('verse ui store — dismissed context advice', () => {
-  beforeEach(() => {
+describe('v2 → v3 migration', () => {
+  it.each([
+    ['autonomy', 'fleet', null],
+    ['approvals', 'command', 'needs-you'],
+    ['mcp', 'apps', null],
+    ['usage', 'usage', null],
+    ['settings', 'settings', null],
+    ['chat', 'chat', null],
+  ] as const)('a saved v2 %s opens %s', (from, to, overlay) => {
+    localStorage.setItem(VERSE_UI_STORAGE_KEY_V2, JSON.stringify({ section: from, railExpanded: true, sidebarWidth: 300 }));
+    // No Command module here, so the launch rule stays out of the way.
+    reloadVerseUiForTest({ now: NOON, landed: NOTHING_LANDED });
+    const s = getVerseUiState();
+    expect(s.section).toBe(to);
+    expect(s.overlay).toBe(overlay);
+    expect(s.railExpanded).toBe(true);
+    expect(s.sidebarWidth).toBe(300);
+    expect(stored()).toMatchObject({ version: 3, section: to });
+    // The v2 blob is left alone: a downgrade still finds its own state.
+    expect(localStorage.getItem(VERSE_UI_STORAGE_KEY_V2)).not.toBeNull();
+  });
+
+  it('announces "Chat moved" once, and only to someone who had v2', () => {
+    localStorage.setItem(VERSE_UI_STORAGE_KEY_V2, JSON.stringify({ section: 'chat' }));
+    reloadVerseUiForTest({ now: NOON, landed: NOTHING_LANDED });
+    expect(getVerseUiState().announceChatMoved).toBe(true);
+    acknowledgeChatMoved();
+    expect(getVerseUiState().announceChatMoved).toBe(false);
+    reloadVerseUiForTest({ now: NOON, landed: NOTHING_LANDED });
+    expect(getVerseUiState().announceChatMoved).toBe(false);
+
     localStorage.clear();
-    resetVerseUi();
+    reloadVerseUiForTest({ now: NOON, landed: NOTHING_LANDED });
+    expect(getVerseUiState().announceChatMoved).toBe(false);
   });
 
-  it('remembers a dismissal per session and per evidence key', () => {
-    expect(isVerseAdviceDismissed('vs_1', 'handoff:suggest:0')).toBe(false);
-    dismissVerseAdvice('vs_1', 'handoff:suggest:0');
-    expect(isVerseAdviceDismissed('vs_1', 'handoff:suggest:0')).toBe(true);
-    // Escalated evidence is a different key, and another chat is unaffected.
-    expect(isVerseAdviceDismissed('vs_1', 'handoff:urge:0')).toBe(false);
-    expect(isVerseAdviceDismissed('vs_2', 'handoff:suggest:0')).toBe(false);
+  it('never reads v2 again once v3 exists', () => {
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ version: 3, section: 'usage', lastLaunchDay: localDay(NOON) }));
+    localStorage.setItem(VERSE_UI_STORAGE_KEY_V2, JSON.stringify({ section: 'approvals' }));
+    reloadVerseUiForTest({ now: NOON, landed: EVERYTHING_LANDED });
+    expect(getVerseUiState()).toMatchObject({ section: 'usage', overlay: null });
+  });
+});
+
+describe('launch rule', () => {
+  it('opens Command on the first launch of the day, then the last surface', () => {
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ version: 3, section: 'chat', lastLaunchDay: '2026-09-23' }));
+    reloadVerseUiForTest({ now: NOON, landed: EVERYTHING_LANDED });
+    expect(getVerseUiState().section).toBe('command');
+    setVerseSection('fleet');
+    // Same day, next launch: back where the operator left it.
+    reloadVerseUiForTest({ now: NOON + 3_600_000, landed: EVERYTHING_LANDED });
+    expect(getVerseUiState().section).toBe('fleet');
   });
 
-  it('never persists: advice is evidence, and a reload must re-evaluate it', () => {
-    dismissVerseAdvice('vs_1', 'expansive:2');
-    for (let i = 0; i < localStorage.length; i += 1) {
-      expect(localStorage.getItem(localStorage.key(i)!) ?? '').not.toContain('expansive:2');
-    }
-    resetVerseUi();
-    expect(isVerseAdviceDismissed('vs_1', 'expansive:2')).toBe(false);
+  it('does not force a surface that is not in this build', () => {
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ version: 3, section: 'chat', lastLaunchDay: '2026-09-01' }));
+    reloadVerseUiForTest({ now: NOON, landed: NOTHING_LANDED });
+    expect(getVerseUiState().section).toBe('chat');
+  });
+});
+
+describe('keep-alive', () => {
+  it(`keeps the last ${KEEP_ALIVE_SURFACES} surfaces mounted, and Chat once visited`, () => {
+    setVerseSection('chat');
+    setVerseSection('command');
+    setVerseSection('fleet');
+    setVerseSection('growth');
+    setVerseSection('mind');
+    expect(getVerseUiState().mounted).toEqual(['mind', 'growth', 'fleet', 'chat']);
+    setVerseSection('fleet');
+    expect(getVerseUiState().mounted).toEqual(['fleet', 'mind', 'growth', 'chat']);
+    setVerseSection('chat');
+    expect(getVerseUiState().mounted[0]).toBe('chat');
+    expect(getVerseUiState().mounted).toHaveLength(KEEP_ALIVE_SURFACES + 1);
+  });
+});
+
+describe('history', () => {
+  it('steps back and forward through surfaces and chats', () => {
+    setVerseSection('chat');
+    setVerseActiveSession('a');
+    openVerseSession('b');
+    setVerseSection('fleet');
+    expect(stepVerseHistory(-1)).toBe(true);
+    expect(getVerseUiState()).toMatchObject({ section: 'chat', activeSessionId: 'b' });
+    expect(stepVerseHistory(-1)).toBe(true);
+    const back = getVerseUiState();
+    expect(back).toMatchObject({ section: 'chat', activeSessionId: 'a' });
+    expect(back.command).toMatchObject({ name: 'open-session', sessionId: 'a' });
+    expect(stepVerseHistory(1)).toBe(true);
+    expect(stepVerseHistory(1)).toBe(true);
+    expect(getVerseUiState().section).toBe('fleet');
+    expect(stepVerseHistory(1)).toBe(false);
   });
 
-  it('ignores empty ids and stays bounded, forgetting the oldest sessions first', () => {
-    dismissVerseAdvice('', 'handoff:suggest:0');
-    dismissVerseAdvice('vs_1', '');
-    expect(isVerseAdviceDismissed('', 'handoff:suggest:0')).toBe(false);
-    for (let i = 0; i < 60; i += 1) dismissVerseAdvice(`vs_${i}`, 'k');
-    expect(isVerseAdviceDismissed('vs_0', 'k')).toBe(false);
-    expect(isVerseAdviceDismissed('vs_9', 'k')).toBe(false);
-    expect(isVerseAdviceDismissed('vs_10', 'k')).toBe(true);
-    expect(isVerseAdviceDismissed('vs_59', 'k')).toBe(true);
+  it('⌃Tab walks the recent chats like Alt-Tab', () => {
+    setVerseSection('chat');
+    for (const id of ['c', 'b', 'a']) setVerseActiveSession(id);
+    // MRU is a, b, c: one press goes to b; a second press within the window to c.
+    expect(cycleVerseRecentChat(1, 1_000)).toBe('b');
+    expect(cycleVerseRecentChat(1, 1_500)).toBe('c');
+    // After a pause the list is re-read from the top (c, b, a → b).
+    expect(cycleVerseRecentChat(1, 9_000)).toBe('b');
+    expect(getVerseUiState().command).toMatchObject({ name: 'open-session', sessionId: 'b' });
+  });
+});
+
+describe('commands and overlays', () => {
+  it('hands the chat a one-shot command and switches to it', () => {
+    setVerseSection('fleet');
+    requestVerseCommand('new-chat', { seatId: 'grok-a' });
+    const s = getVerseUiState();
+    expect(s.section).toBe('chat');
+    expect(s.command).toMatchObject({ name: 'new-chat', seatId: 'grok-a' });
+    const first = s.command!.nonce;
+    clearVerseCommand();
+    requestVerseCommand('quick-switcher');
+    expect(getVerseUiState().command!.nonce).toBeGreaterThan(first);
+    expect(stored()).not.toHaveProperty('command');
+  });
+
+  it('opening a chat before Chat has mounted also primes its selection key', () => {
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, JSON.stringify({ version: 3, section: 'fleet', lastLaunchDay: localDay(NOON) }));
+    reloadVerseUiForTest({ now: NOON, landed: EVERYTHING_LANDED });
+    expect(getVerseUiState().mounted).toEqual(['fleet']);
+    openVerseSession('vs_9');
+    expect(localStorage.getItem('ashlr.verse.selected.v1')).toBe('vs_9');
+    openVerseSession('../etc');
+    expect(getVerseUiState().activeSessionId).toBe('vs_9');
+  });
+
+  it('toggles overlays without touching the surface', () => {
+    setVerseSection('growth');
+    toggleVerseOverlay('palette');
+    expect(getVerseUiState()).toMatchObject({ overlay: 'palette', section: 'growth' });
+    toggleVerseOverlay('palette');
+    expect(getVerseUiState().overlay).toBeNull();
+    openVerseNeedsYou({ split: 'accounts', focusId: 'accounts:reconnect:x' });
+    expect(getVerseUiState()).toMatchObject({ overlay: 'needs-you', needsYouSplit: 'accounts', needsYouFocus: 'accounts:reconnect:x' });
+  });
+});
+
+describe('the v3 blob', () => {
+  it('persists preferences and folds in the dock, never the evidence', () => {
+    toggleVerseRail();
+    setVerseSidebarWidth(9_999);
+    recordVerseAction('chats.stop-all');
+    recordVerseAction('chat.new');
+    recordVerseAction('chats.stop-all');
+    openDockPane('tasks');
+    const blob = stored();
+    expect(blob).toMatchObject({
+      version: 3,
+      railExpanded: true,
+      sidebarWidth: VERSE_SIDEBAR.max,
+      recentActions: ['chats.stop-all', 'chat.new'],
+      dock: { open: true, tabs: ['tasks'], active: 'tasks' },
+    });
+    // The desktop prefs belong to the desktop app (desktop_prefs.rs), not this blob.
+    for (const key of ['overlay', 'mounted', 'history', 'command', 'activeSessionId', 'desktop']) expect(blob).not.toHaveProperty(key);
+  });
+
+  it('loads garbage field by field', () => {
+    localStorage.setItem(
+      VERSE_UI_STORAGE_KEY,
+      JSON.stringify({ version: 3, section: 'wormhole', sidebarWidth: -3, recentChats: ['ok', '../bad', 7], recentActions: ['DROP TABLE'], desktop: 'x', lastLaunchDay: localDay(NOON) }),
+    );
+    reloadVerseUiForTest({ now: NOON, landed: EVERYTHING_LANDED });
+    expect(getVerseUiState()).toMatchObject({
+      section: 'chat',
+      sidebarWidth: VERSE_SIDEBAR.def,
+      recentChats: ['ok'],
+      recentActions: [],
+    });
+    expect(getVerseUiState()).not.toHaveProperty('desktop');
+    localStorage.setItem(VERSE_UI_STORAGE_KEY, '{not json');
+    expect(() => reloadVerseUiForTest({ now: NOON })).not.toThrow();
   });
 });

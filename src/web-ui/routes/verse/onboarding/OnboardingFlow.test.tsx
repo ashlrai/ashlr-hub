@@ -10,6 +10,9 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { evictAll } from '../../../data/cache.js';
 import { resetVerseUi, getVerseUiState } from '../verse-ui-store.js';
+import { bootstrap } from '../fixtures.test-support.js';
+import { healthReport } from '../health/health.test-support.js';
+import { CLAUDE_TIGHT_SEAT, GROK_SEAT } from '../seat-fixtures.test-support.js';
 import { OnboardingFlow } from './OnboardingFlow.js';
 import { OnboardingPanel } from './OnboardingPanel.js';
 import {
@@ -18,28 +21,17 @@ import {
   resetOnboarding,
 } from './onboarding-store.js';
 
-const ACCOUNTS = {
-  sampledAt: '2026-09-20T10:00:00.000Z',
-  refreshing: false,
-  accounts: [
-    {
-      id: 'claude',
-      label: 'Claude Max',
-      provider: 'claude',
-      state: 'observed',
-      authentication: 'signed-in',
-      planType: 'max',
-      windows: [{ id: 'seven_day', usedPercent: 58, resetsAt: null }],
-    },
-    {
-      id: 'grok',
-      label: 'Grok',
-      provider: 'grok',
-      state: 'signed-out',
-      authentication: 'signed-out',
-      reason: 'The Grok seat is signed out.',
-      windows: [],
-    },
+/** Step 2 reads C6's shared capacity strip: the seat roster (bootstrap) and A2's health. */
+const SEATS = [CLAUDE_TIGHT_SEAT, GROK_SEAT];
+const HEALTH = {
+  seats: [
+    healthReport('claude'),
+    healthReport('grok', {
+      engine: 'grok',
+      connection: 'signed-out',
+      reasons: ['The Grok seat is signed out.'],
+      fix: { kind: 'reauth', command: ['grok', 'login'] },
+    }),
   ],
 };
 
@@ -67,7 +59,10 @@ function routes(overrides: Record<string, () => Response> = {}) {
     for (const [path, make] of Object.entries(overrides)) {
       if (url.startsWith(path)) return make();
     }
-    if (url.startsWith('/api/verse/accounts')) return json(ACCOUNTS);
+    if (url.startsWith('/api/verse/bootstrap')) return json(bootstrap({ seats: SEATS }));
+    if (url.startsWith('/api/verse/health')) return json(HEALTH);
+    // No budget route in this build: the strip then says less, never more.
+    if (url.startsWith('/api/verse/budget')) return new Response('{"error":"not found"}', { status: 404 });
     if (url.startsWith('/api/verse/local-models')) return json(LOCAL_MODELS);
     return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
   });
@@ -96,6 +91,14 @@ describe('OnboardingFlow — presence and dismissal', () => {
     render(<OnboardingFlow />);
     expect(screen.getByText('Welcome to Verse')).toBeInTheDocument();
     expect(screen.getByText('Getting started · 1 of 5')).toBeInTheDocument();
+  });
+
+  it('tours the 3.10 rail — Command ⌘1 through Chat ⌘5 — and points at ⌘K, ⌘J and the gear', () => {
+    render(<OnboardingFlow />);
+    const names = screen.getAllByRole('listitem').map((li) => li.textContent ?? '');
+    expect(names.map((n) => n.slice(0, n.indexOf('⌘') + 2))).toEqual(['Command ⌘1', 'Fleet ⌘2', 'Growth ⌘3', 'Mind ⌘4', 'Chat ⌘5']);
+    expect(screen.getByText(/runs anything by name/)).toBeInTheDocument();
+    expect(screen.queryByText(/Approvals|Autonomy/)).not.toBeInTheDocument();
   });
 
   it('is not a modal: no dialog role, no backdrop, nothing to trap focus', () => {
@@ -180,26 +183,30 @@ describe('OnboardingFlow — presence and dismissal', () => {
 });
 
 describe('OnboardingFlow — what it says about the machine', () => {
-  it('flags the signed-out seat with the exact fix and leaves the connected one alone', async () => {
+  it('shows the seats through the shared capacity strip, with A2’s exact fix for a signed-out one', async () => {
     const user = userEvent.setup();
     render(<OnboardingFlow />);
     await stepTo(user, 1);
 
-    await waitFor(() => expect(screen.getByText('Grok')).toBeInTheDocument());
-    expect(screen.getByText('signed out')).toBeInTheDocument();
-    expect(screen.getByText('Reconnect the Grok seat through `ashlr resources`.')).toBeInTheDocument();
-    expect(screen.getByText(/1 seat is signed out/)).toBeInTheDocument();
-    expect(screen.getByText('Claude Max')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText('grok login')).toBeInTheDocument());
+    const strip = screen.getByRole('list', { name: 'Your seats' });
+    expect(strip).toHaveTextContent('Claude Max');
+    expect(strip).toHaveTextContent('Grok');
+    // Only the broken seat carries a fix; the connected one gets none.
+    expect(screen.getAllByText('Fix')).toHaveLength(1);
+    // The 3.9 accounts narrower is gone: the tour reads what Apps & Accounts reads.
+    const calls = (fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+    expect(calls.some((u) => u.startsWith('/api/verse/accounts'))).toBe(false);
   });
 
-  it('says it cannot tell, rather than inventing a roster, when the route is absent', async () => {
-    vi.stubGlobal('fetch', routes({ '/api/verse/accounts': () => new Response('nope', { status: 404 }) }));
+  it('says no seats were reported, rather than inventing a roster, when there are none', async () => {
+    vi.stubGlobal('fetch', routes({ '/api/verse/bootstrap': () => json(bootstrap({ seats: [] })) }));
     const user = userEvent.setup();
     render(<OnboardingFlow />);
     await stepTo(user, 1);
 
-    await waitFor(() => expect(screen.getByText(/did not report a per-account roster/)).toBeInTheDocument());
-    expect(screen.queryByText('connected')).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/No seats reported yet/)).toBeInTheDocument());
+    expect(screen.queryByText('Fix')).not.toBeInTheDocument();
   });
 
   it('reports the local runtime with its tool-capable count', async () => {

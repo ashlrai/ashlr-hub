@@ -8,6 +8,7 @@
   background: var(--bg-surface);
 }
 .box {
+  position: relative;
   width: 100%;
   max-width: var(--measure-read);
   margin: 0 auto;
@@ -50,20 +51,6 @@
   gap: var(--space-1);
   padding: var(--space-1) var(--space-2) var(--space-2) var(--space-2);
 }
-.spacer { flex: 1; }
-
-/* ---- engine identity --------------------------------------------------- */
-.engine-claude { --verse-engine: var(--engine-claude, #c96442); }
-.engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
-.engine-grok { --verse-engine: var(--engine-grok, #6b7280); }
-.engine-local { --verse-engine: var(--engine-local, #7c5cff); }
-.engineDot {
-  flex-shrink: 0;
-  width: 5px;
-  height: 5px;
-  border-radius: var(--radius-full);
-  background: var(--verse-engine, var(--text-tertiary));
-}
 
 /* ---- seat selector (new-chat dialog) ----------------------------------- */
 .seatField { display: flex; flex-direction: column; gap: var(--space-1); min-width: 0; }
@@ -85,83 +72,9 @@
 .seatSelect:disabled { opacity: 0.6; cursor: not-allowed; }
 .seatFieldCompact .seatSelect { min-height: var(--control-h-sm); font-size: var(--text-xs-size); border-color: transparent; background: transparent; }
 
-/* ---- seat pill (read-only) + menu -------------------------------------- */
-.seatPillWrap { position: relative; display: inline-flex; min-width: 0; }
-.seatPill {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-2);
-  max-width: 34ch;
-  min-height: var(--control-h-xs);
-  padding: 0 var(--space-2);
-  border-radius: var(--radius-xs);
-  color: var(--text-secondary);
-  font-size: var(--text-2xs-size, 11px);
-  font-weight: var(--font-weight-medium);
-  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
-}
-.seatPill:hover:not(:disabled),
-.seatPill[aria-expanded='true'] { background: var(--bg-hover); color: var(--text-primary); }
-.seatPill:active:not(:disabled) { background: var(--bg-active); }
-.seatPill:disabled { opacity: 0.6; cursor: not-allowed; }
-.seatPillText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.seatMenu {
-  position: absolute;
-  bottom: calc(100% + var(--space-2));
-  left: 0;
-  z-index: var(--z-dropdown);
-  min-width: 260px;
-  max-width: 360px;
-  padding: var(--space-1);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-sm);
-  background: var(--bg-surface-raised);
-  color: var(--text-primary);
-  box-shadow: var(--shadow-menu, var(--shadow-md));
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-.seatMenuHeading {
-  margin: 0 0 var(--space-1);
-  padding: var(--space-2) var(--space-2) var(--space-2);
-  border-bottom: 1px solid var(--border-subtle);
-  font-size: var(--text-xs-size);
-  color: var(--text-tertiary);
-}
-.seatMenuHeading strong { color: var(--text-primary); font-weight: var(--font-weight-medium); }
-.seatMenuEmpty { margin: 0; padding: var(--space-2); font-size: var(--text-xs-size); color: var(--text-tertiary); }
-.seatMenuItem {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  width: 100%;
-  padding: var(--space-2);
-  border-radius: var(--radius-xs);
-  text-align: left;
-  color: var(--text-primary);
-}
-.seatMenuItem:hover,
-.seatMenuItem:focus-visible { background: var(--bg-hover); }
-.seatMenuItem:active { background: var(--bg-active); }
-.seatMenuText { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-.seatMenuPrimary { font-size: var(--text-sm-size); }
-.seatMenuSecondary { font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
-
-/* The seat's capacity, at the point the seat is chosen. The WORD carries the
-   state and the tint is a second channel, never the only one (DESIGN-V2 §6);
-   `blocked` is marked, not disabled, because a spent window can still have
-   credits behind it (docs/VERSE-TELEMETRY-V2.md). */
-.seatMenuCapacity {
-  font-family: var(--font-display);
-  font-size: var(--text-2xs-size, 11px);
-  letter-spacing: var(--tracking-label, 0.06em);
-  text-transform: uppercase;
-  color: var(--text-tertiary);
-}
-.seatMenuItem[data-capacity='tight'] .seatMenuCapacity { color: var(--status-warning-fg); }
-.seatMenuItem[data-capacity='blocked'] .seatMenuCapacity { color: var(--status-danger-fg); }
+/* ---- seat chip, pickers, queue, attachments ---------------------------- */
+/* 3.10: the read-only seat pill and its menu became composer/SeatChip.tsx;
+   every new control's styles live in composer/composer.module.css. */
 
 /* ---- dictation --------------------------------------------------------- */
 .dictationWrap { position: relative; display: inline-flex; align-items: center; }
@@ -257,7 +170,6 @@
 }
 @media (max-width: 640px) {
   .row { flex-wrap: wrap; }
-  .seatPill { max-width: 100%; }
   .textarea { font-size: 16px; }
 }
 

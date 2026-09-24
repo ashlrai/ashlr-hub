@@ -94,9 +94,12 @@ export const LOCAL_FLEET_ENGINE = 'llama-server' as EngineId;
  * slots exist — a real bound, and a tighter one than slots, so the derivation
  * must name it rather than quote a concurrency the fence will not permit.
  *
- * The api-model path (`runApiModelSandboxed`, which is what LOCAL_FLEET_ENGINE
- * uses) narrows the fence to sandbox creation and proposal filing and releases
- * it across inference, so it is deliberately absent here.
+ * Both sandboxed producers — the api-model path (`runApiModelSandboxed`, which
+ * is what LOCAL_FLEET_ENGINE uses) and, since V3.10 U6, the CLI-agent path
+ * (`runEngineSandboxed`: claude, codex, grok-cli) — hold the fence only for
+ * the policy gate, proposal filing and cleanup. Across inference they hold a
+ * shared execution lease (src/core/sandbox/execution-leases.ts) that any
+ * number of agents hold at once, so they are deliberately absent here.
  */
 export const FENCE_SERIALIZED_ENGINES: ReadonlySet<EngineId> = new Set<EngineId>([
   'builtin' as EngineId,
@@ -491,6 +494,12 @@ export type LocalFleetLimiter =
   /** An operator cap below the slot count. */
   | 'config'
   /**
+   * A per-tick lane cap below the slot count (V3.10: the fleet runtime's
+   * `laneCaps.local` — operator presence, a Leader lane decision, the budget
+   * or the grant). Named separately from 'config' so the panel says WHY.
+   */
+  | 'lane-cap'
+  /**
    * The process-wide outward mutation fence is held across dispatch, so at
    * most ONE sandboxed agent executes machine-wide no matter how many slots
    * the runtime has. A real bound, and the tightest one when it applies.
@@ -538,7 +547,44 @@ export function deriveLocalFleetConcurrency(
      * quoting the slot count would be a number the machine cannot deliver.
      */
     fenceSerialized?: boolean;
+    /**
+     * V3.10: this tick's cap on the `local` lane (TickHooks.beforeTick
+     * `laneCaps.local`, e.g. 2 while Mason is present) and the sentence that
+     * explains it. Like config, it may only LOWER the answer — and when it is
+     * the binding bound the snapshot says so instead of quoting a slot count
+     * the dispatcher will not use. null / absent = no lane cap this tick.
+     */
+    laneCap?: { limit: number; reason: string } | null;
   },
+): LocalFleetConcurrency {
+  const derived = deriveUncappedLocalFleetConcurrency(capacity, configuredLocal, opts);
+  const laneLimit = opts?.laneCap ? positiveInt(opts.laneCap.limit) : null;
+  // A lane cap of 0 means "lane off"; the dispatcher never asks this function
+  // then (no local items are dispatched). Floor it at 1 so `effective` keeps
+  // its >= 1 contract, and say that the lane is off in the reason.
+  if (opts?.laneCap && laneLimit === null) {
+    return {
+      ...derived,
+      effective: 1,
+      limiter: 'lane-cap',
+      reason: `local lane is off this tick: ${opts.laneCap.reason}`,
+    };
+  }
+  if (laneLimit !== null && laneLimit < derived.effective) {
+    return {
+      ...derived,
+      effective: laneLimit,
+      limiter: 'lane-cap',
+      reason: `lane cap ${laneLimit} is below ${derived.effective} (${derived.limiter}): ${opts!.laneCap!.reason}`,
+    };
+  }
+  return derived;
+}
+
+function deriveUncappedLocalFleetConcurrency(
+  capacity: ServingRuntimeCapacity,
+  configuredLocal: number | null,
+  opts?: { fenceSerialized?: boolean },
 ): LocalFleetConcurrency {
   const configured = positiveInt(configuredLocal);
   const slots = capacity.state === 'up' ? (positiveInt(capacity.slots) ?? 0) : 0;
@@ -1107,9 +1153,11 @@ export class LocalFleetMonitor {
         // NO "ONLY". This note is rendered verbatim under the fleet table, so
         // an exhaustive-sounding list of bounds that omits a tighter one is a
         // claim the codebase itself contradicts: the process-wide outward
-        // mutation fence is held across dispatch by `runSwarm` and
-        // `runApiModelSandboxed`, which bounds sandboxed agents at one
-        // machine-wide regardless of slot count (src/core/sandbox/worktree.ts).
+        // mutation fence is still held across a whole `runSwarm` ('builtin')
+        // run, and the short outward sections of every other producer
+        // (worktree creation, filing, cleanup) plus verification slots (2
+        // machine-wide, 1 per repo) serialize too — see
+        // src/core/sandbox/execution-leases.ts.
         note: (maxPerDay === null
           ? 'local dispatch costs $0, so the daily budget cap cannot bound it; ' +
             'no daily ceiling is set (explicit operator opt-out) — ' +
@@ -1120,7 +1168,9 @@ export class LocalFleetMonitor {
           (this._concurrency.limiter === 'mutation-fence'
             ? ', and the process-wide outward mutation fence is currently the tightest: ' +
               'only one sandboxed agent can execute at a time machine-wide'
-            : ''),
+            : this._concurrency.limiter === 'lane-cap'
+              ? `, and this tick's lane cap is currently the tightest: ${this._concurrency.reason}`
+              : ''),
       },
       totals: {
         started: this._started,
@@ -1523,6 +1573,9 @@ export function projectFleetSnapshot(
   }
   if (snapshot.concurrency.limiter === 'mutation-fence') {
     notes.push(`bounded by the outward mutation fence, not by slots: ${snapshot.concurrency.reason}`);
+  }
+  if (snapshot.concurrency.limiter === 'lane-cap') {
+    notes.push(`bounded by this tick's lane cap, not by slots: ${snapshot.concurrency.reason}`);
   }
   if (snapshot.health.state !== 'healthy') {
     notes.push(`serving runtime ${snapshot.health.state}: ${snapshot.health.reasons[0] ?? snapshot.runtime.detail}`);

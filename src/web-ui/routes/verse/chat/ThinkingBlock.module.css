@@ -91,6 +91,18 @@
 }
 .thinking[data-streaming] .body { border-left-color: var(--status-running-solid); }
 
+/* 3.10: the streaming window — exactly three lines of the tail, the top
+   line fading so it reads as "there is more above", no scrollbar. */
+.body[data-window] {
+  max-height: calc(3 * var(--text-sm-line-relaxed));
+  overflow: hidden;
+  cursor: pointer;
+}
+.body[data-window][data-clipped] {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, black 1.2em);
+  mask-image: linear-gradient(to bottom, transparent 0, black 1.2em);
+}
+
 @keyframes thinking-breathe { 50% { opacity: 0.35; } }
 
 @media (prefers-reduced-motion: reduce) {

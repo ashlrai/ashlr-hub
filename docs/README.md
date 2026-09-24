@@ -28,6 +28,9 @@ that every integration, provider or autonomous effect is active.
 | Cut a release and publish without CI | [Releasing locally](RELEASING-LOCALLY.md) |
 | See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](VERSE-WORKSPACES.md) |
 | Read a Verse chat's context meter, choose standard or expansive context, and continue a long session in a fresh chat | [Verse context windows — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) |
+| Use the Verse workbench: Command, Fleet, Growth, Mind and Chat, the Needs-you drawer, terminal, preview, review, budget modes and account health | [Ashlr Verse — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE.md) |
+| Let the fleet merge on its own inside a scope you signed with Touch ID, and run the one-time `ashlr authority setup` | [Standing authority — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/STANDING-AUTHORITY.md) |
+| Find a Verse route family, its gates and wire shapes | [Verse build contract — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTRACT-V1.md#v310-additive-contract--the-workbench-and-the-autonomy-console) |
 
 The CLI's `universe help`, `resources pool --help` and `runtime help` describe
 the command surface in the exact binary you are running. A source guide may

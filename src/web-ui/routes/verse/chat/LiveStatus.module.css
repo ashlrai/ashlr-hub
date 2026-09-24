@@ -103,5 +103,8 @@
 :root[data-motion="reduce"] .pulse { animation: none; }
 
 @media (max-width: 480px) {
-  .line { flex-wrap: wrap; }
+  /* 3.10: one line above the composer, beside the tasks chip — the text
+     ellipsises (its detail first) rather than wrapping Stop onto a row of
+     its own. */
+  .line { flex-wrap: nowrap; }
 }

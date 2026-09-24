@@ -28,3 +28,18 @@ describe('Gauge', () => {
     expect(screen.getByText('at the limit')).toBeInTheDocument();
   });
 });
+
+describe('Gauge V3.10 — fits its container', () => {
+  it('sizes to the container, never below the floor or above the max', async () => {
+    const { gaugeDiameter, MIN_GAUGE_SIZE } = await import('./Gauge.js');
+    expect(gaugeDiameter(0, 180)).toBe(180); // not laid out yet (jsdom, hidden tab)
+    expect(gaugeDiameter(150, 180)).toBe(150);
+    expect(gaugeDiameter(60, 180)).toBe(MIN_GAUGE_SIZE);
+    expect(gaugeDiameter(900, 180)).toBe(180);
+  });
+
+  it('hatches the track when the value is unknown', () => {
+    const { container } = render(<Gauge title="Codex" value={null} />);
+    expect(container.querySelector('[data-role="track"]')!.getAttribute('stroke')).toMatch(/^url\(#chart-hatch-/);
+  });
+});

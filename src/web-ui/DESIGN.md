@@ -418,3 +418,242 @@ The built app is served at **`/next/index.html`** by the existing
 `ashlr serve` (not `/next/` — `static.ts`'s `"/"` special case is the only
 path that resolves without a filename, and this foundation doesn't touch
 `static.ts`). The legacy app keeps serving unmodified at `/`.
+
+---
+
+## 13. Verse workbench (3.10)
+
+The Verse console (`routes/verse/**`) is the product surface in 3.10. This
+chapter is its design contract. The rules are enforced by tests (§13.10);
+the contract files are owned by unit C0 (SPEC-310C §7). Other units send C0
+a change request rather than editing them.
+
+### 13.1 Surfaces
+
+| Key | Surface | What it answers |
+|---|---|---|
+| ⌘1 | Command | What needs me, and is the company producing? Verdict line, Needs you, Leader memo, KPIs, burn-down per seat, 12h swimlane. |
+| ⌘2 | Fleet | What is running where, and why that seat? |
+| ⌘3 | Growth | Is the output compounding? |
+| ⌘4 | Mind | What did the Leader decide, and was it right? |
+| ⌘5 | Chat | The interactive workbench: transcript, dock, composer. |
+
+- **Gear tray:** Settings (⌘,), Apps & Accounts, Usage, Shortcuts (⌘/). MCP now lives inside Apps.
+- **Approvals** became the **Needs-you drawer** (⌘J).
+- **Stored sections migrate:** a v2 `section` value moves via `migrateSectionId()` in `core/verse/workbench-types.ts`. autonomy → fleet, approvals → command with the drawer open, mcp → apps.
+- **Ids:** `WORKBENCH_SURFACES` holds the rail order and `WORKBENCH_TRAY_SECTIONS` holds the tray. Nothing else declares a section id.
+
+### 13.2 Colour roles
+
+Each colour role has one meaning. In 3.9 a single violet meant four
+different things. `design/tokens-310.test.ts` checks every rule below in
+both themes.
+
+| Role | Tokens | Rule |
+|---|---|---|
+| Accent | `--accent-*` | Used for interaction only: focus, selection, primary action, links. The operator can pick any hue, so **no data colour may resolve through it**. |
+| Quantity | `--data-seq-1..7` → charts `--chart-seq-*`, `--chart-sequential` | A fixed azure ramp at hue 214°. Steps get further from the surface as the value grows (light to dark in light mode, dark to light in dark mode). |
+| Status | `--status-*` | Unchanged: running is amber, done is green. Always paired with a text label. |
+| Unknown | `--status-unknown-*` → `--chart-unknown`, `--chart-unknown-hatch` | Gray, never violet. Charts draw it as an outlined 45° hatch and badges set it in italics. Never shown as a pale step of a data ramp, which would imply "a little". |
+| Categorical | `--data-cat-1..6` → `--chart-series-1..6` | Six identity inks. A seventh series becomes `--chart-neutral` ("Other") and colours never cycle. |
+| Queued / parked | `--chart-queued-outline` | An outline with no fill. |
+| Engines | `--engine-*` | Identity only (see below). |
+
+**Engines.** Each engine is marked by a 2px tick and a monogram tile
+(`ENGINE_MONOGRAM`). Never use a vendor logo.
+
+| Engine | Colour |
+|---|---|
+| Claude | `C` clay `#c96442` / `#d97757` |
+| Codex | `X` cyan `#0e9aa7` / `#32adba` (moved off success green) |
+| Grok | `G` ink `var(--gray-800)`: near-black in light, near-white in dark |
+| Local | `L` violet `#7c5cff` / `#9b82ff` |
+
+Engine hues fill only charts that show nothing but engines, such as runs by
+engine or usage bars. Pass them explicitly with `engineColor()`. When status
+colour is on screen, show engines by position and monogram instead.
+
+**Where the palette came from.** The categorical inks were searched in
+OKLCH. Each is one colour per free hue family between the engine, status,
+quantity and default-accent hues. They were ordered so every gate of the
+dataviz skill's `validate_palette.js` passes in both modes:
+
+- **Adjacent colour difference:** worst ΔE is 17.6 in light and 16.5 in dark, against a target of 15.
+- **Colour-blind check:** under protanopia and deuteranopia simulation, the worst is 17.5 in light and 16.8 in dark, against a target of 8.
+- **Distance from reserved colours:** every ink is at least ΔE 11 from each engine, status and quantity colour.
+
+There are six inks because no seventh family clears that floor. The test
+re-measures all of this. **Re-derive the palette rather than hand-tuning a
+hex.**
+
+### 13.3 Type roles
+
+| Role | Tokens |
+|---|---|
+| Surface title | `--font-display`, `--text-xl-size`/`--text-xl-line` (20/28), `--tracking-display` |
+| Verdict line | `--text-lg-size`/`--text-lg-line` (17/24), weight 500 |
+| KPI number | `--font-ui` 600, `--text-2xl-size`/`--text-2xl-line` (24/32), `font-variant-numeric: tabular-nums` |
+| Card title | `--text-sm-size`/`--text-sm-line` (13/18), 600 |
+| Micro-label | `--text-2xs-size`/`--text-2xs-line` (11/14), uppercase, `--tracking-label`, `--font-display` |
+| Body | `--text-base-size`/`--text-base-line` (14/20) |
+| Transcript | `--text-base-size`/`--text-base-line-relaxed` (14/24), max `--measure-read` |
+| IDs, commands, SHAs | `--font-mono`, `--text-xs-size` (12) |
+
+- **Nothing under 11px.** New files may not set a px font size at all (§13.10). Every size is a token, so the display-size setting reaches it.
+- **Fonts:** preload only the latin subset.
+
+### 13.4 Layout and density
+
+- **Grid:** Command, Fleet, Growth and Mind share a `--surface-columns` (12) grid with `--surface-gap` (16px) gaps.
+  - Set `align-items: start`. Cards are never stretched to the tallest card in their row.
+  - At compact width, use a single column in the listed order.
+- **Cards:**
+  - A card is a title, a caption, then the chart, inside `--card-pad` (16px, or 12px in compact density).
+  - Add a legend only for two or more series. Otherwise, label the series directly.
+- **Widths:** these come from `routes/verse/shell/viewport.ts`. Never hard-code a breakpoint.
+  - compact is below 480. This is the 375 layout, where sheets become bottom sheets.
+  - medium is 480 to 1023. The dock and drawer are sheets.
+  - wide is 1024 and up. This is the full workbench.
+
+### 13.5 Motion
+
+- **Speed and form:** 120 to 220ms (`--duration-*`), using opacity plus a 2–4px shift.
+- **Running pulse:** `--duration-pulse` (1.6s).
+- **New chart points:** fade in over `--duration-base` (160ms).
+- **Never:** count-up numbers, or entry animations on charts.
+- **Reduced motion:** collapses every duration.
+  - `--duration-pulse` becomes `0s`, so the pulse stops rather than strobing.
+
+### 13.6 Dark theme
+
+Dark mode separates elements with hairlines, not shadows. KPI cards add a
+top hairline in `--hairline-lift`, which is 4% white in dark and
+transparent in light.
+
+### 13.7 Charts
+
+Every chart has:
+
+- a TableView twin, reached from its ⋯ menu or the `T` key when the card has focus;
+- a designed empty or dark state ("Fleet dark since Sep 1");
+- the unknown hatch for unmeasured values;
+- a render at `width={375}` in its tests.
+
+Colour comes only from `components/charts/colors.ts`:
+
+- `seriesColor(slot)` for categories. Assign each series its slot once, and never re-pack slots after filtering.
+- `seqColor` / `quantityColor` / `heatColor` for magnitudes.
+- `toneColor` for status.
+- `engineColor` for engines.
+- `UNKNOWN_HATCH` plus `hatchPatternId(useId())` for SVG hatching.
+
+### 13.8 Copy
+
+- Write in operator language with units: "npm test, 1m 02s", "Claude 46% reserved for you".
+- Use "—" when a value was not measured. `null` means unknown, never zero.
+- Never put a file path, stack trace or secret in UI text. Errors go to the console, and the page says what failed and what still works.
+
+### 13.9 Keys, slots, dock, visibility
+
+- **Keys:** `routes/verse/shell/command-catalog.ts` is the only source of commands and keys.
+  - The palette, the shortcuts overlay, the desktop menu bridge, the drawer and every key handler read it.
+  - Scopes are global, chat, composer, drawer and chart. A key must be unique among the scopes that can be live together (`SCOPE_LAYERS`).
+  - A key the desktop menu owns (⌘, and ⇧⌘L) is declared as `native: { kind: 'menu' }`. The page's own handler then runs only in a plain browser.
+  - `app.summon` (⌃⌥Space) is system-wide and registered by the desktop app. The page never binds it.
+  - Desktop → page commands (`open-settings`, `open-needs-you`, `open-session:<id>`, …) are parsed by `parseDesktopCommand`.
+- **Slots:** `routes/verse/shell/slots.tsx` is how Chat mounts other units' UI: BranchBar, DiffPane, TerminalPane, PreviewPane and SessionInsightChip.
+  - Each lazily loads one fixed file.
+  - It renders nothing until that file lands, and `isSlotAvailable` reports whether it has.
+  - It is fenced by an error boundary.
+  - Its props interfaces are the contract.
+- **Dock:** `routes/verse/shell/dock-catalog.ts` defines the dock.
+  - Panes, widths (320px to 60% of the window), and the column / sheet / bottom-sheet rules.
+  - The persisted `dock` field of the single `ashlr.verse.ui.v3` blob, read back through `sanitizeDockState`.
+- **Visibility:** `routes/verse/shell/section-visibility.tsx` handles the keep-alive shell.
+  - Hidden surfaces stay mounted, so every surface polls through `usePollWhileVisible`.
+  - A poll stops while its surface or the window is hidden, and catches up once it is back in view.
+  - A poll never runs faster than 2s.
+
+### 13.10 What enforces this
+
+| Test | Guards |
+|---|---|
+| `design/tokens-contrast.test.ts` | text, border and marker contrast in both themes; both dark blocks identical |
+| `design/tokens-310.test.ts` | the colour roles in §13.2, the palette's validator scores, and layout and motion tokens |
+| `design/style-scan-310.test.ts` | no raw hex colour or px font size in new 3.10 UI files (`NEW_310_UI_PATHS`) |
+| `design/control-density.test.ts` | no literal px control height (≥ 18px) in the listed chrome and workbench stylesheets; genuine intrinsic geometry is allowed per file and value, with its reason |
+| `components/charts/colors.test.ts` | colour helpers reference only real tokens, and never cycle |
+| `routes/verse/shell/command-catalog.test.ts` | keys unique per live scope, no clash with `app_menu.rs` or macOS, and tables consistent |
+| `routes/verse/shell/{slots,dock-catalog,section-visibility,viewport}.test.*` | the shell contracts in §13.9 |
+| `test/verse-workbench-contracts-310.test.ts` | route families never overlap, partial landing never breaks the server, and the gates hold |
+
+**Test support** for compact-layout tests: `routes/verse/shell/viewport.test-support.ts`
+(`mockCompactViewport()` puts jsdom at 375, and `setWidth()` moves it).
+`design/palette-math.test-support.ts` has the same colour-distance math as
+the validator.
+
+### 13.11 Density covers the workbench
+
+The density rule in §2 ("every list row and control height derives from these")
+reaches every 3.10 chrome stylesheet: shell, chat, composer, dock, git, apps,
+command, fleet and mind. `design/control-density.test.ts` lists each file.
+
+- **A new stylesheet joins the list the day it lands.** Drift enters through
+  files nobody listed yet. That is how `onboarding.module.css` picked up a 22px
+  literal during the V2.1 run.
+- **An exception is geometry, not a control.** Keycaps (`<kbd>`), monogram
+  tiles, class badges, thumbnails and aria-hidden marks keep a fixed size. Each
+  is allowed by file and value, with the reason written next to it.
+- **Touch targets do not shrink.** The phone bottom bar's items
+  (`.shell[data-compact] .railButton`, 56px) stay the same size when the desktop
+  density switch goes compact.
+- **Known offenders stay off the list until fixed.** They are named in the
+  test's comment, not given an exception. At 3.10 these were the palette's
+  input and rows (`shell/CommandPalette.module.css`) and the 20px tab-close
+  buttons in the Preview and Terminal panes. All four now derive from the
+  tokens: the palette input is `calc(var(--control-h) + var(--space-5))`, its
+  rows `calc(var(--density-row) + var(--space-2))`, and each tab-close button
+  `calc(var(--control-h-xs) - var(--space-1))`. The palette keeps three
+  fixed sizes, each an exception of the kinds above: its 20px monogram tile,
+  its 20px keycap, and its 48px phone row, which is a touch target. The files
+  join the list once those three are allowed by value.
+- **Charts are out of scope.** `components/charts/**` is plot geometry, not
+  controls.
+
+### 13.12 Route families the page talks to
+
+Every workbench surface reads one route family. `WORKBENCH_ROUTE_FAMILIES` in
+`core/verse/workbench-types.ts` owns the list. `docs/VERSE-CONTRACT-V1.md`
+("V3.10 additive contract") indexes every route, gate and wire shape. Two
+rules there shape the UI:
+
+- **Preview frames use tickets.** An `<iframe src>` cannot send the
+  read-client header. So the Preview pane first asks
+  `GET /api/verse/preview/ticket` for a short-lived URL, then frames
+  `GET /api/verse/preview/frame/<ticket>`. That path is the only one
+  `server.ts` lets past its read boundary. It answers only a live ticket
+  presented with the cookie of the read session that minted it. Never build a
+  frame URL any other way, and never put a token in one.
+- **The frame path is the one exemption. Do not add a second.** Every other
+  `GET /api/**` is default-deny in `server.ts` until a read session is proven.
+  The frame path gets past that only because the route checks authority
+  itself: the ticket covers one file, expires in 5 minutes, and redeems only
+  with the minting session's cookie. The shape is pinned by
+  `VERSE_PREVIEW_FRAME_PATH_RE` in `workbench-types.ts`, which is the regex
+  `server.ts` matches.
+  - The usual workarounds are closed. A `srcdoc` or `blob:` frame inherits the
+    page's `script-src 'self'`, so an artifact's own scripts could never run.
+    A query-string token would leak into history and logs.
+  - What the frame gets: every artifact except a PDF is served under
+    `CSP: sandbox allow-scripts` with `connect-src 'none'` and
+    `frame-ancestors 'self'` (`ARTIFACT_CSP` in `core/verse/preview.ts`). The artifact runs in an opaque origin. It cannot
+    read the page's cookies, storage or DOM, and cannot call the API. PDFs get
+    only `frame-ancestors 'self'`, because browser PDF viewers refuse to render
+    in a sandboxed document.
+  - A future surface that needs to frame server content reuses the ticket
+    route rather than widening the boundary. If it truly cannot, the change
+    goes in `server.ts` beside the existing exception, with a server test and
+    a line here. The contract test and these docs must list every exemption.
+- **The terminal stream is a `fetch`, not an `EventSource`.** It carries the
+  read-client header, so it needs no query-proof allowance. Only the visible
+  tab holds a connection open, because the browser allows about 6 per origin.

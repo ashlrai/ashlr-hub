@@ -34,3 +34,26 @@ export { CalendarHeatmap, type CalendarDatum, type CalendarHeatmapProps } from '
 export { BurnDown, burnVerdict, type BurnDownProps } from './BurnDown.js';
 export { Gauge, type GaugeProps } from './Gauge.js';
 export * as chartMath from './chart-math.js';
+
+// V3.10 Track C (unit C7) — charts v2.
+export { ForestPlot, forestVerdict, type ForestRow, type ForestPlotProps, type ForestVerdict } from './ForestPlot.js';
+export { MatrixHeatmap, matrixTotals, type MatrixAxisItem, type MatrixHeatmapProps } from './MatrixHeatmap.js';
+export { StepBand, stepSpans, type StepPoint, type StepMarker, type StepBandProps, type StepSpan } from './StepBand.js';
+export { HatchPattern, EngineTick, engineLetter, type ChartLegendItem } from './ChartParts.js';
+export { deltaText } from './StatTile.js';
+export { OUTLINE_STATUSES } from './Swimlane.js';
+export { gaugeDiameter, MIN_GAUGE_SIZE } from './Gauge.js';
+export {
+  engineColor,
+  quantityColor,
+  seqColor,
+  hatchPatternId,
+  CHART_UNKNOWN,
+  CHART_UNKNOWN_HATCH,
+  CHART_QUEUED_OUTLINE,
+  CHART_DIVERGING_POS,
+  CHART_DIVERGING_NEG,
+  CHART_DIVERGING_MID,
+  UNKNOWN_HATCH,
+  type ChartEngine,
+} from './colors.js';

@@ -12,8 +12,15 @@
 //!    the web UI can inset its rail and header strip under the traffic lights.
 //! 3. Mirroring of `data-app-region="drag" | "no-drag"` onto Tauri's own
 //!    `data-tauri-drag-region`, so the top strip drags the window.
-//! 4. `window.__ASHLR_DESKTOP_COMMAND__(name)`, which the macOS menu bar calls
-//!    by `eval` to dispatch an `ashlr:desktop-command` window event.
+//! 4. `window.__ASHLR_DESKTOP_COMMAND__(name)`, which the macOS menu bar, the
+//!    tray, a clicked notification and the global hotkey call by `eval` to
+//!    dispatch an `ashlr:desktop-command` window event.
+//! 5. Desktop state (V3.10, C8): `window.__ASHLR_DESKTOP__.getState()` /
+//!    `.setPreference(name, bool)` and the `ashlr:desktop-state` event, which
+//!    back Settings ▸ Desktop (global hotkey, notifications). Native pushes a
+//!    new state by evaluating `desktop_prefs::state_script`; the page changes a
+//!    preference by emitting `shell-prefs` over the event permission it
+//!    already has — no new capability.
 //!
 //! The script is origin-gated to the sidecar origin. Token values are
 //! JSON-encoded into a config object, never string-interpolated, so no token
@@ -39,9 +46,17 @@ pub const TRAFFIC_LIGHT_Y: f64 = 18.0;
 /// Event the page emits when its theme resolves (see `reportTheme`).
 pub const THEME_EVENT: &str = "shell-theme";
 
-/// Commands the menu bar can send to the page.
+/// Commands native can send to the page — C0's `DESKTOP_COMMAND_NAMES`
+/// (`src/web-ui/routes/verse/shell/command-catalog.ts`), plus
+/// `open-session:<id>` built by `notify::ClickTarget::command`.
 pub const COMMAND_OPEN_SETTINGS: &str = "open-settings";
 pub const COMMAND_TOGGLE_THEME: &str = "toggle-theme";
+/// Tray "Needs you…" and a clicked "Needs you" / seat-health banner.
+pub const COMMAND_OPEN_NEEDS_YOU: &str = "open-needs-you";
+/// Tray "New chat".
+pub const COMMAND_NEW_CHAT: &str = "new-chat";
+/// The global hotkey (`hotkey::SUMMON_COMMAND`).
+pub const COMMAND_FOCUS_COMPOSER: &str = "focus-composer";
 
 const SHELL_JS: &str = include_str!("shell_contract.js");
 
@@ -64,14 +79,29 @@ struct ShellConfig<'a> {
     #[serde(rename = "trafficLightInset")]
     traffic_light_inset: u32,
     tokens: Option<ShellTokens<'a>>,
+    /// Desktop state at window creation (the page asks for a fresh copy with
+    /// `shell-state-request` once it runs, since a reload re-runs this script
+    /// with the creation-time value).
+    desktop: Option<&'a crate::desktop_prefs::DesktopStateView>,
+}
+
+/// Test convenience: the script without desktop state (`"desktop":null`).
+#[cfg(test)]
+pub fn init_script(origin: &str, tokens: Option<ShellTokens<'_>>) -> String {
+    init_script_with_state(origin, tokens, None)
 }
 
 /// Build the initialization script for a window pointed at `origin`.
 ///
 /// `tokens` is `None` before the sidecar has reported readiness (or when the
 /// user chose to adopt an already-running server); the shell contract still
-/// applies, and the SessionGate asks for a token as usual.
-pub fn init_script(origin: &str, tokens: Option<ShellTokens<'_>>) -> String {
+/// applies, and the SessionGate asks for a token as usual. `desktop` is the
+/// Settings ▸ Desktop state at window creation.
+pub fn init_script_with_state(
+    origin: &str,
+    tokens: Option<ShellTokens<'_>>,
+    desktop: Option<&crate::desktop_prefs::DesktopStateView>,
+) -> String {
     let config = ShellConfig {
         origin,
         platform: std::env::consts::OS,
@@ -79,6 +109,7 @@ pub fn init_script(origin: &str, tokens: Option<ShellTokens<'_>>) -> String {
         titlebar_height: TITLEBAR_HEIGHT,
         traffic_light_inset: TRAFFIC_LIGHT_INSET,
         tokens,
+        desktop,
     };
     let json = serde_json::to_string(&config).unwrap_or_else(|_| "null".to_string());
     format!("var __ASHLR_SHELL_CONFIG = {json};\n{SHELL_JS}")
@@ -183,12 +214,62 @@ mod tests {
     }
 
     #[test]
+    fn the_desktop_state_rides_in_the_config_and_the_page_can_ask_for_it() {
+        use crate::desktop_prefs::{DesktopStateView, HotkeyView, NotificationsView};
+        let view = DesktopStateView {
+            hotkey: HotkeyView {
+                enabled: false,
+                registered: false,
+                accelerator: "⌃⌥Space".into(),
+                error: None,
+            },
+            notifications: NotificationsView {
+                enabled: true,
+                delivery: "native",
+            },
+        };
+        let script = init_script_with_state(ORIGIN, None, Some(&view));
+        assert!(
+            script.contains(r#""desktop":{"hotkey":{"enabled":false"#),
+            "{script}"
+        );
+        assert!(init_script(ORIGIN, None).contains(r#""desktop":null"#));
+        for needle in [
+            "getState",
+            "setPreference",
+            "window.__ASHLR_DESKTOP_STATE__",
+            "ashlr:desktop-state",
+            "'shell-prefs'",
+            "'shell-state-request'",
+        ] {
+            assert!(script.contains(needle), "shell contract lost `{needle}`");
+        }
+        // Only the two known preferences, booleans only, may be emitted.
+        assert!(script.contains("name !== 'globalHotkey' && name !== 'notifications'"));
+        assert!(script.contains("typeof value !== 'boolean'"));
+    }
+
+    #[test]
+    fn the_command_names_match_the_web_catalog() {
+        // C0's DESKTOP_COMMAND_NAMES in routes/verse/shell/command-catalog.ts.
+        assert_eq!(COMMAND_OPEN_SETTINGS, "open-settings");
+        assert_eq!(COMMAND_TOGGLE_THEME, "toggle-theme");
+        assert_eq!(COMMAND_OPEN_NEEDS_YOU, "open-needs-you");
+        assert_eq!(COMMAND_NEW_CHAT, "new-chat");
+        assert_eq!(COMMAND_FOCUS_COMPOSER, "focus-composer");
+        assert_eq!(crate::hotkey::SUMMON_COMMAND, COMMAND_FOCUS_COMPOSER);
+        assert_eq!(
+            command_script("open-session:vs_1"),
+            "if (typeof window.__ASHLR_DESKTOP_COMMAND__ === 'function') window.__ASHLR_DESKTOP_COMMAND__(\"open-session:vs_1\");"
+        );
+    }
+
+    #[test]
     fn the_titlebar_band_matches_the_design_language() {
         // docs/VERSE-DESIGN-V2.md §4: 56px rail, 48px header strip.
         assert_eq!(TITLEBAR_HEIGHT, 48);
-        assert!(
-            TRAFFIC_LIGHT_INSET > 56,
-            "the traffic lights overrun the 56px rail and the UI must know it"
-        );
+        // The traffic lights overrun the 56px rail and the UI must know it
+        // (checked at compile time, so clippy does not flag a constant assert).
+        const _: () = assert!(TRAFFIC_LIGHT_INSET > 56);
     }
 }

@@ -42,7 +42,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, appendFileSync, readFileSync } from 'node:fs';
 import { execFileSync, execSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve as resolvePath } from 'node:path';
 
 // M154: repo-map + localization pre-pass (flag-gated, zero-dep)
 import { buildRepoMap, renderRepoMap } from './repo-map.js';
@@ -89,7 +89,13 @@ import { iterateToGreen } from './verify-to-green.js';
 import type { TerminationReason } from './run-monitor.js';
 import { measureAgentDiagnosticText, recordAgentDiagnostic } from './agent-diagnostics.js';
 import { classifyEngineError, toAgentDiagnosticErrorClass } from '../classify/engine-errors.js';
-import { resolveEngineSpec } from './engine-registry.js';
+import {
+  GROK_CLI_ENGINE_ID,
+  grokCliDirectCommand,
+  grokStreamUsage,
+  resolveEngineSpec,
+  resolveGrokCliSeat,
+} from './engine-registry.js';
 import { buildOpenAICompatibleClient } from './provider-client.js';
 import { runTask, type ReserveModelStep } from './agent-loop.js';
 import { MAX_GOVERNED_OUTPUT_TOKENS } from './model-call-authority.js';
@@ -98,18 +104,41 @@ import {
   buildEngineerToolSpecs,
   type EngineerContext,
 } from '../mcp-native-engineer.js';
-import { buildSandboxLauncher, confinementProfileFor } from '../sandbox/confine.js';
+import { buildSandboxLauncher, confinementProfileFor, nativeSeatConfinement, type NativeSeatConfinement } from '../sandbox/confine.js';
+import {
+  engineResultTripwireKill,
+  finishAutonomousSpawn,
+  prepareAutonomousSpawn,
+  recordAutonomousViolations,
+  type AutonomousSpawn,
+} from '../sandbox/autonomous-run.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
-import { assertMayMutate, killSwitchOn } from '../sandbox/policy.js';
+import {
+  assertMayMutate,
+  canonicalEnrollmentPath,
+  isEnrolled,
+  killSwitchOn,
+} from '../sandbox/policy.js';
 // LOCAL-ONLY: the ONE predicate. No parallel mechanism lives in this file.
 import { enginePermitted } from '../policy/local-only.js';
 import { markLocalFleetAgentRunning } from '../daemon/local-fleet.js';
 import {
-  acquireOutwardMutationFence,
   acquireOutwardMutationFenceAsync,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
+  type OutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
+// V3.10 U6: agents hold a shared execution lease (not the global fence) across
+// inference; repo-mutating sections take a per-repo lease; verification is
+// capped machine-wide. See src/core/sandbox/execution-leases.ts.
+import {
+  acquireRepoLease,
+  registerExecutionLease,
+  VerificationCapacityError,
+  withVerificationSlot,
+  type ExecutionLease,
+  type RepoLease,
+} from '../sandbox/execution-leases.js';
 import { addUsage, newUsage, estCostUsd } from './budget.js';
 import { withToolEnv } from '../env-bridge.js';
 import { canonicalizeProposalDiff, scrubSecrets } from '../util/scrub.js';
@@ -194,6 +223,13 @@ export interface RunEngineSandboxedOptions {
   delegationScope?: DelegationScope;
   /** Cancellation owned by the daemon or direct caller that started this run. */
   signal?: AbortSignal;
+  /**
+   * V3.10 (INT4): the seat an AUTONOMOUS codex run uses (its per-run
+   * CODEX_HOME copy comes from that seat's native profile). grok-cli resolves
+   * its seat from cfg.foundry.grokCli. Absent for codex under a standing
+   * policy ⇒ the run is refused as unconfinable, never run on Mason's login.
+   */
+  seatId?: string;
   /** Internal whole-attempt generation for mutating-tool evidence. */
   effectGeneration?: string;
   /** Internal exclusive durable-output authority for a best-of-N candidate. */
@@ -253,6 +289,20 @@ export interface CaptureSandboxedProposalOptions {
   contextSummary?: RunContextSummary;
   /** Cancellation authority inherited from the producer that owns this capture. */
   signal?: AbortSignal;
+  /**
+   * V3.10 U6: re-take outward authority immediately before the proposal is
+   * persisted (never for a draft). Returns null when authority is held, or the
+   * refusal — then nothing is filed. Producers run inference without the
+   * global fence; this is where they get it back, AFTER the completeness gate,
+   * so a minutes-long test run never holds the machine-wide fence.
+   */
+  beforeFiling?: () => Promise<CaptureAuthorityRefusal | null>;
+}
+
+/** Why a producer could not re-take outward authority before filing. */
+export interface CaptureAuthorityRefusal {
+  kind: 'kill-switch' | 'sandbox-unavailable';
+  reason: string;
 }
 
 type SpawnEngineResult = {
@@ -1031,6 +1081,34 @@ export function writeMcpConfigIfAvailable(worktreePath: string): string | null {
   }
 }
 
+/**
+ * A worktree.js export that may be missing: the V3.10 additions
+ * (createSandboxAsync, removeSandboxAsync, mintOwnSandboxRemovalRight,
+ * requireVerifiedSandboxGit) are absent from older test doubles, and a vitest
+ * module mock THROWS on access to an export its factory did not define.
+ */
+function optionalWorktreeExport<K extends keyof WorktreeModule>(wt: WorktreeModule, name: K): WorktreeModule[K] | undefined {
+  try {
+    const value = wt[name];
+    return typeof value === 'function' ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Remove a sandbox this run created on an early-exit path (no authority in
+ * hand): the async fence wait when the module has it, else the historical
+ * synchronous removeSandbox. Never throws.
+ */
+async function removeOwnSandboxBestEffort(wt: WorktreeModule, sb: Sandbox): Promise<void> {
+  try {
+    const removeAsync = optionalWorktreeExport(wt, 'removeSandboxAsync');
+    if (typeof removeAsync === 'function') await removeAsync(sb, { fenceWaitMs: CLEANUP_FENCE_WAIT_MS });
+    else wt.removeSandbox(sb);
+  } catch { /* removal is idempotent */ }
+}
+
 /** Create a temp hooks dir containing a pre-push blocker. Returns its path. */
 function installPrePushBlocker(): string {
   const hooksDir = mkdtempSync(join(tmpdir(), 'ashlr-hooks-'));
@@ -1043,6 +1121,283 @@ function installPrePushBlocker(): string {
  * invoking the model again. TITRR uses this after tests pass so the proposal is
  * bound to the exact diff that was just verified.
  */
+// ---------------------------------------------------------------------------
+// V3.10 U6 — leases shared by the CLI-agent and api-model producers
+// ---------------------------------------------------------------------------
+
+/**
+ * The key every lease on this repo uses. Canonical (physical) path, so a run
+ * started through a symlink and an unenroll of the real path agree; the
+ * lexical path is the fallback when the canonical one cannot be resolved (or a
+ * test double of policy.js does not provide the resolver).
+ */
+function sandboxLeaseRepoKey(sourceRepo: string): string {
+  try {
+    const canonical = canonicalEnrollmentPath(sourceRepo);
+    if (typeof canonical === 'string' && canonical.length > 0) return canonical;
+  } catch { /* fall through to the lexical path */ }
+  return resolvePath(sourceRepo);
+}
+
+/**
+ * Cross-process stop probe for a run's execution lease: KILL armed, or the
+ * repo unenrolled (unless the test-only any-repo hatch admitted it). Kill and
+ * unenroll abort agents in THIS process directly; this probe is how an agent
+ * learns about a Stop issued from another process (the CLI, the Verse server).
+ * Errors read as "no stop" — the fence re-check before filing is the gate;
+ * the probe only makes the stop prompt.
+ */
+function executionLeaseStopProbe(sourceRepo: string): () => string | null {
+  const allowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1';
+  return () => {
+    try {
+      if (killSwitchOn() === true) return 'kill switch armed';
+    } catch { /* see above */ }
+    if (!allowAnyRepo) {
+      try {
+        if (isEnrolled(sourceRepo) === false) return 'repo unenrolled';
+      } catch { /* see above */ }
+    }
+    return null;
+  };
+}
+
+/**
+ * Run the completeness gate inside a verification slot (≤ 2 machine-wide,
+ * ≤ 1 per repo). A gate that could not get a slot did not verify anything, so
+ * it FAILS (the diff is not filed) — never a silent pass.
+ */
+async function completenessGateInSlot(
+  repoKey: string,
+  input: Parameters<typeof runCompletenessGate>[0],
+  signal: AbortSignal | undefined,
+): ReturnType<typeof runCompletenessGate> {
+  // A partial run is refused by the gate without running anything, so it
+  // needs no slot — and must not queue behind real verifications to learn so.
+  if (input.isPartial === true) return runCompletenessGate(input);
+  try {
+    return await withVerificationSlot(repoKey, () => runCompletenessGate(input), signal ? { signal } : {});
+  } catch (error) {
+    if (error instanceof VerificationCapacityError) {
+      return { pass: false, reason: `verification capacity unavailable: ${error.message}` };
+    }
+    throw error;
+  }
+}
+
+/** Thrown inside proposal capture when outward authority could not be re-taken; mapped to an outcome. */
+class CaptureAuthorityRefusedError extends Error {
+  constructor(readonly refusal: CaptureAuthorityRefusal, readonly diff: SandboxDiff | undefined) {
+    super(refusal.reason);
+    this.name = 'CaptureAuthorityRefusedError';
+  }
+}
+
+type WorktreeModule = typeof import('../sandbox/worktree.js');
+
+/**
+ * A producer's outward authority across one run (V3.10 U6) — shared by the
+ * CLI-agent and api-model paths so both follow exactly one protocol:
+ *
+ *   admit()      fence → policy gate (KILL, enrollment) → cleanup authority →
+ *                register the SHARED execution lease. Still holding the fence.
+ *   releaseFence()  before inference: the run is now bounded by its lease.
+ *   reacquire()  before filing: repo lease → fence → the same gate again.
+ *                A Stop / unenroll issued mid-run refuses here.
+ *   cleanupSandbox()  borrowed authority when held; else `removeSandbox`
+ *                under the repo lease (refused under KILL → orphan sweep).
+ *   releaseAll() fence, then repo lease, then — last — the execution lease,
+ *                which is what kill / unenroll drain waits for.
+ */
+class ProducerAuthority {
+  private fence: OutwardMutationFence | null = null;
+  /**
+   * V3.10 (INT4 — B-U6 request 6): minted at admission (fence held, KILL off)
+   * for a sandbox this run created, so the run can still remove its own
+   * worktree after a Stop arms KILL (worktree.ts mintOwnSandboxRemovalRight).
+   */
+  private ownRemovalRight: ReturnType<WorktreeModule['mintOwnSandboxRemovalRight']> = null;
+  private cleanupAuthority: ReturnType<WorktreeModule['borrowSandboxCleanupAuthority']> = null;
+  private captureLease: RepoLease | null = null;
+  private lease: ExecutionLease | null = null;
+
+  constructor(
+    private readonly wt: WorktreeModule,
+    private readonly sourceRepo: string,
+    readonly repoKey: string,
+    /** "engine execution" / "api-model execution" — keeps the historical refusal wording. */
+    private readonly phase: string,
+  ) {}
+
+  private allowAnyRepo(): boolean {
+    return process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1';
+  }
+
+  /**
+   * Fence + gate + lease. Returns the refusal reason, or undefined when
+   * admitted (fence still held — release it before inference).
+   *
+   * The fence is awaited ASYNCHRONOUSLY: with agents now running
+   * concurrently, its holder is usually another agent in THIS process (a
+   * sandbox creation, a filing), and a synchronous spin freezes the event loop
+   * so that holder can never release — the waiter burns its whole wait and
+   * fails. (That is what capped concurrency at one agent per repo here.)
+   */
+  async admit(spec: { runId: string; engine: string; parentSignal?: AbortSignal; ownSandbox?: Sandbox }): Promise<string | undefined> {
+    this.fence = await acquireOutwardMutationFenceAsync(
+      ADMIT_FENCE_WAIT_MS,
+      spec.parentSignal ? { signal: spec.parentSignal } : undefined,
+    );
+    if (!ownsOutwardMutationFence(this.fence)) {
+      this.fence = null;
+      return `outward mutation fence unavailable before ${this.phase}`;
+    }
+    try {
+      assertMayMutate(this.sourceRepo, { allowAnyRepo: this.allowAnyRepo() });
+      this.cleanupAuthority = this.wt.borrowSandboxCleanupAuthority(this.fence);
+      if (!this.cleanupAuthority) throw new Error(`outward mutation authority became invalid before ${this.phase}`);
+      const registration = registerExecutionLease(this.fence, {
+        runId: spec.runId,
+        repoKey: this.repoKey,
+        engine: spec.engine,
+        ...(spec.parentSignal ? { parentSignal: spec.parentSignal } : {}),
+        shouldAbort: executionLeaseStopProbe(this.sourceRepo),
+      });
+      if (!registration.ok) throw new Error(`execution lease unavailable: ${registration.reason}`);
+      this.lease = registration.lease;
+      if (spec.ownSandbox) {
+        // Test doubles of worktree.js may predate the right; without it the
+        // run falls back to the KILL-refused cleanup (orphan sweep).
+        const mint = optionalWorktreeExport(this.wt, 'mintOwnSandboxRemovalRight');
+        this.ownRemovalRight = typeof mint === 'function' ? mint(this.fence, spec.ownSandbox) : null;
+      }
+      return undefined;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  }
+
+  /** The lease's signal: fires on the caller's abort, kill, or unenroll. Null before admit(). */
+  get signal(): AbortSignal | null {
+    return this.lease?.signal ?? null;
+  }
+
+  get executionLease(): ExecutionLease | null {
+    return this.lease;
+  }
+
+  /** Drop the fence. The borrowed cleanup authority dies with it, by design. */
+  releaseFence(): void {
+    if (this.fence === null) return;
+    releaseOutwardMutationFence(this.fence);
+    this.fence = null;
+    this.cleanupAuthority = null;
+  }
+
+  private holdsFence(): boolean {
+    return this.fence !== null && ownsOutwardMutationFence(this.fence) && this.cleanupAuthority !== null;
+  }
+
+  /**
+   * Re-take outward authority before anything outward happens again: this
+   * repo's lease first, then the fence (lock order), then the same gate the
+   * run passed at the start — so a Stop or unenroll issued while the model ran
+   * refuses the filing instead of being outrun by it.
+   */
+  async reacquire(signal: AbortSignal | undefined): Promise<CaptureAuthorityRefusal | null> {
+    if (this.holdsFence()) return null;
+    const waitSignal = signal ? { signal } : {};
+    if (this.captureLease === null) {
+      const leased = await acquireRepoLease(this.repoKey, { waitMs: FENCE_REACQUIRE_WAIT_MS, ...waitSignal });
+      if (!leased.ok) {
+        return { kind: 'sandbox-unavailable', reason: `repo lease unavailable for proposal filing: ${leased.reason}` };
+      }
+      this.captureLease = leased.lease;
+    }
+    this.fence = await acquireOutwardMutationFenceAsync(FENCE_REACQUIRE_WAIT_MS, waitSignal);
+    if (!ownsOutwardMutationFence(this.fence)) {
+      this.releaseFence();
+      return {
+        kind: 'sandbox-unavailable',
+        reason: `outward mutation fence unavailable after ${this.phase} — filing nothing`,
+      };
+    }
+    const revoked = (detail: string): CaptureAuthorityRefusal => {
+      this.releaseFence();
+      let killed = false;
+      try { killed = killSwitchOn() === true; } catch { killed = false; }
+      return {
+        kind: killed ? 'kill-switch' : 'sandbox-unavailable',
+        reason: `outward mutation authority revoked during ${this.phase} — filing nothing${detail}`,
+      };
+    };
+    try {
+      assertMayMutate(this.sourceRepo, { allowAnyRepo: this.allowAnyRepo() });
+    } catch (err) {
+      return revoked(`: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    this.cleanupAuthority = this.wt.borrowSandboxCleanupAuthority(this.fence);
+    if (this.cleanupAuthority === null) return revoked('');
+    return null;
+  }
+
+  /** Remove a sandbox this run created. Never throws. */
+  async cleanupSandbox(sb: Sandbox): Promise<void> {
+    try {
+      if (this.holdsFence()) {
+        this.wt.removeSandboxWithBorrowedAuthority(sb, this.cleanupAuthority);
+        return;
+      }
+      // No authority in hand (cancelled, refused, or the run threw before
+      // filing): `removeSandbox` takes its own fence and re-checks KILL — under
+      // KILL it refuses and the worktree is left for the orphan sweep. The repo
+      // lease keeps `git worktree remove` from interleaving with mirror sync or
+      // another agent's `worktree add`; its wait is short because removal is
+      // best-effort anyway.
+      let cleanupLease = this.captureLease;
+      let ownLease = false;
+      if (cleanupLease === null) {
+        const leased = await acquireRepoLease(this.repoKey, { waitMs: CLEANUP_REPO_LEASE_WAIT_MS });
+        if (leased.ok) {
+          cleanupLease = leased.lease;
+          ownLease = true;
+        }
+      }
+      try {
+        const removeAsync = optionalWorktreeExport(this.wt, 'removeSandboxAsync');
+        if (typeof removeAsync === 'function') {
+          // V3.10 (INT4): the fence is awaited off the event loop, and a run
+          // admitted before KILL removes its OWN worktree even after a Stop
+          // (its removal right); anything else is still refused under KILL.
+          await removeAsync(sb, { fenceWaitMs: CLEANUP_FENCE_WAIT_MS, ownRemovalRight: this.ownRemovalRight });
+          return;
+        }
+        // Take the fence asynchronously (see admit()), then mint cleanup
+        // authority the standard way — which refuses under KILL.
+        const fence = await acquireOutwardMutationFenceAsync(CLEANUP_FENCE_WAIT_MS);
+        try {
+          const cleanup = ownsOutwardMutationFence(fence) ? this.wt.borrowSandboxCleanupAuthority(fence) : null;
+          if (cleanup !== null) this.wt.removeSandboxWithBorrowedAuthority(sb, cleanup);
+        } finally {
+          releaseOutwardMutationFence(fence);
+        }
+      } finally {
+        if (ownLease) cleanupLease?.release();
+      }
+    } catch {
+      // removal is idempotent
+    }
+  }
+
+  /** Release everything, execution lease last. Idempotent. */
+  releaseAll(): void {
+    this.releaseFence();
+    this.captureLease?.release();
+    this.captureLease = null;
+    this.lease?.release();
+  }
+}
+
 export async function captureSandboxedProposal(
   engine: EngineId,
   goal: string,
@@ -1156,13 +1511,13 @@ export async function captureSandboxedProposal(
     let blockedOutcome: RunProposalOutcome | undefined;
     if (reviewOnlyVerifyResult === undefined && cfg.foundry?.completenessGate !== false) {
       incrementRunActionCount(actionCounts, 'completenessGateRuns');
-      const gateResult = await runCompletenessGate({
+      const gateResult = await completenessGateInSlot(sandboxLeaseRepoKey(opts.sourceRepo), {
         worktreePath: sb.worktreePath,
         diff,
         goal,
         cfg,
         ...(opts.isPartial ? { isPartial: true } : {}),
-      });
+      }, opts.signal);
       if (opts.signal?.aborted) return cancelledCapture();
       if (!gateResult.pass) {
         blockedOutcome = proposalOutcome(
@@ -1255,6 +1610,20 @@ export async function captureSandboxedProposal(
     // finish persistence verification and report it as filed even if the signal
     // becomes aborted during or after create().
     if (opts.signal?.aborted) return cancelledCapture();
+    // V3.10 U6: the producer re-takes outward authority here — after the gate,
+    // immediately before persistence. A refusal (KILL armed or the repo
+    // unenrolled while the model ran, fence unavailable) files nothing.
+    if (opts.beforeFiling) {
+      const refusal = await opts.beforeFiling();
+      if (opts.signal?.aborted) return cancelledCapture();
+      if (refusal !== null) {
+        const outcome = proposalOutcome(refusal.kind, refusal.reason, diff);
+        return {
+          state: withProposalOutcome(mk({ result: outcome.reason }), outcome, actionCounts, opts.contextSummary),
+          proposalOutcome: outcome,
+        };
+      }
+    }
     const inbox = selectInboxStore(cfg);
     proposalCreationStarted = true;
     const proposal = inbox.create(proposalInput);
@@ -1393,7 +1762,10 @@ export async function runEngineSandboxed(
   cfg: AshlrConfig,
   opts: RunEngineSandboxedOptions,
 ): Promise<SandboxedEngineResult> {
-  const model = opts.model ?? cfg.foundry?.models?.[engine];
+  // V3.10 (INT4): a seat CLI gets its model NAMED (grok-cli's default when
+  // nothing else says), so the argv and the recorded `grok-cli:<model>` agree.
+  const model = opts.model ?? cfg.foundry?.models?.[engine] ??
+    ((engine as string) === GROK_CLI_ENGINE_ID ? resolveEngineSpec(engine, cfg)?.defaultModel : undefined);
   const engineModel = `${engine}:${resolveConcreteModel(engine, cfg, model)}`;
   const tier = engineTierOf(engine, cfg);
   const id = assertSafeExecutionIdentity(
@@ -1412,6 +1784,10 @@ export async function runEngineSandboxed(
   // methods are idempotent; this guard covers every earlier refusal/return
   // (abort, kill switch, sandbox failure, or mutation-fence failure) and any
   // exception before that block is entered.
+  // V3.10 U6 backstop: the execution lease is released by the run's own
+  // `finally`; this outer one covers a throw between registering the lease and
+  // entering that block, so a thrown run can never leave kill "not quiesced".
+  let registeredExecutionLease: ExecutionLease | null = null;
   try {
   const runCreatedAtIso = new Date().toISOString();
   const recordSandboxedRunAgentAction = opts.deferTerminalAction
@@ -1530,6 +1906,7 @@ export async function runEngineSandboxed(
   }
 
   const wt = await import('../sandbox/worktree.js');
+  const leaseRepoKey = sandboxLeaseRepoKey(opts.sourceRepo);
 
   // Acquire a worktree (reuse the caller's when provided).
   let sb: Sandbox;
@@ -1538,7 +1915,15 @@ export async function runEngineSandboxed(
     sb = opts.existingWorktree;
     setRunActionCount(actionCounts, 'sandboxCreated', 0);
   } else {
+    // V3.10 U6: `git worktree add` mutates the repo's git state, so it runs
+    // under the repo's exclusive lease (lock order: repo lease → fence). Two
+    // agents on different repos create worktrees without waiting on each
+    // other's repo; mirror sync on this repo cannot interleave.
+    let creationLease: RepoLease | null = null;
     try {
+      const creation = await acquireRepoLease(leaseRepoKey, opts.signal ? { signal: opts.signal } : {});
+      if (!creation.ok) throw new Error(creation.reason);
+      creationLease = creation.lease;
       // ASYNC creation: the fence guarding `git worktree add` is process-wide,
       // so concurrent agents necessarily queue on it. Waiting for it
       // synchronously froze the whole event loop — watchdog, lease renewer,
@@ -1569,6 +1954,8 @@ export async function runEngineSandboxed(
         state: withProposalOutcome(mk({ status: 'failed', result: outcome.reason }), outcome, actionCounts),
         proposalOutcome: outcome,
       };
+    } finally {
+      creationLease?.release();
     }
   }
   if (opts.delegationScope) {
@@ -1604,9 +1991,7 @@ export async function runEngineSandboxed(
       status: 'aborted',
       actionCounts,
     });
-    if (createdHere) {
-      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
-    }
+    if (createdHere) await removeOwnSandboxBestEffort(wt, sb);
     return {
       state: withProposalOutcome(
         mk({ status: 'aborted', result: 'run cancelled before engine spawn', terminationReason: 'cancelled' }),
@@ -1616,29 +2001,35 @@ export async function runEngineSandboxed(
     };
   }
 
-  // Hold authority through the complete agent lifecycle. Creation has its own
-  // short fence; this second acquisition closes the gap before agent writes and
-  // makes kill/unenroll wait for execution, proposal capture, and cleanup.
-  const executionFence = acquireOutwardMutationFence();
-  let cleanupAuthority: ReturnType<typeof wt.borrowSandboxCleanupAuthority> = null;
-  let executionAuthorityFailure: string | undefined;
-  if (!ownsOutwardMutationFence(executionFence)) {
-    executionAuthorityFailure = 'outward mutation fence unavailable before engine execution';
-  } else {
-    try {
-      assertMayMutate(opts.sourceRepo, {
-        allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
-      });
-      cleanupAuthority = wt.borrowSandboxCleanupAuthority(executionFence);
-      if (!cleanupAuthority) throw new Error('outward mutation authority became invalid before engine execution');
-    }
-    catch (err) { executionAuthorityFailure = err instanceof Error ? err.message : String(err); }
-  }
+  // ── AUTHORITY: THE FENCE FOR THE GATE, A LEASE FOR THE RUN (V3.10 U6) ────
+  //
+  // This used to take the machine-wide outward fence and HOLD it through the
+  // whole agent lifecycle — inference included, ~99% of wall time and no
+  // outward mutation — so exactly one CLI agent ran machine-wide.
+  //
+  // Now the fence is held only for the policy gate: under it the run passes
+  // assertMayMutate and registers a SHARED execution lease, then drops the
+  // fence and runs inference holding only the lease. Kill / unenroll abort the
+  // lease and wait for it (drain), so they still cannot report quiescence
+  // while this agent runs; and proposal filing re-takes the fence (after
+  // re-checking KILL and enrollment) in `reacquireCaptureAuthority`, so an
+  // agent that ignores its abort still files nothing after a Stop.
+  const authority = new ProducerAuthority(wt, opts.sourceRepo, leaseRepoKey, 'engine execution');
+  const executionAuthorityFailure = await authority.admit({
+    runId: id,
+    engine,
+    ...(opts.signal ? { parentSignal: opts.signal } : {}),
+    ...(createdHere ? { ownSandbox: sb } : {}),
+  });
+  registeredExecutionLease = authority.executionLease;
+  const releaseExecutionFence = (): void => authority.releaseFence();
+  // Reads `opts.signal` at call time — after the rebinding below it is the lease's.
+  const reacquireCaptureAuthority = (): Promise<CaptureAuthorityRefusal | null> =>
+    authority.reacquire(opts.signal);
+
   if (executionAuthorityFailure) {
-    releaseOutwardMutationFence(executionFence);
-    if (createdHere) {
-      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
-    }
+    authority.releaseAll();
+    if (createdHere) await removeOwnSandboxBestEffort(wt, sb);
     const outcome = proposalOutcome('sandbox-unavailable', executionAuthorityFailure);
     recordSandboxedRunAgentAction({
       engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
@@ -1650,6 +2041,14 @@ export async function runEngineSandboxed(
       proposalOutcome: outcome,
     };
   }
+
+  // RELEASE ACROSS INFERENCE: from here to the filing below, everything writes
+  // only inside this run's throwaway worktree (the OS launcher jails the
+  // agent there, and the pre-push hook severs push). The run is now bounded by
+  // its execution lease; every cancellation check below reads the lease's
+  // signal, which fires on the caller's own abort AND on kill / unenroll.
+  releaseExecutionFence();
+  opts = { ...opts, signal: authority.signal! };
 
   const hooksDir = installPrePushBlocker();
   const env = buildContainedEnv(cfg, hooksDir);
@@ -1664,9 +2063,23 @@ export async function runEngineSandboxed(
   let candidateProposalId: string | undefined;
   let proposalOutcomeResult: RunProposalOutcome | undefined;
 
+  // V3.10 (INT4): the confinement profile is decided up front — it changes
+  // what the run may be given (no MCP sidecar, per-run homes, the direct grok
+  // exec). confinementProfileFor forces the autonomous profile whenever a
+  // standing policy is live, whatever config says.
+  const confinementProfile = confinementProfileFor(engine, cfg);
+  const autonomousRun = confinementProfile.autonomous === true;
+  // EngineId predates the registry-only ids (grok-cli); compare as a string.
+  const engineKey: string = engine;
+  let autonomousSpawn: AutonomousSpawn | null = null;
+  let autonomousFinished = false;
+
   // M248: write a fleet-owned MCP sidecar to the worktree (guarded: only when ashlr is on PATH).
   // fleetMcp defaults to true (on) — set cfg.foundry.fleetMcp = false to opt out.
-  const fleetMcpEnabled = (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
+  // V3.10 (INT4, B-U2 request): NEVER for an autonomous run — the sidecar is
+  // an unconfined ashlr MCP server the agent could drive (its tools run as
+  // Mason, outside the sandbox profile).
+  const fleetMcpEnabled = !autonomousRun && (cfg.foundry as Record<string, unknown> | undefined)?.['fleetMcp'] !== false;
   let mcpConfigPath: string | null = null;
   if (fleetMcpEnabled) {
     mcpConfigPath = writeMcpConfigIfAvailable(sb.worktreePath);
@@ -1761,19 +2174,86 @@ export async function runEngineSandboxed(
     // propagates as a failed run (caught in spawnEngine's never-throw wrapper).
     // buildContainedEnv, the pre-push hook, and the diff/provenance logic are
     // all unchanged — the launcher wraps the final spawn only.
-    const confinementProfile = confinementProfileFor(engine, cfg);
-    const launcher = buildSandboxLauncher(confinementProfile, {
-      worktree: sb.worktreePath,
-      home: process.env.HOME ?? process.env.USERPROFILE,
-      env: env,
-    });
+    //
+    // V3.10 (INT4 — B-U2's request to U6): an AUTONOMOUS run is assembled by
+    // sandbox/autonomous-run.ts — private run dir, ephemeral homes, per-run
+    // vendor-state copy, credentials stripped, the hardened profile — and
+    // refused (never run unconfined) when that cannot be done.
+    let spawnEnv: NodeJS.ProcessEnv = env;
+    let launcher: ReturnType<typeof buildSandboxLauncher>;
+    if (autonomousRun) {
+      const refuse = (kind: 'engine-unsupported' | 'sandbox-unavailable' | 'engine-command-missing', reason: string): SandboxedEngineResult => {
+        proposalOutcomeResult = proposalOutcome(kind, reason);
+        recordSandboxedRunAgentAction({
+          engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
+          workItemId: opts.workItemId, workSource: opts.workSource,
+          outcome: proposalOutcomeResult, status: 'failed', actionCounts,
+        });
+        return {
+          state: withProposalOutcome(mk({ status: 'failed', result: proposalOutcomeResult.reason }), proposalOutcomeResult, actionCounts),
+          proposalOutcome: proposalOutcomeResult,
+        };
+      };
+      // SPEC-310B residual risks: "Claude as a producer waits for a credential
+      // proxy in 3.11." The overlay gives claude an empty ephemeral config dir
+      // and no token, so it could only fail after taking a slot — say why now.
+      if (confinementProfile.networkEgress && (engineKey === 'claude' || engineKey === 'claude-cli')) {
+        return refuse('engine-unsupported', 'claude producers are not run under a standing policy until the 3.11 credential proxy (the claude-a token only reaches restricted, tool-less judge / Leader calls)');
+      }
+      let seatId: string | null = opts.seatId ?? null;
+      let nativeStatePath: string | null = null;
+      if (engineKey === GROK_CLI_ENGINE_ID) {
+        const direct = grokCliDirectCommand(cmd, cfg);
+        if (!direct) return refuse('engine-command-missing', 'grok-cli seat launcher did not resolve for a direct autonomous exec');
+        cmd = direct.cmd;
+        seatId = direct.seatId;
+        nativeStatePath = direct.nativeStatePath;
+      }
+      try {
+        autonomousSpawn = prepareAutonomousSpawn({
+          engine,
+          worktree: sb.worktreePath,
+          baseEnv: env,
+          bin: cmd.bin,
+          seatId,
+          ...(nativeStatePath ? { nativeStatePath } : {}),
+          // The pre-push blocker must stay readable, or git would skip the hook.
+          extraReadOnly: [hooksDir],
+          profile: confinementProfile,
+        });
+      } catch (err) {
+        return refuse('sandbox-unavailable', `autonomous confinement unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      cmd = { ...cmd, bin: autonomousSpawn.bin };
+      spawnEnv = autonomousSpawn.env;
+      launcher = autonomousSpawn.launcher;
+      // The capture of this worktree must run through a verified `.git`
+      // (worktree.ts agentTreeGitContext); test doubles may lack the hook.
+      optionalWorktreeExport(wt, 'requireVerifiedSandboxGit')?.(sb.id);
+    } else {
+      // Legacy / opt-in M52 profile: a grok-cli seat runs `node launcher.mjs`,
+      // which must read its profile dir and pinned binary and write the seat's
+      // measured runtime state (confine.ts GROK_SEAT_WRITABLE_*).
+      let nativeSeat: NativeSeatConfinement | undefined;
+      if (engineKey === GROK_CLI_ENGINE_ID && confinementProfile.mode === 'os') {
+        const seat = resolveGrokCliSeat(cfg);
+        const home = process.env.HOME ?? process.env.USERPROFILE;
+        if (seat.ok && home) nativeSeat = nativeSeatConfinement(seat.launch, home);
+      }
+      launcher = buildSandboxLauncher(confinementProfile, {
+        worktree: sb.worktreePath,
+        home: process.env.HOME ?? process.env.USERPROFILE,
+        env: env,
+        ...(nativeSeat ? { nativeSeat } : {}),
+      });
+    }
 
     // Emit confinement audit event (append-only, never throws).
     auditConfinement({
       action: 'confinement.run',
       repo: sb.worktreePath,
       sandboxId: sb.id,
-      summary: `engine=${engine} mode=${confinementProfile.mode ?? 'off'} platform=${process.platform} launched=${launcher !== null} networkEgress=${confinementProfile.networkEgress ?? false}`,
+      summary: `engine=${engine} mode=${confinementProfile.mode ?? 'off'} platform=${process.platform} launched=${launcher !== null} networkEgress=${confinementProfile.networkEgress ?? false}${autonomousRun ? ' autonomous=true' : ''}`,
       result: 'ok',
     });
 
@@ -1786,6 +2266,15 @@ export async function runEngineSandboxed(
     // terminations, and non-transient failures fall through to the existing
     // capture/proposal path.
     const maxAttempts = dispatchMaxAttempts(cfg);
+    // V3.10 (INT4 — B-U7 request to U6): the stall monitor (run-monitor.ts)
+    // counts EVERY stdout line as an event but recognises edits only in
+    // claude/codex tool-call shapes, so grok's streamed NDJSON would trip
+    // no-diff-stall (400 events, "0 edits") long before its first edit could
+    // be seen. For grok-cli that detector is switched off; idle-stall (no
+    // output for stallIdleMs) and the wall-clock backstop still bound the run.
+    const spawnCfg: AshlrConfig = engineKey === GROK_CLI_ENGINE_ID
+      ? { ...cfg, foundry: { ...(cfg.foundry ?? {}), noDiffMinEvents: Number.MAX_SAFE_INTEGER } as NonNullable<AshlrConfig['foundry']> }
+      : cfg;
     let res: SpawnEngineResult = { ok: false, output: '', error: 'engine did not run' };
     let _spawnDurationMs = 0;
     const usage = newUsage();
@@ -1797,8 +2286,8 @@ export async function runEngineSandboxed(
       }
       incrementRunActionCount(actionCounts, 'spawnAttempts');
       const _spawnStart = Date.now();
-      res = await spawnEngine(cmd, cfg, {
-        env,
+      res = await spawnEngine(cmd, spawnCfg, {
+        env: spawnEnv,
         timeoutMs: cfg.foundry?.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         launcher: launcher ?? undefined,
         ...(opts.signal ? { signal: opts.signal } : {}),
@@ -1809,6 +2298,14 @@ export async function runEngineSandboxed(
           if (described) emitSinkEvent(streamSink, described);
         },
       });
+      if (engineKey === GROK_CLI_ENGINE_ID) {
+        // V3.10 (INT4): grok-cli's Anthropic-wire NDJSON — its own run total
+        // when the stream carries one, else per-message usage summed
+        // (engine-registry grokStreamUsage); the generic parser in
+        // engines.ts could pick a single message's usage or none.
+        const grokUsage = grokStreamUsage(res.output);
+        if (grokUsage) res = { ...res, usage: grokUsage };
+      }
       const invocationCount = 1 + (res.configRecoveryAttempts ?? 0);
       if (res.configRecoveryAttempts) {
         incrementRunActionCount(actionCounts, 'spawnAttempts', res.configRecoveryAttempts);
@@ -1881,6 +2378,20 @@ export async function runEngineSandboxed(
     }
 
     const terminationReason: TerminationReason | undefined = res.terminationReason;
+
+    if (autonomousSpawn) {
+      // B-U2 step 6: write a refreshed seat token back (same-account only),
+      // record every sandbox violation, delete the run dir (it holds a copy
+      // of the seat's auth.json). Before any capture/filing below.
+      autonomousFinished = true;
+      const finished = finishAutonomousSpawn(autonomousSpawn, {
+        output: `${res.output}\n${res.error ?? ''}`,
+        tripwireKill: engineResultTripwireKill(res),
+      });
+      if (finished.violations.length > 0) {
+        await recordAutonomousViolations({ engine, sourceRepo: opts.sourceRepo, runId: id, operations: finished.violations });
+      }
+    }
 
     const failedAfterAuthoritativeTermination = (
       failure: SpawnEngineResult,
@@ -2000,6 +2511,7 @@ export async function runEngineSandboxed(
             durationMs: _spawnDurationMs,
             producerStatus: 'failed',
             actionCounts,
+            beforeFiling: reacquireCaptureAuthority,
           });
           if (opts.signal?.aborted || captured.state.status === 'aborted') {
             return cancelledAfterSpawn(captured);
@@ -2088,12 +2600,12 @@ export async function runEngineSandboxed(
           let _m275ShouldFile = true;
           if (cfg.foundry?.completenessGate !== false) {
             incrementRunActionCount(actionCounts, 'completenessGateRuns');
-            let _gateResult = await runCompletenessGate({
+            let _gateResult = await completenessGateInSlot(leaseRepoKey, {
               worktreePath: sb.worktreePath,
               diff: effDiff,
               goal,
               cfg,
-            });
+            }, opts.signal);
             if (opts.signal?.aborted) return cancelledAfterSpawn();
             // M331: verify-to-green — bounded repair loop (DEFAULT OFF). When
             // the gate fails, re-invoke the SAME engine inside the SAME confined
@@ -2114,12 +2626,12 @@ export async function runEngineSandboxed(
                   if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
                   const d = wt.sandboxDiff(sb);
                   incrementRunActionCount(actionCounts, 'completenessGateRuns');
-                  const g = await runCompletenessGate({
+                  const g = await completenessGateInSlot(leaseRepoKey, {
                     worktreePath: sb.worktreePath,
                     diff: d,
                     goal,
                     cfg,
-                  });
+                  }, opts.signal);
                   if (opts.signal?.aborted) return { pass: false, reason: 'cancelled' };
                   return { pass: g.pass, reason: String(g.reason ?? '') };
                 },
@@ -2198,6 +2710,11 @@ export async function runEngineSandboxed(
           }
           if (_m275ShouldFile) {
           if (opts.signal?.aborted) return cancelledAfterSpawn();
+          // V3.10 U6: outward authority comes back HERE — after the gate and
+          // any verify-to-green repair, immediately before persistence.
+          const captureRefusal = await reacquireCaptureAuthority();
+          if (opts.signal?.aborted) return cancelledAfterSpawn();
+          if (captureRefusal !== null) throw new CaptureAuthorityRefusedError(captureRefusal, effDiff);
           const filedOutcomeForMetadata = proposalOutcome('filed', 'proposal filed', effDiff);
           const inbox = selectInboxStore(cfg);
           const proposal = inbox.create({
@@ -2351,29 +2868,38 @@ export async function runEngineSandboxed(
         } else {
           proposalOutcomeResult = proposalOutcome('empty-diff', `engine "${engine}" completed without file changes`);
         }
-      } catch {
-        const captureFailureOutcome = candidateProposalId
-          ? proposalOutcome(
-              'proposal-capture-error',
-              'proposal capture requires persistence reconciliation',
-            )
-          : proposalOutcome(
-              'proposal-capture-error',
-              'proposal capture failed before durable proposal filing',
-            );
-        if (opts.signal?.aborted) {
-          return cancelledAfterSpawn({
-            state: withProposalOutcome(
-              mk({ status: 'done', result: captureFailureOutcome.reason, usage }),
-              captureFailureOutcome,
-              actionCounts,
-            ),
-            ...(candidateProposalId ? { candidateProposalId } : {}),
-            proposalOutcome: captureFailureOutcome,
-          });
+      } catch (captureError) {
+        if (captureError instanceof CaptureAuthorityRefusedError) {
+          // Nothing was created: the refusal happened before inbox.create().
+          proposalOutcomeResult = proposalOutcome(
+            captureError.refusal.kind,
+            captureError.refusal.reason,
+            captureError.diff,
+          );
+        } else {
+          const captureFailureOutcome = candidateProposalId
+            ? proposalOutcome(
+                'proposal-capture-error',
+                'proposal capture requires persistence reconciliation',
+              )
+            : proposalOutcome(
+                'proposal-capture-error',
+                'proposal capture failed before durable proposal filing',
+              );
+          if (opts.signal?.aborted) {
+            return cancelledAfterSpawn({
+              state: withProposalOutcome(
+                mk({ status: 'done', result: captureFailureOutcome.reason, usage }),
+                captureFailureOutcome,
+                actionCounts,
+              ),
+              ...(candidateProposalId ? { candidateProposalId } : {}),
+              proposalOutcome: captureFailureOutcome,
+            });
+          }
+          proposalOutcomeResult = captureFailureOutcome;
+          // diff/proposal capture is best-effort — never fail the run on it.
         }
-        proposalOutcomeResult = captureFailureOutcome;
-        // diff/proposal capture is best-effort — never fail the run on it.
       }
     } else {
       trySetRunDiffActionCounts(actionCounts, () => wt.sandboxDiff(sb));
@@ -2406,6 +2932,11 @@ export async function runEngineSandboxed(
     throw error;
   } finally {
     endStreamSink(streamSink);
+    if (autonomousSpawn && !autonomousFinished) {
+      // The run threw after the spawn was prepared: still reconcile vendor
+      // state and delete the run dir (never leave an auth.json copy behind).
+      finishAutonomousSpawn(autonomousSpawn, { output: '' });
+    }
     if (!sandboxRetention) {
       try {
         rmSync(hooksDir, { recursive: true, force: true });
@@ -2413,17 +2944,14 @@ export async function runEngineSandboxed(
         // best-effort cleanup
       }
     }
-    if (createdHere && !sandboxRetention) {
-      try {
-        wt.removeSandboxWithBorrowedAuthority(sb, cleanupAuthority);
-      } catch {
-        // removal is idempotent
-      }
-    }
-    releaseOutwardMutationFence(executionFence);
+    if (createdHere && !sandboxRetention) await authority.cleanupSandbox(sb);
+    // Fence, repo lease, then the execution lease — last, because kill /
+    // unenroll drain waits for exactly that.
+    authority.releaseAll();
   }
   } finally {
     endStreamSink(streamSink);
+    registeredExecutionLease?.release();
   }
 }
 
@@ -2458,6 +2986,38 @@ export async function runEngineSandboxed(
  * running, so a long wait costs this turn's latency and nothing else.
  */
 const FENCE_REACQUIRE_WAIT_MS = 120_000;
+
+/**
+ * How long post-run sandbox cleanup waits for the repo lease before removing
+ * anyway. Cleanup is best-effort (the orphan sweep reclaims a miss), so it
+ * must never hold a finished run — and its execution lease, which kill drains
+ * — hostage to a slow mirror sync.
+ */
+const CLEANUP_REPO_LEASE_WAIT_MS = 15_000;
+
+/**
+ * How long a producer waits for the outward fence at admission. The fence is
+ * now held only for short sections (worktree creation, the policy gate,
+ * filing, cleanup), so a long wait means a queue of admissions, not a stuck
+ * holder; the wait is asynchronous and cancellable.
+ */
+const ADMIT_FENCE_WAIT_MS = 60_000;
+
+/** Fence wait for best-effort cleanup without authority in hand. */
+const CLEANUP_FENCE_WAIT_MS = 15_000;
+
+/**
+ * Wait (asynchronously) until the fence is FREE, without keeping it. The sync
+ * `createSandbox` that follows takes it with a synchronous spin; running that
+ * spin while an in-process holder is mid-await would freeze the loop and fail.
+ * Nothing awaits between this returning and the synchronous call, so no
+ * in-process holder can slip in; another process can, and then the sync
+ * spin simply waits for it as before.
+ */
+async function awaitFenceFree(waitMs: number, signal?: AbortSignal): Promise<void> {
+  const probe = await acquireOutwardMutationFenceAsync(waitMs, signal ? { signal } : undefined);
+  releaseOutwardMutationFence(probe);
+}
 
 export async function runApiModelSandboxed(
   engine: EngineId,
@@ -2651,6 +3211,7 @@ export async function runApiModelSandboxed(
   }
 
   const wt = await import('../sandbox/worktree.js');
+  const apiLeaseRepoKey = sandboxLeaseRepoKey(opts.sourceRepo);
 
   // Acquire sandbox worktree (reuse caller's when provided).
   let sb: Sandbox;
@@ -2659,10 +3220,28 @@ export async function runApiModelSandboxed(
     sb = opts.existingWorktree;
     setRunActionCount(actionCounts, 'sandboxCreated', 0);
   } else {
+    // V3.10 U6: worktree creation runs under the repo's exclusive lease
+    // (lock order: repo lease → fence) — see runEngineSandboxed.
+    let creationLease: RepoLease | null = null;
     try {
-      sb = wt.createSandbox(opts.sourceRepo, {
-        allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
-      });
+      const creation = await acquireRepoLease(apiLeaseRepoKey, opts.signal ? { signal: opts.signal } : {});
+      if (!creation.ok) throw new Error(creation.reason);
+      creationLease = creation.lease;
+      // V3.10 (INT4 — B-U6 request 6): create with the ASYNC fence wait when
+      // the module has it (test doubles may not) — the sync spin in
+      // createSandbox froze the loop while another in-process agent held it.
+      const createAsync = optionalWorktreeExport(wt, 'createSandboxAsync');
+      if (typeof createAsync === 'function') {
+        sb = await createAsync(opts.sourceRepo, {
+          allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
+          ...(opts.signal ? { signal: opts.signal } : {}),
+        });
+      } else {
+        await awaitFenceFree(ADMIT_FENCE_WAIT_MS, opts.signal);
+        sb = wt.createSandbox(opts.sourceRepo, {
+          allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
+        });
+      }
       createdHere = true;
       setRunActionCount(actionCounts, 'sandboxCreated', 1);
     } catch (err) {
@@ -2686,6 +3265,8 @@ export async function runApiModelSandboxed(
       };
       endStreamSink(streamSink);
       return result;
+    } finally {
+      creationLease?.release();
     }
   }
   if (opts.delegationScope) {
@@ -2721,9 +3302,7 @@ export async function runApiModelSandboxed(
       status: 'aborted',
       actionCounts,
     });
-    if (createdHere) {
-      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
-    }
+    if (createdHere) await removeOwnSandboxBestEffort(wt, sb);
     const result = {
       state: withProposalOutcome(
         mk({ status: 'aborted', result: 'run cancelled before provider request', terminationReason: 'cancelled' }),
@@ -2737,77 +3316,32 @@ export async function runApiModelSandboxed(
 
   // ── THE OUTWARD MUTATION FENCE, SCOPED TO WHAT IT PROTECTS ──────────────
   //
-  // This fence is the machine-wide "at most one agent is positioned to make
-  // outward mutations" guarantee, and it must keep meaning exactly that. It
-  // was previously ACQUIRED HERE and released at the end of the run — spanning
-  // the whole model loop, which is ~99% of wall time and makes no outward
-  // mutation at all. Because it is process-wide and cross-process, that made
-  // every agent past the first block on a lock held across inference: one
-  // sandboxed agent at a time machine-wide, no matter how many serving slots
-  // the runtime has. A four-slot fleet ran one agent.
+  // The fence is the machine-wide linearization point for outward mutations.
+  // It was once held across the whole model loop (~99% of wall time, no
+  // outward mutation at all), which made a four-slot fleet run one agent.
   //
-  // So it is held for the two sections that actually need it — the policy gate
-  // here, and proposal filing plus sandbox cleanup at the end — and RELEASED
-  // across inference. The guarantee is unchanged: no outward mutation happens
-  // in the gap, and the re-acquisition re-checks the kill switch through
-  // `borrowSandboxCleanupAuthority`, so a KILL armed mid-inference stops the
-  // filing. Pause also reaches quiescence sooner, because it no longer has to
-  // wait behind a model.
-  let executionFence = acquireOutwardMutationFence();
-  let cleanupAuthority: ReturnType<typeof wt.borrowSandboxCleanupAuthority> = null;
-  let executionAuthorityFailure: string | undefined;
-  if (!ownsOutwardMutationFence(executionFence)) {
-    executionAuthorityFailure = 'outward mutation fence unavailable before api-model execution';
-  } else {
-    try {
-      assertMayMutate(opts.sourceRepo, {
-        allowAnyRepo: process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1',
-      });
-      cleanupAuthority = wt.borrowSandboxCleanupAuthority(executionFence);
-      if (!cleanupAuthority) throw new Error('outward mutation authority became invalid before api-model execution');
-    }
-    catch (err) { executionAuthorityFailure = err instanceof Error ? err.message : String(err); }
-  }
-
-  /** Drop the fence. The borrowed cleanup authority dies with it, by design. */
-  const releaseExecutionFence = (): void => {
-    if (executionFence === null) return;
-    releaseOutwardMutationFence(executionFence);
-    executionFence = null;
-    cleanupAuthority = null;
-  };
-
-  /**
-   * Re-take the fence before anything outward happens again.
-   *
-   * Re-minting the cleanup authority re-checks `killSwitchOn()`, so a switch
-   * armed while the model was running refuses the filing rather than being
-   * outrun by a fence acquired twenty minutes earlier. Returns false when the
-   * fence could not be retaken; callers then file nothing and let
-   * `removeSandbox` take its own fence for cleanup.
-   */
-  const reacquireExecutionFence = async (): Promise<boolean> => {
-    if (executionFence !== null && ownsOutwardMutationFence(executionFence)) return true;
-    executionFence = await acquireOutwardMutationFenceAsync(FENCE_REACQUIRE_WAIT_MS);
-    if (!ownsOutwardMutationFence(executionFence)) {
-      releaseOutwardMutationFence(executionFence);
-      executionFence = null;
-      cleanupAuthority = null;
-      return false;
-    }
-    cleanupAuthority = wt.borrowSandboxCleanupAuthority(executionFence);
-    if (cleanupAuthority === null) {
-      releaseExecutionFence();
-      return false;
-    }
-    return true;
-  };
+  // It is held for the policy gate here (where the run also registers its
+  // SHARED execution lease — V3.10 U6), RELEASED across inference, and re-taken
+  // only immediately before proposal filing (`beforeFiling`, after the
+  // completeness gate) and for cleanup. The guarantee is unchanged: no outward
+  // mutation happens in the gap, and the re-acquisition re-checks KILL and
+  // enrollment, so a Stop armed mid-inference refuses the filing. Kill and
+  // unenroll abort the lease and wait for it, so they still see this run.
+  const authority = new ProducerAuthority(wt, opts.sourceRepo, apiLeaseRepoKey, 'api-model execution');
+  const executionAuthorityFailure = await authority.admit({
+    runId: id,
+    engine,
+    ...(opts.signal ? { parentSignal: opts.signal } : {}),
+    ...(createdHere ? { ownSandbox: sb } : {}),
+  });
+  const releaseExecutionFence = (): void => authority.releaseFence();
+  // Reads `opts.signal` at call time — after the rebinding below it is the lease's.
+  const reacquireCaptureAuthority = (): Promise<CaptureAuthorityRefusal | null> =>
+    authority.reacquire(opts.signal);
 
   if (executionAuthorityFailure) {
-    releaseExecutionFence();
-    if (createdHere) {
-      try { wt.removeSandbox(sb); } catch { /* removal is idempotent */ }
-    }
+    authority.releaseAll();
+    if (createdHere) await removeOwnSandboxBestEffort(wt, sb);
     const outcome = proposalOutcome('sandbox-unavailable', executionAuthorityFailure);
     recordSandboxedRunAgentAction({
       engine, engineModel, tier, runId: id, sourceRepo: opts.sourceRepo,
@@ -2821,6 +3355,22 @@ export async function runApiModelSandboxed(
     endStreamSink(streamSink);
     return result;
   }
+  // Admitted: drop the fence now. Everything until filing — client setup,
+  // context building, the model loop — writes only inside this run's
+  // worktree, and holding the fence across those awaits would stall every
+  // other agent's admission and filing.
+  releaseExecutionFence();
+  // V3.10 (INT4): under a standing policy the in-process engineer's write
+  // tools can still reach `<worktree>/.git` (it is inside the workspace), so
+  // the capture must verify `.git` against the git dir the daemon created.
+  try {
+    if (confinementProfileFor(engine, cfg).autonomous === true) {
+      optionalWorktreeExport(wt, 'requireVerifiedSandboxGit')?.(sb.id);
+    }
+  } catch { /* confinementProfileFor never throws; defensive */ }
+  // Every cancellation check and the model loop below read the lease's
+  // signal, which fires on the caller's own abort AND on kill / unenroll.
+  opts = { ...opts, signal: authority.signal! };
 
   let proposalId: string | undefined;
   let candidateProposalId: string | undefined;
@@ -3004,7 +3554,8 @@ export async function runApiModelSandboxed(
       taskId: task.id,
       text: `api-model task started (${engineModel.slice(0, 256)})`,
     });
-    // RELEASE ACROSS INFERENCE. Everything from here to the capture below
+    // RELEASED ACROSS INFERENCE (since admission — this call is a no-op kept
+    // as the explicit marker). Everything from here to the capture below
     // writes only inside this run's throwaway worktree (`allowWrite` is scoped
     // to `sb.worktreePath`, `allowExec` is false) and talks to a model. None of
     // it is an outward mutation, and holding the machine-wide fence through it
@@ -3042,19 +3593,11 @@ export async function runApiModelSandboxed(
       ...(opts.signal ? { signal: opts.signal } : {}),
     });
 
-    // RE-TAKE IT before anything outward happens again — proposal filing and
-    // sandbox cleanup both live past this point. Re-minting the cleanup
-    // authority re-checks the kill switch, so a KILL armed during inference
-    // refuses here instead of being outrun. A failure to retake is not fatal:
-    // nothing is filed, and `removeSandbox` acquires its own fence to clean up.
-    const fenceRetaken = await reacquireExecutionFence();
-    if (!fenceRetaken) {
-      emitSinkEvent(streamSink, {
-        kind: 'log',
-        taskId: task.id,
-        text: 'outward mutation authority unavailable after the model run — filing nothing',
-      });
-    }
+    // The fence is NOT re-taken here any more: the completeness gate inside
+    // captureSandboxedProposal runs first, in a verification slot, and the
+    // fence comes back through `beforeFiling` immediately before persistence
+    // (V3.10 U6). Before, a refused re-take was logged as "filing nothing"
+    // and the capture below filed anyway.
 
     const finalUsage: RunUsage = {
       ...usage,
@@ -3130,6 +3673,7 @@ export async function runApiModelSandboxed(
             ...(opts.signal ? { signal: opts.signal } : {}),
             isPartial: true,
             sourceLabel: 'api-model',
+            beforeFiling: reacquireCaptureAuthority,
             usage: finalUsage,
             durationMs,
             producerStatus: 'failed',
@@ -3221,6 +3765,7 @@ export async function runApiModelSandboxed(
           ...(opts.signal ? { signal: opts.signal } : {}),
           isPartial: isPartialResult,
           sourceLabel: 'api-model',
+          beforeFiling: reacquireCaptureAuthority,
           usage: finalUsage,
           durationMs,
           producerStatus: 'done',
@@ -3306,22 +3851,13 @@ export async function runApiModelSandboxed(
       });
       endStreamSink(streamSink);
     }
-    if (createdHere) {
-      try {
-        // With the fence in hand, cleanup borrows this run's authority. Without
-        // it — the run threw during inference, or the fence could not be
-        // retaken — `removeSandbox` acquires its own fence and re-checks KILL,
-        // which is the standalone path built for exactly this case. Passing a
-        // null borrowed authority would instead REFUSE and leak the worktree.
-        if (cleanupAuthority !== null) {
-          wt.removeSandboxWithBorrowedAuthority(sb!, cleanupAuthority);
-        } else {
-          wt.removeSandbox(sb!);
-        }
-      } catch {
-        // removal is idempotent
-      }
-    }
-    releaseExecutionFence();
+    // With the fence in hand, cleanup borrows this run's authority. Without
+    // it — the run threw during inference, or the fence could not be retaken —
+    // `removeSandbox` acquires its own fence and re-checks KILL, which is the
+    // standalone path built for exactly this case. Passing a null borrowed
+    // authority would instead REFUSE and leak the worktree.
+    if (createdHere) await authority.cleanupSandbox(sb!);
+    // Execution lease last: kill / unenroll drain waits for exactly that.
+    authority.releaseAll();
   }
 }

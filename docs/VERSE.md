@@ -14,8 +14,15 @@ It is served by the normal `ashlr serve` server at `/verse/`, opened by
   [`docs/VERSE-CONTEXT.md`](VERSE-CONTEXT.md) — the authority for every number
   the context meter shows.
 - Design language: `docs/VERSE-DESIGN-V2.md`.
-- Shared types: `src/core/verse/types.ts` (V1, frozen) and
-  `src/core/verse/control-types.ts` (V2).
+- Shared types: `src/core/verse/types.ts` (V1, frozen),
+  `src/core/verse/control-types.ts` (V2) and
+  `src/core/verse/workbench-types.ts` (3.10 workbench; owned by one unit, frozen
+  for the others).
+- 3.10 routes, gates and wire shapes: `docs/VERSE-CONTRACT-V1.md`, section
+  "V3.10 additive contract".
+- Standing authority, Touch ID grants, the rollout ladder and the ledger:
+  [`docs/STANDING-AUTHORITY.md`](STANDING-AUTHORITY.md), the authority for
+  everything autonomy may do without you.
 
 This page is the user guide.
 
@@ -47,19 +54,62 @@ The server binds to `127.0.0.1` only. Do not expose it to other hosts.
 
 ---
 
-## The five sections
+## The five surfaces
 
-A 56px icon rail down the left switches between them. ⌘1–⌘5 do the same.
+3.10 reorganised Verse around one question per surface. The icon rail down the
+left switches between them, and ⌘1–⌘5 do the same.
 
-| # | Section | What it is for |
-|---|---------|----------------|
-| 1 | **Chat** | Talk to a seat about a project. Sessions, transcript, composer. |
-| 2 | **Autonomy** | Run the fleet without you. Start/stop the loop, set caps, set scope, read the audit trail, emergency stop. |
-| 3 | **Approvals** | The inbox of proposals the fleet produced. Diff, evidence, approve or reject. |
-| 4 | **Usage** | What each account and local model has spent, against plan windows and configured limits. |
-| 5 | **Settings** | Appearance, connection, shortcuts, about. |
+| Key | Surface | What it answers |
+|-----|---------|-----------------|
+| ⌘1 | **Command** | What needs me, and is the company producing? The autonomy switch, Stop, the budget pill and the grant chip; a one-line verdict ("Autonomous · 5 building · 7 merged today · 0 reverts · Claude 46% reserved for you"); Needs you; the Leader's memo; five KPIs; a burn-down per seat; a 12-hour swimlane. |
+| ⌘2 | **Fleet** | What is running where, and why that seat? A live swimlane by lane and phase, the gate funnel with refusal reasons, "why this seat" for each dispatch, parked work, the repo table with pause and resume, and Overnight. The 3.9 Autonomy panels live under **Fleet ▸ Advanced**. |
+| ⌘3 | **Growth** | Is the output compounding? Merges per week, cost per merge, model ROI, a calendar of merges, the harness history and the experiment results. |
+| ⌘4 | **Mind** | What did the Leader decide, and was it right? Its memos with each move's 7-day outcome, its hit-rate, the reasoning insights, the standards it set, and the action log with Veto. |
+| ⌘5 | **Chat** | The interactive workbench: sessions, transcript, dock (Terminal, Preview, Review) and composer. |
 
-A dot on the Approvals rail icon means something is waiting for you.
+The **gear** at the foot of the rail holds Settings (⌘,), **Apps & Accounts**,
+Usage and Shortcuts (⌘/). Beside it, a small ring shows the scarcest seat's
+five-hour window.
+
+**Where the 3.9 sections went.** Chat is ⌘5. Autonomy is Fleet (its panels
+under Fleet ▸ Advanced). Approvals is the **Needs you** drawer (⌘J). Usage and
+Settings are in the gear tray, and MCP is inside Apps & Accounts. A saved 3.9
+section is migrated once, and a v2 user sees a single "Chat moved to ⌘5" notice.
+The first launch of each day opens Command, so the overnight digest is the
+first thing you see. Later launches reopen the surface you left.
+
+**Rail badges.** Command shows the Needs-you count. Chat shows a pulsing amber
+dot while any chat runs (the count is in its accessible name). Fleet shows the
+autonomy state, and Mind a dot when there is a memo you have not opened.
+
+**Surfaces stay alive.** The last three surfaces stay mounted while hidden, and
+Chat stays mounted once visited, so switching back is instant and a half-typed
+message survives. A hidden surface stops polling and catches up when it is back
+in view; nothing polls faster than every 2 s.
+
+Every chart has a table twin (its ⋯ menu, or `T` when the card has focus), a
+designed empty state ("Fleet dark since Sep 1") and a hatched fill for values
+that were not measured. An unmeasured value is shown as "—", never as zero.
+
+### Needs you (⌘J)
+
+One drawer for everything waiting on you: owner-lane PRs the fleet may not
+merge, the Leader's class-C asks and questions, repos on owner hold, seats that
+need reconnecting, a grant about to expire, and the proposals that used to be
+Approvals. Splits: All, Approvals, Fleet, Chats, Accounts (`H`/`L` switch).
+`J`/`K` move, ↩ opens, `A` approves, `R` rejects, `V` vetoes, `E` marks done.
+Approve, reject and veto confirm first, then ask for the mutation token. An
+empty drawer says "All clear" with the fleet's status line.
+
+### Command palette (⌘K)
+
+Opens in under 50 ms and never switches surface on its own. Results are
+grouped Needs you › Chats (running first) › Actions › Go to › Seats & Apps ›
+Projects. Start with `>` for actions only or `#` for chats only; ⇥ fills an
+argument ("New chat on…" → a seat). An empty query lists your last five
+actions. Guarded actions ("Stop running chats…", "Stop the fleet…") confirm,
+then ask for the token. Every palette entry, menu item, shortcut and key
+handler reads one catalog, `routes/verse/shell/command-catalog.ts`.
 
 ### Chat
 
@@ -197,6 +247,79 @@ provides it. WKWebView — which is what the desktop app is — does not, so the
 the button explains itself and you use system dictation (Wispr Flow,
 Superwhisper, macOS dictation) into the composer, which is an ordinary textarea.
 
+### The 3.10 chat workbench
+
+**Sidebar.** Filter chips (All, Running, Needs you, Pinned) sit under the
+search box. Chats group as Pinned, then projects, then Archived (collapsed).
+Each row carries one status: a pulse with elapsed time, failed, an unread dot,
+or the time. A running row adds a muted second line from the live activity feed
+("npm test, 1m 02s", or the tail of the live reasoning). Hover or right-click to
+pin, archive, rename, hand off or delete. Unread is counted by turns: a chat that
+existed before 3.10 does not show unread on its first launch.
+
+**Transcript.** Consecutive tool calls fold into one activity row ("Ran 12
+commands, read 8, edited 3; 1 failed; 2m 14s ▸"); a failure expands the group to
+the failed rows. A **chapter rail** on the right edge has one tick per turn (red
+failed, amber running) plus markers for compaction, handoff and recovery; hover
+shows the prompt and a click jumps to it. Screen readers hear a polite
+announcement only when a turn starts, finishes or fails. A command block's
+**Run in terminal** pastes the command into the Terminal pane and never runs it.
+
+**Live reasoning.** Claude, Codex and Grok stream their reasoning while they
+think. The thinking block shows three live lines, then collapses to
+"Thought 12s, ~1.8k tok ▸". Settings ▸ Chat chooses Collapsed (default),
+Expanded or Hidden. Above the composer, the live status line reads
+"● Running npm test, 1m 02s, 38 tok/s, Stop" — every figure is measured from the
+CLI's own events, and nothing is estimated. Reasoning is also kept as data for
+insights (below), scrubbed and local.
+
+**Above the composer**, each row hidden when empty: one notice at a time (seat
+health first, then retry and recovery, then context advice) with "+N more";
+queued turns; the live status line; and the **branch bar**.
+
+**Composer.** It is always editable. ↩ during a running turn queues the message
+on the server (up to 3); the queue sends when the turn ends cleanly, and holds
+and asks after a failure or Stop. ⌘⇧↩ stops the turn and sends. Attach files by
+upload, paste or drop (⌘U); they are stored in
+`~/.ashlr/verse/attachments/<session>/` (0600) and that one folder is shared
+with the turn. `@` fuzzy-finds project files and `/` offers handoff, compact,
+new, plan, effort and model. The footer holds the **permission mode** (Plan,
+Accept edits — the default —, Auto, and Bypass, which is red and confirmed per
+chat), the model and effort pickers, the context ring, and the **seat chip**:
+its tooltip shows plan, windows, resets, health and what autonomy may use of
+that seat, and its menu offers "Continue on ‹seat›" and the budget mode. An
+option a seat cannot run is disabled with the reason.
+
+**Dock.** One pane or a vertical split of two, 320 px to 60 % of the window;
+a sheet below 1024 px and a bottom sheet on a phone.
+
+- **Terminal** (⌃`; ⌃⇧` for a new tab): a real login shell per tab in the
+  chat's folder, with copy on select, "Send selection to chat" and a
+  screen-reader mode. Up to 8 tabs; scrollback is 256 KB in memory only; a tab
+  idle for 12 h is closed; tabs survive a page reload. It needs the desktop app
+  (the sidecar's Bun runtime provides the pseudo-terminal). Under plain Node the
+  pane offers **Open in Terminal.app** instead.
+- **Preview** (⌘⇧B): loopback dev servers (`http://127.0.0.1:*`,
+  `http://localhost:*`) with back, forward, reload and a Desktop/375 frame. Its
+  dev-server list comes from `.claude/launch.json`, `package.json` scripts and
+  listening ports; **Start** runs the server in a Terminal tab and waits for the
+  port. The html, markdown, svg, image and pdf files the chat wrote open as
+  **artifacts** under a CSP sandbox, an opaque origin with no access to Verse's
+  cookies.
+- **Review** (⌘⇧D): This turn, Uncommitted or Branch, as a file tree with
+  unified or split diffs. The gutter's `+` adds a note; **Add to message** drafts
+  `path:line: note` into the composer.
+- **Tasks** lists the tools and subagents running in this turn and the other
+  running chats; **Context** is this chat's memory, roots and handoff.
+
+**Branch bar and pull requests.** One bar per root with changes
+(`ashlr-hub  v310-foundation  +35,079 −1,074  [Create PR ▾]`). Its button
+follows the repository's state: Commit, Push, Create PR, Merge (only when
+checks are green and the branch is mergeable) or View PR. A commit is refused
+while a turn is running in that repository, so you never commit half an edit.
+**Isolate in worktree** in the new-chat dialog creates
+`~/.ashlr-worktrees/<repo>/<name>` on the branch `verse/<name>`.
+
 ---
 
 ## Seats
@@ -300,7 +423,127 @@ Resources panel says so.
 
 ---
 
-## Autonomy — running without you
+## Autonomy with custody (3.10)
+
+3.10 lets the fleet merge on its own, and only inside a scope you signed. The
+full model is in [`docs/STANDING-AUTHORITY.md`](STANDING-AUTHORITY.md); this is
+the operator's view of it.
+
+- **One Touch ID raises authority.** A standing grant lists the repos, engines,
+  risk and size caps, spend ceiling and Leader classes. It is signed by a key in
+  this Mac's Secure Enclave, shown in full in the Touch ID prompt, bound to this
+  Mac and valid for at most 30 days. Nothing else can widen what autonomy may
+  do: not config, not the Leader, not an agent.
+- **Lowering never asks.** The Command top bar's switch (Off, Propose,
+  Autonomous) goes down instantly. **■ Stop** writes `~/.ashlr/KILL` (the same
+  fail-closed stop described below). **Revoke** switches off and requires a new
+  grant to resume. Raising the switch past what the grant allows opens the
+  Touch ID sheet, which shows the scope and expiry you are about to sign.
+- **The ramp is automatic.** The grant carries a rollout ladder (shadow, then
+  staged merge, then full). Autonomy advances a stage when that stage's criteria
+  are met in the ledger and drops back one stage on any breach. It can never
+  pass the last stage you signed.
+- **Every merge is remote and reversible.** The fleet works only in its own
+  mirrors (`~/.ashlr/fleet/mirrors/`), never in your checkouts. Each change
+  passes the merge gates in order, is judged by a model from a different family
+  than the one that wrote it, is merged on GitHub pinned to its SHA with
+  `Ashlr-Grant`, `Ashlr-Gates` and `Ashlr-Ledger-Head` trailers, and is watched
+  for two hours afterwards. A red merge is reverted automatically and the repo
+  quarantined.
+- **Protected paths go to you.** Authority, sandbox, merge and release code,
+  manifests, CI and similar paths are never auto-merged; the PR lands in Needs
+  you with the `ashlr:owner-lane` label.
+- **One ledger.** Grants, switches, stops, gates, merges, reverts, holds and
+  every Leader action are rows in a hash-chained log
+  (`~/.ashlr/authority/ledger.jsonl`). A broken chain halts everything until a
+  new grant is signed. `ashlr authority ledger verify` checks it.
+- **Changed authority code pauses the grant.** Deploying a build that changes
+  the authority surface pauses autonomy ("authority code changed — re-approve")
+  until one more Touch ID.
+
+Autonomy stays dormant until you run the one-time setup:
+
+```sh
+ashlr authority setup --dry-run   # print every step and what it would do
+ashlr authority setup             # do them, pausing only where you must act
+ashlr authority status            # grant, switch, Stop, rollout stage, ledger, custody
+```
+
+`setup` does every step it can and stops only for what no agent may do: the
+`sudo` install of the custody helper, Touch ID (key creation and the first
+grant), the two GitHub browser clicks for the `ashlr-fleet` App, `claude
+setup-token`, and confirming the archive of the old `~/.ashlr/activation/`. It
+prints exactly what it did. Afterwards the only recurring step is one Touch ID
+per 30-day grant, or after an authority deploy.
+
+### Budget modes
+
+Every seat has a budget policy under one of three modes. Settings live in
+`~/.ashlr/budget.json`; the budget pill on Command and the seat chip in Chat
+open the same control, clamped to the grant's ceiling.
+
+| Mode | Autonomy may use |
+|---|---|
+| **all-in** | Everything available. No reserves. |
+| **balanced** (default) | Up to each seat's reserve. Claude keeps 40 % of its weekly window for you and is never used while its five-hour window is above 70 %. Grok keeps no reserve. Local models are free and unlimited. |
+| **reserve** | Free local models first, and only a small paid slice (85 % of every paid window is kept for you). |
+
+Codex is off for autonomy in every mode until you switch it on. An unknown
+reading makes a seat ineligible for autonomous work, never eligible: your
+reserve is not spent on a guess. Your own chats ignore reserves (the reserves
+exist for you); a chat is refused only when its seat cannot run a turn at all.
+
+### Account health
+
+A background sweep checks every seat every 10 minutes, using status commands
+only (`auth status`, `login status`, `--version`, a local `/api/version`). It
+detects signed-out, exhausted and expiring sessions and a CLI build that no
+longer matches the seat's pin. A seat that cannot run a turn refuses before the
+CLI starts (409 `seat-not-ready`, with the reason) instead of failing
+mid-turn. **Reconnect** opens the seat's own login in Terminal; Verse never
+types, reads or stores a credential.
+
+### The Leader
+
+The Leader is the fleet's planning agent. It reads deterministic digests (fleet
+history, the ledger, seat headroom, model ROI, reasoning insights and its own
+hit-rate), never raw reasoning, and writes a memo: the bottleneck, one move with
+an expected result and a date, goals, standards, and questions for you. It runs
+daily and after notable events, at most three times a day, on Grok or a local
+model; Claude only for a weekly deep run that fits inside your reserve, and never
+Codex. With no standing grant it runs on free local models or not at all.
+
+- **Class A** actions (focus goals, dispatch work, pause a repo, move the budget
+  toward reserve, start an experiment) apply at once and can be vetoed at any
+  time.
+- **Class B** actions (new goals, move the budget toward all-in within the
+  grant, more Grok lanes, enabling Codex after its reset, adopting a harness that
+  passed its gate) apply after a 30-minute veto window. A spend-raising action
+  whose window would end between 00:00 and 07:00 waits for the next morning
+  unless the mode is all-in.
+- **Class C** is anything outside the grant. It goes to Needs you with the
+  Leader's argument attached.
+
+**Veto** undoes one action, or a whole memo, by running its recorded inverse.
+Each move is graded after 7 days, and the grades are the Leader's hit-rate on
+Mind.
+
+### Learning, reasoning data and experiments
+
+Reasoning from every chat and fleet run is stored as data, scrubbed of secrets
+and home paths, local-only and private (0600): text for 30 days, derived
+features for 180. It is never replayed into a prompt. Deterministic extractors
+turn it into insights (repeated failures, loops, verification gaps, wins),
+which feed Mind and the Leader. Harness changes (prompts, effort, sampling,
+routing weights) are tested as paired experiments with a confidence interval
+against held-out tasks, adopted only through the gate, and rolled back
+automatically if a 48-hour canary falls below baseline.
+
+## Fleet ▸ Advanced — the daemon cockpit
+
+In 3.10 the V2 Autonomy panels live under **Fleet ▸ Advanced**. They set the
+config-level limits; a standing grant bounds them from above, because effective
+policy is the minimum of the grant, the config and the compiled ceilings.
 
 The Autonomy section is the cockpit for the hub's existing daemon. The loop
 picks work off your goals and backlog, dispatches it to seats, and files the
@@ -387,6 +630,8 @@ If you only want the loop to stop, use **Stop**, not the emergency stop.
 
 ## Approvals
 
+In 3.10 Approvals is the **Approvals** split of the Needs-you drawer (⌘J).
+
 Everything the fleet produced that needs a human is here, pending first. Each row
 shows its risk class, repo, title, engine and age. Opening one gives you the
 summary, a real syntax-aware diff, the verify result, the decision evidence and
@@ -400,6 +645,10 @@ repo and the kind of proposal, and shows what will happen before you click.
 
 ## Usage
 
+Usage is in the gear tray. The same per-seat capacity strip now appears in
+Apps & Accounts, the new-chat dialog and onboarding, so there is one
+description of each seat rather than four.
+
 One card per seat: engine marker, plan, window meters with reset times, and
 tokens used. Plus the local-vs-cloud split for the period, `localSavingsUsd`
 framed as money not spent, and dispatch-ledger usage against each configured
@@ -412,6 +661,33 @@ signal and Grok's probe is not on `/api/usage`; both render as **unknown**
 rather than as a fabricated zero. If a per-day spend series cannot be derived
 from the data on hand, you get the aggregate and a note that the series is
 unavailable — not an invented curve.
+
+---
+
+## Apps & Accounts
+
+Gear tray ▸ Apps & Accounts replaces the MCP section and the Resources
+panel's account view. Rows are grouped:
+
+- **Accounts:** per seat, the plan, connection health, the five-hour and weekly
+  windows with reset times, and "Reserved for you 40 %". Actions: Reconnect,
+  Fix (shows the exact command), Edit budget.
+- **Desktop:** Claude Desktop's "Use Ollama models" (shown off, with Restore;
+  Verse's local seat already routes to Ollama) and Hermes Desktop. Turning
+  either on confirms first and shows the command.
+- **Terminal agents:** Claude Code, Codex, Grok, Hermes, Aider, Goose,
+  OpenCode, Droid, Pi and Cline, each with its installed version (or "not
+  installed") and its own launch command. `ollama launch <id>` is offered only
+  where the installed Ollama lists that agent. **Launch ▸** opens a Terminal in
+  the current project; the command is built by the server from the catalog,
+  never taken from the page.
+- **Local models:** Ollama (version, models, last measured tok/s),
+  llama-server's health, LM Studio.
+- **MCP servers**, per seat, with the same add flow as before. Claude and local
+  seats load no MCP servers (`--strict-mcp-config`); the page says so.
+
+Nothing on this page spends: it runs status commands and loopback reads only,
+and Launch or a toggle opens a visible Terminal that you drive.
 
 ---
 
@@ -441,16 +717,39 @@ dark-mode launch never flashes white before the page paints.
 
 ## Keyboard shortcuts
 
-In the console (browser or desktop):
+In the console (browser or desktop). ⌘/ shows this list in the app, read from
+the same catalog the handlers use.
 
 | Keys | Action |
 |---|---|
-| ⌘1 – ⌘5 | Switch section (Chat, Autonomy, Approvals, Usage, Settings) |
-| ⌘K | Quick switcher (sessions and seats) |
+| ⌘1 – ⌘5 | Command, Fleet, Growth, Mind, Chat |
+| ⌘K | Command palette |
+| ⌘J | Needs you |
 | ⌘N | New chat |
-| Enter | Send |
-| Shift+Enter | Newline |
-| Esc | Stop dictation |
+| ⌘, / ⌘/ | Settings / keyboard shortcuts |
+| ⌘[ / ⌘] | Back / forward through surfaces and chats |
+| ⌃⇥ / ⌃⇧⇥ | Next / previous recent chat |
+| ⌘⇧\ | Show or hide rail labels |
+
+In Chat:
+
+| Keys | Action |
+|---|---|
+| ⌘\ | Show or hide the dock |
+| ⌃` / ⌃⇧` | Terminal / new terminal tab |
+| ⌘⇧B / ⌘⇧D | Preview / Review changes |
+| ⌘B / ⌘F | Chat list / find in chat |
+| ⌥↑ / ⌥↓ | Previous / next turn |
+| ⌘⇧M / ⌘⇧I / ⌘⇧E | Permission mode / model / effort |
+| ⌘U | Attach files |
+| ↩ | Send (queues while a turn runs, up to 3) |
+| ⇧↩ | Newline |
+| ⌘⇧↩ | Stop the running turn and send |
+| Esc | Stop the running turn (only from an empty composer with no overlay open) |
+
+In the Needs-you drawer: `J`/`K` move, ↩ opens, `A` approve, `R` reject,
+`V` veto, `E` done, `H`/`L` switch splits. On a focused chart card: `T` shows it
+as a table.
 
 Desktop app only, from the macOS menu bar:
 
@@ -464,7 +763,8 @@ Desktop app only, from the macOS menu bar:
 | ⌘M / ⌘W / ⌘H / ⌘Q | Minimize / Close window / Hide / Quit |
 
 ⌘1–⌘5, ⌘K and ⌘N are deliberately **not** bound in the native menu so they reach
-the page.
+the page. ⌃⌥Space is a system-wide hotkey the desktop app registers (off by
+default; Settings ▸ Desktop): it brings Verse forward and focuses the composer.
 
 ---
 
@@ -504,8 +804,18 @@ triggers a handler that does the same, and if the app is SIGKILLed or crashes,
 the **next launch** kills the sidecar it left behind before probing the port.
 After quitting, `pgrep -fl "Contents/MacOS/ashlr verse"` should print nothing.
 
-The menu-bar item has **Show** and **Quit** only. Daemon controls and the
-emergency stop live in the Autonomy section, behind a confirm step, on purpose.
+The menu-bar item lists the running chats (its title shows "● N" while any
+run), **Needs you…**, **New chat**, **Stop running chats…** (native confirm,
+then each chat is cancelled), **Show** and **Quit**. The tray may stop chats; it
+never starts, stops or steers the fleet. Fleet Stop lives on Command, behind a
+confirm step, on purpose.
+
+While the window is unfocused, the app raises banners for finished and failed
+chats, new Needs-you items and seat-health changes (notifications are on by
+default; Settings ▸ Desktop). The Dock badge counts Needs-you items. Unsigned
+builds deliver banners through `osascript`, so they appear as Script Editor. The
+tray and the Dock badge are the reliable signals there. Details:
+[`desktop/README.md`](../desktop/README.md).
 
 ### Install it on this Mac
 
@@ -687,8 +997,14 @@ launches the staged sidecar, so run steps 1–2 first.
   Switching either starts a new chat; **Continue in a fresh chat** carries a
   deterministic handoff note across. Beyond that note and the shared project
   memory, a session knows only what its own vendor conversation holds.
-- Permission mode is fixed at `acceptEdits` / `workspace-write`. Verse does not
-  surface per-tool approval prompts; use the CLI directly for stricter modes.
+- Permission modes are Plan, Accept edits (default), Auto and Bypass. Verse does
+  not surface per-tool approval prompts yet ("Ask" mode arrives in 3.11); use
+  the CLI directly when you want to approve each tool call.
+- The Terminal pane needs the desktop app (Bun's pseudo-terminal). A browser
+  tab against `ashlr verse` under Node gets **Open in Terminal.app** instead.
+- Preview frames loopback dev servers only. Anything else opens in your
+  browser. Side chats, split sessions, hunk staging and multi-seat compare are
+  deferred to 3.11.
 - No virtualized transcript. Very long sessions render every event — continue in
   a fresh chat when the handoff banner appears anyway.
 - Verse never compacts, summarizes or switches context mode on its own. The
@@ -709,12 +1025,19 @@ launches the staged sidecar, so run steps 1–2 first.
   system dictation in the desktop app.
 
 **Autonomy**
+- Autonomy is dormant until `ashlr authority setup` has installed the custody
+  helper, compiled your key into the trust roots and signed a grant. Without a
+  grant, the switch cannot go above what the config-level daemon allows, and
+  nothing merges.
+- Claude as a fleet **producer** waits for a credential proxy (3.11). In 3.10
+  Claude only judges and runs the Leader, with no tools.
 - Caps bound spend per day, not per task. A single expensive dispatch can still
   consume a large share of the day's budget before the meter catches up.
 - Spend figures are the hub's own accounting, not the vendor's billing. Treat
   them as close, not authoritative.
-- Goals and the backlog are read-only in V2 — create and edit them through the
-  CLI.
+- Goals and the backlog are read-only in the Advanced panels — create and edit
+  them through the CLI, or let the Leader focus them (every change is in the
+  action log and can be vetoed).
 - The emergency stop is global and fail-closed. If the sentinel cannot be read,
   the hub behaves as though it is armed. That is deliberate, and it means a
   broken `~/.ashlr` looks like a stopped fleet.

@@ -7,8 +7,9 @@
  *  - North-star = receipt-qualified retained product/user value, reusable IP,
  *    information gain, and value per expiring token/time window. Engineering
  *    throughput and hours saved remain diagnostics, never the objective.
- *  - ELON-MODE system prompt: maximally bold, contrarian, first-principles.
- *    10x bets > 10% tweaks. Identifies THE single bottleneck + the ONE
+ *  - Visionary persona system prompt: maximally bold, contrarian, first-principles.
+ *    10x bets > 10% tweaks. (V3.10: the persona names no real person; the
+ *    Leader — vision/leader.ts — extends it.) Identifies THE single bottleneck + the ONE
  *    highest-leverage move. Ruthless kill-list. Aggressive + fast correction.
  *  - Rich context wiring: imports gatherStrategicContext from context.js
  *    (best-effort, tolerates absence) to feed repo health / recent commits /
@@ -44,7 +45,8 @@ import { createHash } from 'node:crypto';
 import { basename, isAbsolute, join } from 'node:path';
 import { existsSync, lstatSync, mkdirSync, opendirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AshlrConfig, Goal } from '../types.js';
-import { DEFAULT_LOCAL_MODEL_TAG, defaultStrategistModel } from '../run/model-catalog.js';
+import { defaultStrategistModel } from '../run/model-catalog.js';
+import { resolveLocalLeaderModel } from './leader-seat.js';
 import { loadSpec, applyEvolution } from './spec.js';
 import type { EndStateSpec, ToolRoadmapEntry } from './spec.js';
 import { addDelta, curate, renderPlaybook } from './playbook.js';
@@ -430,7 +432,7 @@ async function ollamaDirectComplete(
 const STRATEGIST_RETRY_SUFFIX = `\n\nYour previous response could not be parsed as JSON. Respond with ONLY the JSON object matching the schema above and nothing else — no prose, no markdown.`;
 
 /**
- * M162/M179: ELON-MODE ECOSYSTEM MANAGER system prompt.
+ * M162/M179: Visionary ECOSYSTEM MANAGER system prompt.
  *
  * M179 upgrades: the strategist is no longer just a fleet-metrics analyst —
  * it is the ECOSYSTEM MANAGER responsible for the whole ashlr ecosystem:
@@ -1190,13 +1192,13 @@ export async function runStrategist(
     // ── Resolve frontier client ─────────────────────────────────────────────
     // M162: strategistModel from cfg.foundry.strategistModel → elite Opus 4.8.
     // M135: Claude CLI FIRST when managerJudgeEngine='auto'/'claude' + claude allowed+installed.
-    const foundryRaw = cfg.foundry as Record<string, unknown> | undefined;
-    // localFallbackModel: used only when Claude CLI is unavailable. Follows
-    // DEFAULT_LOCAL_MODEL_TAG for the same reason the manager's local judge
-    // does — it is one Ollama runtime, and a fallback pinned to a tag the
-    // machine no longer has is not a fallback. Strategy work also benefits
-    // most from the first local entry that is a thinking model.
-    const localFallbackModel = (foundryRaw?.['managerJudgeModel'] as string | undefined) || DEFAULT_LOCAL_MODEL_TAG;
+    // localFallbackModel: used only when Claude CLI is unavailable. It is an
+    // OLLAMA TAG (cfg.foundry.leader.localModel, else DEFAULT_LOCAL_MODEL_TAG)
+    // and never `managerJudgeModel`: that key names the manager judge's model
+    // on ITS engine (`gpt-5.5` on codex here), so the old fallback asked
+    // Ollama for a model it does not have and every nightly briefing since
+    // June came back as the unwritten fallback (V3.10 B-U8).
+    const localFallbackModel = resolveLocalLeaderModel(cfg);
     const visionModel = localFallbackModel; // kept for getActiveClient fallback path
     const ollamaBase = (cfg.models as Record<string, unknown> | undefined)?.['ollama'] as string | undefined;
     const ollamaBaseUrl = (ollamaBase ?? 'http://localhost:11434').replace(/\/+$/, '') + '/v1';
@@ -1211,12 +1213,16 @@ export async function runStrategist(
     }
 
     // Step 2: if resolved to local (not claude), try getActiveClient — handles test mocks
-    // (m121 mocks getActiveClient to return a deterministic client) and cloud API keys.
+    // (m121 mocks getActiveClient to return a deterministic client) and the
+    // local-first provider chain. allowCloud is FALSE (V3.10 B-U8): with it
+    // on, any cloud API key in the environment could be billed by an
+    // unattended nightly strategist run. Paid seats are reached only through
+    // the Leader's seat router, inside Mason's reserve.
     const resolvedIsClaude = strategistJudgeEngine.startsWith('claude') || strategistJudgeEngine.includes('claude');
     if (!resolvedIsClaude) {
       try {
         const { getActiveClient } = await import('../run/provider-client.js');
-        const raw = await getActiveClient(cfg, { allowCloud: true, model: visionModel }) as MinimalClient;
+        const raw = await getActiveClient(cfg, { allowCloud: false, model: visionModel }) as MinimalClient;
         const wrapped = wrapClient(raw);
         if (wrapped) {
           complete = wrapped;

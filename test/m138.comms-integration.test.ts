@@ -23,9 +23,11 @@
  *   5. elon-vision handler never throws even when adoptBriefing rejects
  *   6. comms digest sends an SMS-sized scrubbed report
  *   7. comms digest report text contains key fleet metrics
- *   8. comms ask-vision posts a 3-option question and runs the cycle
- *   9. comms ask-vision uses loadLatestBriefing when available (no runStrategist call)
- *  10. comms ask-vision falls back to runStrategist when no cached briefing
+ *   8. comms ask-vision runs the Leader tick path and posts the latest Leader
+ *      memo as a 3-option question (V3.10 — the kind stays 'elon-vision', a
+ *      persisted wire value; the text names no real person)
+ *   9. comms ask-vision never reaches the legacy runStrategist / briefing path
+ *  10. no Leader memo yet ⇒ nothing posted, exit 1; a memo is posted once
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -44,7 +46,11 @@ const {
   mockBuildOversightSnapshot,
   mockRunCommsCycle,
   mockLoadConfig,
+  mockLeaderTick,
+  mockBuildLeaderState,
 } = vi.hoisted(() => ({
+  mockLeaderTick: vi.fn(),
+  mockBuildLeaderState: vi.fn(),
   mockSendIMessage: vi.fn().mockResolvedValue({ ok: true }),
   mockAdoptBriefing: vi.fn().mockResolvedValue({ specId: 'ecosystem', goalIds: ['g1', 'g2'] }),
   mockLoadLatestBriefing: vi.fn(),
@@ -109,6 +115,15 @@ vi.mock('../src/core/vision/strategist.js', () => ({
   loadLatestBriefing: mockLoadLatestBriefing,
   adoptBriefing: mockAdoptBriefing,
   runStrategist: mockRunStrategist,
+}));
+
+// ---------------------------------------------------------------------------
+// Mock: the Leader (V3.10) — ask-vision runs `ashlr leader tick`'s path
+// ---------------------------------------------------------------------------
+vi.mock('../src/core/vision/leader.js', () => ({
+  loadDefaultLeaderRunDeps: vi.fn(async () => ({ fake: 'deps' })),
+  leaderTick: mockLeaderTick,
+  buildLeaderState: mockBuildLeaderState,
 }));
 
 // ---------------------------------------------------------------------------
@@ -407,52 +422,67 @@ describe('comms digest', () => {
 // ===========================================================================
 
 describe('comms ask-vision', () => {
-  it('posts a 3-option elon-vision question and runs the cycle', async () => {
-    const briefing = makeBriefing();
-    mockLoadLatestBriefing.mockReturnValue(briefing);
+  const MEMO_ID = 'lm-20260924063000-abcdef';
+  function leaderMemo(overrides: Record<string, unknown> = {}) {
+    return {
+      id: MEMO_ID, at: '2026-09-24T06:30:00.000Z', status: 'ok', dryRun: false,
+      bottleneck: { statement: 'Too many open goals', metric: 'active-goals', evidence: [] },
+      move: { statement: 'Prune to four goals', why: 'focus', expectedDelta: null },
+      killList: [], questionsForMason: ['Should ashlr-cortex get a verify command?'],
+      actions: [{ status: 'applied' }, { status: 'refused' }],
+      ...overrides,
+    };
+  }
+
+  beforeEach(() => {
+    mockLeaderTick.mockResolvedValue({ applied: [], graded: [], due: { due: false }, started: false, run: null });
+    mockBuildLeaderState.mockReturnValue({ latest: leaderMemo() });
+  });
+
+  it('runs the Leader tick and posts the latest memo as a 3-option question', async () => {
     mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
 
     const exitCode = await cmdComms(['ask-vision']);
     expect(exitCode).toBe(0);
+    expect(mockLeaderTick).toHaveBeenCalledWith({ fake: 'deps' }, { awaitRun: true });
     expect(mockRunCommsCycle).toHaveBeenCalledOnce();
 
     const all = listRequests({ kind: 'elon-vision' });
-    expect(all.length).toBeGreaterThan(0);
     const r = all[all.length - 1]!;
     expect(r.type).toBe('question');
-    expect(r.options).toHaveLength(3);
-    expect(r.options[0]).toBe('Approve & create goals');
-    expect(r.options[1]).toBe('Hold');
-    expect(r.options[2]).toBe('Show full briefing');
+    expect(r.options).toEqual(['Keep it', 'Veto this memo', 'Show full memo']);
+    expect(r.meta).toEqual({ source: 'leader', memoId: MEMO_ID });
+    expect(r.text).toContain('Bottleneck: Too many open goals');
+    expect(r.text).toContain('Move: Prune to four goals');
+    expect(r.text).toContain('1 action(s) applied');
+    expect(r.text).toContain('Question: Should ashlr-cortex');
+    expect(r.text).not.toMatch(/elon|musk/i);
   });
 
-  it('uses loadLatestBriefing when available — does not call runStrategist', async () => {
-    mockLoadLatestBriefing.mockReturnValue(makeBriefing());
+  it('never reaches the legacy Strategist path', async () => {
     mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
-
     await cmdComms(['ask-vision']);
     expect(mockRunStrategist).not.toHaveBeenCalled();
+    expect(mockLoadLatestBriefing).not.toHaveBeenCalled();
   });
 
-  it('falls back to runStrategist when no cached briefing', async () => {
-    mockLoadLatestBriefing.mockReturnValue(null); // no cached briefing
-    const briefing = makeBriefing();
-    mockRunStrategist.mockResolvedValue(briefing);
+  it('no ok memo yet ⇒ nothing posted, exit 1; the same memo is posted only once', async () => {
+    mockBuildLeaderState.mockReturnValue({ latest: leaderMemo({ status: 'no-seat' }) });
+    expect(await cmdComms(['ask-vision'])).toBe(1);
+    expect(listRequests({ kind: 'elon-vision' })).toHaveLength(0);
+
+    mockBuildLeaderState.mockReturnValue({ latest: leaderMemo() });
     mockRunCommsCycle.mockResolvedValue({ sent: 1, resolved: 0 });
-
-    const exitCode = await cmdComms(['ask-vision']);
-    expect(exitCode).toBe(0);
-    expect(mockRunStrategist).toHaveBeenCalledOnce();
-
-    const all = listRequests({ kind: 'elon-vision' });
-    const r = all[all.length - 1]!;
-    expect(r.options).toHaveLength(3);
+    expect(await cmdComms(['ask-vision'])).toBe(0);
+    mockRunCommsCycle.mockResolvedValue({ sent: 0, resolved: 0 });
+    expect(await cmdComms(['ask-vision'])).toBe(0);
+    expect(listRequests({ kind: 'elon-vision' })).toHaveLength(1);
   });
 
   it('returns exit code 1 when comms is disabled', async () => {
     mockLoadConfig.mockResolvedValue(makeCfg({ comms: { enabled: false } }));
     const exitCode = await cmdComms(['ask-vision']);
     expect(exitCode).toBe(1);
-    expect(mockRunStrategist).not.toHaveBeenCalled();
+    expect(mockLeaderTick).not.toHaveBeenCalled();
   });
 });

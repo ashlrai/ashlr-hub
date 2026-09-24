@@ -550,6 +550,48 @@ export interface VerseSession {
    * writable directory because a preference moved underneath it.
    */
   memoryEnabled?: boolean;
+  /**
+   * V3.10 ADDITIVE (contract: unit C0; written by C3's engine). The operator's
+   * per-chat effort and permission choices, applied from the NEXT turn — a
+   * running turn keeps the argv it was launched with. Absent (every record
+   * before 3.10, and any key never set) = the engine default: permission mode
+   * `accept-edits`, effort = the CLI's own default.
+   *
+   * A MODEL change is deliberately NOT stored here: it rewrites `model` above,
+   * which every launch already reads — one field, one truth.
+   */
+  controls?: VerseSessionControls;
+}
+
+/**
+ * V3.10. Permission modes a chat can run in (SPEC-310C §0.6), in picker order.
+ *  - `plan`         — the CLI plans and edits nothing.
+ *  - `accept-edits` — the default: edits applied without asking.
+ *  - `auto`         — the CLI's own auto mode.
+ *  - `bypass`       — every check skipped. Shown red and confirmed PER CHAT:
+ *                     never a default, never inherited by a new chat.
+ * Adapters map these to each CLI's spelling (claude `acceptEdits` /
+ * `bypassPermissions`, grok `dontAsk`, …). An engine that cannot honour one
+ * reports it unavailable WITH a reason rather than approximating it. The
+ * in-page "Ask" mode (answering permission prompts in the UI) is 3.11.
+ */
+export const VERSE_PERMISSION_MODES = ['plan', 'accept-edits', 'auto', 'bypass'] as const;
+export type VersePermissionMode = (typeof VERSE_PERMISSION_MODES)[number];
+export const VERSE_DEFAULT_PERMISSION_MODE: VersePermissionMode = 'accept-edits';
+
+/**
+ * V3.10. Reasoning effort, the union across engines — claude `--effort`
+ * (low · medium · high · xhigh · max) and codex `model_reasoning_effort`
+ * (minimal · low · medium · high · xhigh). Each seat offers only the subset
+ * its CLI accepts; the rest come back unavailable with a reason.
+ */
+export const VERSE_EFFORTS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type VerseEffort = (typeof VERSE_EFFORTS)[number];
+
+/** V3.10. `VerseSession.controls` — absent key = engine default (see there). */
+export interface VerseSessionControls {
+  effort?: VerseEffort;
+  permissionMode?: VersePermissionMode;
 }
 
 /** Normalized event stream. `seq` is monotonic per session and is the SSE id. */

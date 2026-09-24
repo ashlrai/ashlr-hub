@@ -163,3 +163,49 @@ export function splitLines(text: string): string[] {
   if (lines[lines.length - 1] === '') lines.pop();
   return lines;
 }
+
+/**
+ * The part of a changed line that actually changed (3.10 Review pane, unit
+ * C5): when a deletion is paired with an addition, only the middle span that
+ * differs is emphasised, so a one-character fix in a 120-character line is
+ * visible at a glance instead of two solid bars of red and green.
+ *
+ * Common prefix + common suffix, measured on whole words where possible:
+ * O(n), no allocation beyond the result, and it never emphasises a span that
+ * is identical on both sides. A line pair that shares less than a quarter of
+ * its text is a rewrite, not an edit — `null`, and the caller shows the rows
+ * plainly rather than a confetti of highlights.
+ */
+export interface IntralineSpans {
+  /** [start, end) of the changed text in the old line. */
+  old: [number, number];
+  /** [start, end) of the changed text in the new line. */
+  new: [number, number];
+}
+
+const INTRALINE_MAX_CHARS = 2_000;
+const INTRALINE_MIN_SHARED = 0.25;
+
+export function intralineSpans(oldLine: string, newLine: string): IntralineSpans | null {
+  if (oldLine === newLine) return null;
+  if (oldLine.length > INTRALINE_MAX_CHARS || newLine.length > INTRALINE_MAX_CHARS) return null;
+  const limit = Math.min(oldLine.length, newLine.length);
+  let prefix = 0;
+  while (prefix < limit && oldLine.charCodeAt(prefix) === newLine.charCodeAt(prefix)) prefix++;
+  let suffix = 0;
+  while (
+    suffix < limit - prefix
+    && oldLine.charCodeAt(oldLine.length - 1 - suffix) === newLine.charCodeAt(newLine.length - 1 - suffix)
+  ) suffix++;
+  // Widen to word boundaries so `count` → `counts` highlights the word, not an `s`.
+  const isWord = (c: string | undefined) => c !== undefined && /[A-Za-z0-9_$]/.test(c);
+  while (prefix > 0 && isWord(oldLine[prefix - 1]) && (isWord(oldLine[prefix]) || isWord(newLine[prefix]))) prefix--;
+  while (suffix > 0 && isWord(oldLine[oldLine.length - suffix]) && (isWord(oldLine[oldLine.length - suffix - 1]) || isWord(newLine[newLine.length - suffix - 1]))) suffix--;
+  const shared = prefix + suffix;
+  const longest = Math.max(oldLine.length, newLine.length);
+  if (longest > 0 && shared / longest < INTRALINE_MIN_SHARED) return null;
+  return {
+    old: [prefix, oldLine.length - suffix],
+    new: [prefix, newLine.length - suffix],
+  };
+}

@@ -1,0 +1,428 @@
+/*
+ * dock/preview/PreviewPane.module.css — the Preview pane (unit C4).
+ * Tokens only (design/style-scan-310: no raw hex, no px font sizes). The
+ * chrome (tab strip, toolbar) matches the Terminal pane so the two read as
+ * one dock when split.
+ */
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+}
+
+/* ---- tab strip ------------------------------------------------------------ */
+
+.strip {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  min-height: var(--control-h-sm);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+  max-width: 220px;
+  border-right: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.tab[data-selected] {
+  color: var(--text-primary);
+  background: var(--bg-canvas);
+}
+.tab[data-selected]::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent-500);
+}
+
+.tabButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--space-1) 0 var(--space-3);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  cursor: pointer;
+}
+.tabButton > svg { flex: none; color: var(--text-tertiary); }
+.tabButton:hover { color: var(--text-primary); }
+.tabButton:focus-visible,
+.tabClose:focus-visible,
+.noticeClose:focus-visible,
+.external:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+}
+
+.tabTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  /* One step under the xs control: 20px comfortable, 16px compact. A literal
+     20px stayed comfortable when Density went compact and outgrew the
+     shrunken tab row (control-density.test.ts, DESIGN-V2 §2). */
+  width: calc(var(--control-h-xs) - var(--space-1));
+  height: calc(var(--control-h-xs) - var(--space-1));
+  margin-right: var(--space-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+.tab:hover .tabClose,
+.tab[data-selected] .tabClose,
+.tabClose:focus-visible { opacity: 1; }
+.tabClose:hover { background: var(--bg-hover); color: var(--text-primary); }
+@media (hover: none) {
+  .tabClose { opacity: 1; }
+}
+
+.newTab { align-self: center; margin: 0 var(--space-1); }
+
+/* ---- toolbar -------------------------------------------------------------- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-1) var(--space-2);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.addressForm {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.address {
+  width: 100%;
+  min-width: 0;
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.address::placeholder { color: var(--text-tertiary); }
+.address:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: var(--shadow-focus-ring);
+}
+.address[readonly] { color: var(--text-secondary); }
+
+.external {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: var(--density-row-sm);
+  height: var(--density-row-sm);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+}
+.external:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+/* ---- notices -------------------------------------------------------------- */
+
+.addressNote,
+.notice,
+.waiting {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.addressNote { background: var(--status-info-bg); color: var(--status-info-fg); }
+.notice { background: var(--status-danger-bg); color: var(--status-danger-fg); }
+.waiting { background: var(--status-running-bg); color: var(--status-running-fg); }
+.addressNote > span,
+.notice > span { flex: 1; min-width: 0; }
+.addressNote a { color: inherit; font-weight: var(--font-weight-semibold); }
+.addressNote code,
+.waiting code {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+}
+
+.waitingText {
+  flex: 1;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The 1.6 s running pulse (DESIGN §13.5); stops under reduced motion. */
+.pulse {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  background: var(--status-running-solid);
+  animation: pulse var(--duration-pulse) ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.noticeClose {
+  display: inline-flex;
+  flex: none;
+  padding: var(--space-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* ---- body ----------------------------------------------------------------- */
+
+.body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--card-pad);
+}
+
+.stage {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.stage[data-device='phone'] {
+  align-items: center;
+  padding: var(--space-3) 0;
+}
+
+.frame {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: var(--bg-surface);
+}
+.stage[data-device='phone'] .frame {
+  flex: 1 1 auto;
+  width: 375px;
+  max-width: 100%;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-md);
+}
+
+.frameHint {
+  flex: none;
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-tertiary);
+}
+.stage[data-device='phone'] .frameHint { align-self: stretch; margin-top: var(--space-3); }
+.frameHint a { color: var(--text-link); }
+
+.imageStage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--card-pad);
+  background:
+    repeating-conic-gradient(var(--bg-hover) 0 25%, transparent 0 50%) 0 0 / 16px 16px,
+    var(--bg-surface);
+}
+.image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.markdown {
+  padding: var(--card-pad) var(--space-6);
+  max-width: var(--measure-read);
+  background: var(--bg-canvas);
+}
+
+/* ---- launcher ------------------------------------------------------------- */
+
+.launcher {
+  display: flex;
+  flex-direction: column;
+  padding-bottom: var(--space-6);
+}
+
+.section { padding: var(--space-4) var(--card-pad) 0; }
+.section + .section {
+  margin-top: var(--space-4);
+  border-top: 1px solid var(--border-subtle);
+}
+
+.sectionTitle {
+  margin: 0 0 var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.muted {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-tertiary);
+}
+.muted code { font-family: var(--font-mono); font-size: var(--text-xs-size); }
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--density-row);
+  padding: var(--space-2) 0;
+}
+.row + .row { border-top: 1px solid var(--border-subtle); }
+
+.dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--text-tertiary);
+  border-radius: var(--radius-full);
+}
+.dot[data-running] {
+  border-color: var(--status-success-solid);
+  background: var(--status-success-solid);
+}
+
+.fileIcon { flex: none; color: var(--text-tertiary); }
+
+.rowMain {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.rowTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+}
+
+.rowMeta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+/* What Start will type (a launch.json row's label is only its name). */
+.rowCommand {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+/* ---- compact (375) -------------------------------------------------------- */
+
+.pane[data-compact] .toolbar { flex-wrap: wrap; }
+.pane[data-compact] .addressForm { order: 3; flex-basis: 100%; }
+.pane[data-compact] .section { padding-left: var(--space-3); padding-right: var(--space-3); }
+.pane[data-compact] .markdown { padding: var(--space-3); }
+.pane[data-compact] .tab { max-width: 150px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pulse { animation: none; }
+  .tabClose { transition: none; }
+}

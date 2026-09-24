@@ -51,6 +51,7 @@ import { canonicalModelId } from '../context-math.js';
 import type { VerseSession, VerseTurnLaunch } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter } from './index.js';
+import { grokEffortArgs, grokPermissionArgs } from '../session-controls.js';
 import {
   chooseNativeSession,
   createAnthropicStreamParser,
@@ -95,7 +96,11 @@ function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatL
     // the file left untouched. Grok reaches for a terminal command on most
     // tasks (it shells out to find files), so this failed nearly always.
     // 'dontAsk' and 'auto' both complete; 'dontAsk' is the narrower of the two.
-    '--permission-mode', 'dontAsk',
+    // V3.10: the per-chat permission mode (session-controls.ts) — "Accept
+    // edits", the default, still maps to 'dontAsk' for exactly this reason.
+    ...grokPermissionArgs(session),
+    // V3.10 per-chat effort; nothing by default.
+    ...grokEffortArgs(session),
     // NO MULTI-ROOT FLAG IS EMITTED HERE, deliberately. A workspace session on
     // a Grok seat gets its primary root and nothing else.
     //

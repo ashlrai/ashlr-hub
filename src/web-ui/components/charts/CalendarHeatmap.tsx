@@ -3,8 +3,9 @@
  * weekdays grid (activity by day across months). Sequential: ONE hue, four
  * steps light → dark mixed from the theme's own tokens, with a Less → More
  * key. A TRUE ZERO is the faint step-0 cell; UNKNOWN (null, or a day missing
- * from the data) is an outlined empty cell with its own "no data" key entry —
- * the two are never the same colour.
+ * from the data) is the 45° unknown hatch with an outline (V3.10) and its own
+ * "no data" key entry — the two are never the same colour, and texture keeps
+ * them apart under colour-blindness too.
  *
  * Width: the cell size adapts (8–16 px). When even 8 px cells cannot fit the
  * whole span at 375 px, the grid shows the most recent weeks that fit and says
@@ -14,9 +15,9 @@
  * are weekdays), Home/End jump to the ends; the focused day is announced.
  */
 import { useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
-import { heatColor } from './colors.js';
+import { hatchPatternId, heatColor } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
-import { ChartTooltip, clampTooltipLeft } from './ChartParts.js';
+import { ChartTooltip, HatchPattern, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
 import { calendarGrid, heatBucket, type CalendarCell } from './chart-math.js';
 import { formatCompact, formatDayLabel } from './format.js';
@@ -67,6 +68,7 @@ export function CalendarHeatmap({
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
   const liveId = useId();
+  const hatchId = hatchPatternId(useId());
   const grid = useMemo(() => calendarGrid(days, weekStart), [days, weekStart]);
   const [focus, setFocus] = useState<number | null>(null);
 
@@ -132,7 +134,7 @@ export function CalendarHeatmap({
       ))}
       <span className={plot.legendItem}>More</span>
       <span className={plot.legendItem}>
-        <span className={plot.swatchEmpty} />
+        <span className={plot.swatchHatch} />
         no data
       </span>
     </div>
@@ -166,6 +168,9 @@ export function CalendarHeatmap({
         onKeyDown={onKey}
       >
         <svg className={plot.svg} width={svgW} height={svgH} viewBox={`0 0 ${svgW} ${svgH}`} role="img" aria-label={summary}>
+          <defs>
+            <HatchPattern id={hatchId} />
+          </defs>
           {monthLabels.map((m) => (
             <text key={`${m.week}${m.label}`} className={plot.tick} x={DAY_LABEL_W + (m.week - firstWeek) * (cell + GAP)} y={11}>
               {m.label}
@@ -190,8 +195,8 @@ export function CalendarHeatmap({
                 width={cell}
                 height={cell}
                 rx={2}
-                className={bucket === null ? plot.noData : undefined}
-                fill={bucket === null ? 'none' : heatColor(bucket)}
+                className={bucket === null ? plot.unknownMark : undefined}
+                fill={bucket === null ? `url(#${hatchId})` : heatColor(bucket)}
                 style={isFocus ? { stroke: 'var(--border-focus)', strokeWidth: 2, strokeDasharray: 'none' } : undefined}
                 onPointerEnter={() => setFocus(inside.indexOf(c))}
                 onPointerLeave={() => setFocus(null)}

@@ -50,6 +50,14 @@ vi.mock('../src/core/run/provider-client.js', () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// Mock: the Leader CLI — `vision review` delegates to it (V3.10); mocked so
+// this suite never resolves a Leader seat.
+// ---------------------------------------------------------------------------
+
+const leaderCli = vi.hoisted(() => vi.fn(async (_argv: string[]) => 0));
+vi.mock('../src/cli/leader.js', () => ({ runLeaderCli: leaderCli }));
+
+// ---------------------------------------------------------------------------
 // Mock: createGoal — track calls
 // ---------------------------------------------------------------------------
 
@@ -613,11 +621,14 @@ describe('M121 — cmdVision CLI', () => {
     expect(await cmdVision(['approve'])).toBe(1);
   });
 
-  it('review runs runStrategist and returns 0', async () => {
-    mockComplete.mockResolvedValueOnce(makeMockBriefingJson());
+  it('review delegates to the budget-gated Leader tick (never runStrategist) and returns 0', async () => {
+    // V3.10: `vision review` = `ashlr leader tick --wait`; the Strategist's
+    // Claude-first client is no longer reachable from it.
     const { cmdVision } = await import('../src/cli/vision.js');
     const code = await cmdVision(['review']);
     expect(code).toBe(0);
+    expect(leaderCli).toHaveBeenCalledWith(['tick', '--wait']);
+    expect(mockComplete).not.toHaveBeenCalled();
   });
 
   it('unknown subcommand returns 2', async () => {

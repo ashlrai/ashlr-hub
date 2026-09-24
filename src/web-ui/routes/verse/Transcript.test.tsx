@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { VerseEvent } from '../../data/api-types.js';
 import { ev, session } from './fixtures.test-support.js';
@@ -12,10 +12,10 @@ import { applyVerseEvent, applyVerseEvents, buildTranscript, resetVerseStore, se
 const NO_LIVE: VerseLiveState = { turnId: null, startedAt: null, progress: null, thinking: null, notice: null, settledTurnId: null };
 
 /** The transcript wired to the store the way Workspace wires it (useVerseTranscript + useVerseLive). */
-function LiveHarness({ sessionId, onStop }: { sessionId: string; onStop?: () => void }) {
+function LiveHarness({ sessionId }: { sessionId: string }) {
   const transcript = useVerseTranscript(sessionId);
   const live = useVerseLive(sessionId);
-  return <Transcript transcript={transcript} live={live} loaded loadError={null} onStop={onStop} />;
+  return <Transcript transcript={transcript} live={live} loaded loadError={null} />;
 }
 
 function transient(seq: number, e: Record<string, unknown>): VerseEvent {
@@ -49,7 +49,8 @@ describe('Transcript', () => {
     expect(screen.getByText(/Turn ended without a result/)).toBeInTheDocument();
   });
 
-  it('folds a burst of tool calls into one disclosure that expands to the individual cards', () => {
+  it('folds a burst of tool calls into one activity row that opens on its failure (3.10)', async () => {
+    const user = userEvent.setup();
     const transcript = buildTranscript([
       ev(1, 'user-message', { turnId: 't1', text: 'refactor' }),
       ev(2, 'tool-use', { turnId: 't1', toolUseId: 'a', name: 'Read', input: { file_path: '/a.ts' } }),
@@ -63,17 +64,22 @@ describe('Transcript', () => {
     render(<Transcript transcript={transcript} loaded loadError={null} />);
     const log = screen.getByRole('log');
     expect(log.querySelectorAll('[data-kind="tool"]')).toHaveLength(0);
-    const group = log.querySelector('[data-kind="tool-group"] details') as HTMLDetailsElement;
-    expect(group.open).toBe(false);
-    const summary = group.querySelector('summary')!;
-    // DESIGN §5 wording: `3 tools · Read ×2, Edit · 1 failed` — the count is a
-    // noun, not a sentence, so the row stays one dense line.
-    expect(summary).toHaveTextContent('3 tools');
-    expect(summary).toHaveTextContent('Read ×2, Edit');
-    expect(summary).toHaveTextContent('1 failed');
-    // Every card is still there inside the group.
-    expect(group.querySelectorAll('details details')).toHaveLength(3);
+    const group = log.querySelector('[data-kind="tool-group"]') as HTMLElement;
+    // Actions, not tool names: "Read 2 files, edited 1; 1 failed".
+    const line = within(group).getByRole('button', { name: /^Read 2 files, edited 1; 1 failed/ });
+    // A failure opens the row on its FOCUS view: the failed call only…
+    expect(line).toHaveAttribute('aria-expanded', 'true');
+    expect(group.querySelectorAll('details[data-action]')).toHaveLength(1);
+    expect(document.getElementById('verse-tool-c')).not.toBeNull();
+    expect(document.getElementById('verse-tool-a')).toBeNull();
+    // …and "Show 2 more" for the rest.
+    await user.click(within(group).getByRole('button', { name: 'Show 2 more' }));
+    expect(group.querySelectorAll('details[data-action]')).toHaveLength(3);
     expect(within(group).getByText('/a.ts')).toBeInTheDocument();
+    // The line folds it all away again.
+    await user.click(line);
+    expect(line).toHaveAttribute('aria-expanded', 'false');
+    expect(group.querySelectorAll('details[data-action]')).toHaveLength(0);
   });
 });
 
@@ -101,13 +107,13 @@ describe('Transcript — agentic reading', () => {
     expect(row).toHaveTextContent('+1');
     expect(row).toHaveTextContent('−1');
 
-    // The edit card is inside a collapsed tool-run disclosure; the jump opens
-    // the whole chain rather than scrolling to something invisible.
-    const card = document.getElementById('verse-tool-e1') as HTMLDetailsElement;
-    expect(card.open).toBe(false);
+    // The edit card sits in a folded activity row that renders no members
+    // (3.10); the jump asks the row to open, then reveals the card.
+    expect(document.getElementById('verse-tool-e1')).toBeNull();
     await user.click(row);
-    expect(card.open).toBe(true);
-    expect((card.closest('details[data-state-key^="toolgroup:"]') as HTMLDetailsElement).open).toBe(true);
+    await waitFor(() => expect((document.getElementById('verse-tool-e1') as HTMLDetailsElement | null)?.open).toBe(true));
+    const group = document.querySelector('[data-state-key^="activity:"]') as HTMLElement;
+    expect(within(group).getAllByRole('button')[0]).toHaveAttribute('aria-expanded', 'true');
   });
 
   it('renders an edit as a diff rather than as raw JSON', async () => {
@@ -290,41 +296,14 @@ describe('Transcript — V3.10 live turn', () => {
     ]);
   }
 
-  it('replaces the bare caret with a live line — phase, elapsed, and the command a pending tool runs — and a Stop', async () => {
-    const user = userEvent.setup();
-    const onStop = vi.fn();
-    startTurn();
-    render(<LiveHarness sessionId="vs_1" onStop={onStop} />);
-    const line = screen.getByRole('listitem', { name: 'The agent is working' });
-    expect(line).toHaveTextContent(/Waiting·1[45]s/);
-
-    act(() => { applyVerseEvent('vs_1', ev(3, 'tool-use', { turnId: 't1', toolUseId: 'b', name: 'Bash', input: { command: 'npm test' } })); });
-    expect(line).toHaveTextContent('Running');
-    expect(line).toHaveTextContent('npm test');
-    expect(within(line).getByRole('status')).toHaveTextContent('Running: npm test');
-
-    await user.click(within(line).getByRole('button', { name: 'Stop this turn' }));
-    expect(onStop).toHaveBeenCalledTimes(1);
-  });
-
-  it('shows the server\'s progress figures and a retry notice, and drops the line when the turn ends', () => {
+  it('keeps the live status line OUT of the log (3.10: it sits above the composer)', () => {
     startTurn();
     render(<LiveHarness sessionId="vs_1" />);
-    act(() => {
-      applyVerseEvents('vs_1', [
-        ev(3, 'text-delta', { turnId: 't1', text: 'Tests ' }),
-        transient(3, { type: 'progress', turnId: 't1', phase: 'writing', elapsedMs: 63_000, tokPerSec: 38.4 }),
-        transient(3, { type: 'status', turnId: 't1', kind: 'retry', message: 'The API is overloaded — retrying (2 of 10).' }),
-      ]);
-    });
-    const line = screen.getByRole('listitem', { name: 'The agent is working' });
-    expect(line).toHaveTextContent('Writing');
-    expect(line).toHaveTextContent('1m 3s');
-    expect(line).toHaveTextContent('38 tok/s');
-    expect(line).toHaveTextContent('RetryingThe API is overloaded — retrying (2 of 10).');
-
-    act(() => { applyVerseEvent('vs_1', ev(4, 'turn-done', { turnId: 't1', ok: true, nativeSessionId: null, durationMs: 64_000 })); });
-    expect(screen.queryByRole('listitem', { name: 'The agent is working' })).not.toBeInTheDocument();
+    act(() => { applyVerseEvent('vs_1', ev(3, 'tool-use', { turnId: 't1', toolUseId: 'b', name: 'Bash', input: { command: 'npm test' } })); });
+    expect(screen.queryByRole('listitem', { name: 'The agent is working' })).toBeNull();
+    expect(screen.getByRole('log').querySelector('[data-kind="live-status"]')).toBeNull();
+    // The pending call counts up in its own row instead.
+    expect(document.getElementById('verse-tool-b')).toHaveTextContent(/running \d/);
   });
 
   it('streams reasoning in an open block that becomes the persisted "Thought …" block', () => {
@@ -341,14 +320,15 @@ describe('Transcript — V3.10 live turn', () => {
     expect(live.open).toBe(true);
     expect(live).toHaveTextContent('The pager looks off by one.');
     expect(live.querySelector('summary')).toHaveTextContent(/^Thinking · (<1|\d+)s · ~1\.8k tok$/);
-    expect(screen.getByRole('listitem', { name: 'The agent is working' })).toHaveTextContent('Thinking');
+    // 3.10: it streams in a three-line window…
+    expect(live.querySelector('[data-window]')).not.toBeNull();
 
     act(() => { applyVerseEvent('vs_1', { ...ev(3, 'thinking', { turnId: 't1', text: 'The pager looks off by one.' }), durationMs: 12_000 } as VerseEvent); });
     expect(document.querySelector('[data-kind="thinking-live"]')).toBeNull();
     const done = document.querySelector('[data-kind="thinking"] details') as HTMLDetailsElement;
     expect(done.querySelector('summary')).toHaveTextContent('Thought 12s · ~1.8k tok');
-    // Still open while its turn runs — it is what the operator was reading.
-    expect(done.open).toBe(true);
+    // …and folds once the block ends (Settings ▸ Chat: Collapsed, the default).
+    expect(done.open).toBe(false);
   });
 
   it('says so when the provider withheld the reasoning text', () => {
@@ -435,7 +415,7 @@ describe('Transcript — §1 target: ≤ 4 ms per streamed delta at 5k events', 
     const { events: open, turnId } = openLastTurn(realisticLog(5000));
     seedVerseSession('vs_perf', session({ id: 'vs_perf', status: 'running' }), open);
     const t0 = performance.now();
-    render(<LiveHarness sessionId="vs_perf" onStop={() => {}} />);
+    render(<LiveHarness sessionId="vs_perf" />);
     const mountMs = performance.now() - t0;
 
     let seq = open[open.length - 1]!.seq + 1;

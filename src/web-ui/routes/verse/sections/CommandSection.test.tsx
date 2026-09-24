@@ -1,0 +1,222 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { CommandSection } from './CommandSection.js';
+import { evictAll } from '../../../data/cache.js';
+import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
+import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
+import { authorityStatus } from '../command/fixtures.test-support.js';
+import { resetActivityForTest } from '../shell/useActivity.js';
+import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
+
+const TOKEN = 'a'.repeat(64);
+const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
+
+let vp: ViewportMock | null = null;
+
+beforeEach(() => {
+  evictAll();
+  resetActivityForTest();
+  clearMutationToken();
+  try {
+    window.localStorage.clear();
+  } catch {
+    /* ignore */
+  }
+  vp = mockWideViewport();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  clearMutationToken();
+  vp?.restore();
+  vp = null;
+});
+
+async function ready() {
+  await waitFor(() => expect(screen.getByTestId('verdict')).toHaveTextContent(/building|dark|Propose|unknown/));
+}
+
+describe('CommandSection — live fleet', () => {
+  it('answers the questions top to bottom: verdict, needs you, Leader, KPIs, seats, runs', async () => {
+    stubSurfaceFetch({ kind: 'live' });
+    render(<CommandSection />);
+    await ready();
+    expect(screen.getByRole('heading', { level: 2, name: 'Command' })).toBeInTheDocument();
+    expect(screen.getByTestId('verdict')).toHaveTextContent('Autonomous · 5 building · 7 merged today · 1 revert · Claude 40% reserved for you');
+    const needs = screen.getByRole('region', { name: 'Needs you (4)' });
+    expect(within(needs).getByText('measurably quarantined — post-merge suite failed, reverted')).toBeInTheDocument();
+    expect(within(needs).getByRole('link', { name: /Open/ })).toHaveAttribute('href', 'https://github.com/ashlrai/ashlrcode/pull/81');
+    const leader = screen.getByRole('region', { name: 'Leader' });
+    expect(within(leader).getByText(/Judge queue on grok-a/)).toBeInTheDocument();
+    expect(within(leader).getByText(/\+4 merges\/day by/)).toBeInTheDocument();
+    expect(within(leader).getByRole('timer', { name: /Applies in 1[78]m unless vetoed/ })).toBeInTheDocument();
+    expect(screen.getByRole('group', { name: 'Key numbers' })).toHaveTextContent('Merged · 7d23');
+    await waitFor(() => expect(screen.getByRole('group', { name: 'Capacity per seat' })).toBeInTheDocument());
+    expect(screen.getByRole('figure', { name: 'Last 12 hours' })).toBeInTheDocument();
+  });
+
+  it('lowers the switch instantly — no confirmation, no Touch ID (I1)', async () => {
+    setMutationToken(TOKEN);
+    const { posted } = stubSurfaceFetch({ kind: 'live', post: () => json(authorityStatus('live', Date.now(), { switch: 'off', effectiveSwitch: 'off' })) });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('radio', { name: 'Off' }));
+    await waitFor(() => expect(posted).toEqual([{ url: '/api/verse/authority', body: { action: 'switch', to: 'off' } }]));
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('lowers from the keyboard too (arrow keys on the switch)', async () => {
+    setMutationToken(TOKEN);
+    const { posted } = stubSurfaceFetch({ kind: 'live' });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    screen.getByRole('radio', { name: 'Autonomous' }).focus();
+    await user.keyboard('{ArrowLeft}');
+    await waitFor(() => expect(posted[0]?.body).toEqual({ action: 'switch', to: 'propose' }));
+  });
+
+  it('asks for confirmation before Stop, and sends nothing on Cancel', async () => {
+    setMutationToken(TOKEN);
+    const { posted } = stubSurfaceFetch({ kind: 'live' });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('button', { name: 'Stop' }));
+    const dialog = screen.getByRole('dialog', { name: 'Stop the fleet?' });
+    // Destructive confirm starts on Cancel: a stray Enter never stops the fleet.
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(posted).toEqual([]);
+    await user.click(screen.getByRole('button', { name: 'Stop' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Stop fleet' }));
+    await waitFor(() => expect(posted).toEqual([{ url: '/api/verse/authority', body: { action: 'stop' } }]));
+  });
+
+  it('asks for the mutation token when none is held, after the confirmation', async () => {
+    const { posted } = stubSurfaceFetch({ kind: 'live' });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('button', { name: 'Stop' }));
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Stop fleet' }));
+    expect(await screen.findByRole('dialog', { name: 'Unlock actions' })).toBeInTheDocument();
+    expect(posted).toEqual([]);
+  });
+
+  it('vetoes a Leader action after confirming', async () => {
+    setMutationToken(TOKEN);
+    const { posted } = stubSurfaceFetch({ kind: 'live' });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('button', { name: 'Veto: Raise Grok to 3 lanes' }));
+    expect(screen.getByRole('dialog', { name: 'Veto this action?' })).toHaveTextContent('“Raise Grok to 3 lanes” will not apply.');
+    await user.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Veto' }));
+    await waitFor(() => expect(posted).toEqual([{ url: '/api/verse/leader', body: { action: 'veto', actionId: 'a2' } }]));
+  });
+
+  it('runs a Needs-you item action through its confirmation', async () => {
+    setMutationToken(TOKEN);
+    const { posted } = stubSurfaceFetch({ kind: 'live' });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('button', { name: 'Resume repo' }));
+    await user.click(within(screen.getByRole('dialog', { name: 'Resume measurably now?' })).getByRole('button', { name: 'Resume' }));
+    await waitFor(() => expect(posted[0]).toEqual({ url: '/api/verse/fleet/live', body: { action: 'resume-repo', repo: 'ashlrai/measurably', kind: 'quarantine' } }));
+  });
+
+  it('opens the budget with the grant ceiling stated', async () => {
+    stubSurfaceFetch({ kind: 'live' });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('button', { name: /Budget/ }));
+    expect(screen.getByRole('dialog', { name: 'Budget' })).toHaveTextContent('Your grant allows up to Balanced.');
+  });
+});
+
+describe('CommandSection — raising past the grant', () => {
+  it('opens the Touch ID sheet with scope and expiry, signs the exact draft, then switches', async () => {
+    setMutationToken(TOKEN);
+    const now = Date.now();
+    const granted = authorityStatus('live', now, { switch: 'propose', effectiveSwitch: 'propose', maxSwitchWithoutGrant: 'autonomous' });
+    const { posted } = stubSurfaceFetch({
+      kind: 'sparse',
+      now,
+      post: (_url, body) => (body['action'] === 'grant' ? json(granted) : json(authorityStatus('live', now))),
+    });
+    const user = userEvent.setup();
+    render(<CommandSection />);
+    await ready();
+    await user.click(screen.getByRole('radio', { name: 'Autonomous (needs a new grant — Touch ID)' }));
+    const sheet = await screen.findByRole('dialog', { name: 'Approve a standing grant' });
+    // Nothing is sent before Mason approves.
+    expect(posted).toEqual([]);
+    await waitFor(() => expect(within(sheet).getByText(/30 days, until/)).toBeInTheDocument());
+    expect(within(sheet).getByRole('cell', { name: 'ashlrai/ashlrcode' })).toBeInTheDocument();
+    expect(within(sheet).getByText(/keeps 40% for you/)).toBeInTheDocument();
+    expect(within(sheet).getByText(/Rollout ladder \(4 stages/)).toBeInTheDocument();
+    await user.click(within(sheet).getByRole('button', { name: 'Approve with Touch ID' }));
+    await waitFor(() => expect(posted.map((p) => p.body['action'])).toEqual(['grant', 'switch']));
+    expect(posted[0]!.body['draftDigest']).toMatch(/^[0-9a-f]{64}$/);
+    expect(posted[1]!.body).toEqual({ action: 'switch', to: 'autonomous' });
+  });
+});
+
+describe('CommandSection — dark and not-landed states', () => {
+  it('designs the dark state everywhere instead of drawing empty axes', async () => {
+    stubSurfaceFetch({ kind: 'dark' });
+    render(<CommandSection />);
+    await waitFor(() => expect(screen.getByTestId('verdict')).toHaveTextContent('Off · fleet dark since Sep 1'));
+    expect(screen.getByText('Fleet dark since Sep 1')).toBeInTheDocument();
+    expect(screen.getByRole('region', { name: 'Leader' })).toHaveTextContent('No memo yet');
+    expect(screen.getByRole('button', { name: /Grant: No grant/ })).toBeInTheDocument();
+    expect(screen.getByText('All clear')).toBeInTheDocument();
+  });
+
+  it('treats a module that has not landed as one card\'s absence, never a false all-clear', async () => {
+    stubSurfaceFetch({ kind: 'live', routes: { '/api/verse/authority': null, '/api/verse/activity': null, '/api/verse/leader': null } });
+    render(<CommandSection />);
+    await waitFor(() => expect(screen.getByTestId('verdict')).toHaveTextContent('Autonomy unknown'));
+    expect(screen.getByRole('radio', { name: 'Off' })).toBeDisabled();
+    expect(screen.getByRole('region', { name: 'Needs you' })).toHaveTextContent('not in this build yet');
+    expect(screen.queryByText('All clear')).toBeNull();
+    expect(screen.getByRole('region', { name: 'Leader' })).toHaveTextContent('The Leader is not in this build yet');
+  });
+
+  it('refuses an all-clear when a producer is silent', async () => {
+    const quiet = { ...(await import('../command/fixtures.test-support.js')).activitySnapshot('dark') };
+    quiet.sources = { ...quiet.sources, fleet: 'unavailable' };
+    stubSurfaceFetch({ kind: 'dark', routes: { '/api/verse/activity': quiet } });
+    render(<CommandSection />);
+    await waitFor(() => expect(screen.getByRole('region', { name: 'Needs you (0)' })).toHaveTextContent('fleet is not answering — this is not an all-clear'));
+  });
+});
+
+describe('CommandSection — 375 px', () => {
+  it('shrinks the bar to [Autonomy][■], keeps Needs you first and shows 6 hours', async () => {
+    vp?.restore();
+    vp = mockCompactViewport({ dark: true });
+    stubSurfaceFetch({ kind: 'live' });
+    const { container } = render(<CommandSection />);
+    await ready();
+    const bar = screen.getByRole('toolbar', { name: 'Autonomy controls' });
+    expect(within(bar).getByRole('button', { name: 'Stop the fleet' })).toBeInTheDocument();
+    expect(within(bar).queryByRole('button', { name: /Budget/ })).toBeNull();
+    expect(within(bar).getByRole('radio', { name: 'Autonomous' })).toHaveTextContent('Auto');
+    // Budget and grant move under the bar.
+    expect(screen.getByRole('button', { name: /Budget/ })).toBeInTheDocument();
+    const regions = [...container.querySelectorAll('section[aria-labelledby]')].map((s) => s.textContent ?? '');
+    const needsIndex = regions.findIndex((t) => t.startsWith('Needs you'));
+    const leaderIndex = regions.findIndex((t) => t.startsWith('Leader'));
+    expect(needsIndex).toBeGreaterThan(-1);
+    expect(needsIndex).toBeLessThan(leaderIndex);
+    expect(screen.getByRole('figure', { name: 'Last 6 hours' })).toBeInTheDocument();
+    // Every grid cell is full width at compact.
+    for (const cell of container.querySelectorAll('[data-span]')) expect((cell as HTMLElement).style.gridColumn).toBe('span 12');
+  });
+});

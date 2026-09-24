@@ -17,43 +17,26 @@
  *  - A root with no repo says so, rather than leaving a gap that would read as
  *    "clean, on the default branch".
  *
- * The data is fetched per open rather than cached: a branch is stale the
- * moment a turn commits.
+ * The read itself lives in chat/use-session-roots.ts (3.10): shared by every
+ * consumer of a chat's roots, and refreshed each time a turn finishes,
+ * because a branch is stale the moment a turn commits.
  */
-import { useEffect, useState } from 'react';
 import type { VerseSession, VerseSessionRootsResponse } from '../../data/api-types.js';
 import { rootCaveat, rootGitLine, rootTone } from './workspace-model.js';
-import { fetchVerseSessionRoots } from './verse-queries.js';
 import styles from './SessionRoots.module.css';
 
 export interface SessionRootsProps {
   session: VerseSession | null;
-  /** Bumped by the caller after a turn finishes, so branches re-read. */
-  refreshKey?: number;
+  /**
+   * 3.10: the roots read, from the chat's shared `useSessionRoots` (one
+   * request feeds the header breadcrumb, the dock panes and this list). It is
+   * refreshed there whenever the chat's turnCount moves.
+   */
+  data: VerseSessionRootsResponse | null;
+  error?: string | null;
 }
 
-export function SessionRoots({ session, refreshKey = 0 }: SessionRootsProps) {
-  const [data, setData] = useState<VerseSessionRootsResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const sessionId = session?.id ?? null;
-
-  useEffect(() => {
-    if (!sessionId) {
-      setData(null);
-      return;
-    }
-    const controller = new AbortController();
-    setError(null);
-    fetchVerseSessionRoots(sessionId, controller.signal)
-      .then((next) => setData(next))
-      .catch((err: unknown) => {
-        if (controller.signal.aborted) return;
-        setData(null);
-        setError(err instanceof Error ? err.message : 'could not read this chat’s folders');
-      });
-    return () => controller.abort();
-  }, [sessionId, refreshKey]);
-
+export function SessionRoots({ session, data, error = null }: SessionRootsProps) {
   if (!session) return null;
 
   // A single-folder chat is the overwhelmingly common case and already says

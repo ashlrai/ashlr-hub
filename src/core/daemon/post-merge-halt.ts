@@ -72,6 +72,13 @@
  * `pauseDaemon()` (`~/.ashlr/daemon.paused`, see daemon/pause.ts), which stops
  * autonomous dispatch and nothing else, and which one click reverses.
  *
+ * ── UNDER A STANDING POLICY (V3.10) ────────────────────────────────────────
+ * The local-head gate stands down and fleet/post-merge-watch.ts takes over:
+ * per-landing CI + fresh-worktree suite, revert of the fleet's own commit,
+ * one-repo quarantine. See resolvePostMergeHaltMode for why, and
+ * recordFleetEscalationHalt for how the watch's fleet-wide stops still land
+ * in this module's halt record.
+ *
  * No new runtime deps; node builtins only. Never throws out of a public API.
  */
 
@@ -607,6 +614,82 @@ export function recordPostMergeHalt(
     // audit() swallows its own errors; this covers a thrown path resolution.
   }
   return path;
+}
+
+// ---------------------------------------------------------------------------
+// V3.10 Track B (U4): the halt under a standing policy
+// ---------------------------------------------------------------------------
+
+/**
+ * - `halt`  — this module's local-head gate: a red suite after any landing
+ *             parks the whole run (master's behaviour).
+ * - `watch` — a standing policy is live: the per-landing remote post-merge
+ *             watch (fleet/post-merge-watch.ts) replaces the gate.
+ * - `off`   — neither (the caller opted out, or an unbounded supervised run).
+ */
+export type PostMergeHaltMode = 'halt' | 'watch' | 'off';
+
+/**
+ * Which post-merge guard a daemon run uses (U5 calls this at the loop's
+ * `postMergeHaltEnabled` seam, loop.ts:8987).
+ *
+ * WHY the local-head gate must be OFF under a standing policy: autonomous
+ * enrollment is the fleet MIRRORS, which are reset to `origin/<base>` every
+ * tick — so their heads move whenever ANYONE pushes (Mason included), and the
+ * gate would re-run the suite on commits the fleet never made and park the
+ * entire fleet over a red push of Mason's. Under a standing policy every fleet
+ * landing is remote and recorded (LandingRecord), so the watch can judge each
+ * one by itself: attribute red to exactly that landing, revert only the
+ * fleet's own commit, and quarantine one repo instead of halting all nine.
+ * The fleet-wide stop still exists — the watch arms the global soft kill on
+ * its escalation rules and writes a halt record here (recordFleetEscalationHalt).
+ *
+ * Outside a standing policy the master behaviour is unchanged: an explicit
+ * `postMergeHalt` wins, otherwise the gate is on exactly for a bounded run.
+ */
+export function resolvePostMergeHaltMode(input: {
+  /** `opts.postMergeHalt` as the caller passed it. */
+  explicit: boolean | undefined;
+  /** A run window (`--until` / `--iterations`) is armed. */
+  runWindow: boolean;
+  /** `currentStandingPolicy() !== null` for this run. */
+  standing: boolean;
+}): PostMergeHaltMode {
+  if (input.standing) return 'watch';
+  const enabled = input.explicit ?? input.runWindow;
+  return enabled ? 'halt' : 'off';
+}
+
+/**
+ * Persist a fleet-wide escalation from the post-merge watch (global soft
+ * kill: a failed revert, 2 repos red in 6 h, 3 reverts in 24 h …) in the
+ * same halt directory, so `readPostMergeHalts` — the overnight / morning
+ * report — shows why the fleet stopped. The revert plan is empty on purpose:
+ * the watch already reverted what it could; what is left is Mason's call.
+ * Returns the record path, or null when it could not be written. Never throws.
+ */
+export function recordFleetEscalationHalt(
+  input: { reason: string; repos: readonly string[]; landingIds: readonly string[] },
+  opts: { now?: () => number } = {},
+): string | null {
+  const detail = `FLEET ESCALATION: ${input.reason}` +
+    (input.landingIds.length > 0 ? ` (landing ${input.landingIds.join(', ')})` : '');
+  const failures: PostMergeFailure[] = input.repos.map((repo) => ({
+    repo,
+    kind: 'test',
+    command: 'post-merge watch',
+    detail: input.reason,
+  }));
+  return recordPostMergeHalt({
+    verdict: 'regressed',
+    halt: true,
+    landings: [],
+    failures,
+    ranCommands: 0,
+    detail,
+    revertPlan: [],
+    durationMs: 0,
+  }, opts);
 }
 
 /** Read halt records back, newest first. Best-effort; never throws. */

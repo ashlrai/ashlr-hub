@@ -339,6 +339,150 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.10.0] — DRAFT, not released — autonomy with custody, and a workbench you can live in
+
+> **Draft.** This section describes the `v310-foundation` branch. `package.json` still says 3.9.1; nothing
+> here is published, and no step below has been run on this machine. Numbers are the builders' measurements
+> on this Mac and are re-checked before release.
+
+The fleet could propose but never finish: every change still waited on Mason, and the only way to let it merge
+was a signing key an agent could read. 3.10 lets it merge on its own — inside a scope Mason signs with Touch
+ID, on a budget that keeps his own usage his, with every merge remote, pinned, judged, watched and reversible.
+Verse becomes the place to run that company and to work alongside it.
+
+### Before you turn it on: the one-time `ashlr authority setup`
+
+Autonomy ships **dormant**. Nothing merges, and no standing grant exists, until Mason runs the guided setup once.
+`ashlr authority setup --dry-run` prints every step first; `setup` performs each one it can and **pauses only for
+the steps marked ✋ below**, which no agent may do. It prints exactly what it did, and can be re-run safely.
+
+1. ✋ **Install the custody helper:** `sudo scripts/install-custody.sh` (root-owned, in `/usr/local/libexec/`).
+2. ✋ **Create the Secure Enclave key** (Touch ID). The private key never leaves this Mac's Secure Enclave.
+3. ✋ **Compile the public key in.** Setup opens a PR adding it to `src/core/authority/trust-roots.ts`. Mason merges
+   it, then `npm run build`, installs the release as usual, and kickstarts the daemon.
+4. ✋ **Create the `ashlr-fleet` GitHub App** (one browser page) and **install it** on the enrolled repos (one more
+   click). Its private key goes straight into the custody Keychain item; the PEM never touches disk.
+5. ✋ **Store a Claude token:** run `claude setup-token` and paste it when asked. Only tool-less judge and Leader calls
+   ever see it.
+6. **Apply the rulesets** (`ashlr authority protect --print`, then `--apply`): required checks, no force-push or
+   deletion, and bypass for Mason's admin role but never for the App.
+7. **Create the canary** `ashlrai/fleet-canary` with its CI workflow, using Mason's own `gh` auth (the App cannot
+   write workflows).
+8. ✋ **Retire the old key.** Confirm moving `~/.ashlr/activation/` (the key agents could read since Aug 16) out of
+   `~/.ashlr`; archive it offline, then delete it.
+9. **Rotate the provenance HMAC key** (`ashlr authority rotate-provenance`); agents could read the old one.
+10. ✋ **Sign the first grant** (Touch ID) and, optionally, set the switch to Autonomous. The grant starts on the
+    shadow stage of its rollout ladder.
+
+After that, the only recurring step is **one Touch ID every 30 days, or after a deploy that changes authority code**.
+
+### Autonomy with custody
+
+- **Only a signed grant raises authority.** A standing grant names the repos, engines, risk and size caps, spend
+  ceiling and Leader classes; it is shown in full in the Touch ID prompt, bound to this Mac, and valid 30 days at
+  most. Effective policy is the minimum of the grant, the config and compiled ceilings (medium risk, 10 files / 300
+  lines, 24 merges per repo per day). Config and the Leader can only tighten it.
+- **Lowering never asks.** Off / Propose / Autonomous goes down instantly; **Stop** writes `~/.ashlr/KILL`;
+  **Revoke** requires a new grant to resume. Raising past the grant opens the Touch ID sheet.
+- **One Touch ID starts the whole ramp.** The grant carries a rollout ladder (shadow → staged merge → full). The
+  daemon advances a stage when the ledger shows its criteria met and drops back one stage on any breach; it can
+  never pass the last stage Mason signed.
+- **Every merge is remote and reversible.** The fleet works only in its own mirrors, never in Mason's checkouts.
+  Changes pass the gates in order — authority, protected paths (to the owner lane, never auto-merged), tamper,
+  scope, verify, claims, blast radius, a judge from a **different model family** than the producer, then GitHub's
+  required checks — and merge on GitHub pinned to the head SHA with `Ashlr-Grant`, `Ashlr-Gates` and
+  `Ashlr-Ledger-Head` trailers. For two hours after, CI and a fresh re-run watch the merge; a red one is reverted
+  automatically and the repo quarantined.
+- **Agents cannot touch authority.** While a grant is live, confinement is forced on: no keychain, launchctl, `open`
+  or `osascript`, no reads of `~/.ashlr/authority`, read-only vendor homes, and daemon git with hooks and fsmonitor
+  forced off. No confinement means no ticks.
+- **One hash-chained ledger** records grants, switches, stops, gates, merges, reverts, holds and Leader actions. A
+  broken chain halts everything until a new grant. `ashlr authority ledger verify` checks it.
+- **Changed authority code pauses the grant** ("authority code changed — re-approve") until one Touch ID.
+
+### Budget modes
+
+- **all-in**, **balanced** (default) and **reserve**, with per-seat overrides in `~/.ashlr/budget.json`. Under
+  balanced, Claude keeps 40 % of its weekly window for Mason and autonomy never touches it while the five-hour window
+  is above 70 %; Grok keeps no reserve; local models are free and unlimited. Codex is off for autonomy until switched on.
+- **Unknown usage is not headroom.** Autonomous Claude dispatch used to be allowed when its usage could not be read;
+  it is now refused. Mason's own chats ignore reserves — the reserves exist for him.
+
+### The Leader
+
+- A planning agent that writes a daily memo — the bottleneck, one move with an expected result and a date, goals,
+  standards, questions — from deterministic digests, never raw reasoning. It runs on Grok or a local model (Claude
+  only for a weekly deep run inside the reserve), at most three times a day.
+- **Class A** actions apply now and can be vetoed any time; **class B** after a 30-minute veto window (a
+  spend-raising one never lands between 00:00 and 07:00 unless the mode is all-in); **class C** goes to Needs you.
+  A veto runs the action's recorded inverse. Each move is graded after 7 days into a visible hit-rate.
+- Harness changes are tested as paired experiments on held-out tasks with a confidence interval, adopted only through
+  the gate, and rolled back automatically if a 48-hour canary falls below baseline.
+
+### The workbench
+
+- **Five surfaces:** ⌘1 Command, ⌘2 Fleet, ⌘3 Growth, ⌘4 Mind, ⌘5 Chat, plus a gear tray (Settings, Apps & Accounts,
+  Usage, Shortcuts). Approvals became the **Needs-you drawer** (⌘J) with single-key triage. A **⌘K palette** reaches
+  every chat, action, seat and project.
+- **Chat:** activity groups fold tool calls; a chapter rail maps the session; the composer queues up to 3 turns while
+  one runs, takes attachments, `@` files and `/` commands, and offers four permission modes (Plan, Accept edits,
+  Auto, Bypass — red and confirmed per chat).
+- **Dock:** a real **Terminal** (desktop app), a loopback **Preview** with sandboxed artifacts, and **Review** diffs
+  with notes that draft into the composer. A **branch bar** commits, pushes, opens and merges pull requests.
+- **Apps & Accounts** replaces the MCP section: accounts with health and reserves, desktop apps, ten terminal agents
+  with their launch commands, local runtimes and MCP servers — one description of each seat instead of four.
+- **Charts** for Command, Fleet, Growth and Mind: each has a table twin, a designed "Fleet dark since …" state and a
+  hatched fill for unmeasured values.
+
+### Live reasoning
+
+Claude, Codex and Grok stream their reasoning into the chat as it happens, then collapse it to "Thought 12s, ~1.8k
+tok". A live status line shows the current step, elapsed time and measured tokens per second. Reasoning is also
+kept as data — scrubbed, local-only, 0600, text for 30 days and derived features for 180, never replayed into a
+prompt — and mined into insights that feed Mind and the Leader.
+
+### Health
+
+A background sweep checks every seat every 10 minutes with status commands only and catches signed-out, exhausted
+and expiring sessions and a CLI build that drifted from its pin. A seat that cannot run refuses the turn up front
+(409 `seat-not-ready`, with the reason) instead of failing mid-turn; **Reconnect** opens the seat's own login.
+Codex's `limitReached` flag now survives the evidence path, so an exhausted Codex seat reads as exhausted.
+
+### Performance
+
+| Path | Before | After |
+|---|---|---|
+| `/api/verse/control`, warm | 5.2–6.1 s | 2.9–4.1 ms |
+| `/api/verse/usage-series`, warm | 1.3–3.4 s | 0.3–0.5 ms |
+| Seat telemetry on every `/seats` and `/bootstrap` | 27–31 ms | 1.1–2.3 ms |
+| Replay 5k / 10k chat events | 2.45 s / 17 s | 0.6–2.1 ms / 0.9–2.4 ms |
+| Render per streamed delta at 5k events | 50 ms | 1.0–1.3 ms |
+| Fonts at first paint | 658 KB | 98 KB |
+| Static assets | 2.4 MB unencoded | 702 KB brotli, immutable |
+
+Not yet met: first-chat-paint JavaScript is 615 KB against a 350 KB target, and the runtime probe still stalls the
+event loop 53–78 ms against a 20 ms budget.
+
+### Reliability
+
+Streamed text is folded at turn end and chats resume from a sequence index; a lost or locked vendor conversation is
+retried once on a fresh one seeded with the handoff note; a watchdog says so after 3 minutes of silence; crash
+handlers interrupt running turns and reap their process groups; orphaned processes are killed only when their start
+time and command line match what was recorded; a storage error stops the turn instead of the server.
+
+### Desktop
+
+The tray lists running chats, **Needs you…**, **New chat** and **Stop running chats…** — it may stop chats, never the
+fleet. Banners for finished and failed chats, Needs-you items and seat health while the window is unfocused; a Dock
+badge; and an opt-in ⌃⌥Space hotkey that summons Verse with the composer focused.
+
+### Still to come (3.11)
+
+Claude as a fleet producer (it judges and leads in 3.10, with no tools), per-tool "Ask" permission prompts, side
+chats, split sessions, hunk staging and multi-seat compare.
+
+Verification for this draft runs locally without GitHub Actions and is recorded at release.
+
 ## [3.9.1] — 2026-09-24 UTC — Claude usage stays visible after a re-pin
 
 - **The Claude usage meter went blind on any seat re-pinned to Claude Code

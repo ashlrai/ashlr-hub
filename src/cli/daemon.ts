@@ -35,6 +35,14 @@ import type { ServiceInstallOptions, ServiceStatusResult } from '../core/daemon/
 import { serviceActivity } from '../core/daemon/service-activity.js';
 import { assertResidentServiceInstallAuthorized } from '../core/daemon/service-install-authority.js';
 import type { PolicyMutationResult } from '../core/sandbox/policy.js';
+// V3.10 (U5): pure run-window arithmetic (no I/O, no module side effects), so
+// `daemon start --until/--iterations` can refuse a bad stop rule at parse time.
+import {
+  resolveRunWindow,
+  resolveWallClockStopRule,
+  RUN_WINDOW_MAX_ITERATIONS,
+  type RunWindowStopRule,
+} from '../core/daemon/run-window.js';
 
 // ---------------------------------------------------------------------------
 // Detached `ashlr daemon start` launcher (shared with the Verse control plane)
@@ -124,6 +132,7 @@ type DaemonSubcommand =
   | 'pause'
   | 'resume'
   | 'status'
+  | 'doctor'
   | 'activation-preflight'
   | 'activate'
   | 'recover-state'
@@ -138,6 +147,7 @@ const DAEMON_SUBCOMMANDS = new Set<DaemonSubcommand>([
   'pause',
   'resume',
   'status',
+  'doctor',
   'activation-preflight',
   'activate',
   'recover-state',
@@ -149,6 +159,7 @@ const DAEMON_SUBCOMMANDS = new Set<DaemonSubcommand>([
 
 const NO_FLAGS = new Set<string>();
 const JSON_FLAG = new Set(['--json']);
+const DOCTOR_FLAGS = new Set(['--json', '--clear-stale']);
 const INSTALL_FLAGS = new Set(['--no-autostart']);
 const RESOLVE_STATE_VALUE_FLAGS = new Set([
   '--quarantine-plan-id',
@@ -161,11 +172,18 @@ const RESOLVE_STATE_VALUE_FLAGS = new Set([
 
 const DAEMON_USAGE: Record<DaemonSubcommand, string> = {
   start:
-    'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--limit <n>] [--budget <usd>] [--interval <ms>] [--parallel <n>]',
+    'Usage: ashlr daemon start [--once] [--dry-run] [--drain diagnostic-reslices] [--limit <n>] [--budget <usd>] [--interval <ms>] [--parallel <n>]\n' +
+    '                          [--until <HH:MM|ISO instant> | --iterations <n> | --until-paused]\n' +
+    '  --until / --iterations / --until-paused bound an unattended run: it ends by PAUSING (never the kill switch),\n' +
+    '  and the post-merge guard is on for it.',
   stop: 'Usage: ashlr daemon stop',
   pause: 'Usage: ashlr daemon pause',
   resume: 'Usage: ashlr daemon resume',
   status: 'Usage: ashlr daemon status [--json]',
+  doctor:
+    'Usage: ashlr daemon doctor [--clear-stale] [--json]\n' +
+    '  Proves whether the resident daemon is really running (lock heartbeat + process identity),\n' +
+    '  not what daemon.json claims. --clear-stale rewrites a provably stale running record.',
   'activation-preflight':
     'Usage: ashlr daemon activation-preflight --request <absolute-canonical-plan-path> [--json]',
   activate:
@@ -189,6 +207,7 @@ Subcommands:
   resume          Lift the pause
   stop            Request an orderly daemon shutdown (WIDE: sets the global kill switch)
   status          Show daemon state [--json]
+  doctor          Prove the daemon is really running; --clear-stale fixes a stale record
   activation-preflight  Verify operator-custodied signed release and rollback evidence (read-only)
   activate        Permit-gated 3.2.7 selection while preserving the exact stopped service state
   recover-state   Preview or explicitly execute one exact state quarantine
@@ -205,7 +224,7 @@ Run \`ashlr daemon <subcommand> --help\` for subcommand usage.`;
 
 type RunDaemonFn = (
   cfg: AshlrConfig,
-  opts: { once: boolean; dryRun: boolean; drain?: DaemonDrainMode; drainLimit?: number },
+  opts: { once: boolean; dryRun: boolean; drain?: DaemonDrainMode; drainLimit?: number; runWindow?: RunWindowStopRule },
 ) => Promise<DaemonState>;
 type StopDaemonFn = () => PolicyMutationResult | void;
 type LoadDaemonStateFn = () => DaemonState;
@@ -334,6 +353,25 @@ interface StartFlags {
   budgetUsd?: number;
   intervalMs?: number;
   parallel?: number;
+  /** V3.10 (U5): a bounded run's stop rule (--until / --iterations / --until-paused). */
+  runWindow?: RunWindowStopRule;
+}
+
+/**
+ * Parse `--until`: `HH:MM` is the next occurrence of that wall-clock time in
+ * this machine's zone (the same arithmetic the Overnight panel does in the
+ * browser); anything else must be an absolute ISO-8601 instant.
+ */
+function parseUntil(value: string | undefined): { rule?: RunWindowStopRule; err?: string } {
+  if (value === undefined || value.startsWith('-')) return { err: '--until requires a time (HH:MM) or an ISO-8601 instant' };
+  if (/^\d{1,2}:\d{2}$/.test(value)) {
+    const resolved = resolveWallClockStopRule(value);
+    return resolved.ok ? { rule: resolved.rule } : { err: resolved.reason };
+  }
+  if (!Number.isFinite(Date.parse(value))) {
+    return { err: `--until '${value}' is neither HH:MM nor an ISO-8601 instant` };
+  }
+  return { rule: { kind: 'at-time', at: value } };
 }
 
 interface RecoverStateFlags {
@@ -416,6 +454,27 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
         flags.parallel = Math.floor(v);
         break;
       }
+      case '--until': {
+        if (flags.runWindow) return { flags, err: 'choose one stop rule: --until, --iterations or --until-paused' };
+        const parsed = parseUntil(args[++i]);
+        if (!parsed.rule) return { flags, err: parsed.err ?? '--until is invalid' };
+        flags.runWindow = parsed.rule;
+        break;
+      }
+      case '--iterations': {
+        if (flags.runWindow) return { flags, err: 'choose one stop rule: --until, --iterations or --until-paused' };
+        const raw = args[++i];
+        const n = raw !== undefined && /^\d{1,4}$/.test(raw) ? Number(raw) : NaN;
+        if (!Number.isInteger(n) || n < 1 || n > RUN_WINDOW_MAX_ITERATIONS) {
+          return { flags, err: `--iterations requires a whole number from 1 to ${RUN_WINDOW_MAX_ITERATIONS}` };
+        }
+        flags.runWindow = { kind: 'after-iterations', iterations: n };
+        break;
+      }
+      case '--until-paused':
+        if (flags.runWindow) return { flags, err: 'choose one stop rule: --until, --iterations or --until-paused' };
+        flags.runWindow = { kind: 'until-paused' };
+        break;
       default:
         if (a?.startsWith('-')) return { flags, err: `Unknown flag: ${a}` };
         return { flags, err: `Unexpected argument: ${a}` };
@@ -423,6 +482,14 @@ function parseStartFlags(args: string[]): { flags: StartFlags; err?: string } {
   }
   if (flags.limit !== undefined && flags.drain === undefined) {
     return { flags, err: '--limit requires --drain' };
+  }
+  if (flags.runWindow) {
+    // A bounded run is a RESIDENT run: a single tick has nothing to bound, and
+    // a dry run plans exactly one tick and records nothing.
+    if (flags.once) return { flags, err: '--until / --iterations / --until-paused cannot be combined with --once' };
+    if (flags.dryRun) return { flags, err: '--until / --iterations / --until-paused cannot be combined with --dry-run' };
+    const resolved = resolveRunWindow(flags.runWindow);
+    if (!resolved.ok) return { flags, err: resolved.reason };
   }
   return { flags };
 }
@@ -676,6 +743,10 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     console.log(col.dim(`  targeted drain: ${flags.drain}`));
     console.log(col.dim(`  drain limit: ${flags.limit ?? DEFAULT_DIAGNOSTIC_RESLICE_DRAIN_LIMIT}`));
   }
+  if (flags.runWindow !== undefined) {
+    const resolved = resolveRunWindow(flags.runWindow);
+    console.log(col.dim(`  run window: ${resolved.ok ? resolved.window.describe : 'invalid'} — ends by pausing, never by the kill switch`));
+  }
   console.log(col.dim('  proposal-only · sandboxed · enrollment-only'));
   console.log('');
 
@@ -687,6 +758,7 @@ async function cmdDaemonStart(flags: StartFlags): Promise<number> {
     dryRun: flags.dryRun,
     ...(flags.drain ? { drain: flags.drain } : {}),
     ...(flags.limit ? { drainLimit: flags.limit } : {}),
+    ...(flags.runWindow ? { runWindow: flags.runWindow } : {}),
   });
 
   if (finalState.startRefusal) {
@@ -841,6 +913,27 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
         diagnostic: strictState.diagnostic,
       };
   const stateKnown = stateSource.sourceState === 'healthy';
+  // V3.10 (U5): the recorded `running` is a CLAIM (pid 850 said running for
+  // three weeks after it died). Liveness is the proof; loaded lazily so a
+  // missing module only costs this line, never the command.
+  let liveness: { state: string; alive: boolean | null; reason: string; staleRecord: boolean } | null = null;
+  try {
+    const mod = await import('../core/daemon/liveness.js');
+    // The record this command already read (no second state-file read).
+    const verdict = mod.probeDaemonLiveness({
+      recorded: stateKnown
+        ? {
+            running: state.running === true,
+            pid: typeof state.pid === 'number' ? state.pid : null,
+            startedAt: state.startedAt ?? null,
+            lastTickAt: state.lastTickAt ?? null,
+          }
+        : { running: null, pid: null, startedAt: null, lastTickAt: null },
+    });
+    liveness = { state: verdict.state, alive: verdict.alive, reason: verdict.reason, staleRecord: verdict.staleRecord };
+  } catch {
+    liveness = null;
+  }
 
   // pendingCount is READ-ONLY; degrade to 0 if the inbox store is absent.
   const pendingCount = await importPendingCount();
@@ -895,6 +988,9 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
       JSON.stringify(
         {
           running: stateKnown ? state.running : null,
+          // V3.10 (U5): what liveness PROVES (null = could not tell).
+          runningVerified: liveness ? liveness.alive : null,
+          liveness,
           pid: stateKnown ? state.pid : null,
           startedAt: stateKnown ? state.startedAt : null,
           lastTickAt: stateKnown ? state.lastTickAt : null,
@@ -921,10 +1017,15 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
       col.bold('running:        ') +
       (!stateKnown
         ? col.yellow('unknown')
-        : state.running
-          ? col.green('yes') + col.dim(` (pid ${state.pid ?? '?'})`)
-          : col.dim('no (idle)')),
+        : state.running && liveness?.alive === false
+          ? col.yellow('no') + col.dim(` — stale record: ${liveness.reason}`)
+          : state.running
+            ? col.green('yes') + col.dim(` (pid ${state.pid ?? '?'})`)
+            : col.dim('no (idle)')),
   );
+  if (stateKnown && state.running && liveness?.staleRecord) {
+    console.log('  ' + col.dim('                 clear it with `ashlr daemon doctor --clear-stale`'));
+  }
   console.log('  ' + col.bold('state source:   ') +
     (stateKnown ? col.dim(stateSource.reason) : col.yellow(stateSource.reason)));
   if (!strictState.ok) {
@@ -971,6 +1072,62 @@ async function cmdDaemonStatus(jsonMode: boolean): Promise<number> {
     console.log('');
   }
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Subcommand: doctor (V3.10, unit U5) — liveness, not the recorded claim
+// ---------------------------------------------------------------------------
+
+function describeAgeMs(ms: number | null): string {
+  if (ms === null) return 'unknown';
+  if (ms < 60_000) return 'just now';
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}m ago`;
+  if (ms < 86_400_000) return `${Math.floor(ms / 3_600_000)}h ago`;
+  return `${Math.floor(ms / 86_400_000)}d ago`;
+}
+
+async function cmdDaemonDoctor(jsonMode: boolean, clearStale: boolean): Promise<number> {
+  const col = makeColors(process.stdout.isTTY === true);
+  let mod: typeof import('../core/daemon/liveness.js');
+  try {
+    mod = await import('../core/daemon/liveness.js');
+  } catch {
+    console.error(col.red('error: ') + 'daemon liveness is unavailable in this build. No state was changed.');
+    return 1;
+  }
+  const verdict = mod.probeDaemonLiveness();
+  const cleared = clearStale ? mod.clearStaleDaemonRecord() : null;
+  if (jsonMode) {
+    console.log(JSON.stringify({ liveness: verdict, cleared }, null, 2));
+  } else {
+    console.log('');
+    console.log(col.bold('  ashlr daemon doctor'));
+    console.log('');
+    const running = verdict.alive === true
+      ? col.green('yes') + col.dim(` (pid ${verdict.pid ?? '?'})`)
+      : verdict.alive === false ? col.dim('no') : col.yellow('unknown');
+    console.log('  ' + col.bold('running:   ') + running);
+    console.log('  ' + col.bold('evidence:  ') + col.dim(verdict.reason));
+    const rec = verdict.recorded;
+    console.log('  ' + col.bold('record:    ') + col.dim(rec.running === null
+      ? 'daemon.json unreadable'
+      : rec.running ? `says running${rec.pid !== null ? ` as pid ${rec.pid}` : ''}` : 'says not running'));
+    console.log('  ' + col.bold('lock:      ') + col.dim(verdict.lock
+      ? `pid ${verdict.lock.pid}, heartbeat ${describeAgeMs(verdict.lock.heartbeatAgeMs)}`
+      : 'none'));
+    console.log('  ' + col.bold('activity:  ') + col.dim(verdict.activity
+      ? `${verdict.activity.phase ?? 'unknown'} · ${describeAgeMs(verdict.activity.ageMs)} · owner ${verdict.activity.ownerState}`
+      : 'none'));
+    if (cleared) {
+      console.log('  ' + (cleared.ok ? col.green('✓ ') : col.red('✗ ')) + cleared.reason);
+    } else if (verdict.staleRecord) {
+      console.log('');
+      console.log(col.dim('  daemon.json claims a run that provably ended. Clear it with `ashlr daemon doctor --clear-stale`.'));
+    }
+    console.log('');
+  }
+  if (cleared) return cleared.ok ? 0 : 1;
+  return verdict.state === 'alive' || verdict.state === 'stopped' ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -1475,7 +1632,9 @@ export async function cmdDaemon(args: string[]): Promise<number> {
       ? INSTALL_FLAGS
       : sub === 'status' || sub === 'service-status'
         ? JSON_FLAG
-        : NO_FLAGS;
+        : sub === 'doctor'
+          ? DOCTOR_FLAGS
+          : NO_FLAGS;
     validationError = validateExactFlags(rest, allowed);
   }
   if (validationError) return printDaemonUsageError(validationError, sub);
@@ -1491,6 +1650,8 @@ export async function cmdDaemon(args: string[]): Promise<number> {
       return cmdDaemonPause(false);
     case 'status':
       return cmdDaemonStatus(rest.includes('--json'));
+    case 'doctor':
+      return cmdDaemonDoctor(rest.includes('--json'), rest.includes('--clear-stale'));
     case 'activation-preflight':
       return cmdDaemonActivationPreflight(activationPreflightFlags!);
     case 'activate':

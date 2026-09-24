@@ -660,7 +660,8 @@ describe('codex adapter — buildLaunch', () => {
     expect(first.env).toEqual({});
 
     const second = a.buildLaunch(session({ engine: 'codex', seatId: 'codex-a', model: 'gpt-5.5', nativeSessionId: 'thread-9', turnCount: 1 }), 'more', l);
-    expect(second.argv).toEqual(['/usr/local/bin/node', '/x/launcher.mjs', 'exec', 'resume', 'thread-9', '-c', 'model_reasoning_summary="detailed"', '--skip-git-repo-check', '--json', '-']);
+    // V3.10 (C3): `--model` on resume too, so a model picked mid-chat (⌘⇧I) is the one the thread runs.
+    expect(second.argv).toEqual(['/usr/local/bin/node', '/x/launcher.mjs', 'exec', 'resume', 'thread-9', '-c', 'model_reasoning_summary="detailed"', '--skip-git-repo-check', '--model', 'gpt-5.5', '--json', '-']);
     expect(second.stdin).toBe('more');
   });
 

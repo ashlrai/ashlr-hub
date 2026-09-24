@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseUnifiedDiff } from '../../inbox/diff-parser.js';
-import { diffLines, splitLines, toUnifiedDiff, unifiedDiffFor } from './line-diff.js';
+import { diffLines, intralineSpans, splitLines, toUnifiedDiff, unifiedDiffFor } from './line-diff.js';
 
 describe('splitLines', () => {
   it('keeps empty lines but not the artefact of a trailing newline', () => {
@@ -92,5 +92,38 @@ describe('toUnifiedDiff', () => {
     const hunk = parseUnifiedDiff(text).files[0]!.hunks[0]!;
     expect(hunk.oldStart).toBe(100);
     expect(hunk.lines.find((l) => l.kind === 'add')!.newLineNo).toBe(101);
+  });
+});
+
+describe('intralineSpans (3.10 Review pane)', () => {
+  const cut = (line: string, [a, b]: [number, number]) => line.slice(a, b);
+
+  it('emphasises only the changed word, widened to word boundaries', () => {
+    const oldLine = 'const count = items.length;';
+    const newLine = 'const counts = items.length;';
+    const spans = intralineSpans(oldLine, newLine)!;
+    expect(cut(oldLine, spans.old)).toBe('count');
+    expect(cut(newLine, spans.new)).toBe('counts');
+  });
+
+  it('marks a pure insertion as an empty old span', () => {
+    const spans = intralineSpans('call(a, b)', 'call(a, b, c)')!;
+    expect(spans.old[0]).toBe(spans.old[1]);
+    expect(cut('call(a, b, c)', spans.new)).toBe(', c');
+  });
+
+  it('declines identical lines, rewrites and very long lines', () => {
+    expect(intralineSpans('same', 'same')).toBeNull();
+    expect(intralineSpans('import { a } from "x";', 'return total / count;')).toBeNull();
+    expect(intralineSpans('x'.repeat(3000), 'y'.repeat(3000))).toBeNull();
+  });
+
+  it('never produces an inverted span', () => {
+    for (const [a, b] of [['aaa', 'aa'], ['ab', 'aab'], ['foo.bar()', 'foo.baz()'], ['', 'x']]) {
+      const s = intralineSpans(a!, b!);
+      if (!s) continue;
+      expect(s.old[0]).toBeLessThanOrEqual(s.old[1]);
+      expect(s.new[0]).toBeLessThanOrEqual(s.new[1]);
+    }
   });
 });

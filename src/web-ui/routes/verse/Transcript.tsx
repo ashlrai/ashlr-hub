@@ -6,8 +6,14 @@
  * measure. Role is weight and rule, never a coloured box.
  *
  * Runs of tool calls fold (verse-store groupTranscriptItems) into one
- * `6 tools · Read ×4, Edit ×2 · 12s` row, so an agentic turn reads as a
- * summary line between two pieces of prose instead of a wall of cards.
+ * activity row — "Ran 12 commands, read 8, edited 3; 1 failed · 2m 14s"
+ * (chat/ActivityGroup) — that opens on its failed and running calls by
+ * itself, so an agentic turn reads as a summary line between two pieces of
+ * prose instead of a wall of cards.
+ *
+ * 3.10 also adds the ChapterRail (a minimap of turns down the right edge)
+ * and a screen-reader announcer that speaks turn boundaries instead of
+ * every streamed token.
  *
  * On top of that the items are grouped into TURNS (`chat/turn-model.ts`),
  * which is what makes a long agentic session usable:
@@ -26,9 +32,11 @@
  * V3.10 — live reasoning and a transcript that costs one turn per frame:
  *
  *   - the model's reasoning streams in a ThinkingBlock ("Thinking · 12s ·
- *     ~1.8k tok"), and the caret that used to be the only sign of life is a
- *     LiveStatus line ("Running · 14s · npm test", "Writing · 38 tok/s",
- *     Stop) with the engine's retry / preflight / watchdog notices under it;
+ *     ~1.8k tok"), in a three-line window that folds when the block ends
+ *     (Settings ▸ Chat: Collapsed / Expanded / Hidden);
+ *   - the live status line ("Running · 14s · npm test") and the engine's
+ *     retry / watchdog notices sit ABOVE THE COMPOSER (Workspace), not in the
+ *     log: they describe the turn you are waiting on, not its history;
  *   - the store hands the transcript over in turn SEGMENTS that keep their
  *     identity while unchanged; each segment's turn model is derived once
  *     and every finished turn is a memoized TurnView, so a streamed token
@@ -44,10 +52,15 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { VerseEngine, VerseSession } from '../../data/api-types.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
+import { ActivityGroupView, revealAnchorInGroups } from './chat/ActivityGroup.js';
+import { ChapterRail } from './chat/ChapterRail.js';
+import { buildChapters, chaptersSignature } from './chat/chapter-model.js';
 import { FileActivity } from './chat/FileActivity.js';
-import { derivePhaseFromTranscript, LiveStatus } from './chat/LiveStatus.js';
+import { useReasoningDisplay, type ReasoningDisplay } from './chat/reasoning-pref.js';
 import { ThinkingBlock } from './chat/ThinkingBlock.js';
+import { onTranscriptFind, onTranscriptJump, onTranscriptStep } from './chat/transcript-jump.js';
 import { TranscriptNav } from './chat/TranscriptNav.js';
+import { TurnAnnouncer } from './chat/TurnAnnouncer.js';
 import { toolAnchorId, type ToolFacts } from './chat/tool-semantics.js';
 import { buildTurns, createTurnCache, noteAnchorId, searchTurns, turnAnchorId, type TurnBlock, type TurnCache } from './chat/turn-model.js';
 import { MessageMarkdown } from './MessageMarkdown.js';
@@ -58,6 +71,7 @@ import {
   formatTokens,
   groupTranscriptItems,
   type ToolGroupItem,
+  type ToolGroupMember,
   type Transcript as TranscriptModel,
   type TranscriptItem,
   type TranscriptRenderItem,
@@ -78,10 +92,8 @@ export interface TranscriptProps {
   handoffFrom?: VerseSession['handoffFrom'] | null;
   /** Opens another chat (the handoff source). Absent → the source is named but not a link. */
   onOpenSession?: (sessionId: string) => void;
-  /** V3.10: transient signals of the running turn (streaming reasoning, progress, notices). */
+  /** V3.10: transient signals of the running turn (the streaming reasoning block). */
   live?: VerseLiveState | null;
-  /** V3.10: Stop on the live line. Absent → the line shows no Stop (the composer still has one). */
-  onStop?: () => void;
 }
 
 type CompactionItem = Extract<TranscriptItem, { kind: 'compaction' }>;
@@ -156,7 +168,8 @@ function deriveSegment(segment: TranscriptSegment, cache: TurnCache): SegmentMod
   return { turns: model.turns, facts: model.facts, errorAnchors: model.errorAnchors, explained: explainedKeys(segment.items) };
 }
 
-export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, engine, handoffFrom = null, onOpenSession, live = null, onStop }: TranscriptProps) {
+export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, engine, handoffFrom = null, onOpenSession, live = null }: TranscriptProps) {
+  const reasoning = useReasoningDisplay();
   const scroller = useRef<HTMLDivElement>(null);
   const turnNodes = useRef(new Map<string, HTMLElement>());
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -197,6 +210,15 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     return out;
   }, [perSegment]);
   const errorAnchors = useMemo(() => perSegment.flatMap((m) => m.errorAnchors), [perSegment]);
+  // The rail's model, rebuilt only when what it draws changes (never per token).
+  const turnsForRail = useRef(turns);
+  turnsForRail.current = turns;
+  const railSignature = chaptersSignature(turns, handoffFrom !== null);
+  const chapters = useMemo(
+    () => buildChapters(turnsForRail.current, { handoff: handoffFrom !== null }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the signature IS the dependency
+    [railSignature],
+  );
   const matches = useMemo(
     () => searchTurns(turns, query, turnCache.current),
     [turns, query],
@@ -240,16 +262,38 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     reveal(turnNodes.current.get(turnKey) ?? null);
   }, [reveal]);
 
-  /** Open the disclosure chain around a tool call before revealing it. */
-  const jumpToAnchor = useCallback((id: string) => {
+  /**
+   * Open the disclosure chain around a tool call before revealing it. A call
+   * folded inside a collapsed activity group is not in the DOM at all: the
+   * group is asked to open (revealAnchorInGroups) and the jump retried on
+   * the next frame, once it has rendered its members.
+   */
+  const jumpToAnchor = useCallback((id: string, retried = false): boolean => {
     const node = scroller.current?.ownerDocument?.getElementById(id) ?? null;
-    if (!node) return;
+    if (!node) {
+      if (!retried && revealAnchorInGroups(id)) {
+        requestAnimationFrame(() => { jumpToAnchor(id, true); });
+        return true;
+      }
+      return false;
+    }
     for (let el: Element | null = node; el; el = el.parentElement) {
       if (el instanceof HTMLDetailsElement) el.open = true;
       if (el === scroller.current) break;
     }
     reveal(node);
+    return true;
   }, [reveal]);
+
+  // The dock's Tasks pane (and anything else outside this subtree) jumps
+  // through the bus; ⌘K "Find in chat" focuses the search the same way ⌘F does.
+  useEffect(() => onTranscriptJump((id) => jumpToAnchor(id)), [jumpToAnchor]);
+  const findable = turns.length >= NAV_MIN_TURNS;
+  useEffect(() => onTranscriptFind(() => {
+    if (!findable) return false;
+    setFocusToken((n) => n + 1);
+    return true;
+  }), [findable]);
 
   const jumpToTool = useCallback((toolUseId: string) => jumpToAnchor(toolAnchorId(toolUseId)), [jumpToAnchor]);
 
@@ -293,12 +337,22 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
     jumpToTurn(list[next]!.key);
   }, [jumpToTurn]);
 
+  useEffect(() => onTranscriptStep((delta) => {
+    if (turnsRef.current.length === 0) return false;
+    stepTurn(delta);
+    return true;
+  }), [stepTurn]);
+
   // ⌘F focuses the in-chat search; Alt+↑/↓ steps turns from anywhere EXCEPT a
   // text field, where the OS already owns those chords for word/paragraph
   // movement and the composer must keep them.
   useEffect(() => {
     if (turns.length === 0) return;
     const onKey = (event: globalThis.KeyboardEvent) => {
+      // The shell's key handler routes these through the command bus (and
+      // back here via onTranscriptStep / onTranscriptFind); an event it
+      // already took must not step twice.
+      if (event.defaultPrevented) return;
       const target = event.target as HTMLElement | null;
       const typing = target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement
         || target?.isContentEditable === true;
@@ -328,21 +382,16 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
   }
 
   // ---- live turn -----------------------------------------------------------
+  // The live STATUS line moved above the composer in 3.10 (Workspace
+  // LiveRow); what stays here is the reasoning streaming into the turn.
   const running = transcript.live;
-  const liveThinking = running && live?.thinking && live.thinking.turnId === live.turnId ? live.thinking : null;
-  const lastSegmentItems = segments.length > 0 ? segments[segments.length - 1]!.items : transcript.items;
-  const derivedPhase = useMemo(
-    () => derivePhaseFromTranscript(lastSegmentItems, { thinking: liveThinking }),
-    [lastSegmentItems, liveThinking],
-  );
-  const liveState = useMemo<VerseLiveState>(() => live ?? {
-    turnId: null, startedAt: null, progress: null, thinking: null, notice: null, settledTurnId: null,
-  }, [live]);
+  const liveThinking = running && reasoning !== 'hidden' && live?.thinking && live.thinking.turnId === live.turnId ? live.thinking : null;
+  const lastTurn = turns.length > 0 ? turns[turns.length - 1]! : null;
 
   // Auto-follow new content only while pinned to the bottom. "New content"
   // includes the live parts: streamed reasoning and a notice appearing.
   const lastItem = transcript.items[transcript.items.length - 1];
-  const version = `${transcript.items.length}:${lastItem?.kind === 'assistant' ? lastItem.text.length : 0}:${liveThinking?.text.length ?? -1}:${live?.notice?.receivedAt ?? 0}:${running ? 1 : 0}`;
+  const version = `${transcript.items.length}:${lastItem?.kind === 'assistant' ? lastItem.text.length : 0}:${liveThinking?.text.length ?? -1}:${running ? 1 : 0}`;
   useLayoutEffect(() => {
     if (version === lastVersion.current) return;
     lastVersion.current = version;
@@ -387,7 +436,13 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
           onStepMatch={stepMatch} errorCount={errorAnchors.length} onJumpError={jumpToFirstError}
           onJumpTurn={jumpToTurn} focusToken={focusToken} />
       ) : null}
-      <div ref={scroller} className={styles.transcript} onScroll={onScroll} role="log" aria-live="polite" aria-relevant="additions text">
+      {/* The log is NOT a live region (3.10): streamed tokens announced one by
+          one made a screen reader unusable mid-turn. TurnAnnouncer says only
+          when a turn starts, finishes, fails or is stopped. */}
+      <TurnAnnouncer running={running} lastStatus={lastTurn?.status ?? null} lastKey={lastTurn?.key ?? null} />
+      <div className={styles.scrollArea}>
+      <div ref={scroller} className={styles.transcript} onScroll={onScroll} role="log" aria-live="off"
+        aria-label="Conversation" data-has-rail={turns.length >= NAV_MIN_TURNS || undefined}>
         {handoffFrom ? (
           <p className={styles.continued} data-kind="handoff-from">
             <span className={styles.continuedLabel}>Continued from</span>{' '}
@@ -411,7 +466,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
           {perSegment.map((segment, s) => segment.turns.map((turn, t) => (
             <TurnView key={turn.key} turn={turn} index={turnOffsets[s]! + t} facts={segment.facts} explained={segment.explained}
               engine={engine} match={matchKeys.has(turn.key) ? (turn.key === activeMatchKey ? 'active' : 'true') : undefined}
-              onJumpTool={jumpToTool} onJumpAnchor={jumpToAnchor} registerNode={registerTurn} />
+              reasoning={reasoning} onJumpTool={jumpToTool} onJumpAnchor={jumpToAnchor} registerNode={registerTurn} />
           )))}
           {/* The reasoning streaming right now — it becomes an ordinary
               thinking item the moment its persisted block lands. */}
@@ -421,12 +476,11 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, 
                 estimatedTokens={liveThinking.estimatedTokens} defaultOpen />
             </li>
           ) : null}
-          {running ? (
-            <li className={styles.item} data-kind="live-status" aria-label="The agent is working">
-              <LiveStatus live={liveState} derived={derivedPhase} onStop={onStop} />
-            </li>
-          ) : null}
         </ol>
+      </div>
+      {turns.length >= NAV_MIN_TURNS ? (
+        <ChapterRail model={chapters} onJumpTurn={jumpToTurn} />
+      ) : null}
       </div>
       {!following ? (
         <button type="button" className={`${styles.jump} ${unseen ? styles.jumpUnseen : ''}`}
@@ -449,8 +503,9 @@ interface TurnViewProps {
   explained: ReadonlySet<string>;
   engine?: VerseEngine;
   match: 'active' | 'true' | undefined;
+  reasoning: ReasoningDisplay;
   onJumpTool: (toolUseId: string) => void;
-  onJumpAnchor: (id: string) => void;
+  onJumpAnchor: (id: string) => boolean;
   registerNode: (key: string, node: HTMLElement | null) => void;
 }
 
@@ -460,7 +515,7 @@ interface TurnViewProps {
  * `match` only changes for turns a search touches. So a streamed token
  * re-renders exactly one TurnView.
  */
-const TurnView = memo(function TurnView({ turn, index, facts, explained, engine, match, onJumpTool, onJumpAnchor, registerNode }: TurnViewProps) {
+const TurnView = memo(function TurnView({ turn, index, facts, explained, engine, match, reasoning, onJumpTool, onJumpAnchor, registerNode }: TurnViewProps) {
   const running = turn.status === 'running';
   return (
     <li
@@ -476,7 +531,7 @@ const TurnView = memo(function TurnView({ turn, index, facts, explained, engine,
       aria-label={`Turn ${index + 1}`}
     >
       <ol className={styles.turnItems}>
-        {turn.items.map((item) => renderItem(item, facts, explained, running, engine))}
+        {turn.items.map((item) => renderItem(item, facts, explained, reasoning, engine))}
       </ol>
       {turn.files.length > 0 ? <FileActivity files={turn.files} onJump={onJumpTool} /> : null}
       {turn.errorCount > 0 && turn.firstErrorAnchor ? (
@@ -499,7 +554,7 @@ const MemoToolUseCard = memo(ToolUseCard, (a: ToolUseCardProps, b: ToolUseCardPr
   a.facts === b.facts && a.result?.output === b.result?.output && a.result?.isError === b.result?.isError &&
   (a.result === null) === (b.result === null));
 
-function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, explained: ReadonlySet<string>, running: boolean, engine?: VerseEngine) {
+function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, explained: ReadonlySet<string>, reasoning: ReasoningDisplay, engine?: VerseEngine) {
   switch (item.kind) {
     case 'user':
       return (
@@ -514,26 +569,27 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
         </li>
       );
     case 'thinking':
+      if (reasoning === 'hidden') return null;
       return (
         <li key={item.key} className={styles.item} data-kind="thinking">
           <ThinkingBlock text={item.text} redacted={item.redacted} durationMs={item.durationMs}
             estimatedTokens={item.estimatedTokens} kind={item.thinkingKind}
-            // Open while its turn runs (it continues what the operator just
-            // watched stream); a finished turn's reasoning starts folded.
-            defaultOpen={running} stateKey={`thinking:${item.key}`} />
+            // 3.10: a settled block folds (it streamed in its three-line
+            // window while it ran) unless Settings ▸ Chat says Expanded.
+            defaultOpen={reasoning === 'expanded'} stateKey={`thinking:${item.key}`} />
         </li>
       );
     case 'tool':
       return (
         <li key={item.key} className={styles.item} data-kind="tool">
           <MemoToolUseCard name={item.name} input={item.input} result={item.result} toolUseId={item.toolUseId}
-            durationMs={item.durationMs} facts={facts.get(item.toolUseId)} />
+            durationMs={item.durationMs} facts={facts.get(item.toolUseId)} startedAt={item.at} />
         </li>
       );
     case 'toolGroup':
       return (
         <li key={item.key} className={styles.item} data-kind="tool-group">
-          <ToolGroup item={item} facts={facts} />
+          <ActivityGroup item={item} facts={facts} reasoning={reasoning} />
         </li>
       );
     case 'error': {
@@ -623,39 +679,31 @@ function sameMembers(a: ToolGroupItem, b: ToolGroupItem, fa: Map<string, ToolFac
 }
 
 /**
- * The folded run: `6 tools · Read ×4, Edit ×2 · 12s`. Failures tint the left
- * rule and say so in words — never the colour on its own (DESIGN §6).
+ * One member of a folded run: a tool card, or the reasoning that explained
+ * the next call (hidden when Settings ▸ Chat says so).
  */
-const ToolGroup = memo(function ToolGroup({ item, facts }: { item: ToolGroupItem; facts: Map<string, ToolFacts> }) {
-  const state = item.pending
-    ? 'running'
-    : item.errorCount > 0
-      ? `${item.errorCount} failed`
-      : item.spanMs !== null && item.spanMs > 0
-        ? formatDuration(item.spanMs)
-        : 'done';
-  const label = `${item.toolCount} tool${item.toolCount === 1 ? '' : 's'}`;
+function renderMember(member: ToolGroupMember, facts: Map<string, ToolFacts>, reasoning: ReasoningDisplay) {
+  if (member.kind === 'tool') {
+    return (
+      <MemoToolUseCard name={member.name} input={member.input} result={member.result}
+        toolUseId={member.toolUseId} durationMs={member.durationMs} facts={facts.get(member.toolUseId)} startedAt={member.at} />
+    );
+  }
+  if (reasoning === 'hidden') return null;
   return (
-    <details className={`${styles.toolRun} ${item.errorCount > 0 ? styles.toolFailed : ''}`} data-state-key={`toolgroup:${item.key}`}>
-      <summary className={styles.toolLine} aria-label={`${label}: ${item.summary} (${state})`}>
-        <span className={styles.toolGlyph} aria-hidden="true" />
-        <span className={styles.toolName}>{label}</span>
-        {item.summary ? <span className={styles.toolArg} title={item.summary}>{item.summary}</span> : null}
-        <span className={styles.toolState}>{state}</span>
-      </summary>
-      <div className={styles.toolRunBody}>
-        <ol className={styles.toolRunList}>
-          {item.items.map((member) => (
-            <li key={member.key} data-member={member.kind}>
-              {member.kind === 'tool'
-                ? <MemoToolUseCard name={member.name} input={member.input} result={member.result}
-                    toolUseId={member.toolUseId} durationMs={member.durationMs} facts={facts.get(member.toolUseId)} />
-                : <ThinkingBlock text={member.text} redacted={member.redacted} durationMs={member.durationMs}
-                    estimatedTokens={member.estimatedTokens} kind={member.thinkingKind} stateKey={`thinking:${member.key}`} />}
-            </li>
-          ))}
-        </ol>
-      </div>
-    </details>
+    <ThinkingBlock text={member.text} redacted={member.redacted} durationMs={member.durationMs}
+      estimatedTokens={member.estimatedTokens} kind={member.thinkingKind} defaultOpen={reasoning === 'expanded'}
+      stateKey={`thinking:${member.key}`} />
   );
-}, (a, b) => sameMembers(a.item, b.item, a.facts, b.facts));
+}
+
+/**
+ * The folded run (3.10: chat/ActivityGroup — "Ran 12 commands, read 8,
+ * edited 3; 1 failed"). Re-rendered only when a member's visible facts
+ * changed: the live turn rebuilds its item objects on every token, and
+ * `sameMembers` compares what the row shows rather than object identity.
+ */
+const ActivityGroup = memo(function ActivityGroup({ item, facts, reasoning }: { item: ToolGroupItem; facts: Map<string, ToolFacts>; reasoning: ReasoningDisplay }) {
+  const render = useCallback((member: ToolGroupMember) => renderMember(member, facts, reasoning), [facts, reasoning]);
+  return <ActivityGroupView item={item} facts={facts} renderMember={render} />;
+}, (a, b) => a.reasoning === b.reasoning && sameMembers(a.item, b.item, a.facts, b.facts));

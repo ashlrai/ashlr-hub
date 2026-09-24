@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { AreaTrend } from './AreaTrend.js';
 import { formatDayLabel } from './format.js';
+import { showTable } from './chart-test-support.js';
 
 // Day-bucketed series are UTC midnights; label them as UTC days (runner TZ-independent).
 const utcDay = (x: number) => formatDayLabel(new Date(x).toISOString().slice(0, 10));
@@ -62,7 +62,7 @@ describe('AreaTrend', () => {
     fireEvent.keyDown(group, { key: 'ArrowLeft' });
     expect(document.querySelector('[aria-live="polite"]')!.textContent).toBe('Sep 1: Done 1, Failed 0');
     expect(screen.getByText('Done', { selector: 'li' })).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('radio', { name: 'Table' }));
+    showTable();
     expect(screen.getAllByRole('row')).toHaveLength(3);
     expect(screen.getByRole('cell', { name: '—' })).toBeInTheDocument();
   });
@@ -76,7 +76,7 @@ describe('AreaTrend', () => {
     const { container } = render(
       <AreaTrend title="Spend" width={375} threshold={{ value: 50, label: 'Cap' }} series={[{ id: 'a', label: 'Spend', points: pts([10, 20, 30]) }]} />,
     );
-    const svg = container.querySelector('svg')!;
+    const svg = container.querySelector('svg[role="img"]')!;
     expect(svg.getAttribute('width')).toBe('375');
     expect(screen.getByText(/Cap · 50/)).toBeInTheDocument();
     for (const line of container.querySelectorAll('line')) {

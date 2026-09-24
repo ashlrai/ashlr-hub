@@ -7,15 +7,21 @@
  * right edge; a `stale` one (running on disk, silent for a long time) is drawn
  * faded and says so in its tooltip and the table.
  *
+ * V3.10: a lane may carry its ENGINE — drawn as the 2px identity tick and
+ * the C/X/G/L monogram beside the label (never a vendor logo, and never the
+ * bar fill: bars keep STATUS colour). Queued and parked work draws as a
+ * neutral OUTLINE with no fill ("not running yet" must not look like a
+ * status), and an unknown status draws as the 45° unknown hatch.
+ *
  * Scale: past VIRTUALIZE_AFTER lanes the body becomes a fixed-height scroller
  * that renders only the rows in view (plus overscan), so a 500-lane history
  * costs the same DOM as a 20-lane one. Each lane is a keyboard stop with a
  * spoken summary; every run is in the Table view.
  */
 import { useId, useMemo, useRef, useState, type UIEvent } from 'react';
-import { toneColor, type ChartTone } from './colors.js';
+import { CHART_QUEUED_OUTLINE, hatchPatternId, toneColor, type ChartEngine, type ChartTone } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
-import { ChartLegend, ChartTooltip, clampTooltipLeft } from './ChartParts.js';
+import { ChartLegend, ChartTooltip, EngineTick, HatchPattern, clampTooltipLeft, type ChartLegendItem } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
 import { linearScale } from './chart-math.js';
 import { useChartWidth } from './useChartWidth.js';
@@ -33,12 +39,27 @@ export interface SwimlaneItem {
   /** Optional short text for tooltip and table (e.g. the engine). */
   detail?: string;
   stale?: boolean;
+  /**
+   * Draw as an outline with no fill — queued / parked work that holds a place
+   * in line but is not running. Defaults to true for the statuses in
+   * OUTLINE_STATUSES.
+   */
+  outline?: boolean;
 }
 
 export interface SwimlaneLane {
   id: string;
   label: string;
   items: SwimlaneItem[];
+  /** The lane's engine: a 2px identity tick + monogram beside the label. */
+  engine?: ChartEngine;
+}
+
+/** Statuses that draw as an outline by default (they hold a place; nothing runs). */
+export const OUTLINE_STATUSES: ReadonlySet<string> = new Set(['queued', 'parked', 'waiting']);
+
+function isOutline(item: SwimlaneItem): boolean {
+  return item.outline ?? OUTLINE_STATUSES.has(item.status.toLowerCase());
 }
 
 export interface SwimlaneProps {
@@ -78,7 +99,8 @@ const DEFAULT_TONES: Record<string, ChartTone> = {
   aborted: 'neutral',
   cancelled: 'neutral',
   running: 'running',
-  queued: 'info',
+  queued: 'neutral',
+  parked: 'neutral',
 };
 
 function defaultToneOf(status: string): ChartTone {
@@ -104,6 +126,10 @@ export function spanTickFormatter(from: number, to: number): (ms: number) => str
   };
 }
 
+function truncateLabel(label: string, chars: number): string {
+  return label.length > chars ? `${label.slice(0, Math.max(1, chars - 1))}…` : label;
+}
+
 function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return '—';
   const m = Math.round(ms / 60_000);
@@ -115,6 +141,7 @@ function formatDuration(ms: number): string {
 
 interface FlatItem extends SwimlaneItem {
   lane: string;
+  engine: ChartEngine | undefined;
 }
 
 export function Swimlane({
@@ -138,13 +165,17 @@ export function Swimlane({
   const [scrollTop, setScrollTop] = useState(0);
   const [hover, setHover] = useState<{ lane: number; item: number } | null>(null);
   const liveId = useId();
+  const hatchId = hatchPatternId(useId());
   const nowMs = now ?? to;
 
   const itemCount = lanes.reduce((n, l) => n + l.items.length, 0);
   const resolvedStatus: ChartStatus = status ?? (itemCount === 0 ? { kind: 'empty', message: 'No runs in this window.' } : { kind: 'ready' });
 
-  // Narrow screens give the labels less room, never less than a readable 72 px.
-  const labelW = Math.max(72, Math.min(160, Math.round(width * 0.24)));
+  // Narrow screens give the labels less room, never less than a readable 72 px
+  // (plus room for the engine tick and monogram when lanes carry one).
+  const tickW = lanes.some((l) => l.engine !== undefined) ? 18 : 0;
+  const labelW = Math.max(72, Math.min(160, Math.round(width * 0.24))) + tickW;
+  const labelChars = Math.floor((labelW - tickW) / 7);
   const plotW = Math.max(40, width - labelW - 8);
   const xs = linearScale(from, Math.max(to, from + 1), labelW, labelW + plotW);
   const virtual = lanes.length > VIRTUALIZE_AFTER;
@@ -152,15 +183,20 @@ export function Swimlane({
   const last = virtual ? Math.min(lanes.length, Math.ceil(scrollTop / ROW_H) + VIEWPORT_ROWS + OVERSCAN) : lanes.length;
   const bodyH = lanes.length * ROW_H;
 
-  const tones = useMemo(() => {
-    const seen = new Map<ChartTone, Set<string>>();
+  // Legend: one entry per drawn style — a status tone, the outline (queued /
+  // parked) or the unknown hatch — each named by the statuses it stands for.
+  const legendItems = useMemo((): ChartLegendItem[] => {
+    const seen = new Map<string, { item: Omit<ChartLegendItem, 'label'>; names: Set<string> }>();
     for (const lane of lanes) for (const item of lane.items) {
       const tone = toneOf(item.status);
-      if (!seen.has(tone)) seen.set(tone, new Set());
-      seen.get(tone)!.add(item.status.toLowerCase());
+      const key = isOutline(item) ? 'outline' : tone === 'unknown' ? 'hatch' : tone;
+      const style: Omit<ChartLegendItem, 'label'> = key === 'outline' ? { kind: 'empty' } : key === 'hatch' ? { kind: 'hatch' } : { color: toneColor(tone) };
+      if (!seen.has(key)) seen.set(key, { item: style, names: new Set() });
+      seen.get(key)!.names.add(item.status.toLowerCase());
     }
-    return [...seen.entries()].map(([tone, names]) => ({ tone, label: [...names].sort().join(' / ') }));
+    return [...seen.values()].map(({ item, names }) => ({ ...item, label: [...names].sort().join(' / ') }));
   }, [lanes, toneOf]);
+  const anyEngine = lanes.some((l) => l.engine !== undefined);
 
   const ticks = useMemo(() => {
     const count = Math.max(2, Math.floor(plotW / 90));
@@ -169,7 +205,7 @@ export function Swimlane({
   }, [from, to, plotW]);
 
   const flat: FlatItem[] = useMemo(
-    () => lanes.flatMap((lane) => lane.items.map((item) => ({ ...item, lane: lane.label }))),
+    () => lanes.flatMap((lane) => lane.items.map((item) => ({ ...item, lane: lane.label, engine: lane.engine }))),
     [lanes],
   );
 
@@ -177,13 +213,15 @@ export function Swimlane({
     const counts = new Map<string, number>();
     for (const item of lane.items) counts.set(item.status, (counts.get(item.status) ?? 0) + 1);
     const parts = [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([s, n]) => `${n} ${s}`);
-    return `${lane.label}: ${lane.items.length} run${lane.items.length === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}`;
+    const engine = lane.engine ? ` (${lane.engine})` : '';
+    return `${lane.label}${engine}: ${lane.items.length} run${lane.items.length === 1 ? '' : 's'}${parts.length ? ` (${parts.join(', ')})` : ''}`;
   }
 
   const summary = ariaLabel ?? `${title}: ${itemCount} runs across ${lanes.length} lanes from ${formatTime(from)} to ${formatTime(to)}.`;
 
   const columns: TableColumn<FlatItem>[] = [
     { key: 'lane', label: 'Lane', render: (r) => r.lane },
+    ...(anyEngine ? [{ key: 'engine', label: 'Engine', render: (r: FlatItem) => r.engine ?? '—' }] : []),
     { key: 'status', label: 'Status', render: (r) => `${r.status}${r.stale ? ' (stale)' : ''}` },
     { key: 'start', label: 'Started', render: (r) => formatTime(r.start) },
     { key: 'dur', label: 'Duration', numeric: true, render: (r) => (r.end === null ? `${formatDuration(nowMs - r.start)}+` : formatDuration(r.end - r.start)) },
@@ -197,8 +235,9 @@ export function Swimlane({
     return (
       <g key={lane.id} data-lane={lane.id}>
         {index % 2 === 1 ? <rect className={styles.band} x={0} y={y} width={width} height={ROW_H} /> : null}
+        {lane.engine ? <EngineTick engine={lane.engine} x={2} y={y + 5} height={ROW_H - 10} /> : null}
         <text className={plot.label} x={labelW - 8} y={y + ROW_H / 2} dy="0.32em" textAnchor="end">
-          {lane.label.length > Math.floor(labelW / 7) ? `${lane.label.slice(0, Math.floor(labelW / 7) - 1)}…` : lane.label}
+          {truncateLabel(lane.label, labelChars)}
         </text>
         {lane.items.map((item, itemIndex) => {
           const start = Math.max(from, item.start);
@@ -207,19 +246,23 @@ export function Swimlane({
           const x0 = xs(start);
           const w = Math.max(MIN_BAR_W, xs(Math.max(endMs, start)) - x0);
           const tone = toneOf(item.status);
+          const outline = isOutline(item);
+          const unknown = !outline && tone === 'unknown';
           return (
             <rect
               key={item.id}
               data-item={item.id}
               data-status={item.status}
               data-open={item.end === null ? 'true' : undefined}
-              className={`${styles.bar} ${item.stale ? styles.stale : ''} ${item.end === null ? styles.open : ''}`}
-              x={x0}
-              y={y + 5}
-              width={w}
-              height={ROW_H - 10}
+              data-style={outline ? 'outline' : unknown ? 'hatch' : 'fill'}
+              className={`${styles.bar} ${item.stale ? styles.stale : ''} ${item.end === null ? styles.open : ''} ${outline ? styles.outline : ''} ${unknown ? plot.unknownMark : ''}`}
+              x={outline ? x0 + 0.5 : x0}
+              y={outline ? y + 5.5 : y + 5}
+              width={outline ? Math.max(MIN_BAR_W, w - 1) : w}
+              height={outline ? ROW_H - 11 : ROW_H - 10}
               rx={3}
-              fill={toneColor(tone)}
+              fill={outline ? 'none' : unknown ? `url(#${hatchId})` : toneColor(tone)}
+              stroke={outline ? CHART_QUEUED_OUTLINE : undefined}
               onPointerEnter={() => setHover({ lane: index, item: itemIndex })}
               onPointerLeave={() => setHover((h) => (h && h.lane === index && h.item === itemIndex ? null : h))}
             />
@@ -253,12 +296,7 @@ export function Swimlane({
       caveat={caveat}
       status={resolvedStatus}
       table={<TableView caption={title} columns={columns} rows={flat} rowKey={(r) => r.id} />}
-      footer={
-        <ChartLegend
-          min={1}
-          items={tones.map(({ tone, label }) => ({ label, color: toneColor(tone) }))}
-        />
-      }
+      footer={<ChartLegend min={1} items={legendItems} />}
     >
       <div ref={wrapRef} className={plot.plotWrap}>
         {axis}
@@ -269,6 +307,9 @@ export function Swimlane({
           data-virtualized={virtual ? 'true' : undefined}
         >
           <svg className={plot.svg} width={width} height={bodyH} viewBox={`0 0 ${width} ${bodyH}`} role="img" aria-label={summary}>
+            <defs>
+              <HatchPattern id={hatchId} />
+            </defs>
             {ticks.map((t) => (
               <line key={t} className={plot.grid} x1={xs(t)} x2={xs(t)} y1={0} y2={bodyH} />
             ))}
@@ -299,7 +340,12 @@ export function Swimlane({
             top={AXIS_H + hover.lane * ROW_H - (virtual ? scrollTop : 0)}
             title={lanes[hover.lane]!.label}
             rows={[
-              { key: 's', label: 'Status', value: `${hovered.status}${hovered.stale ? ' (stale)' : ''}`, color: toneColor(toneOf(hovered.status)) },
+              {
+                key: 's',
+                label: 'Status',
+                value: `${hovered.status}${hovered.stale ? ' (stale)' : ''}`,
+                ...(isOutline(hovered) || toneOf(hovered.status) === 'unknown' ? {} : { color: toneColor(toneOf(hovered.status)) }),
+              },
               { key: 't', label: 'Started', value: formatTime(hovered.start) },
               {
                 key: 'd',

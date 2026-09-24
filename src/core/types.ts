@@ -100,7 +100,12 @@ interface AgentSemanticEventBaseV1 {
   /** Parent-bound opaque durable id (`proposal:<id>`, `run:<id>`, or `trajectory:<id>`). */
   subjectRef: string;
   producerRole: 'manager' | 'agent' | 'verifier' | 'observer' | 'system';
-  producerModelFamily: 'claude' | 'openai' | 'local' | 'unknown';
+  /**
+   * V3.10 adds `xai`: Grok was filed under `local`, which let a Grok producer
+   * and a local judge count as the SAME family (and a Grok judge could never be
+   * independent of local work). xAI is its own provider family.
+   */
+  producerModelFamily: 'claude' | 'openai' | 'xai' | 'local' | 'unknown';
   producerVersion:
     | 'manager-semantic-v1'
     | 'agent-semantic-v1'
@@ -2741,8 +2746,14 @@ export type EngineKind = 'builtin' | 'cli-agent' | 'api-model';
  * which are substituted (each as a SINGLE argv element — never shell-split, so a
  * goal containing '$CWD' or ';' is passed verbatim and never expanded). An
  * `{ optModel }` segment is emitted only when a concrete model is present.
+ *
+ * V3.10 `{ join }`: each part is substituted exactly as above, then the parts
+ * are concatenated into ONE argv element. It exists for clap value options such
+ * as grok's `--single=<goal>`: a leading-dash value is only accepted in the
+ * `--opt=value` spelling, so a goal that starts with `-` must travel glued to
+ * its flag rather than as the next element (where it would parse as a flag).
  */
-export type ArgvSeg = string | { optModel: string[] };
+export type ArgvSeg = string | { optModel: string[] } | { join: string[] };
 
 /**
  * M50 (v5): a declarative backend engine specification. The registry

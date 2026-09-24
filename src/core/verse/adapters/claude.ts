@@ -81,7 +81,9 @@ import {
   type VerseUsage,
 } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
+import { claudeEffortArgs, claudePermissionArgs } from '../session-controls.js';
 import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
+import { turnAttachmentDirs } from './turn-extras.js';
 
 type JsonObject = Record<string, unknown>;
 
@@ -1215,7 +1217,7 @@ export function thinkingDisplayEnabled(launch: VerseSeatLaunch): boolean {
 }
 
 /** The claude build this seat will actually exec: its profile's pinned binary, else the launch snapshot's. */
-function pinnedClaudeVersion(launch: VerseSeatLaunch): string | null {
+export function pinnedClaudeVersion(launch: VerseSeatLaunch): string | null {
   const facts = launch.launcher ? readNativeProfileFacts(launch.launcher, 'claude') : null;
   const fromProfile = facts?.executable ? cliVersionFromExecutable(facts.executable) : null;
   if (fromProfile) return fromProfile;
@@ -1251,6 +1253,12 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
   // has the file's contents in the appended block.
   const addDirs = [...extraRoots];
   if (memory?.writable && !addDirs.includes(memory.dir) && memory.dir !== session.projectPath) addDirs.push(memory.dir);
+  // V3.10 attachments: exactly the one directory this message's `@path`
+  // tokens name (the engine resolved them), so the CLI may read those files
+  // and nothing else of the store around them.
+  for (const dir of turnAttachmentDirs(launch)) {
+    if (!addDirs.includes(dir) && dir !== session.projectPath) addDirs.push(dir);
+  }
   // `-p` is boolean (`--print`); the prompt is the positional `[prompt]`. It
   // goes LAST, behind the end-of-options marker, so a message that starts
   // with `-` (a bullet list, or a literal `--dangerously-skip-permissions`)
@@ -1264,7 +1272,12 @@ function buildClaudeLaunch(session: VerseSession, text: string, launch: VerseSea
     // Always the CANONICAL id: `claude-opus-5.5` (an id Verse once shipped) is
     // fuzzy-matched by the CLI to Opus 5, so a stored alias must never reach it.
     '--model', canonicalModelId(session.model),
-    '--permission-mode', 'acceptEdits',
+    // V3.10 per-chat permission mode (session-controls.ts); the default is
+    // `acceptEdits`, exactly the flag every turn carried before 3.10.
+    ...claudePermissionArgs(session),
+    // V3.10 per-chat effort — claude seats on a build that knows `--effort`
+    // only; nothing by default, so an untouched chat launches as before.
+    ...claudeEffortArgs(session, session.engine === 'claude' ? pinnedClaudeVersion(launch) : null),
     '--strict-mcp-config',
     '--mcp-config', '{"mcpServers":{}}',
     ...autocompactArgs(session, launch),

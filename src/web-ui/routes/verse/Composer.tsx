@@ -1,42 +1,85 @@
 /**
- * routes/verse/Composer.tsx — the message box. Enter sends, Shift+Enter
- * inserts a newline; one control row beneath it carries the seat pill
- * (engine-tinted dot + name), the mic, and send/stop. No inner card: a
- * hairline that takes the accent on focus is the whole chrome (DESIGN §5).
+ * routes/verse/Composer.tsx — the message box and its controls (3.10: unit
+ * C3; SPEC-310C §2 "Composer").
  *
- * While a turn is running the box stays EDITABLE so the next message (typed
- * or dictated) can be drafted during the reply — only Send is withheld and
- * Stop takes its place. This deliberately relaxes the V1 contract line
- * "Composer disabled while running except stop": a disabled textarea loses
- * focus on every send and turns the loop (type · Enter · read · type) into a
- * click-into-the-box ritual, and system dictation lands nowhere.
+ *   [queued follow-ups: Edit · Send now · ×]          (hidden when empty; portalled
+ *                                                      to the host's `queueSlot` when given)
+ *   ┌───────────────────────────────────────────────┐
+ *   │ [attachment chips]                            │
+ *   │ Message the agent…                            │
+ *   │ [+] 🎙 Permission ▾      [C] seat ◔ Model ▾ Effort ▾ ◔ Send │
+ *   └───────────────────────────────────────────────┘
  *
- * Sessions are seat-bound, so the seat pill is read-only: its menu says what
- * this chat runs on and offers "New chat on …" per seat, which asks the
- * parent to start a new chat rather than mutating this one.
+ * ALWAYS EDITABLE. Enter while a turn runs QUEUES the message on the server
+ * (at most 3); the queue sends each follow-up when the turn before it ends
+ * cleanly, and HOLDS after a failure or a Stop (queue row says why). ⇧⌘↩
+ * stops the running turn and sends this message next. Esc stops the turn —
+ * only from an empty box with no menu open, so it never eats a draft.
  *
- * V3.10: above the box sits the seat-health block (routes/verse/health,
- * unit A2). When the chat's seat cannot run a turn — signed out, spent,
- * pinned to a skewed CLI — it says why, when it resets, offers Reconnect,
- * and ranks the seats that CAN run it, before a message is typed into a
- * dead end. It renders nothing for a ready seat.
+ * CONTROLS apply from the next turn, even mid-run: Permission (⇧⌘M: Plan,
+ * Accept edits, Auto, Bypass — bypass is red and confirmed per chat), Model
+ * (⇧⌘I) and Effort (⇧⌘E). An option the seat cannot honour is listed
+ * disabled with the reason. Keys come from C0's command catalog; the palette
+ * reaches the same actions through the `ashlr:command` window event.
+ *
+ * ATTACHMENTS: [+] / ⌘U, paste or drop. Each becomes a private copy on the
+ * server and an `@path` token in the text, which the engine grants with
+ * exactly that folder. `@` fuzzy-finds project files; `/` at the start offers
+ * handoff, compact, new, plan, effort, model.
+ *
+ * At 375px the footer folds to [+] [mic] · seat · ⋯ (the pickers in a bottom
+ * sheet) · Send.
+ *
+ * Kept from 3.9: per-chat drafts that survive a reload, ↑ history recall, the
+ * pre-send cost hint, dictation, ⌘. to stop, and the seat-health block (A2).
  */
-import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent, type ReactNode } from 'react';
+import { createPortal } from 'react-dom';
 import type { VerseSeat } from '../../data/api-types.js';
+import type { VerseEffort, VersePermissionMode } from '../../../core/verse/workbench-types.js';
+import { VERSE_QUEUE_MAX } from '../../../core/verse/workbench-types.js';
+import { MutationTokenDialog } from '../../components/auth/MutationTokenDialog.js';
+import { IconPlus } from '../../components/primitives/icons.js';
+import { Tooltip } from '../../components/primitives/Tooltip.js';
 import { costHint, loadDraft, loadHistory, pushHistory, saveDraft, type CostHint } from './chat/composer-state.js';
+import { AttachmentChips } from './composer/AttachmentChips.js';
+import { BypassConfirmDialog } from './composer/BypassConfirmDialog.js';
+import { COMPOSER_COMMAND_IDS, pressesCommand, shortcutLabel, WORKBENCH_COMMAND_EVENT, type ComposerCommandId } from './composer/composer-keys.js';
+import { searchSessionFiles } from './composer/composer-queries.js';
+import {
+  activeTrigger,
+  applyCompletion,
+  insertAttachmentRef,
+  matchSlashCommands,
+  mentionFor,
+  removeAttachmentRef,
+  type ComposerTrigger,
+  type SlashCommand,
+} from './composer/composer-text.js';
+import { ContextRing } from './composer/ContextRing.js';
+import { ControlMenu } from './composer/ControlMenu.js';
+import { ControlsSheet } from './composer/ControlsSheet.js';
+import { QueueRow } from './composer/QueueRow.js';
+import { SeatChip } from './composer/SeatChip.js';
+import { SuggestMenu, suggestOptionId, type SuggestItem } from './composer/SuggestMenu.js';
+import { useAttachmentDrafts, useFollowUpQueue, useSessionControls } from './composer/useComposerData.js';
+import { useTokenGate } from './context/use-token-gate.js';
 import { DictationButton } from './DictationButton.js';
 import { ComposerSeatBlock } from './health/ComposerSeatBlock.js';
 import type { SeatChoice } from './SeatSelector.js';
-import { firstRunnableModel, seatCapacity, SEAT_CAPACITY_WORD, seatPillLabel } from './verse-model.js';
+import { useViewport } from './shell/viewport.js';
+import { seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-store.js';
+import type { VerseFileMatch } from '../../../core/verse/workbench-types.js';
 import styles from './Composer.module.css';
+import cstyles from './composer/composer.module.css';
 
 export interface ComposerProps {
-  /** Which chat this box belongs to — drafts and ↑ history are per session. */
+  /** Which chat this box belongs to — drafts, history, controls and the queue are per session. */
   sessionId?: string | null;
   seats: readonly VerseSeat[];
   seat: SeatChoice;
-  /** Engine of the current chat; only used for the pill's identity dot. */
+  /** Engine of the current chat (identity tick, and what the seat can do). */
   engine?: VerseSeat['engine'];
   running: boolean;
   disabled: boolean;
@@ -45,84 +88,125 @@ export interface ComposerProps {
   /** True when this session already has turns — the hint row has done its job. */
   hintSeen?: boolean;
   /**
-   * Live context occupancy, for the pre-send cost hint — the SAME budget the
-   * header meter draws (verse-model `sessionContextBudget`), so the two can
-   * never disagree about when things are tight.
+   * Live context occupancy, for the pre-send cost hint and the footer ring —
+   * the SAME budget the header meter draws (verse-model `sessionContextBudget`).
    */
   contextTokens?: number | null;
   contextWindow?: number | null;
-  /** Where the CLI auto-compacts; the hint's tone is measured against it. */
   autoCompactAt?: number | null;
   /** False when `contextTokens` is an upper bound (codex before its rollout is read). */
   contextExact?: boolean;
-  /**
-   * The box was pre-filled with a handoff note (V3.9) that has not been sent
-   * yet: the help row says so, because the first send IS the first spend.
-   */
+  /** The box was pre-filled with a handoff note that has not been sent yet. */
   handoffDraft?: boolean;
   onSend: (text: string) => Promise<boolean> | boolean;
   onStop: () => void;
+  /** Start a new chat on a seat (the seat menu, `/new`). */
   onSeatChange: (choice: SeatChoice) => void;
+  /** "Continue on ‹seat›": open the handoff prefilled for that seat. Absent → a new chat on it. */
+  onContinueOn?: (choice: SeatChoice) => void;
+  /** `/handoff`: open this chat's handoff. Absent → the command is listed disabled with where to find it. */
+  onHandoff?: () => void;
+  /**
+   * Why `/handoff` cannot run right now (a turn is running, dispatch is off) —
+   * the SAME reason the header's ⋯ item shows. Null/absent = available.
+   */
+  handoffDisabledReason?: string | null;
+  /**
+   * Where the "Queued turns" row renders. SPEC-310C §2 orders the rows above
+   * the composer notice → queued → live status → branch bar; the queue's state
+   * lives here, so the host (Workspace) passes the element at the queue's
+   * place and the row is portalled into it. Absent/null → the row renders at
+   * the top of the composer, as before.
+   */
+  queueSlot?: HTMLElement | null;
+  /**
+   * Text another pane drafts INTO the box (Review's "Add to message"
+   * `path:line: note`, Terminal's "Send selection to chat"): each new `nonce`
+   * appends `text` on its own paragraph and focuses the box. Never sends —
+   * the operator reads it and presses Enter (or ⌘Enter).
+   */
+  insertRequest?: { nonce: number; text: string } | null;
   autoFocus?: boolean;
 }
 
 const MAX_TEXT_BYTES = 64 * 1024;
-
-/**
- * How long typing must pause before the draft is written to `localStorage`.
- *
- * `saveDraft` re-parses the whole drafts map, mutates it, re-serialises it and
- * writes it back synchronously — up to 40 sessions of 64 KB. On every keystroke
- * that lands on the main thread inside the composer's own render commit, which
- * is the one place in the app where the operator feels a stall directly. The
- * draft is a crash-recovery convenience, so 400ms of exposure costs nothing;
- * every path that actually loses the component flushes it immediately.
- */
+/** Typing must pause this long before the draft is written to localStorage (see saveDraft). */
 const DRAFT_WRITE_DEBOUNCE_MS = 400;
+/** The `@` finder waits for a pause in typing before it asks the server. */
+const MENTION_DEBOUNCE_MS = 120;
 /** DESIGN §5: the box grows to 40% of the viewport, then scrolls. */
 const MAX_HEIGHT_RATIO = 0.4;
 const MAX_HEIGHT_FALLBACK_PX = 320;
 
+type PickerId = 'permission' | 'model' | 'effort';
+
+const PERMISSION_GLYPH: Record<VersePermissionMode, string> = {
+  plan: '◇',
+  'accept-edits': '✎',
+  auto: '↻',
+  bypass: '⚠',
+};
+
 export function Composer({ sessionId = null, seats, seat, engine, running, disabled, disabledReason, locked,
   hintSeen = false, contextTokens = null, contextWindow = null, autoCompactAt = null, contextExact = true, handoffDraft = false,
-  onSend, onStop, onSeatChange, autoFocus = false }: ComposerProps) {
-  // A draft survives ⌘K, a reload and a crash; it is restored on mount and
-  // written back on every keystroke (Composer is keyed by session id, so a
-  // mount is exactly one chat).
+  onSend, onStop, onSeatChange, onContinueOn, onHandoff, handoffDisabledReason = null, queueSlot = null, insertRequest = null,
+  autoFocus = false }: ComposerProps) {
+  const { compact } = useViewport();
+  const gate = useTokenGate();
+  const run = gate.run;
+  const controls = useSessionControls(disabled ? null : sessionId, running, run);
+  const followUps = useFollowUpQueue(disabled ? null : sessionId, running, run);
+  const attachments = useAttachmentDrafts(disabled ? null : sessionId, run);
+
+  // A draft survives ⌘K, a reload and a crash (Composer is keyed by session id).
   const [draft, setDraft] = useState(() => loadDraft(sessionId));
   const [interim, setInterim] = useState('');
   const [sending, setSending] = useState(false);
   const [listening, setListening] = useState(false);
   const [sentHere, setSentHere] = useState(false);
-  /** -1 = editing a fresh draft; 0..n-1 = walking back through sent messages. */
+  const [note, setNote] = useState<{ text: string; error: boolean } | null>(null);
   const [historyAt, setHistoryAt] = useState(-1);
-  // `useRef` takes a VALUE, not a lazy initializer: written as
-  // `useRef(loadHistory(sessionId))` this re-read and re-parsed the whole sent
-  // map from localStorage on every render — every keystroke and every streamed
-  // token — and threw the result away each time. `useState`'s initializer is
-  // the lazy one, and it runs exactly once, which is what the ref wanted.
   const [initialHistory] = useState(() => loadHistory(sessionId));
   const history = useRef<string[]>(initialHistory);
   const stashed = useRef('');
   const textarea = useRef<HTMLTextAreaElement>(null);
   const form = useRef<HTMLFormElement>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
   const helpId = useId();
+  const suggestId = useId();
+  const [caret, setCaret] = useState<number | null>(null);
+  const [dismissedTrigger, setDismissedTrigger] = useState<number | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
+  const [fileMatches, setFileMatches] = useState<{ query: string; files: VerseFileMatch[]; primaryRoot: string | null } | null>(null);
+  const [fileSearchError, setFileSearchError] = useState<string | null>(null);
+  const [openRequest, setOpenRequest] = useState<Record<PickerId, number>>({ permission: 0, model: 0, effort: 0 });
+  const [openMenus, setOpenMenus] = useState<Record<PickerId, boolean>>({ permission: false, model: false, effort: false });
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const [bypassAsk, setBypassAsk] = useState(false);
+  const [dragging, setDragging] = useState(false);
+
   const text = interim ? `${draft}${draft && !draft.endsWith(' ') ? ' ' : ''}${interim}` : draft;
   const tooLong = useMemo(() => new TextEncoder().encode(text).length > MAX_TEXT_BYTES, [text]);
-  const canSend = !disabled && !running && !sending && text.trim().length > 0 && !tooLong;
+  const queue = followUps.queue;
+  const queueAvailable = queue !== null;
+  const queueFull = (queue?.items.length ?? 0) >= VERSE_QUEUE_MAX;
+  const hasText = text.trim().length > 0;
+  const blockedByUpload = attachments.uploading;
+  const canSend = !disabled && !sending && hasText && !tooLong && !blockedByUpload && (!running || (queueAvailable && !queueFull));
   const showHint = !hintSeen && !sentHere;
-  const showHandoffHelp = handoffDraft && !sentHere && text.trim().length > 0;
+  const showHandoffHelp = handoffDraft && !sentHere && hasText;
   const cost = useMemo(
     () => costHint(text, { contextTokens, contextWindow, autoCompactAt, exact: contextExact }),
     [text, contextTokens, contextWindow, autoCompactAt, contextExact],
   );
+  const view = controls.view;
+  const effectiveEngine = engine ?? seats.find((s) => s.id === seat.seatId)?.engine ?? 'claude';
+  const chipLabel = seatPillLabel(seats, { seatId: seat.seatId, engine: effectiveEngine, model: view?.controls.model ?? seat.model });
+  const attachBlocked = effectiveEngine === 'grok'
+    ? 'Grok can only open files inside the project folder, so it can’t read attachments.'
+    : null;
 
-  // Persist the draft as it is typed, but not ON every keystroke — see
-  // DRAFT_WRITE_DEBOUNCE_MS. Dictation interim text is deliberately NOT
-  // persisted: it is not committed until the recognizer finalizes it.
-  //
-  // `persistedDraft` is what storage already holds, seeded with the value
-  // `loadDraft` returned, so mounting does not write back what it just read.
+  // ---- drafts ---------------------------------------------------------------
   const persistedDraft = useRef(draft);
   const latestDraft = useRef(draft);
   latestDraft.current = draft;
@@ -139,9 +223,6 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     return () => clearTimeout(id);
   }, [draft, flushDraft]);
 
-  // A tab closing, and the component going away (⌘K to another chat), are the
-  // two ways the debounce window could otherwise swallow the last few
-  // characters. Both flush synchronously.
   useEffect(() => {
     window.addEventListener('beforeunload', flushDraft);
     return () => {
@@ -154,11 +235,20 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     if (autoFocus) textarea.current?.focus();
   }, [autoFocus]);
 
-  // ⌘. stops the running turn from anywhere in the app, the way ⌘. has meant
-  // "cancel" on this platform for forty years. Only armed while a turn is
-  // actually running, so it can never fire on an idle chat.
+  // Text drafted in from another pane: appended once per nonce, never sent.
+  const seenInsert = useRef<number | null>(insertRequest?.nonce ?? null);
   useEffect(() => {
-    if (!running) return;
+    if (!insertRequest || insertRequest.nonce === seenInsert.current) return;
+    seenInsert.current = insertRequest.nonce;
+    const addition = insertRequest.text.replace(/\s+$/, '');
+    if (!addition) return;
+    setDraft((current) => (current.trim() ? `${current.replace(/\s+$/, '')}\n\n${addition}` : addition));
+    placeCaret(Number.MAX_SAFE_INTEGER);
+  }, [insertRequest]);
+
+  // ⌘. stops the running turn from anywhere in the app (armed only while one runs).
+  useEffect(() => {
+    if (!running) return undefined;
     const onKey = (event: globalThis.KeyboardEvent) => {
       if (event.key !== '.' || (!event.metaKey && !event.ctrlKey) || event.shiftKey || event.altKey) return;
       event.preventDefault();
@@ -168,10 +258,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     return () => document.removeEventListener('keydown', onKey);
   }, [running, onStop]);
 
-  // When the reply finishes, hand focus back to the box unless the operator
-  // moved it somewhere deliberate outside the composer. Focus on <body>, on a
-  // node that just unmounted (the Stop button), or on one of the composer's
-  // own controls all count as "nowhere useful".
+  // When the reply finishes, hand focus back to the box unless it went somewhere deliberate.
   useEffect(() => {
     if (running || !autoFocus) return;
     const active = document.activeElement;
@@ -189,39 +276,298 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     node.style.height = `${Math.min(node.scrollHeight, max)}px`;
   }, [text]);
 
-  const submit = useCallback(async () => {
-    if (!canSend) return;
-    const value = text.trim();
-    setSending(true);
-    try {
-      const ok = await onSend(value);
-      if (ok) {
-        const last = history.current[history.current.length - 1];
-        if (last !== value) history.current = [...history.current, value];
-        pushHistory(sessionId, value);
-        setHistoryAt(-1);
-        stashed.current = '';
-        setDraft('');
-        // Clear the stored draft now: the message is sent, and leaving it in
-        // storage for the debounce window risks restoring a sent prompt.
-        persistedDraft.current = '';
-        latestDraft.current = '';
-        saveDraft(sessionId, '');
-        setInterim('');
-        setSentHere(true);
+  // ---- `@` and `/` ------------------------------------------------------------
+  const trigger: ComposerTrigger | null = useMemo(() => {
+    if (disabled || interim || caret === null) return null;
+    const found = activeTrigger(draft, caret);
+    if (!found || found.start === dismissedTrigger) return null;
+    if (found.kind === 'mention' && !sessionId) return null;
+    return found;
+  }, [draft, caret, disabled, interim, dismissedTrigger, sessionId]);
+
+  useEffect(() => {
+    if (trigger?.kind !== 'mention' || !sessionId) {
+      setFileSearchError(null);
+      return undefined;
+    }
+    const abort = new AbortController();
+    const timer = setTimeout(() => {
+      searchSessionFiles(sessionId, trigger.query, abort.signal)
+        .then((result) => {
+          setFileMatches({ query: result.query, files: result.files, primaryRoot: result.primaryRoot ?? null });
+          setFileSearchError(null);
+        })
+        .catch(() => { if (!abort.signal.aborted) setFileSearchError('Files could not be listed.'); });
+    }, MENTION_DEBOUNCE_MS);
+    return () => {
+      clearTimeout(timer);
+      abort.abort();
+    };
+  }, [trigger?.kind, trigger?.query, sessionId]);
+
+  const commands: SlashCommand[] = trigger?.kind === 'command' ? matchSlashCommands(trigger.query) : [];
+  const commandDisabled = useCallback((id: SlashCommand['id']): string | null => {
+    if (id === 'handoff' && !onHandoff) return 'Use Hand off in the chat header’s ⋯ menu';
+    if (id === 'handoff' && handoffDisabledReason) return handoffDisabledReason;
+    if ((id === 'plan' || id === 'effort' || id === 'model') && !view) return 'This server has no session controls yet';
+    if (id === 'plan' && view && !view.options.permissionModes.find((o) => o.id === 'plan')?.available) return 'This seat has no plan mode';
+    return null;
+  }, [onHandoff, handoffDisabledReason, view]);
+
+  const suggestItems: SuggestItem[] = trigger?.kind === 'command'
+    ? commands.map((c) => ({ id: c.id, primary: c.title, secondary: c.description, disabledReason: commandDisabled(c.id) }))
+    : trigger?.kind === 'mention'
+      ? (fileMatches?.files ?? []).slice(0, 12).map((f) => ({ id: `${f.root}:${f.path}`, primary: f.path, secondary: fileMatches?.primaryRoot === f.root ? null : f.root }))
+      : [];
+  const suggestOpen = trigger !== null;
+  const suggestStatus = trigger?.kind === 'mention'
+    ? fileSearchError ?? (fileMatches === null || fileMatches.query !== trigger.query ? 'Searching…' : suggestItems.length === 0 ? 'No files match' : null)
+    : null;
+  const boundedActive = suggestItems.length === 0 ? 0 : Math.min(activeIndex, suggestItems.length - 1);
+
+  useEffect(() => { setActiveIndex(0); }, [trigger?.kind, trigger?.query]);
+
+  function syncCaret() {
+    const node = textarea.current;
+    if (node) setCaret(node.selectionStart === node.selectionEnd ? node.selectionStart : null);
+  }
+
+  function placeCaret(position: number) {
+    requestAnimationFrame(() => {
+      const node = textarea.current;
+      if (!node) return;
+      const at = Math.min(position, node.value.length);
+      node.focus();
+      node.setSelectionRange(at, at);
+      setCaret(at);
+    });
+  }
+
+  const openPicker = useCallback((id: PickerId) => {
+    if (compact) {
+      setSheetOpen(true);
+      return;
+    }
+    setOpenRequest((current) => ({ ...current, [id]: current[id] + 1 }));
+  }, [compact]);
+
+  function runSlash(command: SlashCommand) {
+    if (!trigger) return;
+    const reason = commandDisabled(command.id);
+    if (reason) {
+      setNote({ text: reason, error: false });
+      return;
+    }
+    // Every command but /compact consumes its own text.
+    const without = `${draft.slice(0, trigger.start)}${draft.slice(trigger.end)}`.replace(/^\s+/, '');
+    switch (command.id) {
+      case 'compact': {
+        const next = applyCompletion(draft, trigger, '/compact');
+        setDraft(next.text);
+        placeCaret(next.caret);
+        return;
       }
+      case 'new':
+        setDraft(without);
+        onSeatChange({ seatId: seat.seatId, model: view?.controls.model ?? seat.model });
+        return;
+      case 'handoff':
+        setDraft(without);
+        onHandoff?.();
+        return;
+      case 'plan':
+        setDraft(without);
+        placeCaret(0);
+        void changePermission('plan');
+        return;
+      case 'effort':
+      case 'model':
+        setDraft(without);
+        openPicker(command.id);
+        return;
+      default:
+    }
+  }
+
+  function acceptSuggestion(index: number) {
+    if (!trigger) return;
+    if (trigger.kind === 'command') {
+      const command = commands[index];
+      if (command) runSlash(command);
+      return;
+    }
+    const match = fileMatches?.files[index];
+    if (!match) return;
+    const next = applyCompletion(draft, trigger, mentionFor(match, fileMatches?.primaryRoot ?? null));
+    setDraft(next.text);
+    placeCaret(next.caret);
+  }
+
+  // ---- controls ---------------------------------------------------------------
+  const changePermission = useCallback(async (mode: VersePermissionMode) => {
+    if (mode === 'bypass') {
+      setBypassAsk(true);
+      return;
+    }
+    const ok = await controls.update({ permissionMode: mode }, 'Change this chat’s permission mode.');
+    if (ok) setNote({ text: running ? 'Permission mode changes from the next turn.' : `Permission mode: ${labelOf(view?.options.permissionModes, mode)}.`, error: false });
+  }, [controls, running, view]);
+
+  const changeModel = useCallback(async (model: string) => {
+    const ok = await controls.update({ model }, 'Change this chat’s model.');
+    if (ok) setNote({ text: running ? 'The new model takes over from the next turn.' : `Model: ${labelOf(view?.options.models, model)}.`, error: false });
+  }, [controls, running, view]);
+
+  const changeEffort = useCallback(async (effort: VerseEffort | null) => {
+    const ok = await controls.update({ effort }, 'Change this chat’s reasoning effort.');
+    if (ok) setNote({ text: running ? 'Effort changes from the next turn.' : `Effort: ${effort ? labelOf(view?.options.efforts, effort) : 'the CLI default'}.`, error: false });
+  }, [controls, running, view]);
+
+  async function confirmBypass() {
+    setBypassAsk(false);
+    const ok = await controls.update({ permissionMode: 'bypass', confirmBypass: true }, 'Bypass permissions for this chat.');
+    if (ok) setNote({ text: 'Bypass is on for this chat — every check is skipped.', error: false });
+    textarea.current?.focus();
+  }
+
+  // ---- attachments ------------------------------------------------------------
+  const addFiles = useCallback((files: readonly File[]) => {
+    if (files.length === 0 || disabled) return;
+    if (attachBlocked) {
+      setNote({ text: attachBlocked, error: true });
+      return;
+    }
+    attachments.add(files, (ref) => {
+      setDraft((current) => insertAttachmentRef(current, ref).text);
+    });
+  }, [attachments, attachBlocked, disabled]);
+
+  async function removeChip(key: string) {
+    const ref = await attachments.remove(key);
+    if (ref) setDraft((current) => removeAttachmentRef(current, ref));
+  }
+
+  function onPaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    event.preventDefault();
+    addFiles(files);
+  }
+
+  function onDrop(event: DragEvent<HTMLFormElement>) {
+    setDragging(false);
+    const files = Array.from(event.dataTransfer?.files ?? []);
+    if (files.length === 0) return;
+    event.preventDefault();
+    addFiles(files);
+  }
+
+  const openFilePicker = useCallback(() => {
+    if (disabled) return;
+    if (attachBlocked) {
+      setNote({ text: attachBlocked, error: true });
+      return;
+    }
+    fileInput.current?.click();
+  }, [disabled, attachBlocked]);
+
+  // ---- send / queue -------------------------------------------------------------
+  const clearAfterSend = useCallback((value: string) => {
+    const last = history.current[history.current.length - 1];
+    if (last !== value) history.current = [...history.current, value];
+    pushHistory(sessionId, value);
+    setHistoryAt(-1);
+    stashed.current = '';
+    setDraft('');
+    persistedDraft.current = '';
+    latestDraft.current = '';
+    saveDraft(sessionId, '');
+    setInterim('');
+    setSentHere(true);
+    attachments.reset();
+  }, [sessionId, attachments]);
+
+  const submit = useCallback(async (mode: 'send' | 'stop-and-send' = 'send') => {
+    if (disabled || sending || tooLong) return;
+    const value = text.trim();
+    if (!value) return;
+    if (blockedByUpload) {
+      setNote({ text: 'Wait for the attachments to finish uploading.', error: false });
+      return;
+    }
+    setSending(true);
+    setNote(null);
+    try {
+      if (running && queueAvailable) {
+        if (mode !== 'stop-and-send' && queueFull) {
+          setNote({ text: `Up to ${VERSE_QUEUE_MAX} follow-ups can wait — send or remove one first.`, error: true });
+          return;
+        }
+        const result = await followUps.enqueue(value, { sendNow: mode === 'stop-and-send' });
+        if (result) {
+          clearAfterSend(value);
+          if (mode === 'stop-and-send') setNote({ text: 'Stopping the turn — this message goes next.', error: false });
+        }
+        return;
+      }
+      if (running) return; // older server: no queue, the box just keeps the draft
+      const ok = await onSend(value);
+      if (ok) clearAfterSend(value);
     } finally {
       setSending(false);
       textarea.current?.focus();
     }
-  }, [canSend, text, onSend, sessionId]);
+  }, [disabled, sending, tooLong, text, blockedByUpload, running, queueAvailable, queueFull, followUps, clearAfterSend, onSend]);
 
-  /**
-   * Shell-style recall. ↑ from the top of an untouched box walks back through
-   * what was already sent here; ↓ walks forward and finally restores whatever
-   * was being written. Only fires at the very start/end of the text, so
-   * multi-line editing keeps both arrow keys.
-   */
+  async function editQueued(queueId: string, queuedText: string) {
+    const ok = await followUps.remove(queueId);
+    if (!ok) return;
+    setDraft((current) => (current.trim() ? `${current.replace(/\s+$/, '')}\n\n${queuedText}` : queuedText));
+    placeCaret(Number.MAX_SAFE_INTEGER);
+  }
+
+  // ---- keys ----------------------------------------------------------------------
+  const anyOverlayOpen = suggestOpen || Object.values(openMenus).some(Boolean) || sheetOpen || bypassAsk || gate.dialog.open;
+
+  const runCommand = useCallback((id: ComposerCommandId) => {
+    switch (id) {
+      case 'composer.permission': openPicker('permission'); return;
+      case 'composer.model': openPicker('model'); return;
+      case 'composer.effort': openPicker('effort'); return;
+      case 'composer.attach': openFilePicker(); return;
+      case 'composer.send': void submit('send'); return;
+      case 'composer.stop-and-send': void submit('stop-and-send'); return;
+      case 'composer.stop': if (running) onStop(); return;
+      default:
+    }
+  }, [openPicker, openFilePicker, submit, running, onStop]);
+
+  // Chat-scope keys (⇧⌘M/I/E, ⌘U) are live while the chat is on screen, not
+  // only while the box has focus; a modal dialog anywhere owns the keys.
+  useEffect(() => {
+    if (disabled) return undefined;
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.defaultPrevented || document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+      for (const id of ['composer.permission', 'composer.model', 'composer.effort', 'composer.attach'] as const) {
+        if (pressesCommand(event, id)) {
+          event.preventDefault();
+          runCommand(id);
+          return;
+        }
+      }
+    };
+    const onCommand = (event: Event) => {
+      const id = (event as CustomEvent<{ id?: unknown }>).detail?.id;
+      if (typeof id === 'string' && (COMPOSER_COMMAND_IDS as readonly string[]).includes(id)) runCommand(id as ComposerCommandId);
+    };
+    document.addEventListener('keydown', onKey);
+    window.addEventListener(WORKBENCH_COMMAND_EVENT, onCommand);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      window.removeEventListener(WORKBENCH_COMMAND_EVENT, onCommand);
+    };
+  }, [disabled, runCommand]);
+
   function recall(delta: -1 | 1): boolean {
     const list = history.current;
     if (list.length === 0) return false;
@@ -249,27 +595,52 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     const node = event.currentTarget;
     const collapsed = node.selectionStart === node.selectionEnd;
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
+    const composing = event.nativeEvent.isComposing;
+
+    if (suggestOpen && !composing) {
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        if (suggestItems.length > 0) {
+          event.preventDefault();
+          const step = event.key === 'ArrowDown' ? 1 : -1;
+          setActiveIndex((boundedActive + step + suggestItems.length) % suggestItems.length);
+        }
+        return;
+      }
+      if ((event.key === 'Enter' && !event.shiftKey && !event.metaKey && !event.ctrlKey) || event.key === 'Tab') {
+        if (suggestItems.length > 0) {
+          event.preventDefault();
+          acceptSuggestion(boundedActive);
+          return;
+        }
+        if (event.key === 'Tab') return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setDismissedTrigger(trigger?.start ?? null);
+        return;
+      }
+    }
+
+    if (!composing && pressesCommand(event, 'composer.stop-and-send')) {
       event.preventDefault();
-      void submit();
+      void submit('stop-and-send');
       return;
     }
-    // ⌘/Ctrl+Enter also sends, so a hand already on the modifier for a
-    // multi-line draft does not have to reach for plain Enter.
-    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey) && !event.nativeEvent.isComposing) {
+    if (event.key === 'Enter' && !event.shiftKey && !composing) {
       event.preventDefault();
-      void submit();
+      void submit('send');
       return;
     }
-    // ⌘. is NOT handled here: the document-level listener above owns it, and
-    // handling it in both places called onStop twice whenever the box had
-    // focus — which is nearly always.
-    //
-    // History walking. ↑ enters history only from the very start of an
-    // untouched box, so multi-line editing keeps the arrow keys; once IN
-    // history both arrows walk it, because a recalled message leaves the
-    // caret at its end and a second ↑ must still step back, the way a shell
-    // does. Typing anything leaves history (see the textarea's onChange).
+    if (!composing && event.key === 'Escape' && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+      // Esc stops the turn ONLY from an empty box with nothing open over it,
+      // so it can never discard a draft or fight a menu for the key.
+      if (running && !hasText && !anyOverlayOpen) {
+        event.preventDefault();
+        onStop();
+      }
+      return;
+    }
     if (event.key === 'ArrowUp' && collapsed && (historyAt !== -1 || (node.selectionStart === 0 && !interim))) {
       if (recall(-1)) event.preventDefault();
       return;
@@ -279,37 +650,139 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
     }
   }
 
+  // ---- render ----------------------------------------------------------------------
   const placeholder = disabled
     ? disabledReason ?? 'Sending is disabled'
     : running
-      ? 'Draft your next message…'
-      : 'Message the agent…';
+      ? (queueAvailable ? 'Queue a follow-up — it sends when this turn ends…' : 'Draft your next message…')
+      : 'Message the agent… (@ files, / commands)';
+
+  const permissionValue = view?.controls.permissionMode ?? null;
+  const bypassOn = permissionValue === 'bypass';
+  const appliesNote = running ? 'Changes apply from the next turn.' : null;
+  const pickers = view ? (variant: 'menu' | 'list') => ({
+    permission: (
+      <ControlMenu<VersePermissionMode> key="permission" label="Permission mode" variant={variant}
+        valueLabel={labelOf(view.options.permissionModes, view.controls.permissionMode)}
+        options={view.options.permissionModes} value={view.controls.permissionMode}
+        onChange={(mode) => { void changePermission(mode); }} disabled={controls.pending}
+        shortcut={shortcutLabel('composer.permission')} openRequest={openRequest.permission}
+        icon={PERMISSION_GLYPH[view.controls.permissionMode]} danger={bypassOn} note={appliesNote}
+        onOpenChange={(open) => setOpenMenus((m) => ({ ...m, permission: open }))} />
+    ),
+    model: (
+      <ControlMenu<string> key="model" label="Model" variant={variant}
+        valueLabel={labelOf(view.options.models, view.controls.model)}
+        options={view.options.models} value={view.controls.model}
+        onChange={(model) => { void changeModel(model); }} disabled={controls.pending}
+        shortcut={shortcutLabel('composer.model')} openRequest={openRequest.model} note={appliesNote}
+        onOpenChange={(open) => setOpenMenus((m) => ({ ...m, model: open }))} />
+    ),
+    effort: view.options.efforts.some((o) => o.available) ? (
+      <ControlMenu<VerseEffort> key="effort" label="Effort" variant={variant}
+        valueLabel={view.controls.effort ? labelOf(view.options.efforts, view.controls.effort) : 'Default effort'}
+        options={view.options.efforts} value={view.controls.effort}
+        defaultOption={{ label: 'Default', description: 'The CLI decides', onSelect: () => { void changeEffort(null); } }}
+        onChange={(effort) => { void changeEffort(effort); }} disabled={controls.pending}
+        shortcut={shortcutLabel('composer.effort')} openRequest={openRequest.effort} note={appliesNote}
+        onOpenChange={(open) => setOpenMenus((m) => ({ ...m, effort: open }))} />
+    ) : (
+      <span key="effort" className={cstyles.controlStatic} title={view.options.efforts[0]?.reason ?? 'No effort setting on this seat'}>
+        No effort setting
+      </span>
+    ),
+  }) : null;
+  const wide = pickers?.('menu') ?? null;
+
+  const sendLabel = running ? (queueFull ? 'Queue full' : 'Queue') : sending ? 'Sending…' : locked ? 'Unlock & send' : 'Send';
 
   return (
-    <form ref={form} className={styles.composer} onSubmit={(event) => { event.preventDefault(); void submit(); }} aria-describedby={helpId}>
-      {/* A read-only server cannot send anyway; the block would only add a second reason. */}
+    <form ref={form} className={`${styles.composer} ${compact ? cstyles.composerCompact : ''}`}
+      onSubmit={(event) => { event.preventDefault(); void submit('send'); }} aria-describedby={helpId}
+      onDragOver={(event) => {
+        if (disabled || !Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+        event.preventDefault();
+        setDragging(true);
+      }}
+      onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
+      onDrop={onDrop}>
       {disabled ? null : <ComposerSeatBlock seats={seats} seatId={seat.seatId} onSeatChange={onSeatChange} />}
-      <div className={`${styles.box} ${listening ? styles.boxListening : ''}`}>
+      {portalInto(queueSlot, (
+        <QueueRow queue={queue} running={running} disabled={disabled}
+          onEdit={(id, queued) => { void editQueued(id, queued); }}
+          onSendNow={(id) => { void followUps.sendNow(id); }}
+          onRemove={(id) => { void followUps.remove(id); }} />
+      ))}
+      <div className={`${styles.box} ${listening ? styles.boxListening : ''} ${dragging ? cstyles.boxDragging : ''} ${bypassOn ? cstyles.boxBypass : ''}`}>
+        {suggestOpen ? (
+          <SuggestMenu id={suggestId} label={trigger?.kind === 'command' ? 'Commands' : 'Files in this chat’s folders'}
+            items={suggestItems} activeIndex={boundedActive} status={suggestStatus}
+            onPick={acceptSuggestion} onHover={setActiveIndex} />
+        ) : null}
+        <AttachmentChips drafts={attachments.drafts} onRemove={(key) => { void removeChip(key); }} disabled={disabled} />
         <textarea ref={textarea} className={styles.textarea} value={text} rows={1} placeholder={placeholder}
           aria-label="Message" disabled={disabled}
-          onChange={(event) => { setInterim(''); setHistoryAt(-1); setDraft(event.target.value); }} onKeyDown={onKeyDown} />
-        <div className={styles.row}>
-          <SeatPill seats={seats} seat={seat} engine={engine} disabled={disabled} onNewChat={onSeatChange} />
-          <div className={styles.spacer} />
-          <DictationButton disabled={disabled}
-            onInterim={setInterim}
-            onFinal={(chunk) => setDraft((current) => (current && !current.endsWith(' ') ? `${current} ${chunk}` : `${current}${chunk}`))}
-            onListeningChange={setListening} />
-          {running ? (
-            <button key="stop" type="button" className={styles.stop} onClick={onStop}
-              title="Stop the running turn (⌘.)" aria-label="Stop the running turn">
-              <span className={styles.stopIcon} aria-hidden="true" />Stop
-            </button>
-          ) : (
-            <button key="send" type="submit" className={styles.send} disabled={!canSend} aria-label={locked ? 'Send (unlocks first)' : 'Send message'}>
-              {sending ? 'Sending…' : locked ? 'Unlock & send' : 'Send'}
-            </button>
-          )}
+          aria-autocomplete={suggestOpen ? 'list' : undefined}
+          aria-controls={suggestOpen && suggestItems.length > 0 ? suggestId : undefined}
+          aria-expanded={suggestOpen ? true : undefined}
+          aria-activedescendant={suggestOpen && suggestItems.length > 0 ? suggestOptionId(suggestId, boundedActive) : undefined}
+          onChange={(event) => {
+            setInterim('');
+            setHistoryAt(-1);
+            setDraft(event.target.value);
+            setDismissedTrigger(null);
+            setCaret(event.target.selectionStart === event.target.selectionEnd ? event.target.selectionStart : null);
+          }}
+          onSelect={syncCaret} onClick={syncCaret} onKeyUp={(event) => { if (event.key.startsWith('Arrow') || event.key === 'Home' || event.key === 'End') syncCaret(); }}
+          onBlur={() => setCaret(null)} onFocus={syncCaret}
+          onPaste={onPaste} onKeyDown={onKeyDown} />
+        <input ref={fileInput} type="file" multiple hidden tabIndex={-1} aria-hidden="true"
+          onChange={(event) => { addFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
+        <div className={`${styles.row} ${cstyles.footer}`}>
+          <div className={cstyles.footerLeft}>
+            <Tooltip label={attachBlocked ?? 'Attach files — or paste, or drop'} shortcut={attachBlocked ? undefined : shortcutLabel('composer.attach')}>
+              <button type="button" className={cstyles.iconButton} aria-label="Attach files" aria-disabled={attachBlocked ? true : undefined}
+                disabled={disabled} onClick={openFilePicker}>
+                <IconPlus width={16} height={16} aria-hidden="true" />
+              </button>
+            </Tooltip>
+            <DictationButton disabled={disabled}
+              onInterim={setInterim}
+              onFinal={(chunk) => setDraft((current) => (current && !current.endsWith(' ') ? `${current} ${chunk}` : `${current}${chunk}`))}
+              onListeningChange={setListening} />
+            {!compact && wide ? wide.permission : null}
+          </div>
+          <div className={cstyles.footerRight}>
+            <SeatChip seats={seats} seat={{ seatId: seat.seatId, model: view?.controls.model ?? seat.model }} engine={effectiveEngine}
+              label={chipLabel} disabled={disabled} compact={compact}
+              {...(onContinueOn ? { onContinueOn } : {})} onNewChat={onSeatChange} />
+            {!compact && wide ? wide.model : null}
+            {!compact && wide ? wide.effort : null}
+            {!compact ? <ContextRing contextTokens={contextTokens} contextWindow={contextWindow} autoCompactAt={autoCompactAt} exact={contextExact} /> : null}
+            {compact && view ? (
+              <button type="button" className={`${cstyles.iconButton} ${bypassOn ? cstyles.iconButtonDanger : ''}`}
+                aria-haspopup="dialog" aria-label={`Chat settings: ${labelOf(view.options.permissionModes, view.controls.permissionMode)}, ${labelOf(view.options.models, view.controls.model)}`}
+                onClick={() => setSheetOpen(true)} disabled={disabled}>
+                <span aria-hidden="true">⋯</span>
+              </button>
+            ) : null}
+            {running && hasText && queueAvailable ? (
+              <button key="queue" type="submit" className={styles.send} disabled={!canSend}
+                aria-label={queueFull ? 'Queue is full' : 'Queue this message — it sends when the turn ends'}>
+                {sendLabel}
+              </button>
+            ) : null}
+            {running ? (
+              <button key="stop" type="button" className={styles.stop} onClick={onStop}
+                title="Stop the running turn (⌘. or Esc from an empty box)" aria-label="Stop the running turn">
+                <span className={styles.stopIcon} aria-hidden="true" />{compact ? null : 'Stop'}
+              </button>
+            ) : (
+              <button key="send" type="submit" className={styles.send} disabled={!canSend} aria-label={locked ? 'Send (unlocks first)' : 'Send message'}>
+                {sendLabel}
+              </button>
+            )}
+          </div>
         </div>
       </div>
       {cost ? (
@@ -320,20 +793,45 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
           <span className="visually-hidden"> This is an estimate; the provider counts the real total.</span>
         </p>
       ) : null}
-      <p id={helpId} className={`${styles.help} ${showHint || tooLong || listening || running || disabled || historyAt !== -1 || showHandoffHelp ? '' : styles.helpQuiet}`}>
+      <p id={helpId} className={`${styles.help} ${showHint || tooLong || listening || running || disabled || historyAt !== -1 || showHandoffHelp || note || controls.error || followUps.error ? '' : styles.helpQuiet}`}>
         {tooLong ? <span role="alert" className={styles.helpError}>Message is over 64 KB — trim it before sending.</span>
-          : listening ? 'Listening… Esc stops dictation.'
-            : disabled && disabledReason ? disabledReason
-              : running ? <>Reply in progress — your draft stays here · <kbd>⌘.</kbd> or Stop interrupts the turn</>
-                : showHandoffHelp
-                  ? <>Handoff note drafted from the previous chat — review or edit it; nothing is spent until you press Send.</>
-                : historyAt !== -1 ? <>Recalled message {historyAt + 1} of {history.current.length} · <kbd>↓</kbd> returns to your draft</>
-                  : showHint
-                    ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>↑</kbd> recalls · <kbd>⌘N</kbd> new chat · <kbd>⌘K</kbd> switch</>
-                    : null}
+          : followUps.error ? <span role="alert" className={styles.helpError}>{followUps.error}</span>
+            : controls.error && view ? <span role="alert" className={styles.helpError}>{controls.error}</span>
+              : note ? <span role={note.error ? 'alert' : 'status'} className={note.error ? styles.helpError : undefined}>{note.text}</span>
+                : listening ? 'Listening… Esc stops dictation.'
+                  : disabled && disabledReason ? disabledReason
+                    : running ? (queueAvailable
+                      ? <><kbd>Enter</kbd> queues (sends when this turn ends) · <kbd>{shortcutLabel('composer.stop-and-send')}</kbd> stops and sends · <kbd>Esc</kbd> stops</>
+                      : <>Reply in progress — your draft stays here · <kbd>⌘.</kbd> or Stop interrupts the turn</>)
+                      : showHandoffHelp
+                        ? <>Handoff note drafted from the previous chat — review or edit it; nothing is spent until you press Send.</>
+                        : historyAt !== -1 ? <>Recalled message {historyAt + 1} of {history.current.length} · <kbd>↓</kbd> returns to your draft</>
+                          : showHint
+                            ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>@</kbd> files · <kbd>/</kbd> commands · <kbd>↑</kbd> recalls</>
+                            : null}
       </p>
+      {compact && pickers ? (
+        <ControlsSheet open={sheetOpen} onClose={() => setSheetOpen(false)}>
+          {(() => {
+            const list = pickers('list');
+            return <>{list.permission}{list.model}{list.effort}</>;
+          })()}
+        </ControlsSheet>
+      ) : null}
+      <BypassConfirmDialog open={bypassAsk} chatLabel={chipLabel} running={running}
+        onCancel={() => { setBypassAsk(false); textarea.current?.focus(); }} onConfirm={() => { void confirmBypass(); }} />
+      <MutationTokenDialog {...gate.dialog} tokenLabel="Mutation token" tokenHelp="the mutation token ashlr verse printed" />
     </form>
   );
+}
+
+/** Render `node` into `host` when one is given (the queue's place above the live row), else in place. */
+function portalInto(host: HTMLElement | null, node: ReactNode) {
+  return host ? createPortal(node, host) : node;
+}
+
+function labelOf<T extends string>(options: ReadonlyArray<{ id: T; label: string }> | undefined, id: T): string {
+  return options?.find((o) => o.id === id)?.label ?? String(id);
 }
 
 /**
@@ -350,109 +848,4 @@ export function costConsequence(cost: CostHint): string {
     return ` About ${formatTokens(left)} left before the CLI auto-compacts.${cost.tone === 'danger' ? ' Start a new chat to keep the agent sharp.' : ''}${bound}`;
   }
   return `${cost.tone === 'danger' ? ' Start a new chat to keep the agent sharp.' : ''}${bound}`;
-}
-
-// ---------------------------------------------------------------------------
-// Seat pill + menu
-// ---------------------------------------------------------------------------
-
-interface SeatPillProps {
-  seats: readonly VerseSeat[];
-  seat: SeatChoice;
-  engine?: VerseSeat['engine'];
-  disabled: boolean;
-  onNewChat: (choice: SeatChoice) => void;
-}
-
-function SeatPill({ seats, seat, engine, disabled, onNewChat }: SeatPillProps) {
-  const [open, setOpen] = useState(false);
-  const wrap = useRef<HTMLDivElement>(null);
-  const button = useRef<HTMLButtonElement>(null);
-  const menuId = useId();
-  const current = seatById(seats, seat.seatId);
-  const tint = engine ?? current?.engine;
-  const label = seatPillLabel(seats, { seatId: seat.seatId, engine: tint ?? 'claude', model: seat.model });
-  // A seat whose every model is listed as unavailable (e.g. needs a newer
-  // CLI) cannot start a chat, so it is not offered as one.
-  const options = seats.filter((s) => s.health.state !== 'unavailable' && firstRunnableModel(s) !== null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (wrap.current && !wrap.current.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: globalThis.KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        setOpen(false);
-        button.current?.focus();
-      }
-    };
-    document.addEventListener('pointerdown', onPointerDown);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [open]);
-
-  useEffect(() => {
-    if (open) wrap.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus();
-  }, [open]);
-
-  function onMenuKey(event: KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
-    const items = Array.from(wrap.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') ?? []);
-    if (items.length === 0) return;
-    event.preventDefault();
-    const index = items.indexOf(document.activeElement as HTMLButtonElement);
-    const next = event.key === 'ArrowDown' ? (index + 1) % items.length : (index - 1 + items.length) % items.length;
-    items[next]?.focus();
-  }
-
-  return (
-    <div ref={wrap} className={`${styles.seatPillWrap} ${tint ? styles[`engine-${tint}`] ?? '' : ''}`}>
-      <button ref={button} type="button" className={styles.seatPill} data-engine={tint}
-        aria-haspopup="menu" aria-expanded={open} aria-controls={open ? menuId : undefined} disabled={disabled}
-        title="This chat is bound to one seat — open to start a new chat on another"
-        onClick={() => setOpen((v) => !v)}>
-        <span className={styles.engineDot} aria-hidden="true" />
-        <span className={styles.seatPillText}>{label}</span>
-      </button>
-      {open ? (
-        <div id={menuId} role="menu" aria-label="Seat" className={styles.seatMenu} onKeyDown={onMenuKey}>
-          <p className={styles.seatMenuHeading}>This chat runs on <strong>{label}</strong></p>
-          {options.length === 0 ? <p className={styles.seatMenuEmpty}>No other seats are available right now.</p> : null}
-          {options.map((s) => {
-            // The capacity belongs HERE, at the point of choice. This menu
-            // filtered only on `health.state !== 'unavailable'`, and Claude's
-            // health is `unknown` by construction, so a seat with a 100%-used
-            // weekly window looked exactly like a fresh one.
-            const capacity = seatCapacity(s);
-            const model = firstRunnableModel(s)!;
-            return (
-              <button key={s.id} type="button" role="menuitem" className={`${styles.seatMenuItem} ${styles[`engine-${s.engine}`] ?? ''}`}
-                data-capacity={capacity.cls}
-                onClick={() => { setOpen(false); onNewChat({ seatId: s.id, model: model.id }); }}>
-                <span className={styles.engineDot} aria-hidden="true" />
-                <span className={styles.seatMenuText}>
-                  <span className={styles.seatMenuPrimary}>New chat on {s.label}</span>
-                  <span className={styles.seatMenuSecondary}>{model.label}{s.id === seat.seatId ? ' · same seat' : ''}</span>
-                  {capacity.cls === 'unread' ? null : (
-                    <span className={styles.seatMenuCapacity}>
-                      {SEAT_CAPACITY_WORD[capacity.cls]} · {capacity.text}
-                    </span>
-                  )}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-function seatById(seats: readonly VerseSeat[], id: string): VerseSeat | undefined {
-  return seats.find((s) => s.id === id);
 }

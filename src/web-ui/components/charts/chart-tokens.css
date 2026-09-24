@@ -1,69 +1,80 @@
 /**
- * components/charts/chart-tokens.css — chart-only aliases over the existing
- * design tokens (design/tokens.css, off-limits to this work — read, never
- * edited). Every value below is `var(--existing-token)`, never a hardcoded
- * hex: light/dark theming is inherited automatically from tokens.css and can
- * never drift out of sync with the rest of the app.
+ * components/charts/chart-tokens.css — chart-only aliases over the design
+ * tokens (owner: unit C0, with colors.ts; the chart components are C7's).
+ * Every value below is `var(--existing-token)`, never a hex: the raw values
+ * and their light/dark variants live in design/tokens.css, so theming is
+ * inherited and can never drift out of sync with the rest of the app.
  *
- * Categorical order (identity — fixed, never cycled, never reassigned by
- * rank; see dataviz skill's color-formula.md) was chosen by exhaustively
- * running the skill's `validate_palette.js` six-checks validator against
- * ALL 5,040 permutations of the app's existing categorical-ish hues:
- * `--phase-1..6` (already documented in DESIGN.md as "categorical, distinct
- * from status colors") plus `--status-success-solid` / `--status-danger-
- * solid`. `--phase-6` (slate/gray, chroma ~0.04) was dropped from the
- * identity rotation — it already reads as gray in this design system, which
- * is exactly the right color for the "Other"/overflow bucket, not a 7th
- * identity.
+ * V3.10 COLOUR ROLES (SPEC-310C §6), one meaning per hue:
  *
- * A prior pass shipped order [violet, green, pink, teal, red, blue, orange]:
- * it cleared the normal-vision floor (ΔE 32.2 light / 31.2 dark, target 15)
- * but NOT the CVD (protan/deutan) adjacent floor (worst ΔE 3.7 light / 5.0
- * dark, target 6-8 floor / 8.0 target) — the worst adjacent pair in that
- * order was teal↔pink, a near-metamer under deutan simulation. The exhaustive
- * permutation search (same 7 hexes, no new colors) found
- * [green, violet, teal, red, blue, orange, pink] moves teal and pink apart
- * and clears the CVD floor outright: worst adjacent ΔE 13.8 light / 14.5
- * dark — comfortably past the 8.0 target, not just the 6-8 floor — while
- * keeping the normal-vision floor just as strong (20.8 light / 18.7 dark).
- * So: this WAS a fixable-by-reordering problem, not a fundamental one — the
- * tokens are fine, the original assignment just put two CVD-adjacent hues
- * next to each other. (Search script + full report kept in scratch, not
- * committed — reproducible by permuting the same 7 hex values through
- * validate_palette.js.)
+ *   QUANTITY — `--chart-seq-1..7`, the fixed azure ramp at 214°
+ *     (tokens.css --data-seq-*). Every magnitude — heat cells, a single
+ *     nominal series, gauge fills, the positive diverging pole — is azure.
+ *     It is NEVER the accent: the accent is interaction-only and the
+ *     operator can drag it to any hue, which used to re-colour every chart
+ *     (tokens-310.test.ts fails if a data token here points at --accent-*).
  *
- * Mandatory secondary encoding (direct/legend labels + table-view twin,
- * never color alone) stays in place regardless — that's a categorical-chart
- * rule independent of how well any one ordering scores, not a CVD-floor
- * workaround. One separate, pre-existing, order-independent finding from the
- * same validator run: 5 of these 7 hues sit outside the dark-mode OKLCH
- * lightness band (0.48-0.67) — a property of the individual dark-mode token
- * values (tuned for on-dark UI legibility, not chart-ramp lightness), not
- * something any reordering can change. Flagging it here since it surfaced
- * during this audit; out of scope for the CVD-floor fix and not a new
- * regression — every ordering of these 7 dark hexes has it.
+ *   CATEGORICAL — `--chart-series-1..6` (tokens.css --data-cat-*). Six
+ *     identity inks chosen to avoid every engine, status and quantity hue,
+ *     with the validator scores recorded in tokens.css. Order is identity,
+ *     never rank: a series keeps its slot even when others are filtered out.
+ *     A seventh series goes to `--chart-neutral` ("Other") — colors.ts never
+ *     cycles, because a repeated colour would say two series are one.
+ *
+ *   UNKNOWN — gray, drawn as a 45° HATCH with an outline, never a solid
+ *     fill on a data ramp (a solid gray would read as "zero" or "neutral").
+ *     `--chart-unknown-hatch` for CSS fills; colors.ts UNKNOWN_HATCH for SVG.
+ *
+ *   QUEUED / PARKED — a neutral OUTLINE with no fill (Fleet Gantt, Swimlane).
+ *
+ *   ENGINES — identity only, and only in charts that show nothing else
+ *     (runs by engine, usage bars); passed explicitly via colors.ts
+ *     engineColor(), never picked by index.
+ *
+ *   STATUS — unchanged; always travels with a text label.
+ *
+ * Mandatory secondary encoding (direct or legend labels, and the TableView
+ * twin every chart has) stays in place whatever the palette scores — colour
+ * is never the only carrier of meaning.
  */
 :root {
-  --chart-series-1: var(--status-success-solid); /* green */
-  --chart-series-2: var(--phase-2); /* violet */
-  --chart-series-3: var(--phase-5); /* teal */
-  --chart-series-4: var(--status-danger-solid); /* red */
-  --chart-series-5: var(--phase-1); /* blue */
-  --chart-series-6: var(--phase-4); /* orange */
-  --chart-series-7: var(--phase-3); /* pink */
+  /* Categorical identity (fixed order; see tokens.css for the derivation). */
+  --chart-series-1: var(--data-cat-1); /* steel */
+  --chart-series-2: var(--data-cat-2); /* olive */
+  --chart-series-3: var(--data-cat-3); /* wine */
+  --chart-series-4: var(--data-cat-4); /* purple */
+  --chart-series-5: var(--data-cat-5); /* green */
+  --chart-series-6: var(--data-cat-6); /* pink */
 
   /* Overflow "Other" bucket — never part of the identity rotation above. */
   --chart-neutral: var(--status-neutral-solid);
 
-  /* Sequential (magnitude): one hue, reusing the app's existing accent ramp. */
-  --chart-sequential: var(--accent-500);
-  --chart-sequential-soft: var(--accent-300);
+  /* Quantity: the fixed azure ramp, low → high. */
+  --chart-seq-1: var(--data-seq-1);
+  --chart-seq-2: var(--data-seq-2);
+  --chart-seq-3: var(--data-seq-3);
+  --chart-seq-4: var(--data-seq-4);
+  --chart-seq-5: var(--data-seq-5);
+  --chart-seq-6: var(--data-seq-6);
+  --chart-seq-7: var(--data-seq-7);
 
-  /* Diverging pair: warm/cool poles + neutral gray midpoint, from existing
-     tokens (accent reads "up/normal", danger reads "down/bad"). */
-  --chart-diverging-pos: var(--accent-500);
+  /* The single hue for magnitude and for one nominal series (one series
+     needs no legend box — it takes this colour and a direct label). */
+  --chart-sequential: var(--chart-seq-5);
+  --chart-sequential-soft: var(--chart-seq-3);
+
+  /* Diverging pair around a neutral midpoint: azure reads "up / better",
+     danger reads "down / worse" (ForestPlot effect sizes, deltas). */
+  --chart-diverging-pos: var(--chart-seq-5);
   --chart-diverging-neg: var(--status-danger-solid);
   --chart-diverging-mid: var(--border-strong);
+
+  /* Unknown: gray, hatched at 45°, outlined. */
+  --chart-unknown: var(--status-unknown-solid);
+  --chart-unknown-hatch: repeating-linear-gradient(135deg, var(--chart-unknown) 0 1px, transparent 1px 5px);
+
+  /* Queued / parked: an outline, no fill. */
+  --chart-queued-outline: var(--status-neutral-solid);
 
   /* Chart chrome — hairline grid/axis, one step off the surface. */
   --chart-grid: var(--border-subtle);
@@ -72,16 +83,15 @@
   --chart-tooltip-bg: var(--bg-surface-raised);
   --chart-tooltip-border: var(--border-default);
 
-  /* V3.10 — sequential heat ramp (CalendarHeatmap): ONE hue, light → dark,
-     mixed toward the chart surface so every step is re-derived per theme
-     from the same tokens. Step 0 is a TRUE ZERO; "no data" is drawn as an
-     outlined empty cell instead, never as a colour on this ramp. */
+  /* Heat (CalendarHeatmap, MatrixHeatmap): four steps of the quantity ramp.
+     Step 0 is a TRUE ZERO; "no data" is the unknown hatch or an outlined
+     empty cell, never a colour on this ramp. */
   --chart-heat-0: var(--chart-grid);
-  --chart-heat-1: color-mix(in oklab, var(--chart-sequential) 28%, var(--chart-surface));
-  --chart-heat-2: color-mix(in oklab, var(--chart-sequential) 52%, var(--chart-surface));
-  --chart-heat-3: color-mix(in oklab, var(--chart-sequential) 76%, var(--chart-surface));
-  --chart-heat-4: var(--chart-sequential);
+  --chart-heat-1: var(--chart-seq-2);
+  --chart-heat-2: var(--chart-seq-3);
+  --chart-heat-3: var(--chart-seq-5);
+  --chart-heat-4: var(--chart-seq-7);
 
-  /* Gauge/meter track: a lighter step of the fill's own ramp. */
-  --chart-track: color-mix(in oklab, var(--chart-sequential) 16%, var(--chart-surface));
+  /* Gauge/meter track: the lightest step of the fill's own ramp. */
+  --chart-track: var(--chart-seq-1);
 }

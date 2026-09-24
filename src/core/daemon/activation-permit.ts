@@ -2,6 +2,7 @@ import {
   createHash,
   createPrivateKey,
   createPublicKey,
+  randomBytes,
   sign,
   verify,
   type KeyObject,
@@ -27,6 +28,14 @@ import {
 import { homedir, hostname } from 'node:os';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
+import { canonicalJson } from '../authority/canonical-json.js';
+import {
+  currentStandingPolicy,
+  evaluateStandingAuthority,
+  primeStandingPolicyCache,
+  type StandingEvaluation,
+} from '../authority/effective-config.js';
+import type { DaemonCapabilityKind } from '../authority/types.js';
 import { readBuildIdentity, type BuildIdentity } from '../build-identity.js';
 import {
   acquireLocalStoreLock,
@@ -55,10 +64,18 @@ const capabilityBrand: unique symbol = Symbol('ashlr.daemon-activation-capabilit
 /**
  * Runtime authority is nominal and process-local. Objects that merely match
  * this public shape are rejected by isDaemonActivationCapability().
+ *
+ * Two kinds (V3.10): `proposal-once` is M461's signed one-shot permit;
+ * `resident-standing` is minted per tick under a verified standing grant by
+ * mintResidentStandingCapability() below. Loop code that means the M461
+ * profile tests `kind === 'proposal-once'`.
  */
 export interface DaemonActivationCapability {
-  readonly kind: 'proposal-once';
+  readonly kind: DaemonCapabilityKind;
+  /** proposal-once: the consumed permit id; resident-standing: a fresh per-tick id. */
   readonly permitId: string;
+  /** resident-standing only: the standing grant the tick runs under. */
+  readonly grantId?: string;
   readonly [capabilityBrand]: true;
 }
 
@@ -216,13 +233,80 @@ export function isDaemonActivationCapability(
   }
 }
 
+export type ResidentStandingMintResult =
+  | { ok: true; capability: DaemonActivationCapability; evaluation: StandingEvaluation }
+  | { ok: false; reason: string; evaluation: StandingEvaluation | null };
+
+/**
+ * Mint this tick's single-use `resident-standing` capability (V3.10, unit
+ * B-U1) — but only after a FRESH, complete re-verification of the standing
+ * authority by the code this process is running: compiled trust root, ES256
+ * signature, expiry, revocation / sequence, host binding, a full re-hash of
+ * the authority surface, the ledger chain (including every byte already
+ * verified), KILL, the switch and OS confinement.
+ *
+ * WHY THE VERIFICATION LIVES HERE AND NOT IN THE CALLER: minting and
+ * verifying are one step, so no caller can hand in a weaker check — the only
+ * way to obtain a resident capability is for the standing authority to be
+ * genuinely live. The claim-time check (when loop.ts consumes it) re-reads the
+ * lowering signals, so a Stop between mint and claim still wins.
+ * authority/capability.ts (mintStandingTickCapability) is the intended caller.
+ */
+export function mintResidentStandingCapability(
+  opts: { config?: AshlrConfig; nowMs?: number } = {},
+): ResidentStandingMintResult {
+  let evaluation: StandingEvaluation;
+  try {
+    evaluation = evaluateStandingAuthority({ mode: 'fresh', surface: 'running', config: opts.config, nowMs: opts.nowMs });
+  } catch {
+    return { ok: false, reason: 'standing authority could not be evaluated', evaluation: null };
+  }
+  primeStandingPolicyCache(evaluation);
+  if (!evaluation.policy || !evaluation.grant) {
+    return {
+      ok: false,
+      reason: evaluation.inactiveReason ?? evaluation.grantReason ?? 'no standing authority',
+      evaluation,
+    };
+  }
+  const grantId = evaluation.grant.grantId;
+  const expiresAtMs = Date.parse(evaluation.grant.expiresAt);
+  const capability = Object.freeze({
+    kind: 'resident-standing' as const,
+    permitId: randomBytes(16).toString('hex'),
+    grantId,
+    [capabilityBrand]: true as const,
+  });
+  validCapabilities.set(capability, () => {
+    if (Date.now() >= expiresAtMs || killSwitchOn()) return false;
+    const live = currentStandingPolicy();
+    return live !== null && live.grantId === grantId;
+  });
+  return { ok: true, capability, evaluation };
+}
+
 /**
  * Goal and simple conductors have broader authority than M461's one-item
- * proposal profile. They remain dormant until a separately reviewed permit
- * contract exists for those entry points.
+ * proposal profile. They run live only while a verified standing grant is in
+ * force AND that grant sets `conductorGoals` (V3.10); otherwise dormant, as on
+ * master. The compiled standing roots are empty until Mason commits his
+ * custody key, so this stays false until then.
  */
 export function liveConductorActivationAuthorized(): boolean {
-  return false;
+  try {
+    return currentStandingPolicy()?.conductorGoals === true;
+  } catch {
+    return false;
+  }
+}
+
+/** True while a verified standing policy is in force (observation only). */
+function residentStandingLive(): boolean {
+  try {
+    return currentStandingPolicy() !== null;
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -235,40 +319,13 @@ function hasExactKeys(value: Record<string, unknown>, expected: readonly string[
   return actual.length === wanted.length && actual.every((key, index) => key === wanted[index]);
 }
 
-function canonicalJsonValue(value: unknown, stack: Set<object>): string | undefined {
-  if (value === null) return 'null';
-  if (typeof value === 'string') return JSON.stringify(value);
-  if (typeof value === 'boolean') return value ? 'true' : 'false';
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error('canonical JSON rejects non-finite numbers');
-    return JSON.stringify(value);
-  }
-  if (typeof value === 'undefined' || typeof value === 'function' || typeof value === 'symbol') {
-    return undefined;
-  }
-  if (typeof value !== 'object') throw new Error('canonical JSON rejects unsupported values');
-  if (stack.has(value)) throw new Error('canonical JSON rejects cycles');
-  stack.add(value);
-  try {
-    if (Array.isArray(value)) {
-      return `[${value.map((entry) => canonicalJsonValue(entry, stack) ?? 'null').join(',')}]`;
-    }
-    const entries = Object.keys(value as Record<string, unknown>)
-      .sort()
-      .flatMap((key) => {
-        const encoded = canonicalJsonValue((value as Record<string, unknown>)[key], stack);
-        return encoded === undefined ? [] : [`${JSON.stringify(key)}:${encoded}`];
-      });
-    return `{${entries.join(',')}}`;
-  } finally {
-    stack.delete(value);
-  }
-}
-
+/**
+ * The canonical JSON every signed activation record uses. The algorithm lives
+ * in authority/canonical-json.ts (moved verbatim, V3.10) so the standing-grant
+ * verifier and the authority ledger share it without importing this module.
+ */
 export function canonicalizeDaemonActivationValue(value: unknown): string {
-  const encoded = canonicalJsonValue(value, new Set());
-  if (encoded === undefined) throw new Error('canonical JSON requires a value');
-  return encoded;
+  return canonicalJson(value);
 }
 
 function sha256(value: string | Buffer): string {
@@ -892,7 +949,8 @@ function activationReadiness(
     requestedShape: 'proposal-once',
     trustRootCount,
     residentAuthorized: false,
-    residentStandingAuthorized: false,
+    // V3.10: observation of whether a verified standing grant is in force.
+    residentStandingAuthorized: residentStandingLive(),
     installAuthorized: false,
     repairAuthorized: false,
     reason,

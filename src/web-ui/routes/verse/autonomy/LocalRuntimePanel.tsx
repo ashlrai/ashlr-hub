@@ -17,13 +17,15 @@
  * State is never carried by colour alone: every tone is paired with a word
  * (StatusBadge) and a sentence.
  */
-import { useState } from 'react';
+import { useCallback, useState, useSyncExternalStore } from 'react';
 import type { ReactNode } from 'react';
+import { getQuerySnapshot, subscribeQuery } from '../../../data/cache.js';
 import { StatusBadge, type Tone } from '../../../components/primitives/StatusBadge.js';
 import { Meter } from '../../../components/primitives/Meter.js';
 import { ConfirmDialog } from '../../inbox/ConfirmDialog.js';
 import { UNKNOWN } from './format.js';
 import type {
+  FleetSnapshot,
   OptionalFleetRead,
   RuntimeAction,
   ServingRuntimeSnapshot,
@@ -37,7 +39,7 @@ import {
   slotUtilisation,
   type RuntimeCapacity,
 } from './fleet-model.js';
-import { runRuntimeAction } from './fleet-queries.js';
+import { runRuntimeAction, VERSE_FLEET_KEY } from './fleet-queries.js';
 import { useNow } from './use-ticker.js';
 import type { GuardedAction } from './use-guarded-action.js';
 import styles from './autonomy.module.css';
@@ -64,6 +66,78 @@ export interface LocalRuntimePanelProps {
   dispatchEnabled: boolean;
   /** Shown while the read is in flight and nothing has arrived yet. */
   loading?: boolean;
+  /**
+   * The fleet read, for the lane-cap line. Omitted = the panel peeks the
+   * app-wide `/api/verse/fleet` cache entry (see `useCachedFleetRead`).
+   */
+  fleet?: OptionalFleetRead<FleetSnapshot> | null;
+}
+
+// ---------------------------------------------------------------------------
+// The lane cap (V3.10, B-U6)
+// ---------------------------------------------------------------------------
+//
+// WHY THIS PANEL SAYS IT. The big number above is what the RUNTIME can run in
+// parallel. Since 3.10 the fleet may run FEWER than that on a given tick: the
+// tick's `laneCaps.local` (Mason present → 2, a Leader lane decision, the
+// budget, the grant) lowers `deriveLocalFleetConcurrency`'s answer and names
+// the limiter 'lane-cap'. Without a line here, "4 agents in parallel" next to
+// a fleet running two reads as a slow or wedged fleet — the exact confusion
+// the effective-vs-configured headline exists to prevent.
+//
+// The wire carries it only as a sentence: `projectFleetSnapshot`
+// (core/daemon/local-fleet.ts) pushes LANE_CAP_NOTE_PREFIX + the limiter's
+// reason into FleetSnapshot.notes; there is no structured limiter field on
+// the route. The prefix is mirrored here and pinned against the real
+// projector in fleet-panels.test.tsx, so a reworded note fails a test instead
+// of silently hiding this line.
+
+/** What `projectFleetSnapshot` prefixes a binding lane-cap note with. */
+export const LANE_CAP_NOTE_PREFIX = "bounded by this tick's lane cap, not by slots: ";
+/** `deriveLocalFleetConcurrency`'s reason when the cap is 0 (lane off). */
+const LANE_OFF_RE = /^local lane is off this tick: (.+)$/s;
+/** `deriveLocalFleetConcurrency`'s reason when the cap binds below the slots. */
+const LANE_BELOW_RE = /^lane cap (\d+) is below (\d+) \([^)]*\): (.+)$/s;
+
+export interface LaneCapView {
+  /** true = no local agent this tick (cap 0). */
+  off: boolean;
+  /** The cap in force; null when the lane is off or the number is not stated. */
+  limit: number | null;
+  /** The concurrency the runtime would otherwise have allowed; null when not stated. */
+  uncapped: number | null;
+  /** Why — the tick's own sentence (presence, Leader, budget, grant). */
+  why: string;
+}
+
+/** The binding lane cap from the fleet's notes, or null when no lane cap binds. */
+export function laneCapFromNotes(notes: readonly string[] | null | undefined): LaneCapView | null {
+  const note = notes?.find((n) => typeof n === 'string' && n.startsWith(LANE_CAP_NOTE_PREFIX));
+  if (!note) return null;
+  const reason = note.slice(LANE_CAP_NOTE_PREFIX.length).trim();
+  const off = LANE_OFF_RE.exec(reason);
+  if (off) return { off: true, limit: null, uncapped: null, why: off[1]!.trim() };
+  const below = LANE_BELOW_RE.exec(reason);
+  if (below) return { off: false, limit: Number(below[1]), uncapped: Number(below[2]), why: below[3]!.trim() };
+  // A reason in a shape this client does not know: still say a lane cap binds,
+  // in the server's words, rather than dropping the fact.
+  return { off: false, limit: null, uncapped: null, why: reason };
+}
+
+/**
+ * The fleet read as the app-wide cache holds it — WITHOUT fetching. The Fleet
+ * tab's Advanced view already reads and polls `/api/verse/fleet` for the
+ * FleetPanel beside this one; a second subscriber that fetched would only add
+ * requests, and one mounted elsewhere (a test, a future surface) must not
+ * start polling a route on its own.
+ */
+function useCachedFleetRead(): OptionalFleetRead<FleetSnapshot> | null {
+  const entry = useSyncExternalStore(
+    useCallback((listener: () => void) => subscribeQuery(VERSE_FLEET_KEY, listener), []),
+    () => getQuerySnapshot<OptionalFleetRead<FleetSnapshot>>(VERSE_FLEET_KEY),
+    () => getQuerySnapshot<OptionalFleetRead<FleetSnapshot>>(VERSE_FLEET_KEY),
+  );
+  return entry.data ?? null;
 }
 
 export function LocalRuntimePanel({
@@ -71,8 +145,14 @@ export function LocalRuntimePanel({
   guard,
   dispatchEnabled,
   loading = false,
+  fleet: fleetProp,
 }: LocalRuntimePanelProps): ReactNode {
   const now = useNow(1000);
+  const cachedFleet = useCachedFleetRead();
+  const fleet = fleetProp === undefined ? cachedFleet : fleetProp;
+  const laneCap = laneCapFromNotes(fleet?.value?.notes);
+  // The daemon writes the snapshot when it ticks; an aged one is last tick's cap, not this one's.
+  const laneCapStale = fleet?.value?.notes.some((n) => n.startsWith('snapshot is ')) ?? false;
   const [confirmStop, setConfirmStop] = useState<RuntimeAction | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
@@ -175,6 +255,17 @@ export function LocalRuntimePanel({
                 <span className={styles.capacityDetail}>{capacity.detail}</span>
               </div>
             </div>
+
+            {laneCap ? (
+              <p className={styles.capacityDetail} data-limiter="lane-cap" role="note">
+                <StatusBadge status="lane-cap" tone={laneCap.off ? 'neutral' : 'warning'}>
+                  {laneCap.off ? 'lane off' : 'lane-capped'}
+                </StatusBadge>{' '}
+                {laneCap.off
+                  ? `The fleet runs no local agent ${laneCapStale ? 'as of its last tick' : 'this tick'}: ${laneCap.why}.`
+                  : `The fleet runs ${laneCap.limit === null ? 'fewer' : `at most ${laneCap.limit}`} local ${laneCap.limit === 1 ? 'agent' : 'agents'} ${laneCapStale ? 'as of its last tick' : 'this tick'}${laneCap.uncapped === null ? '' : `, not ${laneCap.uncapped}`} — a lane cap is tighter than this runtime: ${laneCap.why}.`}
+              </p>
+            ) : null}
 
             {capacity.overstated ? (
               <ConcurrencyEvidence

@@ -14,6 +14,7 @@ import { render, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { evictAll } from '../../data/cache.js';
+import { getDockState, resetDockStore } from './dock/dock-store.js';
 import { bootstrap, CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT, session } from './fixtures.test-support.js';
 import type { VerseSessionView } from './useVerseSession.js';
 import { Workspace, type WorkspaceProps } from './Workspace.js';
@@ -52,14 +53,15 @@ function props(over: Partial<WorkspaceProps> = {}): WorkspaceProps {
     onSend: vi.fn(async () => true),
     onStop: vi.fn(),
     onRename: vi.fn(async () => true),
-    onDelete: vi.fn(async () => true),
+    onRequestDelete: vi.fn(),
     onSeatChange: vi.fn(),
     onNew: vi.fn(),
     onRetry: vi.fn(),
     sidebarCollapsed: false,
     onToggleSidebar: vi.fn(),
-    resourcesOpen: true,
-    onToggleResources: vi.fn(),
+    handoffOpen: false,
+    onHandoffOpenChange: vi.fn(),
+    otherRunning: [],
     ...over,
   };
 }
@@ -69,7 +71,8 @@ function props(over: Partial<WorkspaceProps> = {}): WorkspaceProps {
 // but a stubbed fetch keeps an accidental read from hitting undefined.
 beforeEach(() => {
   evictAll();
-  vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } })));
+  // A 404 is what an unmounted route answers; every reader must survive it.
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('not found', { status: 404 })));
 });
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -101,7 +104,7 @@ describe('Workspace header — nothing selected', () => {
     const view1 = render(<Workspace {...props()} />);
     const strip = header(view1.container);
     expect(within(strip).getByRole('button', { name: 'Chat list' })).toBeInTheDocument();
-    expect(within(strip).getByRole('button', { name: 'Resources' })).toBeInTheDocument();
+    expect(within(strip).getByRole('button', { name: 'Dock' })).toBeInTheDocument();
   });
 
   it('keeps the strip draggable in the desktop shell', () => {
@@ -115,27 +118,35 @@ describe('Workspace header — nothing selected', () => {
   });
 });
 
-describe('Workspace header — the pane toggles are a pair', () => {
+describe('Workspace header — the pane toggles', () => {
+  // The shell folds dock state into its persisted blob, so a clean dock is a
+  // clean store AND clean storage.
+  beforeEach(() => {
+    localStorage.clear();
+    resetDockStore();
+  });
+
   it('groups them, labels them, and reports open/closed with aria-pressed', async () => {
     const user = userEvent.setup();
     const onToggleSidebar = vi.fn();
-    const onToggleResources = vi.fn();
-    const view1 = render(<Workspace {...props({ onToggleSidebar, onToggleResources })} />);
+    const view1 = render(<Workspace {...props({ onToggleSidebar })} />);
 
     const group = within(header(view1.container)).getByRole('group', { name: 'Panels' });
     const sidebar = within(group).getByRole('button', { name: 'Chat list' });
-    const resources = within(group).getByRole('button', { name: 'Resources' });
+    const dock = within(group).getByRole('button', { name: 'Dock' });
     expect(sidebar).toHaveAttribute('aria-pressed', 'true');
-    expect(resources).toHaveAttribute('aria-pressed', 'true');
+    // The dock starts closed; ⌘\ or this button opens it (on Tasks when empty).
+    expect(dock).toHaveAttribute('aria-pressed', 'false');
 
     await user.click(sidebar);
-    await user.click(resources);
+    await user.click(dock);
     expect(onToggleSidebar).toHaveBeenCalledTimes(1);
-    expect(onToggleResources).toHaveBeenCalledTimes(1);
+    expect(dock).toHaveAttribute('aria-pressed', 'true');
+    expect(getDockState()).toMatchObject({ open: true, active: 'tasks' });
   });
 
   it('is unpressed — and the sidebar one renames — once the panes are closed', () => {
-    const view1 = render(<Workspace {...props({ sidebarCollapsed: true, resourcesOpen: false })} />);
+    const view1 = render(<Workspace {...props({ sidebarCollapsed: true })} />);
     const strip = header(view1.container);
     // "Show chat list" is the name the Chat section's own tests drive while
     // the list is hidden. It differs from the expanded name on purpose: the
@@ -143,7 +154,7 @@ describe('Workspace header — the pane toggles are a pair', () => {
     // one accessible name is an ambiguity, not a pair.
     const sidebar = within(strip).getByRole('button', { name: 'Show chat list' });
     expect(sidebar).toHaveAttribute('aria-pressed', 'false');
-    expect(within(strip).getByRole('button', { name: 'Resources' })).toHaveAttribute('aria-pressed', 'false');
+    expect(within(strip).getByRole('button', { name: 'Dock' })).toHaveAttribute('aria-pressed', 'false');
     expect(within(strip).queryByRole('button', { name: 'Hide chat list' })).toBeNull();
   });
 });
@@ -178,7 +189,7 @@ describe('Workspace header — a chat is open', () => {
     const rename = within(strip).getByRole('button', { name: long });
     expect(rename.textContent).toBe(long);
 
-    for (const name of ['Delete chat', 'Chat list', 'Resources']) {
+    for (const name of ['Chat actions', 'Chat list', 'Dock']) {
       const action = within(strip).getByRole('button', { name });
       expect(action).toBeInTheDocument();
       // Every action sits after the title in document order — the actions are
@@ -194,7 +205,7 @@ describe('Workspace header — a chat is open', () => {
     const project = within(strip).getByText('edge');
     expect(project).toHaveAttribute('title', deep);
     // The actions survive it, which is the whole point of the short name.
-    expect(within(strip).getByRole('button', { name: 'Resources' })).toBeInTheDocument();
+    expect(within(strip).getByRole('button', { name: 'Dock' })).toBeInTheDocument();
   });
 
   it('renames from the title and leaves the lockup in place while editing', async () => {
@@ -218,7 +229,7 @@ describe('Workspace header — a chat is open', () => {
     const strip = header(view1.container);
     expect(within(strip).getByLabelText('Loading chat')).toBeInTheDocument();
     // The toggles are chrome, not chat data — they are usable immediately.
-    expect(within(strip).getByRole('button', { name: 'Resources' })).toBeInTheDocument();
+    expect(within(strip).getByRole('button', { name: 'Dock' })).toBeInTheDocument();
     expect(within(strip).getByRole('button', { name: 'Chat list' })).toBeInTheDocument();
   });
 });

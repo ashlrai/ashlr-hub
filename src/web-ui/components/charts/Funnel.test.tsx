@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { Funnel } from './Funnel.js';
+import { showTable } from './chart-test-support.js';
 
 const stages = [
   { id: 'filed', label: 'Filed', value: 542 },
@@ -38,7 +39,7 @@ describe('Funnel', () => {
 
   it('carries every rate in the table', () => {
     render(<Funnel title="P" width={700} stages={stages} />);
-    fireEvent.click(screen.getByRole('radio', { name: 'Table' }));
+    showTable();
     expect(screen.getAllByRole('cell', { name: '24.5%' })).toHaveLength(2); // of previous = of first
     expect(screen.getByRole('cell', { name: '0.2%' })).toBeInTheDocument();
   });

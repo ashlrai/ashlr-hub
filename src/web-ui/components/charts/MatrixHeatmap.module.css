@@ -1,0 +1,16 @@
+/* MatrixHeatmap — horizontal scroll when a wide matrix meets a narrow card,
+   the focused-cell ring, and in-cell numbers. Tokens only. */
+.scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.focus {
+  stroke: var(--border-focus);
+  stroke-width: 2;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}

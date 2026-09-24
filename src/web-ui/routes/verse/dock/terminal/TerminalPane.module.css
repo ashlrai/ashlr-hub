@@ -1,0 +1,371 @@
+/*
+ * dock/terminal/TerminalPane.module.css — the Terminal pane (unit C4).
+ * Tokens only (design/style-scan-310: no raw hex, no px font sizes).
+ *
+ * THE TERMINAL PALETTE. xterm needs concrete colours, so the pane declares
+ * them here as custom properties mapped onto design tokens, and
+ * terminal-view.ts resolves them at runtime (and again on a theme change).
+ * The ANSI colours reuse the status inks (red/green/yellow), the quantity
+ * azure (blue) and categorical inks (magenta/cyan) — never the accent, which
+ * is interaction only; the accent appears only as the selection, which IS
+ * interaction. The neutral ramp inverts between themes, so black/white are
+ * re-pointed in dark mode to stay dark/light.
+ */
+
+.pane {
+  --term-bg: var(--bg-code);
+  --term-fg: var(--text-primary);
+  --term-cursor: var(--text-primary);
+  --term-selection: color-mix(in srgb, var(--accent-500) 26%, transparent);
+  --term-selection-inactive: var(--bg-selected);
+  --term-scrollbar: color-mix(in srgb, var(--text-tertiary) 30%, transparent);
+  --term-scrollbar-hover: color-mix(in srgb, var(--text-tertiary) 55%, transparent);
+  /* Light: the normal hues are the dark text inks; "bright" ones are the
+     stronger fills where those still read on --bg-code (≥ 3:1, tested). */
+  --term-black: var(--gray-800);
+  --term-red: var(--status-danger-fg);
+  --term-green: var(--status-success-fg);
+  --term-yellow: var(--status-running-fg);
+  --term-blue: var(--data-seq-6);
+  --term-magenta: var(--data-cat-4);
+  --term-cyan: var(--data-cat-1);
+  --term-white: var(--gray-300);
+  --term-bright-black: var(--gray-500);
+  --term-bright-red: var(--status-danger-solid);
+  --term-bright-green: var(--data-cat-5);
+  --term-bright-yellow: var(--status-warning-fg);
+  --term-bright-blue: var(--status-info-solid);
+  --term-bright-magenta: var(--data-cat-6);
+  --term-bright-cyan: var(--data-cat-1);
+  --term-bright-white: var(--gray-100);
+
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--term-bg);
+  color: var(--text-primary);
+}
+
+/* Dark: the solids read well on the near-black background and the -fg inks
+   are the brighter set; the neutral ramp inverts (gray-800 is light here). */
+:global(:root[data-theme='dark']) .pane {
+  --term-black: var(--gray-300);
+  --term-red: var(--status-danger-solid);
+  --term-green: var(--status-success-solid);
+  --term-yellow: var(--status-running-solid);
+  --term-blue: var(--data-seq-5);
+  --term-magenta: var(--data-cat-4);
+  --term-cyan: var(--data-cat-1);
+  --term-white: var(--gray-800);
+  --term-bright-black: var(--gray-500);
+  --term-bright-red: var(--status-danger-fg);
+  --term-bright-green: var(--status-success-fg);
+  --term-bright-yellow: var(--status-running-fg);
+  --term-bright-blue: var(--data-seq-6);
+  --term-bright-magenta: var(--data-cat-6);
+  --term-bright-cyan: var(--data-cat-1);
+  --term-bright-white: var(--gray-900);
+}
+@media (prefers-color-scheme: dark) {
+  :global(:root:not([data-theme='light'])) .pane {
+    --term-black: var(--gray-300);
+    --term-red: var(--status-danger-solid);
+    --term-green: var(--status-success-solid);
+    --term-yellow: var(--status-running-solid);
+    --term-blue: var(--data-seq-5);
+    --term-magenta: var(--data-cat-4);
+    --term-cyan: var(--data-cat-1);
+    --term-white: var(--gray-800);
+    --term-bright-black: var(--gray-500);
+    --term-bright-red: var(--status-danger-fg);
+    --term-bright-green: var(--status-success-fg);
+    --term-bright-yellow: var(--status-running-fg);
+    --term-bright-blue: var(--data-seq-6);
+    --term-bright-magenta: var(--data-cat-6);
+    --term-bright-cyan: var(--data-cat-1);
+    --term-bright-white: var(--gray-900);
+  }
+}
+
+.loading {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--card-pad);
+}
+
+/* ---- tab strip ------------------------------------------------------------ */
+
+.strip {
+  display: flex;
+  align-items: stretch;
+  flex: none;
+  min-height: var(--control-h-sm);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+
+.tab {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+  max-width: 200px;
+  border-right: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+}
+.tab[data-selected] {
+  color: var(--text-primary);
+  background: var(--term-bg);
+}
+/* The selected tab's 2px underline: interaction, so the accent. */
+.tab[data-selected]::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  background: var(--accent-500);
+}
+
+.tabButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  height: 100%;
+  padding: 0 var(--space-1) 0 var(--space-3);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  cursor: pointer;
+}
+.tabButton:hover { color: var(--text-primary); }
+.tabButton:focus-visible,
+.tabClose:focus-visible,
+.noticeClose:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+}
+
+.tabTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabExited {
+  flex: none;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  color: var(--text-tertiary);
+}
+
+/* Unseen output in a background tab: a dot WITH an accessible name. */
+.unseen {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-info-solid);
+}
+
+.tabClose {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  /* One step under the xs control: 20px comfortable, 16px compact. A literal
+     20px stayed comfortable when Density went compact and outgrew the
+     shrunken tab row (control-density.test.ts, DESIGN-V2 §2). */
+  width: calc(var(--control-h-xs) - var(--space-1));
+  height: calc(var(--control-h-xs) - var(--space-1));
+  margin-right: var(--space-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-standard);
+}
+.tab:hover .tabClose,
+.tab[data-selected] .tabClose,
+.tabClose:focus-visible { opacity: 1; }
+.tabClose:hover { background: var(--bg-hover); color: var(--text-primary); }
+@media (hover: none) {
+  .tabClose { opacity: 1; }
+}
+
+.stripActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+  padding: 0 var(--space-1);
+}
+
+/* ---- header --------------------------------------------------------------- */
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.cwd {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+}
+
+.headerStatus {
+  flex: none;
+  font-size: var(--text-xs-size);
+  color: var(--text-tertiary);
+}
+.headerStatus:empty { display: none; }
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex: none;
+}
+
+/* ---- notices -------------------------------------------------------------- */
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  background: var(--status-info-bg);
+  color: var(--status-info-fg);
+}
+.notice[data-tone='error'] {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+.notice > span { flex: 1; }
+
+.noticeClose {
+  display: inline-flex;
+  flex: none;
+  padding: var(--space-1);
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.inlineNotice {
+  margin: 0 var(--card-pad) var(--card-pad);
+  font-size: var(--text-sm-size);
+  color: var(--text-secondary);
+}
+
+/* ---- terminal body -------------------------------------------------------- */
+
+.body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.panel[hidden] { display: none; }
+
+/* Padding lives on the viewport; xterm's fit reads the HOST's box. */
+.viewport {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: var(--space-2) var(--space-1) var(--space-1) var(--space-3);
+}
+
+.host {
+  width: 100%;
+  height: 100%;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm-size);
+}
+
+/* xterm's own scroll area follows the pane's background, not xterm's default black. */
+.host :global(.xterm),
+.host :global(.xterm-viewport) {
+  background-color: var(--term-bg) !important;
+}
+.host :global(.xterm-viewport) {
+  scrollbar-width: thin;
+  scrollbar-color: var(--term-scrollbar) transparent;
+}
+
+.viewLoading {
+  position: absolute;
+  inset: var(--space-3);
+}
+
+.exitBar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: none;
+  padding: var(--space-2) var(--space-3);
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm-size);
+  color: var(--text-secondary);
+}
+.exitBar > span { flex: 1; min-width: 0; }
+
+/* ---- compact (375) -------------------------------------------------------- */
+
+.pane[data-compact] .tab { max-width: 140px; }
+.pane[data-compact] .header { padding-left: var(--space-2); }
+.pane[data-compact] .viewport { padding-left: var(--space-2); }
+
+@media (prefers-reduced-motion: reduce) {
+  .tabClose { transition: none; }
+}

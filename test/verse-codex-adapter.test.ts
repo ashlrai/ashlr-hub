@@ -192,7 +192,8 @@ describe('buildLaunch', () => {
     expect(first.stdin).toBe('hello');
     expect(first.env).toEqual({});
     const next = codexAdapter.buildLaunch(resumed(), 'again', launch());
-    expect(next.argv).toEqual([process.execPath, launcher, 'exec', 'resume', THREAD, '-c', REASONING, '--skip-git-repo-check', '--json', '-']);
+    // V3.10 (C3): `--model` on resume too, so a model picked mid-chat (⌘⇧I) is the one the thread runs.
+    expect(next.argv).toEqual([process.execPath, launcher, 'exec', 'resume', THREAD, '-c', REASONING, '--skip-git-repo-check', '--model', 'gpt-6-sol', '--json', '-']);
   });
 
   it('expansive mode sends the window AND the compaction limit together, on exec and on resume', () => {

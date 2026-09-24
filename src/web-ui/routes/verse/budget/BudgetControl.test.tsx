@@ -136,6 +136,32 @@ describe('BudgetControlView', () => {
     expect(within(claude).getByText('1 more note')).toBeInTheDocument();
   });
 
+  it('a grant ceiling disables the modes above it, with the reason; lowering stays one keystroke', async () => {
+    const user = userEvent.setup();
+    const { onMode } = renderView({ maxMode: 'balanced' });
+    const allIn = screen.getByRole('radio', { name: 'All-in — above your grant' });
+    expect(allIn).toBeDisabled();
+    expect(screen.getByText('Your grant allows up to Balanced; modes above it are off. Re-approve the grant to raise it.')).toBeInTheDocument();
+    // Arrow keys skip the disabled mode; toward Reserve is always allowed.
+    screen.getByRole('radio', { name: 'Balanced' }).focus();
+    await user.keyboard('{ArrowRight}');
+    expect(onMode).not.toHaveBeenCalledWith('all-in');
+    await user.click(screen.getByRole('radio', { name: 'Reserve' }));
+    expect(onMode).toHaveBeenCalledWith('reserve');
+  });
+
+  it('a mode already above a lowered ceiling says what autonomy actually spends', () => {
+    renderView({ view: view({ mode: 'all-in' }), maxMode: 'reserve' });
+    expect(screen.getByText('Your grant allows up to Reserve, so autonomy spends as Reserve until this moves down.')).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: 'Balanced — above your grant' })).toBeDisabled();
+  });
+
+  it('no grant ceiling: every mode is selectable and no ceiling line is shown', () => {
+    renderView({ maxMode: null });
+    expect(screen.getByRole('radio', { name: 'All-in' })).toBeEnabled();
+    expect(screen.queryByText(/Your grant allows/)).toBeNull();
+  });
+
   it('renders an unread window as "no reading", never as a bar', () => {
     renderView();
     const grok = screen.getByRole('listitem', { name: 'Grok' });

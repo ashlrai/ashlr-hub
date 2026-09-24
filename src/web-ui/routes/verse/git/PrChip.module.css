@@ -1,0 +1,73 @@
+/*
+ * PR chip: one line, icon + number + state word (+ checks). The tone tints
+ * the text and hairline only; the word carries the meaning (DESIGN §13.2).
+ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  text-decoration: none;
+  white-space: nowrap;
+  transition: border-color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.chip:hover { background: var(--bg-hover); border-color: var(--border-default); }
+.chip:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
+.glyph { flex: none; }
+
+.chip[data-tone='success'] .glyph,
+.chip[data-tone='merged'] .glyph,
+.chip[data-tone='success'] .state,
+.chip[data-tone='merged'] .state { color: var(--status-success-fg); }
+.chip[data-tone='danger'] .glyph,
+.chip[data-tone='danger'] .checks { color: var(--status-danger-fg); }
+.chip[data-tone='running'] .checks { color: var(--status-running-fg); }
+.chip[data-tone='warning'] .glyph { color: var(--status-warning-fg); }
+
+.number {
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.title {
+  min-width: 0;
+  max-width: 22ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-secondary);
+}
+
+.state { font-weight: var(--font-weight-medium); color: var(--text-primary); }
+.state::before,
+.checks::before {
+  content: '·';
+  margin-right: var(--space-1);
+  color: var(--text-tertiary);
+  font-weight: var(--font-weight-regular);
+}
+.checks { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
+
+.pulse {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin: 0 2px;
+  border-radius: var(--radius-full);
+  background: var(--status-running-solid);
+  animation: pr-pulse var(--duration-pulse) var(--ease-standard) infinite;
+}
+
+@keyframes pr-pulse {
+  50% { opacity: 0.35; }
+}

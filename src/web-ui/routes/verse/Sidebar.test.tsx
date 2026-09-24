@@ -220,3 +220,181 @@ describe('Sidebar — one search field, two answers', () => {
     expect(await screen.findByText('No messages match “login”.')).toBeInTheDocument();
   });
 });
+
+// ===========================================================================
+// 3.10 — filters, pins, archive, unread, the live line, the row menu
+// ===========================================================================
+
+describe('Sidebar 3.10', () => {
+  const NOW = new Date().toISOString();
+  const S = [
+    session({ id: 'vs_run', title: 'Running one', status: 'running', updatedAt: NOW }),
+    session({ id: 'vs_fail', title: 'Failed one', status: 'error', updatedAt: NOW }),
+    session({ id: 'vs_new', title: 'Unread one', turnCount: 4, updatedAt: NOW }),
+    session({ id: 'vs_pin', title: 'Pinned one', updatedAt: NOW }),
+    session({ id: 'vs_old', title: 'Archived one', updatedAt: NOW }),
+  ];
+  const activity = {
+    cursor: 'c', generatedAt: NOW, completions: [], counts: { running: 1, needsYou: 1, unread: 1 },
+    sources: { approvals: 'ok', authority: 'ok', fleet: 'ok', leader: 'ok', chats: 'ok', accounts: 'ok' },
+    autonomy: null, capacity: null, mind: null,
+    running: [{ sessionId: 'vs_run', title: 'Running one', engine: 'claude', seatId: CLAUDE_SEAT.id, startedAt: new Date(Date.now() - 62_000).toISOString(),
+      live: { phase: 'tool', tool: 'npm test', elapsedMs: 62_000, thinkingTail: null } }],
+    needsYou: [{ id: 'chats:chat-failed:vs_fail', source: 'chats', kind: 'chat-failed', severity: 'warn', title: 'Failed one failed', detail: null,
+      since: NOW, expiresAt: null, subject: { repo: null, pr: null, seatId: null, sessionId: 'vs_fail', engine: 'claude' },
+      target: { kind: 'session', sessionId: 'vs_fail' }, actions: [] }],
+  } as unknown as import('../../../core/verse/workbench-types.js').VerseActivityResponse;
+  const meta = {
+    sessions: {
+      vs_new: { sessionId: 'vs_new', pinned: false, archived: false, seenTurnCount: 2 },
+      vs_pin: { sessionId: 'vs_pin', pinned: true, archived: false, seenTurnCount: 1 },
+      vs_old: { sessionId: 'vs_old', pinned: false, archived: true, seenTurnCount: 1 },
+      vs_run: { sessionId: 'vs_run', pinned: false, archived: false, seenTurnCount: 1 },
+      vs_fail: { sessionId: 'vs_fail', pinned: false, archived: false, seenTurnCount: 1 },
+    },
+  };
+
+  function actions() {
+    return {
+      setPinned: vi.fn(), setArchived: vi.fn(), rename: vi.fn(async () => true), handoff: vi.fn(), requestDelete: vi.fn(), dispatchEnabled: true,
+    };
+  }
+
+  function mount310(over: Partial<import('./Sidebar.js').SidebarProps> = {}) {
+    const boot = bootstrap();
+    const a = actions();
+    const onSelect = vi.fn();
+    const view = render(
+      <Sidebar sessions={S} sessionsStatus="success" sessionsError={null} projects={boot.projects}
+        seats={[CLAUDE_SEAT]} selectedId={null} query="" onQuery={() => {}} onSelect={onSelect} onNew={() => {}}
+        onRetry={() => {}} onCollapse={() => {}} onDisconnect={() => {}} activity={activity} meta={meta} actions={a} {...over} />,
+    );
+    return { ...view, actions: a, onSelect };
+  }
+
+  it('groups Pinned first, then projects, then a collapsed Archived', async () => {
+    const user = userEvent.setup();
+    mount310();
+    const nav = screen.getByRole('navigation', { name: 'Chats' });
+    const groups = within(nav).getAllByRole('region').filter((r) => r.hasAttribute('data-group'));
+    expect(groups.map((g) => g.getAttribute('aria-label'))).toEqual(['Pinned', 'hub', 'Archived']);
+    expect(within(groups[0]!).getByRole('button', { name: /Pinned one/ })).toBeInTheDocument();
+    // Archived starts folded; its heading is a disclosure.
+    const archived = within(groups[2]!).getByRole('button', { name: 'Archived' });
+    expect(archived).toHaveAttribute('aria-expanded', 'false');
+    expect(within(nav).queryByRole('button', { name: /Archived one/ })).toBeNull();
+    await user.click(archived);
+    expect(within(nav).getByRole('button', { name: /Archived one/ })).toBeInTheDocument();
+  });
+
+  it('gives each row ONE status, named: running with its elapsed time and live line, failed, unread, or the time', () => {
+    mount310();
+    const nav = screen.getByRole('navigation', { name: 'Chats' });
+    const running = within(nav).getByRole('button', { name: /Running one/ });
+    expect(within(running).getByRole('img', { name: 'Running' })).toBeInTheDocument();
+    expect(running).toHaveTextContent('npm test');
+    expect(running).toHaveTextContent(/1m \d+s/);
+    expect(within(within(nav).getByRole('button', { name: /Failed one/ })).getByRole('img', { name: 'Last turn failed' })).toBeInTheDocument();
+    expect(within(within(nav).getByRole('button', { name: /Unread one/ })).getByRole('img', { name: '2 new turns' })).toBeInTheDocument();
+    const quiet = within(nav).getByRole('button', { name: /Pinned one/ });
+    expect(quiet.querySelector('time')).not.toBeNull();
+    expect(within(quiet).queryByRole('img')).toBeNull();
+  });
+
+  it('says nothing is unread when read state is unknown (no session-meta route)', () => {
+    mount310({ meta: null });
+    const nav = screen.getByRole('navigation', { name: 'Chats' });
+    expect(within(nav).queryByRole('img', { name: /new turn/ })).toBeNull();
+  });
+
+  it('filters with a radio group: one tab stop, ←/→ between All, Running, Needs you, Pinned', async () => {
+    const user = userEvent.setup();
+    mount310();
+    const nav = screen.getByRole('navigation', { name: 'Chats' });
+    const group = within(nav).getByRole('radiogroup', { name: 'Show chats' });
+    const all = within(group).getByRole('radio', { name: 'All' });
+    expect(all).toHaveAttribute('aria-checked', 'true');
+    expect(within(group).getByRole('radio', { name: 'Running 1' })).toHaveAttribute('tabindex', '-1');
+    all.focus();
+    await user.keyboard('{ArrowRight}');
+    expect(within(group).getByRole('radio', { name: 'Running 1' })).toHaveFocus();
+    expect(within(nav).getAllByRole('button', { name: /one/ }).map((b) => b.textContent)).toEqual([expect.stringContaining('Running one')]);
+    await user.keyboard('{ArrowRight}');
+    expect(within(nav).getAllByRole('button', { name: / one/ }).map((b) => b.getAttribute('data-focus-key'))).toEqual(['verse-session:vs_fail']);
+    await user.keyboard('{ArrowRight}');
+    expect(within(nav).getAllByRole('button', { name: / one/ }).map((b) => b.getAttribute('data-focus-key'))).toEqual(['verse-session:vs_pin']);
+    await user.keyboard('{End}{ArrowRight}');
+    expect(all).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('offers a way out of an empty filter', async () => {
+    const user = userEvent.setup();
+    mount310({ activity: { ...activity, running: [] }, sessions: S.map((s) => ({ ...s, status: 'idle' as const })) });
+    await user.click(screen.getByRole('radio', { name: 'Running' }));
+    expect(screen.getByText('No chat is running')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Show all chats' }));
+    expect(screen.getByRole('radio', { name: 'All' })).toHaveAttribute('aria-checked', 'true');
+  });
+
+  it('opens the row menu with Shift+F10 and right-click; pins, archives, hands off and asks to delete', async () => {
+    const user = userEvent.setup();
+    const { actions: a } = mount310();
+    const nav = screen.getByRole('navigation', { name: 'Chats' });
+    const row = within(nav).getByRole('button', { name: /Unread one/ });
+    expect(row).toHaveAttribute('aria-haspopup', 'menu');
+    row.focus();
+    await user.keyboard('{Shift>}{F10}{/Shift}');
+    let menu = screen.getByRole('menu', { name: 'Actions for Unread one' });
+    expect(within(menu).getAllByRole('menuitem')[0]).toHaveFocus();
+    await user.keyboard('{Enter}');
+    expect(a.setPinned).toHaveBeenCalledWith('vs_new', true);
+    expect(row).toHaveFocus();
+
+    await user.pointer({ keys: '[MouseRight]', target: row });
+    menu = screen.getByRole('menu', { name: 'Actions for Unread one' });
+    await user.click(within(menu).getByRole('menuitem', { name: 'Archive' }));
+    expect(a.setArchived).toHaveBeenCalledWith('vs_new', true);
+
+    await user.pointer({ keys: '[MouseRight]', target: row });
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Continue in a fresh chat…' }));
+    expect(a.handoff).toHaveBeenCalledWith('vs_new');
+
+    await user.pointer({ keys: '[MouseRight]', target: row });
+    await user.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Delete…' }));
+    expect(a.requestDelete).toHaveBeenCalledWith('vs_new');
+  });
+
+  it('renames in place: Enter commits, Escape keeps the old title', async () => {
+    const user = userEvent.setup();
+    const { actions: a } = mount310();
+    const row = within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: /Unread one/ });
+    row.focus();
+    await user.keyboard('{Shift>}{F10}{/Shift}');
+    await user.click(screen.getByRole('menuitem', { name: 'Rename' }));
+    const box = screen.getByRole('textbox', { name: 'Chat title' });
+    expect(box).toHaveFocus();
+    await user.clear(box);
+    await user.type(box, 'Read me{Enter}');
+    expect(a.rename).toHaveBeenCalledWith('vs_new', 'Read me');
+
+    const again = within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: /Unread one/ });
+    again.focus();
+    await user.keyboard('{Shift>}{F10}{/Shift}');
+    await user.click(screen.getByRole('menuitem', { name: 'Rename' }));
+    await user.type(screen.getByRole('textbox', { name: 'Chat title' }), 'nope{Escape}');
+    expect(a.rename).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows pin and archive disabled, with the reason, on a server without session meta; delete is refused while running', async () => {
+    const user = userEvent.setup();
+    mount310({ meta: null });
+    const nav = screen.getByRole('navigation', { name: 'Chats' });
+    const row = within(nav).getByRole('button', { name: /Running one/ });
+    row.focus();
+    await user.keyboard('{Shift>}{F10}{/Shift}');
+    const menu = screen.getByRole('menu');
+    expect(within(menu).getByRole('menuitem', { name: /Pin/ })).toHaveAttribute('aria-disabled', 'true');
+    expect(within(menu).getByRole('menuitem', { name: /Pin/ })).toHaveTextContent('Not available on this server yet.');
+    expect(within(menu).getByRole('menuitem', { name: /Delete/ })).toHaveTextContent('Stop its turn before deleting.');
+  });
+});

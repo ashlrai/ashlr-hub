@@ -10,11 +10,17 @@
  * a dashed "no data" placeholder; a column with some nulls stacks what is
  * known and marks the total as a lower bound (hollow cap + "≥" in the
  * tooltip and table). Nothing unknown ever renders as a zero-height bar.
+ *
+ * V3.10: every segment names its colour. The old fallback — categorical slot
+ * by INDEX — meant an engine chart silently painted Claude in whatever ink
+ * slot 0 held; engine charts must pass engineColor(), status charts
+ * toneColor(), identity charts seriesColor(slot) with a slot fixed per entity
+ * (SPEC-310C §6). An all-unknown column is drawn with the unknown hatch.
  */
 import { useId, useRef, useState, type KeyboardEvent } from 'react';
-import { seriesColor } from './colors.js';
+import { hatchPatternId } from './colors.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
-import { ChartLegend, ChartTooltip, clampTooltipLeft } from './ChartParts.js';
+import { ChartLegend, ChartTooltip, HatchPattern, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
 import { linearScale, niceTicks, roundedTopBar, stackColumn, thinIndexes, type StackedColumn } from './chart-math.js';
 import { formatCompact, formatPercent } from './format.js';
@@ -24,8 +30,11 @@ import plot from './plot.module.css';
 export interface BarStackSegment {
   id: string;
   label: string;
-  /** Defaults to the categorical slot by index. Pass toneColor(...) for status meaning. */
-  color?: string;
+  /**
+   * Required (V3.10): seriesColor(fixedSlot) for identity, toneColor(...) for
+   * status, engineColor(...) for engines. Never picked by index.
+   */
+  color: string;
 }
 
 export interface BarStackProps {
@@ -75,7 +84,8 @@ export function BarStack({
   const width = useChartWidth(wrapRef, fixedWidth);
   const [active, setActive] = useState<number | null>(null);
   const liveId = useId();
-  const colors = segments.map((s, i) => s.color ?? seriesColor(i));
+  const hatchId = hatchPatternId(useId());
+  const colors = segments.map((s) => s.color);
 
   const rows: Row[] = categories.map((label, i) => {
     const vals = values[i] ?? segments.map(() => null);
@@ -138,7 +148,14 @@ export function BarStack({
       caveat={caveat}
       status={resolvedStatus}
       table={<TableView caption={title} columns={columns} rows={rows} rowKey={(r, i) => `${i}:${r.label}`} />}
-      footer={<ChartLegend items={segments.map((s, i) => ({ label: s.label, color: colors[i] }))} />}
+      footer={
+        <ChartLegend
+          items={[
+            ...segments.map((s, i) => ({ label: s.label, color: colors[i] })),
+            ...(rows.some((r) => r.stack.unknown) ? [{ label: 'no data', kind: 'hatch' as const }] : []),
+          ]}
+        />
+      }
     >
       <div
         ref={wrapRef}
@@ -152,6 +169,9 @@ export function BarStack({
         onKeyDown={onKey}
       >
         <svg className={plot.svg} width={width} height={height} viewBox={`0 0 ${width} ${height}`} role="img" aria-label={summary}>
+          <defs>
+            <HatchPattern id={hatchId} />
+          </defs>
           {ticks.map((t) => (
             <g key={t}>
               <line className={plot.grid} x1={padL} x2={padL + plotW} y1={ys(t)} y2={ys(t)} />
@@ -163,7 +183,17 @@ export function BarStack({
             const scaleTotal = normalize ? r.stack.total || 1 : 1;
             if (r.stack.unknown) {
               return (
-                <rect key={i} data-unknown="true" className={plot.noData} x={x} y={PAD_T + plotH - 12} width={barW} height={12} rx={2} />
+                <rect
+                  key={i}
+                  data-unknown="true"
+                  className={plot.unknownMark}
+                  fill={`url(#${hatchId})`}
+                  x={x + 0.5}
+                  y={PAD_T + plotH - 12.5}
+                  width={Math.max(1, barW - 1)}
+                  height={12}
+                  rx={2}
+                />
               );
             }
             const last = r.stack.segments[r.stack.segments.length - 1];

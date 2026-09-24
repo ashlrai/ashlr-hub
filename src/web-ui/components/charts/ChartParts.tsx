@@ -1,15 +1,18 @@
 /**
  * components/charts/ChartParts.tsx — small shared pieces of the V3.10 charts:
- * the legend list and the tooltip. Identity is never colour alone: every
- * swatch sits beside its text label, and text always wears text tokens.
+ * the legend list, the tooltip, the unknown hatch and the engine tick.
+ * Identity is never colour alone: every swatch sits beside its text label,
+ * and text always wears text tokens.
  */
 import type { ReactNode } from 'react';
+import { UNKNOWN_HATCH, engineColor, type ChartEngine } from './colors.js';
 import plot from './plot.module.css';
 
 export interface ChartLegendItem {
   label: string;
   color?: string;
-  kind?: 'swatch' | 'line' | 'empty';
+  /** `hatch` = the unknown texture (not measured), never a colour. */
+  kind?: 'swatch' | 'line' | 'empty' | 'hatch';
 }
 
 /** Renders nothing for fewer than `min` items (a lone series is named by the title). */
@@ -21,8 +24,10 @@ export function ChartLegend({ items, min = 2 }: { items: ChartLegendItem[]; min?
         <li key={item.label} className={plot.legendItem}>
           <span
             aria-hidden="true"
-            className={item.kind === 'line' ? plot.swatchLine : item.kind === 'empty' ? plot.swatchEmpty : plot.swatch}
-            style={item.kind === 'empty' ? undefined : { background: item.color }}
+            className={
+              item.kind === 'line' ? plot.swatchLine : item.kind === 'empty' ? plot.swatchEmpty : item.kind === 'hatch' ? plot.swatchHatch : plot.swatch
+            }
+            style={item.kind === 'empty' || item.kind === 'hatch' ? undefined : { background: item.color }}
           />
           {item.label}
         </li>
@@ -64,4 +69,63 @@ export function ChartTooltip({ left, top, title, rows }: { left: number; top: nu
 /** Keep a centred tooltip inside [margin, width - margin]. */
 export function clampTooltipLeft(x: number, width: number, margin = 70): number {
   return Math.min(Math.max(x, Math.min(margin, width / 2)), Math.max(width - margin, width / 2));
+}
+
+// ---------------------------------------------------------------------------
+// Unknown hatch (V3.10) — one <pattern> per chart instance
+// ---------------------------------------------------------------------------
+
+/**
+ * The 45° unknown hatch as an SVG <pattern>. Render it inside the chart's own
+ * <svg><defs> with an id from `hatchPatternId(useId())` (colors.ts) — ids are
+ * document-global, so a shared literal id would let one chart's unmount blank
+ * another's hatch — then fill unknown marks with `url(#id)` and outline them
+ * with CHART_UNKNOWN. Texture, not hue, is what separates "not measured" from
+ * a low value, so it survives colour-blindness and greyscale print.
+ */
+export function HatchPattern({ id }: { id: string }) {
+  const { size, angle, strokeWidth, stroke } = UNKNOWN_HATCH;
+  return (
+    <pattern id={id} width={size} height={size} patternUnits="userSpaceOnUse" patternTransform={`rotate(${angle})`}>
+      <line x1={0} y1={0} x2={0} y2={size} stroke={stroke} strokeWidth={strokeWidth} />
+    </pattern>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Engine identity (V3.10) — a 2px tick plus a one-letter monogram
+// ---------------------------------------------------------------------------
+
+const ENGINE_LETTER: Readonly<Record<ChartEngine, string>> = { claude: 'C', codex: 'X', grok: 'G', local: 'L' };
+
+/** The monogram letter for an engine (mirrors workbench-types ENGINE_MONOGRAM; charts stay core-free). */
+export function engineLetter(engine: ChartEngine): string {
+  return ENGINE_LETTER[engine];
+}
+
+/**
+ * SVG engine mark for a lane label: the 2px identity tick and the monogram.
+ * Never a vendor logo (SPEC-310C §6). The engine's NAME still travels in the
+ * lane's spoken summary and the table — the letter is a glance aid only.
+ */
+export function EngineTick({ engine, x, y, height }: { engine: ChartEngine; x: number; y: number; height: number }) {
+  return (
+    <g data-engine={engine} aria-hidden="true">
+      <rect x={x} y={y} width={2} height={height} rx={1} fill={engineColor(engine)} />
+      <text className={plot.monogram} x={x + 6} y={y + height / 2} dy="0.34em">
+        {ENGINE_LETTER[engine]}
+      </text>
+    </g>
+  );
+}
+
+/** A quiet ⋯ glyph (three dots), currentColor, 16px. */
+export function MoreGlyph() {
+  return (
+    <svg width={16} height={16} viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <circle cx={3.5} cy={8} r={1.4} fill="currentColor" />
+      <circle cx={8} cy={8} r={1.4} fill="currentColor" />
+      <circle cx={12.5} cy={8} r={1.4} fill="currentColor" />
+    </svg>
+  );
 }

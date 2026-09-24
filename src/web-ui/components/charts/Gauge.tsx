@@ -11,8 +11,9 @@
  *
  * Semantics: role="meter" with aria-valuenow/min/max/valuetext.
  */
-import { useId } from 'react';
-import { CHART_SEQUENTIAL, CHART_TRACK, toneColor } from './colors.js';
+import { useId, useLayoutEffect, useRef, useState } from 'react';
+import { CHART_SEQUENTIAL, CHART_TRACK, hatchPatternId, toneColor } from './colors.js';
+import { HatchPattern } from './ChartParts.js';
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { TableView, type TableColumn } from './TableView.js';
 import { gaugeArc, gaugeSeverity, polar, type GaugeSeverity } from './chart-math.js';
@@ -34,9 +35,19 @@ export interface GaugeProps {
   marker?: { value: number; label: string };
   /** Words under the number, e.g. "resets in 2h". */
   caption?: string;
-  /** Diameter in px. */
+  /**
+   * The LARGEST diameter in px (default 180). V3.10: the gauge fits its
+   * container — two gauges side by side at 375 px each shrink (never below
+   * MIN_GAUGE_SIZE) instead of widening the page.
+   */
   size?: number;
   formatValue?: (fraction: number) => string;
+  /**
+   * Print the severity words ("near the limit"). Default true. Set false for
+   * a fraction where higher is BETTER (a hit rate): the fill stays one
+   * quantity hue and no limit language is used.
+   */
+  showState?: boolean;
 }
 
 const SEVERITY_LABEL: Record<GaugeSeverity, string> = {
@@ -45,6 +56,49 @@ const SEVERITY_LABEL: Record<GaugeSeverity, string> = {
   danger: 'at the limit',
   unknown: 'unknown',
 };
+
+/** Smallest diameter a gauge draws at; below it the readout would collide with the arc. */
+export const MIN_GAUGE_SIZE = 112;
+
+/** The container's measured width (0 until laid out: jsdom, a hidden tab). */
+function useContainerWidth(ref: React.RefObject<HTMLElement | null>): number {
+  const [width, setWidth] = useState(0);
+  // Track the node: the gauge mounts after a loading frame (see useChartWidth).
+  const [node, setNode] = useState<HTMLElement | null>(null);
+  // Runs after every render on purpose (ref.current is not a dependency React
+  // can see); the equality guard makes it settle in one pass, never a loop.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    if (ref.current !== node) setNode(ref.current);
+  });
+  useLayoutEffect(() => {
+    const el = node;
+    if (!el) return undefined;
+    const read = (): void => {
+      const w = Math.floor(el.getBoundingClientRect().width);
+      setWidth((prev) => (prev === w ? prev : w));
+    };
+    read();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(read);
+    });
+    observer.observe(el);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [node]);
+  return width;
+}
+
+/** Diameter for a container: the largest that fits, clamped to [MIN_GAUGE_SIZE, max]. */
+export function gaugeDiameter(containerWidth: number, max: number): number {
+  if (!(containerWidth > 0)) return max;
+  return Math.max(MIN_GAUGE_SIZE, Math.min(max, Math.floor(containerWidth)));
+}
 
 function severityColor(severity: GaugeSeverity): string {
   if (severity === 'danger') return toneColor('danger');
@@ -68,24 +122,32 @@ export function Gauge({
   dangerAt = 0.9,
   marker,
   caption,
-  size = 180,
+  size: maxSize = 180,
   formatValue = (f) => formatPercent(f),
+  showState = true,
 }: GaugeProps) {
   const captionId = useId();
-  const severity = gaugeSeverity(value, warnAt, dangerAt);
+  const hatchId = hatchPatternId(useId());
+  const fitRef = useRef<HTMLDivElement>(null);
+  const size = gaugeDiameter(useContainerWidth(fitRef), maxSize);
+  const severity = showState ? gaugeSeverity(value, warnAt, dangerAt) : value === null ? 'unknown' : 'ok';
   const stroke = Math.max(10, Math.round(size / 12));
   const r = size / 2 - stroke / 2 - 2;
   const cx = size / 2;
   const cy = size / 2;
   const h = size / 2 + stroke / 2 + 4;
   const valueText = value === null ? 'unknown' : formatValue(value);
-  const spoken = value === null ? `${title}: unknown` : `${title}: ${valueText}, ${SEVERITY_LABEL[severity]}`;
+  const spoken = value === null ? `${title}: unknown` : showState ? `${title}: ${valueText}, ${SEVERITY_LABEL[severity]}` : `${title}: ${valueText}`;
 
   const rows: Row[] = [
     { key: 'value', label: 'Used', value: valueText },
-    { key: 'state', label: 'State', value: SEVERITY_LABEL[severity] },
-    { key: 'warn', label: 'Warning at', value: formatValue(warnAt) },
-    { key: 'danger', label: 'Limit at', value: formatValue(dangerAt) },
+    ...(showState
+      ? [
+          { key: 'state', label: 'State', value: SEVERITY_LABEL[severity] },
+          { key: 'warn', label: 'Warning at', value: formatValue(warnAt) },
+          { key: 'danger', label: 'Limit at', value: formatValue(dangerAt) },
+        ]
+      : []),
     ...(marker ? [{ key: 'marker', label: marker.label, value: formatValue(marker.value) }] : []),
   ];
   const columns: TableColumn<Row>[] = [
@@ -104,6 +166,7 @@ export function Gauge({
       status={status ?? { kind: 'ready' }}
       table={<TableView caption={title} columns={columns} rows={rows} rowKey={(row) => row.key} />}
     >
+      <div ref={fitRef} className={styles.fit}>
       <div
         className={styles.gauge}
         role="meter"
@@ -116,7 +179,18 @@ export function Gauge({
         data-severity={severity}
       >
         <svg className={plot.svg} width={size} height={h} viewBox={`0 0 ${size} ${h}`} aria-hidden="true">
-          <path d={gaugeArc(cx, cy, r, 0, 1)} fill="none" stroke={CHART_TRACK} strokeWidth={stroke} strokeLinecap="round" />
+          <defs>
+            <HatchPattern id={hatchId} />
+          </defs>
+          {/* Unknown: the track is hatched, not the pale ramp step a "little" value would get. */}
+          <path
+            data-role="track"
+            d={gaugeArc(cx, cy, r, 0, 1)}
+            fill="none"
+            stroke={value === null ? `url(#${hatchId})` : CHART_TRACK}
+            strokeWidth={stroke}
+            strokeLinecap="round"
+          />
           {value !== null && value > 0 ? (
             <path
               data-role="fill"
@@ -142,10 +216,11 @@ export function Gauge({
         </svg>
         <div className={styles.readout}>
           <span className={value === null ? styles.unknownValue : styles.value}>{valueText}</span>
-          {severity !== 'unknown' ? <span className={styles.state}>{SEVERITY_LABEL[severity]}</span> : null}
+          {showState && severity !== 'unknown' ? <span className={styles.state}>{SEVERITY_LABEL[severity]}</span> : null}
           {caption ? <span id={captionId} className={styles.caption}>{caption}</span> : null}
           {marker ? <span className={styles.caption}>{marker.label}: {formatValue(marker.value)}</span> : null}
         </div>
+      </div>
       </div>
     </ChartFrame>
   );

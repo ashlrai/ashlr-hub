@@ -13,6 +13,8 @@
  *   - mutation guard: no token → dialog, action runs once unlocked
  *   - the panel resizers: their ARIA contract, keyboard steps, double-click
  *     reset, and that a hidden panel leaves no handle behind
+ *   - 3.10: the dock replaced the resources column (Tasks / Context panes,
+ *     width handle, persisted with the shell's v3 blob)
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -23,7 +25,11 @@ import { evictAll } from '../../../data/cache.js';
 import { bootstrap as bootstrapFixture, ev, MockEventSource, session as sessionFixture, verseFetch } from '../fixtures.test-support.js';
 import { CLAUDE_CONTEXT_SEAT } from '../seat-fixtures.test-support.js';
 import { resetVerseStore } from '../verse-store.js';
-import { resetVerseUi } from '../verse-ui-store.js';
+import { getVerseUiState, openVerseSession, requestVerseCommand, resetVerseUi, VERSE_UI_STORAGE_KEY } from '../verse-ui-store.js';
+import { resetCommandBus, runCommand } from '../shell/command-bus.js';
+import { mockCompactViewport } from '../shell/viewport.test-support.js';
+import { getDockSnapshot, requestTerminal, resetDockStore } from '../dock/dock-store.js';
+import { resetLocalSeen } from '../chat/use-chat-activity.js';
 import { CHAT_PANEL_RANGES, CHAT_PANEL_SIZING_KEY, resetChatPanelSizing } from '../chat-panel-sizing.js';
 import { ApiError } from '../../../data/client.js';
 import { ChatSection, describeChatError } from './ChatSection.js';
@@ -40,6 +46,9 @@ beforeEach(() => {
   evictAll();
   resetVerseStore();
   resetVerseUi();
+  resetDockStore();
+  resetLocalSeen();
+  resetCommandBus();
   resetChatPanelSizing();
   clearMutationToken();
   MockEventSource.reset();
@@ -80,12 +89,10 @@ describe('ChatSection bootstrap', () => {
     expect(await screen.findByRole('tooltip')).toHaveTextContent('Claude Max');
     fireEvent.mouseOut(row);
 
-    // Resources panel lists every seat with its health and the local runtime.
-    const resources = screen.getByRole('complementary', { name: 'Resources' });
-    expect(within(resources).getByText('Personal Codex')).toBeInTheDocument();
-    expect(within(resources).getByText('quota exhausted until 14:00')).toBeInTheDocument();
-    expect(within(resources).getByText('http://127.0.0.1:11434')).toBeInTheDocument();
-    expect(within(resources).getByText('reachable')).toBeInTheDocument();
+    // 3.10: no resources column — the dock starts closed, and seat capacity
+    // lives in Apps & Accounts. Nothing in the chat surface lists seats.
+    expect(screen.queryByRole('complementary', { name: /^Dock/ })).not.toBeInTheDocument();
+    expect(screen.queryByText('Personal Codex')).not.toBeInTheDocument();
 
     // Empty workspace state with the ⌘N hint.
     expect(screen.getByRole('heading', { name: 'Pick a chat, or start a new one' })).toBeInTheDocument();
@@ -290,7 +297,7 @@ describe('ChatSection refusals', () => {
 });
 
 describe('ChatSection layout', () => {
-  it('collapses and restores the sidebar, persisting the choice under ashlr.verse.ui.v2', async () => {
+  it('collapses and restores the sidebar, persisting the choice in the shell\'s v3 blob', async () => {
     const { fetch } = verseFetch();
     vi.stubGlobal('fetch', fetch);
     const user = userEvent.setup();
@@ -298,27 +305,47 @@ describe('ChatSection layout', () => {
     await screen.findByRole('navigation', { name: 'Chats' });
 
     await user.click(screen.getByRole('button', { name: 'Hide chat list' }));
-    expect(JSON.parse(localStorage.getItem('ashlr.verse.ui.v2') ?? '{}')).toMatchObject({ sidebarCollapsed: true });
+    expect(JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}')).toMatchObject({ sidebarCollapsed: true });
     await user.click(screen.getByRole('button', { name: 'Show chat list' }));
-    expect(JSON.parse(localStorage.getItem('ashlr.verse.ui.v2') ?? '{}')).toMatchObject({ sidebarCollapsed: false });
+    expect(JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}')).toMatchObject({ sidebarCollapsed: false });
   });
 
-  it('hides the resources panel on request and remembers that too', async () => {
+  it('opens the dock on Tasks, switches to Context, and persists it with the shell blob', async () => {
     const { fetch } = verseFetch();
     vi.stubGlobal('fetch', fetch);
     const user = userEvent.setup();
     mount();
-    await screen.findByRole('complementary', { name: 'Resources' });
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
 
-    await user.click(screen.getByRole('button', { name: 'Resources' }));
-    expect(screen.queryByRole('complementary', { name: 'Resources' })).not.toBeInTheDocument();
-    expect(JSON.parse(localStorage.getItem('ashlr.verse.ui.v2') ?? '{}')).toMatchObject({ resourcesOpen: false });
+    await user.click(screen.getByRole('button', { name: 'Dock' }));
+    // The dock loads on first open (lazy chunk).
+    const dock = await screen.findByRole('complementary', { name: 'Dock: Tasks' });
+    expect(within(dock).getByRole('tab', { name: 'Tasks' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(dock).getByText('No tool calls in the latest turn.')).toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}').dock).toMatchObject({ open: true, active: 'tasks', tabs: ['tasks'] });
+
+    // "+" adds Context; it is the ResourcesPanel minus the accounts.
+    await user.click(within(dock).getByRole('button', { name: 'Add a pane' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Context' }));
+    const context = screen.getByRole('complementary', { name: 'Dock: Context' });
+    expect(within(context).getByRole('tab', { name: 'Context' })).toHaveAttribute('aria-selected', 'true');
+    expect(within(context).getByLabelText('Context efficiency')).toBeInTheDocument();
+    expect(within(context).getByRole('button', { name: 'Accounts & capacity →' })).toBeInTheDocument();
+    expect(within(context).queryByText('Personal Codex')).not.toBeInTheDocument();
+
+    // ←/→ move between tabs; the close button closes the dock.
+    within(context).getByRole('tab', { name: 'Context' }).focus();
+    await user.keyboard('{ArrowLeft}');
+    expect(screen.getByRole('complementary', { name: 'Dock: Tasks' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Close the dock' }));
+    expect(screen.queryByRole('complementary', { name: /^Dock/ })).not.toBeInTheDocument();
+    expect(JSON.parse(localStorage.getItem(VERSE_UI_STORAGE_KEY) ?? '{}').dock).toMatchObject({ open: false });
   });
 });
 
 describe('ChatSection resizers', () => {
   const SIDE = CHAT_PANEL_RANGES.sidebar;
-  const RES = CHAT_PANEL_RANGES.resources;
 
   /**
    * jsdom implements no PointerEvent, so synthesise one. `pointerId` is the
@@ -351,14 +378,30 @@ describe('ChatSection resizers', () => {
     // NOT a pixel assertion — jsdom computes no layout, and none of this
     // needs it. What is asserted is the contract a screen reader and a
     // keyboard operator actually consume.
-    for (const [name, range] of [['Resize chat list', SIDE], ['Resize resources panel', RES]] as const) {
-      const handle = screen.getByRole('separator', { name });
-      expect(handle).toHaveAttribute('aria-orientation', 'vertical');
-      expect(handle).toHaveAttribute('aria-valuemin', String(range.min));
-      expect(handle).toHaveAttribute('aria-valuemax', String(range.max));
-      expect(handle).toHaveAttribute('aria-valuenow', String(range.def));
-      expect(handle).toHaveAttribute('tabindex', '0');
-    }
+    const handle = screen.getByRole('separator', { name: 'Resize chat list' });
+    expect(handle).toHaveAttribute('aria-orientation', 'vertical');
+    expect(handle).toHaveAttribute('aria-valuemin', String(SIDE.min));
+    expect(handle).toHaveAttribute('aria-valuemax', String(SIDE.max));
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def));
+    expect(handle).toHaveAttribute('tabindex', '0');
+  });
+
+  it('gives the dock column its own width handle: 320px … 60% of the window, keys and double-click', async () => {
+    const user = userEvent.setup();
+    await mounted();
+    await user.click(screen.getByRole('button', { name: 'Dock' }));
+    const handle = await screen.findByRole('separator', { name: 'Resize the dock' });
+    // jsdom's window is 1024 wide: the column presentation, capped at 60%.
+    expect(handle).toHaveAttribute('aria-valuemin', '320');
+    expect(handle).toHaveAttribute('aria-valuemax', String(Math.floor(window.innerWidth * 0.6)));
+    const start = Number(handle.getAttribute('aria-valuenow'));
+    // The dock grows LEFTward: ← widens it.
+    fireEvent.keyDown(handle, { key: 'Home' });
+    expect(handle).toHaveAttribute('aria-valuenow', '320');
+    fireEvent.keyDown(handle, { key: 'ArrowLeft' });
+    expect(handle).toHaveAttribute('aria-valuenow', '336');
+    fireEvent.doubleClick(handle);
+    expect(Number(handle.getAttribute('aria-valuenow'))).toBe(start);
   });
 
   it('moves the width with the arrow keys and persists it under its own key', async () => {
@@ -377,9 +420,6 @@ describe('ChatSection resizers', () => {
     fireEvent.keyDown(handle, { key: 'ArrowLeft', shiftKey: true });
     expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def + 16));
 
-    const resources = screen.getByRole('separator', { name: 'Resize resources panel' });
-    fireEvent.keyDown(resources, { key: 'ArrowLeft' });
-    expect(resources).toHaveAttribute('aria-valuenow', String(RES.def + 16));
   });
 
   it('clamps the keyboard to the range, and Home/End go to the extremes', async () => {
@@ -405,13 +445,13 @@ describe('ChatSection resizers', () => {
 
   it('restores the default width on a double-click', async () => {
     await mounted();
-    const handle = screen.getByRole('separator', { name: 'Resize resources panel' });
+    const handle = screen.getByRole('separator', { name: 'Resize chat list' });
     fireEvent.keyDown(handle, { key: 'End' });
-    expect(handle).toHaveAttribute('aria-valuenow', String(RES.max));
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.max));
 
     fireEvent.doubleClick(handle);
-    expect(handle).toHaveAttribute('aria-valuenow', String(RES.def));
-    expect(stored().resources).toBe(RES.def);
+    expect(handle).toHaveAttribute('aria-valuenow', String(SIDE.def));
+    expect(stored().sidebar).toBe(SIDE.def);
   });
 
   it('drags from the pointer, suppresses selection, and releases outside the handle', async () => {
@@ -475,15 +515,16 @@ describe('ChatSection resizers', () => {
     const user = userEvent.setup();
     await mounted();
     expect(screen.getByRole('separator', { name: 'Resize chat list' })).toBeInTheDocument();
-    expect(screen.getByRole('separator', { name: 'Resize resources panel' })).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dock' }));
+    expect(await screen.findByRole('separator', { name: 'Resize the dock' })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'Hide chat list' }));
     expect(screen.queryByRole('separator', { name: 'Resize chat list' })).not.toBeInTheDocument();
-    expect(screen.getByRole('separator', { name: 'Resize resources panel' })).toBeInTheDocument();
+    expect(screen.getByRole('separator', { name: 'Resize the dock' })).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'Resources' }));
-    expect(screen.queryByRole('complementary', { name: 'Resources' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('separator', { name: 'Resize resources panel' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dock' }));
+    expect(screen.queryByRole('complementary', { name: /^Dock/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('separator', { name: 'Resize the dock' })).not.toBeInTheDocument();
 
     // The show/hide toggles still work, and the handles come back with them.
     await user.click(screen.getByRole('button', { name: 'Show chat list' }));
@@ -564,7 +605,7 @@ describe('ChatSection — context orchestration wiring', () => {
       .toEqual({ projectPath: '/Users/mason/dev/hub', seatId: 'claude-a', model: 'claude-fable-5-1', contextMode: 'expansive' });
   });
 
-  it('feeds the open chat’s log to the resources panel’s per-turn figures', async () => {
+  it('feeds the open chat’s log to the Context pane’s per-turn figures', async () => {
     const boot = bootstrapFixture();
     const { fetch } = verseFetch({
       bootstrap: boot,
@@ -583,6 +624,11 @@ describe('ChatSection — context orchestration wiring', () => {
     const user = userEvent.setup();
     mount();
     await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    // The Context pane is the dock's; open it the way ⌘\ + "+" would.
+    await user.click(screen.getByRole('button', { name: 'Dock' }));
+    await user.click(await screen.findByRole('button', { name: 'Add a pane' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Context' }));
     const efficiency = await screen.findByLabelText('Context efficiency');
     await waitFor(() => expect(within(efficiency).getByText('Peak context', { selector: 'dt' }).nextElementSibling).toHaveTextContent('50k'));
     expect(within(efficiency).getByText('Avg context / turn', { selector: 'dt' }).nextElementSibling).toHaveTextContent('40k');
@@ -600,5 +646,166 @@ describe('ChatSection — context orchestration wiring', () => {
     await user.click(within(screen.getByRole('log')).getByRole('button', { name: 'Fix the login bug' }));
     expect(await screen.findByRole('heading', { name: 'Fix the login bug' })).toBeInTheDocument();
     expect(localStorage.getItem('ashlr.verse.selected.v1')).toBe('vs_1');
+  });
+});
+
+/**
+ * 3.10: the ways INTO the chat from the rest of the workbench, and the
+ * chat-scope keys (SPEC-310C §1 key table, "Chat" row).
+ */
+describe('ChatSection — commands and keys (3.10)', () => {
+  it('serves the catalog\'s dock and chat commands on the shell\'s command bus', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    expect(runCommand('dock.toggle')).toBe(true);
+    expect(await screen.findByRole('complementary', { name: 'Dock: Tasks' })).toBeInTheDocument();
+    act(() => { runCommand('dock.toggle'); });
+    expect(screen.queryByRole('complementary', { name: /^Dock/ })).not.toBeInTheDocument();
+    act(() => { runCommand('chat.sidebar'); });
+    expect(getVerseUiState().sidebarCollapsed).toBe(true);
+    expect(screen.getByRole('button', { name: 'Show chat list' })).toBeInTheDocument();
+  });
+
+  it('handles ⌘\\ and ⌘B itself when the shell has not taken the key, and never twice', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    // jsdom reports no macOS platform, so the catalog's "mod" is Ctrl here.
+    fireEvent.keyDown(document.body, { key: '\\', code: 'Backslash', ctrlKey: true });
+    expect(await screen.findByRole('complementary', { name: 'Dock: Tasks' })).toBeInTheDocument();
+    // A key the shell already handled (defaultPrevented) is left alone.
+    const handled = new KeyboardEvent('keydown', { key: '\\', code: 'Backslash', ctrlKey: true, bubbles: true, cancelable: true });
+    handled.preventDefault();
+    act(() => { document.body.dispatchEvent(handled); });
+    expect(screen.getByRole('complementary', { name: 'Dock: Tasks' })).toBeInTheDocument();
+    // ⌘B — the chat list.
+    fireEvent.keyDown(document.body, { key: 'b', code: 'KeyB', ctrlKey: true });
+    expect(getVerseUiState().sidebarCollapsed).toBe(true);
+  });
+
+  it('opens the chat an open-session command names, and reports what is open to the shell', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    act(() => { openVerseSession('vs_2'); });
+    expect(await screen.findByRole('heading', { name: 'Write the docs' })).toBeInTheDocument();
+    expect(getVerseUiState().activeSessionId).toBe('vs_2');
+    expect(localStorage.getItem('ashlr.verse.selected.v1')).toBe('vs_2');
+  });
+
+  it('prefills "New chat on…" from the command\'s seat', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    act(() => { requestVerseCommand('new-chat', { seatId: 'local:qwen3-coder', projectPath: '/Users/mason/dev/site' }); });
+    const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    expect(within(dialog).getByLabelText('Project')).toHaveValue('/Users/mason/dev/site');
+    expect(within(dialog).getByLabelText('Seat and model')).toHaveValue(JSON.stringify(['local:qwen3-coder', 'qwen3-coder']));
+  });
+
+  it('confirms a delete from the chat list in a dialog before anything is removed', async () => {
+    const { fetch, state } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    const nav = await screen.findByRole('navigation', { name: 'Chats' });
+    const row = await within(nav).findByRole('button', { name: /Write the docs/ });
+    row.focus();
+    await user.keyboard('{Shift>}{F10}{/Shift}');
+    await user.click(screen.getByRole('menuitem', { name: 'Delete…' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete this chat?' });
+    expect(dialog).toHaveTextContent('“Write the docs” and its transcript are removed');
+    await user.click(within(dialog).getByRole('button', { name: 'Keep' }));
+    expect(state.calls.some((c) => c.path.endsWith('/delete'))).toBe(false);
+
+    await user.keyboard('{Shift>}{F10}{/Shift}');
+    await user.click(screen.getByRole('menuitem', { name: 'Delete…' }));
+    await user.click(within(screen.getByRole('dialog', { name: 'Delete this chat?' })).getByRole('button', { name: 'Delete' }));
+    await waitFor(() => expect(state.calls.some((c) => c.path === '/api/verse/sessions/vs_2/delete')).toBe(true));
+    await waitFor(() => expect(within(nav).queryByRole('button', { name: /Write the docs/ })).not.toBeInTheDocument());
+  });
+
+  it('⌃` asks the dock for a terminal (the active tab, else one at the root); pressed again it hides Terminal', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    // jsdom has no macOS platform: the catalog's ⌃ is Ctrl either way.
+    fireEvent.keyDown(document.body, { key: '`', code: 'Backquote', ctrlKey: true });
+    const first = getDockSnapshot();
+    expect(first.state).toMatchObject({ open: true, active: 'terminal' });
+    // An EMPTY request: TerminalPane focuses the active tab or opens one at the chat's root.
+    expect(first.requests.terminal).toEqual({ nonce: expect.any(Number) });
+    fireEvent.keyDown(document.body, { key: '`', code: 'Backquote', ctrlKey: true });
+    expect(getDockSnapshot().state.open).toBe(false);
+  });
+
+  it('⌃⇧` always asks for a NEW tab (in the active tab\'s root)', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    mount();
+    await screen.findByRole('navigation', { name: 'Chats' });
+    act(() => { runCommand('dock.terminal-new'); });
+    expect(getDockSnapshot().requests.terminal).toEqual({ nonce: expect.any(Number), newTab: true });
+    expect(getDockSnapshot().state).toMatchObject({ open: true, active: 'terminal' });
+  });
+
+  it('keeps an Apps [Launch ▸] terminal request raised before Chat mounted; a chat SWITCH drops it', async () => {
+    localStorage.setItem('ashlr.verse.selected.v1', 'vs_1');
+    // Apps raised it on its own surface, then brought Chat forward.
+    requestTerminal({ newTab: true, appId: 'codex', via: 'ollama', model: 'qwen3.8:27b' });
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    expect(getDockSnapshot().requests.terminal).toMatchObject({ appId: 'codex', via: 'ollama', model: 'qwen3.8:27b', newTab: true });
+    await user.click(screen.getByRole('button', { name: /Write the docs/ }));
+    await screen.findByRole('heading', { name: 'Write the docs' });
+    expect(getDockSnapshot().requests.terminal).toBeNull();
+  });
+
+  it('"Accounts & capacity →" in the Context pane goes to Apps & Accounts', async () => {
+    const { fetch } = verseFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug' });
+    act(() => { runCommand('dock.toggle'); });
+    const dock = await screen.findByRole('complementary', { name: 'Dock: Tasks' });
+    await user.click(within(dock).getByRole('button', { name: 'Add a pane' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Context' }));
+    await user.click(screen.getByRole('button', { name: 'Accounts & capacity →' }));
+    expect(getVerseUiState().section).toBe('apps');
+  });
+
+  it('at 375 (dark): the dock is a bottom sheet over the chat, and Escape closes it', async () => {
+    const vp = mockCompactViewport({ dark: true });
+    try {
+      const { fetch } = verseFetch();
+      vi.stubGlobal('fetch', fetch);
+      const user = userEvent.setup();
+      mount();
+      await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+      await screen.findByRole('heading', { name: 'Fix the login bug' });
+      await user.click(screen.getByRole('button', { name: 'Dock' }));
+      const sheet = await screen.findByRole('dialog', { name: 'Dock: Tasks' });
+      expect(sheet).toHaveAttribute('data-presentation', 'bottom-sheet');
+      // Not a grid column: the chat keeps its full width underneath.
+      expect(document.querySelector('[data-dock]')).toHaveAttribute('data-dock', 'closed');
+      await user.keyboard('{Escape}');
+      expect(screen.queryByRole('dialog', { name: /^Dock/ })).not.toBeInTheDocument();
+    } finally {
+      vp.restore();
+    }
   });
 });

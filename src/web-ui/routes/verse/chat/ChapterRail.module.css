@@ -1,0 +1,129 @@
+/**
+ * chat/ChapterRail.module.css — the minimap down the transcript's right edge.
+ * Positioned by the transcript wrapper (Transcript.module.css .transcriptWrap
+ * is the containing block). Hidden below 768px: at phone width the outline
+ * (TranscriptNav) is the navigator and the rail would eat the gutter.
+ */
+.rail {
+  position: absolute;
+  top: var(--space-6);
+  bottom: var(--space-6);
+  /* Clear of the scroller's stable gutter, so the rail never sits on the scrollbar. */
+  right: var(--space-4);
+  z-index: var(--z-sticky);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 22px;
+}
+
+.handoff {
+  flex: none;
+  margin-bottom: var(--space-1);
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+  line-height: 1;
+}
+
+.track {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+}
+
+/* A 22×12 target around a 10×2 bar: the bar is the design, the box is the ergonomics. */
+.tick {
+  position: absolute;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 12px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  cursor: pointer;
+  transform: translateY(-50%);
+}
+.tick:hover,
+.tick:focus-visible { background: var(--bg-hover); }
+.tick:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
+.bar {
+  width: 10px;
+  height: 2px;
+  border-radius: var(--radius-full);
+  background: var(--border-strong);
+  transition: width var(--duration-fast) var(--ease-standard);
+}
+.tick:hover .bar,
+.tick:focus-visible .bar { width: 14px; }
+.tick[data-status='error'] .bar { height: 3px; background: var(--status-danger-solid); }
+.tick[data-status='running'] .bar {
+  height: 3px;
+  background: var(--status-running-solid);
+  animation: rail-pulse var(--duration-pulse) ease-in-out infinite;
+}
+.tick[data-status='stopped'] .bar { background: var(--text-tertiary); }
+
+.markers {
+  position: absolute;
+  left: -2px;
+  display: inline-flex;
+  gap: 1px;
+  transform: translateX(-100%);
+  pointer-events: none;
+}
+.marker {
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+  line-height: 1;
+}
+.marker[data-marker='recovered'] { color: var(--status-info-fg); }
+
+/* The hover card sits LEFT of the rail, over the transcript's gutter. */
+.card {
+  position: absolute;
+  right: calc(100% + var(--space-2));
+  display: grid;
+  gap: var(--space-1);
+  width: max-content;
+  max-width: min(320px, 60vw);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-menu);
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+.cardMeta {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.cardTitle {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+@keyframes rail-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .tick[data-status='running'] .bar { animation: none; }
+  :root:not([data-motion='full']) .bar { transition: none; }
+}
+:root[data-motion='reduce'] .tick[data-status='running'] .bar { animation: none; }
+
+@media (max-width: 767.98px) {
+  .rail { display: none; }
+}

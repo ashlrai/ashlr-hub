@@ -36,7 +36,8 @@ const ACTION_CODES = new Set(['manager.judge', 'verification.execute', 'agent.ru
 const EVIDENCE_CODES = new Set(['verification.merge-profile']);
 const CHALLENGE_CODES = new Set(['merge.bounds-exceeded', 'verdict.review', 'verdict.noise', 'verdict.harmful']);
 const PRODUCER_ROLES = new Set(['manager', 'agent', 'verifier', 'observer', 'system']);
-const MODEL_FAMILIES = new Set(['claude', 'openai', 'local', 'unknown']);
+// V3.10: `xai` is a family of its own (see agentSemanticModelFamily).
+const MODEL_FAMILIES = new Set(['claude', 'openai', 'xai', 'local', 'unknown']);
 const PRODUCER_VERSIONS = new Set([
   'manager-semantic-v1', 'agent-semantic-v1', 'verifier-semantic-v1',
   'system-semantic-v1', 'test-semantic-v1',
@@ -124,15 +125,34 @@ export function agentSemanticBoundSubjectRef(
   return allowed.has(subjectRef) ? subjectRef : undefined;
 }
 
+/**
+ * Provider family of a model / engine string, by whole token.
+ *
+ * V3.10: `grok` / `xai` map to `xai`, no longer `local`. Filing Grok under
+ * `local` made a Grok producer and a local judge look like the same family,
+ * and made a Grok judge look correlated with every local producer — the
+ * reverse of reality (SPEC-310B §3, reviewer-independence G6: local work is
+ * judged by grok-cli, Grok work by Claude). The family says only WHO trained
+ * the model; whether an xai judge carries merge authority is a separate rule
+ * (`isFrontierJudgeId`: only through the grok-cli seat engine).
+ *
+ * The vendor families are checked before the local list so a composite such
+ * as `grok-cli:…` or `xai/…` is always read as its vendor, never as local.
+ *
+ * History: no fleet ledger row was ever attributed to a grok/xai model before
+ * this change (Grok was not routable — not in allowedBackends, not in the
+ * catalog), so re-classifying it re-labels no stored semantic event.
+ */
 export function agentSemanticModelFamily(value: unknown): AgentSemanticEventV1['producerModelFamily'] {
   if (typeof value !== 'string') return 'unknown';
   const model = value.toLowerCase();
   const hasToken = (token: string): boolean => new RegExp(`(^|[/:._-])${token}([/:._-]|$)`).test(model);
   if (['claude', 'anthropic'].some(hasToken)) return 'claude';
   if (['gpt', 'codex', 'openai'].some(hasToken)) return 'openai';
+  if (['grok', 'xai'].some(hasToken)) return 'xai';
   if ([
     'local', 'ollama', 'qwen', 'llama', 'deepseek', 'kimi', 'nim',
-    'builtin', 'ashlrcode', 'aw', 'hermes', 'grok', 'xai', 'gemini',
+    'builtin', 'ashlrcode', 'aw', 'hermes', 'gemini',
     'mistral', 'moonshot',
   ].some(hasToken)) {
     return 'local';

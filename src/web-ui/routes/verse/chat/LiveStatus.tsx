@@ -109,9 +109,14 @@ export interface LiveStatusProps {
   live: VerseLiveState;
   derived: LivePhase;
   onStop?: () => void;
+  /**
+   * 3.10: above the composer the engine's notice goes to the notice slot
+   * (one notice at a time, in priority order), so the line omits it.
+   */
+  showNotice?: boolean;
 }
 
-export const LiveStatus = memo(function LiveStatus({ live, derived, onStop }: LiveStatusProps) {
+export const LiveStatus = memo(function LiveStatus({ live, derived, onStop, showNotice = true }: LiveStatusProps) {
   const [now, setNow] = useState(() => Date.now());
   // The clock only; never a request. Re-armed per turn.
   useEffect(() => {
@@ -122,7 +127,7 @@ export const LiveStatus = memo(function LiveStatus({ live, derived, onStop }: Li
 
   const line = liveStatusLine(live, derived, now);
   const spoken = line.detail ? `${line.word}: ${line.detail}` : line.word;
-  const notice = live.notice;
+  const notice = showNotice ? live.notice : null;
 
   return (
     <div className={styles.live} data-phase={line.phase}>

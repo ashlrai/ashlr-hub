@@ -38,6 +38,7 @@ import {
 import { listProposals } from '../src/core/inbox/store.js';
 import { killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
 import { listSandboxes } from '../src/core/sandbox/worktree.js';
+import { countLiveExecutionLeases } from '../src/core/sandbox/execution-leases.js';
 import {
   acquireOutwardMutationFence,
   ownsOutwardMutationFence,
@@ -167,7 +168,14 @@ describe('M409 engine execution outward mutation fence', () => {
     },
   ];
 
-  it.each(cases)('$label holds the fence through cancellation and cleanup', async ({ start }) => {
+  // V3.10 U6: an agent no longer HOLDS the outward fence across inference (that
+  // capped the machine at one agent); it holds a shared execution lease that
+  // kill aborts and waits for. The guarantee this suite pins is unchanged —
+  // kill cannot report quiescence while an agent admitted before it is still
+  // running, and that agent files nothing. V3.10 INT4: the agent still
+  // removes its OWN throwaway worktree under KILL (a removal right minted at
+  // admission, while KILL was off); nothing else is cleaned up under KILL.
+  it.each(cases)('$label: kill cannot quiesce while its execution lease is live, and it files nothing', async ({ start }) => {
     await withTmpHome(async (fx) => {
       const previousAllowAnyRepo = process.env.ASHLR_TEST_ALLOW_ANY_REPO;
       process.env.ASHLR_TEST_ALLOW_ANY_REPO = '1';
@@ -204,14 +212,26 @@ describe('M409 engine execution outward mutation fence', () => {
         expect(result).not.toHaveProperty('proposalDraft');
         expect(result).not.toHaveProperty('proposalOutcome');
         expect(listProposals()).toEqual([]);
+        // The run has ended, so its lease is gone and kill now quiesces.
+        expect(countLiveExecutionLeases()).toBe(0);
+        expect(setKill(true, { waitMs: 500 })).toMatchObject({ ok: true, quiesced: true });
+
+        // V3.10 (INT4, B-U6 request 6): a run admitted before KILL removes
+        // its OWN worktree even under KILL (its removal right was minted at
+        // admission). It used to be stranded until resume / the orphan sweep.
+        // The source branch and tree were never touched.
         expect(listSandboxes()).toEqual([]);
-        expect(sourceSnapshot(repo)).toEqual(before);
+        expect(repo.currentBranch()).toBe(before.branch);
+        expect(repo.shasumTree()).toBe(before.tree);
+        expect(repo.gitStatus()).toBe(before.status);
 
         expect(setKill(false, { waitMs: 500 })).toMatchObject({
           ok: true,
           quiesced: true,
         });
         expect(killSwitchOn()).toBe(false);
+        expect(listSandboxes()).toEqual([]);
+        expect(sourceSnapshot(repo)).toEqual(before);
       } finally {
         controller.abort();
         await running?.catch(() => undefined);

@@ -3,6 +3,12 @@
  * No bubbles, no cards — a 2px rule and whitespace carry the structure.
  */
 .transcriptWrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* The scroller and the ChapterRail share this box, so the rail spans the log, not the outline above it. */
+.scrollArea { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+/* 3.10: room for the ChapterRail on the right (hidden below 768px, like the rail). */
+@media (min-width: 768px) {
+  .transcript[data-has-rail] { padding-right: calc(var(--space-6) + var(--space-8)); }
+}
 .transcript {
   flex: 1;
   min-height: 0;

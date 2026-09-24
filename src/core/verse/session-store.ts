@@ -62,7 +62,9 @@ import { join } from 'node:path';
 
 import {
   VERSE_CONTEXT_MODES,
+  VERSE_EFFORTS,
   VERSE_MAX_EVENTS_PER_SESSION,
+  VERSE_PERMISSION_MODES,
   VERSE_TRANSIENT_EVENT_TYPES,
   type VerseEvent,
   type VerseSession,
@@ -188,7 +190,28 @@ function isV39SessionValid(value: Record<string, unknown>): boolean {
       || (isObject(handoff)
         && typeof handoff['sessionId'] === 'string' && handoff['sessionId'].length > 0
         && typeof handoff['title'] === 'string'))
-    && isOptionalBoolean(value['memoryEnabled']);
+    && isOptionalBoolean(value['memoryEnabled'])
+    && isOptionalControls(value['controls']);
+}
+
+const VERSE_EFFORT_SET = new Set<string>(VERSE_EFFORTS);
+const VERSE_PERMISSION_MODE_SET = new Set<string>(VERSE_PERMISSION_MODES);
+
+/**
+ * V3.10 `controls` (unit C3) — same absent-or-exact rule. Written out here
+ * rather than imported from session-controls.ts, which imports this module's
+ * private writer: the store must not depend on the module it serves.
+ */
+function isOptionalControls(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isObject(value)) return false;
+  for (const key of Object.keys(value)) {
+    if (key !== 'effort' && key !== 'permissionMode') return false;
+  }
+  const effort = value['effort'];
+  const mode = value['permissionMode'];
+  return (effort === undefined || (typeof effort === 'string' && VERSE_EFFORT_SET.has(effort)))
+    && (mode === undefined || (typeof mode === 'string' && VERSE_PERMISSION_MODE_SET.has(mode)));
 }
 
 function isSession(value: unknown): value is VerseSession {
@@ -300,7 +323,7 @@ function writeAtomically(target: string, content: string | Buffer): void {
  * (process-registry's running.json) that are rewritten often and must never
  * be observed half-written. Creates `dir` 0700 when missing.
  */
-export function writePrivateFileAtomically(dir: string, target: string, content: string): void {
+export function writePrivateFileAtomically(dir: string, target: string, content: string | Buffer): void {
   ensurePrivateDir(dir);
   writeAtomically(target, content);
 }

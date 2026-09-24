@@ -1,0 +1,146 @@
+/**
+ * chat/ActivityGroup.module.css — the folded tool run (SPEC-310C §2).
+ *
+ * The line keeps the transcript's tool grammar (a 2px left rule, tertiary
+ * text, one dense row) so a group and a single call read as the same kind of
+ * thing; it differs only in speaking actions ("Ran 12 commands") instead of
+ * a tool name. Tokens only — no hex, no px font sizes (style-scan-310).
+ */
+.group {
+  font-size: var(--text-sm-size);
+}
+
+.line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  width: 100%;
+  min-height: var(--density-row-sm);
+  padding: 0 var(--space-2) 0 var(--space-3);
+  border: 0;
+  border-left: 2px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.line:hover { color: var(--text-primary); background: var(--bg-hover); }
+.line:active { background: var(--bg-active); }
+.line:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
+/* The failure is in the rule AND the words (never colour alone). */
+.group[data-failed] > .line { border-left-color: var(--status-danger-solid); }
+.group[data-running]:not([data-failed]) > .line { border-left-color: var(--status-running-solid); }
+
+.chevron {
+  flex: none;
+  width: 0;
+  height: 0;
+  margin: 0 3px 0 2px;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  opacity: 0.7;
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+.group:not([data-view='collapsed']) > .line .chevron { transform: rotate(90deg); }
+
+.work {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.state {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  font-size: var(--text-xs-size);
+}
+.state::before {
+  content: '·';
+  margin-right: var(--space-2);
+  color: var(--text-tertiary);
+}
+.failed { color: var(--status-danger-fg); font-weight: var(--font-weight-medium); }
+.sep { color: var(--text-tertiary); white-space: pre; }
+.running {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--status-running-fg);
+}
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-running-solid);
+  animation: activity-pulse var(--duration-pulse) ease-in-out infinite;
+}
+
+.time {
+  flex: none;
+  margin-left: auto;
+  padding-left: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-tertiary);
+  white-space: nowrap;
+}
+.line:hover .time { color: var(--text-secondary); }
+
+.body {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-subtle);
+}
+.body[hidden] { display: none; }
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.list > li { min-width: 0; }
+
+.more {
+  justify-self: start;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+.more:hover { background: var(--bg-hover); }
+.more:focus-visible { outline: none; box-shadow: var(--shadow-focus-ring); }
+
+@keyframes activity-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+/* --duration-pulse is 0s under reduced motion, which already stops the
+   animation; these name it too, because an `infinite` animation with a 0s
+   duration still burns frames in some engines. */
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .pulse { animation: none; }
+}
+:root[data-motion='reduce'] .pulse { animation: none; }
+
+@media (max-width: 479.98px) {
+  .state::before { display: none; }
+}

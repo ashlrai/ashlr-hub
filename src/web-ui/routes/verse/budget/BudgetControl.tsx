@@ -38,6 +38,7 @@ import {
   buildBudgetRows,
   budgetSummary,
   clampPercent,
+  modeAboveCeiling,
   readingAge,
   STATUS_WORDS,
   type BudgetBar,
@@ -228,15 +229,24 @@ export interface BudgetControlViewProps {
   pending: string | null;
   error: string | null;
   readOnly?: boolean;
+  /**
+   * The standing grant's ceiling (`spend.maxMode`). Modes above it are shown
+   * DISABLED with the reason — never hidden — because autonomy could not
+   * spend them anyway. Moving toward Reserve is always allowed. Null/absent
+   * = no grant ceiling applies (every mode selectable).
+   */
+  maxMode?: BudgetMode | null;
   onMode: (mode: BudgetMode) => void;
   onSeat: (seatId: string, patch: BudgetSeatPatchWire) => void;
 }
 
-export function BudgetControlView({ view, preview, nowMs, pending, error, readOnly = false, onMode, onSeat }: BudgetControlViewProps) {
+export function BudgetControlView({ view, preview, nowMs, pending, error, readOnly = false, maxMode = null, onMode, onSeat }: BudgetControlViewProps) {
   const titleId = useId();
   const rows = buildBudgetRows(view);
   const summary = budgetSummary(rows);
   const mode = BUDGET_MODE_OPTIONS.find((o) => o.value === view.mode) ?? BUDGET_MODE_OPTIONS[1]!;
+  const ceilingLabel = maxMode ? BUDGET_MODE_OPTIONS.find((o) => o.value === maxMode)?.label ?? maxMode : null;
+  const aboveNow = modeAboveCeiling(view.mode, maxMode);
   const chosen = preview?.seatId ? rows.find((r) => r.seatId === preview.seatId) : null;
 
   return (
@@ -250,11 +260,23 @@ export function BudgetControlView({ view, preview, nowMs, pending, error, readOn
       <div className={styles.mode}>
         <Segmented
           aria-label="Budget mode"
-          options={BUDGET_MODE_OPTIONS.map((o) => ({ value: o.value, label: o.label, disabled: readOnly || pending !== null }))}
+          options={BUDGET_MODE_OPTIONS.map((o) => ({
+            value: o.value,
+            label: o.label,
+            ...(modeAboveCeiling(o.value, maxMode) ? { ariaLabel: `${o.label} — above your grant` } : {}),
+            disabled: readOnly || pending !== null || modeAboveCeiling(o.value, maxMode),
+          }))}
           value={view.mode}
-          onChange={(next) => { if (next !== view.mode) onMode(next); }}
+          onChange={(next) => { if (next !== view.mode && !modeAboveCeiling(next, maxMode)) onMode(next); }}
         />
         <p className={styles.modeText}>{mode.description}</p>
+        {ceilingLabel ? (
+          <p className={styles.modeText} data-ceiling="">
+            {aboveNow
+              ? `Your grant allows up to ${ceilingLabel}, so autonomy spends as ${ceilingLabel} until this moves down.`
+              : `Your grant allows up to ${ceilingLabel}; modes above it are off. Re-approve the grant to raise it.`}
+          </p>
+        ) : null}
       </div>
 
       {preview ? (
@@ -289,7 +311,7 @@ export function BudgetControlView({ view, preview, nowMs, pending, error, readOn
 // Connected panel
 // ---------------------------------------------------------------------------
 
-export function BudgetControl() {
+export function BudgetControl({ maxMode = null }: { maxMode?: BudgetMode | null } = {}) {
   const budget = useQuery(budgetQuery, { freshMs: 0 });
   const preview = useQuery(budgetPreviewQuery, { freshMs: 0 });
   const refetchBudget = useRefetch(budgetQuery);
@@ -354,6 +376,7 @@ export function BudgetControl() {
         nowMs={nowMs}
         pending={pending}
         error={error}
+        maxMode={maxMode}
         onMode={(mode) => void apply('mode', `Switch the budget to ${mode}`, { mode })}
         onSeat={(seatId, patch) => void apply(seatId, `Change the budget for ${seatId}`, { seatId, policy: patch })}
       />

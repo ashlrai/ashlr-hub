@@ -32,8 +32,10 @@ import {
   lstatSync,
   mkdirSync,
   openSync,
+  readFileSync,
   readSync,
   readdirSync,
+  realpathSync,
   renameSync,
   rmdirSync,
   rmSync,
@@ -68,6 +70,7 @@ import {
   releaseOutwardMutationFence,
   type OutwardMutationFence,
 } from './mutation-fence.js';
+import { resolveGitExecutable, safeGitConfigArgs, verifyGitTarget } from './safe-git.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -300,15 +303,73 @@ export function _setSandboxGitRunFaultHookForTest(
  * Run a git command inside `cwd`. Throws on failure (callers decide whether
  * to tolerate). Always uses an arg array — never a shell string.
  */
+// ---------------------------------------------------------------------------
+// V3.10 (INT4 — B-U6 request 5, B-U2 request to U6): daemon git on trees an
+// agent may have touched never runs a configured program
+// ---------------------------------------------------------------------------
+
+const DAEMON_GIT_NULL_DEVICE = process.platform === 'win32' ? 'NUL' : '/dev/null';
+
+/**
+ * Command-scope config forced on EVERY git call this module makes (worktree
+ * add/remove/prune, branch -D, rev-parse, diff capture), directly or through
+ * the pinned-worktree child scripts, which inherit it through the env.
+ *
+ * WHY: a sandbox worktree is LINKED to its source repo (the fleet mirror, or
+ * Mason's checkout in legacy mode) and shares that repo's config and hooks
+ * directory. Anything that plants `core.fsmonitor=<cmd>`, a hook or a
+ * `core.hooksPath` there — between two mirror syncs, or in a legacy checkout —
+ * would otherwise run as Mason, unconfined, the next time the daemon touched
+ * the worktree. GIT_CONFIG_COUNT entries are COMMAND scope, which beats every
+ * config file, and unlike `-c` they reach git spawned by the child scripts.
+ */
+export const DAEMON_GIT_FORCED_CONFIG: readonly (readonly [string, string])[] = Object.freeze([
+  ['core.hooksPath', DAEMON_GIT_NULL_DEVICE],
+  ['core.fsmonitor', 'false'],
+  ['core.untrackedCache', 'false'],
+  ['core.pager', 'cat'],
+  ['credential.helper', ''],
+  ['commit.gpgSign', 'false'],
+  ['gc.auto', '0'],
+  ['maintenance.auto', 'false'],
+  ['submodule.recurse', 'false'],
+  ['protocol.ext.allow', 'never'],
+] as const);
+
+/**
+ * `env` plus DAEMON_GIT_FORCED_CONFIG as GIT_CONFIG_COUNT entries. Existing
+ * well-formed entries are kept and ours are appended AFTER them (the last
+ * value wins, so ours hold); a malformed count is replaced rather than trusted.
+ */
+export function withDaemonGitHardening(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = { ...env };
+  const raw = out.GIT_CONFIG_COUNT;
+  let count = raw !== undefined && /^\d{1,3}$/.test(raw) ? Number.parseInt(raw, 10) : 0;
+  for (let i = 0; i < count; i += 1) {
+    if (out[`GIT_CONFIG_KEY_${i}`] === undefined || out[`GIT_CONFIG_VALUE_${i}`] === undefined) { count = 0; break; }
+  }
+  if (count === 0) {
+    for (const key of Object.keys(out)) if (/^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(key)) delete out[key];
+  }
+  for (const [key, value] of DAEMON_GIT_FORCED_CONFIG) {
+    out[`GIT_CONFIG_KEY_${count}`] = key;
+    out[`GIT_CONFIG_VALUE_${count}`] = value;
+    count += 1;
+  }
+  out.GIT_CONFIG_COUNT = String(count);
+  return out;
+}
+
 function gitRun(cwd: string, args: string[]): string {
   sandboxGitRunFaultHookForTest?.(cwd, [...args]);
-  const env = { ...process.env };
+  const env: NodeJS.ProcessEnv = { ...process.env };
   delete env.GIT_DIR;
   delete env.GIT_WORK_TREE;
   delete env.GIT_COMMON_DIR;
   return execFileSync('git', args, {
+    // hooks / fsmonitor / pager / credential helpers off (see withDaemonGitHardening).
     cwd,
-    env,
+    env: withDaemonGitHardening(env),
     timeout: GIT_TIMEOUT,
     stdio: 'pipe',
     encoding: 'utf8',
@@ -1014,7 +1075,9 @@ function createPinnedWorktree(
   destination: PinnedSandboxDestinationIdentity,
   sb: Sandbox,
 ): PinnedWorktreeCreationResult {
-  const env = { ...process.env };
+  // The runner and its supervisors copy this env into every git they spawn,
+  // so the forced config reaches `worktree add` and its validation calls too.
+  const env = withDaemonGitHardening({ ...process.env });
   if (env.NODE_OPTIONS) env.ASHLR_PINNED_GIT_NODE_OPTIONS = env.NODE_OPTIONS;
   else delete env.ASHLR_PINNED_GIT_NODE_OPTIONS;
   delete env.NODE_OPTIONS;
@@ -1793,6 +1856,145 @@ function createSandboxWhileFenced(
 // ---------------------------------------------------------------------------
 const SANDBOX_INFRA_FILES = ['.mcp.json', '.ashlr-fleet.mcp.json', 'node_modules'] as const;
 
+// ---------------------------------------------------------------------------
+// V3.10 (INT4 — B-U2 request to U6): git on the agent-touched worktree
+// ---------------------------------------------------------------------------
+
+/**
+ * Sandboxes whose capture MUST run through a verified `.git` (autonomous runs
+ * under a standing policy mark theirs). In-process only: the daemon that
+ * starts an autonomous run is the one that captures it.
+ */
+const verifiedGitRequired = new Set<string>();
+
+/**
+ * Require (or stop requiring) a verified `.git` for `sandboxId`'s capture.
+ * WHY a mark and not a parameter: sandboxDiff has many callers (retry probes,
+ * capture, partial-diff salvage); the run that knows it is autonomous marks
+ * its sandbox once and every one of them is covered.
+ */
+export function requireVerifiedSandboxGit(sandboxId: string, required = true): void {
+  if (required) verifiedGitRequired.add(sandboxId);
+  else verifiedGitRequired.delete(sandboxId);
+}
+
+/** Thrown when an autonomous capture finds a `.git` the daemon did not create. */
+export class SandboxGitVerificationError extends Error {
+  constructor(reason: string) {
+    super(`refusing to run git in the sandbox worktree: ${reason}`);
+    this.name = 'SandboxGitVerificationError';
+  }
+}
+
+const EMPTY_TREE_BY_FORMAT = {
+  sha1: '4b825dc642cb6eb9a060e54bf8d69288fbee4904',
+  sha256: '6ef19b41225c5369f1c104d45d8d85efa9b057b53b14b4b9b939dd74decc5321',
+} as const;
+
+type AgentTreeGitContext =
+  | { kind: 'verified'; file: string; prefix: string[]; workTree: string }
+  | { kind: 'discovered'; prefix: string[] };
+
+/**
+ * The git dir the daemon created for this sandbox, found from the SOURCE
+ * repo's common dir (`<common>/worktrees/<name>` whose back-link names this
+ * worktree) — never from the worktree's own `.git`, which the agent could
+ * have rewritten.
+ */
+function expectedSandboxGitDir(sb: Sandbox, workTreeReal: string): { gitDir: string; commonDir: string } | null {
+  const common = gitTry(sb.sourceRepo, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+  if (!common) return null;
+  let commonDir: string;
+  try { commonDir = realpathSync(common); } catch { return null; }
+  const expectedDotGit = join(workTreeReal, '.git');
+  let names: string[];
+  try { names = readdirSync(join(commonDir, 'worktrees')); } catch { return null; }
+  for (const name of names) {
+    const dir = join(commonDir, 'worktrees', name);
+    try {
+      const back = lstatSync(join(dir, 'gitdir'));
+      if (!back.isFile() || back.isSymbolicLink() || back.size > 4096) continue;
+      const named = readFileSync(join(dir, 'gitdir'), 'utf8').trim();
+      if (resolve(dir, named) === expectedDotGit) return { gitDir: dir, commonDir };
+    } catch { /* next */ }
+  }
+  return null;
+}
+
+function objectFormatOfCommonDir(commonDir: string): 'sha1' | 'sha256' {
+  try {
+    return /^\s*objectformat\s*=\s*sha256\s*$/im.test(readFileSync(join(commonDir, 'config'), 'utf8')) ? 'sha256' : 'sha1';
+  } catch {
+    return 'sha1';
+  }
+}
+
+/**
+ * How capture git runs on this sandbox's worktree.
+ *  - verified: `.git` is exactly the pointer the daemon created (safe-git's
+ *    verifyGitTarget); git runs as the trusted absolute binary with explicit
+ *    --git-dir/--work-tree (nothing discovered from the tree) and safe-git's
+ *    config set, which also reads gitattributes from the EMPTY tree — so no
+ *    `.gitattributes` the agent wrote can route a file through a filter or
+ *    diff driver during `add -A` / `diff`.
+ *  - discovered (legacy, non-autonomous runs only): plain discovery, still with
+ *    the empty-tree attributes and the forced config. An autonomous sandbox
+ *    (requireVerifiedSandboxGit) that fails verification throws instead.
+ */
+function agentTreeGitContext(sb: Sandbox): AgentTreeGitContext {
+  let reason = 'the worktree is missing';
+  try {
+    const workTree = realpathSync(sb.worktreePath);
+    const expected = expectedSandboxGitDir(sb, workTree);
+    if (expected) {
+      const verified = verifyGitTarget({ workTree, gitDir: expected.gitDir, layout: 'linked' });
+      if (verified.ok) {
+        return {
+          kind: 'verified',
+          file: resolveGitExecutable(),
+          workTree: verified.workTree,
+          prefix: [
+            ...safeGitConfigArgs([], objectFormatOfCommonDir(verified.commonDir)),
+            `--git-dir=${verified.gitDir}`,
+            `--work-tree=${verified.workTree}`,
+          ],
+        };
+      }
+      reason = verified.reason;
+    } else {
+      reason = 'no git dir created by the daemon names this worktree';
+    }
+  } catch (error) {
+    reason = error instanceof Error ? error.message : String(error);
+  }
+  if (verifiedGitRequired.has(sb.id)) throw new SandboxGitVerificationError(reason);
+  const format = gitTry(sb.worktreePath, ['rev-parse', '--show-object-format']) === 'sha256' ? 'sha256' : 'sha1';
+  return { kind: 'discovered', prefix: [`--attr-source=${EMPTY_TREE_BY_FORMAT[format]}`] };
+}
+
+/** One capture git call in `cwd` (the agent-touched worktree). null on failure; never throws. */
+function agentTreeGit(context: AgentTreeGitContext, cwd: string, args: string[]): string | null {
+  if (context.kind === 'discovered') return gitTry(cwd, [...context.prefix, ...args]);
+  sandboxGitRunFaultHookForTest?.(cwd, [...args]);
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const key of Object.keys(env)) {
+    // Nothing from the daemon's own env may redirect or reconfigure this call.
+    if (key.startsWith('GIT_')) delete env[key];
+  }
+  try {
+    return execFileSync(context.file, [...context.prefix, ...args], {
+      cwd: context.workTree,
+      env: withDaemonGitHardening({ ...env, GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1', GIT_TERMINAL_PROMPT: '0' }),
+      timeout: GIT_TIMEOUT,
+      stdio: 'pipe',
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+    }).trim();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Capture the git diff of the sandbox worktree vs its base HEAD. Read-only —
  * never mutates the worktree or the source repo. Counts come from --numstat;
@@ -1803,6 +2005,12 @@ const SANDBOX_INFRA_FILES = ['.mcp.json', '.ashlr-fleet.mcp.json', 'node_modules
  */
 export function sandboxDiff(sb: Sandbox): SandboxDiff {
   const cwd = sb.worktreePath;
+  // V3.10: every git call below runs on a tree an agent wrote. agentTreeGit
+  // verifies `.git` against the git dir the daemon created and nulls every
+  // configured program (hooks, fsmonitor, filter / textconv / external diff
+  // drivers) — see agentTreeGitContext.
+  const context = agentTreeGitContext(sb);
+  const agentGit = (args: string[]): string | null => agentTreeGit(context, cwd, args);
 
   // Stage everything (including UNTRACKED new files) against the worktree's OWN
   // index so plain `git diff` captures new files too. `git diff` ignores
@@ -1813,7 +2021,7 @@ export function sandboxDiff(sb: Sandbox): SandboxDiff {
   // SANDBOX worktree is safe: it touches only the worktree's index, never the
   // source repo's index/working-tree/HEAD (the worktree has its own index).
   // `add -A` records adds/mods/deletes; we then diff the index vs baseHead.
-  gitTry(cwd, ['add', '-A']);
+  agentGit(['add', '-A']);
 
   // M283 LAYER 2: build :(exclude) pathspecs for fleet-infra files that were NOT
   // present in the base commit. If the file existed at baseHead (the agent has a
@@ -1821,15 +2029,9 @@ export function sandboxDiff(sb: Sandbox): SandboxDiff {
   // suppressed. `git cat-file -e <baseHead>:<file>` exits 0 iff the blob exists.
   const infraExcludeSpecs: string[] = [];
   for (const infraFile of SANDBOX_INFRA_FILES) {
-    try {
-      execFileSync('git', ['cat-file', '-e', `${sb.baseHead}:${infraFile}`], {
-        cwd,
-        stdio: 'ignore',
-        timeout: 5_000,
-      });
-      // Exit 0 → file exists at baseHead → agent may legitimately edit it → do NOT exclude.
-    } catch {
-      // Non-zero exit → file did NOT exist at baseHead → fleet-written → exclude from diff.
+    // Exit 0 → file exists at baseHead → agent may legitimately edit it → do NOT exclude.
+    // Non-zero exit → file did NOT exist at baseHead → fleet-written → exclude from diff.
+    if (agentGit(['cat-file', '-e', `${sb.baseHead}:${infraFile}`]) === null) {
       infraExcludeSpecs.push(`:(exclude)${infraFile}`);
     }
   }
@@ -1837,9 +2039,11 @@ export function sandboxDiff(sb: Sandbox): SandboxDiff {
   // numstat: one line per file "<ins>\t<del>\t<path>" (binary => "-\t-\t..").
   // `--staged` diffs the index (now including new files) against baseHead.
   // M283: append :(exclude) pathspecs after '--' to suppress fleet-infra files.
-  const numstatArgs = ['diff', '--staged', '--numstat', sb.baseHead];
+  // --no-ext-diff / --no-textconv: a configured external diff or textconv
+  // driver is a program; the capture never runs one.
+  const numstatArgs = ['diff', '--no-ext-diff', '--no-textconv', '--staged', '--numstat', sb.baseHead];
   if (infraExcludeSpecs.length > 0) numstatArgs.push('--', ...infraExcludeSpecs);
-  const numstat = gitTry(cwd, numstatArgs) ?? '';
+  const numstat = agentGit(numstatArgs) ?? '';
   let files = 0;
   let insertions = 0;
   let deletions = 0;
@@ -1857,9 +2061,9 @@ export function sandboxDiff(sb: Sandbox): SandboxDiff {
 
   // Full unified patch — staged vs baseHead so new files are included.
   // M283: append :(exclude) pathspecs after '--' to suppress fleet-infra files.
-  const patchArgs = ['diff', '--staged', sb.baseHead];
+  const patchArgs = ['diff', '--no-ext-diff', '--no-textconv', '--staged', sb.baseHead];
   if (infraExcludeSpecs.length > 0) patchArgs.push('--', ...infraExcludeSpecs);
-  const patch = gitTry(cwd, patchArgs) ?? '';
+  const patch = agentGit(patchArgs) ?? '';
 
   return {
     sandboxId: sb.id,
@@ -2123,6 +2327,96 @@ export function removeSandboxWithBorrowedAuthority(
   borrowedAuthority: BorrowedSandboxCleanupAuthority | null,
 ): SandboxCleanupResult {
   return removeSandbox(sb, { borrowedAuthority });
+}
+
+// ---------------------------------------------------------------------------
+// V3.10 (INT4 — B-U6 request 6): async removal, and a run's own sandbox after KILL
+// ---------------------------------------------------------------------------
+
+const ownRemovalRightBrand: unique symbol = Symbol('own-sandbox-removal-right');
+
+/**
+ * Proof that THIS process created `sandboxId` for a run admitted while KILL was
+ * off. Minted only under the outward fence with KILL off; unforgeable (a
+ * module-private brand plus a registry of minted objects).
+ */
+export interface OwnSandboxRemovalRight {
+  readonly sandboxId: string;
+  readonly pid: number;
+  readonly [ownRemovalRightBrand]: true;
+}
+
+const mintedOwnRemovalRights = new WeakSet<object>();
+
+/**
+ * Mint the right for the run that owns `sb` to remove it later — even after a
+ * Stop arms KILL. Null when the fence is not held or KILL is already on.
+ *
+ * WHY KILL does not strand it: KILL means "no new outward work"; removing a
+ * run's OWN scratch worktree and its `ashlr/sandbox/*` branch is the run
+ * cleaning up after itself (removeSandboxWhileFenced re-derives both from the
+ * sandbox id and never touches a user branch). Refusing it only left the
+ * worktree for an orphan sweep that also refuses under KILL — so every Stop
+ * leaked one sandbox per running agent until Mason resumed.
+ */
+export function mintOwnSandboxRemovalRight(
+  outwardFence: OutwardMutationFence | null | undefined,
+  sb: Sandbox,
+): OwnSandboxRemovalRight | null {
+  if (!outwardFence || !ownsOutwardMutationFence(outwardFence) || killSwitchOn()) return null;
+  if (!SANDBOX_ID_RE.test(sb.id)) return null;
+  const right = Object.freeze({ sandboxId: sb.id, pid: process.pid, [ownRemovalRightBrand]: true as const });
+  mintedOwnRemovalRights.add(right);
+  return right;
+}
+
+function ownRemovalRightValid(right: OwnSandboxRemovalRight | null | undefined, sb: Sandbox): boolean {
+  return right !== null && right !== undefined && mintedOwnRemovalRights.has(right) &&
+    right[ownRemovalRightBrand] === true && right.sandboxId === sb.id && right.pid === process.pid;
+}
+
+/** How long async removal waits for the outward fence by default. */
+export const SANDBOX_ASYNC_REMOVE_FENCE_WAIT_MS = 30_000;
+
+/**
+ * removeSandbox that waits for the outward fence WITHOUT blocking the event
+ * loop (removeSandbox spins synchronously; with agents running concurrently
+ * in this process the fence holder is usually another agent that can only
+ * release it if the loop turns).
+ *
+ * Under KILL it removes the sandbox only with `ownRemovalRight` minted for it
+ * (see mintOwnSandboxRemovalRight); otherwise it is deferred exactly like
+ * removeSandbox ('paused').
+ */
+export async function removeSandboxAsync(
+  sb: Sandbox,
+  opts: { fenceWaitMs?: number; signal?: AbortSignal; ownRemovalRight?: OwnSandboxRemovalRight | null } = {},
+): Promise<SandboxCleanupResult> {
+  const waitMs = opts.fenceWaitMs ?? SANDBOX_ASYNC_REMOVE_FENCE_WAIT_MS;
+  const fence = await acquireOutwardMutationFenceAsync(waitMs, opts.signal ? { signal: opts.signal } : undefined);
+  if (!ownsOutwardMutationFence(fence)) {
+    releaseOutwardMutationFence(fence);
+    return cleanupAuthorityUnavailableResult(sb, 'authority-unavailable');
+  }
+  try {
+    if (killSwitchOn()) {
+      if (!ownRemovalRightValid(opts.ownRemovalRight, sb)) return cleanupAuthorityUnavailableResult(sb, 'paused');
+      audit({
+        action: 'sandbox:remove',
+        repo: sb.sourceRepo,
+        sandboxId: sb.id,
+        summary: 'kill switch ON: removing the sandbox of a run admitted before KILL (its own scratch worktree only)',
+        result: 'ok',
+      });
+      return removeSandboxWhileFenced(sb);
+    }
+    const authority = mintSandboxCleanupAuthority(fence);
+    if (!authority) return cleanupAuthorityUnavailableResult(sb, 'paused');
+    return removeSandboxWhileFenced(sb);
+  } finally {
+    verifiedGitRequired.delete(sb.id);
+    releaseOutwardMutationFence(fence);
+  }
 }
 
 function removeSandboxWhileFenced(sb: Sandbox): SandboxCleanupResult {

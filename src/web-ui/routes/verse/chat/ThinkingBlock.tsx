@@ -15,11 +15,19 @@
  *     signature-only block): the duration is real, the words are not shown,
  *     and there is nothing to expand.
  *
+ * 3.10 (SPEC-310C §2, unit C2): while it streams, the body is a THREE-LINE
+ * window that follows the tail — enough to see what the model is working
+ * on, not so much that a long think shoves the answer off screen. Clicking
+ * the label (or the window) shows the whole stream. Once the block ends it
+ * folds to "Thought 12s · ~1.8k tok ▸" — or stays open when Settings ▸ Chat
+ * says Expanded (chat/reasoning-pref.ts; Hidden is handled by the
+ * transcript, which then renders no reasoning at all).
+ *
  * Honesty rule: an unknown duration or token count is omitted, never shown
  * as 0. A token count the CLI did not report is estimated from the text
  * (~4 characters per token) and always carries the "~".
  */
-import { memo, useEffect, useLayoutEffect, useRef, useState, type SyntheticEvent } from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState, type MouseEvent, type SyntheticEvent } from 'react';
 import type { VerseThinkingKind } from '../../../../core/verse/types.js';
 import styles from './ThinkingBlock.module.css';
 
@@ -116,6 +124,8 @@ export const ThinkingBlock = memo(function ThinkingBlock({
   const [open, setOpen] = useState(defaultOpen);
   /** The operator opened or closed it by hand; from then on their choice wins over `defaultOpen`. */
   const chosen = useRef(false);
+  /** The operator asked for the whole stream instead of the three-line window. */
+  const [full, setFull] = useState(false);
   const body = useRef<HTMLDivElement>(null);
   const following = useRef(true);
   const now = useSecondTick(streaming && startedAt !== null);
@@ -128,11 +138,16 @@ export const ThinkingBlock = memo(function ThinkingBlock({
   const hasText = text.trim().length > 0;
 
   // Follow the stream inside the body unless the operator scrolled up in it.
+  const windowed = streaming && open && !full;
   useLayoutEffect(() => {
     const node = body.current;
-    if (!node || !streaming || !following.current) return;
+    if (!node) return;
+    // Fade the top line only when something is actually cut off above it.
+    if (windowed && node.scrollHeight > node.clientHeight + 1) node.setAttribute('data-clipped', '');
+    else node.removeAttribute('data-clipped');
+    if (!streaming || (!following.current && !windowed)) return;
     node.scrollTop = node.scrollHeight;
-  }, [text, streaming, open]);
+  }, [text, streaming, open, windowed]);
 
   function onScroll() {
     const node = body.current;
@@ -145,6 +160,16 @@ export const ThinkingBlock = memo(function ThinkingBlock({
   useEffect(() => {
     if (!chosen.current) setOpen(defaultOpen);
   }, [defaultOpen]);
+
+  // While windowed, the first click on the label means "show me all of it",
+  // not "hide it": folding the one thing the operator is trying to read
+  // would be the opposite of the gesture.
+  function onSummaryClick(event: MouseEvent<HTMLElement>) {
+    if (!windowed) return;
+    event.preventDefault();
+    chosen.current = true;
+    setFull(true);
+  }
 
   function onToggle(event: SyntheticEvent<HTMLDetailsElement>) {
     const next = event.currentTarget.open;
@@ -175,13 +200,14 @@ export const ThinkingBlock = memo(function ThinkingBlock({
   return (
     <details className={styles.thinking} open={open} onToggle={onToggle} data-state-key={stateKey}
       data-streaming={streaming || undefined} data-thinking-kind={kind ?? undefined}>
-      <summary className={styles.summary}>
+      <summary className={styles.summary} onClick={onSummaryClick} aria-label={windowed ? `${label} — show all` : undefined}>
         <span className={styles.chevron} aria-hidden="true" />
         <span className={styles.glyph} aria-hidden="true" data-live={streaming || undefined} />
         <span className={styles.label}>{label}</span>
         {kind === 'summary' ? <span className={styles.kind} title="A summary the provider wrote of the model's reasoning, not its raw chain of thought.">summary</span> : null}
       </summary>
-      <div ref={body} className={styles.body} onScroll={onScroll}>{text}</div>
+      <div ref={body} className={styles.body} onScroll={onScroll} data-window={windowed || undefined}
+        onClick={windowed ? () => { chosen.current = true; setFull(true); } : undefined}>{text}</div>
     </details>
   );
 });

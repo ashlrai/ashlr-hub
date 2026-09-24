@@ -76,7 +76,7 @@ import {
 import type { AshlrConfig } from '../types.js';
 import { scrubSecrets } from '../util/scrub.js';
 
-import { classifyVerseCliError } from './adapters/claude.js';
+import { classifyVerseCliError, pinnedClaudeVersion } from './adapters/claude.js';
 import {
   adapterFor as defaultAdapterFor,
   VERSE_TELEMETRY_POLL_MS,
@@ -115,6 +115,7 @@ import {
   VERSE_MAX_TURN_TEXT_BYTES,
   VERSE_MAX_WORKSPACE_ROOTS,
   VERSE_TURN_TIMEOUT_MS,
+  verseSessionRoots,
   type VerseContextMode,
   type VerseCreateSessionRequest,
   type VerseEngine,
@@ -129,6 +130,40 @@ import {
   type VerseWindowSource,
 } from './types.js';
 import { appendVerseLog, type VerseLogLevel } from './verse-log.js';
+import {
+  createAttachmentStore,
+  expandHomeMentions,
+  isImageAttachment,
+  resolveAttachmentRefs,
+  type VerseAttachmentStore,
+} from './attachments.js';
+import {
+  controlOptionsFor,
+  effectiveControls,
+  initialControlsFor,
+  readControlDefaults,
+  refusalFor,
+  writeControlDefaults,
+} from './session-controls.js';
+import { createTurnQueue, VerseQueueError, type VerseTurnQueue } from './turn-queue.js';
+import type { VerseTurnExtras } from './adapters/turn-extras.js';
+import {
+  NEEDS_YOU_DETAIL_MAX,
+  NEEDS_YOU_TITLE_MAX,
+  VERSE_LIVE_THINKING_TAIL_CHARS,
+  VERSE_TURN_END_BUFFER,
+  type NeedsYouItem,
+  type VerseAttachment,
+  type VerseAttachmentUpload,
+  type VerseLiveStatus,
+  type VerseQueueResponse,
+  type VerseSessionControlDefaults,
+  type VerseSessionControlDefaultsUpdate,
+  type VerseSessionControlsResponse,
+  type VerseSessionControlsUpdate,
+  type VerseTurnEnd,
+  type VerseTurnOutcome,
+} from './workbench-types.js';
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -291,6 +326,38 @@ export interface VerseEngineHandle {
    * Optional on the interface so test fakes and older handles still conform.
    */
   interruptAll?(reason: string): number;
+
+  // ---- V3.10 workbench (unit C3). Optional on the interface so test fakes
+  // and older handles still conform; the real engine implements all of them.
+
+  /** The chat's effective model / effort / permission mode and what its seat offers. */
+  getControls?(id: string): VerseSessionControlsResponse;
+  /**
+   * Change them. Applies from the NEXT turn — a running turn keeps the argv it
+   * launched with (`appliesNextTurn` says so). `bypass` needs `confirmBypass`.
+   */
+  setControls?(id: string, update: VerseSessionControlsUpdate): VerseSessionControlsResponse;
+  getControlDefaults?(): VerseSessionControlDefaults;
+  setControlDefaults?(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaults;
+  /** What a running turn is doing right now; null when none runs. O(1), no I/O. */
+  peekLiveStatus?(sessionId: string): VerseLiveStatus | null;
+  /** Turn ends with seq > cursor, oldest first (last VERSE_TURN_END_BUFFER kept). */
+  turnEndsSince?(cursor: number): { cursor: number; ends: VerseTurnEnd[] };
+  saveAttachment?(id: string, upload: VerseAttachmentUpload): VerseAttachment;
+  listAttachments?(id: string): VerseAttachment[];
+  removeAttachment?(id: string, attachmentId: string): boolean;
+  getQueue?(id: string): VerseQueueResponse;
+  /**
+   * Queue a follow-up. Sent at once (and `sentTurnId` set) when nothing runs
+   * and nothing is waiting; `sendNow` stops the running turn and sends this
+   * next (⌘⇧Enter).
+   */
+  enqueueTurn?(id: string, text: string, opts?: { sendNow?: boolean }): VerseQueueResponse & { sentTurnId: string | null };
+  removeQueuedTurn?(id: string, queueId: string): VerseQueueResponse;
+  /** [Send now] / Needs-you "Send next": stops a running turn first, else sends at once. */
+  sendQueuedTurn?(id: string, queueId: string): VerseQueueResponse & { sentTurnId: string | null };
+  /** Held queues as Needs-you items (pure, in memory) — for C1's activity route. */
+  queueNeedsYou?(): NeedsYouItem[];
 }
 
 /** V3.10. Result of the local-endpoint preflight. */
@@ -957,6 +1024,37 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
   const listingKeys = new Map<string, string>();
   let closed = false;
 
+  // ---- V3.10 workbench state (unit C3) --------------------------------------
+  const attachments: VerseAttachmentStore = createAttachmentStore(root, { now });
+  const queue: VerseTurnQueue = createTurnQueue(root, {
+    now,
+    onWriteError: (sessionId, err) => {
+      log('warn', `session ${sessionId}: queue file write failed (${errorCode(err) || 'EIO'}); the queue is kept in memory`);
+    },
+  });
+  /**
+   * What each RUNNING turn is doing, folded from its transient progress and
+   * reasoning events as they pass through `emitTransient` — with or without a
+   * listener, so activity (C1) can answer "npm test, 1m 02s" for a chat no tab
+   * is watching. Dropped when the turn settles.
+   */
+  interface LiveFold {
+    turnId: string;
+    phase: VerseLiveStatus['phase'];
+    tool: string | null;
+    thinking: string;
+    outTokens: number | null;
+    tokPerSec: number | null;
+  }
+  const live = new Map<string, LiveFold>();
+  /** The last VERSE_TURN_END_BUFFER turn ends, for `turnEndsSince` (process-local seq). */
+  const turnEnds: VerseTurnEnd[] = [];
+  let turnEndSeq = 0;
+  /** A model changed while its turn ran: re-derive the budget when that turn settles. */
+  const budgetStale = new Set<string>();
+  /** Chats with a queue drain scheduled for the next tick (see `afterTurn`). */
+  const drainPending = new Set<string>();
+
   // ---- lazily-bound collaborators (V3.10) ----------------------------------
   //
   // Both live in modules built by other units and loaded at runtime, so this
@@ -1079,6 +1177,121 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     return { sessionId: source.id, title: source.title };
   }
 
+  // ---- V3.10 live status + turn ends (unit C3) ------------------------------
+
+  function foldLive(id: string, event: VerseParsedEvent): void {
+    const turn = running.get(id);
+    if (!turn || !('turnId' in event) || event.turnId !== turn.turnId) return;
+    let fold = live.get(id);
+    if (!fold || fold.turnId !== turn.turnId) {
+      fold = { turnId: turn.turnId, phase: null, tool: null, thinking: '', outTokens: null, tokPerSec: null };
+      live.set(id, fold);
+    }
+    if (event.type === 'progress') {
+      fold.phase = event.phase;
+      fold.tool = event.phase === 'tool' && typeof event.tool === 'string' && event.tool.length > 0 ? event.tool.slice(0, 120) : null;
+      if (typeof event.outTokens === 'number' && Number.isFinite(event.outTokens)) fold.outTokens = event.outTokens;
+      if (typeof event.tokPerSec === 'number' && Number.isFinite(event.tokPerSec)) fold.tokPerSec = event.tokPerSec;
+    } else if (event.type === 'thinking-delta' && typeof event.text === 'string') {
+      // Keep a little more than the tail so a scrub at peek time sees whole
+      // tokens; never more than 4× the tail in memory.
+      fold.thinking = `${fold.thinking}${event.text}`.slice(-VERSE_LIVE_THINKING_TAIL_CHARS * 4);
+    }
+  }
+
+  function peekLive(id: string): VerseLiveStatus | null {
+    const turn = running.get(id);
+    if (!turn || turn.settled) return null;
+    const fold = live.get(id);
+    const matching = fold && fold.turnId === turn.turnId ? fold : null;
+    let thinkingTail: string | null = null;
+    if (matching && matching.thinking.trim().length > 0) {
+      const collapsed = scrubSecrets(matching.thinking).replace(/\s+/g, ' ').trim();
+      thinkingTail = collapsed.length > VERSE_LIVE_THINKING_TAIL_CHARS
+        ? `…${collapsed.slice(-(VERSE_LIVE_THINKING_TAIL_CHARS - 1))}`
+        : collapsed;
+    }
+    return {
+      sessionId: id,
+      turnId: turn.turnId,
+      startedAt: new Date(turn.startedAt).toISOString(),
+      phase: matching?.phase ?? null,
+      tool: matching?.tool ?? null,
+      elapsedMs: Math.max(0, Date.now() - turn.startedAt),
+      thinkingTail: thinkingTail && thinkingTail.length > 0 ? thinkingTail : null,
+      outTokens: matching?.outTokens ?? null,
+      tokPerSec: matching?.tokPerSec ?? null,
+    };
+  }
+
+  /**
+   * One turn ended — the single funnel every close-out path calls (a normal
+   * settle, a refusal before spawn, a launch that could not be built). Records
+   * it for `turnEndsSince`, then decides the queue: a clean end drains the next
+   * follow-up; a failure or a Stop HOLDS it (synchronously, so the crash path
+   * persists the hold before the process exits) — unless the operator marked
+   * one "send now", which goes regardless.
+   */
+  function afterTurn(id: string, turnId: string, outcome: VerseTurnOutcome, durationMs: number | null): void {
+    live.delete(id);
+    const session = store.get(id);
+    turnEndSeq += 1;
+    turnEnds.push({
+      seq: turnEndSeq,
+      sessionId: id,
+      turnId,
+      outcome,
+      at: nowIso(),
+      durationMs,
+      turnCount: session?.turnCount ?? 0,
+    });
+    if (turnEnds.length > VERSE_TURN_END_BUFFER) turnEnds.splice(0, turnEnds.length - VERSE_TURN_END_BUFFER);
+    if (!session) return;
+    let size = 0;
+    try { size = queue.size(id); } catch { size = 0; }
+    if (size === 0) return;
+    const sendNowId = queue.takeSendNow(id);
+    // A queue already HELD stays held through a turn the operator sent
+    // themselves: it waits for their answer, not for the next clean turn.
+    if (sendNowId === null && queue.get(id).held) return;
+    if (sendNowId === null && outcome !== 'ok') {
+      queue.hold(id, outcome === 'cancelled'
+        ? 'You stopped the last turn, so the follow-ups are waiting for you.'
+        : 'The last turn failed, so the follow-ups are waiting for you.');
+      return;
+    }
+    if (closed) return;
+    // Deferred one tick: the close-out events above reach every subscriber
+    // first, and the send never runs inside a child process's close handler.
+    drainPending.add(id);
+    setImmediate(() => {
+      drainPending.delete(id);
+      if (closed || !store.get(id)) return;
+      // A timer callback must never throw (process-fatal); drainOne already
+      // held the queue and logged why.
+      try { drainOne(id, sendNowId ?? undefined); } catch { /* held */ }
+    });
+  }
+
+  /** Send one queued follow-up now. A send that cannot start puts it back and holds, saying why. */
+  function drainOne(id: string, queueId?: string): string | null {
+    const item = queue.take(id, queueId);
+    if (!item) return null;
+    queue.release(id);
+    try {
+      return sendTurnImpl(id, item.text).turnId;
+    } catch (err) {
+      queue.restore(id, item);
+      const code = errorCode(err);
+      // Somebody else's turn got there first: this one simply waits for it.
+      if (code === 'VERSE_SESSION_BUSY') return null;
+      const why = err instanceof Error && err.message ? scrubSecrets(err.message).slice(0, 200) : 'the turn could not start';
+      queue.hold(id, `The next follow-up could not be sent: ${why}`);
+      log('warn', `session ${id}: queued follow-up could not start (${code || 'error'})`);
+      throw err;
+    }
+  }
+
   function fanOut(id: string, event: VerseEvent): void {
     const subs = listeners.get(id);
     if (!subs) return;
@@ -1094,6 +1307,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
    * the SSE `id:` line for these, so a resume cursor never points at one.
    */
   function emitTransient(id: string, event: VerseParsedEvent): void {
+    foldLive(id, event);
     if (!listeners.get(id)?.size) return;
     let seq = 0;
     try { seq = store.lastSeq(id); } catch { seq = 0; }
@@ -1743,10 +1957,33 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     if (ok || turn.sawOutput) session.turnCount += 1;
     session.status = ok || stopped ? 'idle' : 'error';
     session.lastError = ok || stopped ? null : (lastError ?? session.lastError ?? 'turn failed');
+    // V3.10: the model changed while this turn ran — its budget is derived
+    // now, after the old model's last reading, so the meter shows the model
+    // the NEXT turn runs.
+    if (budgetStale.delete(id)) rebudget(session, turn.seatLaunch);
     save(session);
     compactLog(id);
 
     detachChild(turn);
+    afterTurn(id, turn.turnId, ok ? 'ok' : stopped ? 'cancelled' : 'failed', Math.max(0, Date.now() - turn.startedAt));
+  }
+
+  /**
+   * Re-derive a session's context budget for its CURRENT model (a model
+   * switch). A mode the new model has no budget for falls back to standard —
+   * the same "refused, never faked" rule as createSession.
+   */
+  function rebudget(session: VerseSession, seatLaunch: VerseSeatLaunch): void {
+    const option = effectiveModelOption(seatLaunch.seat, session.model, session.engine);
+    let mode: VerseContextMode = session.contextMode ?? 'standard';
+    if (mode !== 'standard' && !budgetFor(option, mode)) {
+      mode = 'standard';
+      session.contextMode = 'standard';
+    }
+    const budget = sessionBudgetFor(seatLaunch.seat, option, mode, session.engine);
+    session.usage.contextWindow = budget.contextWindow;
+    session.usage.contextWindowSource = budget.source;
+    session.usage.autoCompactAt = budget.autoCompactAt;
   }
 
   /**
@@ -1860,6 +2097,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       session.status = 'error';
       session.lastError = message;
       save(session);
+      afterTurn(id, turnId, 'failed', 0);
       return;
     }
 
@@ -1886,6 +2124,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       session.status = 'error';
       session.lastError = message;
       save(session);
+      afterTurn(id, turnId, 'failed', 0);
       return;
     }
 
@@ -1929,6 +2168,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       terminationMessage: null,
     };
     running.set(id, turn);
+    live.delete(id);
     if (registry && turn.pgid !== null && typeof child.pid === 'number') {
       registry.add({
         sessionId: id,
@@ -2112,6 +2352,100 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     });
   }
 
+  // ---- V3.10 session controls (unit C3) --------------------------------------
+
+  function requireLaunch(id: string): VerseSeatLaunch {
+    const launch = store.loadLaunch(id);
+    if (!isSeatLaunch(launch)) throw new VerseError('VERSE_INVALID', 'session launch record is missing or unreadable');
+    return launch;
+  }
+
+  function controlContext(session: VerseSession, launch: VerseSeatLaunch): { claudeCliVersion: string | null } {
+    return { claudeCliVersion: session.engine === 'claude' ? pinnedClaudeVersion(launch) : null };
+  }
+
+  function controlsResponse(session: VerseSession, launch: VerseSeatLaunch): VerseSessionControlsResponse {
+    return {
+      sessionId: session.id,
+      controls: effectiveControls(session),
+      appliesNextTurn: isBusy(session.id),
+      options: controlOptionsFor(launch.seat, controlContext(session, launch)),
+    };
+  }
+
+  function sendTurnImpl(id: string, text: string): { turnId: string; session: VerseSession } {
+    if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+    const session = require(id);
+    if (typeof text !== 'string' || !text.trim()) throw new VerseError('VERSE_INVALID', 'text is required');
+    if (Buffer.byteLength(text, 'utf8') > VERSE_MAX_TURN_TEXT_BYTES) {
+      throw new VerseError('VERSE_TOO_LARGE', `text exceeds ${VERSE_MAX_TURN_TEXT_BYTES} bytes`);
+    }
+    if (isBusy(id)) {
+      throw new VerseError('VERSE_SESSION_BUSY', 'a turn is already running');
+    }
+    // `running` on disk with no live process is stale (see reconcileInterrupted), not busy.
+    if (session.status === 'running') reconcileInterrupted(session);
+    const launch = store.loadLaunch(id);
+    if (!isSeatLaunch(launch)) {
+      throw new VerseError('VERSE_INVALID', 'session launch record is missing or unreadable');
+    }
+    // READINESS GATE (V3.10). Before anything is recorded: a refused turn
+    // leaves no trace in the chat — the 409 (with ranked alternatives) is
+    // the whole answer. Only an explicit `ready: false` refuses; a seat
+    // account health knows nothing about is admitted.
+    admitSeat(session.seatId);
+    // A memory snapshot pinned before control characters were stripped can
+    // hold a NUL, which no OS accepts inside an argv entry — the session
+    // could never start again. Repair the in-memory copy for this launch;
+    // the pinned record stays as written (it is the provenance).
+    if (launch.memory && launch.memory.block !== stripUnsafeControlChars(launch.memory.block)) {
+      launch.memory = { ...launch.memory, block: stripUnsafeControlChars(launch.memory.block) };
+    }
+
+    const turnId = randomUUID();
+    if (session.turnCount === 0 && session.title === DEFAULT_TITLE) session.title = autoTitle(text);
+    storageFailed.delete(id);
+    const userMessage = emit(id, { type: 'user-message', turnId, text });
+    if (!userMessage) {
+      // The log cannot be written (onStorageFailure already recorded it):
+      // a turn nobody can ever see must not spend.
+      throw new Error('verse session log could not be written');
+    }
+    session.status = 'running';
+    session.lastError = null;
+    save(session);
+
+    // V3.10 attachments: the operator's text is logged exactly as typed; the
+    // CLI gets the same text with this chat's attachment tokens resolved to
+    // absolute paths, plus the ONE directory they live in (never granted when
+    // the message names no attachment). A recovery re-sends the resolved text.
+    const resolved = resolveAttachmentRefs(text, attachments.dirFor(id));
+    resolved.text = expandHomeMentions(resolved.text, verseSessionRoots(session));
+    const extras: VerseTurnExtras = { attachmentDirs: resolved.dirs, attachmentImages: resolved.files.filter(isImageAttachment) };
+    const turnSeatLaunch: VerseSeatLaunch = resolved.files.length > 0 ? { ...launch, ...extras } : launch;
+    const cliText = resolved.text;
+
+    let turnLaunch: VerseTurnLaunch;
+    try {
+      turnLaunch = adapterFor(session.engine).buildLaunch(session, cliText, turnSeatLaunch);
+    } catch (err) {
+      const message = redact(err instanceof Error ? err.message : String(err), redactionsFor(launch, null));
+      emit(id, { type: 'error', turnId, message });
+      emit(id, { type: 'turn-done', turnId, ok: false, nativeSessionId: session.nativeSessionId, durationMs: 0 });
+      session.status = 'error';
+      session.lastError = message;
+      save(session);
+      afterTurn(id, turnId, 'failed', 0);
+      return { turnId, session: cloneSession(session) };
+    }
+    startTurn(session, turnId, turnSeatLaunch, turnLaunch, redactionsFor(turnSeatLaunch, turnLaunch), {
+      text: cliText,
+      userSeq: userMessage.seq,
+      isRecovery: false,
+    });
+    return { turnId, session: cloneSession(store.get(id) ?? session) };
+  }
+
   // ---- handle -----------------------------------------------------------------
 
   return {
@@ -2207,6 +2541,14 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
 
       const handoffFrom = resolveHandoffSource(req, opts);
 
+      // V3.10: the operator's defaults for new chats (global, then this
+      // seat's), each dropped when this seat cannot honour it. Bypass is never
+      // inherited. Nothing set → no `controls` key, so the record is
+      // byte-identical to a 3.9 one.
+      const controls = initialControlsFor(readControlDefaults(root), seat, {
+        claudeCliVersion: engine === 'claude' ? pinnedClaudeVersion(launch) : null,
+      });
+
       const title = req.title ? normaliseTitle(req.title) : '';
       const at = nowIso();
       const session: VerseSession = {
@@ -2250,6 +2592,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         contextMode,
         ...(handoffFrom ? { handoffFrom } : {}),
         ...(memory !== undefined ? { memoryEnabled: memory !== null } : {}),
+        ...(Object.keys(controls).length > 0 ? { controls } : {}),
       };
       store.save(session);
       store.saveLaunch(session.id, {
@@ -2273,65 +2616,7 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
     },
 
     sendTurn(id: string, text: string): { turnId: string; session: VerseSession } {
-      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
-      const session = require(id);
-      if (typeof text !== 'string' || !text.trim()) throw new VerseError('VERSE_INVALID', 'text is required');
-      if (Buffer.byteLength(text, 'utf8') > VERSE_MAX_TURN_TEXT_BYTES) {
-        throw new VerseError('VERSE_TOO_LARGE', `text exceeds ${VERSE_MAX_TURN_TEXT_BYTES} bytes`);
-      }
-      if (isBusy(id)) {
-        throw new VerseError('VERSE_SESSION_BUSY', 'a turn is already running');
-      }
-      // `running` on disk with no live process is stale (see reconcileInterrupted), not busy.
-      if (session.status === 'running') reconcileInterrupted(session);
-      const launch = store.loadLaunch(id);
-      if (!isSeatLaunch(launch)) {
-        throw new VerseError('VERSE_INVALID', 'session launch record is missing or unreadable');
-      }
-      // READINESS GATE (V3.10). Before anything is recorded: a refused turn
-      // leaves no trace in the chat — the 409 (with ranked alternatives) is
-      // the whole answer. Only an explicit `ready: false` refuses; a seat
-      // account health knows nothing about is admitted.
-      admitSeat(session.seatId);
-      // A memory snapshot pinned before control characters were stripped can
-      // hold a NUL, which no OS accepts inside an argv entry — the session
-      // could never start again. Repair the in-memory copy for this launch;
-      // the pinned record stays as written (it is the provenance).
-      if (launch.memory && launch.memory.block !== stripUnsafeControlChars(launch.memory.block)) {
-        launch.memory = { ...launch.memory, block: stripUnsafeControlChars(launch.memory.block) };
-      }
-
-      const turnId = randomUUID();
-      if (session.turnCount === 0 && session.title === DEFAULT_TITLE) session.title = autoTitle(text);
-      storageFailed.delete(id);
-      const userMessage = emit(id, { type: 'user-message', turnId, text });
-      if (!userMessage) {
-        // The log cannot be written (onStorageFailure already recorded it):
-        // a turn nobody can ever see must not spend.
-        throw new Error('verse session log could not be written');
-      }
-      session.status = 'running';
-      session.lastError = null;
-      save(session);
-
-      let turnLaunch: VerseTurnLaunch;
-      try {
-        turnLaunch = adapterFor(session.engine).buildLaunch(session, text, launch);
-      } catch (err) {
-        const message = redact(err instanceof Error ? err.message : String(err), redactionsFor(launch, null));
-        emit(id, { type: 'error', turnId, message });
-        emit(id, { type: 'turn-done', turnId, ok: false, nativeSessionId: session.nativeSessionId, durationMs: 0 });
-        session.status = 'error';
-        session.lastError = message;
-        save(session);
-        return { turnId, session: cloneSession(session) };
-      }
-      startTurn(session, turnId, launch, turnLaunch, redactionsFor(launch, turnLaunch), {
-        text,
-        userSeq: userMessage.seq,
-        isRecovery: false,
-      });
-      return { turnId, session: cloneSession(store.get(id) ?? session) };
+      return sendTurnImpl(id, text);
     },
 
     setContextMode(id: string, mode: VerseContextMode): VerseSession {
@@ -2425,6 +2710,11 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
       listeners.delete(id);
       store.remove(id);
       listingKeys.delete(id);
+      // V3.10: the chat's private attachments and queued follow-ups go with it.
+      live.delete(id);
+      budgetStale.delete(id);
+      queue.drop(id);
+      attachments.drop(id);
       announce(id);
     },
 
@@ -2467,6 +2757,218 @@ export function createVerseEngine(opts: VerseEngineOptions = {}): VerseEngineHan
         current.delete(gate);
         if (current.size === 0) listeners.delete(id);
       };
+    },
+
+    // ---- V3.10 workbench (unit C3) -------------------------------------------
+
+    getControls(id: string): VerseSessionControlsResponse {
+      const session = require(id);
+      return controlsResponse(session, requireLaunch(id));
+    },
+
+    setControls(id: string, update: VerseSessionControlsUpdate): VerseSessionControlsResponse {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      const session = require(id);
+      const launch = requireLaunch(id);
+      if (update === null || typeof update !== 'object') throw new VerseError('VERSE_INVALID', 'update must be an object');
+      const options = controlOptionsFor(launch.seat, controlContext(session, launch));
+      let modelChanged = false;
+      if (update.model !== undefined) {
+        const option = typeof update.model === 'string' ? findModelOption(launch.seat, update.model.trim()) : null;
+        if (!option) throw new VerseError('VERSE_INVALID', `model ${String(update.model)} is not available on seat ${session.seatId}`);
+        if (typeof option.unavailableReason === 'string' && option.unavailableReason.trim()) {
+          throw new VerseError('VERSE_INVALID', `${option.label}: ${option.unavailableReason.trim()}`);
+        }
+        modelChanged = option.id !== session.model;
+      }
+      const next = { ...(session.controls ?? {}) };
+      if (update.effort !== undefined) {
+        if (update.effort === null) {
+          delete next.effort;
+        } else {
+          const refusal = refusalFor(options.efforts, update.effort, 'effort');
+          if (refusal) throw new VerseError('VERSE_INVALID', refusal);
+          next.effort = update.effort;
+        }
+      }
+      if (update.permissionMode !== undefined) {
+        const refusal = refusalFor(options.permissionModes, update.permissionMode, 'permission mode');
+        if (refusal) throw new VerseError('VERSE_INVALID', refusal);
+        // Defence in depth: the API refuses this too. Bypass is only ever set
+        // by an explicit per-chat confirmation.
+        if (update.permissionMode === 'bypass' && update.confirmBypass !== true) {
+          throw new VerseError('VERSE_INVALID', 'bypass skips every permission check; confirm it for this chat');
+        }
+        if (update.permissionMode === 'accept-edits') delete next.permissionMode;
+        else next.permissionMode = update.permissionMode;
+      }
+      // Replaced, never mutated: clones handed out earlier share the old object.
+      if (Object.keys(next).length > 0) session.controls = next;
+      else delete session.controls;
+      if (modelChanged) {
+        session.model = findModelOption(launch.seat, (update.model as string).trim())!.id;
+        if (isBusy(id)) {
+          budgetStale.add(id);
+        } else {
+          rebudget(session, launch);
+        }
+      }
+      save(session);
+      if (modelChanged && !isBusy(id)) emitBudgetChange(id, session);
+      // The header, the sidebar's model line and every other window read the
+      // record: push it now rather than on the next poll.
+      announce(id);
+      return controlsResponse(session, launch);
+    },
+
+    getControlDefaults(): VerseSessionControlDefaults {
+      return readControlDefaults(root);
+    },
+
+    setControlDefaults(update: VerseSessionControlDefaultsUpdate): VerseSessionControlDefaults {
+      if (isObject(update) && (update as { permissionMode?: unknown }).permissionMode === 'bypass') {
+        throw new VerseError('VERSE_INVALID', 'bypass is confirmed per chat and can never be a default');
+      }
+      return writeControlDefaults(root, update);
+    },
+
+    peekLiveStatus(sessionId: string): VerseLiveStatus | null {
+      return typeof sessionId === 'string' ? peekLive(sessionId) : null;
+    },
+
+    turnEndsSince(cursor: number): { cursor: number; ends: VerseTurnEnd[] } {
+      const from = typeof cursor === 'number' && Number.isFinite(cursor) ? cursor : 0;
+      // A cursor from a previous process (larger than anything this one
+      // issued) gets everything buffered — the caller's boot id tells it why.
+      const ends = from > turnEndSeq ? turnEnds.slice() : turnEnds.filter((end) => end.seq > from);
+      return { cursor: turnEndSeq, ends: ends.map((end) => ({ ...end })) };
+    },
+
+    saveAttachment(id: string, upload: VerseAttachmentUpload): VerseAttachment {
+      const session = require(id);
+      if (session.engine === 'grok') {
+        // grok 0.2.118 reaches only `--cwd`: no `--add-dir`, no writable-roots
+        // option (adapters/grok.ts). A file it cannot open would be a silent
+        // lie in the message, so the upload is refused with the reason.
+        throw new VerseError('VERSE_INVALID', 'Grok can only open files inside the project folder, so it can’t read attachments. Paste the text, or save the file in the project.');
+      }
+      try {
+        return attachments.save(id, upload);
+      } catch (err) {
+        const code = errorCode(err);
+        if (code === 'VERSE_INVALID' || code === 'VERSE_TOO_LARGE') {
+          throw new VerseError(code, err instanceof Error ? err.message : 'attachment refused');
+        }
+        log('warn', `session ${id}: attachment write failed (${code || 'EIO'})`);
+        throw err;
+      }
+    },
+
+    listAttachments(id: string): VerseAttachment[] {
+      require(id);
+      return attachments.list(id);
+    },
+
+    removeAttachment(id: string, attachmentId: string): boolean {
+      require(id);
+      return attachments.remove(id, attachmentId);
+    },
+
+    getQueue(id: string): VerseQueueResponse {
+      require(id);
+      // Items waiting with nothing running and no drain on its way (the
+      // server restarted, or a turn ended while the drain could not run) are
+      // HELD, never left to look like they will send on their own.
+      const current = queue.get(id);
+      if (current.items.length > 0 && !current.held && !isBusy(id) && !drainPending.has(id)) {
+        queue.hold(id, 'The chat stopped before these could send.');
+        return queue.get(id);
+      }
+      return current;
+    },
+
+    enqueueTurn(id: string, text: string, opts: { sendNow?: boolean } = {}): VerseQueueResponse & { sentTurnId: string | null } {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      require(id);
+      const sendNow = opts.sendNow === true;
+      if (!isBusy(id)) {
+        const current = queue.get(id);
+        // Nothing to wait for: send it now (the turn ended between the
+        // keystroke and this request). Behind a HELD queue it waits its turn
+        // unless the operator said "send now".
+        if (current.items.length === 0 || sendNow) {
+          const { turnId } = sendTurnImpl(id, text);
+          return { ...queue.get(id), sentTurnId: turnId };
+        }
+      }
+      let item;
+      try {
+        item = queue.enqueue(id, text, { front: sendNow });
+      } catch (err) {
+        if (err instanceof VerseQueueError) {
+          throw new VerseError(err.code === 'VERSE_TOO_LARGE' ? 'VERSE_TOO_LARGE' : 'VERSE_INVALID', err.message);
+        }
+        throw err;
+      }
+      if (sendNow && isBusy(id)) {
+        queue.markSendNow(id, item.id);
+        const turn = running.get(id);
+        if (turn && !turn.settled) requestTermination(id, turn, 'cancelled');
+      }
+      return { ...queue.get(id), sentTurnId: null };
+    },
+
+    removeQueuedTurn(id: string, queueId: string): VerseQueueResponse {
+      require(id);
+      if (!queue.remove(id, queueId)) throw new VerseError('VERSE_SESSION_NOT_FOUND', 'that follow-up is no longer queued');
+      return queue.get(id);
+    },
+
+    sendQueuedTurn(id: string, queueId: string): VerseQueueResponse & { sentTurnId: string | null } {
+      if (closed) throw new VerseError('VERSE_INVALID', 'verse engine is closed');
+      require(id);
+      if (!queue.get(id).items.some((item) => item.id === queueId)) {
+        throw new VerseError('VERSE_SESSION_NOT_FOUND', 'that follow-up is no longer queued');
+      }
+      if (isBusy(id)) {
+        queue.markSendNow(id, queueId);
+        const turn = running.get(id);
+        if (turn && !turn.settled) requestTermination(id, turn, 'cancelled');
+        return { ...queue.get(id), sentTurnId: null };
+      }
+      const sentTurnId = drainOne(id, queueId);
+      return { ...queue.get(id), sentTurnId };
+    },
+
+    queueNeedsYou(): NeedsYouItem[] {
+      const items: NeedsYouItem[] = [];
+      for (const held of queue.listHeld()) {
+        const session = store.get(held.sessionId);
+        const first = held.items[0];
+        if (!session || !first) continue;
+        const count = held.items.length;
+        const title = `${count} follow-up${count === 1 ? '' : 's'} waiting in “${session.title}”`;
+        items.push({
+          id: `chats:queue-held:${held.sessionId}`,
+          source: 'chats',
+          kind: 'queue-held',
+          severity: 'warn',
+          title: title.length > NEEDS_YOU_TITLE_MAX ? `${title.slice(0, NEEDS_YOU_TITLE_MAX - 2)}…”` : title,
+          detail: held.heldReason ? held.heldReason.slice(0, NEEDS_YOU_DETAIL_MAX) : null,
+          since: held.heldAt,
+          expiresAt: null,
+          subject: { repo: null, pr: null, seatId: session.seatId, sessionId: session.id, engine: session.engine },
+          target: { kind: 'session', sessionId: session.id },
+          actions: [{
+            kind: 'resume',
+            label: 'Send next',
+            request: { method: 'POST', path: `/api/verse/queue/${session.id}/${first.id}/send`, body: {} },
+            confirm: null,
+            destructive: false,
+          }],
+        });
+      }
+      return items;
     },
 
     close(): void {

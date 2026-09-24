@@ -222,3 +222,36 @@
     transition: opacity 120ms ease;
   }
 }
+
+/* V3.10 — engine monogram beside a lane label (EngineTick). */
+.monogram {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  font-weight: var(--font-weight-semibold);
+  fill: var(--text-secondary);
+}
+
+/* V3.10 — an unknown mark: hatch fill (set inline via url(#id)) + outline. */
+.unknownMark {
+  stroke: var(--chart-unknown);
+  stroke-width: 1;
+}
+
+/* A swatch in a legend that stands for "unknown / not measured". */
+.swatchHatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  flex: none;
+  border: 1px solid var(--chart-unknown);
+  background: var(--chart-unknown-hatch);
+}
+
+/* Text laid over the plot (reference labels): a surface-coloured halo keeps it
+   legible where it crosses a line, in both themes. */
+.halo {
+  paint-order: stroke;
+  stroke: var(--chart-surface);
+  stroke-width: 3px;
+  stroke-linejoin: round;
+}

@@ -1,0 +1,169 @@
+# CODEOWNERS for ashlr-hub — the Tier-1 protected paths (SPEC-310B §2; docs/AUTHORITY.md).
+#
+# Everything below is GENERATED from renderCodeownersBlock() in
+# src/core/authority/protected-paths.ts (the owner lane of merge gate G1) so the
+# two can never disagree: a fleet diff touching one of these paths is routed to
+# the owner lane before a PR exists, and GitHub additionally requires the
+# owner's review (the ashlr-fleet App is never a code owner). Regenerate it
+# instead of editing it by hand; test/authority-codeowners-310b.test.ts fails on drift.
+# Generated from src/core/authority/protected-paths.ts — the fleet's owner lane (SPEC-310B §2 G1).
+# The ashlr-fleet App is never a code owner, so every path below needs the owner's review on GitHub too.
+# ci-config: CI configuration decides which checks guard the default branch; only Mason changes it
+/.github/** @masonwyatt23
+/.gitlab-ci.yml @masonwyatt23
+/.gitlab/** @masonwyatt23
+/.circleci/** @masonwyatt23
+/.buildkite/** @masonwyatt23
+/.travis.yml @masonwyatt23
+/azure-pipelines.yml @masonwyatt23
+/Jenkinsfile @masonwyatt23
+/bitbucket-pipelines.yml @masonwyatt23
+/.woodpecker.yml @masonwyatt23
+/.woodpecker/** @masonwyatt23
+# codeowners: CODEOWNERS is the server-side copy of the owner lane
+/CODEOWNERS @masonwyatt23
+/.github/CODEOWNERS @masonwyatt23
+/docs/CODEOWNERS @masonwyatt23
+/.gitlab/CODEOWNERS @masonwyatt23
+# manifest: manifests and lockfiles run code at install time and choose which verify commands run
+**/package.json @masonwyatt23
+**/package-lock.json @masonwyatt23
+**/npm-shrinkwrap.json @masonwyatt23
+**/pnpm-lock.yaml @masonwyatt23
+**/pnpm-workspace.yaml @masonwyatt23
+**/yarn.lock @masonwyatt23
+**/bun.lockb @masonwyatt23
+**/bun.lock @masonwyatt23
+**/.npmrc @masonwyatt23
+**/.yarnrc @masonwyatt23
+**/.yarnrc.yml @masonwyatt23
+**/.pnpmfile.cjs @masonwyatt23
+**/ashlr.verify.json @masonwyatt23
+**/Cargo.toml @masonwyatt23
+**/Cargo.lock @masonwyatt23
+**/go.mod @masonwyatt23
+**/go.sum @masonwyatt23
+**/go.work @masonwyatt23
+**/pyproject.toml @masonwyatt23
+**/poetry.lock @masonwyatt23
+**/uv.lock @masonwyatt23
+**/requirements*.txt @masonwyatt23
+**/Pipfile @masonwyatt23
+**/Pipfile.lock @masonwyatt23
+**/setup.py @masonwyatt23
+**/setup.cfg @masonwyatt23
+**/Gemfile @masonwyatt23
+**/Gemfile.lock @masonwyatt23
+**/*.gemspec @masonwyatt23
+**/Package.swift @masonwyatt23
+**/Package.resolved @masonwyatt23
+**/composer.json @masonwyatt23
+**/composer.lock @masonwyatt23
+**/deno.json @masonwyatt23
+**/deno.jsonc @masonwyatt23
+**/deno.lock @masonwyatt23
+# verify-config: verify configuration decides what the post-merge checks actually check
+**/tsconfig*.json @masonwyatt23
+**/mypy.ini @masonwyatt23
+**/.mypy.ini @masonwyatt23
+**/ruff.toml @masonwyatt23
+**/.ruff.toml @masonwyatt23
+**/pytest.ini @masonwyatt23
+**/tox.ini @masonwyatt23
+# build-and-hooks: build files, git attributes and hook managers execute code on Mason's machine
+**/Dockerfile @masonwyatt23
+**/Dockerfile.* @masonwyatt23
+**/*.dockerfile @masonwyatt23
+**/docker-compose*.yml @masonwyatt23
+**/docker-compose*.yaml @masonwyatt23
+**/compose.yml @masonwyatt23
+**/compose.yaml @masonwyatt23
+**/Makefile @masonwyatt23
+**/justfile @masonwyatt23
+/.gitattributes @masonwyatt23
+/.gitmodules @masonwyatt23
+**/.gitattributes @masonwyatt23
+/.husky/** @masonwyatt23
+/.githooks/** @masonwyatt23
+/.pre-commit-config.yaml @masonwyatt23
+/lefthook.yml @masonwyatt23
+/.lefthook.yml @masonwyatt23
+**/.envrc @masonwyatt23
+/.devcontainer/** @masonwyatt23
+/.vscode/** @masonwyatt23
+# release-tooling: release, build, custody and launchd tooling ship or run with Mason's authority
+/scripts/release* @masonwyatt23
+/scripts/**/release* @masonwyatt23
+/scripts/build* @masonwyatt23
+/scripts/*authority* @masonwyatt23
+/scripts/install-custody* @masonwyatt23
+/tools/custody/** @masonwyatt23
+**/*.plist @masonwyatt23
+**/*.entitlements @masonwyatt23
+**/src-tauri/capabilities/** @masonwyatt23
+**/src-tauri/tauri.conf.json @masonwyatt23
+**/src-tauri/tauri.*.conf.json @masonwyatt23
+# secrets: secret material never moves through a fleet PR
+**/*.pem @masonwyatt23
+**/*.key @masonwyatt23
+**/*.p12 @masonwyatt23
+**/*.pfx @masonwyatt23
+**/*.p8 @masonwyatt23
+**/*.jks @masonwyatt23
+**/*.keystore @masonwyatt23
+**/*.kdbx @masonwyatt23
+**/*.gpg @masonwyatt23
+**/.env @masonwyatt23
+**/.env.* @masonwyatt23
+**/id_rsa* @masonwyatt23
+**/id_ed25519* @masonwyatt23
+**/id_ecdsa* @masonwyatt23
+**/secrets/** @masonwyatt23
+**/.secrets/** @masonwyatt23
+# authority-doc: the authority documentation is the human contract for what the fleet may do
+/docs/RUNTIME_ACTIVATION_AUTHORITY.md @masonwyatt23
+/docs/**/*AUTHORITY* @masonwyatt23
+/docs/**/*authority* @masonwyatt23
+# tier1-authority-code: Tier-1 authority code: the fleet may never change the code that decides what the fleet may do
+/src/core/authority/** @masonwyatt23
+/src/core/daemon/activation-permit.ts @masonwyatt23
+/src/core/daemon/tick-hooks.ts @masonwyatt23
+/src/core/daemon/loop.ts @masonwyatt23
+/src/core/daemon/post-merge-halt.ts @masonwyatt23
+/src/core/daemon/liveness.ts @masonwyatt23
+/src/core/inbox/merge.ts @masonwyatt23
+/src/core/fleet/automerge-pass.ts @masonwyatt23
+/src/core/fleet/host-merge.ts @masonwyatt23
+/src/core/fleet/merge-gates.ts @masonwyatt23
+/src/core/fleet/standing-merge-pass.ts @masonwyatt23
+/src/core/fleet/fleet-merge-state.ts @masonwyatt23
+/src/core/fleet/post-merge-watch.ts @masonwyatt23
+/src/core/fleet/quarantine.ts @masonwyatt23
+/src/core/fleet/regression-sentinel.ts @masonwyatt23
+/src/core/fleet/dispatch-router.ts @masonwyatt23
+/src/core/fleet/backpressure.ts @masonwyatt23
+/src/core/fleet/mirrors.ts @masonwyatt23
+/src/core/fleet/tick-hooks-live.ts @masonwyatt23
+/src/core/fleet/manager.ts @masonwyatt23
+/src/core/fleet/reviewer-independence.ts @masonwyatt23
+/src/core/sandbox/** @masonwyatt23
+/src/core/policy/** @masonwyatt23
+/src/core/routing/** @masonwyatt23
+/src/core/foundry/provenance.ts @masonwyatt23
+/src/core/run/sandboxed-engine.ts @masonwyatt23
+/src/core/run/engine-registry.ts @masonwyatt23
+/src/core/resources/native-profile.ts @masonwyatt23
+/src/core/vision/leader-apply.ts @masonwyatt23
+/src/core/learn/harness-registry.ts @masonwyatt23
+/src/core/learn/experiments.ts @masonwyatt23
+/src/core/local-eval/tasks-heldout.ts @masonwyatt23
+/src/core/autonomy/host-merge-revocation-protocol.ts @masonwyatt23
+/src/core/learning/agent-semantic-events.ts @masonwyatt23
+/src/core/verse/authority-api.ts @masonwyatt23
+/src/cli/authority.ts @masonwyatt23
+# tier1-test-infra: test setup and build config decide which tests run and whether HOME is isolated
+/test/setup/** @masonwyatt23
+/test/config/** @masonwyatt23
+/test/fixtures/authority/** @masonwyatt23
+/vitest.config* @masonwyatt23
+/vitest.workspace* @masonwyatt23

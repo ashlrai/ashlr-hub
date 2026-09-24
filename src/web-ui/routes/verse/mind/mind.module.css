@@ -1,0 +1,345 @@
+/*
+ * routes/verse/mind/mind.module.css — Mind cards and the chat-header chip
+ * (unit C7). Tokens only (style-scan-310).
+ */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--surface-gap);
+}
+
+.muted {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+
+.link {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.link:focus-visible,
+.veto:focus-visible,
+.chip:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* ---- memo timeline ---------------------------------------------------- */
+.timeline {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.memo {
+  display: grid;
+  grid-template-columns: 88px 20px minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.memo:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.memoDay {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-sm-line);
+  font-variant-numeric: tabular-nums;
+}
+
+.mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-full);
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-semibold);
+}
+
+.mark[data-outcome='hit'] {
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+}
+
+.mark[data-outcome='miss'] {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.memoBody {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.memoMove {
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  overflow-wrap: anywhere;
+}
+
+.memoWhy {
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  overflow-wrap: anywhere;
+}
+
+.memoMeta {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.memoMeta [data-outcome='hit'] {
+  color: var(--status-success-fg);
+}
+
+.memoMeta [data-outcome='miss'] {
+  color: var(--status-danger-fg);
+}
+
+.veto {
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+}
+
+.veto:hover {
+  background: var(--bg-hover);
+}
+
+.veto:disabled {
+  color: var(--text-disabled);
+  cursor: default;
+}
+
+[data-viewport='compact'] .memo {
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+}
+
+[data-viewport='compact'] .memoDay {
+  grid-column: 1 / -1;
+}
+
+/* ---- standards -------------------------------------------------------- */
+.standards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.standards li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.standardRule {
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line-relaxed);
+}
+
+.standardMeta {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+
+/* ---- insight cards ---------------------------------------------------- */
+.insights {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--surface-gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+[data-viewport='compact'] .insights,
+[data-viewport='medium'] .insights {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.insight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--card-pad);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  background: var(--bg-surface);
+  box-shadow: inset 0 1px 0 var(--hairline-lift, transparent);
+}
+
+.insight[data-severity='high'] {
+  border-color: var(--status-danger-solid);
+}
+
+.insightKind {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.insightSeverity {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+
+.insightSeverity[data-severity='high'] {
+  color: var(--status-danger-fg);
+}
+
+.insightSeverity[data-severity='warn'] {
+  color: var(--status-warning-fg);
+}
+
+.insightTitle {
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line-relaxed);
+  overflow-wrap: anywhere;
+}
+
+.insightMeta {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.log {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.facet {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+
+.facet select {
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+}
+
+/* ---- chat-header chip ------------------------------------------------- */
+.chipWrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chip:hover,
+.chip[aria-expanded='true'] {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.chipDot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-warning-solid);
+}
+
+.chipDot[data-severity='high'] {
+  background: var(--status-danger-solid);
+}
+
+.chipMore {
+  color: var(--text-tertiary);
+}
+
+.chipPanel {
+  position: absolute;
+  top: calc(100% + var(--space-1));
+  right: 0;
+  z-index: var(--z-dropdown);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  width: min(320px, calc(100vw - var(--space-8)));
+  padding: var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface-raised);
+  box-shadow: var(--shadow-menu);
+}
+
+.chipList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.chipList li {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}

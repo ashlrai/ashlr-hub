@@ -1,0 +1,68 @@
+/* ⌘/ — the key reference, in columns. */
+
+.dialog { width: min(880px, calc(100vw - var(--space-8))); }
+
+.scroll { max-height: 64vh; overflow-y: auto; margin: 0 calc(var(--space-5) * -1); padding: 0 var(--space-5); }
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-5) var(--space-6);
+  align-items: start;
+}
+
+.section { min-width: 0; }
+
+.sectionTitle {
+  margin-bottom: var(--space-2);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.list { margin: 0; }
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-1) 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.action {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-primary);
+}
+
+.note {
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-tertiary);
+}
+
+.keys { display: flex; gap: var(--space-1); margin: 0; flex: none; }
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-default);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  color: var(--text-primary);
+}

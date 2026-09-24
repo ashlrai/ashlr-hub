@@ -2,7 +2,7 @@
  * context.ts — M163: real-world strategic context gatherer.
  *
  * gatherStrategicContext() assembles the grounded, real-world context the elite
- * Elon strategist (M162) reasons from — repo health, commit history, outcome
+ * Strategist (M162) reasons from — repo health, commit history, outcome
  * ledger, fleet state, and a human-readable narrative digest.
  *
  * Design rules:

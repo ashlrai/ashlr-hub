@@ -33,7 +33,14 @@ vi.mock('../src/core/run/verify-commands.js', async (importOriginal) => {
   };
 });
 
-import { autoMergeProposal } from '../src/core/inbox/merge.js';
+import { autoMergeProposal, verifyAndPersistProposal } from '../src/core/inbox/merge.js';
+import { mirrorLeaseKey } from '../src/core/fleet/mirrors.js';
+import { VerificationCapacityError, withVerificationSlot } from '../src/core/sandbox/execution-leases.js';
+import {
+  acquireOutwardMutationFence,
+  ownsOutwardMutationFence,
+  releaseOutwardMutationFence,
+} from '../src/core/sandbox/mutation-fence.js';
 import { createProposal, loadProposal, setStatus } from '../src/core/inbox/store.js';
 import { hashDiff, signProvenance } from '../src/core/foundry/provenance.js';
 import { enroll, killSwitchOn, setKill } from '../src/core/sandbox/policy.js';
@@ -226,7 +233,14 @@ describe('M407 auto-merge verification mutation fence', () => {
     });
   });
 
-  it('holds the outward fence until verification drains and refuses the merge after kill', async () => {
+  // V3.10 (INT3, U6's request): verification no longer holds the global outward
+  // fence for the whole suite — that serialized every verification (and made
+  // every Stop wait on a test run) machine-wide. It runs in a verification slot;
+  // the fence is taken only for the final gate check + persistence. So a Stop
+  // armed mid-verification now quiesces immediately, and the SAFETY property
+  // this test exists for still holds: the fenced final check sees the kill, the
+  // evidence is not persisted, and nothing merges.
+  it('refuses the merge and persists no evidence when kill is armed during verification (fence not held across the suite)', async () => {
     const diff = addFileDiff();
     const diffHash = hashDiff(diff);
     const proposal = createProposal({
@@ -247,11 +261,10 @@ describe('M407 auto-merge verification mutation fence', () => {
     const merge = autoMergeProposal(proposal.id, config());
     await verificationStarted;
 
-    expect(setKill(true, { waitMs: 25 })).toEqual({
-      ok: false,
+    expect(setKill(true, { waitMs: 25 })).toMatchObject({
+      ok: true,
       changed: true,
-      quiesced: false,
-      reason: 'kill armed; an outward mutation has not quiesced',
+      quiesced: true,
     });
     expect(killSwitchOn()).toBe(true);
 
@@ -266,6 +279,41 @@ describe('M407 auto-merge verification mutation fence', () => {
     expect(loadProposal(proposal.id)?.status).toBe('approved');
     expect(loadProposal(proposal.id)?.verifyResult).toBeUndefined();
     expect(verifyMocks.runVerifyCommandAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it('V3.10: verification holds its repo\'s verification SLOT, not the global fence; evidence persists under the fence after', async () => {
+    const diff = addFileDiff();
+    const diffHash = hashDiff(diff);
+    const proposal = createProposal({
+      repo,
+      origin: 'agent',
+      kind: 'patch',
+      title: 'M407 verification slot',
+      summary: 'Verification runs in a slot; the fence is only for the final check + persistence.',
+      diff,
+      diffHash,
+      provenanceSig: signProvenance('codex:gpt-5.5', 'frontier', diffHash),
+      engineModel: 'codex:gpt-5.5',
+      engineTier: 'frontier',
+    });
+    setStatus(proposal.id, 'approved');
+
+    const transaction = verifyAndPersistProposal(loadProposal(proposal.id)!, config());
+    await verificationStarted;
+
+    // The global outward fence is free while the suite runs …
+    const fence = acquireOutwardMutationFence(25);
+    expect(ownsOutwardMutationFence(fence)).toBe(true);
+    releaseOutwardMutationFence(fence);
+    // … while this repo's verification slot is taken (≤ 1 per repo).
+    await expect(withVerificationSlot(mirrorLeaseKey(repo), () => 'second', { waitMs: 50, pollMs: 10 }))
+      .rejects.toBeInstanceOf(VerificationCapacityError);
+
+    releaseVerification();
+    await expect(transaction).resolves.toMatchObject({ persisted: true, authorityLive: true });
+    expect(loadProposal(proposal.id)?.verifyResult).toMatchObject({ passed: true });
+    // The slot is released afterwards.
+    await expect(withVerificationSlot(mirrorLeaseKey(repo), () => 'second', { waitMs: 50, pollMs: 10 })).resolves.toBe('second');
   });
 
   it('re-verifies a passing cache entry that belongs to a different diff', async () => {

@@ -1,0 +1,394 @@
+/*
+ * routes/verse/fleet/fleet.module.css — Fleet surface cards (unit C7).
+ * Tokens only (style-scan-310).
+ */
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: var(--surface-gap);
+}
+
+.muted {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text-link);
+  font: inherit;
+  font-size: var(--text-xs-size);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.link:focus-visible,
+.disclosure:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- lanes strip ------------------------------------------------------ */
+.lanes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lane {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: var(--bg-surface);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.lane[data-off] {
+  border-style: dashed;
+  color: var(--text-tertiary);
+}
+
+.laneName {
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+}
+
+.laneSlots {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.laneWhy {
+  color: var(--text-tertiary);
+  max-width: 32ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- why this seat ---------------------------------------------------- */
+.decision {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.decisionLead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  font-size: var(--text-md-size);
+  line-height: var(--text-md-line);
+  color: var(--text-primary);
+}
+
+.mode {
+  font-family: var(--font-display); /* micro-labels follow the Display-font setting */
+  margin-left: auto;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-xs-line);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
+.decisionWhy {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line-relaxed);
+}
+
+.candidates,
+.exclusions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+}
+
+.candidates li {
+  color: var(--text-secondary);
+}
+
+.exclusions li {
+  display: flex;
+  flex-direction: column;
+}
+
+.excluded {
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+}
+
+.excludedWhy {
+  color: var(--text-secondary);
+}
+
+.excludedWhen {
+  color: var(--text-tertiary);
+}
+
+/* ---- overnight -------------------------------------------------------- */
+.overnight {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.overnightLead {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+}
+
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(96px, 1fr));
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+}
+
+.facts dt {
+  font-family: var(--font-display); /* micro-labels follow the Display-font setting */
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
+.facts dd {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  font-variant-numeric: tabular-nums;
+}
+
+.discarded {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.discarded li {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--text-xs-size);
+}
+
+.discardTitle {
+  color: var(--text-primary);
+}
+
+.discardWhy {
+  color: var(--status-danger-fg);
+}
+
+/* ---- repo table ------------------------------------------------------- */
+.tableWrap {
+  overflow-x: auto;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+.table th,
+.table td {
+  padding: var(--space-2) var(--space-3) var(--space-2) 0;
+  border-bottom: 1px solid var(--border-subtle);
+  text-align: left;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+.table thead th {
+  font-family: var(--font-display); /* micro-labels follow the Display-font setting */
+  color: var(--text-tertiary);
+  font-size: var(--text-2xs-size);
+  font-weight: var(--font-weight-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+}
+
+.table tbody tr[data-held] {
+  background: var(--status-warning-bg);
+}
+
+.repoName {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-regular);
+  color: var(--text-primary);
+}
+
+.actionCell {
+  text-align: right;
+}
+
+.stage {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+}
+
+.stage[data-stage='merge'] {
+  background: var(--status-success-bg);
+  color: var(--status-success-fg);
+}
+
+.stage[data-stage='none'] {
+  background: transparent;
+  border: 1px dashed var(--border-strong);
+  color: var(--text-tertiary);
+}
+
+.stageNote {
+  color: inherit;
+  opacity: 0.8;
+}
+
+.green {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.greenValue {
+  min-width: 4ch;
+  font-variant-numeric: tabular-nums;
+}
+
+.holds {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.hold {
+  padding: 0 var(--space-2);
+  border-radius: var(--radius-full);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  white-space: nowrap;
+}
+
+.hold[data-kind='quarantine'],
+.hold[data-kind='owner-hold'] {
+  background: var(--status-danger-bg);
+  color: var(--status-danger-fg);
+}
+
+.repoCards {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.repoCard {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.repoCardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+/* ---- advanced disclosure --------------------------------------------- */
+.advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.disclosure {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  align-self: flex-start;
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--text-sm-size);
+  cursor: pointer;
+}
+
+.disclosure:hover {
+  background: var(--bg-hover);
+}
+
+.chevron {
+  transition: transform var(--duration-fast) var(--ease-standard);
+}
+
+.disclosure[aria-expanded='true'] .chevron {
+  transform: rotate(90deg);
+}
+
+.disclosureNote {
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chevron {
+    transition: none;
+  }
+}

@@ -1,0 +1,71 @@
+/* Rail badges: pinned to the icon's own 16px box (RailIcon), so they read the
+   same in the 56px and the labelled rail. Shape carries meaning; colour
+   confirms it. */
+
+.count {
+  position: absolute;
+  top: -6px;
+  right: -9px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  /* The status pair, not solid + ink: the bg/fg tokens are the ones tuned
+     for text contrast in BOTH themes (the solid flips nothing). */
+  background: var(--status-warning-bg);
+  box-shadow: 0 0 0 2px var(--bg-canvas), inset 0 0 0 1px var(--status-warning-solid);
+  color: var(--status-warning-fg);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size);
+  font-weight: var(--font-weight-semibold);
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.dot,
+.pulse {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 0 2px var(--bg-canvas);
+  background: var(--status-info-solid);
+}
+.pulse { background: var(--status-running-solid); animation: pulse var(--duration-pulse) ease-in-out infinite; }
+
+/* Autonomy: off = hollow ring, propose = half, autonomous = full,
+   paused = a bar, stopped = a square. */
+.autonomy {
+  position: absolute;
+  top: -3px;
+  right: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-full);
+  box-shadow: 0 0 0 2px var(--bg-canvas);
+  border: 1.5px solid var(--text-tertiary);
+  background: transparent;
+}
+.autonomy[data-shape='propose'] { border-color: var(--status-info-solid); background: linear-gradient(90deg, var(--status-info-solid) 50%, transparent 50%); }
+.autonomy[data-shape='autonomous'] { border-color: var(--status-success-solid); background: var(--status-success-solid); }
+.autonomy[data-shape='paused'] { border-radius: 1px; border: 0; width: 8px; height: 3px; top: 0; background: var(--status-warning-solid); }
+.autonomy[data-shape='stopped'] { border-radius: 1px; border-color: var(--status-danger-solid); background: var(--status-danger-solid); }
+
+.ring { display: block; }
+.ringTrack { fill: none; stroke: var(--meter-track); stroke-width: 2.5; }
+.ringFill { fill: none; stroke: var(--data-seq-5); stroke-width: 2.5; stroke-linecap: round; }
+.ring[data-tone='tight'] .ringFill { stroke: var(--status-warning-solid); }
+.ring[data-tone='critical'] .ringFill { stroke: var(--status-danger-solid); }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion='full']) .pulse { animation: none; }
+}
+:root[data-motion='reduce'] .pulse { animation: none; }

@@ -12,6 +12,7 @@
  *  - No new runtime deps; node builtins only.
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomBytes } from 'node:crypto';
 import {
   chmodSync,
@@ -43,10 +44,22 @@ import { fsyncDirectory } from '../util/durability.js';
 import { assurePrivateStoragePath } from '../util/private-storage.js';
 import {
   acquireOutwardMutationFence,
+  acquireOutwardMutationFenceAsync,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
   type OutwardMutationFence,
 } from './mutation-fence.js';
+// V3.10 U6: kill / unenroll DRAIN running agents. Agents no longer hold the
+// outward fence across inference (that capped the machine at one agent); they
+// hold a shared execution lease instead, and this module aborts and waits for
+// those leases. execution-leases.ts does not import policy.ts (no cycle).
+import {
+  abortExecutionLeases,
+  countLiveExecutionLeases,
+  EXECUTION_LEASE_DRAIN_MS,
+  waitForExecutionLeasesToDrain,
+  type ExecutionLeaseScope,
+} from './execution-leases.js';
 // H6 (PART A — audit completeness): emit an audit() record inside
 // enroll/unenroll/setKill so EVERY path (CLI cmdEnroll OR any programmatic
 // caller — fixture, daemon, onboard) is captured — see
@@ -1198,7 +1211,7 @@ function readRegistry(): Enrollment {
 export function readEnrollmentRegistry(): EnrollmentRegistrySnapshot {
   const read = readRegistryDetailed();
   if (!read.ok) return { state: 'degraded', reason: read.reason };
-  return { state: 'ready', repos: [...read.registry.repos], reason: read.reason };
+  return { state: 'ready', repos: lensedRepos(read.registry.repos), reason: read.reason };
 }
 
 /**
@@ -1231,7 +1244,7 @@ export function recoverEnrollmentRegistry(
     return {
       state: 'ready',
       recovered: recovery.reason !== 'no-transaction',
-      repos: [...read.registry.repos],
+      repos: lensedRepos(read.registry.repos),
       reason: recovery.reason === 'no-transaction' ? read.reason : recovery.reason,
     };
   } finally {
@@ -1550,47 +1563,120 @@ export function killSwitchOn(): boolean {
 }
 
 /**
+ * Arm KILL and try to reach quiescence once. No audit (callers audit once).
+ *
+ * Quiescent means: KILL is durably armed, this call holds the outward fence,
+ * and NO execution lease is live. The lease census happens while holding the
+ * fence — a lease is only ever registered under the fence after checking KILL
+ * — so once it reads zero, nothing admitted before KILL is still running and
+ * nothing can be admitted after it.
+ */
+function armKillOnce(waitMs: number, abortReason: string): PolicyMutationResult {
+  const armed = armKillAndAbort(abortReason);
+  if (!armed.ok) return armed.result;
+  return confirmKillUnderFence(acquireOutwardMutationFence(waitMs), armed);
+}
+
+/**
+ * The same step with the fence awaited asynchronously. Used by the drain
+ * variants: in the daemon process the fence's holder may be another agent
+ * mid-await, which a synchronous spin can never let finish.
+ */
+async function armKillOnceAsync(waitMs: number, abortReason: string): Promise<PolicyMutationResult> {
+  const armed = armKillAndAbort(abortReason);
+  if (!armed.ok) return armed.result;
+  return confirmKillUnderFence(await acquireOutwardMutationFenceAsync(waitMs), armed);
+}
+
+function armKillAndAbort(
+  abortReason: string,
+): { ok: true; changed: boolean; reason: string } | { ok: false; result: PolicyMutationResult } {
+  // Restrictive intent is durable before waiting. A mutation already inside
+  // the fence may finish, but no later effect can enter after observing KILL.
+  const armed = installKillSentinel();
+  if (!armed.ok) {
+    return { ok: false, result: { ok: false, changed: armed.changed, quiesced: false, reason: armed.reason } };
+  }
+  // DRAIN: stop every agent this process runs, now. Agents in other processes
+  // see KILL at their next lease poll (EXECUTION_LEASE_POLL_MS).
+  abortExecutionLeases(null, abortReason);
+  return { ok: true, changed: armed.changed, reason: armed.reason };
+}
+
+function confirmKillUnderFence(
+  fence: OutwardMutationFence | null,
+  armed: { changed: boolean; reason: string },
+): PolicyMutationResult {
+  const armedChanged = armed.changed;
+  const armedReason = armed.reason;
+  let result: PolicyMutationResult;
+  if (!ownsOutwardMutationFence(fence)) {
+    result = {
+      ok: false,
+      changed: armedChanged,
+      quiesced: false,
+      reason: 'kill armed; an outward mutation has not quiesced',
+    };
+  } else {
+    // A concurrent resume may have cleared a pre-existing sentinel while
+    // this pause waited. Reinstall and verify under the same fence.
+    const confirmed = installKillSentinel();
+    const liveLeases = confirmed.ok ? countLiveExecutionLeases(null) : 0;
+    result = !(confirmed.ok && killSwitchOn())
+      ? {
+          ok: false,
+          changed: armedChanged || confirmed.changed,
+          quiesced: false,
+          reason: confirmed.ok ? 'kill-readback-failed' : confirmed.reason,
+        }
+      : liveLeases > 0
+        ? {
+            // Same wording as a held fence: an agent admitted before KILL is
+            // still running (it has been told to stop).
+            ok: false,
+            changed: armedChanged || confirmed.changed,
+            quiesced: false,
+            reason: 'kill armed; an outward mutation has not quiesced',
+          }
+        : {
+            ok: true,
+            changed: armedChanged || confirmed.changed,
+            quiesced: true,
+            reason: confirmed.changed ? 'kill-rearmed' : armedReason,
+          };
+  }
+  releaseOutwardMutationFence(fence);
+  return result;
+}
+
+function auditKill(on: boolean, result: PolicyMutationResult): void {
+  // H6 (§A.2): audit the kill-switch toggle on EVERY call (idempotent on disk;
+  // we audit the requested intent). repo is null (not repo-scoped); summary is
+  // metadata only. audit() swallows its own errors, so the "never throws"
+  // contract of setKill is preserved.
+  if (canonicalHome()) {
+    audit({
+      action: on ? 'kill:on' : 'kill:off',
+      repo: null,
+      sandboxId: null,
+      summary: `kill switch ${on ? 'on' : 'off'}`,
+      result: result.ok ? 'ok' : 'error',
+    });
+  }
+}
+
+/**
  * Turn the kill switch on (creates ~/.ashlr/KILL) or off (removes it).
  * Idempotent in both directions.
+ *
+ * ON is synchronous and does not wait for running agents: it arms KILL,
+ * aborts this process's agents, and reports `quiesced:false` while any
+ * execution lease is still live. Use `setKillAndDrain` to wait for them.
  */
 export function setKill(on: boolean, opts: { waitMs?: number } = {}): PolicyMutationResult {
   let result: PolicyMutationResult;
   if (on) {
-    // Restrictive intent is durable before waiting. A mutation already inside
-    // the fence may finish, but no later effect can enter after observing KILL.
-    const armed = installKillSentinel();
-    if (!armed.ok) {
-      result = { ok: false, changed: armed.changed, quiesced: false, reason: armed.reason };
-    } else {
-      const fence = acquireOutwardMutationFence(opts.waitMs ?? 2_000);
-      const quiesced = ownsOutwardMutationFence(fence);
-      if (!quiesced) {
-        result = {
-          ok: false,
-          changed: armed.changed,
-          quiesced: false,
-          reason: 'kill armed; an outward mutation has not quiesced',
-        };
-      } else {
-        // A concurrent resume may have cleared a pre-existing sentinel while
-        // this pause waited. Reinstall and verify under the same fence.
-        const confirmed = installKillSentinel();
-        result = confirmed.ok && killSwitchOn()
-          ? {
-              ok: true,
-              changed: armed.changed || confirmed.changed,
-              quiesced: true,
-              reason: confirmed.changed ? 'kill-rearmed' : armed.reason,
-            }
-          : {
-              ok: false,
-              changed: armed.changed || confirmed.changed,
-              quiesced: false,
-              reason: confirmed.ok ? 'kill-readback-failed' : confirmed.reason,
-            };
-      }
-      releaseOutwardMutationFence(fence);
-    }
+    result = armKillOnce(opts.waitMs ?? 2_000, 'kill switch armed');
   } else {
     // Resume is permissive, so it may clear KILL only while holding the fence.
     const fence = acquireOutwardMutationFence(opts.waitMs ?? 2_000);
@@ -1613,20 +1699,138 @@ export function setKill(on: boolean, opts: { waitMs?: number } = {}): PolicyMuta
       };
     }
   }
-  // H6 (§A.2): audit the kill-switch toggle on EVERY call (idempotent on disk;
-  // we audit the requested intent). repo is null (not repo-scoped); summary is
-  // metadata only. audit() swallows its own errors, so the "never throws"
-  // contract of setKill is preserved.
-  if (canonicalHome()) {
-    audit({
-      action: on ? 'kill:on' : 'kill:off',
-      repo: null,
-      sandboxId: null,
-      summary: `kill switch ${on ? 'on' : 'off'}`,
-      result: result.ok ? 'ok' : 'error',
-    });
-  }
+  auditKill(on, result);
   return result;
+}
+
+/** A policy mutation that drained running agents, and how many were left. */
+export interface DrainedPolicyMutationResult extends PolicyMutationResult {
+  /** Execution leases in scope still live when the call returned (0 when quiesced). */
+  liveExecutionLeases: number;
+  /** How long the call waited for leases to drain. */
+  drainWaitedMs: number;
+}
+
+/**
+ * STOP (SPEC-310B §3): arm KILL, abort every running agent, wait up to
+ * `drainMs` (default 30 s) for their execution leases to be released, then
+ * take the global exclusive fence to confirm. Never throws; audited once.
+ * `quiesced:true` means no autonomous agent is running and none can start.
+ */
+export async function setKillAndDrain(
+  opts: { waitMs?: number; drainMs?: number; pollMs?: number } = {},
+): Promise<DrainedPolicyMutationResult> {
+  const waitMs = opts.waitMs ?? 2_000;
+  const started = Date.now();
+  let result = await armKillOnceAsync(waitMs, 'kill switch armed');
+  if (!result.quiesced && killSwitchOn()) {
+    await waitForExecutionLeasesToDrain(null, {
+      timeoutMs: opts.drainMs ?? EXECUTION_LEASE_DRAIN_MS,
+      ...(opts.pollMs !== undefined ? { pollMs: opts.pollMs } : {}),
+      reason: 'kill switch armed',
+    });
+    const confirmed = await armKillOnceAsync(waitMs, 'kill switch armed');
+    result = { ...confirmed, changed: result.changed || confirmed.changed };
+  }
+  auditKill(true, result);
+  return {
+    ...result,
+    liveExecutionLeases: result.quiesced ? 0 : countLiveExecutionLeases(null),
+    drainWaitedMs: Date.now() - started,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Enrollment lens — a READ-ONLY narrowing of the registry for one async scope
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS (3.10 R3f). Under a standing grant the fleet must work ONLY
+// in its own mirrors (~/.ashlr/fleet/mirrors, SPEC-310B §2) — never in Mason's
+// checkouts. U6 first got there by rewriting ~/.ashlr/enrollment.json to be
+// exactly the grant's mirrors, i.e. by UNENROLLING Mason's checkouts. That
+// registry is shared: Verse's enrolled flags, the MCP tools' isEnrolled gate,
+// inbox apply, knowledge / quality / backlog scans and the CLI all read it, so
+// a grant silently switched those features off for his own repos and nothing
+// put them back when the grant ended.
+//
+// The lens gives the standing daemon the SAME view U6's rewrite gave it —
+// every enrolled read inside the daemon's scope sees only admitted paths —
+// without writing a byte of Mason's registry:
+//   - it is scoped with AsyncLocalStorage `run`, never `enterWith` (on this
+//     Node, `enterWith` inside an async function leaks into its caller — the
+//     goal conductor calls runDaemon in-process and must not inherit it);
+//   - it only NARROWS: every lens in scope must admit a path; a lens that
+//     throws admits nothing; nested scopes inherit and can only narrow more;
+//   - it applies to the exported READS (isEnrolled — hence assertMayMutate —
+//     listEnrolled, readEnrollmentRegistry, recoverEnrollmentRegistry). The
+//     write paths (enroll / unenroll / writeRegistry) read the raw registry
+//     internally, so a lensed caller can never persist a lensed list and drop
+//     entries it cannot see.
+
+/** One narrowing: `admits` sees a canonical absolute registry path. */
+export interface EnrollmentLens {
+  /** Short human label, for diagnostics and audit summaries. */
+  readonly label: string;
+  admits(path: string): boolean;
+}
+
+interface EnrollmentScope {
+  lenses: EnrollmentLens[];
+}
+
+const enrollmentScopeStorage = new AsyncLocalStorage<EnrollmentScope>();
+
+/**
+ * Run `fn` in a fresh enrollment scope (inheriting any enclosing narrowing) that
+ * `narrowEnrollmentScope` can narrow further from inside. Nothing outside `fn`'s
+ * async tree sees the scope.
+ */
+export function withEnrollmentScope<T>(fn: () => T): T {
+  const parent = enrollmentScopeStorage.getStore();
+  return enrollmentScopeStorage.run({ lenses: parent ? [...parent.lenses] : [] }, fn);
+}
+
+/**
+ * Narrow the CURRENT scope (and everything it later starts) to paths `lens`
+ * admits. Returns false when there is no scope to narrow — the caller must
+ * then refuse the work it wanted to confine, never run it unnarrowed.
+ */
+export function narrowEnrollmentScope(lens: EnrollmentLens): boolean {
+  const scope = enrollmentScopeStorage.getStore();
+  if (!scope) return false;
+  scope.lenses.push(lens);
+  return true;
+}
+
+/** `withEnrollmentScope` + `narrowEnrollmentScope(lens)` around `fn`. */
+export function runWithEnrollmentLens<T>(lens: EnrollmentLens, fn: () => T): T {
+  return withEnrollmentScope(() => {
+    narrowEnrollmentScope(lens);
+    return fn();
+  });
+}
+
+/** Labels of the lenses narrowing this async scope ([] = the full registry). */
+export function activeEnrollmentLenses(): string[] {
+  return (enrollmentScopeStorage.getStore()?.lenses ?? []).map((lens) => lens.label);
+}
+
+function lensAdmits(path: string): boolean {
+  const lenses = enrollmentScopeStorage.getStore()?.lenses;
+  if (!lenses || lenses.length === 0) return true;
+  for (const lens of lenses) {
+    try {
+      if (lens.admits(path) !== true) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** A copy of `repos` narrowed by the scope's lenses (a plain copy when none). */
+function lensedRepos(repos: readonly string[]): string[] {
+  return repos.filter((repo) => lensAdmits(repo));
 }
 
 // ---------------------------------------------------------------------------
@@ -1635,13 +1839,13 @@ export function setKill(on: boolean, opts: { waitMs?: number } = {}): PolicyMuta
 
 /**
  * Returns true when `repo` (normalized to absolute path) is enrolled
- * for autonomous work.
+ * for autonomous work — and, inside a lensed scope, admitted by the lens.
  */
 export function isEnrolled(repo: string): boolean {
   const abs = canonicalEnrollmentPath(repo);
   if (!abs) return false;
   const reg = readRegistry();
-  return reg.repos.includes(abs);
+  return reg.repos.includes(abs) && lensAdmits(abs);
 }
 
 /**
@@ -1703,14 +1907,42 @@ export function enroll(
   return result;
 }
 
+/** The execution-lease scope of one repo: its canonical and lexical spellings. */
+function repoLeaseScope(abs: string | null, lexical: string): ExecutionLeaseScope {
+  return { repoKeys: abs && abs !== lexical ? [abs, lexical] : [abs ?? lexical] };
+}
+
 /**
- * Remove `repo` from the enrollment registry. Idempotent — unenrolling
- * an absent repo is a no-op. Normalizes to absolute path.
+ * Write the unenrollment, then drain the repo's agents once. No audit.
+ *
+ * The registry write stays under the fence exactly as before. While still
+ * holding it, every agent this process runs on the repo is aborted and the
+ * repo's live execution leases are counted: an agent registers its lease only
+ * under the fence after checking enrollment, so after this write no new one
+ * can appear, and `quiesced` is true only when none is left.
  */
-export function unenroll(repo: string, opts: { waitMs?: number } = {}): PolicyMutationResult {
-  const lexical = resolve(repo);
-  const abs = canonicalEnrollmentPath(repo);
-  const fence = acquireOutwardMutationFence(opts.waitMs ?? 2_000);
+function unenrollOnce(
+  abs: string | null,
+  lexical: string,
+  waitMs: number,
+): PolicyMutationResult {
+  return unenrollUnderFence(abs, lexical, acquireOutwardMutationFence(waitMs));
+}
+
+/** unenrollOnce with the fence awaited asynchronously (drain path; see armKillOnceAsync). */
+async function unenrollOnceAsync(
+  abs: string | null,
+  lexical: string,
+  waitMs: number,
+): Promise<PolicyMutationResult> {
+  return unenrollUnderFence(abs, lexical, await acquireOutwardMutationFenceAsync(waitMs));
+}
+
+function unenrollUnderFence(
+  abs: string | null,
+  lexical: string,
+  fence: OutwardMutationFence | null,
+): PolicyMutationResult {
   let result: PolicyMutationResult;
   if (!abs) {
     result = { ok: false, changed: false, quiesced: false, reason: 'invalid-enrollment-path' };
@@ -1736,9 +1968,25 @@ export function unenroll(repo: string, opts: { waitMs?: number } = {}): PolicyMu
           reason: persisted.ok ? 'unenrolled' : persisted.reason,
         };
       }
+      if (result.ok) {
+        const scope = repoLeaseScope(abs, lexical);
+        abortExecutionLeases(scope, 'repo unenrolled');
+        if (countLiveExecutionLeases(scope) > 0) {
+          result = {
+            ok: false,
+            changed: result.changed,
+            quiesced: false,
+            reason: 'unenrolled; an autonomous run on this repo has not drained',
+          };
+        }
+      }
     }
   }
   releaseOutwardMutationFence(fence);
+  return result;
+}
+
+function auditUnenroll(abs: string | null, lexical: string, result: PolicyMutationResult): void {
   // H6 (§A.2): audit AFTER the (idempotent) write so a no-op unenroll STILL
   // records the requested intent. Metadata only (abs path is not a secret);
   // audit() swallows its own errors so unenroll's "never throws" contract holds.
@@ -1751,7 +1999,63 @@ export function unenroll(repo: string, opts: { waitMs?: number } = {}): PolicyMu
       result: result.ok ? 'ok' : 'error',
     });
   }
+}
+
+/**
+ * Remove `repo` from the enrollment registry. Idempotent — unenrolling
+ * an absent repo is a no-op. Normalizes to absolute path.
+ *
+ * Aborts this process's agents on the repo and reports `quiesced:false`
+ * (ok:false, changed as written) while any of the repo's execution leases is
+ * still live. Use `unenrollAndDrain` to wait for them.
+ */
+export function unenroll(repo: string, opts: { waitMs?: number } = {}): PolicyMutationResult {
+  const lexical = resolve(repo);
+  const abs = canonicalEnrollmentPath(repo);
+  const result = unenrollOnce(abs, lexical, opts.waitMs ?? 2_000);
+  auditUnenroll(abs, lexical, result);
   return result;
+}
+
+/**
+ * UNENROLL (SPEC-310B §3): write the unenrollment, abort the repo's running
+ * agents, wait up to `drainMs` (default 30 s) for their execution leases,
+ * then confirm under the global exclusive fence. Never throws; audited once.
+ */
+export async function unenrollAndDrain(
+  repo: string,
+  opts: { waitMs?: number; drainMs?: number; pollMs?: number } = {},
+): Promise<DrainedPolicyMutationResult> {
+  const lexical = resolve(repo);
+  const abs = canonicalEnrollmentPath(repo);
+  const waitMs = opts.waitMs ?? 2_000;
+  const started = Date.now();
+  let result = await unenrollOnceAsync(abs, lexical, waitMs);
+  const drainable = !result.quiesced && result.reason === 'unenrolled; an autonomous run on this repo has not drained';
+  if (drainable) {
+    const scope = repoLeaseScope(abs, lexical);
+    await waitForExecutionLeasesToDrain(scope, {
+      timeoutMs: opts.drainMs ?? EXECUTION_LEASE_DRAIN_MS,
+      ...(opts.pollMs !== undefined ? { pollMs: opts.pollMs } : {}),
+      reason: 'repo unenrolled',
+    });
+    // Re-running the idempotent unenroll re-verifies the registry and recounts
+    // the leases under the fence; keep the first call's `changed`.
+    const confirmed = await unenrollOnceAsync(abs, lexical, waitMs);
+    const changed = result.changed || confirmed.changed;
+    result = {
+      ...confirmed,
+      changed,
+      reason: confirmed.quiesced ? (changed ? 'unenrolled' : 'already-unenrolled') : confirmed.reason,
+    };
+  }
+  auditUnenroll(abs, lexical, result);
+  const scope = repoLeaseScope(abs, lexical);
+  return {
+    ...result,
+    liveExecutionLeases: result.quiesced ? 0 : countLiveExecutionLeases(scope),
+    drainWaitedMs: Date.now() - started,
+  };
 }
 
 /**
@@ -1759,7 +2063,7 @@ export function unenroll(repo: string, opts: { waitMs?: number } = {}): PolicyMu
  * enrolled (the default state — DEFAULT EMPTY).
  */
 export function listEnrolled(): string[] {
-  return readRegistry().repos;
+  return lensedRepos(readRegistry().repos);
 }
 
 // ---------------------------------------------------------------------------
@@ -1799,6 +2103,10 @@ export function assertMayMutate(
     opts?.allowAnyRepo === true &&
     process.env.ASHLR_TEST_ALLOW_ANY_REPO === '1';
   if (!allowAnyRepo && !isEnrolled(repo)) {
-    throw new Error(`repo not enrolled for autonomous work: ${canonicalEnrollmentPath(repo) ?? resolve(repo)}`);
+    // Name the lens when one is in force: "enrolled, but outside the fleet's
+    // lane" is a different fix from "not enrolled".
+    const lenses = activeEnrollmentLenses();
+    throw new Error(`repo not enrolled for autonomous work: ${canonicalEnrollmentPath(repo) ?? resolve(repo)}` +
+      (lenses.length > 0 ? ` (enrollment narrowed to: ${lenses.join('; ')})` : ''));
   }
 }

@@ -16,15 +16,18 @@
 //! PRIVACY. Nothing the server returns as free text reaches a notification:
 //! `reasons` are ignored, the seat id is reduced to `[A-Za-z0-9._-]`, and times
 //! are rendered by this module from the timestamps. The read token lives only in
-//! the request header — never in an error, a log line, or a notification. The
-//! notification itself is delivered through the OS (`osascript` on macOS,
-//! `notify-send` on Linux) with the text passed as ARGV, so no quoting bug can
-//! turn a seat name into script.
+//! the request header — never in an error, a log line, or a notification.
+//! Delivery (native plugin, or osascript with the text as ARGV on unsigned
+//! builds) and the "only while the window is not in front" gate live in
+//! `notify.rs`, shared with the activity watch.
 //!
-//! The HTTP client is a deliberately tiny HTTP/1.1 GET over `std::net`: one
-//! loopback origin, one route, a body cap and hard timeouts. It sends no
+//! The HTTP client is a deliberately tiny HTTP/1.1 client over `std::net`: one
+//! loopback origin, a body cap and hard timeouts. It sends no
 //! `Accept-Encoding`, so the server answers identity-encoded, and it decodes
 //! `Transfer-Encoding: chunked` because Node uses it whenever a handler streams.
+//! Besides this module's health poll it carries the activity watch's GET
+//! (`activity_watch.rs`) and the tray's "Stop running chats" POSTs, which send
+//! the MUTATION token the same way — header only, never logged.
 
 use std::{
     collections::HashMap,
@@ -402,6 +405,36 @@ fn decode_chunked(mut body: &[u8]) -> Result<Vec<u8>, FetchError> {
 
 /// GET `path` from the loopback server with the read token.
 pub fn fetch(addr: SocketAddr, path: &str, read_token: &str) -> Result<Vec<u8>, FetchError> {
+    request(addr, "GET", path, read_token, None)
+}
+
+/// POST a JSON `body` to `path` with the MUTATION token (the sidecar's
+/// `passesMutationGate`: `X-Ashlr-Token` + `Content-Type: application/json`).
+pub fn post_json(
+    addr: SocketAddr,
+    path: &str,
+    token: &str,
+    body: &str,
+) -> Result<Vec<u8>, FetchError> {
+    request(addr, "POST", path, token, Some(body))
+}
+
+/// A header value we are willing to send: no CR/LF (no header injection), and
+/// printable ASCII only — tokens and paths are hex / our own route strings.
+fn header_safe(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+fn request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    token: &str,
+    body: Option<&str>,
+) -> Result<Vec<u8>, FetchError> {
+    if !header_safe(path) || !path.starts_with('/') || !header_safe(token) {
+        return Err(FetchError::Malformed);
+    }
     let mut stream =
         TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|_| FetchError::Connect)?;
     stream
@@ -412,11 +445,23 @@ pub fn fetch(addr: SocketAddr, path: &str, read_token: &str) -> Result<Vec<u8>, 
         .map_err(|_| FetchError::Io)?;
     // Host must match the server's allowlist (anti DNS-rebinding), so it is the
     // literal loopback address and port, exactly as the window uses.
-    let request = format!(
-        "GET {path} HTTP/1.1\r\nHost: {addr}\r\nX-Ashlr-Token: {read_token}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nX-Ashlr-Token: {token}\r\nAccept: application/json\r\nConnection: close\r\n"
     );
+    if let Some(body) = body {
+        head.push_str(&format!(
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        ));
+    }
+    head.push_str("\r\n");
+    // One write: the request is a few hundred bytes, and a single segment is
+    // what a minimal server (and the tests' one-shot server) reads whole.
+    if let Some(body) = body {
+        head.push_str(body);
+    }
     stream
-        .write_all(request.as_bytes())
+        .write_all(head.as_bytes())
         .map_err(|_| FetchError::Io)?;
     let mut raw = Vec::new();
     (&mut stream)
@@ -438,45 +483,6 @@ pub fn poll_once(addr: SocketAddr, read_token: &str) -> Result<Vec<SeatHealth>, 
     let body = fetch(addr, HEALTH_PATH, read_token)?;
     let text = std::str::from_utf8(&body).map_err(|_| FetchError::Malformed)?;
     parse_health(text).ok_or(FetchError::Malformed)
-}
-
-// ── delivery ─────────────────────────────────────────────────────────────────
-
-/// Show a native notification. Best effort: failure is logged, never raised.
-pub fn notify(title: &str, body: &str) {
-    #[cfg(target_os = "macos")]
-    {
-        // Text travels as argv to an AppleScript `on run`, never spliced into
-        // the script source — a seat named `"; do shell script "…` is just text.
-        let result = std::process::Command::new("/usr/bin/osascript")
-            .args([
-                "-e",
-                "on run argv",
-                "-e",
-                "display notification (item 2 of argv) with title (item 1 of argv)",
-                "-e",
-                "end run",
-                title,
-                body,
-            ])
-            .output();
-        if let Err(e) = result {
-            eprintln!("[ashlr-desktop] could not show a notification: {e}");
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let result = std::process::Command::new("notify-send")
-            .args(["--app-name=Ashlr", "--", title, body])
-            .output();
-        if result.is_err() {
-            eprintln!("[ashlr-desktop] notification (notify-send unavailable): {title} — {body}");
-        }
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        eprintln!("[ashlr-desktop] notification: {title} — {body}");
-    }
 }
 
 #[cfg(test)]
@@ -849,6 +855,51 @@ mod tests {
             poll_once(addr, "wrong-token").expect_err("bad token"),
             FetchError::Status(401)
         );
+    }
+
+    #[test]
+    fn a_post_carries_the_mutation_token_json_content_type_and_exact_length() {
+        let (addr, server) = one_shot_server(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 28\r\n\r\n{\"ok\":true,\"cancelled\":true}",
+        );
+        let body = post_json(
+            addr,
+            "/api/verse/sessions/vs_1/cancel",
+            "mutation-token",
+            "{}",
+        )
+        .expect("post");
+        assert_eq!(body, b"{\"ok\":true,\"cancelled\":true}");
+        let request = server.join().expect("server");
+        assert!(
+            request.starts_with("POST /api/verse/sessions/vs_1/cancel HTTP/1.1\r\n"),
+            "{request}"
+        );
+        assert!(request.contains("X-Ashlr-Token: mutation-token\r\n"));
+        assert!(request.contains("Content-Type: application/json\r\n"));
+        assert!(request.contains("Content-Length: 2\r\n"));
+    }
+
+    #[test]
+    fn a_path_or_token_that_could_inject_a_header_is_refused_before_connecting() {
+        // Nothing listens here: a refusal must come back as Malformed, i.e.
+        // decided before any connection attempt.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        drop(listener);
+        for (path, token) in [
+            ("/api/verse/activity\r\nX-Evil: 1", "t"),
+            ("/api/verse/activity", "t\r\nX-Evil: 1"),
+            ("/api/verse/activity?since=a b", "t"),
+            ("api/no-leading-slash", "t"),
+            ("/api/verse/activity", ""),
+        ] {
+            assert_eq!(
+                fetch(addr, path, token).expect_err("refused"),
+                FetchError::Malformed,
+                "{path:?}"
+            );
+        }
     }
 
     #[test]

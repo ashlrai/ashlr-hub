@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMutationToken, clearReadSession, getAuthSnapshot, getMutationToken, hasMutationHold, markCheckComplete } from '../data/auth-store.js';
 import { evictAll } from '../data/cache.js';
@@ -10,6 +10,23 @@ import { listenForSidecarRestart, SIDECAR_RESTARTED_EVENT, VerseConsoleApp } fro
 
 const READ = 'c'.repeat(64);
 const MUT = 'd'.repeat(64);
+
+/**
+ * "The app is in, not the gate": wait for the rail, then check which surface
+ * the launch rule picked.
+ *
+ * WHY NOT the Chats sidebar (the pre-3.10 landmark): verse-ui-store's launch
+ * rule opens COMMAND on the first launch of each local day, and every page
+ * load here is a first launch (localStorage is cleared, and the store reads it
+ * once at import). So Chat — and its "Chats" navigation — is not mounted.
+ * The rail is present on every surface, which is what "adopted, no gate"
+ * actually means; Command being current pins the launch rule itself, so a
+ * regression that silently dropped it would fail here rather than pass.
+ */
+async function expectShellOnCommand(): Promise<void> {
+  const rail = await screen.findByRole('navigation', { name: 'Verse sections' });
+  expect(within(rail).getByRole('button', { name: /^Command/ })).toHaveAttribute('aria-current', 'page');
+}
 
 beforeEach(() => {
   window.history.replaceState(null, '', '/verse/');
@@ -55,7 +72,7 @@ describe('VerseConsoleApp', () => {
     vi.stubGlobal('fetch', fetch);
     window.__ASHLR_TOKENS__ = { readToken: READ, token: MUT };
     render(<VerseConsoleApp />);
-    await screen.findByRole('navigation', { name: 'Chats' });
+    await expectShellOnCommand();
     expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
     const sessionCall = state.calls.find((c) => c.path === '/api/session')!;
     expect(sessionCall.method).toBe('POST');
@@ -151,7 +168,7 @@ describe('listenForSidecarRestart (desktop sidecar restart → immediate re-adop
     expect(await screen.findByRole('heading', { name: 'Connect to Ashlr Verse' })).toBeInTheDocument();
     window.__ASHLR_TOKENS__ = { readToken: READ2, token: MUT2 };
     act(() => { window.dispatchEvent(new CustomEvent(SIDECAR_RESTARTED_EVENT)); });
-    await screen.findByRole('navigation', { name: 'Chats' });
+    await expectShellOnCommand();
     expect(screen.queryByRole('heading', { name: 'Connect to Ashlr Verse' })).not.toBeInTheDocument();
   });
 });

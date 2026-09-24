@@ -28,6 +28,9 @@ import { createReadSessionBoundary, headerValue, isAllowedHost, requestUrl, safe
 import { serveStatic } from './static.js';
 import { gcRunStreams } from '../run/streaming.js';
 import { resetVerseEngine } from '../verse/verse-api.js';
+import { isPreviewFramePath } from '../verse/preview.js';
+import { closeVerseTerminals } from '../verse/terminal.js';
+import { VERSE_TERMINAL_PATH } from '../verse/workbench-types.js';
 
 // ---------------------------------------------------------------------------
 // Host-header allowlist (anti DNS-rebinding)
@@ -60,6 +63,21 @@ export function assetsDir(): string {
 }
 
 // ---------------------------------------------------------------------------
+// Workbench helpers (V3.10, unit C4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Whether an authorised POST to `path` may have changed what the read
+ * projections show. Terminal traffic never does — it is keystrokes and
+ * resizes into a shell — and invalidating tears the projection worker thread
+ * down, which once per KEYSTROKE would both burn CPU and fail every read in
+ * flight. Everything else keeps the conservative default.
+ */
+export function mutationInvalidatesReadCaches(path: string): boolean {
+  return !(path === VERSE_TERMINAL_PATH || path.startsWith(`${VERSE_TERMINAL_PATH}/`));
+}
+
+// ---------------------------------------------------------------------------
 // startServer
 // ---------------------------------------------------------------------------
 
@@ -89,7 +107,11 @@ export async function startServer(
     res.setHeader('Referrer-Policy', 'no-referrer');
     // Legacy index.html contains its stylesheet inline; scripts remain
     // external-only. The new console uses external assets for both.
-    res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'");
+    // frame-src (V3.10, C4 Preview): the page may frame itself (a chat's
+    // artifacts, served sandboxed by /api/verse/preview/frame) and LOOPBACK
+    // http dev servers — nothing else. What those frames may do is limited by
+    // their own sandbox; frame-ancestors 'none' still stops anyone framing Verse.
+    res.setHeader('Content-Security-Policy', "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-src 'self' http://127.0.0.1:* http://localhost:*");
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
@@ -121,10 +143,19 @@ export async function startServer(
 
     // Static assets remain public. Every current and future proprietary API
     // GET (including SSE) is default-deny here before route dispatch.
+    //
+    // ONE exception (V3.10, C4 Preview): GET /api/verse/preview/frame/<ticket>.
+    // An <iframe src> cannot send the read-client header, so the page mints a
+    // single-file ticket through an authenticated GET and the frame presents
+    // it. The route itself refuses any ticket that is unknown, expired, or not
+    // accompanied by the cookie of the read session that minted it
+    // (core/verse/preview.ts redeemFrameTicket) — authority is still checked,
+    // just by the one route that can check it.
     if (
       method === 'GET'
       && (path === '/api' || path.startsWith('/api/'))
       && !authority
+      && !isPreviewFramePath(path)
     ) {
       sendJson(res, 401, { error: 'unauthorized: read session required' }, {
         Vary: 'Cookie, X-Ashlr-Token, X-Ashlr-Read-Client',
@@ -145,6 +176,7 @@ export async function startServer(
         // example a pause whose daemon has not quiesced yet). Invalidate after
         // every token-authorized attempt, never after an unauthenticated POST.
         if (handled && req.method === 'POST' && opts.allowDispatch
+          && mutationInvalidatesReadCaches(path)
           && safeEqual(headerValue(req, 'x-ashlr-token'), token)) {
           invalidateWebReadCaches(cfg);
           // Start invalidation before another request can observe stale worker
@@ -211,6 +243,9 @@ export async function startServer(
       // disk. Dropping the singleton also means a server created later in
       // this process never reuses a closed engine.
       resetVerseEngine(null);
+      // Terminal-pane shells (V3.10) die with the server that owns their PTYs.
+      // A no-op when no terminal was ever opened (it never creates a manager).
+      closeVerseTerminals();
       await Promise.all([readProjections?.close(), new Promise<void>((resolve) => {
         // Drain all open SSE response streams registered by handleApi, then
         // close the HTTP server (stops accepting new connections).

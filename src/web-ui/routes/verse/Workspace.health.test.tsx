@@ -41,26 +41,31 @@ function props(over: Partial<WorkspaceProps> = {}): WorkspaceProps {
     onSend: vi.fn(async () => true),
     onStop: vi.fn(),
     onRename: vi.fn(async () => true),
-    onDelete: vi.fn(async () => true),
+    onRequestDelete: vi.fn(),
     onSeatChange: vi.fn(),
     onNew: vi.fn(),
     onRetry: vi.fn(),
     sidebarCollapsed: false,
     onToggleSidebar: vi.fn(),
-    resourcesOpen: false,
-    onToggleResources: vi.fn(),
+    handoffOpen: false,
+    onHandoffOpenChange: vi.fn(),
+    otherRunning: [],
     ...over,
   };
 }
 
 const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 
-/** Every read answers `{}` except /api/verse/health, which answers `reports`. */
+/**
+ * /api/verse/health answers `reports`; every other read is a 404 — what a
+ * route that is not mounted answers (the 3.10 route families land unit by
+ * unit, and every reader must survive their absence).
+ */
 function stubHealth(reports: SeatHealthReport[]) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
     const path = new URL(String(input), 'http://localhost').pathname;
     if (path === '/api/verse/health') return json({ checkedAt: '2026-09-23T20:00:00.000Z', seats: reports });
-    return json({});
+    return new Response('not found', { status: 404 });
   });
   vi.stubGlobal('fetch', fetchMock);
   return fetchMock;
@@ -91,11 +96,19 @@ describe('Workspace — seat health banner mount', () => {
     expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/api/verse/health'))).toBe(true);
   });
 
-  it('shows it with a chat open, too', async () => {
+  it('shows it with a chat open, too — in the notice slot above the composer (3.10)', async () => {
     stubHealth([SIGNED_OUT]);
     const s = session();
-    render(<Workspace {...props({ view: view({ sessionId: s.id, session: s }) })} />);
-    expect(await screen.findByRole('region', { name: 'Seat health' })).toHaveTextContent('Claude Max');
+    const { container } = render(<Workspace {...props({ view: view({ sessionId: s.id, session: s }) })} />);
+    const region = await screen.findByRole('region', { name: 'Seat health' });
+    expect(region).toHaveTextContent('Claude Max');
+    // Banners moved out of the header: the one notice slot holds it, and the
+    // slot sits after the transcript, before the message box.
+    const slot = screen.getByRole('region', { name: 'Notices' });
+    expect(slot.contains(region)).toBe(true);
+    expect(container.querySelector('header')?.contains(region)).toBe(false);
+    const log = screen.getByRole('log');
+    expect(log.compareDocumentPosition(slot) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it('renders nothing — not even the column wrapper — while every seat is fine', async () => {

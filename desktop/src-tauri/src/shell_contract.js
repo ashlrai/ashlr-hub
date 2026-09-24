@@ -41,6 +41,19 @@
 
   var lastTheme = null
 
+  // Desktop state (Settings ▸ Desktop): the global hotkey and notifications.
+  // Native owns it; the page reads a copy and asks for changes.
+  var desktopState = cfg.desktop || null
+
+  function copyState() {
+    if (!desktopState) return null
+    try {
+      return JSON.parse(JSON.stringify(desktopState))
+    } catch (_) {
+      return null
+    }
+  }
+
   window.__ASHLR_DESKTOP__ = Object.freeze({
     shell: 'tauri',
     platform: cfg.platform,
@@ -55,8 +68,32 @@
       if (!next || next === lastTheme) return
       lastTheme = next
       invoke('plugin:event|emit', { event: 'shell-theme', payload: next })
+    },
+    // The current desktop state, or null before native has sent one. A copy:
+    // page code cannot edit what native believes.
+    getState: copyState,
+    // Ask native to change a preference. Only the two known names, booleans
+    // only; native re-validates and answers with an `ashlr:desktop-state`
+    // event carrying what actually happened (a hotkey another app holds comes
+    // back enabled-but-unregistered, with a reason).
+    setPreference: function (name, value) {
+      if (name !== 'globalHotkey' && name !== 'notifications') return false
+      if (typeof value !== 'boolean') return false
+      var patch = {}
+      patch[name] = value
+      invoke('plugin:event|emit', { event: 'shell-prefs', payload: patch })
+      return true
     }
   })
+
+  // Native → page: a new desktop state (desktop_prefs::state_script).
+  window.__ASHLR_DESKTOP_STATE__ = function (next) {
+    if (!next || typeof next !== 'object') return
+    desktopState = next
+    try {
+      window.dispatchEvent(new CustomEvent('ashlr:desktop-state', { detail: copyState() }))
+    } catch (_) {}
+  }
 
   // 3. Drag regions ---------------------------------------------------------
   // The web UI marks its own top strip with data-app-region="drag" (and opts
@@ -107,8 +144,9 @@
   } catch (_) {}
 
   // 4. Native → page commands ----------------------------------------------
-  // The macOS menu bar calls this by eval (no IPC involved). The web UI just
-  // listens for the event.
+  // The macOS menu bar, the tray, a clicked notification and the global
+  // hotkey call this by eval (no IPC involved). The web UI just listens for
+  // the event and parses it with command-catalog.ts `parseDesktopCommand`.
   window.__ASHLR_DESKTOP_COMMAND__ = function (command) {
     try {
       window.dispatchEvent(
@@ -116,4 +154,10 @@
       )
     } catch (_) {}
   }
+
+  // 5. Fresh desktop state -------------------------------------------------
+  // This script's copy is from when the window was created; a reload after a
+  // Settings change would show stale values. Ask native for the live state —
+  // it answers through window.__ASHLR_DESKTOP_STATE__.
+  invoke('plugin:event|emit', { event: 'shell-state-request', payload: null })
 })()

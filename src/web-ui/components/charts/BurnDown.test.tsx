@@ -57,3 +57,16 @@ describe('BurnDown', () => {
     expect(formatLead(72 * H)).toBe('3d');
   });
 });
+
+describe('burnVerdict V3.10 — already past a line', () => {
+  it('says "used up" for an exhausted window and "inside your reserve" below the reserve', async () => {
+    const { burnVerdict } = await import('./BurnDown.js');
+    const { projectBurnDown } = await import('./chart-math.js');
+    const fmt = (v: number) => `${v}%`;
+    const time = () => 'Thu 09:00';
+    const used = projectBurnDown([{ t: 1, remaining: 0 }], 100);
+    expect(burnVerdict(used, 100, fmt, time, 'Reserved for you')).toEqual({ text: 'Used up — resets Thu 09:00.', severity: 'danger' });
+    const inside = projectBurnDown([{ t: 1, remaining: 50 }, { t: 2, remaining: 30 }], 100, { reserve: 40 });
+    expect(burnVerdict(inside, 100, fmt, time, 'Reserved for you').text).toBe('Inside reserved for you — autonomy has stopped using this window until Thu 09:00.');
+  });
+});

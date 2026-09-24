@@ -27,6 +27,13 @@
  * Fail-closed: if the judge is unavailable the proposal stays unjudged and
  * autoMergeProposal will refuse it (no regression). If judgeProposal throws,
  * the error is swallowed and the pass continues.
+ *
+ * V3.10 (unit U3): when a STANDING GRANT is in force (currentStandingPolicy()
+ * ≠ null) this pass runs the standing gates G0–G7 and the ashlr-fleet App
+ * host merge instead (fleet/standing-merge-pass.ts) — the legacy path below
+ * (local merge fallback, Mason-credential handoff PRs) never runs under a
+ * grant. With no grant, behavior is byte-for-byte master's, except that a
+ * proposal which already has a fleet PR is never landed a second time here.
  */
 
 import type { AshlrConfig, Proposal } from '../types.js';
@@ -81,11 +88,17 @@ import {
   releaseProposalMutationLock,
   type ProposalMutationLock,
 } from '../inbox/proposal-mutation-lock.js';
+import { currentStandingPolicy } from '../authority/effective-config.js';
+import type { DaemonCapabilityKind, EffectivePolicy } from '../authority/types.js';
+import type { LandingRecord } from './fleet-types.js';
+import { proposalHasFleetPr } from './fleet-merge-state.js';
+import type { StandingPassSummary } from './standing-merge-pass.js';
 
 const MAX_REALIZED_MERGE_FANOUT_REPLAYS_PER_PASS = 16;
 let realizedMergeFanoutReplayCursor: string | null = null;
 
-async function runAuthorizedPostMergeEffects(proposal: Proposal, cfg: AshlrConfig): Promise<void> {
+/** Best-effort merge notifications under the outward fence (also used by the standing pass). */
+export async function runAuthorizedPostMergeEffects(proposal: Proposal, cfg: AshlrConfig): Promise<void> {
   const repo = proposal.repo;
   if (!repo) return;
   const fence = acquireOutwardMutationFence();
@@ -129,14 +142,19 @@ async function runAuthorizedPostMergeEffects(proposal: Proposal, cfg: AshlrConfi
   }
 }
 
-interface AuthorizedJudgeResult {
+export interface AuthorizedJudgeResult {
   requested: boolean;
   verdict: ManagerVerdict | null;
   decisionPersisted: boolean;
   authorityLive: boolean;
 }
 
-async function runAuthorizedFrontierJudge(
+/**
+ * Call one frontier judge under the outward fence and record its verdict
+ * (with the HMAC attestation when it ships). Exported for the standing pass,
+ * which chooses the judge lane (G6) and then records through this same path.
+ */
+export async function runAuthorizedFrontierJudge(
   proposal: Proposal,
   cfg: AshlrConfig,
   judgeClient: { complete: (system: string, user: string) => Promise<string>; model: string },
@@ -427,6 +445,25 @@ export interface AutoMergePassResult {
    * temp-worktree regression goals. Reject-only; never merges.
    */
   invalidRejected: number;
+  /**
+   * V3.10: the standing-grant pass summary; present only when a standing grant
+   * was in force and the standing gates ran instead of the legacy path.
+   */
+  standing?: StandingPassSummary;
+  /**
+   * V3.10: fleet landings made this pass (the daemon feeds each one to
+   * TickHooks.afterLanding). Absent / empty with no standing grant.
+   */
+  landings?: LandingRecord[];
+}
+
+export interface AutoMergePassOptions {
+  /**
+   * The activation capability the calling tick holds. A `resident-standing`
+   * tick NEVER falls back to the legacy path, even if the standing policy
+   * cannot be read this instant — it does nothing instead (fail closed).
+   */
+  capabilityKind?: DaemonCapabilityKind | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -749,7 +786,10 @@ function isSpecContractResult(value: unknown): value is { satisfied: boolean; de
  * judged per pass. Already-judged proposals (cache hit) do NOT count against
  * the cap.
  */
-export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassResult> {
+export async function runAutoMergePass(
+  cfg: AshlrConfig,
+  opts: AutoMergePassOptions = {},
+): Promise<AutoMergePassResult> {
   const out: AutoMergePassResult = {
     attempted: 0,
     merged: 0,
@@ -783,6 +823,32 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
     if (killSwitchOn()) return out;
     try { replayAuthorizedRealizedMergeFanout(proposal); } catch { /* retry next pass */ }
   }
+
+  // V3.10 (U3): under a standing grant the standing gates are the ONLY merge
+  // path. They run regardless of cfg.foundry.autoMerge.enabled: B-U1's
+  // EffectivePolicy already folds an explicit `enabled:false` in (PRs only),
+  // and the grant — not the legacy opt-in — is the authority there.
+  let standing: EffectivePolicy | null = null;
+  try {
+    standing = currentStandingPolicy();
+  } catch {
+    standing = null;
+  }
+  if (standing) {
+    const { runStandingMergePass } = await import('./standing-merge-pass.js');
+    await runStandingMergePass({ cfg, policy: standing, pending, out });
+    return out;
+  }
+  if (opts.capabilityKind === 'resident-standing') {
+    // A resident-standing tick whose policy vanished mid-tick (Stop, revoke,
+    // expiry, switch off): nothing merges, and the legacy path never runs.
+    return out;
+  }
+
+  // A proposal that already has an ashlr-fleet PR (opened under an earlier
+  // grant) lands only through that PR, never through the legacy path.
+  pending = pending.filter((proposal) => !proposalHasFleetPr(proposal.id));
+  recovered = recovered.filter((proposal) => !proposalHasFleetPr(proposal.id));
 
   // The opt-in controls new judge/merge progression, not repair of projections
   // for an already-authenticated merge receipt.
@@ -834,8 +900,8 @@ export async function runAutoMergePass(cfg: AshlrConfig): Promise<AutoMergePassR
   if (pending.some((proposal) => isEphemeralRegressionGoalProposal(proposal) || isTtlExpired(proposal))) {
     queues = readHealthyAutoMergeQueues();
     if (queues === null) return out;
-    pending = queues.pending;
-    recovered = queues.recovered;
+    pending = queues.pending.filter((proposal) => !proposalHasFleetPr(proposal.id));
+    recovered = queues.recovered.filter((proposal) => !proposalHasFleetPr(proposal.id));
   }
 
   // M263: sort oldest-first before the judge loop so the stalest proposals

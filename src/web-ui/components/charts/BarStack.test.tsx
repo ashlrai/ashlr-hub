@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { BarStack } from './BarStack.js';
 import { toneColor } from './colors.js';
+import { showTable } from './chart-test-support.js';
 
 const segments = [
   { id: 'done', label: 'Done', color: toneColor('success') },
@@ -46,7 +47,18 @@ describe('BarStack', () => {
   it('has a legend for two segments and a table with totals', () => {
     render(<BarStack title="Runs" width={400} categories={['Mon']} segments={segments} values={[[3, 1]]} />);
     expect(screen.getByText('Failed', { selector: 'li' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('radio', { name: 'Table' }));
+    showTable();
     expect(screen.getByRole('cell', { name: '4' })).toBeInTheDocument();
+  });
+});
+
+describe('BarStack V3.10', () => {
+  it('hatches an all-unknown column and names it in the legend', () => {
+    const { container } = render(
+      <BarStack title="Runs" width={375} categories={['Mon', 'Tue']} segments={segments} values={[[null, null], [1, 1]]} />,
+    );
+    const unknown = container.querySelector('[data-unknown="true"]')!;
+    expect(unknown.getAttribute('fill')).toMatch(/^url\(#chart-hatch-/);
+    expect(screen.getByText('no data', { selector: 'li' })).toBeInTheDocument();
   });
 });

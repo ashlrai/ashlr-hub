@@ -26,6 +26,9 @@
  *   update [--check] [--json]  Safe self-update: git pull --ff-only + rebuild; --check reports only.
  *   runtime <install|status|rollback|run>  Pinned local candidate installation and foreground Universe commands.
  *   local-runtime <start|stop|status|restart|install>  Supervised llama-server: the parallel local fleet.
+ *   authority <status|switch|stop|grant|revoke|ledger|setup|…>  Standing authority (Touch ID grants, Stop, ledger).
+ *   leader <show|run|tick|veto>  The Leader (Visionary): latest memo, run now, apply due actions, veto.
+ *   mirror <list|add|sync|path|remove|reconcile>  The fleet's own mirror clones (~/.ashlr/fleet/mirrors).
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.
  *   swarm "<goal>"|<specId>    Decompose a spec into a contracts-first agent swarm and run it.
@@ -651,6 +654,23 @@ const loadLocalRuntimeCmd = lazyCmd(
   () => import('./local-runtime.js'),
   (m) => m.cmdLocalRuntime as Cmd,
   'local-runtime command requires a current build of src/cli/local-runtime.ts.',
+);
+
+// ─── V3.10 Track B: standing authority, the Leader, fleet mirrors ────────
+const loadAuthorityCmd = lazyCmd(
+  () => import('./authority.js'),
+  (m) => m.runAuthorityCli as Cmd,
+  'authority command requires a current build of src/cli/authority.ts (3.10 Track B unit B-U1).',
+);
+const loadLeaderCmd = lazyCmd(
+  () => import('./leader.js'),
+  (m) => m.runLeaderCli as Cmd,
+  'leader command requires a current build of src/cli/leader.ts (3.10 Track B unit U8).',
+);
+const loadMirrorCmd = lazyCmd(
+  () => import('./mirror.js'),
+  (m) => m.runMirrorCli as Cmd,
+  'mirror command requires a current build of src/cli/mirror.ts (3.10 Track B unit U6).',
 );
 
 // ─── M18 integration reads (best-effort, never throw, used in cmdStatus) ──────
@@ -2174,6 +2194,29 @@ async function main(): Promise<void> {
         // launch agent that makes it survive logout and crashes.
         const cmdLocalRuntime = await loadLocalRuntimeCmd();
         process.exitCode = await cmdLocalRuntime(rest);
+        break;
+      }
+
+      case 'authority': {
+        // V3.10: standing authority — Touch ID grants, the autonomy switch,
+        // Stop, revoke, the ledger, rulesets and the guided Phase-0 setup.
+        const cmdAuthority = await loadAuthorityCmd();
+        process.exitCode = await cmdAuthority(rest);
+        break;
+      }
+
+      case 'leader': {
+        // V3.10: the Leader (Visionary) — show / run / tick / veto (src/cli/leader.ts).
+        const cmdLeader = await loadLeaderCmd();
+        process.exitCode = await cmdLeader(rest);
+        break;
+      }
+
+      case 'mirror': {
+        // V3.10: the fleet's own mirror clones under ~/.ashlr/fleet/mirrors —
+        // list / add / sync / path / remove / reconcile (src/cli/mirror.ts).
+        const cmdMirror = await loadMirrorCmd();
+        process.exitCode = await cmdMirror(rest);
         break;
       }
 

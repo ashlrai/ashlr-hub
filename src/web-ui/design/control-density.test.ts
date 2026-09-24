@@ -42,9 +42,7 @@ const FILES = [
   'routes/verse/Workspace.module.css',
   'routes/verse/Transcript.module.css',
   'routes/verse/Composer.module.css',
-  'routes/verse/QuickSwitcher.module.css',
   'routes/verse/NewChatDialog.module.css',
-  'routes/verse/ResourcesPanel.module.css',
   'routes/verse/sections/ChatSection.module.css',
   // Section bodies, added at V2.1 integration: the density switch reached the
   // chrome but stopped at the section boundary, so a compact operator saw
@@ -58,6 +56,46 @@ const FILES = [
   // sizing its section icons with a 22px literal.
   'routes/verse/chat/chat.module.css',
   'routes/verse/onboarding/onboarding.module.css',
+  // 3.10 workbench (SPEC-310C). QuickSwitcher and ResourcesPanel were deleted
+  // (the command palette and Apps & Accounts replace them), so they left this
+  // list. Every new chrome stylesheet joins it the day it lands — the drift
+  // this test exists for enters exactly through files nobody listed yet.
+  // Deliberately NOT listed yet, because they hardcode real control heights
+  // today (reported to their owners, not papered over with an exception):
+  //   shell/CommandPalette.module.css — .input 52px, .item min-height 40px/48px
+  //   dock/preview/PreviewPane.module.css, dock/terminal/TerminalPane.module.css
+  //     — .tabClose 20px icon buttons
+  // Chart stylesheets (components/charts/**) are plot geometry, not controls,
+  // and stay out of scope.
+  'routes/verse/SeatCapacity.module.css',
+  'routes/verse/budget/BudgetControl.module.css',
+  'routes/verse/shell/GearTray.module.css',
+  'routes/verse/shell/NeedsYouDrawer.module.css',
+  'routes/verse/shell/RailStatus.module.css',
+  'routes/verse/shell/ShortcutsOverlay.module.css',
+  'routes/verse/shell/skeletons.module.css',
+  'routes/verse/chat/ActionMenu.module.css',
+  'routes/verse/chat/ActivityGroup.module.css',
+  'routes/verse/chat/ChapterRail.module.css',
+  'routes/verse/chat/LiveStatus.module.css',
+  'routes/verse/chat/NoticeSlot.module.css',
+  'routes/verse/chat/TasksTray.module.css',
+  'routes/verse/chat/ThinkingBlock.module.css',
+  'routes/verse/composer/composer.module.css',
+  'routes/verse/context/ChatUsage.module.css',
+  'routes/verse/dock/Dock.module.css',
+  'routes/verse/dock/panes.module.css',
+  'routes/verse/git/BranchBar.module.css',
+  'routes/verse/git/DiffPane.module.css',
+  'routes/verse/git/GitDialogs.module.css',
+  'routes/verse/git/PrChip.module.css',
+  'routes/verse/git/WorktreeOption.module.css',
+  'routes/verse/apps/Apps.module.css',
+  'routes/verse/usage/CapacityStrip.module.css',
+  'routes/verse/command/command.module.css',
+  'routes/verse/command/surface.module.css',
+  'routes/verse/fleet/fleet.module.css',
+  'routes/verse/mind/mind.module.css',
   'components/primitives/Button.module.css',
   'components/primitives/Input.module.css',
   'components/primitives/Select.module.css',
@@ -76,6 +114,30 @@ const FILES = [
 const ALLOWED: Record<string, Record<string, string>> = {
   'routes/verse/VerseApp.module.css': {
     '32px': 'the brand mark in the rail head — a fixed 32px logo, never a control',
+    // 3.10 phone layout (`.shell[data-compact]`): the rail becomes a bottom tab
+    // bar whose items stack an icon over a label. That is a touch target, and a
+    // touch target must not shrink when the DESKTOP density switch goes compact.
+    '56px': 'phone bottom-bar item (icon over label) — a touch target, independent of desktop density',
+  },
+  'routes/verse/shell/NeedsYouDrawer.module.css': {
+    '18px': '<kbd> keycap hint (A/R/V/J/K) — a non-interactive glyph sized to its letter',
+    '40px': 'the empty-inbox check mark — an aria-hidden icon, not a control',
+  },
+  'routes/verse/shell/ShortcutsOverlay.module.css': {
+    '22px': '<kbd> keycap in the shortcuts sheet — a non-interactive glyph sized to its chord',
+  },
+  'routes/verse/composer/composer.module.css': {
+    '36px': 'attachment thumbnail / extension tile — a square image preview, not a control',
+  },
+  'routes/verse/apps/Apps.module.css': {
+    '32px': 'app monogram tile — a square identity mark, not a control',
+    '24px': 'app monogram tile, small size — a square identity mark, not a control',
+  },
+  'routes/verse/command/command.module.css': {
+    '20px': 'Leader action class badge (A/B/C) — a square marker, not a control',
+  },
+  'routes/verse/mind/mind.module.css': {
+    '20px': 'outcome mark on a Mind card — an aria-hidden square glyph, not a control',
   },
   'components/primitives/Switch.module.css': {
     '18px': 'switch track — an intrinsic toggle shape, not a text-bearing control',

@@ -33,6 +33,8 @@ export const TOP_LEVEL_COMMANDS: string[] = [
   // Dispatched by index.ts but previously missing here, so completion and
   // "did you mean" were blind to them (caught by cli-registry-drift).
   'verse', 'local-runtime',
+  // V3.10 Track B: standing authority, the Leader, fleet mirrors.
+  'authority', 'leader', 'mirror',
 ];
 
 /** Subcommands per top-level command (first-position completion only). */
@@ -85,6 +87,11 @@ const SUBCOMMANDS: Record<string, string[]> = {
   runtime: ['install', 'status', 'rollback', 'run'],
   // Mirrors the verb switch in src/cli/local-runtime.ts (cmdLocalRuntime).
   'local-runtime': ['status', 'start', 'stop', 'restart', 'reshape', 'install', 'uninstall', 'logs', 'resolve-model'],
+  // Mirrors the verb switch in src/cli/authority.ts (runAuthorityCli).
+  authority: ['status', 'switch', 'stop', 'clear-stop', 'revoke', 'draft', 'grant', 're-approve', 'ledger', 'surface', 'protect', 'github-app', 'rotate-provenance', 'setup', 'help'],
+  // Mirror the verb switches in src/cli/leader.ts (runLeaderCli) and src/cli/mirror.ts (runMirrorCli).
+  leader: ['show', 'run', 'tick', 'veto', 'help'],
+  mirror: ['list', 'add', 'sync', 'path', 'remove', 'reconcile', 'help'],
   universe: ['demo', 'init', 'run', 'status', 'archive', 'campaign', 'portfolio', 'integration', 'deliver', 'deliveries', 'graph', 'compare', 'help'],
 };
 

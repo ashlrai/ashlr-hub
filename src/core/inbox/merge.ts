@@ -96,9 +96,20 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, writeFileSync, unlinkSync, symlinkSync, readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  writeFileSync,
+  unlinkSync,
+  symlinkSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
@@ -157,17 +168,27 @@ import {
 } from '../fleet/manager.js';
 import {
   evaluateReviewerIndependence,
+  isFrontierJudgeId,
   producerModelFamily,
 } from '../fleet/reviewer-independence.js';
+import { proposalHasFleetPr } from '../fleet/fleet-merge-state.js';
 import { readDecisions, recordDecision } from '../fleet/decisions-ledger.js';
 import { judgeDecisionReasonCode } from '../fleet/judge-decision-metadata.js';
 import { edvConfirmationWeight } from '../portfolio/edv-verify.js';
 import {
   detectVerifyCommands,
   runVerifyCommandAsync,
+  runVerifySubprocessAsync,
+  type RunVerifyCommandAsyncOptions,
   type VerifyCommand,
   type VerifyFailureCategory,
 } from '../run/verify-commands.js';
+import {
+  VerificationCapacityError,
+  withRepoLease,
+  withVerificationSlot,
+} from '../sandbox/execution-leases.js';
+import { isMirrorPath, mirrorLeaseKey } from '../fleet/mirrors.js';
 import {
   isWebApp,
   verifyInBrowser,
@@ -191,6 +212,7 @@ import { causalMetadataFromProposal, evidenceOutcomeSummary } from '../learning/
 import { acquireProposalMutationLock, releaseProposalMutationLock } from './proposal-mutation-lock.js';
 import {
   acquireOutwardMutationFence,
+  acquireOutwardMutationFenceAsync,
   ownsOutwardMutationFence,
   releaseOutwardMutationFence,
 } from '../sandbox/mutation-fence.js';
@@ -263,9 +285,18 @@ const SELF_EVAL_PARITY_RETRY_DELAY_MS = 500;
 // git helpers — arg arrays, no shell
 // ---------------------------------------------------------------------------
 
-/** Run a git command in `cwd`. Throws on failure. */
+/**
+ * Run a git command in `cwd`. Throws on failure.
+ *
+ * V3.10 (U3): hooks and fsmonitor are disabled for every git call this module
+ * makes. Under a standing grant `cwd` is a fleet mirror that confined agents
+ * write through their worktrees, so a planted `.git/hooks/post-checkout` or
+ * `core.fsmonitor` command would otherwise run UNCONFINED as the daemon on the
+ * next `worktree add`. No automated merge / verify flow here ever relied on a
+ * hook (commits already pass --no-verify); smudge filters still apply.
+ */
 function gitRun(cwd: string, args: string[], env?: NodeJS.ProcessEnv): string {
-  return execFileSync('git', args, {
+  return execFileSync('git', ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', ...args], {
     cwd,
     timeout: GIT_TIMEOUT,
     stdio: 'pipe',
@@ -1615,28 +1646,25 @@ export interface VerificationGateVerdict {
 }
 
 /**
- * M153: helper — is a judge engine string a frontier (claude-*) model?
+ * M153: helper — is a judge engine string a frontier judge?
  *
  * The frontier-judge requirement is NON-NEGOTIABLE in verification mode:
- * the PRODUCER may be local but the JUDGE must be a Claude frontier model.
- * This prevents self-confirmation (local 72b judging its own output).
+ * the PRODUCER may be local but the JUDGE must be a frontier model. This
+ * prevents self-confirmation (local 72b judging its own output).
  *
- * A model string is frontier-judge when it starts with 'claude' (case-
- * insensitive) OR contains 'claude'. This matches the convention used
- * throughout manager.ts (resolveJudgeClient / runManager).
+ * V3.10 (U3 + U7, SPEC-310B §3): delegates to reviewer-independence's
+ * `isFrontierJudgeId`, the ONE rule shared with the attestation signer, so
+ * the two cannot drift. Accepted: Claude (bare `claude…` or
+ * `claude|claude-cli|anthropic:<claude model>`), OpenAI (`gpt-5…`, `codex-…`,
+ * `codex`, or `codex|openai:<one>`), and xAI ONLY as `grok-cli:<grok model>`
+ * — the SuperGrok seat run with its tools off. Every other xAI spelling (bare
+ * `grok-4.7`, the per-token `grok:` API engine, `xai:`) and every local or
+ * vendor-named local runtime (`local-coder:claude-distill`) is refused. This
+ * reverses engine-registry's "grok is never merge authority" FOR JUDGING
+ * ONLY; Mason reviews that reversal.
  */
 export function isFrontierJudge(judgeEngine: string | undefined): boolean {
-  if (!judgeEngine || judgeEngine === 'unknown' || judgeEngine === 'local') return false;
-  const lc = judgeEngine.toLowerCase();
-  // claude-* (existing — primary frontier judge)
-  if (lc.startsWith('claude') || lc.includes('claude')) return true;
-  // M300: Codex/OpenAI frontier models — gpt-5.x and codex-* are genuine frontier
-  // models already listed in cfg.foundry.mergeAuthority as {engine:'codex',model:'gpt-5.5'}.
-  // Accepting them here lets a Codex judge produce a valid ship attestation; the
-  // HMAC gate + mergeAuthority list + full scoring gate are ALL unchanged.
-  // gpt-4* is intentionally excluded (gpt-4-mini etc. are not frontier-tier judges).
-  if (lc.startsWith('gpt-5') || lc.startsWith('codex-') || lc === 'codex') return true;
-  return false;
+  return isFrontierJudgeId(judgeEngine);
 }
 
 /**
@@ -2157,6 +2185,197 @@ async function verifyProposalInBrowser(
   return browserEvidenceFromResult(result);
 }
 
+// ===========================================================================
+// V3.10 (U3 + U2 + U6): verification under a standing grant
+// ===========================================================================
+
+/** How long G3 waits for a fleet mirror's repo lease around worktree add / remove (agents hold it for seconds). */
+export const VERIFY_MIRROR_LEASE_WAIT_MS = 60_000;
+
+type VerifySubprocessRunner = NonNullable<RunVerifyCommandAsyncOptions['_runSubprocess']>;
+
+/** A standing grant is live but its verification cannot be confined: the caller fails closed (infra). */
+export class VerificationConfinementError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'VerificationConfinementError';
+  }
+}
+
+export interface StandingVerificationConfinement {
+  /** Drop-in for runVerifySubprocessAsync: the same call, run under sandbox-exec with the run's overlay. */
+  runSubprocess: VerifySubprocessRunner;
+  /** Remove the run's private temp dir (ephemeral HOME, TMPDIR, caches). Idempotent. */
+  close: () => void;
+}
+
+function isInsideDir(child: string, parent: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+}
+
+function realpathOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The install prefix of the node running the daemon (`<prefix>/bin/node`).
+ * The autonomous profile read-jails HOME and all of /Users, /Volumes and the
+ * temp dirs, so without it `npm` and `node` cannot even start (Mason's node is
+ * `~/.hermes/node`). Refused when the prefix is too shallow to be a toolchain
+ * directory (`~/bin/node` would re-allow reading all of `~`; `/Users/x/bin`
+ * all of a home), contains HOME, or overlaps a protected path. A prefix
+ * outside the jail (`/opt/homebrew`, `/usr/local`) is readable already.
+ */
+function nodeToolchainPrefix(home: string, denied: readonly string[]): string | null {
+  const exec = realpathOrNull(process.execPath);
+  if (!exec) return null;
+  const prefix = dirname(dirname(exec));
+  if (isInsideDir(home, prefix)) return null;
+  const depthBelow = (root: string): number => relative(root, prefix).split(/[\\/]/).filter(Boolean).length;
+  if (isInsideDir(prefix, home)) {
+    if (depthBelow(home) < 2) return null;
+  } else if (depthBelow('/') < 3) {
+    return null;
+  }
+  if (denied.some((d) => isInsideDir(d, prefix) || isInsideDir(prefix, d))) return null;
+  return prefix;
+}
+
+/**
+ * G3 confinement (SPEC-310B §2 G3; U2's critical request). WHY: verification
+ * EXECUTES the proposal — agent-written code — with whatever authority the
+ * verifier has. Under a standing grant nobody reviews that code before it
+ * runs, so it runs under the same macOS sandbox as an agent
+ * (`autonomousVerificationProfile`: writes only to the worktree and a private
+ * run dir, no network egress but loopback servers for test suites, HOME
+ * jailed, ~/.ashlr/{authority,activation,foundry} and the custody helper
+ * tripwired) with an overlay built for engine `local` (no vendor state).
+ *
+ * Returns null when no standing policy is live — legacy verification is
+ * unchanged byte for byte. Throws VerificationConfinementError when a policy
+ * IS live (or its state cannot be read) and the sandbox cannot be built: the
+ * caller must fail closed, never run the suite unconfined.
+ *
+ * `readOnlyPaths` re-allows reads the run needs beyond the worktree (the
+ * mirror's `node_modules`, which verification symlinks in). Residuals, stated
+ * rather than hidden: the suite can reach anything listening on loopback, and
+ * a suite that writes caches outside its worktree (e.g. into a symlinked
+ * `node_modules/.vite`) fails — closed — until the repo points them inside.
+ */
+export async function openStandingVerificationConfinement(
+  worktree: string,
+  opts: { readOnlyPaths?: readonly string[] } = {},
+): Promise<StandingVerificationConfinement | null> {
+  let live: boolean;
+  try {
+    const { currentStandingPolicy } = await import('../authority/effective-config.js');
+    live = currentStandingPolicy() !== null;
+  } catch {
+    // Unknown ⇒ confine: the same rule sandbox/confine.ts applies to agents.
+    live = true;
+  }
+  if (!live) return null;
+
+  let confine: typeof import('../sandbox/confine.js');
+  let overlayMod: typeof import('../sandbox/autonomous-env.js');
+  try {
+    [confine, overlayMod] = await Promise.all([import('../sandbox/confine.js'), import('../sandbox/autonomous-env.js')]);
+  } catch (error) {
+    throw new VerificationConfinementError(`confinement modules unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  let runTmpDir: string | null = null;
+  const close = (): void => {
+    if (!runTmpDir) return;
+    try {
+      rmSync(runTmpDir, { recursive: true, force: true });
+    } catch { /* a leftover private dir under ~/.ashlr/tmp is harmless */ }
+    runTmpDir = null;
+  };
+  try {
+    const home = realpathSync(homedir());
+    const parent = join(home, '.ashlr', 'tmp');
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+    runTmpDir = realpathSync(mkdtempSync(join(parent, 'verify-confine-')));
+    chmodSync(runTmpDir, 0o700);
+    const base = overlayMod.buildAutonomousEnvOverlay({ engine: 'local', runTmpDir, home, seatId: null });
+    const toolchain = nodeToolchainPrefix(home, base.deniedReadPaths);
+    const readOnly = [...base.readOnlyPaths];
+    for (const p of [...(toolchain ? [toolchain] : []), ...(opts.readOnlyPaths ?? [])]) {
+      const real = realpathOrNull(p);
+      if (!real || readOnly.includes(real)) continue;
+      // A re-allowed read may never reach a protected directory (the profile's
+      // final deny rules win anyway; refusing here keeps the intent explicit).
+      if (base.deniedReadPaths.some((d) => isInsideDir(d, real) || isInsideDir(real, d))) continue;
+      readOnly.push(real);
+    }
+    const overlay = {
+      ...base,
+      readOnlyPaths: Object.freeze(readOnly),
+      set: Object.freeze({
+        ...base.set,
+        ...(toolchain ? { PATH: `${join(toolchain, 'bin')}${delimiter}${base.set['PATH'] ?? ''}` } : {}),
+      }),
+    };
+    const launcher = confine.buildSandboxLauncher(confine.autonomousVerificationProfile(), {
+      worktree,
+      home,
+      env: process.env,
+      overlay,
+    });
+    if (!launcher) throw new VerificationConfinementError('the platform returned no sandbox launcher');
+    const worktreeReal = realpathOrNull(worktree) ?? resolve(worktree);
+    const runSubprocess: VerifySubprocessRunner = (argv, subprocessOpts) => {
+      // Keep the verifier's workspace bins (node_modules/.bin inside the
+      // worktree) ahead of the overlay's sanitized PATH; drop every other entry.
+      const workspaceBins = (subprocessOpts.env['PATH'] ?? '')
+        .split(delimiter)
+        .filter((entry) => entry.length > 0 && isAbsolute(entry) && isInsideDir(realpathOrNull(entry) ?? entry, worktreeReal));
+      const env = overlayMod.applyAutonomousEnvOverlay(subprocessOpts.env, overlay);
+      env['PATH'] = [...workspaceBins, overlay.set['PATH'] ?? ''].filter(Boolean).join(delimiter);
+      return runVerifySubprocessAsync([launcher.bin, ...launcher.prefixArgs, ...argv], { ...subprocessOpts, env });
+    };
+    return { runSubprocess, close };
+  } catch (error) {
+    close();
+    if (error instanceof VerificationConfinementError) throw error;
+    throw new VerificationConfinementError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+/**
+ * Run a ref / worktree mutation on `repo` under its repo lease when `repo` is a
+ * fleet mirror (U6's contract: clone, sync, sandbox creation, proposal filing
+ * and ref/push all take `mirrorLeaseKey(path)`, so a mirror reset never
+ * interleaves with a `git worktree add`). Any other repo runs `fn` directly —
+ * the legacy path is unchanged. Returns null when the lease stayed busy.
+ */
+async function underMirrorLease<T>(repo: string, fn: () => T | Promise<T>): Promise<{ value: T } | null> {
+  let mirror = false;
+  try {
+    mirror = isMirrorPath(repo);
+  } catch {
+    mirror = false;
+  }
+  if (!mirror) return { value: await fn() };
+  const leased = await withRepoLease(mirrorLeaseKey(repo), () => fn(), { waitMs: VERIFY_MIRROR_LEASE_WAIT_MS });
+  return leased.ok ? { value: leased.value } : null;
+}
+
+/** Verification slot key: the canonical repo path, the same form sandboxed-engine and mirrorLeaseKey use. */
+function verificationSlotKey(repo: string): string {
+  try {
+    return mirrorLeaseKey(repo);
+  } catch {
+    return resolve(repo);
+  }
+}
+
 /**
  * Apply the proposal's diff to a THROWAWAY temp worktree branched off the
  * default branch's head, then run every detected verify command (typecheck /
@@ -2221,15 +2440,38 @@ export async function verifyProposal(
   const tmpDir = join(homedir(), '.ashlr', 'tmp', `vwt-${randomBytes(6).toString('hex')}`);
 
   // Create the isolated worktree on a scratch branch off the default-branch head.
+  // V3.10 (U6): in a fleet mirror this is a ref + worktree mutation, so it
+  // takes the mirror's repo lease (a mirror sync must not interleave with it).
+  let added: { value: string | null } | null;
   try {
-    gitRun(repo, ['worktree', 'add', '-b', tmpBranch, tmpDir, baseHead]);
-    linkNodeModules(repo, tmpDir);
+    added = await underMirrorLease(repo, () => {
+      try {
+        gitRun(repo, ['worktree', 'add', '-b', tmpBranch, tmpDir, baseHead]);
+        linkNodeModules(repo, tmpDir);
+        return null;
+      } catch (err) {
+        gitTry(repo, ['worktree', 'prune']);
+        return err instanceof Error ? err.message : String(err);
+      }
+    });
   } catch (err) {
-    gitTry(repo, ['worktree', 'prune']);
+    added = { value: err instanceof Error ? err.message : String(err) };
+  }
+  if (added === null) {
     return {
       ok: false,
       ran: [],
-      detail: `git worktree add failed: ${err instanceof Error ? err.message : String(err)}`,
+      detail: `the fleet mirror's repo lease stayed busy for ${VERIFY_MIRROR_LEASE_WAIT_MS}ms; verification did not start`,
+      failureCategory: 'infra',
+      baseBranch: base,
+      baseHead,
+    };
+  }
+  if (added.value !== null) {
+    return {
+      ok: false,
+      ran: [],
+      detail: `git worktree add failed: ${added.value}`,
       baseBranch: base,
       baseHead,
     };
@@ -2237,7 +2479,27 @@ export async function verifyProposal(
 
   let patchFile: string | null = null;
   const ran: VerifyCommand[] = [];
+  let confined: StandingVerificationConfinement | null = null;
   try {
+    // V3.10 G3: under a standing grant every verify command runs confined
+    // (see openStandingVerificationConfinement); no grant ⇒ null ⇒ unchanged.
+    try {
+      const nodeModules = join(repo, 'node_modules');
+      confined = await openStandingVerificationConfinement(tmpDir, {
+        readOnlyPaths: existsSync(nodeModules) ? [nodeModules] : [],
+      });
+    } catch (err) {
+      return {
+        ok: false,
+        ran: [],
+        detail: `verification confinement unavailable under the standing grant: ${err instanceof Error ? err.message : String(err)}`,
+        failureCategory: 'infra',
+        baseBranch: base,
+        baseHead,
+      };
+    }
+    const runOpts: RunVerifyCommandAsyncOptions | undefined = confined ? { _runSubprocess: confined.runSubprocess } : undefined;
+
     // ── H1a: detect verify commands from the BASE tree BEFORE applying the ─────
     // diff, so the diff CANNOT rewrite which commands run (e.g. a diff that sets
     // package.json scripts.test to "true" can no longer self-certify). The
@@ -2278,7 +2540,7 @@ export async function verifyProposal(
       // tested change must not be blocked by lint debt it did not introduce. Baseline
       // lint and tolerate pre-existing failures (block only a clean→failing regression).
       if (vc.id === undefined && vc.required === undefined && (vc.kind === 'test' || vc.kind === 'lint')) {
-        const baseRes = await runVerifyCommandAsync(vc, tmpDir, cfg);
+        const baseRes = await runVerifyCommandAsync(vc, tmpDir, cfg, runOpts);
         if (!baseRes.timedOut) {
           const key = verifyCommandIdentity(vc);
           baselineResults.set(key, {
@@ -2309,7 +2571,7 @@ export async function verifyProposal(
 
     for (const vc of commands) {
       ran.push(vc);
-      const res = await runVerifyCommandAsync(vc, tmpDir, cfg);
+      const res = await runVerifyCommandAsync(vc, tmpDir, cfg, runOpts);
 
       if (!res.ok) {
         if (vc.required === false) continue;
@@ -2401,6 +2663,18 @@ export async function verifyProposal(
       }
     }
 
+    if (confined && (cfg.foundry as { browserVerify?: boolean } | undefined)?.browserVerify === true && isWebApp(tmpDir)) {
+      // The browser verifier serves the patched app outside any sandbox; under a
+      // standing grant that would run agent code unconfined, so it fails closed.
+      return {
+        ok: false,
+        ran,
+        detail: 'browser verification cannot run confined under the standing grant; fail-closed',
+        failureCategory: 'infra',
+        baseBranch: base,
+        baseHead,
+      };
+    }
     const browser = await verifyProposalInBrowser(tmpDir, cfg);
     if (browser && !browser.ok) {
       return {
@@ -2430,6 +2704,7 @@ export async function verifyProposal(
       baseHead,
     };
   } finally {
+    confined?.close();
     if (patchFile) {
       try {
         unlinkSync(patchFile);
@@ -2437,9 +2712,19 @@ export async function verifyProposal(
         /* ignore */
       }
     }
-    gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
-    gitTry(repo, ['worktree', 'prune']);
-    gitTry(repo, ['branch', '-D', tmpBranch]);
+    const cleanup = (): void => {
+      gitTry(repo, ['worktree', 'remove', '--force', tmpDir]);
+      gitTry(repo, ['worktree', 'prune']);
+      gitTry(repo, ['branch', '-D', tmpBranch]);
+    };
+    // Under the mirror lease when it comes free; otherwise anyway — a stranded
+    // worktree and scratch branch in the mirror are worse than an unleased
+    // removal of our own, never-shared temp worktree.
+    let cleaned = false;
+    try {
+      cleaned = (await underMirrorLease(repo, () => { cleanup(); return true; }))?.value === true;
+    } catch { /* fall through */ }
+    if (!cleaned) cleanup();
   }
 }
 
@@ -2468,9 +2753,18 @@ function verificationProposalConflict(expected: Proposal, current: Proposal | nu
 
 /**
  * Run verification and durably bind its evidence to the exact proposal state.
- * Lock order is proposal -> outward fence; evidence is persisted before either
- * capability is released so pause/kill cannot observe a verified-but-unrecorded
- * transaction or let a stale diff inherit fresh verification.
+ *
+ * Lock order: proposal lock -> verification slot (released) -> outward fence.
+ * The proposal lock is held throughout, so a changed diff can never inherit
+ * fresh verification. V3.10 (U6): the suite runs in a verification SLOT
+ * (at most VERIFICATION_REPO_SLOTS per repo and VERIFICATION_MACHINE_SLOTS on
+ * the machine), NOT under the global outward fence — holding the fence for a
+ * whole test suite serialized every verification (and every Stop, which waits
+ * on the fence for quiescence) machine-wide. The fence is taken only for the
+ * final gate check and the persistence: KILL / pause armed while the suite ran
+ * is seen by that final check and the evidence is refused, and one armed
+ * after it waits for the persistence to finish — so pause/kill still cannot
+ * observe a verified-but-unrecorded transaction.
  */
 export async function verifyAndPersistProposal(
   expected: Proposal,
@@ -2497,21 +2791,33 @@ export async function verifyAndPersistProposal(
     const initialConflict = verificationProposalConflict(expected, current);
     if (initialConflict) return refused(initialConflict);
 
-    outwardFence = acquireOutwardMutationFence();
-    if (!outwardFence || !ownsOutwardMutationFence(outwardFence)) {
-      return refused('outward mutation fence unavailable');
-    }
+    // Cheap refusal before spending a slot (no fence: this is advisory; the
+    // binding check is the fenced one after verification).
     const initialAuthorityFailure = finalMutationAuthorityFailure(repo);
     if (initialAuthorityFailure) return refused(initialAuthorityFailure);
 
-    const verify = await verifyProposal(current!, cfg);
+    let verify: VerifyProposalResult;
+    try {
+      verify = await withVerificationSlot(verificationSlotKey(repo), () => verifyProposal(current!, cfg));
+    } catch (err) {
+      if (err instanceof VerificationCapacityError) {
+        return refused(`verification capacity unavailable: ${err.message}`, {
+          ok: false,
+          ran: [],
+          detail: `verification did not run: ${err.message}`,
+          failureCategory: 'infra',
+        });
+      }
+      throw err;
+    }
 
+    outwardFence = await acquireOutwardMutationFenceAsync();
+    if (!outwardFence || !ownsOutwardMutationFence(outwardFence)) {
+      return refused('outward mutation fence unavailable', verify);
+    }
     current = loadProposal(expected.id);
     const finalConflict = verificationProposalConflict(expected, current);
     if (finalConflict) return refused(finalConflict, verify);
-    if (!ownsOutwardMutationFence(outwardFence)) {
-      return refused('outward mutation fence was revoked', verify);
-    }
     const finalAuthorityFailure = finalMutationAuthorityFailure(repo);
     if (finalAuthorityFailure) return refused(finalAuthorityFailure, verify);
 
@@ -2882,6 +3188,114 @@ function mergeLocally(
 }
 
 /**
+ * Gate 6.5 (M86/M54) as a reusable unit: the invariant suite of the ashlr-hub
+ * checkout at `repo` must be green with the foundry auto-merge flag OFF and
+ * ON. Extracted unchanged from autoMergeProposal so the standing-grant gate
+ * G3 (fleet/standing-merge-pass.ts) runs the exact same check.
+ */
+export async function selfEvalParityForRepo(
+  repo: string,
+  cfg: AshlrConfig,
+): Promise<{ ok: boolean; reason: string }> {
+  return selfEvalParityAsync(async (flagOn: boolean) => {
+    // Re-use detectVerifyCommands/runVerifyCommand on the REPO (base tree).
+    // The diff was already verified green in an isolated worktree by Gate 6;
+    // here we check that the EXISTING suite (without the diff applied) stays
+    // green under both flag states — if the diff is not yet on main this is
+    // the pre-merge invariant check (the post-merge green was Gate 6).
+    // Use the cfg with autoMerge.enabled toggled per flagOn; everything else
+    // stays the same so no other gate is affected.
+    const parityCfg: AshlrConfig = {
+      ...cfg,
+      foundry: {
+        ...cfg.foundry,
+        autoMerge: {
+          ...(cfg.foundry?.autoMerge ?? { enabled: false }),
+          enabled: flagOn,
+        },
+      },
+    };
+    // M296: prefer the targeted invariant suite (`test:invariants` =
+    // `vitest run test/h*.test.ts`) over the full `npm run test`.  The full
+    // suite can have pre-existing failures in unrelated tests (e.g. m240,
+    // m86) that are NOT invariant regressions — running all tests would
+    // permanently block every self-edit even when the h1-h8 safety tests
+    // are perfectly green.  `test:invariants` scopes to exactly the files
+    // guarded by guardSafetyTests, so a real invariant breakage is still
+    // caught.  When the script is absent (e.g. older installs, test repos)
+    // we fall back to detectVerifyCommands so the gate is never a no-op.
+    // Read the package.json scripts inline (readPackageJson/scriptsOf are
+    // internal to verify-commands.ts and not exported).
+    const scriptsForParity: Record<string, string> = {};
+    try {
+      const raw = readFileSync(join(repo, 'package.json'), 'utf8');
+      const pkg = JSON.parse(raw) as { scripts?: Record<string, unknown> };
+      if (pkg.scripts && typeof pkg.scripts === 'object') {
+        for (const [k, v] of Object.entries(pkg.scripts)) {
+          if (typeof v === 'string') scriptsForParity[k] = v;
+        }
+      }
+    } catch { /* best-effort */ }
+    const pm = existsSync(join(repo, 'pnpm-lock.yaml'))
+      ? 'pnpm'
+      : existsSync(join(repo, 'yarn.lock'))
+        ? 'yarn'
+        : existsSync(join(repo, 'bun.lockb'))
+          ? 'bun'
+          : 'npm';
+    if (scriptsForParity['test:invariants']) {
+      // Fast path: run only the invariant suite.
+      //
+      // Bounded retry (merge-pipeline reliability): test:invariants
+      // includes concurrency/timing/disk-cap tests (h3/h5) that are
+      // legitimately flaky under host contention — a second live daemon
+      // tick, another sandboxed agent's test run, or transient disk
+      // pressure can make ONE pass momentarily red for reasons that have
+      // nothing to do with the proposal's diff. Unlike the main verify
+      // path (Gate 6, M281/M293) there is no per-proposal baseline to
+      // diff against here — this check runs against the UNPATCHED repo
+      // tree, so a single flaky run previously meant 3 non-parity
+      // refusals permanently auto-archived an otherwise-good proposal.
+      // A genuinely broken invariant fails EVERY attempt and is still
+      // refused — this only tolerates transient noise, never a real break.
+      const invariantCmd: VerifyCommand = {
+        kind: 'test',
+        cmd: [pm, 'run', 'test:invariants'],
+      };
+      for (let attempt = 1; attempt <= SELF_EVAL_PARITY_RETRY_ATTEMPTS; attempt++) {
+        const res = await runVerifyCommandAsync(invariantCmd, repo, parityCfg);
+        if (res.ok) return true;
+        if (attempt < SELF_EVAL_PARITY_RETRY_ATTEMPTS) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, SELF_EVAL_PARITY_RETRY_DELAY_MS));
+        }
+      }
+      return false;
+    }
+    // Fallback: no targeted script — run all detected verify commands.
+    const cmds = detectVerifyCommands(repo, 'merge');
+    if (cmds.length === 0) {
+      // No commands → parity is vacuously true (verify already passed in
+      // the worktree; flag-sensitivity cannot be tested without a suite).
+      return true;
+    }
+    for (const vc of cmds) {
+      const attempts = vc.kind === 'test' ? SELF_EVAL_PARITY_RETRY_ATTEMPTS : 1;
+      let ok = false;
+      for (let attempt = 1; attempt <= attempts; attempt++) {
+        const res = await runVerifyCommandAsync(vc, repo, parityCfg);
+        ok = res.ok;
+        if (ok) break;
+        if (attempt < attempts) {
+          await new Promise((resolveDelay) => setTimeout(resolveDelay, SELF_EVAL_PARITY_RETRY_DELAY_MS));
+        }
+      }
+      if (!ok && vc.required !== false) return false;
+    }
+    return true;
+  });
+}
+
+/**
  * Autonomously merge an approved frontier proposal to the default branch,
  * subject to the full gate chain documented in the module header. NEVER throws;
  * every refusal returns { ok:false, merged:false, reason } and mutates nothing.
@@ -2932,6 +3346,13 @@ export async function autoMergeProposal(
     if (!proposal) return refuse(`proposal not found: ${id}`);
     if (proposal.status !== 'pending' && proposal.status !== 'approved') {
       return refuse(`proposal status '${proposal.status}' has no active merge authority`, proposal.repo);
+    }
+    // V3.10 (U3): a proposal the fleet already opened as an ashlr-fleet App PR
+    // lands ONLY through that PR (SHA-pinned, gated, ledgered). This legacy
+    // path must never land the same change a second time (local merge or a
+    // second handoff PR). An unreadable fleet record counts as "has a PR".
+    if (proposalHasFleetPr(id)) {
+      return refuse('proposal already has an ashlr-fleet PR; it lands only through the fleet host merge (merge or close that PR on GitHub)', proposal.repo);
     }
     if (proposal.status === 'approved' && proposal.remoteHandoff?.recovery !== undefined &&
       !isApprovedRemoteHandoffRetryCandidate(proposal)) {
@@ -3251,102 +3672,7 @@ export async function autoMergeProposal(
     // check is the second layer that runs AFTER verify passes, so a self-edit
     // cannot silently break the suite under either foundry-enabled state.
     if (isSelfTargetProposal(proposal, cfg)) {
-      const parity = await selfEvalParityAsync(async (flagOn: boolean) => {
-        // Re-use detectVerifyCommands/runVerifyCommand on the REPO (base tree).
-        // The diff was already verified green in an isolated worktree by Gate 6;
-        // here we check that the EXISTING suite (without the diff applied) stays
-        // green under both flag states — if the diff is not yet on main this is
-        // the pre-merge invariant check (the post-merge green was Gate 6).
-        // Use the cfg with autoMerge.enabled toggled per flagOn; everything else
-        // stays the same so no other gate is affected.
-        const parityCfg: AshlrConfig = {
-          ...cfg,
-          foundry: {
-            ...cfg.foundry,
-            autoMerge: {
-              ...(cfg.foundry?.autoMerge ?? { enabled: false }),
-              enabled: flagOn,
-            },
-          },
-        };
-        // M296: prefer the targeted invariant suite (`test:invariants` =
-        // `vitest run test/h*.test.ts`) over the full `npm run test`.  The full
-        // suite can have pre-existing failures in unrelated tests (e.g. m240,
-        // m86) that are NOT invariant regressions — running all tests would
-        // permanently block every self-edit even when the h1-h8 safety tests
-        // are perfectly green.  `test:invariants` scopes to exactly the files
-        // guarded by guardSafetyTests, so a real invariant breakage is still
-        // caught.  When the script is absent (e.g. older installs, test repos)
-        // we fall back to detectVerifyCommands so the gate is never a no-op.
-        // Read the package.json scripts inline (readPackageJson/scriptsOf are
-        // internal to verify-commands.ts and not exported).
-        const scriptsForParity: Record<string, string> = {};
-        try {
-          const raw = readFileSync(join(repo, 'package.json'), 'utf8');
-          const pkg = JSON.parse(raw) as { scripts?: Record<string, unknown> };
-          if (pkg.scripts && typeof pkg.scripts === 'object') {
-            for (const [k, v] of Object.entries(pkg.scripts)) {
-              if (typeof v === 'string') scriptsForParity[k] = v;
-            }
-          }
-        } catch { /* best-effort */ }
-        const pm = existsSync(join(repo, 'pnpm-lock.yaml'))
-          ? 'pnpm'
-          : existsSync(join(repo, 'yarn.lock'))
-            ? 'yarn'
-            : existsSync(join(repo, 'bun.lockb'))
-              ? 'bun'
-              : 'npm';
-        if (scriptsForParity['test:invariants']) {
-          // Fast path: run only the invariant suite.
-          //
-          // Bounded retry (merge-pipeline reliability): test:invariants
-          // includes concurrency/timing/disk-cap tests (h3/h5) that are
-          // legitimately flaky under host contention — a second live daemon
-          // tick, another sandboxed agent's test run, or transient disk
-          // pressure can make ONE pass momentarily red for reasons that have
-          // nothing to do with the proposal's diff. Unlike the main verify
-          // path (Gate 6, M281/M293) there is no per-proposal baseline to
-          // diff against here — this check runs against the UNPATCHED repo
-          // tree, so a single flaky run previously meant 3 non-parity
-          // refusals permanently auto-archived an otherwise-good proposal.
-          // A genuinely broken invariant fails EVERY attempt and is still
-          // refused — this only tolerates transient noise, never a real break.
-          const invariantCmd: VerifyCommand = {
-            kind: 'test',
-            cmd: [pm, 'run', 'test:invariants'],
-          };
-          for (let attempt = 1; attempt <= SELF_EVAL_PARITY_RETRY_ATTEMPTS; attempt++) {
-            const res = await runVerifyCommandAsync(invariantCmd, repo, parityCfg);
-            if (res.ok) return true;
-            if (attempt < SELF_EVAL_PARITY_RETRY_ATTEMPTS) {
-              await new Promise((resolveDelay) => setTimeout(resolveDelay, SELF_EVAL_PARITY_RETRY_DELAY_MS));
-            }
-          }
-          return false;
-        }
-        // Fallback: no targeted script — run all detected verify commands.
-        const cmds = detectVerifyCommands(repo, 'merge');
-        if (cmds.length === 0) {
-          // No commands → parity is vacuously true (verify already passed in
-          // the worktree; flag-sensitivity cannot be tested without a suite).
-          return true;
-        }
-        for (const vc of cmds) {
-          const attempts = vc.kind === 'test' ? SELF_EVAL_PARITY_RETRY_ATTEMPTS : 1;
-          let ok = false;
-          for (let attempt = 1; attempt <= attempts; attempt++) {
-            const res = await runVerifyCommandAsync(vc, repo, parityCfg);
-            ok = res.ok;
-            if (ok) break;
-            if (attempt < attempts) {
-              await new Promise((resolveDelay) => setTimeout(resolveDelay, SELF_EVAL_PARITY_RETRY_DELAY_MS));
-            }
-          }
-          if (!ok && vc.required !== false) return false;
-        }
-        return true;
-      });
+      const parity = await selfEvalParityForRepo(repo, cfg);
       if (!parity.ok) {
         return refuse(`self-eval parity failed: ${parity.reason}`, repo);
       }

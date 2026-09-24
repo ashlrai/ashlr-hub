@@ -15,14 +15,10 @@
  * narrow, and a probe that could not reach a runtime each produce their own
  * sentence, and none of them produces a green check.
  *
- * The tour NEVER renders a reconnect command it invented. `Account.
- * reconnectCommand` is already sanitized by usage-contract.ts's
- * `sanitizeCommand` (which is itself a backstop on the server's stripping),
- * and a native-profile launcher argv is withheld on purpose — where that is
- * the case the server says so in `notes`, and the tour shows the note rather
- * than a command.
+ * The tour NEVER renders a command it invented: the seats step shows only
+ * A2's own fix argv (through C6's capacity rows).
  */
-import type { Account, AccountsSnapshot, LocalModelsSnapshot } from '../usage/usage-contract.js';
+import type { LocalModelsSnapshot } from '../usage/usage-contract.js';
 
 // ---------------------------------------------------------------------------
 // Steps
@@ -72,164 +68,16 @@ export function clampStep(step: number): number {
 }
 
 // ---------------------------------------------------------------------------
-// Accounts
+// Tone
 // ---------------------------------------------------------------------------
 
+/**
+ * Step 2 (seats) is C6's shared LiveCapacityStrip since 3.10 — the tour no
+ * longer narrows the accounts route itself, so the seats can never read
+ * differently here than in Apps & Accounts. The tone below serves the local
+ * runtime and the stops.
+ */
 export type FindingTone = 'ok' | 'attention' | 'unknown';
-
-export interface AccountFinding {
-  id: string;
-  label: string;
-  provider: Account['provider'];
-  tone: FindingTone;
-  /** Short state word shown next to the label. Never a colour on its own. */
-  state: string;
-  /** One plain sentence: what is true, and when it is not ok, what to do. */
-  detail: string;
-  /** A sanitized command the operator can run, when the server offered one. */
-  fix: string | null;
-}
-
-export interface AccountsFindings {
-  /** Null when the read has not resolved or the route is absent. */
-  findings: AccountFinding[] | null;
-  /** Headline sentence for the step. Always present. */
-  summary: string;
-  /** Set when the roster itself is not trustworthy. */
-  caveat: string | null;
-  signedOutCount: number;
-}
-
-const PROVIDER_RECONNECT: Record<Account['provider'], string> = {
-  claude: 'Sign back in with the Claude CLI on this machine, then reopen Verse.',
-  codex: 'Sign back in with the Codex CLI on this machine, then reopen Verse.',
-  grok: 'Reconnect the Grok seat through `ashlr resources`.',
-};
-
-function accountFinding(account: Account): AccountFinding {
-  const label = account.label || account.id;
-  const base = { id: account.id, label, provider: account.provider };
-
-  if (account.authentication === 'signed-out' || account.state === 'signed-out') {
-    return {
-      ...base,
-      tone: 'attention',
-      state: 'signed out',
-      detail:
-        account.reason ??
-        account.notes[0] ??
-        `Verse cannot dispatch to ${label} until this seat is signed in again.`,
-      fix: account.reconnectCommand ?? PROVIDER_RECONNECT[account.provider],
-    };
-  }
-
-  if (account.unsupported) {
-    return {
-      ...base,
-      tone: 'attention',
-      state: 'probe blocked',
-      detail:
-        `The usage probe for ${label} is pinned to a specific CLI build` +
-        (account.unsupported.pinnedVersion ? ` (${account.unsupported.pinnedVersion})` : '') +
-        ' and this machine is running a different one, so its quota is unreadable. The seat itself still works.',
-      fix: null,
-    };
-  }
-
-  if (account.state === 'unavailable') {
-    return {
-      ...base,
-      tone: 'unknown',
-      state: 'no reading',
-      detail: account.reason ?? `No usage reading came back for ${label}. That is not the same as a limit.`,
-      fix: null,
-    };
-  }
-
-  if (account.state === 'checking') {
-    return { ...base, tone: 'unknown', state: 'checking', detail: `Still probing ${label}.`, fix: null };
-  }
-
-  const binding = account.binding;
-  const limited = binding?.limitReached === true;
-  const spendable = account.credits?.hasCredits === true || account.credits?.unlimited === true;
-
-  if (limited && !spendable) {
-    return {
-      ...base,
-      tone: 'attention',
-      state: 'limit reached',
-      detail: `${label} reported its limit reached. Pick another seat, or wait for the window to reset.`,
-      fix: null,
-    };
-  }
-
-  if (limited && spendable) {
-    // The trap this surface must not fall into: a used-up window on an
-    // account that still has a spendable balance is NOT blocked.
-    return {
-      ...base,
-      tone: 'ok',
-      state: 'usable on credits',
-      detail: `${label} has used up its included window but still has a spendable balance, so it can still dispatch.`,
-      fix: null,
-    };
-  }
-
-  const percent = binding?.measured === true && typeof binding.usedPercent === 'number' ? binding.usedPercent : null;
-  return {
-    ...base,
-    tone: 'ok',
-    state: 'connected',
-    detail:
-      percent === null
-        ? `${label} is signed in. No local utilization signal for this provider — that is expected, not a fault.`
-        : `${label} is signed in, ${Math.round(percent)}% through its binding window.`,
-    fix: null,
-  };
-}
-
-export interface AccountsInput {
-  /** Narrowed snapshot, or null when the route was absent or did not narrow. */
-  snapshot: AccountsSnapshot | null;
-  /** True while the read has produced nothing at all yet. */
-  loading: boolean;
-  /** Why the read could not be used, when the server or the client said. */
-  unavailableReason: string | null;
-}
-
-export function buildAccountsFindings(input: AccountsInput): AccountsFindings {
-  if (input.loading) {
-    return { findings: null, summary: 'Checking which accounts this machine can reach…', caveat: null, signedOutCount: 0 };
-  }
-  if (!input.snapshot) {
-    return {
-      findings: null,
-      summary: 'This server did not report a per-account roster, so Verse cannot say which seats are connected.',
-      caveat: input.unavailableReason,
-      signedOutCount: 0,
-    };
-  }
-
-  const findings = input.snapshot.accounts.map(accountFinding);
-  if (findings.length === 0) {
-    return {
-      findings,
-      summary: 'No provider accounts are connected on this machine yet. Verse will still run local models.',
-      caveat: input.snapshot.collectorNote,
-      signedOutCount: 0,
-    };
-  }
-
-  const signedOut = findings.filter((f) => f.state === 'signed out');
-  const usable = findings.filter((f) => f.tone === 'ok');
-  const summary =
-    signedOut.length === 0
-      ? `${usable.length} of ${findings.length} ${findings.length === 1 ? 'seat is' : 'seats are'} ready to dispatch.`
-      : `${signedOut.length} ${signedOut.length === 1 ? 'seat is' : 'seats are'} signed out. Each one below says how to get it back.`;
-
-  return { findings, summary, caveat: input.snapshot.collectorNote, signedOutCount: signedOut.length };
-}
 
 // ---------------------------------------------------------------------------
 // Local runtime

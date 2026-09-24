@@ -539,64 +539,191 @@ function hasCodexConfigKey(args: string[], expectedKey: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
- * Normalise a stdout/stderr line from a streaming engine subprocess to a RunEvent.
- * Handles `claude --output-format stream-json` JSONL and codex JSONL.
- * Lines that don't parse as JSON become kind:'raw' events.
+ * Which stdout dialect an engine command speaks (V3.10 R3a).
+ *
+ * WHY NOT `bin === 'claude'`. The stall monitor's loop and no-diff checks
+ * only work when tool calls are recognised, and the old comparison matched
+ * only a BARE bin name: an absolute path (`/opt/…/claude`, which is what
+ * sandbox-exec needs), grok's pinned binary (`grok-0.2.118-macos-aarch64`)
+ * and the grok-cli seat's launcher form (`node launcher.mjs …`) all fell
+ * through to "raw", so grok's no-diff check had to be switched off. The
+ * family is decided by basename, then by the declared output format (the
+ * launcher form's bin is `node`, but its argv says streaming-messages-json).
+ *  - `anthropic`: Anthropic Messages wire NDJSON — claude stream-json and
+ *    grok streaming-messages-json (bare events, `stream_event` wrappers and
+ *    whole `assistant` envelopes).
+ *  - `codex`: codex JSONL.
+ *  - `generic`: everything else (usage lines only).
  */
-function normaliseEngineOutputLine(line: string, engineBin: string, ts: number): RunEvent {
-  const trimmed = line.trim();
-  if (!trimmed.startsWith('{')) {
-    return { kind: 'raw', ts, text: trimmed, rawLine: line };
+export type EngineStreamFamily = 'anthropic' | 'codex' | 'generic';
+
+export function engineStreamFamily(cmd: Pick<EngineCommand, 'bin' | 'args'>): EngineStreamFamily {
+  const base = basename(cmd.bin.replace(/\\/g, '/')).toLowerCase().replace(/\.(?:exe|cmd)$/, '');
+  if (base === 'claude') return 'anthropic';
+  if (base === 'codex') return 'codex';
+  if (/^grok(?:$|[-_.])/.test(base)) return 'anthropic';
+  const args = cmd.args ?? [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    const format = arg === '--output-format' ? args[i + 1] : arg.startsWith('--output-format=') ? arg.slice('--output-format='.length) : undefined;
+    if (format === 'streaming-messages-json' || format === 'stream-json') return 'anthropic';
   }
-  try {
-    const ev = JSON.parse(trimmed) as Record<string, unknown>;
+  return 'generic';
+}
 
-    // claude stream-json: tool_use events carry name + input
-    if (engineBin === 'claude') {
-      // tool_use block start: { type: 'content_block_start', content_block: { type: 'tool_use', name: ... } }
-      const cb = ev['content_block'] as Record<string, unknown> | undefined;
-      if (ev['type'] === 'content_block_start' && cb?.['type'] === 'tool_use') {
-        return { kind: 'tool_call', ts, toolName: String(cb['name'] ?? ''), rawLine: line };
-      }
-      // text delta: { type: 'content_block_delta', delta: { type: 'text_delta', text: '...' } }
-      const delta = ev['delta'] as Record<string, unknown> | undefined;
-      if (ev['type'] === 'content_block_delta' && delta?.['type'] === 'text_delta') {
-        return { kind: 'text', ts, text: String(delta['text'] ?? ''), rawLine: line };
-      }
-      // result summary: { type: 'result', ... } with usage
-      if (ev['type'] === 'result') {
-        const u = ev['usage'] as Record<string, unknown> | undefined;
-        if (u && typeof u['input_tokens'] === 'number') {
-          return {
-            kind: 'usage', ts,
-            text: `tokensIn=${u['input_tokens']} tokensOut=${u['output_tokens'] ?? 0}`,
-            rawLine: line,
-          };
-        }
-      }
+/** Tool names that MUTATE files, beyond run-monitor's EDIT_TOOL_RE (grok's `search_replace`, `apply_patch`, …). */
+const MUTATING_TOOL_RE = /(write|edit|create|replace|patch|insert|delete|remove|move|rename|notebook)/i;
+/** Loop detection hashes the first 256 chars of `text`; keep args bounded but distinctive. */
+const TOOL_ARGS_MAX_CHARS = 2_000;
+const TOOL_INPUT_JSON_MAX_CHARS = 64 * 1024;
+const SEEN_TOOL_IDS_MAX = 4_096;
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+  return v !== null && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** The file a mutating tool names in its input, if any (bounded; display only). */
+function toolTargetPath(input: unknown): string | undefined {
+  if (!isRecord(input)) return undefined;
+  for (const key of ['file_path', 'path', 'target_file', 'filePath', 'notebook_path', 'filename']) {
+    const v = input[key];
+    if (typeof v === 'string' && v.length > 0) return v.slice(0, 300);
+  }
+  return undefined;
+}
+
+/**
+ * Normalises one engine's stdout, line by line, into RunEvents. Stateful per
+ * spawn: Anthropic-wire tool calls arrive split across lines
+ * (content_block_start → input_json_delta… → content_block_stop) and, with
+ * partial messages, ALSO as a whole `assistant` envelope — so each tool_use is
+ * emitted exactly once (deduplicated by its id), at its stop or its envelope,
+ * WITH its arguments. Arguments matter: the loop check hashes name+args, and
+ * a name-only hash would call six reads of six different files a loop.
+ * A mutating tool also yields a `file_touched` event so the no-diff check
+ * sees edits whatever the CLI calls its edit tool.
+ */
+export interface EngineOutputNormaliser {
+  /** Events for one stdout line (at least one; the first is the line's primary event). */
+  line(line: string, ts: number): RunEvent[];
+}
+
+export function createEngineOutputNormaliser(cmd: Pick<EngineCommand, 'bin' | 'args'>): EngineOutputNormaliser {
+  const family = engineStreamFamily(cmd);
+  const seenToolIds = new Set<string>();
+  const pending = new Map<number, { id: string | null; name: string; json: string; input: unknown }>();
+
+  const markSeen = (id: string | null): void => {
+    if (!id) return;
+    seenToolIds.add(id);
+    if (seenToolIds.size > SEEN_TOOL_IDS_MAX) seenToolIds.delete(seenToolIds.values().next().value!);
+  };
+
+  const toolEvents = (name: string, input: unknown, argsText: string, ts: number, rawLine: string): RunEvent[] => {
+    const events: RunEvent[] = [{ kind: 'tool_call', ts, toolName: name, text: argsText.slice(0, TOOL_ARGS_MAX_CHARS), rawLine }];
+    if (MUTATING_TOOL_RE.test(name)) {
+      const target = toolTargetPath(input);
+      events.push({ kind: 'file_touched', ts, ...(target ? { fileTouched: target } : {}), rawLine });
     }
+    return events;
+  };
 
-    // codex JSONL: tool_call events
-    if (engineBin === 'codex') {
-      if (ev['type'] === 'function_call' || ev['type'] === 'tool_call') {
-        return { kind: 'tool_call', ts, toolName: String(ev['name'] ?? ev['function'] ?? ''), rawLine: line };
-      }
+  const stringifyInput = (input: unknown): string => {
+    if (input === undefined || (isRecord(input) && Object.keys(input).length === 0)) return '';
+    try { return JSON.stringify(input) ?? ''; } catch { return ''; }
+  };
+
+  /** One bare Anthropic-wire event (possibly unwrapped from `stream_event`). */
+  const wire = (ev: Record<string, unknown>, ts: number, rawLine: string): RunEvent[] | null => {
+    const index = typeof ev['index'] === 'number' ? ev['index'] : -1;
+    if (ev['type'] === 'content_block_start' && isRecord(ev['content_block']) && ev['content_block']['type'] === 'tool_use') {
+      const block = ev['content_block'];
+      const id = typeof block['id'] === 'string' ? block['id'] : null;
+      if (id && seenToolIds.has(id)) return null;
+      pending.set(index, { id, name: String(block['name'] ?? ''), json: stringifyInput(block['input']), input: block['input'] });
+      return null;
     }
+    if (ev['type'] === 'content_block_delta' && isRecord(ev['delta'])) {
+      const delta = ev['delta'];
+      if (delta['type'] === 'text_delta') return [{ kind: 'text', ts, text: String(delta['text'] ?? ''), rawLine }];
+      if (delta['type'] === 'input_json_delta' && typeof delta['partial_json'] === 'string') {
+        const open = pending.get(index);
+        if (open && open.json.length < TOOL_INPUT_JSON_MAX_CHARS) open.json += delta['partial_json'];
+      }
+      return null;
+    }
+    if (ev['type'] === 'content_block_stop') {
+      const open = pending.get(index);
+      if (!open) return null;
+      pending.delete(index);
+      if (open.id && seenToolIds.has(open.id)) return null;
+      markSeen(open.id);
+      let input: unknown = open.input;
+      if (open.json) {
+        try { input = JSON.parse(open.json); } catch { /* truncated / partial: keep the text */ }
+      }
+      return toolEvents(open.name, input, open.json, ts, rawLine);
+    }
+    return null;
+  };
 
-    // Generic usage line (any engine): any line with input_tokens + output_tokens
+  /** A whole `assistant` envelope: every tool_use block not already seen. */
+  const envelope = (message: Record<string, unknown>, ts: number, rawLine: string): RunEvent[] | null => {
+    const content = message['content'];
+    if (!Array.isArray(content)) return null;
+    const events: RunEvent[] = [];
+    for (const block of content) {
+      if (!isRecord(block) || block['type'] !== 'tool_use') continue;
+      const id = typeof block['id'] === 'string' ? block['id'] : null;
+      if (id && seenToolIds.has(id)) continue;
+      markSeen(id);
+      // A still-open streamed copy of the same block must not count again at its stop.
+      for (const [idx, open] of pending) if (id && open.id === id) pending.delete(idx);
+      events.push(...toolEvents(String(block['name'] ?? ''), block['input'], stringifyInput(block['input']), ts, rawLine));
+    }
+    return events.length > 0 ? events : null;
+  };
+
+  const usageEvent = (ev: Record<string, unknown>, ts: number, rawLine: string): RunEvent | null => {
     const u = (ev['usage'] ?? ev['token_usage']) as Record<string, unknown> | undefined;
     if (u && typeof u['input_tokens'] === 'number') {
-      return {
-        kind: 'usage', ts,
-        text: `tokensIn=${u['input_tokens']} tokensOut=${u['output_tokens'] ?? 0}`,
-        rawLine: line,
-      };
+      return { kind: 'usage', ts, text: `tokensIn=${u['input_tokens']} tokensOut=${u['output_tokens'] ?? 0}`, rawLine };
     }
+    return null;
+  };
 
-    return { kind: 'raw', ts, text: trimmed, rawLine: line };
-  } catch {
-    return { kind: 'raw', ts, text: trimmed, rawLine: line };
-  }
+  return {
+    line(line: string, ts: number): RunEvent[] {
+      const trimmed = line.trim();
+      const raw: RunEvent = { kind: 'raw', ts, text: trimmed, rawLine: line };
+      if (!trimmed.startsWith('{')) return [raw];
+      let ev: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (!isRecord(parsed)) return [raw];
+        ev = parsed;
+      } catch {
+        return [raw];
+      }
+
+      if (family === 'anthropic') {
+        let derived: RunEvent[] | null = null;
+        if (ev['type'] === 'stream_event' && isRecord(ev['event'])) derived = wire(ev['event'], ts, line);
+        else if (ev['type'] === 'assistant' && isRecord(ev['message'])) derived = envelope(ev['message'], ts, line);
+        else derived = wire(ev, ts, line);
+        if (derived && derived.length > 0) return derived;
+      }
+
+      if (family === 'codex' && (ev['type'] === 'function_call' || ev['type'] === 'tool_call')) {
+        return [{ kind: 'tool_call', ts, toolName: String(ev['name'] ?? ev['function'] ?? ''), rawLine: line }];
+      }
+
+      // Usage (any engine): a line with input_tokens (+ output_tokens) — claude's
+      // and grok's terminal `result` included.
+      const usage = usageEvent(ev, ts, line);
+      return [usage ?? raw];
+    },
+  };
 }
 
 /**
@@ -607,15 +734,16 @@ function normaliseEngineOutputLine(line: string, engineBin: string, ts: number):
  */
 function parseUsageFromLines(
   lines: string[],
-  engineBin: string,
+  cmd: Pick<EngineCommand, 'bin' | 'args'>,
 ): { tokensIn: number; tokensOut: number } | undefined {
+  const anthropicWire = engineStreamFamily(cmd) === 'anthropic';
   for (let i = lines.length - 1; i >= 0; i--) {
     const trimmed = (lines[i] ?? '').trim();
     if (!trimmed.startsWith('{')) continue;
     try {
       const ev = JSON.parse(trimmed) as Record<string, unknown>;
       // claude stream-json: final result event
-      if (engineBin === 'claude' && ev['type'] === 'result') {
+      if (anthropicWire && ev['type'] === 'result') {
         const u = ev['usage'] as Record<string, unknown> | undefined;
         if (u && typeof u['input_tokens'] === 'number' && typeof u['output_tokens'] === 'number') {
           return { tokensIn: u['input_tokens'] as number, tokensOut: u['output_tokens'] as number };
@@ -714,6 +842,8 @@ async function spawnEngineInner(
     let stdoutBuf = '';
     let stderrBuf = '';
     const callerOnEvent = opts?.onEvent;
+    // One normaliser per spawn: Anthropic-wire tool calls span several lines.
+    const normaliser = createEngineOutputNormaliser(cmd);
     const captureClaudeRateLimitEvents = isClaudeEngineBin(cmd.bin);
     const ownsProcessGroup = opts?.signal !== undefined && platform !== 'win32';
     const processKill = opts?._processKill ?? ((pid: number, signal: NodeJS.Signals | 0) => {
@@ -790,7 +920,7 @@ async function spawnEngineInner(
     } {
       const lines = stdoutBuf.trim() ? [...stdoutLines, stdoutBuf] : stdoutLines;
       const output = lines.join('\n').trim();
-      const usage = parseUsageFromLines(lines, cmd.bin);
+      const usage = parseUsageFromLines(lines, cmd);
       return usage ? { output, usage } : { output };
     }
 
@@ -969,9 +1099,10 @@ async function spawnEngineInner(
         stdoutBuf = stdoutBuf.slice(nl + 1);
         stdoutLines.push(line);
         captureClaudeRateLimitLine(line);
-        const ev = normaliseEngineOutputLine(line, cmd.bin, Date.now());
-        monitor.onEvent(ev);
-        if (callerOnEvent) callerOnEvent(ev);
+        for (const ev of normaliser.line(line, Date.now())) {
+          monitor.onEvent(ev);
+          if (callerOnEvent) callerOnEvent(ev);
+        }
       }
     });
 
@@ -1036,8 +1167,9 @@ async function spawnEngineInner(
       if (stdoutBuf.trim()) {
         stdoutLines.push(stdoutBuf);
         captureClaudeRateLimitLine(stdoutBuf);
-        const ev = normaliseEngineOutputLine(stdoutBuf, cmd.bin, Date.now());
-        if (callerOnEvent) callerOnEvent(ev);
+        for (const ev of normaliser.line(stdoutBuf, Date.now())) {
+          if (callerOnEvent) callerOnEvent(ev);
+        }
       }
       if (stderrBuf.trim()) {
         stderrLines.push(stderrBuf);
@@ -1048,7 +1180,7 @@ async function spawnEngineInner(
 
       const exitedClean = code === 0 && signal === null;
       const rawOutput = stdoutLines.join('\n').trim();
-      const usage = parseUsageFromLines(stdoutLines, cmd.bin);
+      const usage = parseUsageFromLines(stdoutLines, cmd);
 
       if (terminationRequested && ownsProcessGroup) {
         const groupState = probeOwnedGroup();

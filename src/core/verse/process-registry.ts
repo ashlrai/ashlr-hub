@@ -3,8 +3,8 @@
  * server launched, so the NEXT server can reap the ones a crash left behind.
  *
  *   <root>/running.json   (default root ~/.ashlr/verse; 0600, atomic rewrite)
- *   { "v": 1, "entries": [ { sessionId, turnId, pid, pgid, markers, spawnedAt,
- *                            serverPid, serverStartedAt } ] }
+ *   { "v": 1, "entries": [ { kind?, sessionId, turnId, pid, pgid, markers,
+ *                            spawnedAt, serverPid, serverStartedAt } ] }
  *
  * WHY. Every turn's CLI runs in its own DETACHED process group (so Stop can
  * signal the whole tree). When the server dies without settling it — a crash,
@@ -31,6 +31,15 @@
  * Kill: SIGTERM to the group, then SIGKILL after a grace period if it is still
  * alive (unref'd timer — never holds the process open).
  *
+ * TWO KINDS OF ENTRY (V3.10, unit C4). A `turn` is one agent CLI turn — at
+ * most one per session, so registering a new turn replaces the session's old
+ * one. A `terminal` is one Terminal-pane tab's login shell (terminal.ts) — a
+ * session can have several, keyed by `turnId` = the tab id, and registering
+ * one never displaces the session's running turn (nor the other way round).
+ * Entries written before 3.10 carry no `kind` and are turns. Reaping treats
+ * both the same way: a shell a crashed sidecar left behind is killed on the
+ * next start under exactly the same identity proof.
+ *
  * `ps` is only run when there is something to verify (a live group whose
  * server is dead); a clean start reads an empty file and spawns nothing.
  */
@@ -47,8 +56,13 @@ export const START_TOLERANCE_MS = 3_000;
 /** SIGTERM → SIGKILL escalation for a reaped group. */
 export const REAP_TERM_GRACE_MS = 3_000;
 
+export type VerseRunningKind = 'turn' | 'terminal';
+
 export interface VerseRunningEntry {
+  /** Absent on every pre-3.10 entry, which are all turns. */
+  kind?: VerseRunningKind;
   sessionId: string;
+  /** The turn id — or, for a `terminal` entry, the tab id. */
   turnId: string;
   /** Group leader pid (the spawned CLI / launcher). */
   pid: number;
@@ -96,7 +110,7 @@ export interface ProcessRegistryOptions {
 
 export interface VerseProcessRegistry {
   readonly path: string;
-  /** Record a launched turn. Never throws (a registry write must not fail a turn). */
+  /** Record a launched turn (or terminal shell). Never throws (a registry write must not fail a turn). */
   add(entry: Omit<VerseRunningEntry, 'serverPid' | 'serverStartedAt'>): void;
   /** Forget a settled turn. Never throws. */
   remove(sessionId: string, turnId: string): void;
@@ -113,8 +127,14 @@ function isPid(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
 }
 
+/** An entry's kind; a missing (pre-3.10) kind is a turn. */
+export function runningKindOf(entry: Pick<VerseRunningEntry, 'kind'>): VerseRunningKind {
+  return entry.kind === 'terminal' ? 'terminal' : 'turn';
+}
+
 function isEntry(value: unknown): value is VerseRunningEntry {
   return isObject(value)
+    && (value['kind'] === undefined || value['kind'] === 'turn' || value['kind'] === 'terminal')
     && typeof value['sessionId'] === 'string'
     && typeof value['turnId'] === 'string'
     && isPid(value['pid'])
@@ -277,8 +297,18 @@ export function createProcessRegistry(root: string, opts: ProcessRegistryOptions
 
     add(entry): void {
       const full: VerseRunningEntry = { ...entry, serverPid, serverStartedAt };
+      const kind = runningKindOf(entry);
       update((entries) => [
-        ...entries.filter((e) => !(e.serverPid === serverPid && e.sessionId === entry.sessionId)),
+        // A turn replaces its session's previous TURN (one turn per session);
+        // a terminal replaces only an entry for the SAME tab. Neither kind
+        // ever displaces the other — a shell opened mid-turn must not make
+        // that turn's process group unreapable, and vice versa.
+        ...entries.filter((e) => !(
+          e.serverPid === serverPid
+          && e.sessionId === entry.sessionId
+          && runningKindOf(e) === kind
+          && (kind === 'turn' || e.turnId === entry.turnId)
+        )),
         full,
       ]);
     },

@@ -1,0 +1,316 @@
+/*
+ * The shared capacity strip. Tokens only (DESIGN.md §13): no raw colour, no
+ * px font size. It adapts to ITS container, not the window — the same strip
+ * sits in an 880px Apps column and a 300px Resources panel — so the narrow
+ * layout is a container query at the compact breakpoint (480, viewport.ts).
+ */
+.strip {
+  container-type: inline-size;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.headline {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-medium);
+  color: var(--text-primary);
+}
+
+.empty {
+  margin: 0;
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  color: var(--text-secondary);
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border-subtle);
+}
+.row:first-child {
+  border-top: 0;
+}
+.row[data-compact] {
+  padding: var(--space-2) 0;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+
+.nameWrap,
+.nameButton {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.nameButton {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  border-radius: var(--radius-xs);
+}
+.nameButton:hover .name {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.nameButton:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-focus-ring);
+}
+.nameButton[aria-pressed='true'] .name {
+  color: var(--text-link);
+}
+
+.name {
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+  font-weight: var(--font-weight-semibold);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.plan {
+  font-size: var(--text-2xs-size);
+  line-height: var(--text-2xs-line);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-label);
+  font-family: var(--font-display);
+  color: var(--text-tertiary);
+}
+
+/* A state is a WORD; the dot only reinforces it. */
+.word {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: var(--radius-full);
+  background: var(--status-neutral-solid);
+  flex: none;
+}
+.word[data-tone='success'] .dot { background: var(--status-success-solid); }
+.word[data-tone='warning'] { color: var(--status-warning-fg); }
+.word[data-tone='warning'] .dot { background: var(--status-warning-solid); }
+.word[data-tone='danger'] { color: var(--status-danger-fg); }
+.word[data-tone='danger'] .dot { background: var(--status-danger-solid); }
+.word[data-tone='neutral'] { font-style: italic; }
+.word[data-tone='neutral'] .dot {
+  background: transparent;
+  border: 1px solid var(--status-unknown-solid);
+}
+
+.summary,
+.meta {
+  margin: 0;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line-relaxed);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.meta {
+  color: var(--text-tertiary);
+}
+.autonomy {
+  color: var(--text-secondary);
+  font-weight: var(--font-weight-medium);
+}
+.autonomy[data-status='eligible'] { color: var(--status-success-fg); }
+.autonomy[data-status='unknown'] {
+  font-style: italic;
+  color: var(--status-unknown-fg);
+}
+
+.bars {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.bar {
+  display: grid;
+  grid-template-columns: minmax(4.5rem, 7.5rem) minmax(5rem, 1fr) minmax(2.75rem, auto) minmax(0, 12rem);
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.bar[data-compact] {
+  grid-template-columns: minmax(3.5rem, 5.5rem) minmax(3rem, 1fr) auto;
+}
+
+.barLabel {
+  color: var(--text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bar[data-binding] .barLabel {
+  color: var(--text-secondary);
+}
+
+/* used (solid) · room (track) · kept for you (hatched, past the tick). */
+.track {
+  position: relative;
+  display: block;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--meter-track);
+  overflow: hidden;
+}
+.trackUnknown {
+  display: block;
+  height: 6px;
+  border-radius: var(--radius-full);
+  border: 1px dashed var(--border-strong);
+}
+.used {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: var(--radius-full);
+  background: var(--data-seq-5);
+  transition: width var(--duration-base) var(--ease-standard);
+}
+.used[data-level='tight'] { background: var(--status-warning-solid); }
+.used[data-level='limit'] { background: var(--status-danger-solid); }
+.reserve {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: repeating-linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--text-tertiary) 34%, transparent) 0 2px,
+    transparent 2px 5px
+  );
+}
+.ceiling {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text-secondary);
+}
+
+.value {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+  white-space: nowrap;
+  text-align: right;
+}
+.value[data-level='tight'] { color: var(--status-warning-fg); }
+.value[data-level='limit'] { color: var(--status-danger-fg); }
+.value[data-level='unknown'] {
+  font-style: italic;
+  color: var(--status-unknown-fg);
+}
+
+.reset {
+  color: var(--text-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-1);
+}
+
+/* Narrow container (a side panel, or a 375 window): actions and resets wrap. */
+@container (max-width: 480px) {
+  .row {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .actions {
+    grid-column: 2;
+    justify-content: flex-start;
+  }
+  .bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+    row-gap: var(--space-1);
+  }
+  .bar .track,
+  .bar .trackUnknown {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+  .reset {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    white-space: normal;
+  }
+  .bar[data-compact] {
+    grid-template-columns: minmax(3rem, auto) minmax(3rem, 1fr) auto;
+  }
+  .bar[data-compact] .track,
+  .bar[data-compact] .trackUnknown {
+    grid-column: auto;
+    grid-row: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .used {
+    transition: none;
+  }
+}

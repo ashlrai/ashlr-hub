@@ -11,9 +11,21 @@ export const MIN_CHART_WIDTH = 280;
 
 export function useChartWidth(ref: RefObject<HTMLElement | null>, fixed: number | undefined, fallback = 640): number {
   const [measured, setMeasured] = useState<number | null>(null);
+  // WHY track the node: a chart whose frame starts in a non-ready state
+  // (loading / empty / dark) mounts its plot — and so this ref — LATER than
+  // the hook. An effect keyed only on the ref object never re-ran, so every
+  // chart that first rendered "Loading…" stayed at the 640 px fallback and
+  // was scaled down by CSS (V3.10 fix, found in the 1440 harness).
+  const [node, setNode] = useState<HTMLElement | null>(null);
+  // Runs after every render on purpose (ref.current is not a dependency React
+  // can see); the equality guard makes it settle in one pass, never a loop.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useLayoutEffect(() => {
+    if (ref.current !== node) setNode(ref.current);
+  });
   useLayoutEffect(() => {
     if (fixed !== undefined) return undefined;
-    const el = ref.current;
+    const el = node;
     if (!el) return undefined;
     const read = (): void => {
       const w = Math.floor(el.getBoundingClientRect().width);
@@ -33,6 +45,6 @@ export function useChartWidth(ref: RefObject<HTMLElement | null>, fixed: number 
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [ref, fixed]);
+  }, [node, fixed]);
   return Math.max(MIN_CHART_WIDTH, fixed ?? measured ?? fallback);
 }

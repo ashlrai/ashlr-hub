@@ -417,6 +417,9 @@ export const CLI_AGENT_METEREDNESS: Readonly<Record<string, Meteredness>> = Obje
   opencode: 'metered',
   ashlrcode: 'metered',
   aw: 'unknown',
+  // V3.10: the grok-a SuperGrok seat run through its native-profile launcher.
+  // A subscription seat reached over the network — metered, like claude/codex.
+  'grok-cli': 'metered',
 });
 
 /**

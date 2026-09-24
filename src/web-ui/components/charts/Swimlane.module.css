@@ -46,3 +46,8 @@
   left: 0;
   right: 0;
 }
+
+/* Queued / parked: a neutral outline, no fill — holding a place, not running. */
+.outline {
+  stroke-width: 1.5;
+}

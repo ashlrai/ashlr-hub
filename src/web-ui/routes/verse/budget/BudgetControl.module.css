@@ -155,7 +155,7 @@
 }
 .bar[data-binding] .barLabel { color: var(--text-primary); }
 .bindingMark {
-  font-size: 10px;
+  font-size: var(--text-2xs-size);
   color: var(--text-tertiary);
 }
 .barValue {
@@ -185,12 +185,13 @@
 }
 .used {
   left: 0;
-  background: var(--accent-500);
+  /* Quantity, not interaction: the fixed azure ramp, never the operator-chosen accent (DESIGN §13.2). */
+  background: var(--data-seq-5);
   border-radius: var(--radius-full) 0 0 var(--radius-full);
 }
 .used[data-over] { background: var(--status-warning-solid); }
 .room {
-  background: color-mix(in srgb, var(--accent-500) 28%, transparent);
+  background: color-mix(in srgb, var(--data-seq-5) 28%, transparent);
 }
 .reserveBand {
   background: repeating-linear-gradient(

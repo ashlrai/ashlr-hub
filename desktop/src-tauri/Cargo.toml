@@ -30,6 +30,17 @@ tauri-plugin-updater = "2"
 # `dialog:allow-open` is granted, and only to the remote Verse origin —
 # see capabilities/verse-remote.json.
 tauri-plugin-dialog = "2"
+# Native notifications (turn finished / failed, "Needs you", seat health).
+# Driven from RUST ONLY: the Verse page gets no `notification:*` permission
+# (capabilities/verse-remote.json is unchanged), so page code can never raise
+# a notification or choose its text — `notify.rs` renders every word from its
+# own templates. Unsigned builds fall back to osascript (see notify.rs).
+tauri-plugin-notification = "2"
+# The optional system-wide "show Verse" hotkey (⌃⌥Space, off by default,
+# toggled in Settings ▸ Desktop). Registered from Rust only; the plugin's IPC
+# commands are not granted to any window, so the page can ask for the hotkey
+# to be switched on or off but never register a key of its own.
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hmac = "0.12"

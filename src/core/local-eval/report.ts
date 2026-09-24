@@ -11,6 +11,7 @@
  * ranked list answers it without opening a single log.
  */
 
+import type { ExperimentResultV1 } from '../learn/harness-types.js';
 import type {
   EvalReport,
   FailureMode,
@@ -180,5 +181,32 @@ export function renderReport(report: EvalReport): string {
     }
   }
 
+  return lines.join('\n');
+}
+
+/**
+ * Render one harness experiment (learn/experiments.ts) for a terminal.
+ *
+ * The verdict line comes LAST, after the numbers it rests on, and every
+ * unknown prints as "not measured" — never as 0 — because a missing number
+ * read as zero is how an inconclusive experiment gets mistaken for a clean one.
+ */
+export function renderExperimentResult(exp: ExperimentResultV1): string {
+  const unknown = 'not measured';
+  const signed = (n: number, unit: string): string => `${n >= 0 ? '+' : ''}${n.toFixed(1)}${unit}`;
+  const lines: string[] = [];
+  lines.push(`EXPERIMENT ${exp.id}  ${exp.baseVersionId} (base) vs ${exp.candidateVersionId} (candidate)`);
+  lines.push(`  hypothesis       ${exp.hypothesisId ?? 'manual'}`);
+  lines.push(`  task set         ${exp.taskSet.id} (${exp.taskSet.digest.slice(0, 12)})`);
+  lines.push(`  status           ${exp.status}`);
+  lines.push(`  pairs            ${exp.pairs}  (candidate wins ${exp.wins}, losses ${exp.losses}, ties ${exp.ties})`);
+  lines.push(`  lift             ${exp.lift
+    ? `${signed(exp.lift.mean, ' pp')}  95% CI [${signed(exp.lift.ciLow, '')}, ${signed(exp.lift.ciHigh, '')}] pp`
+    : unknown}`);
+  lines.push(`  refuse regressed ${exp.refuseRegression === null ? unknown : exp.refuseRegression ? 'YES' : 'no'}`);
+  lines.push(`  claimed-none Δ   ${exp.claimedChangeNoneMadeDelta === null ? unknown : String(exp.claimedChangeNoneMadeDelta)}`);
+  lines.push(`  cost (wall) Δ    ${exp.costDeltaPct === null ? unknown : signed(exp.costDeltaPct, '%')}`);
+  lines.push(`VERDICT  ${exp.verdict ?? (exp.status === 'cancelled' ? 'none (cancelled)' : 'pending')}`);
+  for (const reason of exp.reasons) lines.push(`  - ${reason}`);
   return lines.join('\n');
 }
