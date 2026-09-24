@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { performance } from 'node:perf_hooks';
-import { parseClaudeNativeUsage, probeClaudeAccountUsage } from '../src/core/resources/claude-account-usage.js';
+import { CLAUDE_USAGE_VERIFIED_VERSIONS, parseClaudeNativeUsage, probeClaudeAccountUsage } from '../src/core/resources/claude-account-usage.js';
 import * as auth from '../src/core/resources/claude-account-status.js';
 import * as verify from '../src/core/run/verify-commands.js';
 
@@ -133,7 +133,17 @@ describe('bounded version-gated report collection', () => {
     }
     expect(result).not.toHaveProperty('observation'); expect(result).not.toHaveProperty('quotaObservedAt');
   });
-  it.each(['2.1.256 (Claude Code)', '2.1.258 (Claude Code)', 'PRIVATE_VERSION'])('never sends /usage to unverified version %s', async (version) => {
+  it.each(CLAUDE_USAGE_VERIFIED_VERSIONS)('reads usage on every verified build (%s)', async (version) => {
+    const { subprocess } = mocks();
+    subprocess.mockImplementation(async (argv, config) => {
+      scratchDirs.push(config.cwd);
+      return nativeResult(argv.at(-1) === '--version' ? `${version} (Claude Code)\n` : JSON.stringify(envelope()));
+    });
+    const result = await probeClaudeAccountUsage(options());
+    expect(result).toMatchObject({ status: 'observed', reason: 'usage-native-reported' });
+    expect(result.windows.map((w) => w.id)).toEqual(['five_hour', 'seven_day', 'seven_day_fable']);
+  });
+  it.each(['2.1.256 (Claude Code)', '2.1.258 (Claude Code)', '2.1.279 (Claude Code)', '2.1.281 (Claude Code)', '2.1.280', 'PRIVATE_VERSION'])('never sends /usage to unverified version %s', async (version) => {
     const { subprocess, authentication } = mocks(); subprocess.mockResolvedValue(nativeResult(version));
     expect(await probeClaudeAccountUsage(options())).toMatchObject({ status: 'observed', reason: 'usage-version-unsupported', windows: [] });
     expect(subprocess).toHaveBeenCalledTimes(1); expect(authentication).toHaveBeenCalledTimes(1);

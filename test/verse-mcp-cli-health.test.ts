@@ -19,6 +19,7 @@
  *
  * Hermetic: the compatibility check is injected, so nothing spawns.
  */
+import { CLAUDE_USAGE_VERIFIED_VERSIONS } from '../src/core/resources/claude-account-usage.js';
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -62,22 +63,15 @@ function record(patch: Partial<VerseAccountRecord> = {}): VerseAccountRecord {
 // ---------------------------------------------------------------------------
 
 describe('the version pin is stored twice and they must agree', () => {
-  it('the displayed constant matches the literal the usage probe enforces', () => {
+  it('the displayed constant is the newest version the usage probe enforces', () => {
     const source = readFileSync(join(process.cwd(), VERSE_CLI_PIN_SOURCE), 'utf8');
-
-    // The enforcing line, verbatim from claude-account-usage.ts:
-    //   if ((await run(['--version'])).trim() !== '2.1.257 (Claude Code)') ...
-    const match = /!==\s*'(\d+\.\d+\.\d+) \(Claude Code\)'/.exec(source);
+    // The probe must gate on the verified list, never a lone inline literal.
+    expect(source, 'the probe must check CLAUDE_USAGE_VERIFIED_VERSIONS').toMatch(/CLAUDE_USAGE_VERIFIED_VERSIONS\.some\(/);
     expect(
-      match,
-      `could not find the enforcing version literal in ${VERSE_CLI_PIN_SOURCE}; ` +
-      'if the probe changed shape, this guard must be updated with it',
-    ).not.toBeNull();
-
-    expect(
-      match![1],
-      'VERSE_CLAUDE_USAGE_PINNED_VERSION has drifted from the version the probe actually enforces',
+      CLAUDE_USAGE_VERIFIED_VERSIONS.at(-1),
+      'VERSE_CLAUDE_USAGE_PINNED_VERSION has drifted from the newest version the probe actually enforces',
     ).toBe(VERSE_CLAUDE_USAGE_PINNED_VERSION);
+    expect(CLAUDE_USAGE_VERIFIED_VERSIONS).toContain('2.1.257');
   });
 
   it('the reason constant is the code the probe actually reports', () => {

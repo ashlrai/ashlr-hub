@@ -59,6 +59,26 @@ export function parseClaudeNativeUsage(raw: string): ResourceConnectionQuotaWind
  * Claude 2.1.257 may silently seed /usage from cached headers; observedAt is the
  * collection time, NOT quota freshness. These windows must never feed admission.
  */
+/**
+ * Claude Code builds whose `-p /usage` is VERIFIED to be a local command that
+ * never reaches a model, and whose output `parseClaudeNativeUsage` reads.
+ *
+ * Any other version still fails closed: an unknown build could route the slash
+ * command to inference. Add a version ONLY after repeating BOTH checks:
+ *   1. the binary's command table defines `name:"usage"` as `type:"local"` with
+ *      `supportsNonInteractive:!0` (grep `strings <binary>`), and
+ *   2. one live `-p /usage` run reports `num_turns: 0` and `total_cost_usd: 0`
+ *      and parses to windows.
+ *
+ * 2.1.257 — the original pin.
+ * 2.1.280 — verified 2026-09-24: identical local definition in the binary; a
+ *           live run returned num_turns 0, total_cost_usd 0 and three windows
+ *           (five_hour, seven_day, seven_day_fable). Needed because Opus 5.5
+ *           (`claude-opus-5-5`) exists only from 2.1.280, so seats re-pinned
+ *           for it would otherwise lose their usage meter.
+ */
+export const CLAUDE_USAGE_VERIFIED_VERSIONS: readonly string[] = ['2.1.257', '2.1.280'];
+
 export async function probeClaudeAccountUsage(options: ClaudeAccountStatusOptions): Promise<ClaudeAccountUsageResult> {
   const pinned = validateClaudeAccountStatusOptions(options);
   const started = performance.now();
@@ -96,7 +116,10 @@ export async function probeClaudeAccountUsage(options: ClaudeAccountStatusOption
       return value.stdout;
     };
     // Unknown versions never receive a slash command: its fallback could be inference.
-    if ((await run(['--version'])).trim() !== '2.1.257 (Claude Code)') return report('usage-version-unsupported');
+    const reported = (await run(['--version'])).trim();
+    if (!CLAUDE_USAGE_VERIFIED_VERSIONS.some((version) => reported === `${version} (Claude Code)`)) {
+      return report('usage-version-unsupported');
+    }
     const raw = await run(['--safe-mode', '--restricted', '--tools', '', '--strict-mcp-config', '--mcp-config',
       '{"mcpServers":{}}', '--no-chrome', '--no-session-persistence', '--output-format', 'json', '-p', '/usage']);
     const windows = parseClaudeNativeUsage(raw);
