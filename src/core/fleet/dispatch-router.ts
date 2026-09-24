@@ -757,8 +757,11 @@ export function meetsBonThreshold(difficulty: RoutingDifficulty, threshold: Rout
 
 export interface StandingBestOfNInput {
   item: Pick<WorkItem, 'effort' | 'source' | 'tags'>;
-  /** The route this tick chose for the item (a held route never fans out). */
-  route: Pick<DispatchRoute, 'hold'>;
+  /**
+   * The route this tick chose for the item (a held route never fans out).
+   * `lane` is the lane whose pool slot the item already holds.
+   */
+  route: Pick<DispatchRoute, 'hold'> & Partial<Pick<DispatchRoute, 'lane'>>;
   lanes: Readonly<Record<FleetEngine, LanePlan>>;
   laneEngines: Readonly<Record<FleetEngine, EngineId | null>>;
   mode: BudgetPolicy['mode'];
@@ -768,7 +771,83 @@ export interface StandingBestOfNInput {
   /** hooks.seatAllows verdicts for the frontier lanes, asked by the caller. */
   grokAllowed: boolean;
   claudeAllowed: boolean;
+  /**
+   * Review c15: extra lane turns still free for fan-out this tick
+   * (`planFanoutReserve`, minus what earlier plans took). Absent = not
+   * accounted (pure callers / tests of the plan shape only); the live hooks
+   * always pass it.
+   */
+  fanoutBudget?: Readonly<Record<FleetEngine, number>>;
   cfg?: AshlrConfig;
+}
+
+/** A standing best-of-N plan plus the extra lane turns it takes beyond the item's own slot. */
+export type StandingBestOfNPlan = AutonomousBestOfNPlan & { laneCharge: Record<FleetEngine, number> };
+
+function zeroLanes(): Record<FleetEngine, number> {
+  return Object.fromEntries(FLEET_ENGINES.map((lane) => [lane, 0])) as Record<FleetEngine, number>;
+}
+
+/**
+ * Review c15: the pool (daemon/loop.ts TieredPool) charges ONE lane slot per
+ * item, but a best-of-N item runs every candidate — so without this a hard
+ * grok-routed item added two local turns on top of a full local lane (4
+ * llama-server turns against Mason's presence cap of 2). The fix is a
+ * reserve: beforeTick holds these slots back from the pool's lane caps when a
+ * fan-out is plausible this tick, and plans may spend only that reserve. The
+ * pool can then never start an item into a turn a fan-out is using.
+ *
+ * Reserve per lane (0 when no fan-out is plausible): local — up to the 2
+ * extra local candidates, always leaving the pool at least one local slot;
+ * grok-cli — one frontier candidate when the lane has 2+ slots; Claude and
+ * Codex none (a Claude candidate runs only on a Claude-routed item's own
+ * slot). Pure.
+ */
+export function planFanoutReserve(
+  lanes: Readonly<Record<FleetEngine, LanePlan>>,
+  fanoutPlausible: boolean,
+): Record<FleetEngine, number> {
+  const reserve = zeroLanes();
+  if (!fanoutPlausible) return reserve;
+  reserve.local = Math.min(FANOUT_LOCAL_EXTRA_MAX, Math.max(0, lanes.local.slots - 1));
+  reserve['grok-cli'] = lanes['grok-cli'].slots >= 2 ? 1 : 0;
+  return reserve;
+}
+
+/** planAutonomousBestOfN's local candidates per plan (best-of-n-policy.ts LOCAL_CANDIDATES). */
+export const FANOUT_LOCAL_EXTRA_MAX = 2;
+
+/**
+ * Fit a plan into the lanes: each candidate runs on the item's own slot (one
+ * candidate of the routed lane) or on a reserved extra turn; candidates with
+ * neither are dropped. Engine diversity is still required after trimming
+ * (the policy's own rule) — otherwise the item runs as one attempt. Pure.
+ */
+export function fitBestOfNToLanes(
+  plan: AutonomousBestOfNPlan,
+  routeLane: FleetEngine | null,
+  budget: Readonly<Record<FleetEngine, number>>,
+  cfg?: AshlrConfig,
+): StandingBestOfNPlan {
+  const laneCharge = zeroLanes();
+  if (!plan.run) return { ...plan, laneCharge };
+  let ownSlot = routeLane !== null ? 1 : 0;
+  const kept: typeof plan.candidates = [];
+  for (const candidate of plan.candidates) {
+    const lane = fleetLaneOf(candidate.engine, cfg);
+    if (lane === null) continue;
+    if (lane === routeLane && ownSlot > 0) {
+      ownSlot -= 1;
+      kept.push(candidate);
+    } else if ((budget[lane] ?? 0) - laneCharge[lane] > 0) {
+      laneCharge[lane] += 1;
+      kept.push(candidate);
+    }
+  }
+  if (new Set(kept.map((c) => c.engine)).size < 2) {
+    return { run: false, reason: 'no-engine-diversity', candidates: [], laneCharge: zeroLanes() };
+  }
+  return { ...plan, candidates: kept, laneCharge };
 }
 
 /**
@@ -780,8 +859,8 @@ export interface StandingBestOfNInput {
  * candidates; the in-process builtin loop is not a distinct engine for
  * best-of-N's judge to separate.
  */
-export function planStandingBestOfN(input: StandingBestOfNInput): AutonomousBestOfNPlan {
-  if (input.route.hold !== null) return { run: false, reason: 'not-needed', candidates: [] };
+export function planStandingBestOfN(input: StandingBestOfNInput): StandingBestOfNPlan {
+  if (input.route.hold !== null) return { run: false, reason: 'not-needed', candidates: [], laneCharge: zeroLanes() };
   const difficulty = difficultyOf(input.item);
   const planned: RoutingDifficulty = meetsBonThreshold(difficulty, input.weights.bonThreshold) ? 'high' : difficulty;
   const localEngine = input.laneEngines.local;
@@ -793,7 +872,7 @@ export function planStandingBestOfN(input: StandingBestOfNInput): AutonomousBest
     : null;
   const grokEngine = input.laneEngines['grok-cli'];
   const claudeEngine = input.laneEngines['claude-cli'];
-  return planAutonomousBestOfN({
+  const plan = planAutonomousBestOfN({
     difficulty: planned,
     priorFailures: input.priorFailures,
     mode: input.mode,
@@ -805,4 +884,19 @@ export function planStandingBestOfN(input: StandingBestOfNInput): AutonomousBest
     claudeEligible: input.claudeAllowed && claudeEngine !== null && input.lanes['claude-cli'].slots > 0,
     ...(claudeEngine !== null && configuredModel(input.cfg, claudeEngine) ? { claudeModel: configuredModel(input.cfg, claudeEngine)! } : {}),
   });
+  if (input.fanoutBudget === undefined) return { ...plan, laneCharge: zeroLanes() };
+  return fitBestOfNToLanes(plan, input.route.lane ?? null, input.fanoutBudget, input.cfg);
+}
+
+/**
+ * Could an item in `items` fan out this tick? The same threshold the plan
+ * uses: difficulty at or above `bonThreshold`, or an earlier failed attempt.
+ * Pure; `attemptsOf` returns 0 when unknown.
+ */
+export function anyFanoutCandidate(
+  items: readonly Pick<WorkItem, 'id' | 'effort' | 'source' | 'tags'>[],
+  threshold: RoutingDifficulty,
+  attemptsOf: (item: Pick<WorkItem, 'id'>) => number,
+): boolean {
+  return items.some((item) => meetsBonThreshold(difficultyOf(item), threshold) || attemptsOf(item) > 0);
 }

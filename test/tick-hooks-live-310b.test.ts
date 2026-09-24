@@ -13,11 +13,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  EXPERIMENT_LOCAL_SLOTS_BUSY,
+  EXPERIMENT_LOCAL_SLOTS_IDLE,
   createLiveTickHooks,
   createStandingRun,
   probeOperatorPresence,
   type LiveHooksDeps,
 } from '../src/core/fleet/tick-hooks-live.js';
+import { EXPERIMENT_SLOTS } from '../src/core/learn/experiments.js';
+import { fleetLaneOf } from '../src/core/fleet/dispatch-router.js';
+import { fleetPrKey, type ObservedPrState, type OpenFleetPrRef } from '../src/core/fleet/backpressure.js';
 import { emptyBackpressureState } from '../src/core/fleet/backpressure.js';
 import { defaultBudgetPolicy } from '../src/core/routing/policy.js';
 import type { SeatCapacity } from '../src/core/routing/headroom.js';
@@ -131,6 +136,9 @@ function harness(): Harness {
     listEnrolled: () => [PATH, OTHER_PATH, '/tmp/no-origin'],
     repoIdentity: (path) => (path === PATH ? REPO : path === OTHER_PATH ? 'ashlrai/other' : null),
     waitingVerify: async () => waiting,
+    // Never GitHub / the real ledger from a unit test: unknown PR state, no breach rows.
+    observeFleetPrs: async () => new Map(),
+    recordReserveBreaches: async () => 0,
     installed: () => true,
     tierOf: (engine) => {
       const id: string = engine;
@@ -630,5 +638,251 @@ describe('beforeTick — KILL revokes armed host merges (R3b)', () => {
     hooks.effectiveConfig(CFG);
     await hooks.beforeTick({ ...hookCtx, dryRun: true });
     expect(revokeCalls).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3.10 review regressions (F1-fleet): c5, c9, c15, reserve breaches.
+// ---------------------------------------------------------------------------
+
+function prOpened(number: number, at: string): LedgerEntry {
+  return {
+    v: 1, seq: number, at, actor: 'daemon', grantId: 'g-1', repo: REPO, prevHash: '0'.repeat(64), hash: '1'.repeat(64),
+    kind: 'pr:opened',
+    data: { v: 1, repo: REPO, number, proposalId: `p-${number}`, branch: `ashlr/fleet/p-${number}`, headSha: 'a'.repeat(40), kind: 'change', ownerLane: true, at },
+  } as LedgerEntry;
+}
+
+describe('review c5 — open fleet PRs reconcile with GitHub', () => {
+  it('three owner-lane PRs Mason merged on GitHub no longer pause the repo', async () => {
+    ledgerChain = 'ok';
+    const at = new Date(NOW - 60 * 60_000).toISOString();
+    ledgerRows = [prOpened(1, at), prOpened(2, at), prOpened(3, at)];
+    const asked: OpenFleetPrRef[][] = [];
+    let observed: ObservedPrState = null;
+    const deps = {
+      ...h.deps,
+      observeFleetPrs: async (refs: readonly OpenFleetPrRef[]) => {
+        asked.push([...refs]);
+        return new Map(refs.map((r) => [fleetPrKey(r.repo, r.number), observed] as const));
+      },
+    };
+    // Unknown (and recent): still counted — fail closed.
+    let hooks = createLiveTickHooks({ deps });
+    hooks.effectiveConfig(CFG);
+    expect((await hooks.beforeTick(hookCtx)).pausedRepos).toContain(PATH);
+    expect(h.ticks.at(-1)!.pausedRepos.find((p) => p.repo === REPO)?.reason).toMatch(/3 fleet PRs are already open/);
+    expect(asked[0]!.map((r) => r.number)).toEqual([1, 2, 3]);
+
+    // Observed merged on GitHub: the ledger still says open, the count does not.
+    observed = 'merged';
+    hooks = createLiveTickHooks({ deps });
+    hooks.effectiveConfig(CFG);
+    expect((await hooks.beforeTick(hookCtx)).pausedRepos).not.toContain(PATH);
+    expect(h.ticks.at(-1)!.openPrsByRepo).toEqual({});
+  });
+
+  it('an observation failure is unknown, never a crash or a silent zero', async () => {
+    ledgerChain = 'ok';
+    const at = new Date(NOW - 60 * 60_000).toISOString();
+    ledgerRows = [prOpened(1, at), prOpened(2, at), prOpened(3, at)];
+    const hooks = createLiveTickHooks({ deps: { ...h.deps, observeFleetPrs: async () => { throw new Error('GitHub 502'); } } });
+    hooks.effectiveConfig(CFG);
+    expect((await hooks.beforeTick(hookCtx)).pausedRepos).toContain(PATH);
+  });
+});
+
+describe('review c9 — the Leader\'s class-B Codex enable passes the final seat gate', () => {
+  const CODEX_CFG = { foundry: { allowedBackends: ['builtin', 'llama-server', 'grok-cli', 'claude', 'codex'] } } as unknown as AshlrConfig;
+  function codexSeat(primary = 5, secondary = 10): SeatCapacity {
+    return {
+      seatId: 'codex', engine: 'codex', label: 'Codex', free: false,
+      windows: [
+        { id: 'codex_primary', usedPercent: primary, resetsAt: new Date(NOW + 2 * 3_600_000).toISOString(), resetDescription: null, limitReached: false },
+        { id: 'codex_secondary', usedPercent: secondary, resetsAt: new Date(NOW + 5 * 86_400_000).toISOString(), resetDescription: null, limitReached: false },
+      ],
+      signedOut: false, reachable: null, contextWindow: 256_000, observedAt: NOW_ISO, spentTodayUsd: null,
+    };
+  }
+  function codexWorld(seat: SeatCapacity) {
+    const base = policyFixture();
+    policy = {
+      ...base,
+      engines: ['local', 'grok-cli', 'claude-cli', 'codex'],
+      spend: { ...base.spend, seats: { ...base.spend.seats, codex: { seatId: 'codex', enabled: true, reserveFloorPercent: 0, maxSessionWindowPercent: null, roles: ['producer', 'judge'] } } },
+    };
+    // Master's gate re-reads Mason's STORED budget, where Codex is off in every
+    // mode — exactly what the real subscriptionAllows answers.
+    const calls: string[] = [];
+    const deps = {
+      ...h.deps,
+      capacitySnapshot: () => ({ v: 1 as const, publishedAt: NOW_ISO, seats: [grokSeat(), claudeSeat(), seat] }),
+      directives: () => ({ v: 1 as const, updatedAt: NOW_ISO, routerTuning: null, grokLanes: null, codexEnabled: true }),
+      subscriptionAllows: (engine: EngineId) => {
+        calls.push(engine);
+        return { allowed: false, reason: `${engine} seat codex is held back by the balanced budget: Autonomy is switched off for this seat.` };
+      },
+    };
+    return { deps, calls };
+  }
+
+  it('allows Codex under the tick\'s directive-applied budget instead of refusing it every tick', async () => {
+    const world = codexWorld(codexSeat());
+    const hooks = createLiveTickHooks({ deps: world.deps });
+    hooks.effectiveConfig(CODEX_CFG);
+    await hooks.beforeTick({ ...hookCtx, cfg: CODEX_CFG });
+    const verdict = hooks.seatAllows('codex' as EngineId, { maxPercent: 90 });
+    expect(verdict).toMatchObject({ allowed: true });
+    expect(verdict.reason).toMatch(/enabled by the Leader/);
+    expect(world.calls).toEqual([]);
+    // The router and the gate agree: work routed to Codex is not stranded.
+    const routed = hooks.route(item({ id: 'hard', effort: 5 }), CODEX_CFG);
+    if (routed.backend === ('codex' as EngineId)) expect(hooks.seatAllows(routed.backend, { maxPercent: 90 }).allowed).toBe(true);
+  });
+
+  it('still applies the window ceiling to a directive-enabled Codex seat', async () => {
+    const world = codexWorld(codexSeat(95, 10));
+    const hooks = createLiveTickHooks({ deps: world.deps });
+    hooks.effectiveConfig(CODEX_CFG);
+    await hooks.beforeTick({ ...hookCtx, cfg: CODEX_CFG });
+    const verdict = hooks.seatAllows('codex' as EngineId, { maxPercent: 90 });
+    expect(verdict.allowed).toBe(false);
+  });
+
+  it('without the directive, Codex stays off (no lane slots)', async () => {
+    const world = codexWorld(codexSeat());
+    const hooks = createLiveTickHooks({ deps: { ...world.deps, directives: () => null } });
+    hooks.effectiveConfig(CODEX_CFG);
+    await hooks.beforeTick({ ...hookCtx, cfg: CODEX_CFG });
+    expect(hooks.seatAllows('codex' as EngineId, { maxPercent: 90 }).allowed).toBe(false);
+  });
+});
+
+describe('review c15 — best-of-N and experiments stay inside the lane caps', () => {
+  function localTurns(plan: { run: boolean; candidates: { engine: string }[] } | null): number {
+    return plan?.run ? plan.candidates.filter((c) => fleetLaneOf(c.engine, CFG) === 'local').length : 0;
+  }
+
+  it('pins the experiment slot constants to the runner', () => {
+    expect(EXPERIMENT_LOCAL_SLOTS_IDLE).toBe(EXPERIMENT_SLOTS.idle);
+    expect(EXPERIMENT_LOCAL_SLOTS_BUSY).toBe(EXPERIMENT_SLOTS.fleetBusy);
+  });
+
+  it('while Mason is present (local cap 2), pool slots + fan-out turns never exceed the cap', async () => {
+    presenceNow = { present: true, reason: 'A Verse chat turn is running.', evidenceAt: NOW_ISO };
+    const hooks = createLiveTickHooks({ deps: h.deps });
+    hooks.effectiveConfig(CFG);
+    const hard1 = item({ id: 'hard-1', effort: 5 });
+    const hard2 = item({ id: 'hard-2', effort: 5 });
+    hooks.standingBacklog([hard1, hard2]); // the previous tick's backlog: hard work is plausible
+    const result = await hooks.beforeTick(hookCtx);
+    const laneCap = h.ticks.at(-1)!.lanes.find((l) => l.lane === 'local')!.slots;
+    expect(laneCap).toBe(2);
+    const poolLocal = result.laneCaps.local ?? 0;
+    expect(poolLocal).toBeLessThan(laneCap); // a slot is held back for fan-out
+    let extraLocal = 0;
+    const ran: boolean[] = [];
+    for (const it of [hard1, hard2]) {
+      const route = hooks.route(it, CFG);
+      const plan = hooks.bestOfNPlan(it, { maxPercent: 70 });
+      ran.push(plan?.run === true);
+      const own = fleetLaneOf(route.backend, CFG) === 'local' && localTurns(plan) > 0 ? 1 : 0;
+      extraLocal += localTurns(plan) - own;
+      // Asking again for the same item never charges twice.
+      expect(hooks.bestOfNPlan(it, { maxPercent: 70 })).toEqual(plan);
+    }
+    // The first hard item still fans out (Grok + a reserved local turn); the
+    // second finds the reserve spent and runs as one attempt.
+    expect(ran).toEqual([true, false]);
+    expect(poolLocal + extraLocal).toBeLessThanOrEqual(laneCap);
+  });
+
+  it('with no plausible fan-out, the pool gets the whole lane and plans cannot spend beyond it', async () => {
+    presenceNow = { present: true, reason: 'here', evidenceAt: NOW_ISO };
+    const hooks = createLiveTickHooks({ deps: h.deps });
+    hooks.effectiveConfig(CFG);
+    hooks.standingBacklog([item({ id: 'easy', effort: 1 })]);
+    const result = await hooks.beforeTick(hookCtx);
+    expect(result.laneCaps.local).toBe(2);
+    const surprise = item({ id: 'surprise-hard', effort: 5 });
+    const route = hooks.route(surprise, CFG);
+    const plan = hooks.bestOfNPlan(surprise, { maxPercent: 70 });
+    const own = fleetLaneOf(route.backend, CFG) === 'local' ? 1 : 0;
+    expect(localTurns(plan)).toBeLessThanOrEqual(own);
+  });
+
+  it('a running experiment\'s slots come out of the local lane, and idle means no scanned backlog either', async () => {
+    let now = NOW;
+    const started: number[] = [];
+    const deps = {
+      ...h.deps,
+      now: () => now,
+      runExperiment: (opts: { fleetQueueDepth: () => number; signal: AbortSignal }) => {
+        started.push(opts.fleetQueueDepth());
+        return new Promise<string | null>(() => undefined); // keeps running
+      },
+    };
+    // Unknown backlog is not idle.
+    const cautious = createLiveTickHooks({ deps });
+    cautious.effectiveConfig(CFG);
+    await cautious.beforeTick(hookCtx);
+    expect(started).toEqual([]);
+    // A scanned backlog with work is not idle, even with no fleet tasks.
+    cautious.standingBacklog([item({ id: 'scanned' })]);
+    now += 10 * 60_000;
+    await cautious.beforeTick({ ...hookCtx, nowMs: now });
+    expect(started).toEqual([]);
+
+    const hooks = createLiveTickHooks({ deps });
+    hooks.effectiveConfig(CFG);
+    hooks.standingBacklog([]);
+    await hooks.beforeTick({ ...hookCtx, nowMs: now });
+    expect(started).toEqual([0]);
+    const idleCaps = await hooks.beforeTick({ ...hookCtx, nowMs: now + 1 });
+    expect(idleCaps.laneCaps.local).toBe(4 - EXPERIMENT_LOCAL_SLOTS_IDLE);
+    hooks.standingBacklog([item({ id: 'arrived' })]);
+    const busyCaps = await hooks.beforeTick({ ...hookCtx, nowMs: now + 2 });
+    expect(busyCaps.laneCaps.local).toBe(4 - EXPERIMENT_LOCAL_SLOTS_BUSY);
+    hooks.stopBackground('test over');
+  });
+});
+
+describe('reserve breaches are checked once per standing tick, after dispatch', () => {
+  const session = { sessionId: 's', grantId: 'g-1', openedAt: NOW_ISO };
+
+  it('calls recordReserveBreaches with fresh capacity, the live policy and the seats this tick used', async () => {
+    const seen: { capacity: unknown; policy: EffectivePolicy; now?: Date; usedSeatIds?: readonly string[] }[] = [];
+    const hooks = createLiveTickHooks({ deps: { ...h.deps, recordReserveBreaches: async (input) => { seen.push(input); return 1; } } });
+    hooks.effectiveConfig(CFG);
+    await hooks.beforeTick(hookCtx);
+    hooks.route(item(), CFG);
+    await hooks.afterDispatch({ itemId: 'item-1', repoPath: PATH, backend: 'grok-cli', model: null, seatId: 'grok', lane: 'grok-cli', dispatched: true, skipReason: null, runId: 'r', proposalId: 'p-1', spentUsd: 0, at: NOW_ISO });
+    const run = createStandingRun({ session, mint: () => ({ ok: false, reason: 'x' }), hooks, judgeCredentials: null });
+    expect(await run.notifyLedgerRows([])).toEqual({ landings: 0, verdicts: 0, reserveBreaches: 1 });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.policy.grantId).toBe('g-1');
+    expect(seen[0]!.capacity).toMatchObject({ seats: expect.any(Array) });
+    expect(seen[0]!.usedSeatIds).toEqual(['grok']);
+    // Once per tick.
+    expect((await run.notifyLedgerRows([])).reserveBreaches).toBe(0);
+    expect(seen).toHaveLength(1);
+    // Next tick: checked again.
+    await hooks.beforeTick({ ...hookCtx, nowMs: NOW + 60_000 });
+    await run.notifyLedgerRows([]);
+    expect(seen).toHaveLength(2);
+  });
+
+  it('never runs for a dry run or without a tick context, and a failure is audited, not thrown', async () => {
+    let calls = 0;
+    const failing = createLiveTickHooks({ deps: { ...h.deps, recordReserveBreaches: async () => { calls += 1; throw new Error('ledger refused'); } } });
+    expect(await failing.afterStandingTick()).toBe(0); // no context yet
+    failing.effectiveConfig(CFG);
+    await failing.beforeTick({ ...hookCtx, dryRun: true });
+    expect(await failing.afterStandingTick()).toBe(0);
+    expect(calls).toBe(0);
+    await failing.beforeTick(hookCtx);
+    expect(await failing.afterStandingTick()).toBe(0);
+    expect(calls).toBe(1);
+    expect(h.audits.some((a) => /reserve breaches could not be checked after the tick: ledger refused/.test(a))).toBe(true);
   });
 });

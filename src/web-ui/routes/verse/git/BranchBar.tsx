@@ -21,9 +21,10 @@
  * status, which replaces the row — no refetch. Outcomes are announced in a
  * polite live region; failures in an alert, in the server's own words.
  */
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { useTokenGate } from '../context/use-token-gate.js';
+import { useCommandHandler } from '../shell/command-bus.js';
 import type { BranchBarProps, DiffPaneRequest } from '../shell/slots.js';
 import { useViewport } from '../shell/viewport.js';
 import { ActionMenu } from './ActionMenu.js';
@@ -35,8 +36,11 @@ import {
   formatCount,
   hasBranchActivity,
   menuItems,
+  mergeDrift,
+  pinMerge,
   primaryAction,
   type GitStatusView,
+  type PinnedMerge,
   type MenuActionId,
 } from './git-model.js';
 import { commitGit, mergeGitPr, openGitPr, pushGit } from './git-queries.js';
@@ -47,10 +51,16 @@ import styles from './BranchBar.module.css';
 /** How long "Pushed feat/x to origin." stays before the line clears. */
 const NOTICE_MS = 6_000;
 
+/** The palette commands this bar serves (command-catalog.ts `git.*`). */
+type PaletteGitCommand = 'create-pr' | 'merge';
+
 type DialogState =
   | { kind: 'commit'; root: string }
   | { kind: 'pr'; root: string; draft: boolean }
-  | { kind: 'merge'; root: string }
+  // `pin` is the PR as shown when the dialog opened (git-model.ts pinMerge):
+  // the dialog asserts and submits THAT head, never whatever the 10 s poll
+  // brought in while it was open.
+  | { kind: 'merge'; root: string; pin: PinnedMerge }
   | null;
 
 export interface BranchBarTestProps {
@@ -59,7 +69,7 @@ export interface BranchBarTestProps {
 }
 
 export function BranchBar({ roots, onOpenDiff, statusOptions }: BranchBarProps & BranchBarTestProps) {
-  const { statuses, replace } = useGitStatuses(roots, statusOptions);
+  const { statuses, loading, replace } = useGitStatuses(roots, statusOptions);
   const { compact } = useViewport();
   const gate = useTokenGate();
   const [expanded, setExpanded] = useState(false);
@@ -67,6 +77,8 @@ export function BranchBar({ roots, onOpenDiff, statusOptions }: BranchBarProps &
   const [busyRoot, setBusyRoot] = useState<string | null>(null);
   const [dialogError, setDialogError] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; tone: 'ok' | 'error' } | null>(null);
+  // A palette command that arrived before the first status read answered.
+  const [pendingCommand, setPendingCommand] = useState<PaletteGitCommand | null>(null);
   const listId = useId();
 
   // A confirmation fades after a few seconds; an error stays until the next action.
@@ -112,6 +124,13 @@ export function BranchBar({ roots, onOpenDiff, statusOptions }: BranchBarProps &
 
   const openDiff = (request: DiffPaneRequest) => onOpenDiff(request);
 
+  const openMerge = (s: GitStatusView) => {
+    const pin = pinMerge(s);
+    if (!pin) return;
+    setDialogError(null);
+    setDialog({ kind: 'merge', root: s.root, pin });
+  };
+
   const onPrimary = (s: GitStatusView) => {
     switch (s.suggested) {
       case 'commit':
@@ -126,8 +145,7 @@ export function BranchBar({ roots, onOpenDiff, statusOptions }: BranchBarProps &
         setDialog({ kind: 'pr', root: s.root, draft: false });
         break;
       case 'merge':
-        setDialogError(null);
-        setDialog({ kind: 'merge', root: s.root });
+        openMerge(s);
         break;
       case 'view-pr':
         if (s.pr) window.open(s.pr.url, '_blank', 'noopener,noreferrer');
@@ -166,6 +184,65 @@ export function BranchBar({ roots, onOpenDiff, statusOptions }: BranchBarProps &
         break;
     }
   };
+
+  /**
+   * ⌘K "Create pull request…" / "Merge pull request…" (command-catalog.ts
+   * `git.create-pr` / `git.merge-pr`). The palette only OPENS the same dialog
+   * the row's button would — the disclosure, the token gate and the server's
+   * own checks all still stand between the operator and the write. It never
+   * declines: a declined command from the palette vanishes without a word,
+   * so when no row can take the action the bar says why instead.
+   */
+  const servePaletteCommand = (command: PaletteGitCommand) => {
+    setDialogError(null);
+    if (command === 'create-pr') {
+      // The server's suggestion first; otherwise any row whose "Create draft
+      // PR…" item is enabled — the same preconditions the ▾ menu applies, so
+      // the palette offers nothing the bar itself would refuse.
+      const target =
+        rows.find((s) => s.suggested === 'create-pr') ??
+        rows.find((s) => menuItems(s).find((item) => item.id === 'draft-pr')?.disabledReason === null);
+      if (target) {
+        setNotice(null);
+        setDialog({ kind: 'pr', root: target.root, draft: false });
+        return;
+      }
+      const reason = rows.length > 0 ? menuItems(rows[0]!).find((item) => item.id === 'draft-pr')?.disabledReason : null;
+      setNotice({ text: reason ? `Can't open a pull request: ${reason}.` : 'No branch in this chat has changes to open a pull request from.', tone: 'error' });
+      return;
+    }
+    // Merge only where the server suggests it: that is the one place its
+    // checks are known to have passed (see the header).
+    const target = rows.find((s) => s.suggested === 'merge' && s.pr !== null);
+    if (target) {
+      setNotice(null);
+      openMerge(target);
+      return;
+    }
+    const open = rows.find((s) => s.pr !== null && (s.pr.state === 'open' || s.pr.state === 'draft'));
+    setNotice({
+      text: open?.pr ? `#${open.pr.number} isn't ready to merge yet — its checks haven't passed or it isn't mergeable.` : 'No pull request in this chat is ready to merge.',
+      tone: 'error',
+    });
+  };
+
+  // A command parked while the operator was on another surface is delivered
+  // the moment this bar mounts — before its first status read answers. Hold
+  // it until the read lands rather than answering "nothing to merge" from an
+  // empty list.
+  const onPaletteCommand = (command: PaletteGitCommand) => {
+    if (loading) setPendingCommand(command);
+    else servePaletteCommand(command);
+  };
+  useCommandHandler('git.create-pr', () => onPaletteCommand('create-pr'));
+  useCommandHandler('git.merge-pr', () => onPaletteCommand('merge'));
+  const serveRef = useRef(servePaletteCommand);
+  serveRef.current = servePaletteCommand;
+  useEffect(() => {
+    if (pendingCommand === null || loading) return;
+    setPendingCommand(null);
+    serveRef.current(pendingCommand);
+  }, [pendingCommand, loading]);
 
   if (rows.length === 0 && !notice) return null;
 
@@ -231,23 +308,30 @@ export function BranchBar({ roots, onOpenDiff, statusOptions }: BranchBarProps &
           }
         />
       ) : null}
-      {dialogStatus && dialog?.kind === 'merge' && dialogStatus.pr ? (
+      {dialog?.kind === 'merge' ? (
+        // Rendered from the pin even if the live PR vanished from the poll:
+        // the dialog then says so and keeps Merge disabled, rather than
+        // closing under the operator's cursor.
         <MergeDialog
           open
-          status={dialogStatus}
+          pin={dialog.pin}
+          live={dialogStatus}
           busy={busyRoot === dialog.root}
           error={dialogError}
           onClose={() => setDialog(null)}
           onSubmit={() => {
-            const pr = dialogStatus.pr!;
+            const { pin } = dialog;
+            // Belt and braces: the dialog disables Merge on drift, and this
+            // re-check covers a poll that lands between render and click.
+            if (pin.headSha === null || mergeDrift(pin, statusFor(dialog.root)) !== null) return;
             void act(
               dialog.root,
-              `Squash-merge #${pr.number} into ${pr.baseRef}.`,
+              `Squash-merge #${pin.number} (head ${pin.headSha.slice(0, 7)}) into ${pin.baseRef}.`,
               async () => {
-                const res = await mergeGitPr({ root: dialog.root, number: pr.number, headSha: pr.headSha ?? '' });
+                const res = await mergeGitPr({ root: dialog.root, number: pin.number, headSha: pin.headSha! });
                 return { status: { ...res.status, pr: res.pr ?? res.status.pr } };
               },
-              () => `Merged #${pr.number} into ${pr.baseRef}.`,
+              () => `Merged #${pin.number} into ${pin.baseRef}.`,
               true,
             );
           }}

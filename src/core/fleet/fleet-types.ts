@@ -560,6 +560,22 @@ export interface FleetLiveSnapshotV1 {
   runs: FleetLiveRun[];
   funnel: FleetGateFunnel | null;
   repos: FleetRepoRow[];
+  /**
+   * The fleet's own enrolled mirror clones (~/.ashlr/fleet/mirrors/…), kept
+   * OUT of `repos` (a mirror is a working copy of a repo Mason already
+   * enrolled or granted, not a repo of its own) and shown here instead.
+   * null = the enrollment registry could not be read. Optional and additive:
+   * absent from a snapshot served by an older build.
+   */
+  mirrors?: FleetMirrorSummary | null;
+}
+
+/** Enrolled fleet mirror clones, apart from Mason's repos (FleetLiveSnapshotV1.mirrors). */
+export interface FleetMirrorSummary {
+  /** How many mirror clones are enrolled (0 is a measurement, not a default). */
+  count: number;
+  /** The owner/name each mirror clones (its directory name when unidentified) — sorted, de-duplicated. */
+  repos: string[];
 }
 
 /**

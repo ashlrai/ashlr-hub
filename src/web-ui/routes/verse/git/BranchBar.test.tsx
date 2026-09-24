@@ -8,6 +8,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
+import { resetCommandBus, runCommand, runCommandWhenReady } from '../shell/command-bus.js';
 import { BranchBar } from './BranchBar.js';
 import { pr, status } from './git-fixtures.test-support.js';
 import type { GitStatusView } from './git-model.js';
@@ -34,10 +35,19 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Undo setVisibility's own-property override (jsdom's getter lives on the prototype).
+  delete (document as unknown as { visibilityState?: unknown }).visibilityState;
+  resetCommandBus();
   vp.restore();
   vi.unstubAllGlobals();
   clearMutationToken();
 });
+
+/** Flip document visibility; hidden → visible makes usePollWhileVisible re-read now (the poll's "refresh on show"). */
+function setVisibility(state: 'hidden' | 'visible') {
+  Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state });
+  document.dispatchEvent(new Event('visibilitychange'));
+}
 
 function renderBar(statuses: GitStatusView[] | ((root: string) => GitStatusView), extra: { roots?: string[] } = {}) {
   const onOpenDiff = vi.fn<(request: DiffPaneRequest) => void>();
@@ -213,6 +223,35 @@ describe('actions', () => {
     expect(screen.getByRole('link', { name: /Merged/ })).toHaveTextContent('Merged ✓');
   });
 
+  // Review 3.10 c16: the dialog used to follow the 10 s poll, so a head that
+  // landed while it was open was shown as "checks passed, no conflicts" and
+  // its SHA — not the one confirmed — went to the server.
+  it('pins the head it opened on: a new head from the poll disables Merge and is never sent', async () => {
+    const user = userEvent.setup();
+    const confirmed = 'c'.repeat(40);
+    let current = status({ suggested: 'merge', pr: pr({ headSha: confirmed }), prCheckCounts: { total: 9, passed: 9, failed: 0, pending: 0 } });
+    const { fetchStatus } = renderBar(() => current);
+    await user.click(await screen.findByRole('button', { name: 'Merge' }));
+    const dialog = screen.getByRole('dialog', { name: 'Merge #463?' });
+    expect(within(dialog).getByText('ccccccc')).toBeInTheDocument();
+
+    // An agent pushes: the next poll reports a new head with checks pending.
+    current = status({ suggested: 'view-pr', pr: pr({ headSha: 'e'.repeat(40), checks: 'pending', mergeable: null }), prCheckCounts: { total: 0, passed: 0, failed: 0, pending: 0 } });
+    const reads = fetchStatus.mock.calls.length;
+    await act(async () => { setVisibility('hidden'); });
+    await act(async () => { setVisibility('visible'); });
+    await waitFor(() => expect(fetchStatus.mock.calls.length).toBeGreaterThan(reads));
+    await waitFor(() => expect(within(dialog).getByText(/The PR changed since you opened this/)).toBeInTheDocument());
+    // Still the confirmed head, never the new one, and Merge is off.
+    expect(within(dialog).getByText('ccccccc')).toBeInTheDocument();
+    expect(within(dialog).queryByText('eeeeeee')).toBeNull();
+    const merge = within(dialog).getByRole('button', { name: 'Merge #463' });
+    expect(merge).toBeDisabled();
+    await user.click(merge);
+    await act(async () => { await new Promise((r) => setTimeout(r, 5)); });
+    expect(posts).toEqual([]);
+  });
+
   it('asks for the mutation token first, and does nothing if it is dismissed', async () => {
     const user = userEvent.setup();
     clearMutationToken();
@@ -253,6 +292,69 @@ describe('at 375px', () => {
     expect(chip).not.toHaveTextContent('verse context orchestration');
     expect(screen.getByRole('region', { name: 'Branches' })).toHaveAttribute('data-compact', 'true');
     expect(screen.getByRole('button', { name: 'Merge' })).toBeInTheDocument();
+  });
+});
+
+// ⌘K "Create pull request…" / "Merge pull request…" (command-catalog.ts
+// git.create-pr / git.merge-pr): without these handlers the palette entries
+// switched to Chat and silently expired after the parked-command TTL.
+describe('palette git commands', () => {
+  it('Create pull request… opens the same dialog the row button opens', async () => {
+    renderBar([status({ suggested: 'create-pr' })]);
+    await screen.findByRole('button', { name: 'Create PR' });
+    act(() => {
+      expect(runCommand('git.create-pr', { via: 'palette' })).toBe(true);
+    });
+    expect(await screen.findByRole('dialog', { name: 'Create pull request' })).toBeInTheDocument();
+    expect(posts).toHaveLength(0); // opening is not writing
+  });
+
+  it('Merge pull request… opens the merge dialog only where the server suggests merge', async () => {
+    renderBar([status({ suggested: 'merge', pr: pr(), prCheckCounts: { total: 4, passed: 4, failed: 0, pending: 0 } })]);
+    await screen.findByRole('button', { name: 'Merge' });
+    act(() => {
+      runCommand('git.merge-pr', { via: 'palette' });
+    });
+    expect(await screen.findByRole('dialog', { name: 'Merge #463?' })).toBeInTheDocument();
+  });
+
+  it('says why instead of declining when no row can merge', async () => {
+    renderBar([status({ suggested: 'view-pr', pr: pr({ checks: 'failing' }) })]);
+    await screen.findByRole('link', { name: /Pull request #463/ });
+    act(() => {
+      expect(runCommand('git.merge-pr', { via: 'palette' })).toBe(true);
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent("#463 isn't ready to merge yet");
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('gives the menu’s reason when no row can open a PR', async () => {
+    renderBar([status({ suggested: 'view-pr', pr: pr() })]);
+    await screen.findByRole('link', { name: /Pull request #463/ });
+    act(() => {
+      runCommand('git.create-pr', { via: 'palette' });
+    });
+    expect(await screen.findByRole('alert')).toHaveTextContent("Can't open a pull request: #463 is already open.");
+  });
+
+  it('a command parked before mount waits for the first status read', async () => {
+    // From another surface the shell parks the command, then Chat mounts the
+    // bar; the command is delivered on registration, before any status.
+    let answer!: (s: GitStatusView) => void;
+    const first = new Promise<GitStatusView>((resolve) => {
+      answer = resolve;
+    });
+    expect(runCommandWhenReady('git.create-pr', { via: 'palette' })).toBe(false);
+    render(<BranchBar sessionId="s-1" roots={[ROOT]} onOpenDiff={() => {}} statusOptions={{ fetchStatus: () => first }} />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+    await act(async () => {
+      answer(status({ suggested: 'create-pr' }));
+      await first;
+    });
+    expect(await screen.findByRole('dialog', { name: 'Create pull request' })).toBeInTheDocument();
   });
 });
 

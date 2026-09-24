@@ -476,7 +476,10 @@ describe('M48 tick — AUTO-MERGE PASS plumbing', () => {
     autoMergeMerged = 2;
     const cfg = makeCfg();
     await tick(cfg, { dryRun: false });
-    expect(mockRunAutoMergePass).toHaveBeenCalledWith(cfg);
+    // 3.10: the pass also receives the tick's capability kind so a
+    // `resident-standing` tick takes only the standing gates (never legacy).
+    // This fixture has no activation, so the kind is null.
+    expect(mockRunAutoMergePass).toHaveBeenCalledWith(cfg, { capabilityKind: null });
   });
 
   it('tick has no `merged` field when the pass returns {merged:0}', async () => {

@@ -140,12 +140,43 @@ const MAX_HEIGHT_FALLBACK_PX = 320;
 
 type PickerId = 'permission' | 'model' | 'effort';
 
-const PERMISSION_GLYPH: Record<VersePermissionMode, string> = {
-  plan: '◇',
-  'accept-edits': '✎',
-  auto: '↻',
-  bypass: '⚠',
+/**
+ * Permission-mode icons as inline SVG, NOT text glyphs (review 3.10 c18).
+ * WHY: '◇ ✎ ↻ ⚠' all sit outside the Ashlr Sans Latin subset's unicode-range
+ * (design/global.css), so the browser fetched the 230 KB full IBM Plex face
+ * on every chat paint just to find that three of the four are not in Plex
+ * either and fall back to a system font. SVG costs no font request and draws
+ * the same in every OS. Same geometry as components/primitives/icons.tsx
+ * (16-unit box, 1.5 stroke, round caps, currentColor); decorative — the menu
+ * button already carries the mode's name.
+ */
+function ModeIcon({ children }: { children: ReactNode }) {
+  return (
+    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth={1.5} strokeLinecap="round" strokeLinejoin="round" focusable="false" aria-hidden="true">
+      {children}
+    </svg>
+  );
+}
+
+const PERMISSION_GLYPH: Record<VersePermissionMode, ReactNode> = {
+  // Plan: an outlined diamond (was '◇').
+  plan: <ModeIcon><path d="M8 2.2 13.8 8 8 13.8 2.2 8Z" /></ModeIcon>,
+  // Accept edits: a pencil (was '✎').
+  'accept-edits': <ModeIcon><path d="M10.6 2.9 13.1 5.4 5.6 12.9 2.6 13.4 3.1 10.4Z" /><path d="M9.2 4.3 11.7 6.8" /></ModeIcon>,
+  // Auto: a circular arrow (was '↻').
+  auto: <ModeIcon><path d="M13.2 7.2a5.2 5.2 0 1 0-.7 3.5" /><path d="M13.5 3.4v3.9h-3.9" /></ModeIcon>,
+  // Bypass: a warning triangle (was '⚠').
+  bypass: <ModeIcon><path d="M8 2.6 14.2 13H1.8L8 2.6Z" /><path d="M8 6.6v3" /><circle cx="8" cy="11.3" r="0.75" fill="currentColor" stroke="none" /></ModeIcon>,
 };
+
+/** The compact footer's "more settings" dots — SVG for the same reason ('⋯' U+22EF is outside the subset and not in Plex). */
+const MORE_DOTS = (
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" focusable="false" aria-hidden="true">
+    <circle cx="3.5" cy="8" r="1.25" />
+    <circle cx="8" cy="8" r="1.25" />
+    <circle cx="12.5" cy="8" r="1.25" />
+  </svg>
+);
 
 export function Composer({ sessionId = null, seats, seat, engine, running, disabled, disabledReason, locked,
   hintSeen = false, contextTokens = null, contextWindow = null, autoCompactAt = null, contextExact = true, handoffDraft = false,
@@ -307,7 +338,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
 
   const commands: SlashCommand[] = trigger?.kind === 'command' ? matchSlashCommands(trigger.query) : [];
   const commandDisabled = useCallback((id: SlashCommand['id']): string | null => {
-    if (id === 'handoff' && !onHandoff) return 'Use Hand off in the chat header’s ⋯ menu';
+    if (id === 'handoff' && !onHandoff) return 'Use Hand off in the chat header’s Chat actions menu'; // named, not drawn as the U+22EF glyph, which is outside the font subset (c18)
     if (id === 'handoff' && handoffDisabledReason) return handoffDisabledReason;
     if ((id === 'plan' || id === 'effort' || id === 'model') && !view) return 'This server has no session controls yet';
     if (id === 'plan' && view && !view.options.permissionModes.find((o) => o.id === 'plan')?.available) return 'This seat has no plan mode';
@@ -763,7 +794,7 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
               <button type="button" className={`${cstyles.iconButton} ${bypassOn ? cstyles.iconButtonDanger : ''}`}
                 aria-haspopup="dialog" aria-label={`Chat settings: ${labelOf(view.options.permissionModes, view.controls.permissionMode)}, ${labelOf(view.options.models, view.controls.model)}`}
                 onClick={() => setSheetOpen(true)} disabled={disabled}>
-                <span aria-hidden="true">⋯</span>
+                {MORE_DOTS}
               </button>
             ) : null}
             {running && hasText && queueAvailable ? (

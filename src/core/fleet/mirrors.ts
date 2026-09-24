@@ -75,14 +75,33 @@
  * logged. When custody is unavailable the fetch is anonymous and a private
  * repo fails with a specific reason.
  *
+ * DEPENDENCIES (3.10 review c0). A clone has no toolchain, yet G3 verifies
+ * and the post-merge watch re-tests IN the mirror (inbox/merge.ts
+ * linkNodeModules and post-merge-watch.ts symlink `<mirror>/node_modules`
+ * into their worktrees and re-allow reading it under confinement). Without
+ * it `vitest` / `tsc` exit 127, G3 answers `wait` (verify-infra) forever and
+ * nothing a Node repo proposes can ever merge. So after every successful
+ * reset the daemon — a TRUSTED step, never an agent — installs the repo's
+ * dependencies from its COMMITTED lockfile (npm / pnpm / yarn / bun, frozen,
+ * lifecycle scripts off) into `<mirror>/node_modules`, and only when the
+ * lockfile hash changed since the last good install (`MirrorState.deps`).
+ * `git clean` excludes `node_modules` so the reset does not wipe them each
+ * tick; a changed lockfile (or a node_modules that is not the directory we
+ * installed) gets a FULL clean first, so nothing stale or planted survives
+ * a reinstall. A repo whose install fails — or that declares dependencies
+ * with no lockfile, or with ambiguous lockfiles — is NOT current: its sync
+ * fails with the reason, which pauses the repo (fail closed, never a guess).
+ *
  * NOTHING HERE RUNS BY ITSELF. The daemon calls `prepareMirrorsForTick` from
  * its beforeTick hook (U5) only under a live standing policy; `ashlr mirror`
  * (src/cli/mirror.ts) is Mason's manual surface.
  */
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import {
+  accessSync,
   chmodSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -91,9 +110,10 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  statSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { EffectivePolicy } from '../authority/types.js';
 import { withRepoLease, countLiveExecutionLeases } from '../sandbox/execution-leases.js';
 import { resolveGitExecutable, runSafeGit, SafeGitError } from '../sandbox/safe-git.js';
@@ -122,6 +142,20 @@ export const MIRROR_LOCAL_TIMEOUT_MS = 2 * 60_000;
 export const MIRROR_LEASE_WAIT_MS = 5 * 60_000;
 /** Mirrors synced in parallel by `prepareMirrorsForTick` (network-bound, but gentle on the machine). */
 export const MIRROR_TICK_CONCURRENCY = 2;
+/** A lockfile install (first install of a large monorepo is the slow case). */
+export const MIRROR_DEPS_INSTALL_TIMEOUT_MS = 10 * 60_000;
+/**
+ * After a failed install for a given lockfile, how long later syncs report the
+ * recorded failure instead of re-running the same doomed install every tick.
+ * A new lockfile (a fix landed) retries at once.
+ */
+export const MIRROR_DEPS_RETRY_MS = 30 * 60_000;
+/**
+ * Directories `git clean` must leave alone: the installed dependencies. The
+ * pattern is unanchored on purpose — workspace installs (pnpm, npm
+ * workspaces) put `node_modules` inside packages too.
+ */
+export const MIRROR_DEPENDENCY_DIRS: readonly string[] = Object.freeze(['node_modules']);
 
 const OWNER_RE = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/;
 const NAME_RE = /^[A-Za-z0-9._-]{1,100}$/;
@@ -280,6 +314,12 @@ export interface MirrorDeps {
   signal?: AbortSignal;
   /** Repo-lease wait override (tests). */
   leaseWaitMs?: number;
+  /**
+   * Runs one dependency install (tests inject a fake; production spawns the
+   * package manager — `installMirrorDependencies`). Never throws; the result
+   * says what happened.
+   */
+  installDependencies?: (plan: MirrorDependencyInstallPlan, mirrorPath: string, signal?: AbortSignal) => Promise<MirrorInstallRun>;
 }
 
 interface GitRun {
@@ -535,6 +575,26 @@ export interface MirrorState {
   lastError: string | null;
   /** How the last fetch authenticated. */
   lastAuth: 'token' | 'anonymous' | null;
+  /** The mirror's installed dependencies (review c0); null = never prepared. */
+  deps?: MirrorDepsState | null;
+}
+
+/**
+ * What the daemon last installed into `<mirror>/node_modules`. Kept OUTSIDE
+ * the clone (agents can reach the clone's tree, never mirror-state).
+ */
+export interface MirrorDepsState {
+  /** 'installed' = node_modules matches `key`; 'none' = nothing to install; 'failed' = the install for `key` failed. */
+  status: 'installed' | 'none' | 'failed';
+  manager: MirrorPackageManager | null;
+  /** sha256 over the manager, argv, lockfile and root package.json; null for 'none'. */
+  key: string | null;
+  at: string;
+  /** Identity of the node_modules directory we installed (a swapped directory is reinstalled). */
+  nodeModulesIno: number | null;
+  nodeModulesMtimeMs: number | null;
+  /** Scrubbed; null unless 'failed'. */
+  error: string | null;
 }
 
 function statePath(nameWithOwner: string): string {
@@ -557,10 +617,30 @@ export function readMirrorState(nameWithOwner: string): MirrorState | null {
       headSha: typeof raw.headSha === 'string' && SHA_RE.test(raw.headSha) ? raw.headSha : null,
       lastError: typeof raw.lastError === 'string' ? raw.lastError : null,
       lastAuth: raw.lastAuth === 'token' || raw.lastAuth === 'anonymous' ? raw.lastAuth : null,
+      deps: parseDepsState(raw.deps),
     };
   } catch {
     return null;
   }
+}
+
+function parseDepsState(raw: unknown): MirrorDepsState | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (r['status'] !== 'installed' && r['status'] !== 'none' && r['status'] !== 'failed') return null;
+  const manager = typeof r['manager'] === 'string' && (PACKAGE_MANAGERS as readonly string[]).includes(r['manager'])
+    ? r['manager'] as MirrorPackageManager
+    : null;
+  const num = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  return {
+    status: r['status'],
+    manager,
+    key: typeof r['key'] === 'string' && /^[0-9a-f]{64}$/.test(r['key']) ? r['key'] : null,
+    at: typeof r['at'] === 'string' && Number.isFinite(Date.parse(r['at'])) ? r['at'] : new Date(0).toISOString(),
+    nodeModulesIno: num(r['nodeModulesIno']),
+    nodeModulesMtimeMs: num(r['nodeModulesMtimeMs']),
+    error: typeof r['error'] === 'string' ? r['error'].slice(0, 600) : null,
+  };
 }
 
 function writeMirrorState(state: MirrorState): void {
@@ -739,8 +819,12 @@ async function fetchAndReset(ctx: SyncContext, base: string): Promise<{ headSha:
   if (!checkout.ok) return { error: `reset to origin/${base} failed: ${checkout.stderr || 'git checkout failed'}` };
   const reset = await git(ctx, ['reset', '--quiet', '--hard', remoteRef]);
   if (!reset.ok) return { error: `reset to origin/${base} failed: ${reset.stderr || 'git reset failed'}` };
-  // -ff also removes nested repositories an agent might have planted.
-  const clean = await git(ctx, ['clean', '-ffdxq']);
+  // -ff also removes nested repositories an agent might have planted. The
+  // installed dependencies are excluded (`-e` still applies under -x): wiping
+  // them every tick is what left G3 without a toolchain (review c0). They are
+  // re-validated right after the reset (`prepareMirrorDependencies`), and a
+  // reinstall starts from a FULL clean (`cleanAll`).
+  const clean = await git(ctx, ['clean', '-ffdxq', ...MIRROR_DEPENDENCY_DIRS.flatMap((dir) => ['-e', dir])]);
   if (!clean.ok) return { error: `clean failed: ${clean.stderr || 'git clean failed'}` };
   // Drops admin entries of sandbox worktrees whose directories are gone
   // (crash leftovers); live worktrees are untouched.
@@ -779,6 +863,329 @@ async function cloneInto(ctx: SyncContext, base: string): Promise<{ headSha: str
     return { error: `could not publish the clone: ${(error as Error).message}` };
   }
   return staged;
+}
+
+// ---------------------------------------------------------------------------
+// Dependencies (review c0) — see "DEPENDENCIES" in the header
+// ---------------------------------------------------------------------------
+
+export const PACKAGE_MANAGERS = ['npm', 'pnpm', 'yarn', 'bun'] as const;
+export type MirrorPackageManager = typeof PACKAGE_MANAGERS[number];
+
+/** Root lockfiles by manager, in the order they are looked for. */
+const LOCKFILES: Readonly<Record<MirrorPackageManager, readonly string[]>> = Object.freeze({
+  npm: ['package-lock.json', 'npm-shrinkwrap.json'],
+  pnpm: ['pnpm-lock.yaml'],
+  yarn: ['yarn.lock'],
+  bun: ['bun.lock', 'bun.lockb'],
+});
+
+export interface MirrorDependencyInstallPlan {
+  kind: 'install';
+  manager: MirrorPackageManager;
+  /** Lockfile name at the mirror root. */
+  lockfile: string;
+  /** Binary name looked up on the daemon's PATH, then its arguments. */
+  argv: readonly string[];
+  /** sha256 over manager, argv, lockfile and root package.json — a new key means a reinstall. */
+  key: string;
+}
+
+export type MirrorDependencyPlan =
+  | MirrorDependencyInstallPlan
+  | { kind: 'none'; reason: string }
+  | { kind: 'refuse'; reason: string };
+
+export interface MirrorInstallRun {
+  ok: boolean;
+  /** One scrubbed sentence. */
+  reason: string;
+}
+
+function readRootFile(root: string, name: string, maxBytes = 64 * 1024 * 1024): Buffer | null {
+  try {
+    const path = join(root, name);
+    const stat = lstatSync(path);
+    // A symlinked lockfile could point anywhere; the committed file is a regular file.
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    return readFileSync(path);
+  } catch {
+    return null;
+  }
+}
+
+function declaresDependencies(pkg: Record<string, unknown>): boolean {
+  for (const field of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies']) {
+    const value = pkg[field];
+    if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length > 0) return true;
+  }
+  const workspaces = pkg['workspaces'];
+  return Array.isArray(workspaces) ? workspaces.length > 0 : !!(workspaces && typeof workspaces === 'object');
+}
+
+/**
+ * Which install (if any) the mirror at `root` needs. Pure over the tree:
+ *   - no root package.json → nothing to install;
+ *   - `packageManager` names the manager, else exactly one manager's lockfile
+ *     must be committed (several is ambiguous → refuse, never guess);
+ *   - dependencies with no lockfile → refuse: the fleet installs only
+ *     lockfile-pinned versions (an unpinned install is a different tree than
+ *     the one CI and Mason test).
+ * Every install is frozen (the lockfile is never rewritten) and runs with
+ * lifecycle scripts OFF: the daemon runs unconfined, and a dependency's
+ * postinstall is exactly the supply-chain code it must not execute.
+ */
+export function planMirrorDependencies(root: string): MirrorDependencyPlan {
+  const pkgRaw = readRootFile(root, 'package.json', 4 * 1024 * 1024);
+  if (!pkgRaw) return { kind: 'none', reason: 'no package.json at the repo root' };
+  let pkg: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(pkgRaw.toString('utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { kind: 'refuse', reason: 'package.json is not a JSON object' };
+    pkg = parsed as Record<string, unknown>;
+  } catch {
+    return { kind: 'refuse', reason: 'package.json is not valid JSON' };
+  }
+  const present = PACKAGE_MANAGERS
+    .map((manager) => ({ manager, lockfile: LOCKFILES[manager].find((name) => existsSync(join(root, name))) ?? null }))
+    .filter((row): row is { manager: MirrorPackageManager; lockfile: string } => row.lockfile !== null);
+  const declared = typeof pkg['packageManager'] === 'string' ? /^([a-z]+)@(\d+)/.exec(pkg['packageManager']) : null;
+  let chosen: { manager: MirrorPackageManager; lockfile: string } | null = null;
+  if (declared) {
+    const name = declared[1] as string;
+    if (!(PACKAGE_MANAGERS as readonly string[]).includes(name)) {
+      return { kind: 'refuse', reason: `package.json names packageManager ${name}, which the fleet cannot install with` };
+    }
+    chosen = present.find((row) => row.manager === name) ?? null;
+    if (!chosen) {
+      if (!declaresDependencies(pkg)) return { kind: 'none', reason: 'package.json declares no dependencies' };
+      return { kind: 'refuse', reason: `package.json names packageManager ${name} but its lockfile (${LOCKFILES[name as MirrorPackageManager].join(' / ')}) is not committed` };
+    }
+  } else if (present.length > 1) {
+    return {
+      kind: 'refuse',
+      reason: `several lockfiles are committed (${present.map((row) => row.lockfile).join(', ')}) and package.json names no packageManager, so the install would be a guess`,
+    };
+  } else if (present.length === 1) {
+    chosen = present[0]!;
+  } else {
+    if (!declaresDependencies(pkg)) return { kind: 'none', reason: 'package.json declares no dependencies' };
+    return { kind: 'refuse', reason: 'package.json declares dependencies but no lockfile is committed; the fleet installs only lockfile-pinned dependencies' };
+  }
+  const lockBytes = readRootFile(root, chosen.lockfile);
+  if (!lockBytes) return { kind: 'refuse', reason: `${chosen.lockfile} is not a regular file the fleet can read` };
+  const berry = chosen.manager === 'yarn'
+    && ((declared !== null && declared[1] === 'yarn' && Number(declared[2]) >= 2) || existsSync(join(root, '.yarnrc.yml')));
+  const argv: string[] = (() => {
+    switch (chosen.manager) {
+      case 'npm':
+        return ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline'];
+      case 'pnpm':
+        return ['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts', '--config.confirmModulesPurge=false'];
+      case 'yarn':
+        return berry
+          ? ['yarn', 'install', '--immutable', '--mode=skip-build']
+          : ['yarn', 'install', '--frozen-lockfile', '--ignore-scripts', '--non-interactive'];
+      case 'bun':
+        return ['bun', 'install', '--frozen-lockfile', '--ignore-scripts'];
+    }
+  })();
+  const key = createHash('sha256')
+    .update(`ashlr:mirror-deps:v1\0${chosen.manager}\0${argv.join(' ')}\0${chosen.lockfile}\0`)
+    .update(lockBytes)
+    .update('\0')
+    .update(pkgRaw)
+    .digest('hex');
+  return { kind: 'install', manager: chosen.manager, lockfile: chosen.lockfile, argv, key };
+}
+
+/**
+ * The package manager binary on the daemon's PATH. Only absolute PATH entries
+ * count, and never one inside the fleet's own tree (mirrors / sandboxes are
+ * where an agent could plant a `npm`): the install runs unconfined.
+ */
+function resolveManagerBinary(name: string): string | null {
+  let fleetRoot: string | null = null;
+  try {
+    fleetRoot = join(canonicalHome(), '.ashlr');
+  } catch {
+    fleetRoot = null;
+  }
+  for (const dir of (process.env['PATH'] ?? '').split(delimiter)) {
+    if (!dir || !isAbsolute(dir)) continue;
+    if (fleetRoot && (resolve(dir) === fleetRoot || resolve(dir).startsWith(`${fleetRoot}${sep}`))) continue;
+    const candidate = join(dir, name);
+    try {
+      if (!statSync(candidate).isFile()) continue;
+      accessSync(candidate, fsConstants.X_OK);
+      return candidate;
+    } catch {
+      // not here
+    }
+  }
+  return null;
+}
+
+/** The env an install gets: built from nothing, no git token, prompts and scripts off. */
+function installEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of ['PATH', 'HOME', 'TMPDIR', 'USER', 'LOGNAME', 'LANG', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'NODE_EXTRA_CA_CERTS',
+    'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'http_proxy', 'https_proxy', 'no_proxy', 'SystemRoot']) {
+    const value = process.env[key];
+    if (value) env[key] = value;
+  }
+  Object.assign(env, {
+    CI: '1',
+    npm_config_ignore_scripts: 'true',
+    npm_config_audit: 'false',
+    npm_config_fund: 'false',
+    npm_config_update_notifier: 'false',
+    NO_UPDATE_NOTIFIER: '1',
+    YARN_ENABLE_SCRIPTS: 'false',
+    YARN_ENABLE_TELEMETRY: '0',
+    COREPACK_ENABLE_DOWNLOAD_PROMPT: '0',
+    DISABLE_OPENCOLLECTIVE: '1',
+    ADBLOCK: '1',
+  });
+  return env;
+}
+
+/** Production installer: spawn the planned package manager in the mirror. Never throws. */
+export function installMirrorDependencies(
+  plan: MirrorDependencyInstallPlan,
+  mirrorPath: string,
+  signal?: AbortSignal,
+): Promise<MirrorInstallRun> {
+  return new Promise((resolveRun) => {
+    if (signal?.aborted) {
+      resolveRun({ ok: false, reason: 'cancelled' });
+      return;
+    }
+    const [name, ...args] = plan.argv;
+    const bin = name ? resolveManagerBinary(name) : null;
+    if (!bin) {
+      resolveRun({ ok: false, reason: `${name ?? 'the package manager'} is not installed on the daemon's PATH, so ${plan.lockfile} cannot be installed` });
+      return;
+    }
+    execFile(bin, args, {
+      cwd: mirrorPath,
+      env: installEnv(),
+      timeout: MIRROR_DEPS_INSTALL_TIMEOUT_MS,
+      killSignal: 'SIGKILL',
+      maxBuffer: MAX_GIT_OUTPUT,
+      windowsHide: true,
+      encoding: 'utf8',
+      ...(signal ? { signal } : {}),
+    }, (error, _stdout, stderr) => {
+      if (!error) {
+        resolveRun({ ok: true, reason: `${plan.argv.slice(0, 2).join(' ')} installed ${plan.lockfile}` });
+        return;
+      }
+      const tail = String(stderr ?? '').trim().split('\n').slice(-4).join(' ').trim() || String(error.message ?? '');
+      resolveRun({ ok: false, reason: boundedScrub(`${plan.argv.slice(0, 2).join(' ')} failed: ${tail}`) });
+    });
+  });
+}
+
+function nodeModulesIdentity(mirrorPath: string): { ino: number; mtimeMs: number } | 'absent' | 'not-a-directory' {
+  try {
+    const stat = lstatSync(join(mirrorPath, 'node_modules'));
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return 'not-a-directory';
+    return { ino: stat.ino, mtimeMs: stat.mtimeMs };
+  } catch {
+    return 'absent';
+  }
+}
+
+/**
+ * After a reset (under the mirror's lease): make `<mirror>/node_modules` match
+ * the committed lockfile, or say exactly why it cannot. Reuses the previous
+ * install when its key and directory identity still match; otherwise a FULL
+ * clean (nothing stale or planted survives) and a fresh frozen install.
+ */
+async function prepareMirrorDependencies(
+  ctx: SyncContext,
+  previous: MirrorDepsState | null,
+  nowIso: string,
+): Promise<{ ok: true; deps: MirrorDepsState } | { ok: false; deps: MirrorDepsState; error: string }> {
+  const plan = planMirrorDependencies(ctx.path);
+  const cleanAll = async (): Promise<string | null> => {
+    const clean = await git(ctx, ['clean', '-ffdxq']);
+    return clean.ok ? null : `clean before the dependency install failed: ${clean.stderr || 'git clean failed'}`;
+  };
+  const current = nodeModulesIdentity(ctx.path);
+  if (plan.kind === 'none' || plan.kind === 'refuse') {
+    // Nothing of ours may linger: a node_modules without a plan is stale or planted.
+    if (current !== 'absent') {
+      const cleaned = await cleanAll();
+      if (cleaned) {
+        return { ok: false, error: cleaned, deps: { status: 'failed', manager: null, key: null, at: nowIso, nodeModulesIno: null, nodeModulesMtimeMs: null, error: cleaned } };
+      }
+    }
+    if (plan.kind === 'none') {
+      return { ok: true, deps: { status: 'none', manager: null, key: null, at: nowIso, nodeModulesIno: null, nodeModulesMtimeMs: null, error: null } };
+    }
+    const error = `dependencies cannot be installed: ${plan.reason}`;
+    return { ok: false, error, deps: { status: 'failed', manager: null, key: null, at: nowIso, nodeModulesIno: null, nodeModulesMtimeMs: null, error } };
+  }
+  // Directory identity (inode), not mtime: a replaced or re-created
+  // node_modules is not the tree we installed, but a tool legitimately
+  // touching it must not force a full reinstall every tick. Writes INTO it
+  // from agents and verification are denied by confinement (it is outside
+  // their worktrees and re-allowed read-only).
+  if (previous?.status === 'installed' && previous.key === plan.key
+    && ((typeof current === 'object' && current.ino === previous.nodeModulesIno)
+      || (current === 'absent' && previous.nodeModulesIno === null))) {
+    return { ok: true, deps: previous };
+  }
+  if (previous?.status === 'failed' && previous.key === plan.key) {
+    const failedAt = Date.parse(previous.at);
+    const nowMs = Date.parse(nowIso);
+    if (Number.isFinite(failedAt) && Number.isFinite(nowMs) && nowMs - failedAt < MIRROR_DEPS_RETRY_MS) {
+      const error = previous.error ?? `the ${plan.manager} install for ${plan.lockfile} failed`;
+      return { ok: false, error: `${error} (retried after ${new Date(failedAt + MIRROR_DEPS_RETRY_MS).toISOString()} or when the lockfile changes)`, deps: previous };
+    }
+  }
+  const failed = (error: string): { ok: false; deps: MirrorDepsState; error: string } => {
+    const scrubbed = boundedScrub(error);
+    return {
+      ok: false,
+      error: scrubbed,
+      deps: { status: 'failed', manager: plan.manager, key: plan.key, at: nowIso, nodeModulesIno: null, nodeModulesMtimeMs: null, error: scrubbed },
+    };
+  };
+  const cleaned = await cleanAll();
+  if (cleaned) return failed(cleaned);
+  const run = await (ctx.deps.installDependencies ?? installMirrorDependencies)(plan, ctx.path, ctx.deps.signal);
+  if (!run.ok) {
+    // A half-written tree is worse than none: verification would run against it.
+    rmSync(join(ctx.path, 'node_modules'), { recursive: true, force: true });
+    return failed(`dependencies could not be installed from ${plan.lockfile}: ${run.reason}`);
+  }
+  const installed = nodeModulesIdentity(ctx.path);
+  if (installed === 'not-a-directory') {
+    return failed(`${plan.argv.slice(0, 2).join(' ')} finished but node_modules is not a plain directory`);
+  }
+  // 'absent' is legitimate: a lockfile that pins nothing installs nothing
+  // (npm ci creates no node_modules for it) — recorded as ino null.
+  // The install must not have rewritten the committed lockfile (frozen flags
+  // say it cannot; this proves it) — verification must see origin's tree.
+  const after = planMirrorDependencies(ctx.path);
+  if (after.kind !== 'install' || after.key !== plan.key) {
+    return failed(`the ${plan.manager} install changed ${plan.lockfile} or package.json; the mirror is not origin's tree`);
+  }
+  return {
+    ok: true,
+    deps: {
+      status: 'installed',
+      manager: plan.manager,
+      key: plan.key,
+      at: nowIso,
+      nodeModulesIno: installed === 'absent' ? null : installed.ino,
+      nodeModulesMtimeMs: installed === 'absent' ? null : installed.mtimeMs,
+      error: null,
+    },
+  };
 }
 
 /**
@@ -860,6 +1267,14 @@ export async function ensureMirror(
     }
 
     const at = now();
+    // Review c0: a mirror whose dependencies are not installed is NOT
+    // current — G3 and the post-merge watch would run with no toolchain.
+    let depsState: MirrorDepsState | null = previous?.deps ?? null;
+    if (!('error' in outcome)) {
+      const prepared = await prepareMirrorDependencies(ctx, depsState, at);
+      depsState = prepared.deps;
+      if (!prepared.ok) outcome = { error: prepared.error };
+    }
     if ('error' in outcome) {
       try {
         writeMirrorState({
@@ -874,6 +1289,7 @@ export async function ensureMirror(
           headSha: previous?.headSha ?? null,
           lastError: boundedScrub(outcome.error),
           lastAuth: auth,
+          deps: depsState,
         });
       } catch { /* state is advisory; the result carries the failure */ }
       return fail(outcome.error, { path, base, auth, quarantinedTo });
@@ -892,6 +1308,7 @@ export async function ensureMirror(
         headSha: outcome.headSha,
         lastError: null,
         lastAuth: auth,
+        deps: depsState,
       });
     } catch { /* advisory */ }
     const result: MirrorSyncResult = {

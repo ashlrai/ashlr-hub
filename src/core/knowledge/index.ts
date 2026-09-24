@@ -21,8 +21,35 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { homedir } from 'node:os';
 import type { KnowledgeChunk } from '../types.js';
-import { listEnrolled, isEnrolled } from '../sandbox/policy.js';
+import { activeEnrollmentLenses, listEnrolled, isEnrolled } from '../sandbox/policy.js';
+import { isMirrorPath } from '../fleet/mirrors.js';
 import { scrubSecrets as scrubSharedSecrets } from '../util/scrub.js';
+
+/**
+ * 3.10: drop the fleet's own mirror clones from a DEFAULT scan set. A standing
+ * grant enrolls ~/.ashlr/fleet/mirrors/<owner>__<repo> (src/core/fleet/mirrors.ts)
+ * next to the checkout Mason enrolled himself; outside an enrollment lens both
+ * show up here, so a scan would report every finding twice and spend a bounded
+ * repo slot on a copy that is reset to origin every tick. Inside a lens (the
+ * standing daemon's autonomous lane) the lens already chose the view: every
+ * entry there IS a mirror, and dropping them would blind the fleet, so nothing
+ * is filtered. Any failure keeps the list as it was (the pre-3.10 behaviour):
+ * a duplicate is a nuisance, an empty scan is an outage.
+ */
+function withoutFleetMirrors(enrolled: string[]): string[] {
+  try {
+    if (activeEnrollmentLenses().length > 0) return enrolled;
+    return enrolled.filter((repo) => {
+      try {
+        return !isMirrorPath(repo);
+      } catch {
+        return true;
+      }
+    });
+  } catch {
+    return enrolled;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Constants — bounds to keep indexing fast and private
@@ -566,7 +593,7 @@ export async function buildKnowledge(
   // --repo / positional args) must be validated against isEnrolled() so a caller
   // can NEVER index an arbitrary, non-enrolled directory. Resolve to absolute
   // first (listEnrolled() stores resolved paths) and drop any non-enrolled path.
-  const repos = (opts?.repos ?? listEnrolled()).filter((r) => isEnrolled(r));
+  const repos = (opts?.repos ?? withoutFleetMirrors(listEnrolled())).filter((r) => isEnrolled(r));
 
   // Default-empty enrollment (or all paths non-enrolled) → nothing to do
   if (repos.length === 0) {

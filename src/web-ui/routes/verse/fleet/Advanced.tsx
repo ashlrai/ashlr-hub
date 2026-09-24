@@ -148,11 +148,16 @@ export function FleetAdvanced({ embedded = false }: { embedded?: boolean }) {
               />
               {/* The local fleet, in the order the questions arrive: can it
                   run, what is it allowed to reach, and what is it doing. */}
+              {/* `fleet` explicitly: this screen already holds the fleet read
+                  (FleetPanel below), so the lane-cap line reads the same
+                  object rather than peeking the shared cache entry — one
+                  source for both panels, no reliance on cache timing. */}
               <LocalRuntimePanel
                 read={runtime.data ?? null}
                 guard={guard}
                 dispatchEnabled={dispatchEnabled}
                 loading={runtime.status === 'loading'}
+                fleet={fleet.data ?? null}
               />
               <LocalOnlyPanel
                 read={localOnly.data ?? null}

@@ -53,6 +53,16 @@ describe('Apps & Accounts colours', () => {
     expect(withoutRadio).not.toMatch(/--accent/);
   });
 
+  // design/ui-scale.test.ts pins the header-strip files; this page has no
+  // strip, so its own clearance is pinned here (same expression, same 56px
+  // fallback) — without it the title slid under the traffic lights in the
+  // desktop window at narrow widths.
+  it('clears the macOS traffic lights in the desktop shell', () => {
+    const source = readFileSync(resolve(process.cwd(), 'src/web-ui', CSS), 'utf8');
+    const scroll = /\.scroll \{[^}]*\}/.exec(source)?.[0] ?? '';
+    expect(scroll).toContain('padding-left: max(var(--space-4), calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px)))');
+  });
+
   it('no raw hex colour or px font size anywhere under apps/ or in the section', () => {
     const root = resolve(process.cwd(), 'src/web-ui/routes/verse/apps');
     const files = readdirSync(root).filter((f) => /\.(css|tsx?)$/.test(f) && !/\.test(-support)?\./.test(f));

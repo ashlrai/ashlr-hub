@@ -45,18 +45,14 @@ import { getMutationToken } from '../../data/auth-store.js';
 import { apiPost } from '../../data/client.js';
 import { useTheme } from '../../data/hooks.js';
 import { VERSE_ACTIVITY_SEEN_PATH, type VerseActivityCompletion } from '../../../core/verse/workbench-types.js';
-import { OnboardingFlow } from './onboarding/OnboardingFlow.js';
-import { CommandPalette } from './shell/CommandPalette.js';
+import { useOnboarding } from './onboarding/useOnboarding.js';
 import { detectKeyPlatform, findCommand, formatChord, matchCommand } from './shell/command-catalog.js';
-import { GearTray } from './shell/GearTray.js';
 import { GuardHost } from './shell/guarded-action.js';
-import { NeedsYouDrawer } from './shell/NeedsYouDrawer.js';
-import { CapacityRing, describeRailCapacity, RailBadgeMark, railBadgeFor, useRailCapacity } from './shell/RailStatus.js';
+import type { RailBadge } from './shell/RailStatus.js';
 import { subscribeAnchorRequests } from './shell/reveal-anchor.js';
 import { executeCatalogCommand, useShellCommands } from './shell/run-command.js';
 import { SectionVisibilityProvider } from './shell/section-visibility.js';
 import { SECTION_MODULES, sectionImporter } from './shell/section-modules.js';
-import { ShortcutsOverlay } from './shell/ShortcutsOverlay.js';
 import { SurfaceNotInBuild, SurfaceSkeleton } from './shell/skeletons.js';
 import { onActivityCompletions, useActivity } from './shell/useActivity.js';
 import { useViewport } from './shell/viewport.js';
@@ -116,6 +112,77 @@ const SECTION_COMPONENTS = new Map<VerseSectionId, ComponentType>(
   VERSE_SECTIONS.map((s) => [s.id, lazy(sectionLoader(s.id))] as const),
 );
 
+// ---------------------------------------------------------------------------
+// Off the first-paint path (review 3.10 d1)
+// ---------------------------------------------------------------------------
+//
+// WHY: every module this file imports statically is in the chunk a cold chat
+// paint must download and parse before anything shows (SPEC-310A §1: chat
+// critical JS ≤ 350 KB, SPEC-310C "xterm, the charts and the palette each load
+// as separate lazy chunks"). The overlays render only while open, onboarding
+// only on a first run, and the rail's badges and capacity ring only once the
+// activity / capacity reads answer — none of them can draw anything at first
+// paint, so none of them may cost first-paint bytes. Each is its own chunk,
+// fetched after first paint (the overlays on idle, below) so ⌘K still opens
+// without a visible wait.
+
+const importPalette = () => import('./shell/CommandPalette.js');
+const importDrawer = () => import('./shell/NeedsYouDrawer.js');
+const importShortcuts = () => import('./shell/ShortcutsOverlay.js');
+const importGearTray = () => import('./shell/GearTray.js');
+const importOnboarding = () => import('./onboarding/OnboardingFlow.js');
+const importRailStatus = () => import('./shell/RailStatus.js');
+
+const CommandPalette = lazy(() => importPalette().then((m) => ({ default: m.CommandPalette })));
+const NeedsYouDrawer = lazy(() => importDrawer().then((m) => ({ default: m.NeedsYouDrawer })));
+const ShortcutsOverlay = lazy(() => importShortcuts().then((m) => ({ default: m.ShortcutsOverlay })));
+const GearTray = lazy(() => importGearTray().then((m) => ({ default: m.GearTray })));
+const OnboardingFlow = lazy(() => importOnboarding().then((m) => ({ default: m.OnboardingFlow })));
+
+/** Warm the overlay chunks once the first paint is done, so the first ⌘K / ⌘J never waits on the network. */
+function prefetchOverlays(): () => void {
+  const run = () => {
+    for (const load of [importPalette, importDrawer, importShortcuts]) void load().catch(() => undefined);
+  };
+  const w = window as Window & { requestIdleCallback?: (cb: () => void, o?: { timeout: number }) => number; cancelIdleCallback?: (id: number) => void };
+  if (typeof w.requestIdleCallback === 'function') {
+    const id = w.requestIdleCallback(run, { timeout: 3_000 });
+    return () => w.cancelIdleCallback?.(id);
+  }
+  const id = window.setTimeout(run, 1_500);
+  return () => window.clearTimeout(id);
+}
+
+type RailStatusModule = typeof import('./shell/RailStatus.js');
+let railStatusModule: RailStatusModule | null = null;
+
+/**
+ * The rail badge / capacity module, loaded after first paint. RailStatus
+ * pulls the usage contract and capacity-strip model (~30 KB) for the ring;
+ * the badges it draws depend on the activity read, which is not back at first
+ * paint either, so waiting for the module costs nothing visible. Null until
+ * loaded — the rail then draws no badge, which RailStatus already defines as
+ * "not known yet", never "zero".
+ */
+function useRailStatusModule(): RailStatusModule | null {
+  const [mod, setMod] = useState<RailStatusModule | null>(railStatusModule);
+  useEffect(() => {
+    if (mod) return undefined;
+    let alive = true;
+    void importRailStatus().then(
+      (m) => {
+        railStatusModule = m;
+        if (alive) setMod(m);
+      },
+      (err) => console.error('[verse] rail status failed to load', err),
+    );
+    return () => {
+      alive = false;
+    };
+  }, [mod]);
+  return mod;
+}
+
 /** A dialog the shell did not open (a confirmation, the token prompt, New chat) is up. */
 function foreignModalOpen(): boolean {
   return [...document.querySelectorAll('[aria-modal="true"]')].some(
@@ -135,6 +202,23 @@ export function VerseApp() {
   const gearRef = useRef<HTMLButtonElement>(null);
   const [trayOpen, setTrayOpen] = useState(false);
   const data = activity.data;
+  const rail = useRailStatusModule();
+  const onboarding = useOnboarding();
+
+  useEffect(() => prefetchOverlays(), []);
+  // The gear tray is fetched right after mount (not on idle) and then stays
+  // MOUNTED closed, exactly as before it was split out: its open effect
+  // schedules the first item's focus on a frame, and mounting it only on the
+  // click shifted that frame behind the operator's first arrow key.
+  const [gearReady, setGearReady] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    void importGearTray().then(
+      () => { if (alive) setGearReady(true); },
+      (err) => console.error('[verse] settings tray failed to load', err),
+    );
+    return () => { alive = false; };
+  }, []);
 
   // ── the global commands the shell serves, and run-command's toasts ─────
   useShellCommands();
@@ -220,7 +304,7 @@ export function VerseApp() {
 
   const expanded = ui.railExpanded && !compact;
   const needsYouCount = data ? data.counts.needsYou : null;
-  const capacity = useRailCapacity();
+  const BadgeMark = rail?.RailBadgeMark ?? null;
   const shortcut = (id: string) => {
     const chord = findCommand(id)?.keys[0];
     return chord ? formatChord(chord, platform) : undefined;
@@ -248,7 +332,7 @@ export function VerseApp() {
             // Mind's dot also clears on sight in THIS window, whether or not
             // the server-side mark could be written (it needs a held token).
             const mindSeenHere = entry.id === 'mind' && latestMemoAt !== null && mindSeenLocal === latestMemoAt;
-            const badge = mindSeenHere ? null : railBadgeFor(entry.id, data);
+            const badge: RailBadge | null = mindSeenHere || !rail ? null : rail.railBadgeFor(entry.id, data);
             const active = ui.section === entry.id;
             const keys = shortcut(`surface.${entry.id}`);
             return (
@@ -265,7 +349,7 @@ export function VerseApp() {
                   >
                     <span className={styles.railIcon}>
                       <IconComponent />
-                      {badge ? <RailBadgeMark badge={badge} /> : null}
+                      {badge && BadgeMark ? <BadgeMark badge={badge} /> : null}
                     </span>
                     {expanded || compact ? <span className={styles.railLabel}>{entry.label}</span> : null}
                     {expanded && keys ? <span className={styles.railKey} aria-hidden="true">{keys}</span> : null}
@@ -287,31 +371,12 @@ export function VerseApp() {
             >
               <span className={styles.railIcon}>
                 <NeedsYouIcon />
-                {needsYouCount ? <RailBadgeMark badge={{ kind: 'count', count: needsYouCount, spoken: '', tone: 'warning' }} /> : null}
+                {needsYouCount && BadgeMark ? <BadgeMark badge={{ kind: 'count', count: needsYouCount, spoken: '', tone: 'warning' }} /> : null}
               </span>
               {expanded || compact ? <span className={styles.railLabel}>{compact ? 'Inbox' : 'Needs you'}</span> : null}
             </button>
           </Tooltip>
-          {capacity && !compact ? (
-            <Tooltip label={describeRailCapacity(capacity)} placement="right" disabled={expanded}>
-              <button
-                type="button"
-                className={styles.railButton}
-                aria-label={`Capacity — ${describeRailCapacity(capacity)}`}
-                data-capacity={Math.round(capacity.usedPercent)}
-                onClick={() => setVerseSection('apps', `seat:${capacity.seatId}`)}
-              >
-                <span className={styles.railIcon}>
-                  <CapacityRing badge={capacity} />
-                </span>
-                {expanded ? (
-                  <span className={styles.railLabel}>
-                    {capacity.label} {capacity.limitReached ? 'limit' : `${Math.round(capacity.usedPercent)}%`}
-                  </span>
-                ) : null}
-              </button>
-            </Tooltip>
-          ) : null}
+          {rail && !compact ? <RailCapacityButton rail={rail} expanded={expanded} /> : null}
           <Tooltip label="Settings and more" placement="right" disabled={expanded || compact || trayOpen}>
             <button
               ref={gearRef}
@@ -342,17 +407,53 @@ export function VerseApp() {
         ))}
       </main>
 
-      <GearTray open={trayOpen} anchorRef={gearRef} onClose={() => setTrayOpen(false)} compact={compact} />
-      {ui.overlay === 'palette' ? <CommandPalette /> : null}
-      {ui.overlay === 'needs-you' ? <NeedsYouDrawer /> : null}
-      {ui.overlay === 'shortcuts' ? <ShortcutsOverlay /> : null}
+      {/* Lazy chunks (see "Off the first-paint path"); each mounts only while it can draw. */}
+      <Suspense fallback={null}>
+        {gearReady || trayOpen ? <GearTray open={trayOpen} anchorRef={gearRef} onClose={() => setTrayOpen(false)} compact={compact} /> : null}
+      </Suspense>
+      <Suspense fallback={null}>
+        {ui.overlay === 'palette' ? <CommandPalette /> : null}
+        {ui.overlay === 'needs-you' ? <NeedsYouDrawer /> : null}
+        {ui.overlay === 'shortcuts' ? <ShortcutsOverlay /> : null}
+      </Suspense>
       <GuardHost />
       {/*
         First run only, outside the surfaces: a docked card, not a modal, so
         the rail and the surface stay usable while it is open.
       */}
-      <OnboardingFlow />
+      <Suspense fallback={null}>{onboarding.open ? <OnboardingFlow /> : null}</Suspense>
     </div>
+  );
+}
+
+/**
+ * The rail foot's capacity ring for the scarcest seat. Its own component so
+ * `useRailCapacity` (a hook from the lazily loaded RailStatus module) is only
+ * called once that module is here, always in the same place.
+ */
+function RailCapacityButton({ rail, expanded }: { rail: RailStatusModule; expanded: boolean }) {
+  const capacity = rail.useRailCapacity();
+  if (!capacity) return null;
+  const { CapacityRing, describeRailCapacity } = rail;
+  return (
+    <Tooltip label={describeRailCapacity(capacity)} placement="right" disabled={expanded}>
+      <button
+        type="button"
+        className={styles.railButton}
+        aria-label={`Capacity — ${describeRailCapacity(capacity)}`}
+        data-capacity={Math.round(capacity.usedPercent)}
+        onClick={() => setVerseSection('apps', `seat:${capacity.seatId}`)}
+      >
+        <span className={styles.railIcon}>
+          <CapacityRing badge={capacity} />
+        </span>
+        {expanded ? (
+          <span className={styles.railLabel}>
+            {capacity.label} {capacity.limitReached ? 'limit' : `${Math.round(capacity.usedPercent)}%`}
+          </span>
+        ) : null}
+      </button>
+    </Tooltip>
   );
 }
 

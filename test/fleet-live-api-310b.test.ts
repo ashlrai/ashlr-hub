@@ -6,15 +6,20 @@
  * run phases from the ledger, the gate funnel, the repo table, Needs-you
  * items (validated with C0's isNeedsYouItem) and pause / resume.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
 import * as http from 'node:http';
+import * as os from 'node:os';
+import * as nodePath from 'node:path';
 import type { AddressInfo } from 'node:net';
 
 import {
   buildFleetLiveSnapshot,
+  createDispatchTail,
   gateFunnelFromLedger,
   handleFleetLiveApi,
   needsYouItems,
+  needsYouSourceState,
   proposalProgressFromLedger,
   resetFleetLiveApiForTest,
   setFleetLiveDepsForTest,
@@ -296,8 +301,26 @@ describe('ledger projections', () => {
 });
 
 describe('needsYouItems (R1)', () => {
-  it('throws until a snapshot exists, so activity reports the source instead of an all-clear', () => {
-    expect(() => needsYouItems()).toThrow(/not been read yet/);
+  it('answers [] with source state WARMING until the first snapshot (never an all-clear, never an error)', async () => {
+    // L1 leftover 2: a cold start used to THROW, which activity reported as the
+    // fleet source erroring on every start. Now it is [] + 'warming', which
+    // activity maps to 'unavailable' — still not an all-clear.
+    expect(needsYouSourceState()).toBe('warming');
+    expect(needsYouItems()).toEqual([]);
+    expect(needsYouSourceState()).toBe('warming');
+    // needsYouItems scheduled the first read off the caller's stack; once it lands the source vouches.
+    await new Promise((resolve) => setImmediate(resolve));
+    await get();
+    expect(needsYouSourceState()).toBe('ok');
+  });
+
+  it('says ERROR (and throws) when the first read failed with nothing cached', async () => {
+    setFleetLiveDepsForTest({ ...deps(), now: () => { throw new Error('clock gone'); } });
+    expect(needsYouItems()).toEqual([]);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(needsYouSourceState()).toBe('error');
+    expect(() => needsYouItems()).toThrow(/could not be read/);
   });
 
   it('serves owner-hold, quarantine, recent reverts and open owner-lane PRs from cache', async () => {
@@ -434,5 +457,200 @@ describe('U4 post-merge watch store (INT1)', () => {
       watches: () => { throw new Error('post-merge watches unknown: corrupt'); },
     });
     expect(built.snapshot.stateReason).toMatch(/Unknown: .*post-merge watches could not be read/);
+  });
+});
+
+describe('mirrors apart from repos (R3f, L1 leftover 3)', () => {
+  it('keeps enrolled fleet mirrors OUT of the repo table and exposes them as snapshot.mirrors', async () => {
+    const built = await buildFleetLiveSnapshot({
+      ...(deps() as FleetLiveDeps),
+      enrolled: () => ['/work/binshield', '/m/ashlrai__binshield', '/m/ashlrai__locus', '/m/odd'],
+      isMirror: (path) => path.startsWith('/m/'),
+      repoIdentity: (path) => (path.endsWith('binshield') ? REPO : path.endsWith('locus') ? 'ashlrai/locus' : null),
+    });
+    expect(built.snapshot.mirrors).toEqual({ count: 3, repos: ['ashlrai/binshield', 'ashlrai/locus', 'odd'] });
+    // ashlrai/locus is known ONLY through a mirror: it gets no repo row of its own.
+    expect(built.snapshot.repos.map((r) => r.repo)).toEqual([REPO]);
+  });
+
+  it('says mirrors are unknown (null), not zero, when the enrollment registry cannot be read', async () => {
+    const built = await buildFleetLiveSnapshot({
+      ...(deps() as FleetLiveDeps),
+      enrolled: () => { throw new Error('registry corrupt'); },
+    });
+    expect(built.snapshot.mirrors).toBeNull();
+    const none = await buildFleetLiveSnapshot({ ...(deps() as FleetLiveDeps), enrolled: () => [] });
+    expect(none.snapshot.mirrors).toEqual({ count: 0, repos: [] });
+  });
+});
+
+describe('in-flight dispatches: incremental async ledger tail (review c11)', () => {
+  let dir: string;
+  const DAY = '2026-09-20';
+  const at = (h: number, m = 0) => `${DAY}T${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:00.000Z`;
+  const T0 = Date.parse(at(0));
+
+  function dispatchRow(action: 'daemon:dispatch-start' | 'daemon:dispatch' | 'daemon:dispatch-skip', runId: string, ts: string, extra: Record<string, unknown> = {}): string {
+    return JSON.stringify({
+      schemaVersion: 1, ts, actor: 'daemon', kind: 'dispatch', outcome: action === 'daemon:dispatch-start' ? 'started' : 'succeeded',
+      action, summary: 'dispatch', runId, itemId: `item-${runId}`, repo: '/r/binshield', backend: 'codex', model: 'gpt-5.5', ...extra,
+    });
+  }
+  function tickRow(ts: string, i: number): string {
+    return JSON.stringify({ schemaVersion: 1, ts, actor: 'daemon', kind: 'tick', outcome: 'succeeded', action: 'daemon:tick', summary: `tick ${i} ${'x'.repeat(400)}` });
+  }
+  function file(name: string): string {
+    return nodePath.join(dir, name);
+  }
+  function append(name: string, lines: string[]): void {
+    fs.appendFileSync(file(name), lines.map((l) => `${l}\n`).join(''), { mode: 0o600 });
+    fs.chmodSync(file(name), 0o600);
+  }
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), 'dispatch-tail-'));
+    fs.chmodSync(dir, 0o700);
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('answers started-and-unfinished runs, newest first, and [] with no ledger at all', async () => {
+    const missing = createDispatchTail({ dir: () => nodePath.join(dir, 'nope') });
+    expect(await missing.read(T0)).toEqual([]);
+    append(`${DAY}.jsonl`, [
+      dispatchRow('daemon:dispatch-start', 'a', at(1)),
+      tickRow(at(1, 5), 1),
+      dispatchRow('daemon:dispatch-start', 'b', at(2)),
+      dispatchRow('daemon:dispatch', 'a', at(2, 30)),
+      dispatchRow('daemon:dispatch-start', 'c', at(3)),
+      dispatchRow('daemon:dispatch-skip', 'c', at(3, 1)),
+      dispatchRow('daemon:dispatch-start', 'd', at(4), { model: 'key sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' }),
+    ]);
+    const tail = createDispatchTail({ dir: () => dir });
+    const out = await tail.read(T0);
+    expect(out?.map((f) => f.runId)).toEqual(['d', 'b']);
+    expect(out?.[1]).toEqual({ runId: 'b', itemId: 'item-b', repoPath: '/r/binshield', backend: 'codex', model: 'gpt-5.5', startedAt: at(2) });
+    // Strings leaving the ledger are scrubbed like the ledger's own reader does.
+    expect(out?.[0]?.model).not.toContain('AAAAAAAAAAAAAAAAAAAA');
+    // The window start filters starts, not terminal rows.
+    expect((await tail.read(Date.parse(at(3))))?.map((f) => f.runId)).toEqual(['d']);
+  });
+
+  it('parses ONLY the bytes appended since the last read, and waits for a half-written row', async () => {
+    const name = `${DAY}.jsonl`;
+    append(name, [dispatchRow('daemon:dispatch-start', 'a', at(1))]);
+    const tail = createDispatchTail({ dir: () => dir });
+    expect((await tail.read(T0))?.map((f) => f.runId)).toEqual(['a']);
+    const parse = vi.spyOn(JSON, 'parse');
+    try {
+      const partial = dispatchRow('daemon:dispatch-start', 'b', at(2));
+      fs.appendFileSync(file(name), partial.slice(0, 40));
+      expect((await tail.read(T0))?.map((f) => f.runId)).toEqual(['a']);
+      expect(parse).not.toHaveBeenCalled();
+      fs.appendFileSync(file(name), `${partial.slice(40)}\n${dispatchRow('daemon:dispatch', 'a', at(2, 5))}\n`);
+      expect((await tail.read(T0))?.map((f) => f.runId)).toEqual(['b']);
+      // Exactly the two new rows were parsed — never the first one again.
+      expect(parse).toHaveBeenCalledTimes(2);
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it('starts over when the partition is replaced or truncated, and joins a terminal row across UTC midnight', async () => {
+    const name = `${DAY}.jsonl`;
+    append(name, [dispatchRow('daemon:dispatch-start', 'a', at(23, 50)), dispatchRow('daemon:dispatch-start', 'b', at(23, 55))]);
+    const tail = createDispatchTail({ dir: () => dir });
+    expect((await tail.read(T0))?.map((f) => f.runId)).toEqual(['b', 'a']);
+    fs.rmSync(file(name));
+    append(name, [dispatchRow('daemon:dispatch-start', 'a', at(23, 50))]);
+    expect((await tail.read(T0))?.map((f) => f.runId)).toEqual(['a']);
+    append('2026-09-21.jsonl', [dispatchRow('daemon:dispatch', 'a', '2026-09-21T00:03:00.000Z')]);
+    expect(await tail.read(T0)).toEqual([]);
+  });
+
+  it('is UNKNOWN (null), never a smaller count, when a dispatch row or the store cannot be trusted', async () => {
+    const name = `${DAY}.jsonl`;
+    append(name, [dispatchRow('daemon:dispatch-start', 'a', at(1))]);
+    const tail = createDispatchTail({ dir: () => dir });
+    expect(await tail.read(T0)).toHaveLength(1);
+    // A broken row of another kind says nothing about dispatches.
+    append(name, ['{"kind":"tick", broken']);
+    expect(await tail.read(T0)).toHaveLength(1);
+    // A broken dispatch row does.
+    append(name, ['{"action":"daemon:dispatch-start", broken']);
+    expect(await tail.read(T0)).toBeNull();
+    // A row whose day does not match its partition is refused like the ledger refuses it.
+    fs.rmSync(file(name));
+    append(name, [dispatchRow('daemon:dispatch-start', 'a', '2026-09-19T10:00:00.000Z')]);
+    expect(await tail.read(T0)).toBeNull();
+    // Group-writable partition / directory: refused.
+    fs.rmSync(file(name));
+    append(name, [dispatchRow('daemon:dispatch-start', 'a', at(1))]);
+    expect(await tail.read(T0)).toHaveLength(1);
+    fs.chmodSync(file(name), 0o620);
+    expect(await tail.read(T0)).toBeNull();
+    fs.chmodSync(file(name), 0o600);
+    fs.chmodSync(dir, 0o770);
+    expect(await tail.read(T0)).toBeNull();
+    fs.chmodSync(dir, 0o700);
+    // A symlinked partition is never followed.
+    fs.rmSync(file(name));
+    const outside = nodePath.join(os.tmpdir(), `outside-${process.pid}.jsonl`);
+    fs.writeFileSync(outside, `${dispatchRow('daemon:dispatch-start', 'z', at(1))}\n`, { mode: 0o600 });
+    try {
+      fs.symlinkSync(outside, file(name));
+      expect(await tail.read(T0)).toBeNull();
+    } finally {
+      fs.rmSync(outside, { force: true });
+    }
+  });
+
+  // retry: a wall-clock probe can be descheduled by an unrelated load spike;
+  // the old whole-partition synchronous read failed this on every attempt.
+  it('never blocks the event loop past the 20 ms budget, even on a cold multi-MB partition', { retry: 2 }, async () => {
+    const name = `${DAY}.jsonl`;
+    const lines: string[] = [];
+    for (let i = 0; i < 9_000; i += 1) {
+      const ts = new Date(T0 + i * 5_000).toISOString();
+      lines.push(i % 20 === 0 ? dispatchRow('daemon:dispatch-start', `r${i}`, ts) : tickRow(ts, i));
+      if (i % 20 === 1) lines.push(dispatchRow('daemon:dispatch', `r${i - 1}`, ts));
+    }
+    lines.push(dispatchRow('daemon:dispatch-start', 'open-run', new Date(T0 + 9_000 * 5_000).toISOString()));
+    append(name, lines);
+    expect(fs.statSync(file(name)).size).toBeGreaterThan(3 * 1024 * 1024);
+    const tail = createDispatchTail({ dir: () => dir });
+    let maxGap = 0;
+    let last = performance.now();
+    let probing = true;
+    const probe = (): void => {
+      const now = performance.now();
+      maxGap = Math.max(maxGap, now - last);
+      last = now;
+      if (probing) setImmediate(probe);
+    };
+    setImmediate(probe);
+    const started = performance.now();
+    const out = await tail.read(T0);
+    const coldMs = performance.now() - started;
+    probing = false;
+    expect(out?.map((f) => f.runId)).toEqual(['open-run']);
+    console.log(`[c11] cold tail of ${(fs.statSync(file(name)).size / 1e6).toFixed(1)} MB: ${coldMs.toFixed(1)} ms total, longest loop stall ${maxGap.toFixed(1)} ms`);
+    expect(maxGap).toBeLessThan(20);
+    // A warm refresh with nothing appended is a stat, not a read.
+    const warmStart = performance.now();
+    await tail.read(T0);
+    expect(performance.now() - warmStart).toBeLessThan(20);
+  });
+
+  it('the snapshot awaits an asynchronous inFlight source (only while the daemon is alive)', async () => {
+    alive = true;
+    const built = await buildFleetLiveSnapshot({
+      ...(deps() as FleetLiveDeps),
+      inFlight: async () => [{ runId: 'run-async', itemId: 'item-a', repoPath: '/tmp/mirrors/ashlrai__binshield', backend: 'codex', model: null, startedAt: iso(MIN) }],
+    });
+    expect(built.snapshot.runs.find((r) => r.id === 'run-async')?.phase).toBe('producing');
+    const unknown = await buildFleetLiveSnapshot({ ...(deps() as FleetLiveDeps), inFlight: async () => { throw new Error('io'); } });
+    expect(unknown.snapshot.summary.building).toBeNull();
   });
 });

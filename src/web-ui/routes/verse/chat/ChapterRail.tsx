@@ -4,6 +4,7 @@
  *
  *   ─  a turn            ━ red: it failed     ━ amber: running
  *   ◆  context compacted ↺ recovered          ⤷ continued from another chat
+ *   (the three markers are inline SVG — see MARKER_PATH)
  *
  * Hover (or keyboard focus) shows the ask; click jumps to it.
  *
@@ -13,7 +14,7 @@
  * Enter or Space jumps. Every tick has a full accessible name ("Turn 4 of
  * 12, failed: …"), so the colour is never the only signal (DESIGN §6).
  */
-import { memo, useCallback, useId, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useCallback, useId, useRef, useState, type KeyboardEvent, type ReactElement } from 'react';
 import { describeTick, type ChapterMarkerKind, type ChapterModel } from './chapter-model.js';
 import styles from './ChapterRail.module.css';
 
@@ -26,11 +27,25 @@ export interface ChapterRailProps {
   onJumpTurn: (turnKey: string) => void;
 }
 
-const MARKER_GLYPH: Readonly<Record<ChapterMarkerKind, string>> = {
-  compaction: '◆',
-  recovered: '↺',
-  handoff: '⤷',
+/**
+ * The markers are drawn, not typed. WHY (review 3.10 c18, SPEC-310A §1 fonts
+ * ≤ 150 KB): as text, ◆ ⤷ are in neither UI font and ↺ is only in the 230 KB
+ * full Plex face, so a chat with one compaction or recovery made the browser
+ * fetch that face on first paint just to draw a 6px mark. A 1em SVG in
+ * currentColor keeps the size and the per-kind colour the CSS already sets.
+ */
+const MARKER_PATH: Readonly<Record<ChapterMarkerKind, ReactElement>> = {
+  // ◆ a filled diamond: the context was compacted here.
+  compaction: <path d="M8 2.5 13.5 8 8 13.5 2.5 8Z" fill="currentColor" />,
+  // ↺ an open circle with its arrowhead: recovered.
+  recovered: <path d="M4.2 5.2A5 5 0 1 1 3 8.5M4.2 1.8v3.4h3.4" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />,
+  // ⤷ down, then right: continued from another chat.
+  handoff: <path d="M4 2.5V9a2 2 0 0 0 2 2h7M10.5 8.5 13 11l-2.5 2.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />,
 };
+
+function MarkerIcon({ kind }: { kind: ChapterMarkerKind }) {
+  return <svg className={styles.markerIcon} viewBox="0 0 16 16" width="1em" height="1em" aria-hidden="true" focusable="false">{MARKER_PATH[kind]}</svg>;
+}
 
 export const ChapterRail = memo(function ChapterRail({ model, onJumpTurn }: ChapterRailProps) {
   const [active, setActive] = useState(-1);
@@ -68,7 +83,7 @@ export const ChapterRail = memo(function ChapterRail({ model, onJumpTurn }: Chap
       onKeyDown={onKeyDown} onMouseLeave={() => setPeek(null)}>
       {model.handoff ? (
         <span className={styles.handoff} role="img" aria-label="Continued from another chat" title="Continued from another chat">
-          {MARKER_GLYPH.handoff}
+          <MarkerIcon kind="handoff" />
         </span>
       ) : null}
       <div className={styles.track}>
@@ -94,7 +109,7 @@ export const ChapterRail = memo(function ChapterRail({ model, onJumpTurn }: Chap
               <span className={styles.bar} aria-hidden="true" />
               {markers.length > 0 ? (
                 <span className={styles.markers} aria-hidden="true">
-                  {markers.map((m) => <span key={m} className={styles.marker} data-marker={m}>{MARKER_GLYPH[m]}</span>)}
+                  {markers.map((m) => <span key={m} className={styles.marker} data-marker={m}><MarkerIcon kind={m} /></span>)}
                 </span>
               ) : null}
             </button>

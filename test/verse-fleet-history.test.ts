@@ -339,6 +339,29 @@ describe('fleet history projection', () => {
     expect(serialized).not.toContain(tmpHome);
   });
 
+  // P4 regression (review 3.10 c10): the Spend tile reads per-token spend
+  // against the metered cap, so subscription CLI runs must not count.
+  it('splits out per-token (metered) spend per day, excluding subscription and free engines', async () => {
+    const today = '2026-09-23';
+    writeRun({ createdMs: NOW - HOUR, engine: 'claude', cost: 0.5 }); // subscription seat
+    writeRun({ createdMs: NOW - HOUR, engine: 'codex', cost: 0.25 }); // subscription seat
+    writeRun({ createdMs: NOW - HOUR, engine: 'grok-cli', cost: 0.125 }); // SuperGrok seat
+    writeRun({ createdMs: NOW - HOUR, engine: 'grok', cost: 0.2 }); // the per-token xAI API
+    writeRun({ createdMs: NOW - HOUR, engine: 'aw', cost: 0.05 }); // unclassifiable: counted, never hidden
+    writeRun({ createdMs: NOW - HOUR, engine: 'local-coder', cost: 0.4 }); // loopback: free
+    writeRun({ createdMs: NOW - DAY, engine: 'claude', cost: 1 });
+    const history = await (await service()).get({ days: 7, tzOffsetMinutes: 0 });
+    const t = dayOf(history, today) as ReturnType<typeof dayOf> & { meteredCostUsd: number | null };
+    const y = dayOf(history, '2026-09-22') as ReturnType<typeof dayOf> & { meteredCostUsd: number | null };
+    expect(t.estCostUsd).toBeCloseTo(1.525, 6);
+    expect(t.meteredCostUsd).toBeCloseTo(0.25, 6);
+    // A day of subscription-only work is a real $0, not unknown.
+    expect(y.meteredCostUsd).toBe(0);
+    const { runBilling } = await import('../src/core/verse/fleet-history.js');
+    expect(['claude', 'codex', 'grok-cli', 'grok', 'aw', 'local-coder', 'unknown'].map(runBilling))
+      .toEqual(['subscription', 'subscription', 'subscription', 'per-token', 'per-token', 'free', 'per-token']);
+  });
+
   it('shifts day buckets by the caller timezone offset', async () => {
     // 02:00Z on the 23rd is still the 22nd in PDT.
     writeRun({ createdMs: Date.parse('2026-09-23T02:00:00Z') });
@@ -398,6 +421,7 @@ describe('fleet history projection', () => {
       for (const day of history.days) {
         expect(day.runs.started).toBeNull();
         expect(day.estCostUsd).toBeNull();
+        expect((day as typeof day & { meteredCostUsd: number | null }).meteredCostUsd).toBeNull();
       }
       expect(history.totals.runsStarted).toBeNull();
       expect(history.totals.estCostUsd).toBeNull();

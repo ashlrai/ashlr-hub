@@ -512,6 +512,14 @@ an expected result and a date, goals, standards, and questions for you. It runs
 daily and after notable events, at most three times a day, on Grok or a local
 model; Claude only for a weekly deep run that fits inside your reserve, and never
 Codex. With no standing grant it runs on free local models or not at all.
+From the CLI, `ashlr leader tick` is the same pass the daemon makes: it applies
+class-B actions whose veto window has passed, grades due moves, and starts a
+run only when one is due. `ashlr leader show`, `run` and `veto` cover the rest.
+Since 3.10 `ashlr vision review` is an alias of `ashlr leader tick --wait`; it
+no longer runs the legacy Strategist or writes a briefing. The nightly
+`ai.ashlr.oversight` job should run the plist that
+`ashlr leader oversight-plist --print` prints (see
+[Authority](AUTHORITY.md#7-nightly-oversight)).
 
 - **Class A** actions (focus goals, dispatch work, pause a repo, move the budget
   toward reserve, start an experiment) apply at once and can be vetoed at any

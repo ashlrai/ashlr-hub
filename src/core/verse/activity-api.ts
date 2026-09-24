@@ -38,6 +38,8 @@ import {
   type ActivityEngine,
   type ActivityReader,
   type NeedsYouProducers,
+  type NeedsYouProducerStates,
+  type NeedsYouSourceState,
 } from './activity.js';
 import type { ApiModule } from './api-modules.js';
 import { createSessionMetaStore, type SessionMetaStore } from './session-meta.js';
@@ -65,11 +67,13 @@ export interface VerseActivitySeenSurfaceRequest {
 
 interface TrackBHooks {
   producers: NeedsYouProducers;
+  /** Each producer's `needsYouSourceState` (optional: older hooks / test fakes lack it). */
+  states?: NeedsYouProducerStates;
   autonomy: (() => VerseAutonomyBadge | null) | null;
   latestMemoAt: (() => string | null) | null;
 }
 
-const NO_HOOKS: TrackBHooks = { producers: { authority: null, fleet: null, leader: null }, autonomy: null, latestMemoAt: null };
+const NO_HOOKS: TrackBHooks = { producers: { authority: null, fleet: null, leader: null }, states: {}, autonomy: null, latestMemoAt: null };
 
 type ModuleExports = Record<string, unknown>;
 
@@ -102,6 +106,13 @@ export async function resolveTrackBHooks(): Promise<TrackBHooks> {
       authority: fn<() => NeedsYouItem[]>(authority, 'needsYouItems'),
       fleet: fn<() => NeedsYouItem[]>(fleet, 'needsYouItems'),
       leader: fn<() => NeedsYouItem[]>(leader, 'needsYouItems'),
+    },
+    // R3c: without these, a producer still warming answered [] (read as an
+    // all-clear) or threw (read as an error) on every cold start.
+    states: {
+      authority: fn<() => NeedsYouSourceState>(authority, 'needsYouSourceState'),
+      fleet: fn<() => NeedsYouSourceState>(fleet, 'needsYouSourceState'),
+      leader: fn<() => NeedsYouSourceState>(leader, 'needsYouSourceState'),
     },
     autonomy: fn<() => VerseAutonomyBadge | null>(authority, 'autonomyBadge'),
     latestMemoAt: fn<() => string | null>(leader, 'latestMemoAt'),
@@ -146,6 +157,7 @@ function currentWiring(): Wiring {
     engine: () => (engineOverride ? engineOverride() : (peekVerseEngine() as ActivityEngine | null)),
     meta,
     producers: () => w.hooks.producers,
+    producerStates: () => w.hooks.states ?? {},
     approvals: () => approvals.snapshot(),
     health: () => {
       const current = getVerseHealthService()?.current();

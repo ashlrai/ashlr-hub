@@ -31,6 +31,7 @@
  */
 
 import type { AshlrConfig, Proposal } from '../types.js';
+import type { FrontierJudgeResolutionOptions } from './manager.js';
 import { scrubSecrets } from '../util/scrub.js';
 import { isDestructiveDiff } from '../run/diff-safety.js';
 
@@ -61,6 +62,14 @@ export interface RedTeamResult {
   verdict: RedTeamVerdict;
   /** Short human-readable detail (scrubbed). */
   detail: string;
+  /**
+   * What the frontier (model) half did: 'none' = no model was asked (flag
+   * lanes empty or no judge resolved), 'answered' = a model call returned,
+   * 'failed' = a model call was made and threw. Callers that pay for the
+   * call (the standing merge pass) cache on 'answered' and back off on
+   * 'failed' — a best-effort reviewer must not be re-asked every tick.
+   */
+  frontier?: 'none' | 'answered' | 'failed';
 }
 
 /** Options — mostly knobs for bounding + testing. */
@@ -69,6 +78,15 @@ export interface RedTeamOptions {
   maxDiffChars?: number;
   /** Hard cap on returned attacks (default 12). */
   maxAttacks?: number;
+  /**
+   * V3.10: how the frontier judge is resolved. The standing merge pass passes
+   * the lanes its SeatRouter admits (reserve floors, 5-hour ceilings, grant
+   * judge seats) so the red-team never spends a seat the router refused. An
+   * EMPTY `allowedJudgeEngines` means "no lane is admitted": the model half is
+   * skipped entirely and only the deterministic checks run. Absent ⇒ the
+   * legacy unrouted resolution (non-standing callers only).
+   */
+  judge?: FrontierJudgeResolutionOptions;
 }
 
 // ---------------------------------------------------------------------------
@@ -332,13 +350,19 @@ export async function redTeamProposal(
 
   // ── Adversarial frontier pass (best-effort; never-throws) ────────────────
   let frontierAttacks: RedTeamAttack[] = [];
+  let frontier: 'none' | 'answered' | 'failed' = 'none';
   try {
     let client: { complete: (system: string, user: string) => Promise<string> } | null = null;
-    try {
-      const { resolveFrontierJudgeClient } = await import('./manager.js');
-      client = resolveFrontierJudgeClient(cfg);
-    } catch {
-      client = null;
+    // An explicitly empty lane list is the router saying "no seat may be
+    // spent": never even resolve a client (resolution alone may probe CLIs).
+    const noLaneAdmitted = opts?.judge?.allowedJudgeEngines !== undefined && opts.judge.allowedJudgeEngines.length === 0;
+    if (!noLaneAdmitted) {
+      try {
+        const { resolveFrontierJudgeClient } = await import('./manager.js');
+        client = resolveFrontierJudgeClient(cfg, opts?.judge ?? {});
+      } catch {
+        client = null;
+      }
     }
 
     if (client) {
@@ -346,9 +370,13 @@ export async function redTeamProposal(
       try {
         const raw = await client.complete(RED_TEAM_SYSTEM_PROMPT, userPrompt);
         frontierAttacks = parseFrontierAttacks(raw, maxAttacks);
+        // A refused / unauthorized judge spawn resolves to '' rather than
+        // throwing — that is not an answer, and must not be cached as one.
+        frontier = typeof raw === 'string' && raw.trim() ? 'answered' : 'failed';
       } catch {
         // Frontier call failed — fall back to deterministic-only.
         frontierAttacks = [];
+        frontier = 'failed';
       }
     }
   } catch {
@@ -373,6 +401,7 @@ export async function redTeamProposal(
       attacks,
       verdict: broke ? 'broken' : 'survived',
       detail,
+      frontier,
     };
   } catch {
     // Combine/decision must never throw — neutral survive.

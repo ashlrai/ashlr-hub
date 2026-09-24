@@ -234,6 +234,96 @@ export function defaultPrTitle(s: GitStatusView): string {
 }
 
 // ---------------------------------------------------------------------------
+// Merge: the head the operator confirmed
+// ---------------------------------------------------------------------------
+
+/**
+ * What the Merge dialog showed when it opened. WHY a snapshot: the bar
+ * re-polls git status every 10 s, and the server's `--match-head-commit`
+ * guard only protects the SHA the CLIENT sends. If the dialog followed the
+ * live poll, a commit pushed while it was open (and whose CI went green
+ * before the click) would be merged under a confirmation the operator gave
+ * for a different head. So the dialog pins the PR at open, asserts only what
+ * that pin verified, and submits the pinned SHA — never the latest poll's.
+ */
+export interface PinnedMerge {
+  number: number;
+  title: string;
+  headSha: string | null;
+  headRef: string;
+  baseRef: string;
+  checks: VerseGitPr['checks'];
+  mergeable: boolean | null;
+  counts: GitCheckCounts | null;
+}
+
+export function pinMerge(s: GitStatusView): PinnedMerge | null {
+  const pr = s.pr;
+  if (!pr) return null;
+  return {
+    number: pr.number,
+    title: pr.title,
+    headSha: pr.headSha,
+    headRef: pr.headRef || s.branch || '',
+    baseRef: pr.baseRef || s.base || '',
+    checks: pr.checks,
+    mergeable: pr.mergeable,
+    counts: s.prCheckCounts ?? null,
+  };
+}
+
+/**
+ * The "Head abc1234, 9/9 checks passed, no conflicts." fact, built ONLY from
+ * what the pinned read verified for that SHA: "checks passed" needs
+ * `checks === 'passing'`, "no conflicts" needs `mergeable === true`. Anything
+ * else says what is actually known (running, failing, not reported, GitHub
+ * still computing mergeability) instead of the reassuring default.
+ */
+export function mergeHeadFact(pin: PinnedMerge): { sha: string; detail: string; text: string; verified: boolean } {
+  const sha = pin.headSha ? pin.headSha.slice(0, 7) : '—';
+  const c = pin.counts;
+  let checks: string;
+  switch (pin.checks) {
+    case 'passing':
+      checks = c && c.total > 0 ? `${c.passed}/${c.total} checks passed` : 'checks passed';
+      break;
+    case 'failing':
+      checks = c && c.total > 0 ? `${c.failed} of ${c.total} checks failing` : 'checks failing';
+      break;
+    case 'pending':
+      checks = c && c.total > 0 ? `${c.pending} of ${c.total} checks still running` : 'checks still running';
+      break;
+    case 'none':
+      checks = 'no checks reported';
+      break;
+    default:
+      checks = 'checks not known';
+  }
+  const conflicts = pin.mergeable === true ? 'no conflicts' : pin.mergeable === false ? 'has conflicts' : 'GitHub has not finished checking for conflicts';
+  const detail = `${checks}, ${conflicts}.`;
+  return { sha, detail, text: `Head ${sha}, ${detail}`, verified: pin.checks === 'passing' && pin.mergeable === true && pin.headSha !== null };
+}
+
+/**
+ * Why Merge must stay disabled for this pin against the latest poll, or null
+ * when the live PR is still exactly what the dialog showed. A different head
+ * (or PR, or a PR that is gone/closed) means the operator has not reviewed
+ * what would merge; a regression in checks or mergeability on the SAME head
+ * means the server's own suggestion no longer stands.
+ */
+export function mergeDrift(pin: PinnedMerge, live: GitStatusView | null): string | null {
+  const pr = live?.pr ?? null;
+  // A draft cannot be merged (the server refuses it), so "open" is the only live state that keeps the pin valid.
+  if (!pr || pr.number !== pin.number || pr.state !== 'open') {
+    return `#${pin.number} is no longer an open, ready pull request — close this and check the branch bar.`;
+  }
+  if (pr.headSha !== pin.headSha) return 'The PR changed since you opened this — new commits landed. Close and reopen to review the new head.';
+  if (pr.checks !== 'passing') return 'Checks on this head are no longer passing — close and reopen once they are.';
+  if (pr.mergeable !== true) return 'GitHub no longer reports this head as mergeable — close and reopen to review.';
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // Review pane: file tree
 // ---------------------------------------------------------------------------
 

@@ -82,6 +82,13 @@ export interface ActivityEngine {
 /** Track B's producers (R1). `null` = the module has not landed in this build. */
 export type NeedsYouProducerSource = 'authority' | 'fleet' | 'leader';
 export type NeedsYouProducers = Record<NeedsYouProducerSource, (() => NeedsYouItem[]) | null>;
+/**
+ * A producer's own readiness (each module's `needsYouSourceState()`):
+ * 'warming' = its first read has not landed yet, 'error' = it cannot vouch
+ * for an answer, 'ok' = its items are the truth.
+ */
+export type NeedsYouSourceState = 'warming' | 'ok' | 'error';
+export type NeedsYouProducerStates = Partial<Record<NeedsYouProducerSource, (() => NeedsYouSourceState) | null>>;
 
 export interface ApprovalsView {
   state: 'ok' | 'unavailable' | 'error';
@@ -100,6 +107,8 @@ export interface ActivityDeps {
   engine: () => ActivityEngine | null;
   meta: SessionMetaStore;
   producers: () => NeedsYouProducers;
+  /** Optional: producers that report readiness; one without it is judged by its items alone. */
+  producerStates?: () => NeedsYouProducerStates;
   approvals: () => ApprovalsView;
   /** A2's fused seat view; null when the health service is not running. */
   health: () => HealthView | null;
@@ -504,9 +513,26 @@ export function createActivityReader(deps: ActivityDeps, bootId: string = random
       items.push(...health.items);
 
       const producers = deps.producers();
+      let states: NeedsYouProducerStates = {};
+      try { states = deps.producerStates?.() ?? {}; } catch { states = {}; }
       for (const source of ['authority', 'fleet', 'leader'] as const) {
         const read = producers[source];
         if (!read) continue;
+        // WHY THE STATE IS READ AFTER THE ITEMS: reading the items is what
+        // schedules a producer's first load. A producer still 'warming'
+        // answers [] (or throws "still loading"); either would otherwise
+        // show as an all-clear or as a failure. It is 'unavailable' — the
+        // drawer's "not answering yet", never a false all-clear.
+        const stateOf = (): NeedsYouSourceState | null => {
+          const probe = states[source];
+          if (!probe) return null;
+          try {
+            const value = probe();
+            return value === 'warming' || value === 'ok' || value === 'error' ? value : 'error';
+          } catch {
+            return 'error';
+          }
+        };
         try {
           const produced = read();
           if (!Array.isArray(produced)) throw new TypeError('not an array');
@@ -520,9 +546,10 @@ export function createActivityReader(deps: ActivityDeps, bootId: string = random
             else bad += 1;
           }
           if (bad > 0) dropped[source] = bad;
-          sources[source] = bad > 0 ? 'error' : 'ok';
+          const state = stateOf();
+          sources[source] = bad > 0 || state === 'error' ? 'error' : state === 'warming' ? 'unavailable' : 'ok';
         } catch {
-          sources[source] = 'error';
+          sources[source] = stateOf() === 'warming' ? 'unavailable' : 'error';
         }
       }
 

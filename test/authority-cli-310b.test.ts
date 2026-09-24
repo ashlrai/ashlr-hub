@@ -295,13 +295,29 @@ describe('setup and the trust-root PR', () => {
     expect(validateCustodyRoot({ ...TEST_ROOT, keyId: 'se-p256-0000000000000000' }, keyIdForPublicKeyPem)).toMatch(/does not match the key/);
   });
 
-  it('setup stops at the sudo step and never runs it', async () => {
+  it('setup --dry-run on a fresh Mac prints the WHOLE plan past the missing sudo step, and runs nothing (3.10 review c20)', async () => {
     const h = harness();
     expect(await runAuthorityCli(['setup', '--dry-run'], h.deps)).toBe(0);
     const text = h.out.join('\n');
-    expect(text).toMatch(/sudo scripts\/install-custody\.sh/);
+    expect(text).toMatch(/… custody helper: run `sudo scripts\/install-custody\.sh`/);
+    // Every later step is described, marked as planned (·), never as done (✓).
+    for (const step of ['host binding', 'signing key', 'trust root', 'deploy', 'GitHub App', 'Claude token', 'rulesets', 'canary repo', 'provenance key', 'standing grant']) {
+      expect(text, step).toMatch(new RegExp(`^· ${step}: `, 'm'));
+    }
+    // The only ✓ is a real local fact (the temp HOME has no ~/.ashlr/activation).
+    expect(text.match(/^✓ .*/gm) ?? []).toEqual(['✓ old activation state: nothing to retire']);
+    expect(text).toMatch(/Setup: 0 done, 1 already in place, 1 waiting on you, 0 failed, 10 planned \(dry run: nothing was asked or changed\)\./);
     expect(h.calls).toEqual([]);
     expect(h.deps.custody!.custodyInit).not.toHaveBeenCalled();
+  });
+
+  it('a REAL setup still stops at the missing sudo step', async () => {
+    const h = harness({ confirm: true });
+    expect(await runAuthorityCli(['setup'], h.deps)).toBe(0);
+    const text = h.out.join('\n');
+    expect(text).toMatch(/custody helper: run `sudo/);
+    expect(text).not.toMatch(/GitHub App|standing grant/);
+    expect(h.calls).toEqual([]);
   });
 
   it('setup with a key that is not compiled in reads its public half back, waits for Mason’s PR and signs nothing', async () => {
@@ -321,6 +337,9 @@ describe('setup and the trust-root PR', () => {
     // --dry-run never opens the PR: it stops at the trust root, waiting on Mason.
     expect(text).toMatch(/… trust root: /);
     expect(text).toMatch(/… deploy: after you merge that PR/);
+    // ...and still shows the rest of the plan after the trust-root wait (c20).
+    expect(text).toMatch(/^· GitHub App: /m);
+    expect(text).toMatch(/^· standing grant: would sign the first standing grant/m);
     expect(h.calls.filter((c) => c.bin === 'git' || c.args[0] === 'pr')).toEqual([]);
     expect(h.deps.custody!.signGrant).not.toHaveBeenCalled();
   });

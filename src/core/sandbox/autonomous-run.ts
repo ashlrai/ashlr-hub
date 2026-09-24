@@ -49,10 +49,34 @@ import {
   buildSandboxLauncher,
   ConfinementUnsupportedError,
   isSandboxTripwireKill,
+  sandboxViolationsFromKernel,
   sandboxViolationsInOutput,
   type ConfinementProfile,
   type SandboxLauncher,
 } from './confine.js';
+import {
+  newViolationTag,
+  startSandboxDenialWatch,
+  type KernelEvidence,
+  type SandboxDenialWatch,
+} from './kernel-evidence.js';
+
+/**
+ * How a run's kernel evidence watch is started (d0). Production: the real
+ * `log stream` watch. Under vitest the default is OFF (no `log` process per
+ * prepared run in the unit lane) and the evidence reads `unavailable` —
+ * honest, and exactly what the rollout must treat as unknown. Tests that
+ * exercise the evidence path inject a watcher with setKernelEvidenceWatcherForTest.
+ */
+type WatchFactory = (tag: string, runParent: string) => SandboxDenialWatch | null;
+const defaultWatchFactory: WatchFactory = (tag, runParent) =>
+  (process.env['VITEST'] ? null : startSandboxDenialWatch(tag, { parent: runParent }));
+let watchFactory: WatchFactory = defaultWatchFactory;
+
+/** TEST SEAM: replace (or, with no argument, restore) the kernel-evidence watcher. */
+export function setKernelEvidenceWatcherForTest(factory?: WatchFactory): void {
+  watchFactory = factory ?? defaultWatchFactory;
+}
 
 function isInside(child: string, parent: string): boolean {
   const rel = relative(parent, child);
@@ -244,6 +268,8 @@ export interface AutonomousSpawn {
   runDir: string;
   /** The real HOME (for violation paths). */
   home: string;
+  /** d0: the kernel denial watch for this run (null when none could be started). */
+  evidence: SandboxDenialWatch | null;
 }
 
 /**
@@ -279,9 +305,20 @@ export function prepareAutonomousSpawn(input: AutonomousSpawnInput): AutonomousS
     if (toolchain && !prepend.includes(toolchain.binDir)) prepend.push(toolchain.binDir);
     if (prepend.length > 0) env['PATH'] = [...prepend, ...(env['PATH'] ?? '').split(delimiter).filter((p) => p && !prepend.includes(p))].join(delimiter);
     const profile = input.profile ?? autonomousConfinementProfile(input.engine);
-    const launcher = buildSandboxLauncher(profile, { worktree: input.worktree, home, env, overlay });
+    // d0: tag the violation rules for THIS run and start watching the kernel
+    // for them BEFORE the caller spawns the engine (the watch blocks until
+    // the stream is live), so the kernel — not the agent's output — is the
+    // record of what it attempted.
+    const violationTag = newViolationTag();
+    const launcher = buildSandboxLauncher(profile, { worktree: input.worktree, home, env, overlay, violationTag });
     if (!launcher) throw new ConfinementUnsupportedError('no sandbox launcher for an autonomous run');
-    return { bin: exe.bin, env, launcher, overlay, profile, runDir, home };
+    let evidence: SandboxDenialWatch | null = null;
+    try {
+      evidence = watchFactory(violationTag, parent);
+    } catch {
+      evidence = null;
+    }
+    return { bin: exe.bin, env, launcher, overlay, profile, runDir, home, evidence };
   } catch (error) {
     try { rmSync(runDir, { recursive: true, force: true }); } catch { /* best effort */ }
     throw error;
@@ -299,6 +336,16 @@ export interface AutonomousSpawnFinish {
   /** `access ~/.ashlr/authority`-style operations for sandbox:violation rows (deduplicated). */
   violations: string[];
   vendor: VendorCommitResult;
+  /**
+   * d0: the kernel's record of the run's tagged denials — the SOURCE OF TRUTH.
+   * `complete` ⇒ `violations` holds every protected denial the kernel saw
+   * (plus anything the output scan found). Anything else ⇒ violations are
+   * UNKNOWN for this run: an empty `violations` list then proves nothing, and
+   * the rollout must not count the run toward advancing (see `violationsKnown`).
+   */
+  kernelEvidence: KernelEvidence;
+  /** True only when the kernel evidence is complete. */
+  violationsKnown: boolean;
 }
 
 /**
@@ -312,16 +359,55 @@ export function finishAutonomousSpawn(spawn: AutonomousSpawn, outcome: Autonomou
     vendor = commitAutonomousVendorState(spawn.overlay);
   } catch { /* commit never throws by contract; defensive */ }
   const violations = new Set<string>();
+  // Primary: what the kernel logged for this run's tagged rules (the agent
+  // cannot suppress it — output redirection and child-only tripwires included).
+  let kernelEvidence: KernelEvidence;
+  try {
+    kernelEvidence = spawn.evidence
+      ? spawn.evidence.finish()
+      : { source: 'kernel-log', state: 'unavailable', reason: 'no kernel evidence watch ran for this run', denials: [] };
+  } catch {
+    kernelEvidence = { source: 'kernel-log', state: 'unavailable', reason: 'the kernel evidence watch failed', denials: [] };
+  }
+  try {
+    for (const v of sandboxViolationsFromKernel(kernelEvidence.denials, spawn.home)) violations.add(v);
+  } catch { /* the evidence state below still says what is known */ }
+  // Secondary signals (never the only evidence any more): the agent-written
+  // output and an engine-level tripwire SIGKILL. Forged output can only ADD a
+  // violation (lower authority), never remove one the kernel recorded.
   try {
     for (const v of sandboxViolationsInOutput(outcome.output, spawn.home)) violations.add(v);
   } catch { /* best effort */ }
   if (outcome.tripwireKill) violations.add('signal SIGKILL (a protected-path tripwire killed the engine)');
   disposeAutonomousSpawn(spawn);
-  return { violations: [...violations].sort(), vendor };
+  if (kernelEvidence.state !== 'complete') reportUnknownViolationEvidence(kernelEvidence);
+  return { violations: [...violations].sort(), vendor, kernelEvidence, violationsKnown: kernelEvidence.state === 'complete' };
 }
 
-/** Delete the run dir (idempotent). */
-export function disposeAutonomousSpawn(spawn: Pick<AutonomousSpawn, 'runDir'>): void {
+/**
+ * An audit line for a run whose violations are UNKNOWN (kernel evidence
+ * unavailable or incomplete). Best-effort and async (finish is synchronous).
+ * Silent under vitest when no watcher was injected — every unit-lane run is
+ * `unavailable` by design there.
+ */
+function reportUnknownViolationEvidence(evidence: KernelEvidence): void {
+  if (process.env['VITEST'] && watchFactory === defaultWatchFactory) return;
+  void import('./audit.js')
+    .then(({ audit }) => audit({
+      action: 'confinement.evidence-unknown',
+      repo: '(none)',
+      sandboxId: null,
+      summary: `sandbox violation evidence ${evidence.state}: ${evidence.reason ?? 'unknown'}`.slice(0, 400),
+      result: 'refused',
+    }))
+    .catch(() => { /* audit is best-effort */ });
+}
+
+/** Delete the run dir (idempotent) and stop an uncollected evidence watch. */
+export function disposeAutonomousSpawn(spawn: Pick<AutonomousSpawn, 'runDir'> & { evidence?: SandboxDenialWatch | null }): void {
+  // finish() already collected it (abort is then a no-op); a run disposed
+  // without finishing must not leave a `log stream` process behind.
+  try { spawn.evidence?.abort(); } catch { /* best effort */ }
   try { rmSync(spawn.runDir, { recursive: true, force: true }); } catch { /* best effort */ }
 }
 
@@ -423,10 +509,33 @@ export function prepareConfinedVerification(input: {
     profile: autonomousVerificationProfile(),
     ...(input.runParent ? { runParent: input.runParent } : {}),
   });
+  let disposed = false;
   return {
     prefix: [spawn.launcher.bin, ...spawn.launcher.prefixArgs],
     env: spawn.env,
     runDir: spawn.runDir,
-    dispose: () => disposeAutonomousSpawn(spawn),
+    dispose: () => {
+      if (disposed) return;
+      disposed = true;
+      // d0: the verify commands ran under this run's tagged profile, so the
+      // kernel holds the record of any protected denial by agent-authored
+      // test code (the caller's output scan stays as the secondary signal).
+      // Never throws; the ledger write is async and best-effort.
+      let evidence: KernelEvidence | null = null;
+      try { evidence = spawn.evidence ? spawn.evidence.finish() : null; } catch { evidence = null; }
+      disposeAutonomousSpawn(spawn);
+      if (!evidence) return;
+      if (evidence.state !== 'complete') reportUnknownViolationEvidence(evidence);
+      let operations: string[] = [];
+      try { operations = sandboxViolationsFromKernel(evidence.denials, spawn.home); } catch { operations = []; }
+      if (operations.length > 0) {
+        void recordAutonomousViolations({
+          engine: 'verification',
+          sourceRepo: input.worktree,
+          runId: null,
+          operations,
+        }).catch(() => { /* best effort */ });
+      }
+    },
   };
 }

@@ -27,7 +27,8 @@
  *   runtime <install|status|rollback|run>  Pinned local candidate installation and foreground Universe commands.
  *   local-runtime <start|stop|status|restart|install>  Supervised llama-server: the parallel local fleet.
  *   authority <status|switch|stop|grant|revoke|ledger|setup|…>  Standing authority (Touch ID grants, Stop, ledger).
- *   leader <show|run|tick|veto>  The Leader (Visionary): latest memo, run now, apply due actions, veto.
+ *   leader <show|run|tick|veto|oversight-plist>  The Leader (Visionary): latest memo, run now, apply due
+ *                              actions, veto; print (never install) the nightly oversight plist.
  *   mirror <list|add|sync|path|remove|reconcile>  The fleet's own mirror clones (~/.ashlr/fleet/mirrors).
  *   spec new "<goal>" [opts]   Author a versioned end-state spec artifact.
  *   spec list/show/refine      Manage spec artifacts.

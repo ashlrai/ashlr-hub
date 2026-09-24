@@ -60,11 +60,14 @@ const FILES = [
   // (the command palette and Apps & Accounts replace them), so they left this
   // list. Every new chrome stylesheet joins it the day it lands — the drift
   // this test exists for enters exactly through files nobody listed yet.
-  // Deliberately NOT listed yet, because they hardcode real control heights
-  // today (reported to their owners, not papered over with an exception):
-  //   shell/CommandPalette.module.css — .input 52px, .item min-height 40px/48px
-  //   dock/preview/PreviewPane.module.css, dock/terminal/TerminalPane.module.css
-  //     — .tabClose 20px icon buttons
+  // CommandPalette and the Preview/Terminal panes were held off this list
+  // while they hardcoded real control heights (.input 52px, .item 40px, the
+  // 20px .tabClose buttons); R3d moved those onto the density tokens, so they
+  // are listed now. The palette's remaining literals are glyphs and a phone
+  // touch target — see ALLOWED.
+  'routes/verse/shell/CommandPalette.module.css',
+  'routes/verse/dock/preview/PreviewPane.module.css',
+  'routes/verse/dock/terminal/TerminalPane.module.css',
   // Chart stylesheets (components/charts/**) are plot geometry, not controls,
   // and stay out of scope.
   'routes/verse/SeatCapacity.module.css',
@@ -132,6 +135,13 @@ const ALLOWED: Record<string, Record<string, string>> = {
   'routes/verse/apps/Apps.module.css': {
     '32px': 'app monogram tile — a square identity mark, not a control',
     '24px': 'app monogram tile, small size — a square identity mark, not a control',
+  },
+  'routes/verse/shell/CommandPalette.module.css': {
+    '20px': 'engine monogram tile and <kbd> keycap — square glyphs sized to their letter/chord, not controls',
+    // `@media` phone block: `.item { min-height: 48px }`. Same rule as the
+    // VerseApp bottom bar — the DESKTOP density switch must not shrink a
+    // finger target.
+    '48px': 'phone palette row — a touch target, independent of desktop density',
   },
   'routes/verse/command/command.module.css': {
     '20px': 'Leader action class badge (A/B/C) — a square marker, not a control',

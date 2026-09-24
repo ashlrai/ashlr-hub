@@ -112,6 +112,7 @@ import {
   recordAutonomousViolations,
   type AutonomousSpawn,
 } from '../sandbox/autonomous-run.js';
+import { recordSandboxEvidenceUnknown } from '../authority/rollout.js';
 import { audit as auditConfinement } from '../sandbox/audit.js';
 import {
   assertMayMutate,
@@ -1750,6 +1751,24 @@ export async function captureSandboxedProposal(
   }
 }
 
+/** Mirrors run-monitor.ts's shared no-diff default (NO_DIFF_MIN_EVENTS × 5). */
+const SHARED_NO_DIFF_MIN_EVENTS = 400;
+/** grok streams ~one line per delta; see the spawnCfg comment in runEngineSandboxed. */
+const GROK_DELTA_EVENT_FACTOR = 10;
+
+/**
+ * The no-diff-stall threshold for a grok-cli spawn: the configured (or shared
+ * default) threshold scaled for grok's per-delta line stream. Always finite,
+ * so the detector stays on; an invalid configured value falls back to the default.
+ */
+export function grokNoDiffMinEvents(cfg: AshlrConfig): number {
+  const configured = (cfg.foundry as Record<string, unknown> | undefined)?.['noDiffMinEvents'];
+  const base = typeof configured === 'number' && Number.isFinite(configured) && configured > 0
+    ? configured
+    : SHARED_NO_DIFF_MIN_EVENTS;
+  return Math.min(1_000_000, Math.ceil(base * GROK_DELTA_EVENT_FACTOR));
+}
+
 /**
  * Run `engine` on `goal` inside a sandbox worktree of `opts.sourceRepo`, capturing
  * the diff as a PENDING proposal. Never throws; failures surface as a 'failed'
@@ -2266,14 +2285,22 @@ export async function runEngineSandboxed(
     // terminations, and non-transient failures fall through to the existing
     // capture/proposal path.
     const maxAttempts = dispatchMaxAttempts(cfg);
-    // V3.10 (INT4 — B-U7 request to U6): the stall monitor (run-monitor.ts)
-    // counts EVERY stdout line as an event but recognises edits only in
-    // claude/codex tool-call shapes, so grok's streamed NDJSON would trip
-    // no-diff-stall (400 events, "0 edits") long before its first edit could
-    // be seen. For grok-cli that detector is switched off; idle-stall (no
-    // output for stallIdleMs) and the wall-clock backstop still bound the run.
+    // V3.10 (L1, supersedes INT4's MAX_SAFE_INTEGER override): the stall
+    // monitor now understands grok — engines.ts createEngineOutputNormaliser
+    // recognises its streamed tool calls, and a mutating tool (search_replace
+    // included) emits file_touched — so the no-diff detector is ON for grok
+    // again instead of switched off.
+    //
+    // WHY grok STILL GETS A SCALED (finite) THRESHOLD, not the shared one:
+    // `--output-format streaming-messages-json` streams one NDJSON line per
+    // text / input_json delta, and the monitor counts every line as an event.
+    // An edit's own arguments stream as many deltas before its
+    // content_block_stop yields the file_touched event, so the shared default
+    // (400, tuned for claude/codex whole-message lines) could kill a grok run
+    // mid-way through writing its FIRST edit. The factor keeps the detector
+    // meaningful (a read-only spinner still stops) without that false kill.
     const spawnCfg: AshlrConfig = engineKey === GROK_CLI_ENGINE_ID
-      ? { ...cfg, foundry: { ...(cfg.foundry ?? {}), noDiffMinEvents: Number.MAX_SAFE_INTEGER } as NonNullable<AshlrConfig['foundry']> }
+      ? { ...cfg, foundry: { ...(cfg.foundry ?? {}), noDiffMinEvents: grokNoDiffMinEvents(cfg) } as NonNullable<AshlrConfig['foundry']> }
       : cfg;
     let res: SpawnEngineResult = { ok: false, output: '', error: 'engine did not run' };
     let _spawnDurationMs = 0;
@@ -2390,6 +2417,12 @@ export async function runEngineSandboxed(
       });
       if (finished.violations.length > 0) {
         await recordAutonomousViolations({ engine, sourceRepo: opts.sourceRepo, runId: id, operations: finished.violations });
+      }
+      // d0: an empty violation list proves nothing when the kernel evidence
+      // was not complete — ledger it so the rollout HOLDS instead of
+      // counting this run as clean (never a breach; see authority/rollout.ts).
+      if (finished.violationsKnown !== true) {
+        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
       }
     }
 
@@ -2935,7 +2968,16 @@ export async function runEngineSandboxed(
     if (autonomousSpawn && !autonomousFinished) {
       // The run threw after the spawn was prepared: still reconcile vendor
       // state and delete the run dir (never leave an auth.json copy behind).
-      finishAutonomousSpawn(autonomousSpawn, { output: '' });
+      const finished = finishAutonomousSpawn(autonomousSpawn, { output: '' });
+      // d0: the engine may have run before the throw, so its kernel evidence
+      // still counts — a violation regresses, unknown evidence holds. Both
+      // recorders never throw, so the original error still propagates.
+      if (finished.violations.length > 0) {
+        await recordAutonomousViolations({ engine, sourceRepo: opts.sourceRepo, runId: id, operations: finished.violations });
+      }
+      if (finished.violationsKnown !== true) {
+        await recordSandboxEvidenceUnknown({ engine, sourceRepo: opts.sourceRepo, runId: id, evidence: finished.kernelEvidence });
+      }
     }
     if (!sandboxRetention) {
       try {

@@ -680,7 +680,10 @@ export function budgetView(kind: FixtureKind = 'live', now = Date.now()): Budget
     seats: {},
     updatedAt: iso(now - DAY),
     headroom: [
-      { seatId: 'claude-a', sessionUsedPercent: 74, weeklyUsedPercent: kind === 'dark' ? null : 54, bindingWindow: 'weekly', autonomyHeadroomPercent: kind === 'dark' ? null : 6, resetAt: iso(now + 2 * DAY + 5 * HOUR), eligibleForAutonomy: false, reasons: ['5-hour window at 74% — above the 70% ceiling'] },
+      // Consistent with core/routing/headroom.ts under balanced (reserve 40,
+      // 5-hour cap 70): weekly room 60−54 = 6, 5-hour room 70−74 = −4, so the
+      // 5-HOUR window binds (it used to say 'weekly', which hid review 3.10 d2).
+      { seatId: 'claude-a', sessionUsedPercent: 74, weeklyUsedPercent: kind === 'dark' ? null : 54, bindingWindow: 'session', autonomyHeadroomPercent: 0, resetAt: iso(now + 2 * HOUR), eligibleForAutonomy: false, reasons: ['5-hour window at 74% — above the 70% ceiling'] },
       { seatId: 'grok-a', sessionUsedPercent: null, weeklyUsedPercent: 31, bindingWindow: 'weekly', autonomyHeadroomPercent: 69, resetAt: iso(now + 4 * DAY), eligibleForAutonomy: true, reasons: ['69% of the weekly window is free for autonomy'] },
       { seatId: 'codex-a', sessionUsedPercent: null, weeklyUsedPercent: 100, bindingWindow: 'weekly', autonomyHeadroomPercent: 0, resetAt: iso(now + 42 * HOUR), eligibleForAutonomy: false, reasons: ['weekly window exhausted'] },
       { seatId: 'local-qwen', sessionUsedPercent: null, weeklyUsedPercent: null, bindingWindow: null, autonomyHeadroomPercent: null, resetAt: null, eligibleForAutonomy: true, reasons: ['local: free, no provider window'] },

@@ -881,9 +881,23 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   const report: { step: string; status: StepStatus; detail: string }[] = [];
   const note = (step: string, status: StepStatus, detail: string): void => {
     report.push({ step, status, detail });
-    deps.out(`${status === 'failed' ? '✗' : status === 'waiting-on-you' ? '…' : '✓'} ${step}: ${detail}`);
+    // 'skipped' gets its own glyph: a ✓ on a step a dry run did not perform read as done.
+    const glyph = status === 'failed' ? '✗' : status === 'waiting-on-you' ? '…' : status === 'skipped' ? '·' : '✓';
+    deps.out(`${glyph} ${step}: ${detail}`);
   };
   const ask = async (question: string): Promise<boolean> => !dryRun && (yes || deps.confirm(question));
+  // --dry-run PLANS: the CHANGELOG and docs/AUTHORITY.md promise it "prints
+  // every step first" (3.10 review c20). A real run must stop at an unmet
+  // prerequisite; a dry run notes it and keeps describing the remaining
+  // steps. Once past an unmet prerequisite (`planning`), later steps are only
+  // described — no custody calls, no gh calls, no config reads — because
+  // nothing they would check can be true yet.
+  let planning = false;
+  const stopHere = (): boolean => {
+    if (!dryRun) return true;
+    planning = true;
+    return false;
+  };
 
   // 1. Custody helper (installing it needs sudo — Mason runs that himself).
   let custody: Awaited<ReturnType<typeof deps.custody.custodyStatus>> | null = null;
@@ -894,38 +908,48 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   }
   if (!custody || !custody.installed) {
     note('custody helper', 'waiting-on-you', 'run `sudo scripts/install-custody.sh` from the ashlr-hub checkout, then run setup again');
-    return finish(report, deps);
+    if (stopHere()) return finish(report, deps, dryRun);
+  } else {
+    note('custody helper', 'already', `installed${custody.version ? ` (${custody.version})` : ''}`);
   }
-  note('custody helper', 'already', `installed${custody.version ? ` (${custody.version})` : ''}`);
 
   // 1b. The helper and this CLI must agree on which Mac this is: the helper
   // derives StandingGrantV1.hostBinding as sha256(uppercase IOPlatformUUID)
   // and so does surface.ts. A disagreement would make every grant fail
   // "signed for a different Mac" only AFTER Mason's Touch ID — catch it first.
-  try {
-    const { currentHostBinding } = await import('../core/authority/surface.js');
-    const ours = currentHostBinding();
-    const helpers = await deps.custody.custodyHostBinding();
-    if (ours === null) note('host binding', 'failed', "this Mac's IOPlatformUUID could not be read, so no grant can be bound to it");
-    else if (ours !== helpers) note('host binding', 'failed', 'ashlr-custody and this release disagree on the host binding — reinstall the helper from this checkout');
-    else note('host binding', 'already', `this Mac is ${ours.slice(0, 12)}…`);
-  } catch (error) {
-    note('host binding', 'failed', `could not compare with ashlr-custody (${(error as Error).message})`);
+  if (planning) {
+    note('host binding', 'skipped', 'would check that ashlr-custody and this release agree on which Mac this is');
+  } else {
+    try {
+      const { currentHostBinding } = await import('../core/authority/surface.js');
+      const ours = currentHostBinding();
+      const helpers = await deps.custody.custodyHostBinding();
+      if (ours === null) note('host binding', 'failed', "this Mac's IOPlatformUUID could not be read, so no grant can be bound to it");
+      else if (ours !== helpers) note('host binding', 'failed', 'ashlr-custody and this release disagree on the host binding — reinstall the helper from this checkout');
+      else note('host binding', 'already', `this Mac is ${ours.slice(0, 12)}…`);
+    } catch (error) {
+      note('host binding', 'failed', `could not compare with ashlr-custody (${(error as Error).message})`);
+    }
   }
-  if (report.some((r) => r.step === 'host binding' && r.status === 'failed')) return finish(report, deps);
+  if (report.some((r) => r.step === 'host binding' && r.status === 'failed') && stopHere()) return finish(report, deps, dryRun);
 
   // 2. Secure Enclave key (Touch ID).
-  let keyId = custody.keyId;
+  let keyId = custody?.keyId ?? null;
   let publicKeyPem: string | null = null;
-  if (!custody.keyInitialized) {
+  if (planning || !custody) {
+    note('signing key', 'skipped', 'would create the Secure Enclave signing key (Touch ID) unless it already exists');
+  } else if (!custody.keyInitialized) {
     if (!(await ask('Create the Secure Enclave signing key now (Touch ID)?'))) {
-      note('signing key', dryRun ? 'skipped' : 'waiting-on-you', 'create it with `ashlr-custody init` or rerun setup');
-      return finish(report, deps);
+      note('signing key', dryRun ? 'skipped' : 'waiting-on-you', dryRun
+        ? 'would create it (Touch ID) — or run `ashlr-custody init`'
+        : 'create it with `ashlr-custody init` or rerun setup');
+      if (stopHere()) return finish(report, deps, dryRun);
+    } else {
+      const info = await deps.custody.custodyInit();
+      keyId = info.keyId;
+      publicKeyPem = info.publicKeyPem;
+      note('signing key', 'done', `created ${info.keyId}`);
     }
-    const info = await deps.custody.custodyInit();
-    keyId = info.keyId;
-    publicKeyPem = info.publicKeyPem;
-    note('signing key', 'done', `created ${info.keyId}`);
   } else {
     note('signing key', 'already', `key ${keyId ?? '(id unknown)'}`);
   }
@@ -936,40 +960,49 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   // public half back (`ashlr-custody pubkey`, no Touch ID) instead of asking
   // Mason to copy it by hand.
   const isTrusted = (id: string | null): boolean => id !== null && STANDING_GRANT_TRUST_ROOTS.some((root) => root.keyId === id);
-  if (!isTrusted(keyId) && !publicKeyPem) {
-    try {
-      const info = await deps.custody.custodyPublicKey();
-      keyId = info.keyId;
-      publicKeyPem = info.publicKeyPem;
-    } catch (error) {
-      note('trust root', 'failed', `could not read the custody public key (${(error as Error).message})`);
-      return finish(report, deps);
-    }
-  }
-  if (isTrusted(keyId)) {
-    note('trust root', 'already', `${keyId} is compiled into this release`);
+  const DEPLOY_DETAIL = 'after you merge that PR: `npm run build`, install the release as you normally do (docs/RELEASING-LOCALLY.md), then `launchctl kickstart -k gui/$(id -u)/ai.ashlr.daemon` and rerun setup';
+  if (planning) {
+    note('trust root', 'skipped', 'would check that your signing key is compiled into this release, and if not open a PR adding it to trust-roots.ts for you to review and merge');
+    note('deploy', 'skipped', `would wait for you: ${DEPLOY_DETAIL}`);
   } else {
-    const root: StandingGrantTrustRoot = { keyId: keyId!, alg: 'ES256', publicKeyPem: publicKeyPem! };
-    const invalid = validateCustodyRoot(root, deps.custody.keyIdForPublicKeyPem);
-    if (invalid) {
-      note('trust root', 'failed', invalid);
-      return finish(report, deps);
+    let trustRootFailed = false;
+    if (!isTrusted(keyId) && !publicKeyPem) {
+      try {
+        const info = await deps.custody.custodyPublicKey();
+        keyId = info.keyId;
+        publicKeyPem = info.publicKeyPem;
+      } catch (error) {
+        note('trust root', 'failed', `could not read the custody public key (${(error as Error).message})`);
+        trustRootFailed = true;
+      }
     }
-    const pr = await openTrustRootPr(parsed, deps, root, ask);
-    note('trust root', pr.status, pr.detail);
-    note('deploy', 'waiting-on-you', 'after you merge that PR: `npm run build`, install the release as you normally do (docs/RELEASING-LOCALLY.md), then `launchctl kickstart -k gui/$(id -u)/ai.ashlr.daemon` and rerun setup');
-    return finish(report, deps);
+    if (trustRootFailed) {
+      if (stopHere()) return finish(report, deps, dryRun);
+    } else if (isTrusted(keyId)) {
+      note('trust root', 'already', `${keyId} is compiled into this release`);
+    } else {
+      const root: StandingGrantTrustRoot = { keyId: keyId!, alg: 'ES256', publicKeyPem: publicKeyPem! };
+      const invalid = validateCustodyRoot(root, deps.custody.keyIdForPublicKeyPem);
+      if (invalid) {
+        note('trust root', 'failed', invalid);
+      } else {
+        const pr = await openTrustRootPr(parsed, deps, root, ask);
+        note('trust root', pr.status, pr.detail);
+        note('deploy', 'waiting-on-you', DEPLOY_DETAIL);
+      }
+      if (stopHere()) return finish(report, deps, dryRun);
+    }
   }
 
   // 4. GitHub App.
-  if (custody.githubApp) note('GitHub App', 'already', 'the ashlr-fleet key is in custody');
+  if (custody?.githubApp) note('GitHub App', 'already', 'the ashlr-fleet key is in custody');
   else if (await ask(`Create the ${FLEET_APP_NAME} GitHub App now (one browser page)?`)) {
     const app = await runGithubAppFlow(deps, { org: one(parsed, '--org') ?? 'ashlrai' });
     note('GitHub App', 'done', `created ${app.slug}; install it on the repos: ${app.installUrl}`);
   } else note('GitHub App', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority github-app`');
 
   // 5. Claude token for restricted judge / Leader calls.
-  if (custody.claudeToken) note('Claude token', 'already', 'stored in custody');
+  if (custody?.claudeToken) note('Claude token', 'already', 'stored in custody');
   else if (await ask('Store a Claude token now (run `claude setup-token` in another terminal and paste it)?')) {
     const token = (await deps.readSecret('Paste the token (hidden): ')).trim();
     if (!token) note('Claude token', 'failed', 'nothing was pasted');
@@ -986,8 +1019,8 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   } else note('rulesets', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority protect --print`, then `--apply`');
 
   // 7. Canary repo (the App cannot write workflows, so this uses your own gh auth).
-  const canary = deps.run('gh', ['api', 'repos/ashlrai/fleet-canary']);
-  if (canary.status === 0) note('canary repo', 'already', 'ashlrai/fleet-canary exists');
+  const canary = planning ? null : deps.run('gh', ['api', 'repos/ashlrai/fleet-canary']);
+  if (canary?.status === 0) note('canary repo', 'already', 'ashlrai/fleet-canary exists');
   else if (await ask('Create the public repo ashlrai/fleet-canary with its CI workflow (your gh auth)?')) {
     const created = deps.run('gh', ['repo', 'create', 'ashlrai/fleet-canary', '--public', '--add-readme', '--description', 'ashlr fleet canary (revert drills)']);
     const workflow = created.status === 0
@@ -1014,6 +1047,10 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
   } else note('provenance key', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority rotate-provenance`');
 
   // 10. First grant (Touch ID) and the switch.
+  if (planning) {
+    note('standing grant', 'skipped', 'would sign the first standing grant (Touch ID), then offer to set the autonomy switch to Autonomous (the ladder starts in shadow)');
+    return finish(report, deps, dryRun);
+  }
   const { evaluateStandingAuthority, displaySurfaceTarget } = await import('../core/authority/effective-config.js');
   const evaluation = evaluateStandingAuthority({ mode: 'cached', surface: displaySurfaceTarget() });
   if (evaluation.grantState === 'active') {
@@ -1030,13 +1067,14 @@ async function cmdSetup(parsed: Parsed, deps: AuthorityCliDeps): Promise<number>
       note('autonomy switch', switched.ok ? 'done' : 'failed', switched.ok ? 'Autonomous' : switched.reason);
     }
   } else note('standing grant', dryRun ? 'skipped' : 'waiting-on-you', 'run `ashlr authority grant`');
-  return finish(report, deps);
+  return finish(report, deps, dryRun);
 }
 
-function finish(report: { step: string; status: StepStatus; detail: string }[], deps: AuthorityCliDeps): number {
+function finish(report: { step: string; status: StepStatus; detail: string }[], deps: AuthorityCliDeps, dryRun = false): number {
   const failed = report.filter((r) => r.status === 'failed').length;
   const waiting = report.filter((r) => r.status === 'waiting-on-you').length;
-  deps.out(`\nSetup: ${report.filter((r) => r.status === 'done').length} done, ${report.filter((r) => r.status === 'already').length} already in place, ${waiting} waiting on you, ${failed} failed.`);
+  const planned = dryRun ? `, ${report.filter((r) => r.status === 'skipped').length} planned (dry run: nothing was asked or changed)` : '';
+  deps.out(`\nSetup: ${report.filter((r) => r.status === 'done').length} done, ${report.filter((r) => r.status === 'already').length} already in place, ${waiting} waiting on you, ${failed} failed${planned}.`);
   return failed > 0 ? 1 : 0;
 }
 

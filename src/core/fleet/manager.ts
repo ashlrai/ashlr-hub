@@ -47,6 +47,7 @@ import {
   prepareAutonomousSpawn,
   recordAutonomousViolations,
 } from '../sandbox/autonomous-run.js';
+import { recordSandboxEvidenceUnknown } from '../authority/rollout.js';
 import { withToolEnv } from '../env-bridge.js';
 import { peekBackendAvailability } from '../fabric/resource-monitor.js';
 import {
@@ -1303,6 +1304,11 @@ async function spawnJudge(
       });
       if (finished.violations.length > 0) {
         await recordAutonomousViolations({ engine, sourceRepo: null, runId: null, operations: finished.violations });
+      }
+      // d0: a judge run with incomplete kernel evidence holds the rollout
+      // (never advances or regresses it) — see authority/rollout.ts.
+      if (finished.violationsKnown !== true) {
+        await recordSandboxEvidenceUnknown({ engine, sourceRepo: null, runId: null, evidence: finished.kernelEvidence });
       }
     }
   } catch (error) {

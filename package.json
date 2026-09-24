@@ -108,6 +108,7 @@
     "test:invariants": "vitest run test/h*.test.ts --no-file-parallelism",
     "test:engineering-responsiveness": "vitest run --config vitest.config.engineering-performance.ts",
     "conformance:ecosystem": "tsx scripts/run-ecosystem-conformance.ts",
+    "check:first-paint": "node scripts/check-first-paint-budget.mjs --budget-kb 370",
     "check:docs": "node scripts/check-documentation.mjs",
     "lint": "eslint . && npm run lint:realio-lane",
     "lint:realio-lane": "node scripts/check-realio-lane-membership.mjs",

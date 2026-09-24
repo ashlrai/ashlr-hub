@@ -230,11 +230,13 @@ A Leader tick does four things:
 
 - applies class-B actions whose veto window has passed;
 - grades moves that are due;
-- starts a run only when one is due: the 06:30 slot, or a merge, revert,
-  seat-reset or insight trigger, at most 3 a day, and skipped when the
-  evidence has not changed;
+- starts a run only when one is due: the 06:30 slot, or a trigger (10 fleet
+  merges, a revert, a seat window resetting, a high-severity insight), at
+  most 3 a day, and skipped when the evidence has not changed;
 - routes that run to a seat the router admits (reserve floors, budget mode,
-  no cloud fallback). Without a standing grant the run is a dry run.
+  no cloud fallback). Without a standing grant it runs on a free local model
+  or not at all, and the memo is a dry run: its actions are shown, not
+  applied.
 
 Run at 07:00, the tick catches the 06:30 slot when the daemon is dark. When
 the daemon already ran it, the tick costs nothing.

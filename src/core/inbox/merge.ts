@@ -99,8 +99,10 @@ import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   writeFileSync,
   unlinkSync,
   symlinkSync,
@@ -460,6 +462,97 @@ function linkNodeModules(repo: string, worktreeDir: string): void {
   } catch {
     // best-effort — verify still attempted; absence just risks exit-127 which is handled
   }
+}
+
+/** Bounds on the workspace-package scan (a pathological tree must not stall G3). */
+const WORKSPACE_SCAN_MAX_DEPTH = 4;
+const WORKSPACE_SCAN_MAX_DIRS = 4000;
+const WORKSPACE_SCAN_MAX_PACKAGES = 200;
+
+/** True when `repo` declares a JS workspace (pnpm-workspace.yaml, or package.json `workspaces`). */
+function declaresJsWorkspace(repo: string): boolean {
+  if (existsSync(join(repo, 'pnpm-workspace.yaml')) || existsSync(join(repo, 'pnpm-workspace.yml'))) return true;
+  try {
+    const manifest = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8')) as { workspaces?: unknown };
+    return Array.isArray(manifest.workspaces) || (typeof manifest.workspaces === 'object' && manifest.workspaces !== null);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Relative dirs (never the root) of workspace packages in `repo` that carry
+ * their OWN installed `node_modules` — a real directory, never a symlink (pnpm
+ * creates one per package; its entries point into the root's `.pnpm` store).
+ * Bounded BFS that skips `node_modules`, dot-dirs and symlinked dirs.
+ */
+function workspacePackageInstalls(repo: string): string[] {
+  const found: string[] = [];
+  const queue: Array<{ rel: string; depth: number }> = [{ rel: '', depth: 0 }];
+  let visited = 0;
+  while (queue.length > 0 && visited < WORKSPACE_SCAN_MAX_DIRS && found.length < WORKSPACE_SCAN_MAX_PACKAGES) {
+    const { rel, depth } = queue.shift()!;
+    visited++;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(join(repo, rel), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    if (rel !== '' && entries.some((e) => e.name === 'package.json' && e.isFile()) && entries.some((e) => e.name === 'node_modules' && e.isDirectory())) {
+      found.push(rel);
+    }
+    if (depth >= WORKSPACE_SCAN_MAX_DEPTH) continue;
+    for (const e of entries) {
+      // Dirent.isDirectory() is false for a symlink, so a planted link is never followed.
+      if (!e.isDirectory() || e.name === 'node_modules' || e.name.startsWith('.')) continue;
+      queue.push({ rel: rel === '' ? e.name : join(rel, e.name), depth: depth + 1 });
+    }
+  }
+  return found;
+}
+
+/**
+ * Link the repo's installs into a verify worktree and return the SOURCE dirs
+ * the confined suite must be granted READ-ONLY (V3.10 G3 + post-merge watch).
+ *
+ * - Root: exactly linkNodeModules (M293).
+ * - JS workspaces (pnpm above all): each package's own `node_modules` is
+ *   linked too. WHY: pnpm does not hoist — `packages/x/node_modules/.bin/tsc`
+ *   is where a package-level `tsc`/`vitest` lives, so without the link a
+ *   verify command whose cwd is the package exits 127, and under confinement
+ *   even a resolvable link would be denied without its read grant.
+ *
+ * A package link is made (and granted) only when the worktree's package dir
+ * exists with its own package.json, is reached with NO symlinked component
+ * (a planted `packages/x -> /elsewhere` must not make us write outside the
+ * worktree), and has no `node_modules` yet. Best-effort, never throws: a
+ * missing link surfaces as a failed command, never as a wider grant.
+ */
+export function linkVerifyNodeModules(repo: string, worktreeDir: string): string[] {
+  linkNodeModules(repo, worktreeDir);
+  const grants: string[] = [];
+  const rootInstall = join(repo, 'node_modules');
+  if (existsSync(rootInstall)) grants.push(rootInstall);
+  try {
+    if (!declaresJsWorkspace(repo)) return grants;
+    const worktreeReal = realpathSync(worktreeDir);
+    for (const rel of workspacePackageInstalls(repo)) {
+      const pkgDir = join(worktreeReal, rel);
+      try {
+        if (realpathSync(pkgDir) !== pkgDir || !existsSync(join(pkgDir, 'package.json'))) continue;
+        const dst = join(pkgDir, 'node_modules');
+        try {
+          lstatSync(dst);
+          continue; // something already sits there; never replace it, never grant for it
+        } catch { /* absent — link it */ }
+        const src = join(repo, rel, 'node_modules');
+        symlinkSync(src, dst, 'dir');
+        grants.push(src);
+      } catch { /* best effort per package */ }
+    }
+  } catch { /* best effort: root link still stands */ }
+  return grants;
 }
 
 // ===========================================================================
@@ -2247,6 +2340,41 @@ function nodeToolchainPrefix(home: string, denied: readonly string[]): string | 
 }
 
 /**
+ * The verifier's workspace `.bin` PATH entries a confined command keeps, in
+ * order. An entry must lie LEXICALLY inside the worktree (runVerifyCommandAsync
+ * puts `<cwd>/node_modules/.bin` and `<worktree>/node_modules/.bin` there);
+ * it is kept as-is when it resolves inside the worktree, and replaced by its
+ * REAL path when it resolves into a read-only grant.
+ *
+ * WHY the second case: the worktree's `node_modules` is a symlink to the
+ * mirror's install (linkVerifyNodeModules), so `<wt>/node_modules/.bin`
+ * resolves OUTSIDE the worktree. Dropping it (as the first cut did) left a
+ * bare `tsc` / `vitest` / `eslint` command unresolvable under confinement —
+ * only `npm run …` found its binaries. The granted dir is exactly what the
+ * sandbox lets the suite read, so its `.bin` is safe to put on PATH; any
+ * other resolution (an agent-planted link to ~/bin) is still dropped.
+ */
+export function confinedWorkspaceBins(
+  pathValue: string,
+  worktree: string,
+  worktreeReal: string,
+  grants: readonly string[],
+): string[] {
+  const out: string[] = [];
+  for (const entry of pathValue.split(delimiter)) {
+    if (entry.length === 0 || !isAbsolute(entry)) continue;
+    if (!isInsideDir(resolve(entry), resolve(worktree)) && !isInsideDir(resolve(entry), worktreeReal)) continue;
+    const real = realpathOrNull(entry);
+    if (!real) continue;
+    let keep: string | null = null;
+    if (isInsideDir(real, worktreeReal)) keep = entry;
+    else if (grants.some((g) => isInsideDir(real, g))) keep = real;
+    if (keep && !out.includes(keep)) out.push(keep);
+  }
+  return out;
+}
+
+/**
  * G3 confinement (SPEC-310B §2 G3; U2's critical request). WHY: verification
  * EXECUTES the proposal — agent-written code — with whatever authority the
  * verifier has. Under a standing grant nobody reviews that code before it
@@ -2306,13 +2434,18 @@ export async function openStandingVerificationConfinement(
     const base = overlayMod.buildAutonomousEnvOverlay({ engine: 'local', runTmpDir, home, seatId: null });
     const toolchain = nodeToolchainPrefix(home, base.deniedReadPaths);
     const readOnly = [...base.readOnlyPaths];
+    // The caller's grants that survived the checks below (real paths): the
+    // only dirs outside the worktree a workspace bin entry may resolve into.
+    const callerGrants: string[] = [];
+    const callerPaths = new Set(opts.readOnlyPaths ?? []);
     for (const p of [...(toolchain ? [toolchain] : []), ...(opts.readOnlyPaths ?? [])]) {
       const real = realpathOrNull(p);
-      if (!real || readOnly.includes(real)) continue;
+      if (!real) continue;
       // A re-allowed read may never reach a protected directory (the profile's
       // final deny rules win anyway; refusing here keeps the intent explicit).
       if (base.deniedReadPaths.some((d) => isInsideDir(d, real) || isInsideDir(real, d))) continue;
-      readOnly.push(real);
+      if (callerPaths.has(p) && !callerGrants.includes(real)) callerGrants.push(real);
+      if (!readOnly.includes(real)) readOnly.push(real);
     }
     const overlay = {
       ...base,
@@ -2333,9 +2466,7 @@ export async function openStandingVerificationConfinement(
     const runSubprocess: VerifySubprocessRunner = (argv, subprocessOpts) => {
       // Keep the verifier's workspace bins (node_modules/.bin inside the
       // worktree) ahead of the overlay's sanitized PATH; drop every other entry.
-      const workspaceBins = (subprocessOpts.env['PATH'] ?? '')
-        .split(delimiter)
-        .filter((entry) => entry.length > 0 && isAbsolute(entry) && isInsideDir(realpathOrNull(entry) ?? entry, worktreeReal));
+      const workspaceBins = confinedWorkspaceBins(subprocessOpts.env['PATH'] ?? '', worktree, worktreeReal, callerGrants);
       const env = overlayMod.applyAutonomousEnvOverlay(subprocessOpts.env, overlay);
       env['PATH'] = [...workspaceBins, overlay.set['PATH'] ?? ''].filter(Boolean).join(delimiter);
       return runVerifySubprocessAsync([launcher.bin, ...launcher.prefixArgs, ...argv], { ...subprocessOpts, env });
@@ -2443,11 +2574,13 @@ export async function verifyProposal(
   // V3.10 (U6): in a fleet mirror this is a ref + worktree mutation, so it
   // takes the mirror's repo lease (a mirror sync must not interleave with it).
   let added: { value: string | null } | null;
+  // Read-only grants for the confined suite: the installs linked just below.
+  let installGrants: string[] = [];
   try {
     added = await underMirrorLease(repo, () => {
       try {
         gitRun(repo, ['worktree', 'add', '-b', tmpBranch, tmpDir, baseHead]);
-        linkNodeModules(repo, tmpDir);
+        installGrants = linkVerifyNodeModules(repo, tmpDir);
         return null;
       } catch (err) {
         gitTry(repo, ['worktree', 'prune']);
@@ -2484,10 +2617,7 @@ export async function verifyProposal(
     // V3.10 G3: under a standing grant every verify command runs confined
     // (see openStandingVerificationConfinement); no grant ⇒ null ⇒ unchanged.
     try {
-      const nodeModules = join(repo, 'node_modules');
-      confined = await openStandingVerificationConfinement(tmpDir, {
-        readOnlyPaths: existsSync(nodeModules) ? [nodeModules] : [],
-      });
+      confined = await openStandingVerificationConfinement(tmpDir, { readOnlyPaths: installGrants });
     } catch (err) {
       return {
         ok: false,

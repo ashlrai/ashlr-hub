@@ -229,6 +229,14 @@ describe('BudgetControlView', () => {
     for (const option of screen.getAllByRole('radio')) expect(option).toBeDisabled();
   });
 
+  it('drops a seat with a garbled policy instead of calling it "off"', () => {
+    const garbled = view();
+    (garbled.effective as Record<string, unknown>)['grok'] = { enabled: 'yes' };
+    renderView({ view: garbled });
+    expect(screen.queryByText('Grok')).toBeNull();
+    expect(screen.getByText('Claude Code')).toBeInTheDocument();
+  });
+
   it('says so when there are no seats', () => {
     renderView({ view: view({ seatInfo: [], headroom: [], effective: {} }), preview: null });
     expect(screen.getByText(/No seats yet/)).toBeInTheDocument();
@@ -268,6 +276,22 @@ describe('BudgetControl (connected, real query layer)', () => {
     render(<BudgetControl />);
     await user.click(await screen.findByRole('radio', { name: 'All-in' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('mode must be one of: all-in, balanced, reserve');
+  });
+
+  // Apps' "Edit budget" sheet used to crash here: buildBudgetRows was handed
+  // the raw answer and threw on `{}` (no seatInfo / headroom arrays).
+  it('a malformed budget answer renders the empty panel instead of crashing', async () => {
+    installFetch((call) => {
+      if (call.path === '/api/verse/budget' && call.method === 'GET') return json({});
+      if (call.path.startsWith('/api/verse/budget/preview')) return json({});
+      return json({ error: 'not found' }, 404);
+    });
+    render(<BudgetControl />);
+    expect(await screen.findByRole('heading', { name: 'Budget' })).toBeInTheDocument();
+    expect(screen.getByText(/No seats yet/)).toBeInTheDocument();
+    expect(screen.getByText('The server did not say which mode is on.')).toBeInTheDocument();
+    for (const option of screen.getAllByRole('radio')) expect(option).toHaveAttribute('aria-checked', 'false');
+    expect(screen.getByText(/whose reading is stale/)).toBeInTheDocument();
   });
 
   it('a failed read says so instead of rendering empty bars', async () => {

@@ -49,6 +49,31 @@ const NAME_MAX = 120;
 const MIME_RE = /^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/i;
 /** `<8 hex>-<safe name>` — what the directory may contain; anything else is ignored. */
 const STORED_RE = /^([0-9a-f]{8})-([A-Za-z0-9._-]{1,140})$/;
+/**
+ * The atomic writer's temp-file tail (`.<pid>.<16 hex>.tmp`). Saves now write
+ * through a dot-file temp STORED_RE never matches; this also recognises an
+ * orphan left by an older build, whose temp was `<stored name>.<pid>.<hex>.tmp`
+ * and DID match STORED_RE (review 3.10 d8) — so it is never listed, counted
+ * toward the quotas or removed as an attachment, and is swept instead.
+ */
+const TEMP_TAIL_RE = /\.(\d{1,10})\.[0-9a-f]{16}\.tmp$/;
+/** A temp this old is an orphan: a live save finishes in one synchronous call, in milliseconds. */
+const ORPHAN_TEMP_AGE_MS = 60_000;
+
+function isTempName(name: string): boolean {
+  return TEMP_TAIL_RE.test(name);
+}
+
+function processAlive(pid: number): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM: it exists, it is just not ours to signal.
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
 const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 /** Image types the vendor CLIs read as images (claude Read, codex `--image`). */
@@ -114,7 +139,37 @@ export function createAttachmentStore(root: string, opts: AttachmentStoreOptions
     return join(base, sessionId);
   }
 
+  /**
+   * Remove crash-orphaned temp files from a chat's directory (every list and
+   * save passes through here). A temp is an orphan when the process that
+   * wrote it is gone, or is THIS process (its writer is one synchronous call,
+   * so nothing of ours can be mid-write while this runs), or it is over a
+   * minute old. A temp of another live process younger than that may be a
+   * save in flight and is left alone.
+   */
+  function sweepTemps(dir: string, names: readonly string[]): string[] {
+    const kept: string[] = [];
+    for (const name of names) {
+      const temp = TEMP_TAIL_RE.exec(name);
+      if (!temp) {
+        kept.push(name);
+        continue;
+      }
+      try {
+        const stat = lstatSync(join(dir, name));
+        if (!stat.isFile()) continue;
+        const pid = Number(temp[1]);
+        if (pid === process.pid || !processAlive(pid) || Date.now() - stat.mtimeMs > ORPHAN_TEMP_AGE_MS) {
+          rmSync(join(dir, name), { force: true });
+        }
+      } catch { /* gone already */ }
+    }
+    return kept;
+  }
+
   function describe(sessionId: string, stored: string): VerseAttachment | null {
+    // A temp file (current dot-file or a legacy orphan) is never an attachment.
+    if (isTempName(stored)) return null;
     const match = STORED_RE.exec(stored);
     if (!match) return null;
     const path = join(dirFor(sessionId), stored);
@@ -143,7 +198,7 @@ export function createAttachmentStore(root: string, opts: AttachmentStoreOptions
     if (!existsSync(dir)) return [];
     let names: string[];
     try {
-      names = readdirSync(dir);
+      names = sweepTemps(dir, readdirSync(dir));
     } catch {
       return [];
     }
@@ -188,6 +243,8 @@ export function createAttachmentStore(root: string, opts: AttachmentStoreOptions
       // Give an image pasted as "image.png" with the wrong extension the right one.
       const wanted = extensionForMime(upload.mime.trim().toLowerCase());
       if (wanted && !name.toLowerCase().endsWith(wanted)) name = `${name.replace(/\.[A-Za-z0-9]{1,8}$/, '')}${wanted}`;
+      // A real file whose name happens to end like a temp would be hidden and swept: rename its tail.
+      if (isTempName(name)) name = `${name.slice(0, -'.tmp'.length)}_tmp`;
       let id = randomId();
       if (!/^[0-9a-f]{8}$/.test(id)) id = randomBytes(4).toString('hex');
       const dir = dirFor(sessionId);
@@ -195,7 +252,9 @@ export function createAttachmentStore(root: string, opts: AttachmentStoreOptions
       try { chmodSync(dir, 0o700); } catch { /* best effort on exotic filesystems */ }
       const stored = `${id}-${name}`;
       const path = join(dir, stored);
-      writePrivateFileAtomically(dir, path, bytes);
+      // hiddenTemp: the in-flight temp is a dot-file, which STORED_RE never
+      // matches — a crash mid-write cannot leave a phantom attachment.
+      writePrivateFileAtomically(dir, path, bytes, { hiddenTemp: true });
       const item = describe(sessionId, stored);
       if (!item) throw new VerseAttachmentError('VERSE_INVALID', 'the attachment could not be stored');
       return { ...item, mime: upload.mime.trim().toLowerCase(), createdAt: now().toISOString() };
@@ -206,7 +265,7 @@ export function createAttachmentStore(root: string, opts: AttachmentStoreOptions
       const dir = dirFor(sessionId);
       if (!existsSync(dir)) return false;
       for (const name of readdirSync(dir)) {
-        if (name.startsWith(`${attachmentId}-`) && STORED_RE.test(name)) {
+        if (name.startsWith(`${attachmentId}-`) && STORED_RE.test(name) && !isTempName(name)) {
           rmSync(join(dir, name), { force: true });
           return true;
         }
@@ -297,7 +356,7 @@ export function resolveAttachmentRefs(text: string, dir: string, home: string = 
       tail = `.${tail}`;
     }
     const abs = join(dir, name);
-    if (!STORED_RE.test(name) || !isRegularFile(abs)) return whole;
+    if (!STORED_RE.test(name) || isTempName(name) || !isRegularFile(abs)) return whole;
     if (!files.includes(abs)) files.push(abs);
     return `@${abs}${tail}`;
   });

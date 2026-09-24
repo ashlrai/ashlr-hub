@@ -121,11 +121,13 @@ import {
   DEFAULT_LOCAL_CONTEXT_TOKENS,
   FLEET_LOCAL_SEAT_ID,
   PRESENCE_WINDOW_MS,
+  anyFanoutCandidate,
   clampLeaderDirectives,
   fleetLaneOf,
   laneOfSeat,
   laneStates,
   planLanes,
+  planFanoutReserve,
   planStandingBestOfN,
   resolveLaneEngines,
   resolveRoutingWeights,
@@ -139,13 +141,19 @@ import {
 } from './dispatch-router.js';
 import type { HarnessRoutingWeights } from '../learn/harness-types.js';
 import {
+  awaitsVerification,
   emptyBackpressureState,
   evaluateBackpressure,
+  fleetPrKey,
   loadBackpressureState,
-  openFleetPrsFromLedger,
+  openFleetPrRefsFromLedger,
   outcomeEventsFromLedger,
+  prStateFromMergeState,
+  reconcileOpenFleetPrs,
   saveBackpressureState,
   type BackpressureStateV1,
+  type ObservedPrState,
+  type OpenFleetPrRef,
   type OutcomeEvent,
 } from './backpressure.js';
 import {
@@ -228,6 +236,18 @@ export interface LiveHooksDeps {
   repoIdentity(path: string): string | null;
   /** Proposals waiting for verification in the enrolled repos; null = unknown. */
   waitingVerify(enrolled: readonly string[]): Promise<number | null>;
+  /**
+   * Review c5: the observed state of fleet PRs the ledger says are open, keyed
+   * by `fleetPrKey` — from the fleet's merge state (terminal there wins), else
+   * GitHub (cached). A PR absent from the map, or null, is unknown.
+   */
+  observeFleetPrs(refs: readonly OpenFleetPrRef[], nowMs: number): Promise<Map<string, ObservedPrState>>;
+  /**
+   * F2 `recordReserveBreaches` (authority/reserve-breach.ts): compare fresh
+   * capacity with the grant's seat floors and ledger any breach. Called once
+   * per standing tick, after dispatch. Returns rows written.
+   */
+  recordReserveBreaches(input: { capacity: unknown; policy: EffectivePolicy; now?: Date; usedSeatIds?: readonly string[] }): Promise<number>;
   installed(engine: EngineId, cfg: AshlrConfig): boolean;
   tierOf(engine: EngineId, cfg: AshlrConfig): EngineTier | null;
   subscriptionAllows(engine: EngineId, opts: { maxPercent: number; autonomous: true }): SubscriptionAllowResult;
@@ -292,6 +312,13 @@ export const LEADER_TICK_TIMEOUT_MS = 15_000;
 export const EXPERIMENT_POLL_INTERVAL_MS = 5 * 60_000;
 /** In-memory dedupe of credited verification verdicts (the ledger read is seq-based; this only guards re-reads). */
 const MAX_REMEMBERED_VERDICTS = 5_000;
+/**
+ * learn/experiments.ts EXPERIMENT_SLOTS (idle 2 / fleetBusy 1), restated so
+ * this module does not load the experiment runner statically; a test pins
+ * the two together.
+ */
+export const EXPERIMENT_LOCAL_SLOTS_IDLE = 2;
+export const EXPERIMENT_LOCAL_SLOTS_BUSY = 1;
 
 /** Resolve `promise`, or 'timeout' after `ms` (the promise keeps running). */
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | 'timeout'> {
@@ -434,16 +461,108 @@ export async function probeOperatorPresence(nowMs: number, opts: { home?: string
   };
 }
 
+/**
+ * Review c1: only proposals the VERIFIER will actually reach count. A pending
+ * proposal parked at G0 / G1 (owner lane) / G2 (over the stage caps), or one
+ * with a fleet PR, is never verified while it sits there — counting it held
+ * production for the whole fleet on work nothing would verify (see
+ * backpressure.ts `awaitsVerification`).
+ */
 async function waitingVerifyDefault(enrolled: readonly string[]): Promise<number | null> {
   try {
     const { listProposalsDetailed } = await import('../inbox/store.js');
+    const mergeState = await import('./fleet-merge-state.js');
     const read = listProposalsDetailed({ status: 'pending' });
     if (read.sourceState === 'degraded' || !read.complete) return null;
     const paths = new Set(enrolled.map((p) => resolve(p)));
-    return read.proposals.filter((p) => p.repo !== null && paths.has(resolve(p.repo)) && p.verifyResult === undefined).length;
+    return read.proposals.filter((p) => {
+      if (p.repo === null || !paths.has(resolve(p.repo)) || p.verifyResult !== undefined) return false;
+      // No filename-safe key ⇒ the standing pass skips it, so it is never verified.
+      const key = mergeState.proposalStateKey(p.id);
+      return key !== null && awaitsVerification(mergeState.readFleetMergeState(key));
+    }).length;
   } catch {
     return null;
   }
+}
+
+/** A GitHub PR-state read is reused this long (the merge pass itself re-polls owner-lane PRs every 10 min). */
+export const PR_STATE_CACHE_TTL_MS = 10 * 60_000;
+/** GitHub PR reads per tick at most (3 open per repo is the cap, so this is rarely binding). */
+export const PR_STATE_READS_PER_TICK = 12;
+/** One GitHub PR read never holds the tick longer than this. */
+const PR_STATE_READ_TIMEOUT_MS = 10_000;
+const MAX_PR_STATE_CACHE = 500;
+const prStateCache = new Map<string, { atMs: number; state: Exclude<ObservedPrState, null> }>();
+
+/**
+ * Review c5 (production): terminal merge state first (the standing pass polls
+ * GitHub and records a human merge / close there, but never ledgers it), then
+ * GitHub through the fleet App client (host-merge `readPr`), cached. Unknown
+ * stays null — `reconcileOpenFleetPrs` bounds how long that counts.
+ */
+async function observeFleetPrsDefault(refs: readonly OpenFleetPrRef[], nowMs: number): Promise<Map<string, ObservedPrState>> {
+  const out = new Map<string, ObservedPrState>();
+  if (refs.length === 0) return out;
+  let mergeState: typeof import('./fleet-merge-state.js') | null = null;
+  try {
+    mergeState = await import('./fleet-merge-state.js');
+  } catch {
+    mergeState = null;
+  }
+  const ask: OpenFleetPrRef[] = [];
+  for (const ref of refs) {
+    const key = fleetPrKey(ref.repo, ref.number);
+    let recorded: ObservedPrState = null;
+    const stateKey = ref.proposalId && mergeState ? mergeState.proposalStateKey(ref.proposalId) : null;
+    if (stateKey && mergeState) {
+      try {
+        recorded = prStateFromMergeState(mergeState.readFleetMergeState(stateKey), ref.number);
+      } catch {
+        recorded = null;
+      }
+    }
+    if (recorded === 'closed' || recorded === 'merged') {
+      out.set(key, recorded);
+      continue;
+    }
+    const cached = prStateCache.get(key);
+    if (cached && nowMs - cached.atMs < PR_STATE_CACHE_TTL_MS) {
+      out.set(key, cached.state);
+      continue;
+    }
+    out.set(key, recorded);
+    ask.push(ref);
+  }
+  if (ask.length === 0) return out;
+  let host: typeof import('./host-merge.js');
+  let hostDeps: ReturnType<typeof host.defaultHostMergeDeps>;
+  try {
+    host = await import('./host-merge.js');
+    hostDeps = host.defaultHostMergeDeps();
+  } catch {
+    return out;
+  }
+  await Promise.all(ask.slice(0, PR_STATE_READS_PER_TICK).map(async (ref) => {
+    const key = fleetPrKey(ref.repo, ref.number);
+    try {
+      const live = await withTimeout(host.readPr(ref.repo, ref.number, hostDeps), PR_STATE_READ_TIMEOUT_MS);
+      if (live === 'timeout' || typeof live === 'string') return;
+      const state: Exclude<ObservedPrState, null> = live.merged ? 'merged' : live.state === 'closed' ? 'closed' : 'open';
+      if (prStateCache.size >= MAX_PR_STATE_CACHE) prStateCache.clear();
+      prStateCache.set(key, { atMs: nowMs, state });
+      out.set(key, state);
+    } catch {
+      // unknown: stays as recorded (open or null)
+    }
+  }));
+  return out;
+}
+
+/** F2's reserve-breach producer, loaded lazily (a missing module is a thrown error the caller audits). */
+async function recordReserveBreachesDefault(input: { capacity: unknown; policy: EffectivePolicy; now?: Date; usedSeatIds?: readonly string[] }): Promise<number> {
+  const mod = await import('../authority/reserve-breach.js');
+  return mod.recordReserveBreaches(input);
 }
 
 async function reconcileEnrollmentDefault(policy: EffectivePolicy, enrolled: readonly string[]): Promise<EnrollmentReconcile> {
@@ -502,6 +621,8 @@ export function defaultLiveHooksDeps(): LiveHooksDeps {
     listEnrolled: () => listEnrolled(),
     repoIdentity: (path) => repoIdentityOfPath(path),
     waitingVerify: waitingVerifyDefault,
+    observeFleetPrs: observeFleetPrsDefault,
+    recordReserveBreaches: recordReserveBreachesDefault,
     installed: (engine, cfg) => engineInstalled(engine, cfg),
     tierOf: (engine, cfg) => engineTierOf(engine, cfg),
     subscriptionAllows: (engine, opts) => subscriptionAllows(engine, opts),
@@ -575,6 +696,21 @@ interface TickContext {
   routing: HarnessRoutingWeights;
   /** Fleet task id → attempts so far (best-of-N's "already failed once"). */
   taskAttempts: Map<string, number>;
+  /**
+   * Review c9: Codex seats the Leader's class-B directive switched on in THIS
+   * tick's budget (Mason's stored budget still has them off). The final seat
+   * gate judges them against the tick's budget, as the router did.
+   */
+  directiveSeats: Set<string>;
+  /**
+   * Review c15: extra lane turns best-of-N fan-outs may still take this tick
+   * (slots held back from the pool's lane caps in beforeTick). Decremented as
+   * plans reserve them; never refunded within the tick (no finish signal
+   * reaches the hooks, and every turn ends with the tick).
+   */
+  fanoutBudget: Record<FleetEngine, number>;
+  /** Seats this tick's dispatches actually ran on (reserve-breach attribution). */
+  usedSeats: Set<string>;
 }
 
 function lowerFirst(text: string): string {
@@ -621,10 +757,10 @@ function applyCodexDirective(
   capacity: readonly SeatCapacity[],
   policy: EffectivePolicy,
   directives: LeaderDirectivesV1 | null,
-): BudgetPolicy {
-  if (directives?.codexEnabled !== true || !policy.engines.includes('codex')) return budget;
+): { budget: BudgetPolicy; enabledSeats: Set<string> } {
+  const enabledSeats = new Set<string>();
+  if (directives?.codexEnabled !== true || !policy.engines.includes('codex')) return { budget, enabledSeats };
   const seats = { ...budget.seats };
-  let changed = false;
   for (const seat of capacity) {
     if (seat.engine !== 'codex') continue;
     const grant = standingSeatFor(policy.spend, seat.seatId);
@@ -632,9 +768,9 @@ function applyCodexDirective(
     const current = effectiveSeatPolicy(budget, seat.seatId, 'codex');
     if (current.enabled) continue;
     seats[seat.seatId] = { ...current, enabled: true, reservePercent: Math.max(current.reservePercent, grant.reserveFloorPercent) };
-    changed = true;
+    enabledSeats.add(seat.seatId);
   }
-  return changed ? { ...budget, seats } : budget;
+  return { budget: enabledSeats.size > 0 ? { ...budget, seats } : budget, enabledSeats };
 }
 
 /**
@@ -696,6 +832,15 @@ export interface LiveTickHooks extends TickHooks {
    * when standing authority is withdrawn and when the session closes.
    */
   stopBackground(reason: string): void;
+  /**
+   * Once per standing tick, AFTER its dispatches: re-read capacity and let
+   * F2's `recordReserveBreaches` ledger any seat whose usage crossed the
+   * grant's reserve floor / session ceiling (the rollout's `reserveBreaches`
+   * criterion and regress-on-breach read those rows). Returns rows written;
+   * 0 for a dry run, a tick with no context, or a second call for the same
+   * tick. Never throws (a failure is audited).
+   */
+  afterStandingTick(): Promise<number>;
 }
 
 export interface CreateLiveTickHooksOptions {
@@ -720,6 +865,18 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
   let experiment: { controller: AbortController; promise: Promise<void> } | null = null;
   let lastExperimentPollMs = Number.NEGATIVE_INFINITY;
   let lastFleetQueueDepth = 0;
+  /**
+   * Size of the merged standing backlog (scanned items + fleet tasks) the
+   * loop last asked for; null until it has. Review c15: the experiment
+   * runner's "idle" must see scanned work too, not only the fleet task queue.
+   */
+  let lastBacklogDepth: number | null = null;
+  /** Items the loop may still dispatch this tick, by id (fan-out prediction for the NEXT tick's reserve). */
+  let lastBacklogItems: WorkItem[] = [];
+  /** Plans already made this tick (a repeated ask for one item must not charge its lanes twice). */
+  const plannedThisTick = new Map<string, AutonomousBestOfNPlan>();
+  /** The tick context whose reserve breaches were already recorded. */
+  let breachCheckedFor: TickContext | null = null;
   /** Proposal id → harness version its dispatch ran with (this process). */
   const harnessOfProposal = new Map<string, string | null>();
   const creditedVerdicts = new Set<string>();
@@ -1089,7 +1246,22 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       } catch {
         bpState = emptyBackpressureState();
       }
-      const openPrs = ledgerOk ? openFleetPrsFromLedger(entries) : null;
+      // Review c5: the ledger never hears about a PR Mason merged or closed
+      // on GitHub, so its open set is reconciled with observed PR state
+      // before the per-repo cap can pause anything.
+      let openPrs: Record<string, number> | null = null;
+      if (ledgerOk) {
+        const refs = openFleetPrRefsFromLedger(entries);
+        let observed = new Map<string, ObservedPrState>();
+        if (refs.length > 0) {
+          try {
+            observed = await deps.observeFleetPrs(refs, nowMs);
+          } catch {
+            observed = new Map();
+          }
+        }
+        openPrs = reconcileOpenFleetPrs(refs, observed, nowMs);
+      }
       const bp = evaluateBackpressure({
         nowMs,
         repos: policyRepos,
@@ -1201,13 +1373,16 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }
       let budget: BudgetPolicy | null = null;
       let budgetProblem: string | null = null;
+      let directiveSeats = new Set<string>();
       try {
-        budget = applyCodexDirective(
+        const applied = applyCodexDirective(
           deps.clampBudget(deps.loadBudget(), policy, capacity.map((s) => s.seatId)),
           capacity,
           policy,
           directives,
         );
+        budget = applied.budget;
+        directiveSeats = applied.enabledSeats;
       } catch (err) {
         budgetProblem = `The budget could not be clamped to the grant (${describeError(err)}).`;
       }
@@ -1299,7 +1474,10 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         ?? bp.holdProduction;
 
       // ── Experiments (B-U9): idle or overnight windows only ──────────────
-      lastFleetQueueDepth = fleetItems.length + (waitingVerify ?? 0);
+      // Review c15: "idle" means no work at all — the scanned backlog the
+      // loop dispatches too (last seen via standingBacklog), not only the
+      // fleet task queue — and unknown backlog is not idle.
+      lastFleetQueueDepth = Math.max(fleetItems.length, lastBacklogDepth ?? 0) + (waitingVerify ?? 0);
       if (!hookCtx.dryRun && holdProduction === null && lanes.local.slots > 0) {
         let overnight = false;
         try {
@@ -1307,9 +1485,33 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         } catch {
           overnight = false;
         }
-        const idle = fleetItems.length === 0 && waitingVerify === 0;
+        const idle = fleetItems.length === 0 && lastBacklogDepth === 0 && waitingVerify === 0;
         if (idle || overnight) maybeStartExperiment(nowMs, overnight ? 'overnight window' : 'idle fleet');
       }
+      // A running experiment's local turns are local turns: they come out of
+      // the lane before the pool sees it. The runner narrows itself to
+      // EXPERIMENT_SLOTS.fleetBusy (1) while work waits, idle (2) otherwise;
+      // a pair already in flight when work arrives finishes first (bounded
+      // overlap of one turn, stated rather than hidden).
+      if (experiment && lanes.local.slots > 0) {
+        const width = lastFleetQueueDepth > 0 ? EXPERIMENT_LOCAL_SLOTS_BUSY : EXPERIMENT_LOCAL_SLOTS_IDLE;
+        const left = Math.max(0, lanes.local.slots - width);
+        lanes.local = { lane: 'local', slots: left, capReason: `A harness experiment is using ${lanes.local.slots - left} local slot(s).` };
+      }
+
+      // ── Best-of-N reserve (review c15) ──────────────────────────────────
+      // Held back from the pool's lane caps only when some item this tick
+      // (fleet tasks, or the backlog the loop last dispatched from) could
+      // fan out; fan-outs spend only this reserve, so lane caps hold.
+      const fanoutPlausible = lanes.local.slots > 0 && anyFanoutCandidate(
+        [...fleetItems, ...lastBacklogItems],
+        routing.bonThreshold,
+        (item) => {
+          const taskId = fleetTaskIdOfItem(item);
+          return taskId ? taskAttempts.get(taskId) ?? 0 : 0;
+        },
+      );
+      const fanoutReserve = planFanoutReserve(lanes, fanoutPlausible);
 
       const demotions: RouteDemotion[] = bp.nextState.demotions;
       const pausedList = [...pausedReasons.values()];
@@ -1375,7 +1577,11 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         harness: harnessKnown ? harness : { versionId: null, config: BASELINE_HARNESS_CONFIG },
         routing,
         taskAttempts,
+        directiveSeats,
+        fanoutBudget: { ...fanoutReserve },
+        usedSeats: new Set(),
       };
+      plannedThisTick.clear();
       harnessKnownThisTick = harnessKnown;
 
       const pausedPaths = pausedList.length === 0 ? [] : enrolled.filter((p) => pausedReasons.has(resolve(p)));
@@ -1386,7 +1592,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       }
       return finish({
         pausedRepos: pausedPaths,
-        laneCaps: Object.fromEntries(FLEET_ENGINES.map((lane) => [lane, lanes[lane].slots])) as Partial<Record<FleetEngine, number>>,
+        // The pool gets each lane minus the best-of-N reserve (review c15).
+        laneCaps: Object.fromEntries(FLEET_ENGINES.map((lane) => [lane, Math.max(0, lanes[lane].slots - fanoutReserve[lane])])) as Partial<Record<FleetEngine, number>>,
         holdProduction,
       }, state);
     },
@@ -1464,6 +1671,22 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           };
         }
       }
+      // Review c9: a Codex seat the Leader's class-B directive switched on
+      // exists only in THIS tick's budget. Master's gate re-reads Mason's
+      // stored budget (Codex off in every mode by default) and would refuse
+      // it every tick while the router kept choosing it — so for those seats
+      // the gate's remaining job, the window ceiling, is applied here against
+      // the tick's budget (the seat's eligibility was just assessed above).
+      if (lane === 'codex' && seats.some((seat) => current.directiveSeats.has(seat.seatId))) {
+        for (const seat of seats) {
+          const assessed = assessSeat(seat, effectiveSeatPolicy(current.budget, seat.seatId, seat.engine), { nowMs: current.nowMs });
+          const used = Math.max(assessed.headroom.sessionUsedPercent ?? 0, assessed.headroom.weeklyUsedPercent ?? 0);
+          if (used >= opts.maxPercent) {
+            return { allowed: false, reason: `${engine} seat ${seat.seatId} window ${Math.round(used)}% used (max ${opts.maxPercent}%)` };
+          }
+        }
+        return { allowed: true, reason: `${engine} (${lane}) was enabled by the Leader after its reset and has headroom under the ${current.budget.mode} budget.` };
+      }
       // Master's subscription window gate still applies to claude / codex
       // (it only ever narrows). grok-cli is judged on its seat above: the
       // M80 reader has no Grok signal and would refuse it as "unknown".
@@ -1513,6 +1736,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
         // Only a tick that knew its harness may attribute the run to one.
         ...(current && harnessKnownThisTick ? { harnessVersionId: current.harness.versionId } : {}),
       });
+      const ranOn = outcome.seatId ?? (outcome.dispatched ? cached?.seatDecision?.seatId ?? null : null);
+      if (current && outcome.dispatched && ranOn) current.usedSeats.add(ranOn);
       if (current && harnessKnownThisTick && outcome.dispatched && outcome.proposalId) {
         harnessOfProposal.set(outcome.proposalId, current.harness.versionId);
       }
@@ -1586,7 +1811,13 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
     },
 
     standingBacklog(items: WorkItem[]): WorkItem[] {
-      return ctx && ctx.fleetItems.length > 0 ? mergeFleetTaskItems(items, ctx.fleetItems) : items;
+      const merged = ctx && ctx.fleetItems.length > 0 ? mergeFleetTaskItems(items, ctx.fleetItems) : items;
+      // Review c15: remembered for the experiment runner's idle check and
+      // queue depth, and for the next tick's best-of-N reserve prediction.
+      lastBacklogDepth = merged.length;
+      lastBacklogItems = merged.slice(0, 500);
+      lastFleetQueueDepth = Math.max(lastFleetQueueDepth, merged.length);
+      return merged;
     },
 
     lastTickState(): FleetTickStateV1 | null {
@@ -1608,6 +1839,8 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       if (!current) return null;
       const route = current.routeCache.get(item.id);
       if (!route) return null;
+      const already = plannedThisTick.get(item.id);
+      if (already) return already;
       const engines = current.router.laneEngines;
       const allows = (engine: EngineId | null): boolean => {
         if (engine === null) return false;
@@ -1619,7 +1852,7 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
       };
       const taskId = fleetTaskIdOfItem(item);
       try {
-        return planStandingBestOfN({
+        const plan = planStandingBestOfN({
           item,
           route,
           lanes: current.lanes,
@@ -1629,8 +1862,17 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
           priorFailures: taskId ? current.taskAttempts.get(taskId) ?? 0 : 0,
           grokAllowed: allows(engines['grok-cli']),
           claudeAllowed: allows(engines['claude-cli']),
+          // Review c15: candidates beyond the item's own pool slot spend the
+          // tick's reserve; what one plan takes, the next cannot.
+          fanoutBudget: current.fanoutBudget,
           cfg: current.cfg,
         });
+        for (const lane of FLEET_ENGINES) {
+          current.fanoutBudget[lane] = Math.max(0, current.fanoutBudget[lane] - plan.laneCharge[lane]);
+        }
+        const { laneCharge: _charged, ...out } = plan;
+        plannedThisTick.set(item.id, out);
+        return out;
       } catch {
         return null;
       }
@@ -1672,6 +1914,44 @@ export function createLiveTickHooks(options: CreateLiveTickHooksOptions = {}): L
     stopBackground(reason: string): void {
       stopExperiment(reason);
     },
+
+    async afterStandingTick(): Promise<number> {
+      const current = ctx;
+      if (!current || current.tickState.dryRun || breachCheckedFor === current) return 0;
+      breachCheckedFor = current;
+      // The LIVE policy: a grant revoked during the tick has no floors to breach.
+      let policy: EffectivePolicy | null;
+      try {
+        policy = deps.standingPolicy();
+      } catch {
+        policy = null;
+      }
+      if (!policy) return 0;
+      // Fresh capacity: the point is what this tick's dispatches spent.
+      let capacity: CapacitySnapshot | null;
+      try {
+        capacity = deps.capacitySnapshot();
+      } catch {
+        capacity = null;
+      }
+      try {
+        return await deps.recordReserveBreaches({
+          capacity,
+          policy,
+          now: new Date(deps.now()),
+          // The seats this tick KNOWS it used, on top of the routing log F2 reads.
+          ...(current.usedSeats.size > 0 ? { usedSeatIds: [...current.usedSeats] } : {}),
+        });
+      } catch (err) {
+        deps.audit({
+          action: 'daemon:reserve-breach',
+          repo: null,
+          summary: `reserve breaches could not be checked after the tick: ${describeError(err)}`,
+          result: 'error',
+        });
+        return 0;
+      }
+    },
   };
   return hooks;
 }
@@ -1705,9 +1985,11 @@ export interface StandingRun {
   /**
    * Everything a tick's new ledger rows feed back: landings to `afterLanding`
    * (the post-merge watch) and G3 verification verdicts to the harness
-   * canary (`recordVerdicts`). Never throws.
+   * canary (`recordVerdicts`). runDaemon calls this exactly once after every
+   * standing tick, so it is also where the post-dispatch reserve-breach
+   * check runs (`hooks.afterStandingTick`). Never throws.
    */
-  notifyLedgerRows(rows: readonly LedgerEntry[]): Promise<{ landings: number; verdicts: number }>;
+  notifyLedgerRows(rows: readonly LedgerEntry[]): Promise<{ landings: number; verdicts: number; reserveBreaches: number }>;
   /**
    * Resolves once the restricted-judge credential source is registered.
    * runDaemon awaits it before the first tick: a judge call that ran before
@@ -1894,7 +2176,7 @@ export function createStandingRun(input: CreateStandingRunInput): StandingRun {
     async ready(): Promise<void> {
       await judgeReady;
     },
-    async notifyLedgerRows(rows: readonly LedgerEntry[]): Promise<{ landings: number; verdicts: number }> {
+    async notifyLedgerRows(rows: readonly LedgerEntry[]): Promise<{ landings: number; verdicts: number; reserveBreaches: number }> {
       const landings = await this.notifyLandings(rows);
       let verdicts = 0;
       try {
@@ -1902,7 +2184,13 @@ export function createStandingRun(input: CreateStandingRunInput): StandingRun {
       } catch {
         verdicts = 0;
       }
-      return { landings, verdicts };
+      let reserveBreaches = 0;
+      try {
+        reserveBreaches = typeof hooks.afterStandingTick === 'function' ? await hooks.afterStandingTick() : 0;
+      } catch {
+        reserveBreaches = 0;
+      }
+      return { landings, verdicts, reserveBreaches };
     },
     close(): void {
       if (closed) return;

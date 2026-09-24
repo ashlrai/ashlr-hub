@@ -359,8 +359,25 @@ export async function gatherStrategicContext(
   // ── 1. Enrolled repos ────────────────────────────────────────────────────
   let enrolledPaths: string[] = [];
   try {
-    const { listEnrolled } = await import('../sandbox/policy.js');
-    enrolledPaths = listEnrolled().slice(0, MAX_REPOS);
+    const policy = await import('../sandbox/policy.js');
+    enrolledPaths = policy.listEnrolled();
+    // 3.10: outside an enrollment lens, skip the fleet's own mirror clones
+    // (~/.ashlr/fleet/mirrors/<owner>__<repo>, enrolled by a standing grant).
+    // Each duplicates a checkout Mason enrolled himself, so the briefing would
+    // see every repo twice and MAX_REPOS would be spent on copies. Inside a lens
+    // (the daemon's autonomous lane) every entry IS a mirror, so nothing is
+    // dropped. Filter BEFORE the slice; any failure keeps the unfiltered list.
+    try {
+      // `policy.` is read here, inside the guard, so a policy module without
+      // the lens API (older builds, partial test mocks) keeps the list whole.
+      if (policy.activeEnrollmentLenses().length === 0) {
+        const { isMirrorPath } = await import('../fleet/mirrors.js');
+        enrolledPaths = enrolledPaths.filter((p) => {
+          try { return !isMirrorPath(p); } catch { return true; }
+        });
+      }
+    } catch { /* keep the unfiltered list */ }
+    enrolledPaths = enrolledPaths.slice(0, MAX_REPOS);
   } catch { /* best-effort — empty if policy unavailable */ }
 
   const repos: RepoContext[] = [];

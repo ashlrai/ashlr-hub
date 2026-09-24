@@ -448,6 +448,19 @@ export const REAL_IO_TEST_FILES = [
   'test/post-merge-watch-suite-310b.test.ts', // real git mirror + worktree and the real verify commands the watch runs
   'test/verify-confinement-310b.test.ts', // real sandbox-exec around verify commands via runVerifyCommandAsync — guard cannot see it
   'test/completeness-gate-stash-hardening-310b.test.ts', // real git stash push/pop in temp repos with planted fsmonitor/filter programs (R3a)
+  // Added at the 3.10 fix pass (L2): none carries a marker the guard sees — the
+  // spawn/git lives behind a src/ or test/helpers/ call — so each is named here
+  // by what it really does, measured 2026-09-24 on this machine.
+  'test/verify-commands-confine-310b.test.ts', // real sandbox-exec + node children through runVerifyCommandAsync/runVerifyCommand (R3a)
+  'test/engines-stream-family-310b.test.ts', // real spawnEngine children (fake grok binary) raced against 200ms stall-grace timers — timing-sensitive under parallel load
+  'test/standing-wiring-loop-310b.test.ts', // real h1-fixture git repos driven through the daemon loop (3.4s slowest test, 10.8s file)
+  'test/tick-hooks-loop-310b.test.ts', // real h1-fixture git repos driven through the daemon loop (4.0s slowest test, 14.4s file)
+  // Added at the 3.10 fix pass (P5): the guard flagged it. Its darwin block runs
+  // a real `/usr/bin/log stream` probe and real sandbox-exec children, and waits
+  // on the log stream's readiness + barrier line — only ~50ms per test idle
+  // (2026-09-24), but a wait on another process's output is exactly what slips
+  // past 5s under parallel load, so it belongs in the serialized lane.
+  'test/sandbox-kernel-evidence-310.test.ts', // real log stream + sandbox-exec (d0 kernel evidence)
 
   // --- hermetic H-suite: every file spins up a real temp git repo + real fs by design.
   // Already forced fully serial via `npm run test:invariants` (--no-file-parallelism); folding

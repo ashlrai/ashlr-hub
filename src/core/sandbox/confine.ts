@@ -180,6 +180,14 @@ export interface ConfinementCtx {
    * binary directly with a per-run copy of the vendor home — autonomous-env).
    */
   nativeSeat?: NativeSeatConfinement;
+  /**
+   * V3.10 (review d0) autonomous only: the run's kernel-evidence tag
+   * (kernel-evidence.ts newViolationTag). Every VIOLATION deny rule then
+   * carries `(with message "<tag>")`, so the kernel logs each such denial —
+   * by the engine or any descendant — attributably to this run, whatever the
+   * agent prints. Absent ⇒ the rules are unchanged (no kernel evidence).
+   */
+  violationTag?: string;
 }
 
 /** What the M52 profile must add for one native-profile seat launch. */
@@ -766,13 +774,25 @@ export function buildAutonomousSbplProfile(profile: ConfinementProfile, ctx: Con
   );
   const tripwires = AUTONOMOUS_TRIPWIRE_HOME_PATHS.map((rel) => join(home, rel));
   const quietDenied = denied.filter((p) => !tripwires.includes(p) && p !== CUSTODY_HELPER_PATH);
+  // d0: the kernel logs a denial whose rule carries a message, so tagging the
+  // VIOLATION rules (and only those — the quiet ones stay quiet, or innocent
+  // tool probes would regress the rollout) makes the kernel, not the agent's
+  // own output, the evidence. Hex-only tag, validated before it reaches SBPL.
+  const report = ctx.violationTag !== undefined && /^ashlr-sbx-[0-9a-f]{32}$/.test(ctx.violationTag)
+    ? ` (with message ${sbplString(ctx.violationTag)})`
+    : '';
   if (quietDenied.length > 0) lines.push(`(deny file-read* file-write* ${quietDenied.map(sub).join(' ')})`);
-  lines.push(`(deny file-read* file-write* (with send-signal SIGKILL) ${tripwires.map(sub).join(' ')})`);
+  lines.push(`(deny file-read* file-write* (with send-signal SIGKILL)${report} ${tripwires.map(sub).join(' ')})`);
   // The helper sits in a world-readable system dir: a `find /usr/local` may
   // stat it innocently, so only reading its bytes (to copy it) or writing it
   // trips; exec is denied separately below.
-  lines.push(`(deny file-read-data file-write* (with send-signal SIGKILL) ${lit(CUSTODY_HELPER_PATH)})`);
-  lines.push(`(deny process-exec ${AUTONOMOUS_DENIED_EXECUTABLES.map(lit).join(' ')})`);
+  lines.push(`(deny file-read-data file-write* (with send-signal SIGKILL)${report} ${lit(CUSTODY_HELPER_PATH)})`);
+  // Escape tools are a violation to attempt; the rest (open, pbcopy…) are
+  // denied quietly, exactly the split sandboxViolationsInOutput always used.
+  const violationExecs = AUTONOMOUS_DENIED_EXECUTABLES.filter((exe) => VIOLATION_EXECUTABLES.includes(exe));
+  const quietExecs = AUTONOMOUS_DENIED_EXECUTABLES.filter((exe) => !VIOLATION_EXECUTABLES.includes(exe));
+  if (quietExecs.length > 0) lines.push(`(deny process-exec ${quietExecs.map(lit).join(' ')})`);
+  if (violationExecs.length > 0) lines.push(`(deny process-exec${report} ${violationExecs.map(lit).join(' ')})`);
   lines.push(
     `(deny mach-lookup ${AUTONOMOUS_DENIED_MACH_SERVICES.map((n) => `(global-name ${sbplString(n)})`).join(' ')} ` +
       `${AUTONOMOUS_DENIED_MACH_SERVICE_PATTERNS.map((r) => `(global-name-regex #"${r}")`).join(' ')})`,
@@ -1070,6 +1090,32 @@ export function sandboxViolationsInOutput(output: string, home: string): string[
     for (const exe of VIOLATION_EXECUTABLES) {
       if (line.includes(exe)) found.add(`exec ${exe}`);
     }
+  }
+  return [...found].sort();
+}
+
+/**
+ * d0: the violation operations the KERNEL reported for a run (the source of
+ * truth — kernel-evidence.ts), in the same `access ~/…` / `exec /…` form as
+ * sandboxViolationsInOutput so the two signals deduplicate. Only rules tagged
+ * with the run's violation tag are ever reported, so every denial here is a
+ * violation; an unrecognised target is still reported (never dropped).
+ */
+export function sandboxViolationsFromKernel(
+  denials: readonly { operation: string; target: string; process: string }[],
+  home: string,
+): string[] {
+  const found = new Set<string>();
+  const tilde = (p: string): string => (p === home || p.startsWith(`${home}/`) ? `~${p.slice(home.length)}` : p);
+  const targets = autonomousTripwirePaths(home);
+  for (const denial of denials) {
+    const target = denial.target.trim();
+    if (denial.operation.startsWith('process-exec')) {
+      found.add(`exec ${target || denial.process}`.slice(0, 300));
+      continue;
+    }
+    const root = targets.find((t) => target === t || target.startsWith(`${t}/`));
+    found.add((root ? `access ${tilde(root)}` : `${denial.operation} ${tilde(target)}`).slice(0, 300));
   }
   return [...found].sort();
 }

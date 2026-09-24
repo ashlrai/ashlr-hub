@@ -12,7 +12,11 @@
  * and the experiment that justified it can never disagree), open hypotheses
  * and a bounded ring of live run outcomes the canary is judged on. Every
  * write is a lock (fleet/local-store-lock) + atomic replace; reads are total
- * (a missing or mangled file is the empty registry — the baseline).
+ * (a missing or mangled file is the empty registry — the baseline). Writes
+ * are NOT: a mutation refuses when a file exists but cannot be read, rather
+ * than rebuild from the baseline over it. The byte cap never refuses a write
+ * that compaction can fit — old outcomes, finished experiments and stale
+ * version history are dropped first — so rollback is not blocked by size.
  *
  * WHY ONE FILE, NOT A LOG. The daemon reads `activeHarness()` on every
  * dispatch, synchronously; a single small document with an mtime cache is a
@@ -111,7 +115,20 @@ const BASELINE_MAX_RUNS = 200;
 const HARNESS_DIR_PARTS = ['.ashlr', 'learn', 'harness'] as const;
 const STATE_FILE = 'state.json';
 const LOCK_FILE = '.state.lock';
+/** Read cap — and the hard ceiling a write may never cross (a longer file would read as unreadable). */
 const MAX_STATE_BYTES = 2 * 1024 * 1024;
+/**
+ * When a write would cross MAX_STATE_BYTES the state is compacted down to
+ * this (hysteresis, so compaction is rare, not on every write). WHY: the cap
+ * used to REFUSE the write, so once history filled the file every mutation —
+ * rollback and canary evidence included — failed, and an unsafe harness could
+ * stay in force (review 310 d6).
+ */
+const STATE_COMPACT_TARGET_BYTES = Math.floor(MAX_STATE_BYTES * 0.75);
+/** Past this many, older adopted / rolled-back versions may be dropped under byte pressure. */
+const KEEP_ADOPTED_HISTORY = 20;
+/** Compaction drops outcomes older than the newest this-many before touching anything else. */
+const OUTCOMES_FLOOR = 500;
 const MAX_VERSIONS = 200;
 const MAX_EXPERIMENTS = 100;
 const MAX_HYPOTHESES = 50;
@@ -584,26 +601,37 @@ function coerceState(raw: unknown): HarnessStateV1 | null {
 let cache: { path: string; mtimeMs: number; bytes: number; ino: number; state: HarnessStateV1 } | null = null;
 
 /**
+ * `ok` = the stored state (missing file = the empty registry); `unreadable` =
+ * a file IS there but could not be read or is not a state we wrote.
+ */
+type SharedStateRead = { ok: true; state: HarnessStateV1 } | { ok: false; reason: string };
+
+/**
  * The stored state, SHARED with the cache — callers must not mutate it. One
  * lstat when warm (activeHarness runs on every dispatch); a re-read only when
- * the file's identity, size or mtime moved. Total: never throws.
+ * the file's identity, size or mtime moved. Never throws.
  */
-function readSharedState(): HarnessStateV1 {
+function readSharedStateDetailed(): SharedStateRead {
   const path = harnessStatePath();
   let stat: ReturnType<typeof lstatSync>;
   try {
     stat = lstatSync(path);
-  } catch {
+  } catch (err) {
     cache = null;
-    return emptyHarnessState();
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { ok: true, state: emptyHarnessState() };
+    return { ok: false, reason: `the harness store could not be inspected (${(err as NodeJS.ErrnoException)?.code ?? 'error'})` };
   }
   if (cache && cache.path === path && cache.mtimeMs === stat.mtimeMs && cache.bytes === stat.size && cache.ino === stat.ino) {
-    return cache.state;
+    return { ok: true, state: cache.state };
   }
   const read = readPrivateFileCapped(path, MAX_STATE_BYTES);
-  if (!read || read.truncated) {
+  if (!read) {
     cache = null;
-    return emptyHarnessState();
+    return { ok: false, reason: 'the harness store exists but could not be read' };
+  }
+  if (read.truncated) {
+    cache = null;
+    return { ok: false, reason: `the harness store is ${read.bytes} bytes, over its ${MAX_STATE_BYTES}-byte cap` };
   }
   let parsed: HarnessStateV1 | null = null;
   try {
@@ -613,10 +641,20 @@ function readSharedState(): HarnessStateV1 {
   }
   if (!parsed) {
     cache = null;
-    return emptyHarnessState();
+    return { ok: false, reason: 'the harness store is not a state this build wrote (garbled or hand-edited)' };
   }
   cache = { path, mtimeMs: read.mtimeMs, bytes: read.bytes, ino: stat.ino, state: parsed };
-  return parsed;
+  return { ok: true, state: parsed };
+}
+
+/**
+ * READ paths are total: an unreadable file is the baseline (no adopted
+ * harness in force — the conservative reading). Mutations must NOT use this:
+ * see mutateHarnessState (review 310 d7).
+ */
+function readSharedState(): HarnessStateV1 {
+  const read = readSharedStateDetailed();
+  return read.ok ? read.state : emptyHarnessState();
 }
 
 /** The registry as stored (or empty) — a private copy the caller may mutate. Total: never throws. */
@@ -650,9 +688,122 @@ function pruneState(state: HarnessStateV1): void {
 }
 
 /**
+ * Byte-budget compaction, run only when a write would cross MAX_STATE_BYTES.
+ * Count caps (pruneState) cannot bound bytes: every kept version carries a
+ * full config (up to 4 × 4 KB prompts) and adopted / rolled-back history is
+ * never count-pruned. Drops, oldest first, until the state fits the target:
+ *   1. live outcomes — except the running canary's evidence and the newest
+ *      BASELINE_MAX_RUNS of the active version (the next adoption's baseline);
+ *   2. finished experiments no kept version points at (and their meta);
+ *   3. hypotheses;
+ *   4. versions nothing needs — never the baseline, the active or canary
+ *      version, the canary's fallback, a queued / running candidate, or the
+ *      newest KEEP_ADOPTED_HISTORY adopted / rolled-back versions.
+ * Returns the encoded state (possibly still over the cap when nothing more
+ * may be dropped).
+ */
+function compactStateToBudget(state: HarnessStateV1): string {
+  const encode = (): string => `${JSON.stringify(state, null, 2)}\n`;
+  let encoded = encode();
+  if (Buffer.byteLength(encoded, 'utf8') <= MAX_STATE_BYTES) return encoded;
+  const target = STATE_COMPACT_TARGET_BYTES;
+  // Each item's own serialization is a LOWER bound on the bytes its removal
+  // saves (nested items are indented deeper), so one pass per step never
+  // under-drops by much; the real size is re-measured after every step.
+  let over = Buffer.byteLength(encoded, 'utf8') - target;
+  const dropOldest = <T>(items: readonly T[], droppable: (item: T) => boolean, remove: (item: T) => void): void => {
+    for (const item of [...items]) {
+      if (over <= 0) return;
+      if (!droppable(item)) continue;
+      over -= Buffer.byteLength(JSON.stringify(item, null, 2), 'utf8') + 2;
+      remove(item);
+    }
+  };
+  const remeasure = (): void => {
+    encoded = encode();
+    over = Buffer.byteLength(encoded, 'utf8') - target;
+  };
+
+  const canary = state.canary;
+  const activeVersion = state.activeId ?? BASELINE_VERSION_ID;
+  const pinnedExperiments = (): Set<string> => new Set(state.versions.map((v) => v.experimentId).filter((id): id is string => id !== null));
+
+  // 1. Outcomes older than the newest OUTCOMES_FLOOR, except the canary's
+  //    evidence and the active version's live baseline. (The floor keeps the
+  //    evidence just recorded from being compacted away in the same write.)
+  const activeRows = state.outcomes.filter((o) => o.versionId === activeVersion);
+  const keepOutcomes = new Set(activeRows.slice(-BASELINE_MAX_RUNS));
+  if (canary) {
+    const since = Date.parse(canary.startedAt);
+    for (const o of state.outcomes) if (o.versionId === canary.versionId && Date.parse(o.at) >= since) keepOutcomes.add(o);
+  }
+  const dropOutcomesOlderThan = (floor: number): void => {
+    const recent = new Set(floor > 0 ? state.outcomes.slice(-floor) : []); // slice(-0) would be everything
+    const drop = new Set<HarnessStateV1['outcomes'][number]>();
+    dropOldest(state.outcomes, (o) => !keepOutcomes.has(o) && !recent.has(o), (o) => drop.add(o));
+    state.outcomes = state.outcomes.filter((o) => !drop.has(o));
+    remeasure();
+  };
+  dropOutcomesOlderThan(OUTCOMES_FLOOR);
+
+  // 2. Finished experiments no version points at (and their meta).
+  if (over > 0) {
+    const pinned = pinnedExperiments();
+    const dropExp = new Set<string>();
+    dropOldest(state.experiments, (e) => e.status !== 'queued' && e.status !== 'running' && !pinned.has(e.id), (e) => {
+      dropExp.add(e.id);
+      over -= Buffer.byteLength(JSON.stringify(state.experimentMeta[e.id] ?? null, null, 2), 'utf8');
+    });
+    state.experiments = state.experiments.filter((e) => !dropExp.has(e.id));
+    for (const id of dropExp) delete state.experimentMeta[id];
+    remeasure();
+  }
+
+  // 3. Hypotheses, oldest first.
+  if (over > 0) {
+    const dropHyp = new Set<HarnessHypothesis>();
+    dropOldest(state.hypotheses, () => true, (h) => dropHyp.add(h));
+    state.hypotheses = state.hypotheses.filter((h) => !dropHyp.has(h));
+    remeasure();
+  }
+
+  // 4. Versions nothing needs: rejected / abandoned candidates first, then
+  //    adopted history older than the newest KEEP_ADOPTED_HISTORY.
+  if (over > 0) {
+    const running = new Set(state.experiments.filter((e) => e.status === 'queued' || e.status === 'running').map((e) => e.candidateVersionId));
+    const isHistory = (v: HarnessVersion): boolean => v.status === 'adopted' || v.status === 'rolled-back';
+    const recentHistory = new Set(state.versions.filter(isHistory).slice(-KEEP_ADOPTED_HISTORY).map((v) => v.id));
+    const needed = (v: HarnessVersion): boolean => v.id === BASELINE_VERSION_ID || v.id === state.activeId
+      || v.status === 'canary' || (canary !== null && (v.id === canary.versionId || v.id === canary.fromVersionId))
+      || running.has(v.id) || recentHistory.has(v.id);
+    const order = [...state.versions.filter((v) => !isHistory(v)), ...state.versions.filter(isHistory)];
+    const dropVer = new Set<string>();
+    dropOldest(order, (v) => !needed(v), (v) => dropVer.add(v.id));
+    state.versions = state.versions.filter((v) => !dropVer.has(v.id));
+    // Experiments that only a dropped version justified go too.
+    const pinned = pinnedExperiments();
+    const orphaned = state.experiments.filter((e) => e.status !== 'queued' && e.status !== 'running' && dropVer.has(e.candidateVersionId) && !pinned.has(e.id));
+    for (const e of orphaned) delete state.experimentMeta[e.id];
+    state.experiments = state.experiments.filter((e) => !orphaned.includes(e));
+    remeasure();
+  }
+
+  // 5. Last resort: the recent outcomes too (the protected ones stay).
+  if (over > 0) dropOutcomesOlderThan(0);
+  return encoded;
+}
+
+/**
  * Lock, load, mutate, write. `fn` may throw to abort (nothing is written) or
  * return `{ write: false }`-style values by leaving the state untouched —
  * the file is only rewritten when the serialized state changed.
+ *
+ * Fails closed on an UNREADABLE store (review 310 d7): a file that exists but
+ * cannot be read (EMFILE, EACCES…), is over the cap, or is not a state we
+ * wrote is never replaced by "the empty registry plus this change" — that
+ * silently wiped every version, experiment, canary and the active pointer.
+ * The mutation returns ok:false and the file is left for inspection. Reads
+ * meanwhile see the baseline, so no unverified harness is in force.
  */
 export function mutateHarnessState<T>(fn: (state: HarnessStateV1) => T, opts: { waitMs?: number } = {}): { ok: true; value: T } | { ok: false; reason: string } {
   try {
@@ -663,14 +814,20 @@ export function mutateHarnessState<T>(fn: (state: HarnessStateV1) => T, opts: { 
   const lock = acquireLocalStoreLock(join(harnessDir(), LOCK_FILE), opts.waitMs ?? 2_000, { anchorPath: homedir() });
   if (!lock) return { ok: false, reason: 'the harness store is busy (lock not acquired)' };
   try {
-    const state = loadHarnessState();
+    const read = readSharedStateDetailed();
+    if (!read.ok) return { ok: false, reason: `${read.reason}; nothing was written` };
+    const state = structuredClone(read.state);
     const before = JSON.stringify(state);
     const value = fn(state);
     pruneState(state);
     const after = JSON.stringify(state);
     if (after !== before) {
-      const encoded = `${JSON.stringify(state, null, 2)}\n`;
-      if (Buffer.byteLength(encoded, 'utf8') > MAX_STATE_BYTES) return { ok: false, reason: 'the harness store would exceed its size cap' };
+      // Compaction, not refusal: a cap that refused writes blocked rollback
+      // and canary evidence once history filled the file (d6).
+      const encoded = compactStateToBudget(state);
+      // Only when nothing more may be dropped (active + canary + running +
+      // recent history alone exceed 2 MiB — beyond the per-item bounds).
+      if (Buffer.byteLength(encoded, 'utf8') > MAX_STATE_BYTES) return { ok: false, reason: 'the harness store would exceed its size cap even after compaction' };
       writePrivateFileAtomic(harnessStatePath(), encoded);
       cache = null;
     }

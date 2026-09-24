@@ -58,7 +58,7 @@ import {
   writeSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
-import { join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 
 import {
   VERSE_CONTEXT_MODES,
@@ -298,9 +298,27 @@ function writeAllSync(fd: number, bytes: Buffer, position: number | null): void 
   }
 }
 
+export interface AtomicWriteOptions {
+  /**
+   * Name the temp file `.<target name>.<pid>.<hex>.tmp` (a dot-file) instead
+   * of `<target name>.<pid>.<hex>.tmp`. For a directory whose readers treat
+   * any `<prefix>-<name>` entry as stored data (attachments): a temp orphaned
+   * by a crash mid-write must never look like one (review 3.10 d8).
+   */
+  hiddenTemp?: boolean;
+}
+
+/** The temp name `writeAtomically` uses for `target`. */
+function atomicTempPath(target: string, opts: AtomicWriteOptions = {}): string {
+  const suffix = `${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+  return opts.hiddenTemp === true
+    ? join(dirname(target), `.${basename(target)}.${suffix}`)
+    : `${target}.${suffix}`;
+}
+
 /** Create-exclusive temp file, write, fsync, chmod 0600, rename over target. */
-function writeAtomically(target: string, content: string | Buffer): void {
-  const temp = `${target}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`;
+function writeAtomically(target: string, content: string | Buffer, opts: AtomicWriteOptions = {}): void {
+  const temp = atomicTempPath(target, opts);
   const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
   const fd = openSync(temp, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, 0o600);
   let published = false;
@@ -323,9 +341,9 @@ function writeAtomically(target: string, content: string | Buffer): void {
  * (process-registry's running.json) that are rewritten often and must never
  * be observed half-written. Creates `dir` 0700 when missing.
  */
-export function writePrivateFileAtomically(dir: string, target: string, content: string | Buffer): void {
+export function writePrivateFileAtomically(dir: string, target: string, content: string | Buffer, opts: AtomicWriteOptions = {}): void {
   ensurePrivateDir(dir);
-  writeAtomically(target, content);
+  writeAtomically(target, content, opts);
 }
 
 function readJsonFile(path: string): unknown {
@@ -363,10 +381,27 @@ type TextDelta = Extract<VerseEvent, { type: 'text-delta' }>;
  *  - a run followed (across only non-flushing events) by an
  *    `assistant-message` is DROPPED — the complete message replaces the
  *    provisional bubble;
+ *  - a run that ENDS another turn's open bubble and is then superseded is
+ *    MERGED into its first delta (seq/at unchanged): that first delta is what
+ *    flushes the earlier bubble, and the merged text is discarded by the
+ *    message that follows anyway;
  *  - a run ended any other way (tool use, thinking, error, cancel, turn end,
- *    a delta of another turn, end of log) is MERGED into its first delta,
- *    which keeps that delta's seq/at (so the bubble's key and time are
- *    unchanged) and carries the concatenated text.
+ *    a delta of another turn, end of log) is KEPT VERBATIM.
+ *
+ * WHY THE LAST CASE IS NOT MERGED (review 3.10 c19): compaction rewrites the
+ * log under clients that are resuming by seq (`?after=` / Last-Event-ID). A
+ * run merged into its FIRST delta puts the whole run's text at a seq at or
+ * below the cursor of any client that had received part of it, so that
+ * client never received the rest — the reply stayed cut off until a reload.
+ * No single merged event can serve both a fresh reader (needs all the text)
+ * and a resumed one (needs only the tail), so a run with no complete message
+ * after it is left as it streamed. Every rule above keeps resume EXACT: for
+ * any cursor k, (raw events ≤ k) + (folded events > k) renders the same
+ * transcript as the raw log (a randomized test in verse-session-store.test.ts
+ * proves it with the client's own buildTranscript). What it costs is small:
+ * the Claude/Grok parser closes every text block with an assistant-message
+ * (a Stop or an error included), so unsuperseded runs are the rare leftovers
+ * of a hard kill or a deduplicated repeat.
  * Returns the input array itself when nothing changes.
  */
 export function foldTextDeltas(events: readonly VerseEvent[]): readonly VerseEvent[] {
@@ -380,43 +415,49 @@ export function foldTextDeltas(events: readonly VerseEvent[]): readonly VerseEve
   let run: { index: number; first: TextDelta; parts: string[]; sealsPrevious: boolean } | null = null;
   let changed = false;
 
-  const closeRun = (): void => {
-    if (!run) return;
-    if (run.parts.length > 1) {
-      out[run.index] = { ...run.first, text: run.parts.join('') };
-      changed = true;
-    }
+  /** The run's deltas after the first, by output index (dropped when the run folds). */
+  let rest: number[] = [];
+
+  /** Ended with no message superseding it: keep every delta as streamed (see above). */
+  const keepRun = (): void => {
     run = null;
+    rest = [];
   };
 
   for (const event of events) {
     if (event.type === 'text-delta') {
       if (run && run.first.turnId === event.turnId) {
         run.parts.push(event.text);
+        rest.push(out.length);
+        out.push(event);
         continue;
       }
       const sealsPrevious: boolean = run !== null;
-      closeRun();
+      keepRun();
       run = { index: out.length, first: event, parts: [event.text], sealsPrevious };
       out.push(event);
       continue;
     }
     if (event.type === 'assistant-message') {
       // The client discards its provisional bubble here either way.
-      if (run && !run.sealsPrevious) {
-        out[run.index] = null;
-        run = null;
-        changed = true;
-      } else {
-        closeRun();
+      if (run) {
+        for (const index of rest) out[index] = null;
+        if (run.sealsPrevious) {
+          // Its first delta still flushes the other turn's bubble: keep it (merged).
+          if (run.parts.length > 1) out[run.index] = { ...run.first, text: run.parts.join('') };
+        } else {
+          out[run.index] = null;
+        }
+        if (rest.length > 0 || !run.sealsPrevious) changed = true;
       }
+      keepRun();
       out.push(event);
       continue;
     }
-    if (FOLD_FLUSH_TYPES.has(event.type)) closeRun();
+    if (FOLD_FLUSH_TYPES.has(event.type)) keepRun();
     out.push(event);
   }
-  closeRun();
+  keepRun();
   if (!changed) return events;
   return out.filter((event): event is VerseEvent => event !== null);
 }

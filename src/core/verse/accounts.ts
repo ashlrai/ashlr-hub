@@ -107,6 +107,14 @@ export const VERSE_ACCOUNTS_DEFAULT_IDLE_SUSPEND_MS = 5 * 60_000;
 const IDLE_CHECK_MS = 15_000;
 
 /**
+ * How often a read-only collector may retry the native-metadata lease on
+ * client interest. The daemon's capacity publisher holds it for one short
+ * sample every 5 minutes, so a 30 s spacing takes over within one or two
+ * page refreshes without turning every request into a lock attempt.
+ */
+export const VERSE_ACCOUNTS_LEASE_RETRY_MS = 30_000;
+
+/**
  * Recovery budget for a stopped collection generation.
  *
  * A regeneration only ever runs after the kernel has confirmed every
@@ -1231,61 +1239,107 @@ export async function startVerseAccountCollector(
       .finally(() => { recovering = null; });
   }
 
-  if (config) {
-    if (!config.quota && !config.connections) {
-      reasonCode = 'accounts-collection-not-configured';
-    } else {
-      try {
-        lease = await acquireResourceQuotaRefreshLease(config.ledgerRoot, {
-          ...(options.signal ? { signal: options.signal } : {}),
-          trackNativeActivity: true,
-          scope: config.connections ? 'native-connection-metadata' : 'codex-native-metadata',
-        });
-        mode = 'owned';
-        owner = 'this-server';
-      } catch (error) {
-        // Only a typed, cleanly released refusal may degrade to read-only.
-        // Anything else leaves this collector inert rather than guessing.
-        const typed = error instanceof ResourceQuotaRefreshLeaseError ? error : null;
-        mode = typed?.safeReadOnlyFallback ? 'read-only' : 'unconfigured';
-        state = 'blocked';
-        owner = typed?.code === 'collector-owned' ? 'another-collector' : 'none';
-        reasonCode = typed?.code ?? 'collector-unavailable';
+  /**
+   * Try to take the exclusive per-root lease and, on success, start native
+   * collection. `retry` = a later attempt by a collector that started
+   * read-only (see `requestLeaseRetry`). Never throws.
+   */
+  async function acquireLease(retry: boolean): Promise<void> {
+    if (!config) return;
+    const previousCode = reasonCode;
+    let acquired: ResourceQuotaRefreshLease | null = null;
+    try {
+      acquired = await acquireResourceQuotaRefreshLease(config.ledgerRoot, {
+        ...(options.signal ? { signal: options.signal } : {}),
+        trackNativeActivity: true,
+        scope: config.connections ? 'native-connection-metadata' : 'codex-native-metadata',
+      });
+    } catch (error) {
+      // Only a typed, cleanly released refusal may degrade to read-only.
+      // Anything else leaves this collector inert rather than guessing.
+      const typed = error instanceof ResourceQuotaRefreshLeaseError ? error : null;
+      mode = typed?.safeReadOnlyFallback ? 'read-only' : 'unconfigured';
+      state = 'blocked';
+      owner = typed?.code === 'collector-owned' ? 'another-collector' : 'none';
+      reasonCode = typed?.code ?? 'collector-unavailable';
+      // A retry that is refused for the same reason is not news (touch-driven).
+      if (!retry || reasonCode !== previousCode) {
         log(
           typed?.code === 'collector-owned'
             ? 'Verse account collector: another collector (ashlr resource-console) owns the metadata lease; reading shared evidence only.'
             : `Verse account collector: metadata lease unavailable (${reasonCode}); reading shared evidence only.`,
         );
       }
-      if (lease) {
-        // Everything past acquisition is a DIFFERENT failure from the refusal
-        // the catch above is written for. `markPending()` is a durable fs
-        // write and can throw on EIO/ENOSPC/EPERM — and the refusal handler
-        // would then report `owner: 'none'` and "reading shared evidence
-        // only" while this process silently still HELD the exclusive
-        // per-root lock, so `ashlr resource-console` could never acquire it
-        // and the watchdog (which requires mode 'owned') never revisited the
-        // state. Hand the lock back before degrading, so the reported owner
-        // matches reality.
-        try {
-          lease.markPending();
-          resume();
-        } catch {
-          try { lease.close(true); } catch { /* the pending marker stays durable, which is the safe side. */ }
-          lease = null;
-          mode = 'unconfigured';
-          state = 'blocked';
-          owner = 'none';
-          reasonCode = 'collector-start-failed';
-          log('Verse account collector: the metadata lease was acquired but could not be marked pending; it has been released and no native polling is running.');
-        }
-      }
+      return;
     }
+    if (closing || closed) {
+      // close() landed while this attempt was in flight: nothing was marked
+      // pending and no native contact happened, so a plain release is exact.
+      try { acquired.close(false); } catch { /* the lock stays durable, which is the safe side. */ }
+      return;
+    }
+    lease = acquired;
+    mode = 'owned';
+    owner = 'this-server';
+    reasonCode = null;
+    // Everything past acquisition is a DIFFERENT failure from the refusal
+    // the catch above is written for. `markPending()` is a durable fs
+    // write and can throw on EIO/ENOSPC/EPERM — and the refusal handler
+    // would then report `owner: 'none'` and "reading shared evidence
+    // only" while this process silently still HELD the exclusive
+    // per-root lock, so `ashlr resource-console` could never acquire it
+    // and the watchdog (which requires mode 'owned') never revisited the
+    // state. Hand the lock back before degrading, so the reported owner
+    // matches reality.
+    try {
+      lease.markPending();
+      resume();
+    } catch {
+      try { lease.close(true); } catch { /* the pending marker stays durable, which is the safe side. */ }
+      lease = null;
+      mode = 'unconfigured';
+      state = 'blocked';
+      owner = 'none';
+      reasonCode = 'collector-start-failed';
+      log('Verse account collector: the metadata lease was acquired but could not be marked pending; it has been released and no native polling is running.');
+      return;
+    }
+    if (watchdog === null) {
+      watchdog = setInterval(() => { tickIdle(); requestRecovery(); }, IDLE_CHECK_MS);
+      watchdog.unref?.();
+    }
+    if (retry) log('Verse account collector: the metadata lease was released by its previous owner; this server now collects live readings.');
   }
 
-  if (mode === 'owned') {
-    watchdog = setInterval(() => { tickIdle(); requestRecovery(); }, IDLE_CHECK_MS);
-    watchdog.unref?.();
+  /**
+   * 3.10 c8 follow-up: a collector that started read-only because another
+   * process held the lease — typically the daemon's short-lived capacity
+   * publisher, which holds it for one 5–10 s sample and then releases it —
+   * used to stay read-only for the whole session, so Claude windows read as
+   * unknown until Verse restarted. Client interest (`touch()`) now retries
+   * the lease, at most once per VERSE_ACCOUNTS_LEASE_RETRY_MS and one attempt
+   * at a time. Only a clean, typed refusal (mode 'read-only') is retried: an
+   * inert ('unconfigured') collector stays inert, as before.
+   */
+  let leaseRetry: Promise<void> | null = null;
+  let lastLeaseAttemptAt = Date.now();
+
+  function requestLeaseRetry(): void {
+    if (closing || closed || mode !== 'read-only' || leaseRetry) return;
+    if (Date.now() - lastLeaseAttemptAt < VERSE_ACCOUNTS_LEASE_RETRY_MS) return;
+    lastLeaseAttemptAt = Date.now();
+    leaseRetry = acquireLease(true)
+      .catch(() => { /* acquireLease never throws; defensive */ })
+      .finally(() => { leaseRetry = null; });
+  }
+
+  if (config) {
+    if (!config.quota && !config.connections) {
+      reasonCode = 'accounts-collection-not-configured';
+    } else {
+      await acquireLease(false);
+      lastLeaseAttemptAt = Date.now();
+    }
   }
 
   /**
@@ -1370,7 +1424,9 @@ export async function startVerseAccountCollector(
       // abort is a process-cleanup fence. It goes through `requestRecovery()`
       // instead, which starts a new generation only once the kernel has
       // confirmed the stranded process group is gone.
-      if (closed || mode !== 'owned') return;
+      if (closed) return;
+      if (mode === 'read-only') { requestLeaseRetry(); return; }
+      if (mode !== 'owned') return;
       if (collectionDegraded()) { requestRecovery(); return; }
       if (state === 'suspended') resume();
     },
@@ -1400,6 +1456,10 @@ export async function startVerseAccountCollector(
       // shutdown never races it into releasing the lock under a live probe.
       // `closed` is set AFTER, because the recovery bails out early on it.
       if (recovering) { try { await recovering; } catch { /* already recorded as a hold */ } }
+      // Same for a lease retry: it sees `closing` and hands the lock back, or
+      // it finished first and `lease` below is released normally.
+      if (leaseRetry) { try { await leaseRetry; } catch { /* never throws */ } }
+      if (watchdog !== null) { clearInterval(watchdog); watchdog = null; }
       closed = true;
       await suspend();
       state = 'stopped';

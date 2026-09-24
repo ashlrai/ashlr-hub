@@ -18,6 +18,17 @@
   min-height: 0;
   overflow-y: auto;
   padding: var(--space-6) var(--space-4) var(--space-12);
+  /* Desktop shell (desktop/README.md "Desktop shell contract"): this page has
+     no 48px strip, so its title sits inside the OS title-bar band. Once the
+     window is narrow enough that the 880px column stops centring (minWidth
+     is 900), the column's left edge lands at rail + 16px — under the macOS
+     traffic lights, which cover the top-left 92px of the WINDOW. Owe the same
+     overlap every header strip owes (inset − rail, 36px on a 56px rail);
+     the vars are absent in a browser and the expanded rail sits under the
+     lights itself, so both floor to --space-4 and nothing moves there. The
+     whole column shifts, not just the header, so the title stays aligned
+     with the rows under it. */
+  padding-left: max(var(--space-4), calc(var(--app-traffic-light-inset, 0px) - var(--rail-width, 56px)));
 }
 
 .page {

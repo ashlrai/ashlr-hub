@@ -84,6 +84,7 @@ import { readCodexRateLimits } from '../observability/codex-source.js';
 import { loadBudgetPolicy, readCapacitySnapshot } from '../routing/budget-store.js';
 import { assessSeat, type SeatCapacity } from '../routing/headroom.js';
 import { defaultSeatPolicy, effectiveSeatPolicy, engineOfSeatId } from '../routing/policy.js';
+import type { BudgetPolicy } from '../routing/types.js';
 import { engineTierOf } from '../run/sandboxed-engine.js';
 import type { EngineId } from '../types.js';
 import { SharedStore } from './shared-store.js';
@@ -273,9 +274,24 @@ export function subscriptionAllows(
      * See the module header for why the default is the closed one here.
      */
     autonomous?: boolean;
+    /**
+     * The budget policy to judge the seat by, in place of the stored
+     * ~/.ashlr/budget.json (AUTONOMOUS rule only; the interactive rule never
+     * reads a budget). WHY: a Leader class-B directive can switch a Codex
+     * seat on for ONE tick — that budget exists only in the tick
+     * (fleet/tick-hooks-live.ts applyCodexDirective). Judged by the stored
+     * policy (Codex off by default) the seat was refused every tick, so the
+     * tick skipped this whole gate for such seats and with it the M114
+     * cross-machine reading. Passing the tick's budget here keeps every
+     * check (capacity snapshot, cross-machine ledger, local reading) and
+     * swaps only the policy. It can never widen past the grant: the caller
+     * passes a budget the grant already clamped.
+     */
+    budget?: BudgetPolicy;
   },
 ): SubscriptionAllowResult {
   if (opts?.autonomous === false) return _interactiveAllows(engine, opts);
+  const policyOf = (): BudgetPolicy => opts?.budget ?? loadBudgetPolicy();
   try {
     if (!isSubscriptionEngine(engine)) {
       return {
@@ -290,7 +306,7 @@ export function subscriptionAllows(
     // V3.10: the Verse capacity snapshot + budget policy. Consulted first
     // because it is the only source that knows Claude's windows, the
     // operator's reserves, and whether the seat is switched off.
-    const budget = _budgetVerdict(engine, maxPct, nowMs);
+    const budget = _budgetVerdict(engine, maxPct, nowMs, policyOf);
     if (budget && !budget.allowed) return budget;
 
     // M114: attempt cross-machine aggregation first.
@@ -308,7 +324,7 @@ export function subscriptionAllows(
         };
       }
       if (budget) return budget;
-      const gated = _localPolicyGate(engine, aggregate);
+      const gated = _localPolicyGate(engine, aggregate, policyOf);
       if (gated) return gated;
       return {
         allowed: true,
@@ -349,7 +365,7 @@ export function subscriptionAllows(
 
     // Local reading known and under the cap, but no snapshot to apply the
     // budget policy to: apply what can be applied without seat ids.
-    const gated = _localPolicyGate(engine, usage);
+    const gated = _localPolicyGate(engine, usage, policyOf);
     if (gated) return gated;
 
     return {
@@ -444,13 +460,18 @@ function _snapshotEngine(engine: EngineId): 'claude' | 'codex' | null {
  * allowed:true means EVERY seat of the engine is eligible for autonomy under
  * the current policy AND its binding reading is under maxPercent.
  */
-function _budgetVerdict(engine: EngineId, maxPct: number, nowMs: number): SubscriptionAllowResult | null {
+function _budgetVerdict(
+  engine: EngineId,
+  maxPct: number,
+  nowMs: number,
+  policyOf: () => BudgetPolicy = loadBudgetPolicy,
+): SubscriptionAllowResult | null {
   const snapEngine = _snapshotEngine(engine);
   if (!snapEngine) return null;
   const snapshot = readCapacitySnapshot();
   const seats: SeatCapacity[] = snapshot ? snapshot.seats.filter((s) => s.engine === snapEngine) : [];
   if (seats.length === 0) return null;
-  const policy = loadBudgetPolicy();
+  const policy = policyOf();
   const parts: string[] = [];
   for (const seat of seats) {
     const assessed = assessSeat(seat, effectiveSeatPolicy(policy, seat.seatId, seat.engine), { nowMs });
@@ -484,10 +505,14 @@ function _budgetVerdict(engine: EngineId, maxPct: number, nowMs: number): Subscr
  * default for the engine decides (Codex is OFF by default — Mason, 2026-09-24).
  * The strictest stored reserve applies to the local reading.
  */
-function _localPolicyGate(engine: EngineId, usage: SubscriptionUsage): SubscriptionAllowResult | null {
+function _localPolicyGate(
+  engine: EngineId,
+  usage: SubscriptionUsage,
+  policyOf: () => BudgetPolicy = loadBudgetPolicy,
+): SubscriptionAllowResult | null {
   const snapEngine = _snapshotEngine(engine);
   if (!snapEngine) return null;
-  const policy = loadBudgetPolicy();
+  const policy = policyOf();
   const stored = Object.values(policy.seats).filter((p) => engineOfSeatId(p.seatId) === snapEngine);
   const applicable = stored.length > 0 ? stored : [defaultSeatPolicy(policy.mode, snapEngine, snapEngine)];
   if (applicable.some((p) => !p.enabled)) {

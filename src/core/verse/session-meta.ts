@@ -32,8 +32,21 @@
  * chat was actually seeded; steady state is a Set lookup per chat.
  *
  * HONESTY / SAFETY
- *  - Load is TOTAL: missing, oversized, symlinked or hand-mangled → defaults,
- *    field by field; the server must boot on any file.
+ *  - READS are total: the server must boot on any file. A hand-edited entry
+ *    or field that fails validation falls back to its default, one field at a
+ *    time.
+ *  - WRITES never land on a file this module could not read (3.10 review d7).
+ *    A file that EXISTS but cannot be opened, is over the cap, is a symlink,
+ *    is not JSON, is not an object, or carries a `version` other than 1 puts
+ *    the store in the UNREADABLE state: reads answer from in-memory defaults,
+ *    every write throws `SessionMetaUnreadableError` (503) and nothing is
+ *    written, a byte-exact copy is kept as `session-meta.unreadable-<ts>.json`
+ *    when the bytes can be read, and `fileState()` reports it. Before this,
+ *    load() persisted a fresh empty state over such a file, silently wiping
+ *    every pin, archive and the unread baseline. Only a MISSING file starts
+ *    fresh. The state is re-checked on every write (and at most every
+ *    UNREADABLE_RECHECK_MS for reads), so a transient EMFILE/EACCES or an
+ *    operator who moves the file aside recovers without a restart.
  *  - `seen` only moves FORWARD (two windows marking the same chat cannot
  *    un-read it), and never past the session's real turnCount (the API
  *    clamps before calling in).
@@ -42,6 +55,7 @@
  *  - Writes are atomic 0600 (preferences.ts primitives). Spends nothing,
  *    reads no secrets, starts no process.
  */
+import { closeSync, constants as fsConstants, fstatSync, fsyncSync, lstatSync, openSync, readSync, rmSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 
 import {
@@ -56,6 +70,10 @@ export const VERSE_SESSION_META_FILE = 'session-meta.json';
 /** More chats than anyone keeps; past it, entries for deleted chats are pruned first. */
 export const VERSE_SESSION_META_MAX = 5_000;
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
+/** Largest unreadable file we still copy aside; past it the original is left in place (writes stay refused). */
+const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
+/** How long a read trusts an "unreadable" verdict before looking at the file again (writes always re-check). */
+export const UNREADABLE_RECHECK_MS = 2_000;
 const SESSION_ID_RE = /^[\w.-]{1,200}$/;
 const ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
 
@@ -100,6 +118,155 @@ export interface SessionMetaStore {
    * failed write keeps the seeds in memory for this process.
    */
   seedBaseline(sessions: readonly SessionMetaSubject[]): number;
+  /**
+   * Whether the file on disk is usable. `unreadable` means reads are showing
+   * defaults and every write is refused (see WRITES in the header) — a caller
+   * surfacing store health reads this; nothing here spends or starts anything.
+   */
+  fileState(): SessionMetaFileState;
+}
+
+export type SessionMetaFileState =
+  | { state: 'ok' | 'missing'; file: string }
+  | { state: 'unreadable'; file: string; reason: string; archivedTo: string | null };
+
+/**
+ * The write refusal. Duck-typed like VerseServiceError (`code` + `status`), so
+ * a route that forwards `status`/`code` shows the operator the real reason
+ * instead of a generic 500. 503: the store is temporarily unusable, the
+ * request itself was fine.
+ */
+export class SessionMetaUnreadableError extends Error {
+  readonly code = 'VERSE_STORE_UNREADABLE' as const;
+  readonly status = 503 as const;
+  readonly file: string;
+  readonly archivedTo: string | null;
+
+  constructor(file: string, reason: string, archivedTo: string | null) {
+    super(
+      `${file} ${reason}; nothing was written so the pins, archives and read state in it are kept. `
+        + (archivedTo ? `A copy is at ${archivedTo}. ` : '')
+        + 'Fix or move the file aside to start fresh.',
+    );
+    this.name = 'SessionMetaUnreadableError';
+    this.file = file;
+    this.archivedTo = archivedTo;
+  }
+}
+
+type FileRead =
+  | { kind: 'missing' }
+  | { kind: 'ok'; parsed: Record<string, unknown> }
+  | { kind: 'unreadable'; reason: string; fingerprint: string | null };
+
+function errnoOf(err: unknown): string | null {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : null;
+}
+
+/**
+ * Classify the file without ever following a symlink at its name. Only
+ * ENOENT is "missing": every other failure (EACCES, EMFILE, EIO, a
+ * directory, a link) is "exists but unreadable", which the caller must not
+ * write over.
+ */
+function readSessionMetaFile(file: string): FileRead {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(file);
+  } catch (err) {
+    if (errnoOf(err) === 'ENOENT') return { kind: 'missing' };
+    return { kind: 'unreadable', reason: `could not be inspected (${errnoOf(err) ?? 'error'})`, fingerprint: null };
+  }
+  const fingerprint = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  if (stat.isSymbolicLink()) return { kind: 'unreadable', reason: 'is a symlink', fingerprint: null };
+  if (!stat.isFile()) return { kind: 'unreadable', reason: 'is not a regular file', fingerprint: null };
+  const read = readPrivateFileCapped(file, MAX_FILE_BYTES);
+  if (!read) {
+    // lstat said a file is there, so null is an open/read error — or it was
+    // removed in between, which the next look will see as missing.
+    return { kind: 'unreadable', reason: 'could not be read', fingerprint };
+  }
+  if (read.truncated) return { kind: 'unreadable', reason: `is larger than ${MAX_FILE_BYTES} bytes`, fingerprint };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(read.text);
+  } catch {
+    return { kind: 'unreadable', reason: 'is not valid JSON', fingerprint };
+  }
+  if (!isObject(parsed)) return { kind: 'unreadable', reason: 'is not a JSON object', fingerprint };
+  // A newer build's format: rewriting it as v1 would drop whatever it added.
+  if ('version' in parsed && parsed['version'] !== 1) {
+    return { kind: 'unreadable', reason: 'has an unknown version', fingerprint };
+  }
+  // A `sessions` that is not a map would parse to "no pins at all" and the
+  // next write would make that permanent.
+  if ('sessions' in parsed && !isObject(parsed['sessions'])) {
+    return { kind: 'unreadable', reason: 'has a malformed sessions map', fingerprint };
+  }
+  return { kind: 'ok', parsed };
+}
+
+/**
+ * Byte-exact private copy of an unreadable file beside it. Null when the
+ * bytes cannot be read (the original is then the only copy — which is why
+ * writes stay refused rather than starting fresh). Never throws.
+ */
+function archiveUnreadableCopy(file: string, stamp: number): string | null {
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  let src: number;
+  try {
+    src = openSync(file, fsConstants.O_RDONLY | noFollow);
+  } catch {
+    return null;
+  }
+  let bytes: Buffer;
+  try {
+    const stat = fstatSync(src);
+    if (!stat.isFile() || stat.size > MAX_ARCHIVE_BYTES) return null;
+    bytes = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const n = readSync(src, bytes, offset, bytes.length - offset, offset);
+      if (n <= 0) break;
+      offset += n;
+    }
+    if (offset !== bytes.length) return null;
+  } catch {
+    return null;
+  } finally {
+    closeSync(src);
+  }
+  const iso = new Date(stamp).toISOString().replace(/[:.]/g, '-');
+  const target = file.replace(/\.json$/, '') + `.unreadable-${iso}.json`;
+  let out: number;
+  try {
+    // O_EXCL: two archivings in the same millisecond never clobber each other.
+    out = openSync(target, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, 0o600);
+  } catch {
+    return null;
+  }
+  try {
+    let offset = 0;
+    while (offset < bytes.length) {
+      const n = writeSync(out, bytes, offset, bytes.length - offset, offset);
+      if (n <= 0) throw new Error('archive write made no progress');
+      offset += n;
+    }
+    fsyncSync(out);
+    return target;
+  } catch {
+    // A half-written copy would look like a real archive later.
+    const fd = out;
+    out = -1;
+    try { closeSync(fd); } catch { /* already closed */ }
+    try { rmSync(target, { force: true }); } catch { /* best effort */ }
+    return null;
+  } finally {
+    if (out >= 0) {
+      try { closeSync(out); } catch { /* never throws */ }
+    }
+  }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -145,6 +312,15 @@ export function createSessionMetaStore(options: SessionMetaStoreOptions = {}): S
   const now = options.now ?? Date.now;
   const file = join(root, VERSE_SESSION_META_FILE);
   let state: StoredFile | null = null;
+  /**
+   * Set while the file exists but cannot be used (see WRITES in the header).
+   * `fallback` is what reads answer meanwhile — its baseline is fixed at the
+   * first detection so repeated re-checks do not keep moving it.
+   */
+  let damage: { reason: string; archivedTo: string | null; checkedAt: number; fallback: StoredFile } | null = null;
+  /** Archives already made, by file identity (ino:size:mtime), so a re-check never copies the same bytes twice. */
+  const archived = new Map<string, string | null>();
+  let lastKind: 'ok' | 'missing' = 'ok';
   /** Chats already considered by seedBaseline in this process (seeded or not coverable). */
   const considered = new Set<string>();
 
@@ -153,21 +329,56 @@ export function createSessionMetaStore(options: SessionMetaStoreOptions = {}): S
     writePrivateFileAtomic(file, `${JSON.stringify(next)}\n`);
   }
 
-  function load(): StoredFile {
-    if (state) return state;
-    const read = readPrivateFileCapped(file, MAX_FILE_BYTES);
-    const fallbackBaseline = new Date(now()).toISOString();
-    if (read && !read.truncated) {
-      let parsed: unknown = null;
-      try { parsed = JSON.parse(read.text); } catch { parsed = null; }
-      state = parseSessionMetaFile(parsed, fallbackBaseline);
+  function fresh(): StoredFile {
+    return { version: 1, baselineAt: new Date(now()).toISOString(), mindSeenAt: null, sessions: {} };
+  }
+
+  /** Look at the file again and settle `state` or `damage`. */
+  function inspect(): StoredFile {
+    const read = readSessionMetaFile(file);
+    if (read.kind === 'ok') {
+      damage = null;
+      lastKind = 'ok';
+      state = parseSessionMetaFile(read.parsed, new Date(now()).toISOString());
       return state;
     }
-    // First run (or an unreadable file): fix the baseline NOW and write it, so
-    // a restart before the first click cannot move it forward.
-    state = { version: 1, baselineAt: fallbackBaseline, mindSeenAt: null, sessions: {} };
-    try { persist(state); } catch { /* read-only HOME: keep the in-memory baseline for this process */ }
-    return state;
+    if (read.kind === 'missing') {
+      damage = null;
+      // First run: fix the baseline NOW and write it, so a restart before the
+      // first click cannot move it forward. Nothing was there to lose.
+      state = fresh();
+      try {
+        persist(state);
+        lastKind = 'ok';
+      } catch {
+        lastKind = 'missing'; /* read-only HOME: keep the in-memory baseline for this process */
+      }
+      return state;
+    }
+    let archivedTo: string | null = null;
+    if (read.fingerprint) {
+      if (archived.has(read.fingerprint)) archivedTo = archived.get(read.fingerprint) ?? null;
+      else {
+        archivedTo = archiveUnreadableCopy(file, now());
+        archived.set(read.fingerprint, archivedTo);
+      }
+    }
+    damage = { reason: read.reason, archivedTo, checkedAt: now(), fallback: damage?.fallback ?? fresh() };
+    return damage.fallback;
+  }
+
+  /** For reads: total, never throws, never writes over an unreadable file. */
+  function load(): StoredFile {
+    if (state) return state;
+    if (damage && now() - damage.checkedAt < UNREADABLE_RECHECK_MS) return damage.fallback;
+    return inspect();
+  }
+
+  /** For writes: the state to build on, or a refusal — never defaults standing in for an unreadable file. */
+  function loadForWrite(): StoredFile {
+    const s = state ?? inspect();
+    if (damage) throw new SessionMetaUnreadableError(file, damage.reason, damage.archivedTo);
+    return s;
   }
 
   function baselineSeen(session: SessionMetaSubject, s: StoredFile): number {
@@ -201,7 +412,7 @@ export function createSessionMetaStore(options: SessionMetaStoreOptions = {}): S
   }
 
   function write(session: SessionMetaSubject, entry: StoredEntry, existingIds?: ReadonlySet<string>): VerseSessionMeta {
-    const s = load();
+    const s = loadForWrite();
     const next: StoredFile = { ...s, sessions: { ...s.sessions } };
     const clean: StoredEntry = {};
     if (entry.pinned) clean.pinned = true;
@@ -235,7 +446,7 @@ export function createSessionMetaStore(options: SessionMetaStoreOptions = {}): S
       return out;
     },
     update(session, patch, existingIds) {
-      const s = load();
+      const s = loadForWrite();
       const current: StoredEntry = { ...(s.sessions[session.id] ?? {}) };
       // Materialise the baseline into the entry: once a chat has an entry,
       // its read state must not depend on the baseline any more.
@@ -248,7 +459,7 @@ export function createSessionMetaStore(options: SessionMetaStoreOptions = {}): S
       return write(session, current, existingIds);
     },
     markSeen(session, turnCount, existingIds) {
-      const s = load();
+      const s = loadForWrite();
       const current: StoredEntry = { ...(s.sessions[session.id] ?? {}) };
       const was = current.seen ?? baselineSeen(session, s);
       const target = Math.max(0, Math.trunc(turnCount));
@@ -259,7 +470,7 @@ export function createSessionMetaStore(options: SessionMetaStoreOptions = {}): S
     mindSeenAt: () => load().mindSeenAt,
     markMindSeen(at) {
       if (!isIso(at)) return;
-      const s = load();
+      const s = loadForWrite();
       if (s.mindSeenAt && Date.parse(s.mindSeenAt) >= Date.parse(at)) return;
       const next = { ...s, mindSeenAt: at };
       persist(next);
@@ -268,6 +479,10 @@ export function createSessionMetaStore(options: SessionMetaStoreOptions = {}): S
     baselineAt: () => load().baselineAt,
     seedBaseline(sessions) {
       const s = load();
+      // Seeding is a write: over an unreadable file it would replace the real
+      // seen marks with baseline guesses. Reads keep using the implied
+      // baseline until the file is readable again.
+      if (damage) return 0;
       let seeded: Record<string, StoredEntry> | null = null;
       let room = VERSE_SESSION_META_MAX - Object.keys(s.sessions).length;
       for (const session of sessions) {
@@ -299,6 +514,11 @@ export function createSessionMetaStore(options: SessionMetaStoreOptions = {}): S
       }
       state = next;
       return count;
+    },
+    fileState() {
+      load();
+      if (damage) return { state: 'unreadable', file, reason: damage.reason, archivedTo: damage.archivedTo };
+      return { state: lastKind, file };
     },
   };
 }

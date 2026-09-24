@@ -13,10 +13,17 @@ import { join } from 'node:path';
 
 import {
   BACKPRESSURE_LIMITS,
+  UNKNOWN_PR_STATE_COUNT_MS,
+  awaitsVerification,
   emptyBackpressureState,
   evaluateBackpressure,
+  fleetPrKey,
   loadBackpressureState,
+  openFleetPrRefsFromLedger,
   openFleetPrsFromLedger,
+  prStateFromMergeState,
+  reconcileOpenFleetPrs,
+  type ObservedPrState,
   outcomeEventsFromLedger,
   saveBackpressureState,
   trailingFailures,
@@ -24,6 +31,11 @@ import {
 } from '../src/core/fleet/backpressure.js';
 import type { LedgerEntry } from '../src/core/authority/types.js';
 import type { GateId, LandingRecord } from '../src/core/fleet/fleet-types.js';
+import { mkdirSync } from 'node:fs';
+import { makeFixture } from './helpers/h1-fixture.js';
+import { newFleetMergeState, writeFleetMergeState, type FleetMergeStateRead, type FleetMergeStateV1 } from '../src/core/fleet/fleet-merge-state.js';
+import { createProposal } from '../src/core/inbox/store.js';
+import { defaultLiveHooksDeps } from '../src/core/fleet/tick-hooks-live.js';
 
 const NOW = Date.parse('2026-09-24T12:00:00.000Z');
 const REPO = 'ashlrai/binshield';
@@ -186,5 +198,116 @@ describe('state store', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review c1: "waiting for verification" counts only work G3 will reach.
+// ---------------------------------------------------------------------------
+
+function mergeRecord(over: Partial<FleetMergeStateV1> = {}): FleetMergeStateV1 {
+  return {
+    ...newFleetMergeState({ key: 'p-1', kind: 'change', proposalId: 'p-1', revertsLandingId: null, repo: REPO, repoPath: '/m', enforcement: 'server', nowIso: new Date(NOW).toISOString() }),
+    ...over,
+  };
+}
+
+function memo(verdict: 'pass' | 'wait' | 'owner-lane' | 'refuse', code = 'x') {
+  return { digest: 'd'.repeat(64), verdict, code, headSha: null, at: new Date(NOW).toISOString() };
+}
+
+const prMemo = {
+  number: 7, nodeId: 'n', repositoryId: 'r', branch: 'ashlr/fleet/p-1', baseBranch: 'main', baseSha: 'a'.repeat(40),
+  headSha: 'b'.repeat(40), treeSha: 'c'.repeat(40), ownerLane: true, ownerLaneReason: 'protected path', openedAt: new Date(NOW).toISOString(),
+  ledgered: true, state: 'open' as const, closedBy: null, nextCheckAt: null, checkBackoffMs: 0, checks: null, wouldMergeHeadSha: null,
+};
+
+describe('awaitsVerification (review c1)', () => {
+  const ok = (record: FleetMergeStateV1): FleetMergeStateRead => ({ state: 'ok', record });
+
+  it('counts work the verifier will reach: not yet evaluated, or every pre-G3 gate passed', () => {
+    expect(awaitsVerification({ state: 'missing' })).toBe(true);
+    expect(awaitsVerification(ok(mergeRecord()))).toBe(true);
+    expect(awaitsVerification(ok(mergeRecord({ gates: { G0: memo('pass'), G1: memo('pass'), G1b: memo('pass'), G2: memo('pass') } })))).toBe(true);
+    // Verify-infra retry at G3 is still the verifier's work.
+    expect(awaitsVerification(ok(mergeRecord({ gates: { G0: memo('pass'), G2: memo('pass'), G3: memo('wait', 'verify-infra') } })))).toBe(true);
+  });
+
+  it('does not count G2 over-cap waits, G0 waits, owner-lane PRs, outcomes or unreadable state', () => {
+    expect(awaitsVerification(ok(mergeRecord({ gates: { G0: memo('pass'), G1: memo('pass'), G2: memo('wait', 'risk-over-cap') } })))).toBe(false);
+    expect(awaitsVerification(ok(mergeRecord({ gates: { G0: memo('wait', 'no-judge-seat') } })))).toBe(false);
+    expect(awaitsVerification(ok(mergeRecord({ gates: { G0: memo('pass'), G1: memo('owner-lane') }, pr: prMemo })))).toBe(false);
+    expect(awaitsVerification(ok(mergeRecord({ outcome: 'rejected' })))).toBe(false);
+    expect(awaitsVerification({ state: 'corrupt', reason: 'bad' })).toBe(false);
+  });
+
+  it('five medium-risk proposals parked at G2 no longer hold the whole fleet (end to end, tmp HOME)', async () => {
+    const fx = makeFixture();
+    try {
+      const mirror = `${fx.home}/.ashlr/fleet/mirrors/ashlrai__binshield`;
+      mkdirSync(mirror, { recursive: true });
+      const ids: string[] = [];
+      for (let i = 0; i < 6; i += 1) {
+        const p = createProposal({ repo: mirror, origin: 'swarm', kind: 'patch', title: `change ${i}`, summary: 's', diff: `diff --git a/f${i} b/f${i}\n` });
+        expect(p.status).toBe('pending');
+        ids.push(p.id);
+      }
+      // Five parked at G2 over the stage cap; one untouched (it may go straight to G3).
+      for (const id of ids.slice(0, 5)) {
+        expect(writeFleetMergeState({ ...mergeRecord({ gates: { G0: memo('pass'), G1: memo('pass'), G1b: memo('pass'), G2: memo('wait', 'risk-over-cap') } }), key: id, proposalId: id })).toBe(true);
+      }
+      const waiting = await defaultLiveHooksDeps().waitingVerify([mirror]);
+      expect(waiting).toBe(1);
+      const verdict = evaluateBackpressure({ nowMs: NOW, repos: [REPO], openPrsByRepo: {}, waitingVerify: waiting, outcomes: [], holds: [], state: emptyBackpressureState() });
+      expect(verdict.holdProduction).toBeNull();
+    } finally {
+      fx.cleanup();
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review c5: open fleet PRs reconcile with GitHub / merge state.
+// ---------------------------------------------------------------------------
+
+describe('open fleet PR reconciliation (review c5)', () => {
+  function opened(number: number, at: string, proposalId: string | null = `p-${number}`): LedgerEntry {
+    return entry('pr:opened', { v: 1, repo: REPO, number, proposalId, branch: `ashlr/fleet/p-${number}`, headSha: 'a'.repeat(40), kind: 'change', ownerLane: true, at }, at);
+  }
+
+  it('PRs Mason merged or closed on GitHub stop counting, so the repo is not paused for 7 days', () => {
+    const rows = [opened(1, minutes(60)), opened(2, minutes(50)), opened(3, minutes(40))];
+    expect(openFleetPrsFromLedger(rows)).toEqual({ [REPO]: 3 });
+    const refs = openFleetPrRefsFromLedger(rows);
+    expect(refs.map((r) => r.proposalId)).toEqual(['p-1', 'p-2', 'p-3']);
+    const observed = new Map<string, ObservedPrState>([
+      [fleetPrKey(REPO, 1), 'merged'],
+      [fleetPrKey(REPO, 2), 'closed'],
+      [fleetPrKey(REPO, 3), 'open'],
+    ]);
+    const counts = reconcileOpenFleetPrs(refs, observed, NOW);
+    expect(counts).toEqual({ [REPO]: 1 });
+    const verdict = evaluateBackpressure({ nowMs: NOW, repos: [REPO], openPrsByRepo: counts, waitingVerify: 0, outcomes: [], holds: [], state: emptyBackpressureState() });
+    expect(verdict.pausedRepos[REPO]).toBeUndefined();
+  });
+
+  it('unknown state counts (fail closed) but only for a bounded time, never the whole evidence window', () => {
+    const fresh = opened(1, new Date(NOW - 60_000).toISOString());
+    const stale = opened(2, new Date(NOW - UNKNOWN_PR_STATE_COUNT_MS - 60_000).toISOString());
+    const counts = reconcileOpenFleetPrs(openFleetPrRefsFromLedger([fresh, stale]), new Map(), NOW);
+    expect(counts).toEqual({ [REPO]: 1 });
+    // Observed open is never aged out.
+    const openStale = reconcileOpenFleetPrs(openFleetPrRefsFromLedger([stale]), new Map([[fleetPrKey(REPO, 2), 'open' as const]]), NOW);
+    expect(openStale).toEqual({ [REPO]: 1 });
+  });
+
+  it('reads terminal PR state from the fleet merge record', () => {
+    const ok = (record: FleetMergeStateV1): FleetMergeStateRead => ({ state: 'ok', record });
+    expect(prStateFromMergeState(ok(mergeRecord({ pr: { ...prMemo, state: 'merged' } })), 7)).toBe('merged');
+    expect(prStateFromMergeState(ok(mergeRecord({ pr: { ...prMemo, state: 'closed', closedBy: 'github' }, outcome: 'closed' })), 7)).toBe('closed');
+    expect(prStateFromMergeState(ok(mergeRecord({ pr: prMemo, outcome: 'merged' })), 7)).toBe('merged');
+    expect(prStateFromMergeState(ok(mergeRecord({ pr: prMemo })), 7)).toBe('open');
+    expect(prStateFromMergeState(ok(mergeRecord({ pr: prMemo })), 8)).toBeNull();
+    expect(prStateFromMergeState({ state: 'missing' }, 7)).toBeNull();
   });
 });

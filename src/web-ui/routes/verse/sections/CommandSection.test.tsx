@@ -2,10 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CommandSection } from './CommandSection.js';
-import { evictAll } from '../../../data/cache.js';
+import { evictAll, runQuery } from '../../../data/cache.js';
+import { VERSE_BOOTSTRAP_KEY } from '../verse-queries.js';
 import { clearMutationToken, setMutationToken } from '../../../data/auth-store.js';
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
-import { authorityStatus } from '../command/fixtures.test-support.js';
+import { authorityStatus, budgetView } from '../command/fixtures.test-support.js';
 import { resetActivityForTest } from '../shell/useActivity.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
 
@@ -136,6 +137,39 @@ describe('CommandSection — live fleet', () => {
     await ready();
     await user.click(screen.getByRole('button', { name: /Budget/ }));
     expect(screen.getByRole('dialog', { name: 'Budget' })).toHaveTextContent('Your grant allows up to Balanced.');
+  });
+});
+
+// P4 regressions: the Claude card in production (no machine reset time) and
+// the Spend caption (needs the live budget to list subscription percent).
+describe('CommandSection — seat capacity and metered spend', () => {
+  it('puts subscription window usage in the metered-spend caption', async () => {
+    stubSurfaceFetch({ kind: 'live' });
+    render(<CommandSection />);
+    await ready();
+    await waitFor(() =>
+      expect(screen.getByRole('group', { name: 'Key numbers' })).toHaveTextContent('subscriptions: Claude (claude-a) 74% · Grok (grok-a) 31% · Codex (codex-a) 100% of window used'),
+    );
+  });
+
+  it('draws Claude\'s readings with its own reset words when it publishes no reset time', async () => {
+    const now = Date.now();
+    const view = budgetView('live', now);
+    view.headroom[0] = { ...view.headroom[0]!, resetAt: null };
+    // The roster is read from the cache the console loads at startup — never fetched here.
+    await runQuery(VERSE_BOOTSTRAP_KEY, async () => ({
+      seats: [{ id: 'claude-a', capacity: { windows: [
+        { id: 'five_hour', usedPercent: 74, resetsAt: null, resetDescription: 'Sep 24 at 5pm (America/New_York)', limitReached: false, measured: true },
+        { id: 'seven_day', usedPercent: 54, resetsAt: null, resetDescription: 'Sep 25 at 7pm (America/New_York)', limitReached: false, measured: true },
+      ] } }],
+    }));
+    const { fetchMock } = stubSurfaceFetch({ kind: 'live', now, routes: { '/api/verse/budget': view } });
+    render(<CommandSection />);
+    await ready();
+    const seats = await screen.findByRole('group', { name: 'Capacity per seat' });
+    await waitFor(() => expect(seats).toHaveTextContent('26% left · resets Sep 24 at 5pm (America/New_York)'));
+    expect(within(seats).queryByText(/No window reading/)).toBeNull();
+    expect(fetchMock.mock.calls.some(([u]) => String(u).includes('/api/verse/bootstrap'))).toBe(false);
   });
 });
 

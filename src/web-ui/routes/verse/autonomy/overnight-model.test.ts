@@ -148,6 +148,17 @@ describe('projectOvernight', () => {
     expect(status?.run?.discarded[0]?.reason).toBe('tests failed');
   });
 
+  // P4: mirrors are counted apart from repos (F5's server field).
+  it('carries the fleet mirror count apart from repos, and keeps "absent" distinct from "not recorded"', () => {
+    const base = { armed: true, repos: 9, gate: null, run: null };
+    expect(projectOvernight({ ...base, mirrors: 9 })?.mirrors).toBe(9);
+    expect(projectOvernight({ ...base, mirrors: null })?.mirrors).toBeNull();
+    expect(projectOvernight({ ...base, mirrors: 'nine' })?.mirrors).toBeNull();
+    const older = projectOvernight(base)!;
+    expect('mirrors' in older).toBe(false);
+    expect(older.repos).toBe(9);
+  });
+
   it('refuses a body that does not say whether anything is armed', () => {
     expect(projectOvernight({ run: null })).toBeNull();
     expect(projectOvernight(null)).toBeNull();

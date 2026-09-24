@@ -14,6 +14,8 @@ import type { LearningStateV1 } from '../../../../core/learn/harness-types.js';
 import type { NeedsYouItem, NeedsYouSeverity, VerseActivityResponse } from '../../../../core/verse/workbench-types.js';
 import type { FleetHistoryDay, FleetHistoryResponse } from '../../../../core/verse/fleet-history-types.js';
 import type { BudgetView } from '../../../../core/routing/policy.js';
+import type { VerseSeat } from '../../../../core/verse/types.js';
+import { classifyWindow } from '../../../../core/routing/headroom.js';
 import type { EffectivePolicy } from '../../../../core/authority/types.js';
 import type { StatTileDelta } from '../../../components/charts/StatTile.js';
 
@@ -68,6 +70,42 @@ export interface KpiInputs {
   history: FleetHistoryResponse | null;
   learning: LearningStateV1 | null;
   policy: EffectivePolicy | null;
+  /**
+   * The live budget view, for subscription usage as PERCENT of each paid
+   * seat's binding window. Optional so a caller without it still renders the
+   * metered figure honestly; the caption then points at the seat burn-downs.
+   */
+  budget?: BudgetView | null;
+}
+
+/**
+ * The per-token (metered API) part of a day's spend, when the server splits
+ * it out. WHY not `estCostUsd`: that field prices EVERY run's tokens from a
+ * static table — Claude/Codex/Grok subscription CLI runs included — so
+ * showing it as "spend vs the metered cap" reported subscription work as a
+ * budget breach (review 3.10 c10; the default grant's cap is $0/day).
+ * Subscriptions are not billed per token: their cost is window usage, shown
+ * as percent. fleet-history reports `meteredCostUsd` per day (per-token API
+ * engines only — core/verse/fleet-history.ts `runBilling`); a server that
+ * predates it leaves the figure unknown — "—", never the mixed estimate.
+ */
+export function meteredCost(d: FleetHistoryDay): number | null {
+  const v = (d as FleetHistoryDay & { meteredCostUsd?: number | null }).meteredCostUsd;
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : null;
+}
+
+/** "Claude 54% · Grok 31% of window used" — paid seats' binding-window usage, never dollars. */
+export function subscriptionUsage(view: BudgetView | null | undefined): string | null {
+  if (!view) return null;
+  const info = new Map(view.seatInfo.map((s) => [s.seatId, s]));
+  const parts: string[] = [];
+  for (const h of view.headroom) {
+    const seat = info.get(h.seatId);
+    if (!seat || seat.free) continue;
+    const used = h.bindingWindow === 'session' ? h.sessionUsedPercent : h.bindingWindow === 'weekly' ? h.weeklyUsedPercent : null;
+    parts.push(`${seat.label} ${used === null || !Number.isFinite(used) ? '—' : `${Math.round(used)}%`}`);
+  }
+  return parts.length ? `${parts.join(' · ')} of window used` : null;
 }
 
 const signedInt = (v: number) => (v > 0 ? `+${v}` : String(v));
@@ -92,10 +130,10 @@ export function greenTrend(fleet: FleetLiveSnapshotV1 | null): (number | null)[]
   return Array.from({ length: len }, (_, i) => mean(fleet.repos.map((r) => r.greenTrend[i - (len - r.greenTrend.length)] ?? null)));
 }
 
-export function buildKpis({ fleet, history, learning, policy }: KpiInputs): Kpi[] {
+export function buildKpis({ fleet, history, learning, policy, budget }: KpiInputs): Kpi[] {
   const days = history?.days ?? [];
   const merges = (d: FleetHistoryDay) => d.merges.realized;
-  const spend = (d: FleetHistoryDay) => d.estCostUsd;
+  const spend = meteredCost;
 
   // Merged · 7d — the live summary when the daemon answers, else the history window.
   const merged7 = fleet?.summary.merged7d ?? windowSum(days, merges, 7);
@@ -110,11 +148,22 @@ export function buildKpis({ fleet, history, learning, policy }: KpiInputs): Kpi[
   const gPrior = gTrend.length >= 14 ? mean(gTrend.slice(-14, -7)) : null;
   const greenDelta = gNow !== null && gPrior !== null ? gNow - gPrior : null;
 
-  // Spend vs cap — metered spend only; subscriptions are not billed per token.
+  // Metered spend vs cap — per-token API spend ONLY (see meteredCost);
+  // subscriptions go in the caption as percent of their window.
   const spend7 = windowSum(days, spend, 7);
   const spendPrior = windowSum(days, spend, 7, 7);
   const capPerDay = policy ? policy.spend.meteredUsdPerDay : null;
   const spendValue = spend7 === null ? '—' : `$${spend7.toFixed(2)}${capPerDay !== null ? ` / $${(capPerDay * 7).toFixed(0)}` : ''}`;
+  const meteredKnown = days.some((d) => meteredCost(d) !== null);
+  const capWords = capPerDay === null ? null : capPerDay === 0 ? 'metered APIs off ($0 cap)' : `cap $${capPerDay}/day`;
+  const subs = subscriptionUsage(budget);
+  const spendCaption = [
+    capWords,
+    meteredKnown ? null : 'metered split not reported yet',
+    subs ? `subscriptions: ${subs}` : 'subscriptions are window usage, not dollars — see seat capacity',
+  ]
+    .filter(Boolean)
+    .join(' · ');
 
   // Lift — the active harness's own experiment (null = baseline in force).
   const active = learning?.active ?? null;
@@ -151,12 +200,12 @@ export function buildKpis({ fleet, history, learning, policy }: KpiInputs): Kpi[
     },
     {
       id: 'spend',
-      label: 'Spend vs cap · 7d',
+      label: 'Metered spend · 7d',
       value: spendValue,
       delta: spend7 !== null && spendPrior !== null ? { value: spend7 - spendPrior, versus: 'vs prior 7d', goodWhenPositive: false, format: signedUsd } : null,
-      trend: days.length ? lastValues(days, spend, 14) : undefined,
-      trendLabel: 'Estimated metered spend per day',
-      caption: capPerDay === 0 ? 'metered APIs off — subscriptions only' : 'metered APIs; subscriptions not billed per token',
+      trend: meteredKnown ? lastValues(days, spend, 14) : undefined,
+      trendLabel: 'Metered (per-token API) spend per day',
+      caption: spendCaption,
     },
     {
       id: 'lift',
@@ -273,7 +322,20 @@ export interface SeatBurn {
   points: { t: number; remaining: number | null }[];
   start: number | null;
   resetAt: number | null;
+  /**
+   * The provider's own reset wording for the binding window, verbatim
+   * ("Sep 25 at 7pm (America/New_York)"), when the seat roster carries it.
+   * Claude publishes ONLY this — never a machine instant — so a Claude card
+   * has readings but `resetAt === null`; the card shows the words and draws
+   * the readings with no projected reset point (never a synthesized one).
+   */
+  resetText: string | null;
   reservePercent: number;
+  /**
+   * The line autonomy stops at IN THE WINDOW THIS CHART DRAWS, as remaining
+   * percent (see `bindingLine`); null when that window has no limit.
+   */
+  line: { value: number; label: string } | null;
   enabled: boolean;
   free: boolean;
   eligible: boolean;
@@ -282,13 +344,110 @@ export interface SeatBurn {
 
 const WINDOW_MS = { session: 5 * HOUR, weekly: 7 * DAY } as const;
 
-/** One burn-down per seat, paid seats first (they are the ones that run out). */
-export function seatBurns(view: BudgetView | null, history: Readonly<Record<string, SeatReading[]>>): SeatBurn[] {
+/**
+ * The stop line for the binding window, mirroring core/routing/headroom.ts
+ * exactly (review 3.10 d2). The reserve protects the LONG (weekly) window;
+ * the 5-hour window is capped by `maxSessionWindowPercent` — except when the
+ * seat has no weekly window at all, where the short one carries both limits
+ * and the tighter one wins. Drawing the weekly reserve on a 5-hour chart put
+ * Mason's balanced cutoff at 60% used instead of 70% and made the verdict say
+ * "autonomy has stopped" while the server still had the seat eligible.
+ *
+ * `weeklyUsedPercent === null` stands in for "no weekly window": a weekly
+ * window whose reading is unknown makes the seat ineligible server-side
+ * anyway (unknown usage is never headroom), and the card shows that reason.
+ */
+export function bindingLine(
+  h: { bindingWindow: 'session' | 'weekly' | null; weeklyUsedPercent: number | null },
+  policy: { reservePercent: number; maxSessionWindowPercent?: number } | undefined,
+): { value: number; label: string } | null {
+  if (!policy || h.bindingWindow === null) return null;
+  const reserveCeiling = 100 - policy.reservePercent;
+  const sessionCeiling = policy.maxSessionWindowPercent ?? 100;
+  let ceiling: number;
+  let label: string;
+  if (h.bindingWindow === 'weekly') {
+    ceiling = reserveCeiling;
+    label = 'Reserved for you';
+  } else if (h.weeklyUsedPercent === null && reserveCeiling < sessionCeiling) {
+    ceiling = reserveCeiling;
+    label = 'Reserved for you';
+  } else {
+    ceiling = sessionCeiling;
+    label = '5-hour ceiling';
+  }
+  const value = 100 - ceiling;
+  return value > 0 ? { value, label } : null;
+}
+
+/**
+ * Axis/verdict time format per window (review 3.10 c17). A weekly window
+ * starts exactly seven days before it resets, so weekday + time alone printed
+ * "Sat 10:27 AM … Resets Sat 10:27 AM"; the weekly form carries the date.
+ */
+export function burnTimeFormat(window: 'session' | 'weekly' | null): (ms: number) => string {
+  const opts: Intl.DateTimeFormatOptions =
+    window === 'session'
+      ? { weekday: 'short', hour: 'numeric', minute: '2-digit' }
+      : { weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' };
+  return (ms) => {
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? '' : d.toLocaleString('en-US', opts);
+  };
+}
+
+/**
+ * The provider's reset wording for the seat window that plays `binding`'s
+ * role. WHY the seat roster and not the budget route: `SeatHeadroom` (the
+ * frozen budget wire shape) carries only a machine `resetAt`, which is
+ * structurally null for Claude — the provider's sentence lives on the seat's
+ * capacity windows. The window is picked with the SAME classifier the server
+ * used to choose the binding window (core/routing/headroom.ts), so the words
+ * belong to the window the chart draws, not to a per-model window beside it.
+ */
+export function bindingResetText(
+  seat: Pick<VerseSeat, 'capacity'> | undefined,
+  engine: SeatBurn['engine'],
+  binding: 'session' | 'weekly' | null,
+  nowMs: number,
+): string | null {
+  if (!seat?.capacity || binding === null || engine === 'local') return null;
+  for (const w of seat.capacity.windows) {
+    const text = typeof w.resetDescription === 'string' ? w.resetDescription.trim() : '';
+    if (text.length === 0) continue;
+    if (classifyWindow(engine, { id: w.id, usedPercent: w.usedPercent, resetsAt: w.resetsAt, resetDescription: w.resetDescription, limitReached: w.limitReached }, nowMs) === binding) return text;
+  }
+  return null;
+}
+
+/**
+ * "resets Sep 25 at 7pm (America/New_York)" from the provider's words. The
+ * collector strips the leading "resets" (claude-account-usage.ts) but other
+ * paths keep it; either way the sentence itself is shown verbatim.
+ */
+export function resetWords(text: string): string {
+  return `resets ${text.replace(/^resets\s+/i, '')}`;
+}
+
+/**
+ * One burn-down per seat, paid seats first (they are the ones that run out).
+ * `seats` (the live roster, optional) supplies the provider's reset wording
+ * for seats that publish no machine reset time (see `bindingResetText`).
+ */
+export function seatBurns(
+  view: BudgetView | null,
+  history: Readonly<Record<string, SeatReading[]>>,
+  seats?: readonly VerseSeat[] | null,
+): SeatBurn[] {
   if (!view) return [];
   const info = new Map(view.seatInfo.map((s) => [s.seatId, s]));
+  const roster = new Map((seats ?? []).map((s) => [s.id, s]));
+  const sampled = Date.parse(view.sampledAt);
+  const nowMs = Number.isFinite(sampled) ? sampled : Date.now();
   return view.headroom
     .map((h): SeatBurn => {
       const i = info.get(h.seatId);
+      const engine = i?.engine ?? 'local';
       const resetAt = h.resetAt ? Date.parse(h.resetAt) : NaN;
       const windowMs = h.bindingWindow ? WINDOW_MS[h.bindingWindow] : null;
       const start = Number.isFinite(resetAt) && windowMs ? resetAt - windowMs : null;
@@ -296,12 +455,14 @@ export function seatBurns(view: BudgetView | null, history: Readonly<Record<stri
       return {
         seatId: h.seatId,
         label: i?.label ?? h.seatId,
-        engine: i?.engine ?? 'local',
+        engine,
         window: h.bindingWindow,
         points: readings.filter((r) => start === null || r.t >= start).map((r) => ({ t: r.t, remaining: Math.max(0, 100 - r.used) })),
         start,
         resetAt: Number.isFinite(resetAt) ? resetAt : null,
+        resetText: bindingResetText(roster.get(h.seatId), engine, h.bindingWindow, nowMs),
         reservePercent: view.effective[h.seatId]?.reservePercent ?? 0,
+        line: bindingLine(h, view.effective[h.seatId]),
         enabled: view.effective[h.seatId]?.enabled ?? false,
         free: i?.free ?? false,
         eligible: h.eligibleForAutonomy,

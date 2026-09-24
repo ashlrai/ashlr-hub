@@ -28,6 +28,12 @@
  * `subscriptionAllows` reads in processes without a collector — so as long as
  * the Verse server runs `startBudgetCapacityPublisher`, the daemon sees Claude
  * readings no older than one publish interval.
+ *
+ * When NO Verse server runs, the standing daemon publishes instead
+ * (daemon/capacity-publisher.ts → `publishCapacitySnapshotFrom`): it samples
+ * through its own short-lived account collector under the exclusive native
+ * metadata lease and writes only while no fresher snapshot from another
+ * publisher exists, so there is one writer at a time (review finding c8).
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
@@ -35,6 +41,7 @@ import type { ApiModule } from '../verse/api-modules.js';
 import type { VerseApiContext } from '../verse/verse-api.js';
 import type { AshlrConfig } from '../types.js';
 import type { VerseSeat } from '../verse/types.js';
+import type { VerseAccountCollector } from '../verse/accounts.js';
 import { passesMutationGate, readBody, sendJson } from '../web/api.js';
 import { recordShadowDecision, loadBudgetPolicy, readShadowDecisions, updateBudgetPolicy, writeCapacitySnapshotAsync } from './budget-store.js';
 import { assessSeat, capacityFromSeat, HEADROOM_READING_MAX_AGE_MS, type SeatCapacity } from './headroom.js';
@@ -81,7 +88,13 @@ export interface CapacityReading {
   sampledAt: string;
 }
 
-export type CapacitySource = (cfg: AshlrConfig) => Promise<CapacityReading>;
+/**
+ * `collector` (daemon publisher only): read telemetry from THIS collector
+ * rather than the process-global Verse registration — the daemon has no
+ * Verse collector registered and must not register one (the registry is the
+ * Verse server's).
+ */
+export type CapacitySource = (cfg: AshlrConfig, opts?: { collector?: VerseAccountCollector | null }) => Promise<CapacityReading>;
 
 let identityCache: { cfg: AshlrConfig; expiresAt: number; seats: VerseSeat[] } | null = null;
 let identityInFlight: Promise<VerseSeat[]> | null = null;
@@ -92,7 +105,7 @@ let identityInFlight: Promise<VerseSeat[]> | null = null;
  * call (cheap: in-memory readings plus small file reads), exactly the split
  * verse-api's `liveSeats` uses.
  */
-async function defaultCapacitySource(cfg: AshlrConfig): Promise<CapacityReading> {
+async function defaultCapacitySource(cfg: AshlrConfig, opts: { collector?: VerseAccountCollector | null } = {}): Promise<CapacityReading> {
   const seatsMod = await import('../verse/seats.js');
   const now = Date.now();
   let seats: VerseSeat[];
@@ -113,7 +126,10 @@ async function defaultCapacitySource(cfg: AshlrConfig): Promise<CapacityReading>
     }
     seats = await identityInFlight;
   }
-  const telemetry = seatsMod.buildSeatTelemetry(seatsMod.resolveAccountsRoot(cfg));
+  const telemetry = seatsMod.buildSeatTelemetry(
+    seatsMod.resolveAccountsRoot(cfg),
+    opts.collector !== undefined ? { collector: opts.collector } : {},
+  );
   return {
     sampledAt: new Date().toISOString(),
     seats: seats.map((seat) => capacityFromSeat(
@@ -364,6 +380,21 @@ export function startBudgetCapacityPublisher(cfg: AshlrConfig, opts: { intervalM
   timer.unref?.();
   tick();
   return () => clearInterval(timer);
+}
+
+/**
+ * Daemon-side publish (review finding c8): read capacity through `collector`
+ * — a collector the caller started and OWNS (it holds the native metadata
+ * lease) — and write the snapshot. Returns the snapshot's `publishedAt`, which
+ * the caller remembers so it can tell its own write from another publisher's.
+ * Throws on a failed read or write: the caller then stays cold, and readers
+ * of a stale snapshot fail CLOSED.
+ */
+export async function publishCapacitySnapshotFrom(cfg: AshlrConfig, collector: VerseAccountCollector): Promise<string> {
+  const reading = await capacitySource(cfg, { collector });
+  const snapshot = await writeCapacitySnapshotAsync(reading.seats, new Date());
+  lastSnapshotAt = Date.now();
+  return snapshot.publishedAt;
 }
 
 /**

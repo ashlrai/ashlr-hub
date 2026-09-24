@@ -515,6 +515,26 @@ export const LEDGER_GENESIS_PREV_HASH = '0'.repeat(64);
 export type GrantPauseCode = 'authority-code-changed' | 'ledger-broken';
 
 /**
+ * An autonomous run whose sandbox-violation evidence is UNKNOWN (3.10 d0):
+ * the kernel log watch for its tagged deny rules was unavailable or did not
+ * reach its end barrier, so an empty violation list proves nothing. The
+ * rollout neither counts the run as clean nor treats it as a breach: the row
+ * HOLDS the stage (never advances it, never regresses it) — see
+ * `EVIDENCE_UNKNOWN_HOLD_MS` in authority/rollout.ts.
+ */
+export interface SandboxEvidenceUnknownRecord {
+  v: 1;
+  engine: string;
+  repo: string | null;
+  runId: string | null;
+  /** The kernel evidence state (never `complete` — a complete run writes no row). */
+  state: 'incomplete' | 'unavailable';
+  /** Plain sentence from the evidence watch, no paths. */
+  reason: string;
+  at: string;
+}
+
+/**
  * Payload per ledger event kind. Rows are immutable once written, so a
  * payload never changes shape — add a new kind instead. Grouped by writer.
  */
@@ -587,6 +607,8 @@ export interface LedgerPayloads {
   // Safety signals that regress the rollout (U2 / U5 / U6)
   'sandbox:violation': SandboxViolationRecord;
   'reserve:breach': ReserveBreachRecord;
+  /** d0: a run whose violation evidence is unknown — HOLDS the rollout, never moves it. */
+  'sandbox:evidence-unknown': SandboxEvidenceUnknownRecord;
   // U8 — Leader
   'leader:memo': LeaderMemoRecord;
   /** Written on every status change (scheduled, applied — with its inverse — refused, failed, escalated). */
@@ -631,6 +653,7 @@ export const LEDGER_EVENT_KINDS = keyList<LedgerPayloads>({
   'hold:cleared': true,
   'sandbox:violation': true,
   'reserve:breach': true,
+  'sandbox:evidence-unknown': true,
   'leader:memo': true,
   'leader:action': true,
   'leader:vetoed': true,

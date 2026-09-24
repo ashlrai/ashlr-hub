@@ -25,6 +25,10 @@
  *     local store (~/.ashlr/vision/leader/actions.json) is a working copy the
  *     UI reads; it is never trusted to AUTHORIZE anything, because it is not
  *     hash-chained.
+ *   - Apply and veto settle a stored row by compare-and-set (a claim taken
+ *     under the store lock), never by blind overwrite: a veto that lands
+ *     mid-apply stands and the applier undoes its change; one action is
+ *     applied at most once across processes.
  *   - A veto takes the inverse from the ledger's `applied` row. When the
  *     ledger cannot be read, a veto still runs — lowering never waits on
  *     anything (I1) — but only inverses that cannot raise autonomy (cancel a
@@ -41,8 +45,8 @@
  * reads it); its imports are fs/crypto only — every heavy dependency (GitHub,
  * experiments, the task queue) is imported lazily inside the default deps.
  */
-import { createHash } from 'node:crypto';
-import { readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { lstatSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { goalsDir } from '../config.js';
@@ -262,6 +266,22 @@ export interface RestoreFile {
 export interface StoredLeaderAction {
   action: LeaderAction;
   restore: RestoreFile[];
+  /**
+   * An in-flight apply or veto owns this row (compare-and-set under the store
+   * lock). WHY: the daemon, `ashlr leader tick` and the comms poller can all
+   * apply, and Verse / CLI / Telegram can all veto, from different processes.
+   * Without a claim a veto that landed mid-apply was overwritten with
+   * `applied` and the change stood against Mason's veto, and two tickers could
+   * apply one action twice (review 310 c7). Absent on rows written before
+   * 3.10.1 = unclaimed.
+   */
+  claim?: ActionClaim | null;
+}
+
+interface ActionClaim {
+  op: 'apply' | 'veto';
+  token: string;
+  at: string;
 }
 
 interface LeaderActionStoreV1 {
@@ -273,20 +293,32 @@ interface LeaderActionStoreV1 {
   dismissed: { id: string; at: string }[];
 }
 
+/** Read cap: a file longer than this is never parsed on the hot path. */
 const MAX_STORE_BYTES = 8 * 1024 * 1024;
+/**
+ * Write budget, deliberately BELOW the read cap. WHY: the store used to be
+ * trimmed by count only, so goal snapshots could push it past the read cap;
+ * every reader then saw an empty store and the next write replaced the real
+ * file with it (review 310 d3 — the same write-cap vs read-cap mismatch as
+ * pool-ledger-json.ts). Compacting to this budget on every write keeps a
+ * written file always readable, with headroom.
+ */
+const STORE_WRITE_BUDGET = 6 * 1024 * 1024;
+/** A legacy over-size file is parsed with this cap once, archived and compacted (never read as empty). */
+const STORE_RECOVERY_MAX_BYTES = 64 * 1024 * 1024;
 export const ACTIONS_KEEP = 400;
 const DISMISSED_KEEP = 500;
+/** An apply / veto claim older than this belongs to a process that died mid-way. */
+const CLAIM_STALE_MS = 10 * 60_000;
 
 function emptyStore(nowIso: string): LeaderActionStoreV1 {
   return { v: 1, updatedAt: nowIso, actions: [], dismissed: [] };
 }
 
-export function readActionStore(): LeaderActionStoreV1 {
-  const raw = readRawFile(leaderActionsPath(), MAX_STORE_BYTES);
-  if (!raw) return emptyStore(new Date(0).toISOString());
+function parseStore(raw: string): LeaderActionStoreV1 | null {
   try {
     const parsed = JSON.parse(raw) as Partial<LeaderActionStoreV1>;
-    if (parsed.v !== 1 || !Array.isArray(parsed.actions)) return emptyStore(new Date(0).toISOString());
+    if (typeof parsed !== 'object' || parsed === null || parsed.v !== 1 || !Array.isArray(parsed.actions)) return null;
     return {
       v: 1,
       updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date(0).toISOString(),
@@ -298,18 +330,131 @@ export function readActionStore(): LeaderActionStoreV1 {
         : [],
     };
   } catch {
-    return emptyStore(new Date(0).toISOString());
+    return null;
   }
+}
+
+/**
+ * The store as read, telling "absent" apart from "present but unreadable".
+ *   ok / missing — `store` is the truth (missing = empty);
+ *   recovered    — the file was over the read cap (written by an older build)
+ *                  and was parsed with the recovery cap; `raw` is its bytes;
+ *   invalid      — present but not a store we wrote (garbled, wrong version);
+ *   unreadable   — present but the read failed (EMFILE, EACCES…): transient.
+ */
+type StoreRead =
+  | { state: 'ok' | 'missing'; store: LeaderActionStoreV1 }
+  | { state: 'recovered'; store: LeaderActionStoreV1; raw: string }
+  | { state: 'invalid' | 'unreadable'; reason: string };
+
+function readActionStoreDetailed(): StoreRead {
+  const path = leaderActionsPath();
+  try {
+    lstatSync(path);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === 'ENOENT') return { state: 'missing', store: emptyStore(new Date(0).toISOString()) };
+    return { state: 'unreadable', reason: `stat failed (${(err as NodeJS.ErrnoException)?.code ?? 'error'})` };
+  }
+  const read = readPrivateFileCapped(path, MAX_STORE_BYTES);
+  if (!read) return { state: 'unreadable', reason: 'the file could not be opened or read' };
+  if (!read.truncated) {
+    const store = parseStore(read.text);
+    return store ? { state: 'ok', store } : { state: 'invalid', reason: 'the file is not a Leader action store' };
+  }
+  const big = readPrivateFileCapped(path, STORE_RECOVERY_MAX_BYTES);
+  if (!big) return { state: 'unreadable', reason: 'the over-size file could not be read' };
+  if (big.truncated) return { state: 'invalid', reason: `the file is ${big.bytes} bytes, past the recovery cap` };
+  const store = parseStore(big.text);
+  return store ? { state: 'recovered', store, raw: big.text } : { state: 'invalid', reason: 'the over-size file is not a Leader action store' };
+}
+
+/**
+ * The store for READERS (UI, planning). Total: an unreadable file reads as
+ * empty here, which is safe only because this copy is never written back —
+ * every write goes through `withActionStore`, which refuses or archives
+ * instead (review 310 d3/d7).
+ */
+export function readActionStore(): LeaderActionStoreV1 {
+  const read = readActionStoreDetailed();
+  return 'store' in read ? read.store : emptyStore(new Date(0).toISOString());
+}
+
+function storeBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value), 'utf8');
+}
+
+/**
+ * Drop goal bytes an inverse must not carry (review 310 d5): keep the id, a
+ * digest and the prior status. Rows written before 3.10.1 carried whole
+ * records; this is also applied to them before they reach the ledger again.
+ */
+function projectInverse(inverse: LeaderInverse | null): LeaderInverse | null {
+  if (!inverse || inverse.op !== 'restore-goals') return inverse;
+  return {
+    op: 'restore-goals',
+    before: inverse.before.map((b) => {
+      if (b.record === null) return b;
+      let priorStatus = b.priorStatus;
+      if (priorStatus === undefined) {
+        try { priorStatus = (JSON.parse(b.record) as Goal).status; } catch { /* unknown */ }
+      }
+      return { goalId: b.goalId, record: null, recordSha256: b.recordSha256 ?? sha256(b.record), ...(priorStatus ? { priorStatus } : {}) };
+    }),
+  };
+}
+
+/**
+ * Count trim, then a BYTE budget: oldest first, (1) drop the restore
+ * snapshots of settled actions (their veto then restores the status only),
+ * (2) drop settled actions, (3) drop old dismissals. Scheduled or claimed rows are never touched — they
+ * are tiny (no snapshots) and are what a veto or apply is working on.
+ * Throws rather than write a file the reader could not read.
+ */
+function compactStore(store: LeaderActionStoreV1): LeaderActionStoreV1 {
+  const live = (s: StoredLeaderAction): boolean => s.action.status === 'scheduled' || (s.claim !== undefined && s.claim !== null);
+  // Count trim keeps every live row; the oldest settled rows go first.
+  let actions = store.actions;
+  if (actions.length > ACTIONS_KEEP) {
+    let excess = actions.length - ACTIONS_KEEP;
+    actions = actions.filter((s) => {
+      if (excess > 0 && !live(s)) { excess -= 1; return false; }
+      return true;
+    });
+  }
+  // Goal bytes in a stored INVERSE are never read (a goal veto takes its
+  // inverse from the ledger, and its bytes from `restore`), so rows written
+  // before 3.10.1 lose that duplicate copy on the first write.
+  const projected = actions.map((s) => (s.action.inverse?.op === 'restore-goals' && s.action.inverse.before.some((b) => b.record !== null)
+    ? { ...s, action: { ...s.action, inverse: projectInverse(s.action.inverse) } as LeaderAction }
+    : s));
+  const out: LeaderActionStoreV1 = { ...store, actions: projected, dismissed: store.dismissed.slice(-DISMISSED_KEEP) };
+  let total = storeBytes(out);
+  if (total <= STORE_WRITE_BUDGET) return out;
+  for (let i = 0; i < out.actions.length && total > STORE_WRITE_BUDGET; i += 1) {
+    const s = out.actions[i]!;
+    if (live(s)) continue;
+    if (s.restore.length === 0) continue;
+    const slim: StoredLeaderAction = { ...s, restore: [] };
+    total -= storeBytes(s) - storeBytes(slim);
+    out.actions[i] = slim;
+  }
+  while (total > STORE_WRITE_BUDGET) {
+    const index = out.actions.findIndex((s) => !live(s));
+    if (index === -1) break;
+    total -= storeBytes(out.actions[index]) + 1;
+    out.actions.splice(index, 1);
+  }
+  while (total > STORE_WRITE_BUDGET && out.dismissed.length > 0) {
+    total -= storeBytes(out.dismissed[0]) + 1;
+    out.dismissed.shift();
+  }
+  if (storeBytes(out) > MAX_STORE_BYTES) throw new Error('the Leader action store cannot be compacted under its size cap; nothing was written');
+  return out;
 }
 
 function writeActionStore(store: LeaderActionStoreV1): void {
   ensurePrivateDirectory(leaderRoot());
-  const trimmed: LeaderActionStoreV1 = {
-    ...store,
-    actions: store.actions.slice(-ACTIONS_KEEP),
-    dismissed: store.dismissed.slice(-DISMISSED_KEEP),
-  };
-  writePrivateFileAtomic(leaderActionsPath(), `${JSON.stringify(trimmed)}\n`);
+  writePrivateFileAtomic(leaderActionsPath(), `${JSON.stringify(compactStore(store))}\n`);
   storeListeners.forEach((fn) => {
     try { fn(); } catch { /* a listener never breaks a write */ }
   });
@@ -323,6 +468,38 @@ export function onLeaderStoreChange(fn: () => void): () => void {
   return () => storeListeners.delete(fn);
 }
 
+function archiveSuffix(): string {
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}-${process.pid}`;
+}
+
+/**
+ * The store a read-modify-write may start from — NEVER defaults over a real
+ * file (review 310 d3/d7):
+ *   - transient read failure → throw; nothing is written, the caller retries;
+ *   - over-size legacy file  → a byte-exact archive copy is kept beside it,
+ *     then the parsed store is used (the write compacts it under budget);
+ *   - garbled file           → renamed aside (actions.unreadable-<ts>.json),
+ *     then start empty. The store is a working copy, never an authorization
+ *     source (the ledger is): a class-B row lost this way never applies,
+ *     which fails closed.
+ */
+function loadStoreForWrite(): LeaderActionStoreV1 {
+  const read = readActionStoreDetailed();
+  switch (read.state) {
+    case 'ok':
+    case 'missing':
+      return read.store;
+    case 'recovered':
+      writePrivateFileAtomic(join(leaderRoot(), `actions.oversize-${archiveSuffix()}.json`), read.raw);
+      return read.store;
+    case 'unreadable':
+      throw new Error(`the Leader action store could not be read (${read.reason}); nothing was written`);
+    case 'invalid':
+      renameSync(leaderActionsPath(), join(leaderRoot(), `actions.unreadable-${archiveSuffix()}.json`));
+      return emptyStore(new Date(0).toISOString());
+  }
+}
+
 /**
  * Read-modify-write under the store lock. The mutator gets a fresh copy and
  * returns the value to hand back; the store is written only when it returns.
@@ -332,7 +509,7 @@ function withActionStore<T>(mutate: (store: LeaderActionStoreV1) => T): T {
   const lock = acquireLocalStoreLock(join(leaderRoot(), '.actions.lock'), 5_000);
   if (!lock) throw new Error('the Leader action store is busy');
   try {
-    const store = readActionStore();
+    const store = loadStoreForWrite();
     const out = mutate(store);
     store.updatedAt = new Date().toISOString();
     writeActionStore(store);
@@ -340,6 +517,53 @@ function withActionStore<T>(mutate: (store: LeaderActionStoreV1) => T): T {
   } finally {
     releaseLocalStoreLock(lock);
   }
+}
+
+function claimIsLive(claim: ActionClaim | null | undefined, nowMs: number): boolean {
+  if (!claim) return false;
+  const at = Date.parse(claim.at);
+  return Number.isFinite(at) && nowMs - at < CLAIM_STALE_MS;
+}
+
+interface Claimed {
+  stored: StoredLeaderAction;
+  token: string;
+}
+
+/**
+ * Compare-and-set: claim the row for `op` when `accept` holds for its CURRENT
+ * stored state and no live claim is on it. Null = someone else owns it or it
+ * moved on (vetoed, applied, gone) — the caller does nothing.
+ */
+function claimAction(
+  deps: LeaderApplyDeps,
+  actionId: string,
+  op: ActionClaim['op'],
+  accept: (s: StoredLeaderAction) => boolean,
+  opts: { takeStale?: boolean } = {},
+): Claimed | null {
+  const nowMs = deps.now();
+  const token = randomUUID();
+  return withActionStore((store) => {
+    const s = store.actions.find((x) => x.action.id === actionId);
+    if (!s || !accept(s)) return null;
+    if (s.claim && (claimIsLive(s.claim, nowMs) || !opts.takeStale)) return null;
+    s.claim = { op, token, at: new Date(nowMs).toISOString() };
+    return { stored: structuredClone(s), token };
+  });
+}
+
+/**
+ * Settle a claimed row: write `next` only while this claim still owns it.
+ * Returns false (and writes nothing) when a veto took the row meanwhile.
+ */
+function settleClaim(claimed: Claimed, next: StoredLeaderAction): boolean {
+  return withActionStore((store) => {
+    const index = store.actions.findIndex((x) => x.action.id === next.action.id);
+    if (index === -1 || store.actions[index]!.claim?.token !== claimed.token) return false;
+    store.actions[index] = { action: next.action, restore: next.restore, claim: null };
+    return true;
+  });
 }
 
 /** Newest first. */
@@ -393,6 +617,17 @@ function readGoalRaw(goalId: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * One goal's entry in a `restore-goals` inverse: the digest of the prior bytes
+ * and the prior status — never the bytes themselves, which live only in the
+ * local restore snapshot (the inverse goes on the 64 KB-per-line ledger).
+ */
+function goalInverseEntry(goalId: string, priorBytes: string): { goalId: string; record: null; recordSha256: string; priorStatus?: GoalStatus } {
+  let priorStatus: GoalStatus | undefined;
+  try { priorStatus = (JSON.parse(priorBytes) as Goal).status; } catch { /* unknown: a veto then leaves the status alone */ }
+  return { goalId, record: null, recordSha256: sha256(priorBytes), ...(priorStatus ? { priorStatus } : {}) };
 }
 
 function rolledStatus(goal: Goal): GoalStatus {
@@ -823,7 +1058,8 @@ function ledgerAction(deps: LeaderApplyDeps, action: LeaderAction): { ok: true }
   try {
     const res = deps.appendLedger({
       kind: 'leader:action',
-      data: action,
+      // Never goal bytes on the ledger (d5) — also for rows stored before 3.10.1.
+      data: action.inverse && action.inverse.op === 'restore-goals' ? { ...action, inverse: projectInverse(action.inverse) } as LeaderAction : action,
       actor: 'leader',
       grantId: deps.standingPolicy()?.grantId ?? null,
       repo: actionRepo(action),
@@ -905,7 +1141,8 @@ async function applyGoalStatus(
   const after = readGoalRaw(goalId);
   return {
     status: 'applied',
-    inverse: { op: 'restore-goals', before: [{ goalId, record: beforeBytes }] },
+    // Digest + prior status only; the bytes stay in the local snapshot (d5).
+    inverse: { op: 'restore-goals', before: [goalInverseEntry(goalId, beforeBytes)] },
     restore: [{ target: `goal:${goalId}`, existed: true, before: beforeBytes, afterSha: after === null ? null : sha256(after) }],
     detail: null,
   };
@@ -964,7 +1201,9 @@ async function executeAction(deps: LeaderApplyDeps, action: LeaderAction): Promi
       }
       return {
         status: 'applied',
-        inverse: { op: 'restore-goals', before: ids.map((id, i) => ({ goalId: id, record: befores[i]! })) },
+        // Ten whole goal records overflowed the 64 KB ledger line and every
+        // reorder was undone at once (review 310 d5): ids + digests only.
+        inverse: { op: 'restore-goals', before: ids.map((id, i) => goalInverseEntry(id, befores[i]!)) },
         restore,
         detail: null,
       };
@@ -1097,34 +1336,87 @@ function replaceStored(store: LeaderActionStoreV1, next: StoredLeaderAction): vo
   else store.actions[index] = next;
 }
 
-/** Apply one scheduled action whose time has come. Returns the updated action. */
-async function applyScheduled(deps: LeaderApplyDeps, stored: StoredLeaderAction): Promise<LeaderAction> {
-  const action = stored.action;
+/** The row as stored now (after a lost claim, the caller reports what actually happened). */
+function currentAction(actionId: string, fallback: LeaderAction): LeaderAction {
+  return findStoredAction(actionId)?.action ?? fallback;
+}
+
+/**
+ * Settle a claimed scheduled action that did NOT apply (refused / failed):
+ * write it only while the claim still owns the row, then record it. A veto
+ * that took the row meanwhile stands — its `vetoed` status is not overwritten
+ * and no later ledger row contradicts it.
+ */
+function settleNotApplied(deps: LeaderApplyDeps, claimed: Claimed, next: LeaderAction): LeaderAction {
+  if (!settleClaim(claimed, { action: next, restore: [] })) return currentAction(next.id, next);
+  ledgerAction(deps, next);
+  return next;
+}
+
+/**
+ * Apply one scheduled action the caller has CLAIMED (`claimAction(…, 'apply')`).
+ * Returns the updated action — or, when a veto took the row while the change
+ * was being made, the vetoed action after the change has been undone.
+ */
+async function applyClaimed(deps: LeaderApplyDeps, claimed: Claimed): Promise<LeaderAction> {
+  const action = claimed.stored.action;
   let outcome: ApplyOutcome;
   try {
     outcome = await executeAction(deps, action);
   } catch (err) {
     outcome = { status: 'failed', reason: err instanceof Error ? err.message.slice(0, 300) : 'applying threw' };
   }
-  let next: LeaderAction;
-  let restore = stored.restore;
-  if (outcome.status === 'applied') {
-    next = { ...action, status: 'applied', statusReason: outcome.detail, appliedAt: new Date(deps.now()).toISOString(), inverse: outcome.inverse } as LeaderAction;
-    restore = outcome.restore;
-    const row = ledgerAction(deps, next);
-    if (!row.ok) {
-      // The change is made but could not be recorded: undo it at once. An
-      // authority change that is not on the ledger must not stand.
-      await runInverse(deps, { action: next, restore }, outcome.inverse, true);
-      next = { ...action, status: 'failed', statusReason: `The ledger did not record the change, so it was undone (${row.reason}).`, inverse: null } as LeaderAction;
-      restore = [];
-    }
-  } else {
-    next = { ...action, status: outcome.status, statusReason: outcome.reason } as LeaderAction;
-    ledgerAction(deps, next);
+  if (outcome.status !== 'applied') {
+    return settleNotApplied(deps, claimed, { ...action, status: outcome.status, statusReason: outcome.reason } as LeaderAction);
   }
-  withActionStore((store) => replaceStored(store, { action: next, restore }));
-  return next;
+  let next = { ...action, status: 'applied', statusReason: outcome.detail, appliedAt: new Date(deps.now()).toISOString(), inverse: outcome.inverse } as LeaderAction;
+  let restore = outcome.restore;
+  const row = ledgerAction(deps, next);
+  if (!row.ok) {
+    // The change is made but could not be recorded: undo it at once. An
+    // authority change that is not on the ledger must not stand.
+    await runInverse(deps, { action: next, restore }, outcome.inverse, true);
+    next = { ...action, status: 'failed', statusReason: `The ledger did not record the change, so it was undone (${row.reason}).`, inverse: null } as LeaderAction;
+    restore = [];
+    if (!settleClaim(claimed, { action: next, restore })) return currentAction(next.id, next);
+    return next;
+  }
+  if (settleClaim(claimed, { action: next, restore })) return next;
+  // A veto took the row while the change was being made (c7). The change is
+  // on the ledger as applied; undo it now with the inverse this process just
+  // recorded (trusted), and put the veto's outcome on the ledger after it so
+  // the ledger's last word for this action is `vetoed`, like the store's.
+  const current = currentAction(action.id, next);
+  let result: { restored: boolean; detail: string };
+  try {
+    result = await runInverse(deps, { action: next, restore }, outcome.inverse, true);
+  } catch (err) {
+    result = { restored: false, detail: `Undoing threw: ${err instanceof Error ? err.message.slice(0, 200) : 'error'}` };
+  }
+  const vetoed = current.status === 'vetoed';
+  const record: LeaderVetoRecord = {
+    actionId: action.id,
+    memoId: action.memoId,
+    note: current.vetoNote,
+    inverse: projectInverse(outcome.inverse),
+    restored: result.restored,
+    detail: `${vetoed ? 'Vetoed while it was being applied' : 'The apply lost its claim'}; the change was undone: ${result.detail}`,
+    at: new Date(deps.now()).toISOString(),
+  };
+  try { deps.appendLedger({ kind: 'leader:vetoed', data: record, actor: vetoed ? 'mason' : 'leader', grantId: deps.standingPolicy()?.grantId ?? null, repo: actionRepo(action) }); } catch { /* best-effort */ }
+  const final = vetoed
+    ? { ...current, inverse: null } as LeaderAction
+    : { ...current, status: 'failed', statusReason: 'Another process settled this action while it was being applied; the change was undone.', inverse: null } as LeaderAction;
+  ledgerAction(deps, final);
+  return final;
+}
+
+/** Claim a scheduled action and apply it; when it is no longer ours to apply (vetoed, already claimed), its current row is returned untouched. */
+async function applyScheduled(deps: LeaderApplyDeps, stored: StoredLeaderAction): Promise<LeaderAction> {
+  const expected = stored.action;
+  const claimed = claimAction(deps, expected.id, 'apply', (s) => s.action.status === 'scheduled' && s.action.applyAfter === expected.applyAfter);
+  if (!claimed) return currentAction(expected.id, expected);
+  return applyClaimed(deps, claimed);
 }
 
 /** Build the policy context from live state (the only impure part of planning). */
@@ -1138,9 +1430,14 @@ export function buildPolicyContext(deps: LeaderApplyDeps, hypothesisIds: readonl
     openGoalCount = null;
   }
   const dayAgo = nowMs - 86_400_000;
-  const creates = readActionStore().actions.filter((s) => s.action.kind === 'goal.create'
-    && (s.action.status === 'applied' || s.action.status === 'scheduled')
-    && Date.parse(s.action.createdAt) >= dayAgo).length;
+  const read = readActionStoreDetailed();
+  // An unreadable store is an UNKNOWN tally, not zero: count it as the daily
+  // limit so goal.create fails closed rather than slipping past it.
+  const creates = !('store' in read)
+    ? LEADER_LIMITS.maxNewGoalsPerDay
+    : read.store.actions.filter((s) => s.action.kind === 'goal.create'
+      && (s.action.status === 'applied' || s.action.status === 'scheduled')
+      && Date.parse(s.action.createdAt) >= dayAgo).length;
   let budgetMode: BudgetMode = 'balanced';
   try {
     budgetMode = deps.budget.load().mode;
@@ -1214,25 +1511,37 @@ export async function enactLeaderActions(
  */
 export async function applyDueLeaderActions(deps: LeaderApplyDeps): Promise<LeaderAction[]> {
   const nowMs = deps.now();
-  const due = readActionStore().actions.filter((s) =>
-    s.action.status === 'scheduled' && s.action.class === 'B' && s.action.applyAfter !== null && Date.parse(s.action.applyAfter) <= nowMs);
   const out: LeaderAction[] = [];
-  for (const stored of due) {
-    const action = stored.action;
+  const snapshot = readActionStore().actions;
+  // A claim whose process died (older than CLAIM_STALE_MS) is settled from the
+  // ledger, never re-applied: the change may already have been made.
+  for (const s of snapshot) {
+    if (s.action.status !== 'scheduled' || s.claim?.op !== 'apply' || claimIsLive(s.claim, nowMs)) continue;
+    const settled = await settleInterruptedApply(deps, s);
+    if (settled) out.push(settled);
+  }
+  const due = snapshot.filter((s) =>
+    s.action.status === 'scheduled' && s.action.class === 'B' && s.action.applyAfter !== null && Date.parse(s.action.applyAfter) <= nowMs
+    && !s.claim);
+  for (const snap of due) {
+    // Claim FIRST, under the store lock, against the CURRENT row: a veto that
+    // landed since the snapshot wins, and a second ticker (daemon + CLI +
+    // comms) finds the claim and skips — one apply per action (c7).
+    const claimed = claimAction(deps, snap.action.id, 'apply', (s) =>
+      s.action.status === 'scheduled' && s.action.class === 'B' && s.action.applyAfter === snap.action.applyAfter);
+    if (!claimed) continue;
+    const action = claimed.stored.action;
     const row = await ledgerRowFor(deps, action.id, 'scheduled');
     if (row === 'unavailable' || row === null
       || row.kind !== action.kind || row.class !== 'B' || row.applyAfter !== action.applyAfter || row.memoId !== action.memoId
       || canonical(row.params) !== canonical(action.params)) {
-      const refused = {
+      out.push(settleNotApplied(deps, claimed, {
         ...action,
         status: 'refused',
         statusReason: row === 'unavailable'
           ? 'The authority ledger could not be read, so the scheduled action was not applied.'
           : 'The scheduled action does not match its ledger record, so it was not applied.',
-      } as LeaderAction;
-      ledgerAction(deps, refused);
-      withActionStore((store) => replaceStored(store, { action: refused, restore: [] }));
-      out.push(refused);
+      } as LeaderAction));
       continue;
     }
     const memo = readLeaderMemo(action.memoId);
@@ -1242,19 +1551,37 @@ export async function applyDueLeaderActions(deps: LeaderApplyDeps): Promise<Lead
     const again = classifyLeaderAction(action as unknown as AnyLeaderActionDraft, ctx);
     const granted = !isLeaderDryRun(ctx.policy) && again.verdict === 'ok' && again.class === 'B' && ctx.policy!.leader.classes.includes('B');
     if (!granted) {
-      const refused = {
+      out.push(settleNotApplied(deps, claimed, {
         ...action,
         status: 'refused',
         statusReason: `The grant changed during the veto window: ${again.reason ?? (isLeaderDryRun(ctx.policy) ? 'the Leader may no longer act' : 'class B is no longer granted')}.`,
-      } as LeaderAction;
-      ledgerAction(deps, refused);
-      withActionStore((store) => replaceStored(store, { action: refused, restore: [] }));
-      out.push(refused);
+      } as LeaderAction));
       continue;
     }
-    out.push(await applyScheduled(deps, stored));
+    out.push(await applyClaimed(deps, claimed));
   }
   return out;
+}
+
+/**
+ * A scheduled action whose apply claim went stale: the applying process died
+ * somewhere between claiming and settling. The ledger says whether the change
+ * was recorded as applied; if so the store is brought in line (so Mason can
+ * still veto it), otherwise it is marked failed and NOT retried — re-running
+ * could apply it twice.
+ */
+async function settleInterruptedApply(deps: LeaderApplyDeps, stale: StoredLeaderAction): Promise<LeaderAction | null> {
+  const claimed = claimAction(deps, stale.action.id, 'apply', (s) => s.action.status === 'scheduled' && s.claim?.op === 'apply', { takeStale: true });
+  if (!claimed) return null;
+  const applied = await ledgerRowFor(deps, stale.action.id, 'applied');
+  if (applied !== 'unavailable' && applied !== null) {
+    return settleClaim(claimed, { action: applied, restore: [] }) ? applied : currentAction(applied.id, applied);
+  }
+  return settleNotApplied(deps, claimed, {
+    ...claimed.stored.action,
+    status: 'failed',
+    statusReason: 'An earlier apply of this action was interrupted before it was recorded; it was not retried. Check the setting it touches.',
+  } as LeaderAction);
 }
 
 // ---------------------------------------------------------------------------
@@ -1355,19 +1682,31 @@ async function runInverse(
       if (!trusted) return { restored: false, detail: 'The ledger could not confirm this veto; goals were left as they are.', ran: false };
       let exact = true;
       const notes: string[] = [];
-      for (const { goalId, record } of inverse.before) {
+      for (const entry of inverse.before) {
+        const { goalId } = entry;
         const snap = restoreFor(`goal:${goalId}`);
-        if (record !== null && snap && restoreGoalBytes(goalId, record, snap.afterSha)) continue;
+        // The prior bytes: the inverse's own copy (rows before 3.10.1), else
+        // the local snapshot — trusted only when it hashes to the digest the
+        // (ledger's) inverse carries, so a tampered actions.json cannot
+        // smuggle other bytes into a goal.
+        let priorBytes: string | null = entry.record;
+        if (priorBytes === null && snap?.before != null && typeof entry.recordSha256 === 'string' && sha256(snap.before) === entry.recordSha256) {
+          priorBytes = snap.before;
+        }
+        if (priorBytes !== null && snap && restoreGoalBytes(goalId, priorBytes, snap.afterSha)) continue;
         exact = false;
-        // Changed since: restore the status only.
-        const prior = record === null ? null : (JSON.parse(record) as Goal);
+        // Changed since (or no snapshot): restore the status only.
+        let priorStatus: GoalStatus | null = entry.priorStatus ?? null;
+        if (priorStatus === null && priorBytes !== null) {
+          try { priorStatus = (JSON.parse(priorBytes) as Goal).status; } catch { priorStatus = null; }
+        }
         const goal = deps.goals.load(goalId);
-        if (prior && goal && goal.status !== prior.status) {
-          goal.status = prior.status;
-          if (deps.goals.save(goal, new Date(deps.now()).toISOString())) notes.push(`${goalId}: status put back to ${prior.status}`);
+        if (priorStatus && goal && goal.status !== priorStatus) {
+          goal.status = priorStatus;
+          if (deps.goals.save(goal, new Date(deps.now()).toISOString())) notes.push(`${goalId}: status put back to ${priorStatus}`);
           else notes.push(`${goalId}: could not be written`);
         } else {
-          notes.push(`${goalId}: already as before or missing`);
+          notes.push(`${goalId}: ${priorStatus ? 'already as before or missing' : 'prior state unknown; left as is'}`);
         }
       }
       return { restored: exact, detail: exact ? 'Goals restored exactly.' : `Goals changed since; ${notes.join('; ')}.`, ran: true };
@@ -1432,41 +1771,86 @@ async function runInverse(
   }
 }
 
-async function vetoOne(deps: LeaderApplyDeps, stored: StoredLeaderAction, note: string | null): Promise<LeaderVetoRecord | null> {
-  const action = stored.action;
-  const nowIso = new Date(deps.now()).toISOString();
-  let record: LeaderVetoRecord;
-  if (action.status === 'scheduled') {
-    record = { actionId: action.id, memoId: action.memoId, note, inverse: null, restored: true, detail: 'Vetoed before it applied; nothing changed.', at: nowIso };
-  } else if (action.status === 'applied' && action.inverse) {
-    const fromLedger = await ledgerRowFor(deps, action.id, 'applied');
-    const trustedInverse = fromLedger !== 'unavailable' && fromLedger !== null && fromLedger.inverse ? fromLedger.inverse : null;
-    const inverse = trustedInverse ?? action.inverse;
-    if (!trustedInverse && !LOWERING_ONLY_OPS.has(inverse.op) && inverse.op !== 'restore-directives' && inverse.op !== 'restore-budget') {
-      // Leave the action applied: this veto cannot be confirmed and could raise autonomy.
-      record = { actionId: action.id, memoId: action.memoId, note, inverse: null, restored: false,
-        detail: 'The authority ledger could not confirm this action, so the veto could not safely undo it.', at: nowIso };
-      try { deps.appendLedger({ kind: 'leader:vetoed', data: record, actor: 'mason', grantId: deps.standingPolicy()?.grantId ?? null, repo: actionRepo(action) }); } catch { /* best-effort */ }
-      return record;
-    }
-    let result: { restored: boolean; detail: string };
-    try {
-      result = await runInverse(deps, stored, inverse, trustedInverse !== null);
-    } catch (err) {
-      result = { restored: false, detail: `Undoing threw: ${err instanceof Error ? err.message.slice(0, 200) : 'error'}` };
-    }
-    record = { actionId: action.id, memoId: action.memoId, note, inverse, restored: result.restored, detail: result.detail, at: nowIso };
-  } else {
-    return null;
-  }
-  const vetoed = { ...action, status: 'vetoed', vetoedAt: nowIso, vetoNote: note } as LeaderAction;
-  withActionStore((store) => replaceStored(store, { action: vetoed, restore: [] }));
-  // Lowering never waits on the ledger (I1): the veto stands even if these rows fail.
-  try { deps.appendLedger({ kind: 'leader:vetoed', data: record, actor: 'mason', grantId: deps.standingPolicy()?.grantId ?? null, repo: actionRepo(action) }); } catch { /* best-effort */ }
-  ledgerAction(deps, vetoed);
+type VetoOutcome = LeaderVetoRecord | { busy: string } | null;
+
+function vetoPlaybook(deps: LeaderApplyDeps, action: LeaderAction, note: string | null): void {
   try {
     deps.addPlaybookDelta(`Mason vetoed the Leader's "${action.summary}" (${action.kind})${note ? `: ${note}` : ''}. Weigh this before proposing similar moves.`);
   } catch { /* best-effort */ }
+}
+
+async function vetoOne(deps: LeaderApplyDeps, stored: StoredLeaderAction, note: string | null): Promise<VetoOutcome> {
+  const actionId = stored.action.id;
+  const nowIso = new Date(deps.now()).toISOString();
+  const nowMs = deps.now();
+
+  // A scheduled action is vetoed by compare-and-set on its CURRENT row (c7).
+  // Lowering is instant (I1), so a veto is never refused because an apply is
+  // in flight: it takes the row, and the applier — finding its claim gone —
+  // undoes the change it just made (applyClaimed).
+  if (stored.action.status === 'scheduled') {
+    type Taken = { kind: 'vetoed'; action: LeaderAction; applying: 'no' | 'live' | 'interrupted' } | { kind: 'moved' };
+    const taken = withActionStore((store): Taken => {
+      const s = store.actions.find((x) => x.action.id === actionId);
+      if (!s || s.action.status !== 'scheduled') return { kind: 'moved' };
+      const applying = s.claim?.op !== 'apply' ? 'no' : claimIsLive(s.claim, nowMs) ? 'live' : 'interrupted';
+      const vetoed = { ...s.action, status: 'vetoed', vetoedAt: nowIso, vetoNote: note } as LeaderAction;
+      const index = store.actions.indexOf(s);
+      store.actions[index] = { action: vetoed, restore: [], claim: null };
+      return { kind: 'vetoed', action: vetoed, applying };
+    });
+    if (taken.kind === 'moved') {
+      // It applied (or was settled) between the caller's read and the lock.
+      const fresh = findStoredAction(actionId);
+      return fresh && fresh.action.status === 'applied' ? vetoOne(deps, fresh, note) : null;
+    }
+    const action = taken.action;
+    const detail = taken.applying === 'live'
+      ? 'Vetoed while it was being applied; the change is undone as soon as the apply finishes.'
+      : taken.applying === 'interrupted'
+        ? 'Vetoed; an earlier apply of this action was interrupted and may have partly applied — check the setting it touches.'
+        : 'Vetoed before it applied; nothing changed.';
+    const record: LeaderVetoRecord = { actionId, memoId: action.memoId, note, inverse: null, restored: taken.applying === 'no', detail, at: nowIso };
+    try { deps.appendLedger({ kind: 'leader:vetoed', data: record, actor: 'mason', grantId: deps.standingPolicy()?.grantId ?? null, repo: actionRepo(action) }); } catch { /* best-effort */ }
+    ledgerAction(deps, action);
+    vetoPlaybook(deps, action, note);
+    return record;
+  }
+
+  if (stored.action.status !== 'applied' || !stored.action.inverse) return null;
+  // An applied action: claim it so two vetoes (Verse + Telegram) never run
+  // the inverse twice.
+  const claimed = claimAction(deps, actionId, 'veto', (s) => s.action.status === 'applied' && s.action.inverse !== null);
+  if (!claimed) {
+    const fresh = findStoredAction(actionId);
+    if (fresh && fresh.action.status === 'applied' && claimIsLive(fresh.claim, nowMs)) return { busy: `A veto of ${actionId} is already running.` };
+    return null;
+  }
+  const action = claimed.stored.action;
+  const fromLedger = await ledgerRowFor(deps, action.id, 'applied');
+  const trustedInverse = fromLedger !== 'unavailable' && fromLedger !== null && fromLedger.inverse ? fromLedger.inverse : null;
+  const inverse = trustedInverse ?? action.inverse!;
+  if (!trustedInverse && !LOWERING_ONLY_OPS.has(inverse.op) && inverse.op !== 'restore-directives' && inverse.op !== 'restore-budget') {
+    // Leave the action applied: this veto cannot be confirmed and could raise autonomy.
+    settleClaim(claimed, claimed.stored);
+    const record: LeaderVetoRecord = { actionId: action.id, memoId: action.memoId, note, inverse: null, restored: false,
+      detail: 'The authority ledger could not confirm this action, so the veto could not safely undo it.', at: nowIso };
+    try { deps.appendLedger({ kind: 'leader:vetoed', data: record, actor: 'mason', grantId: deps.standingPolicy()?.grantId ?? null, repo: actionRepo(action) }); } catch { /* best-effort */ }
+    return record;
+  }
+  let result: { restored: boolean; detail: string };
+  try {
+    result = await runInverse(deps, claimed.stored, inverse, trustedInverse !== null);
+  } catch (err) {
+    result = { restored: false, detail: `Undoing threw: ${err instanceof Error ? err.message.slice(0, 200) : 'error'}` };
+  }
+  const record: LeaderVetoRecord = { actionId: action.id, memoId: action.memoId, note, inverse: projectInverse(inverse), restored: result.restored, detail: result.detail, at: nowIso };
+  const vetoed = { ...action, status: 'vetoed', vetoedAt: nowIso, vetoNote: note } as LeaderAction;
+  settleClaim(claimed, { action: vetoed, restore: [] });
+  // Lowering never waits on the ledger (I1): the veto stands even if these rows fail.
+  try { deps.appendLedger({ kind: 'leader:vetoed', data: record, actor: 'mason', grantId: deps.standingPolicy()?.grantId ?? null, repo: actionRepo(action) }); } catch { /* best-effort */ }
+  ledgerAction(deps, vetoed);
+  vetoPlaybook(deps, action, note);
   return record;
 }
 
@@ -1478,6 +1862,7 @@ export async function vetoLeaderAction(deps: LeaderApplyDeps, actionId: string, 
     return { ok: false, code: 409, message: `Action ${actionId} is ${stored.action.status}; there is nothing to veto.`, records: [] };
   }
   const record = await vetoOne(deps, stored, note);
+  if (record && 'busy' in record) return { ok: false, code: 409, message: record.busy, records: [] };
   return record
     ? { ok: true, code: 200, message: record.detail, records: [record] }
     : { ok: false, code: 409, message: 'Nothing to veto.', records: [] };
@@ -1494,7 +1879,7 @@ export async function vetoLeaderMemo(deps: LeaderApplyDeps, memoId: string, note
     // Re-read: an earlier inverse in this loop may have rewritten the store.
     const fresh = findStoredAction(stored.action.id) ?? stored;
     const record = await vetoOne(deps, fresh, note);
-    if (record) records.push(record);
+    if (record && !('busy' in record)) records.push(record);
   }
   return {
     ok: true,

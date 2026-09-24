@@ -465,3 +465,219 @@ describe('merge-time behavior', () => {
     expect(w.fake.pulls.get(pr.number)!.state).toBe('open');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Review finding c2 (3.10): G5's red team spends a paid frontier judge, so it
+// must route like G6 — router-admitted lanes only, the per-pass judge budget,
+// and never one model call per tick for a proposal parked at G6.
+// ---------------------------------------------------------------------------
+describe('standing merge pass — G5 red team is routed, budgeted and cached (c2)', () => {
+  const RED_TEAM_CFG = { foundry: { redTeam: true } } as unknown as AshlrConfig;
+
+  function redTeamWorld(frontier: 'answered' | 'failed' = 'answered') {
+    const w = world();
+    const redTeamCalls: FleetEngine[][] = [];
+    w.deps.redTeam = async (_proposal, _cfg, lanes) => {
+      redTeamCalls.push([...lanes]);
+      return {
+        check: { name: 'red-team', outcome: 'ok', detail: 'survived' },
+        // The model half runs only when a lane was admitted.
+        frontier: lanes.length > 0 ? frontier : 'none',
+      };
+    };
+    return { w, redTeamCalls };
+  }
+
+  async function redTeamPass(w: World, cfg: AshlrConfig = RED_TEAM_CFG) {
+    const out = emptyOut();
+    const pending = [...w.proposals.values()].filter((p) => p.status === 'pending');
+    return runStandingMergePass({ cfg, policy: w.policy.current!, pending, out, deps: w.deps });
+  }
+
+  it('passes the red team ONLY the router-admitted judge lanes (never an unrouted call)', async () => {
+    const { w, redTeamCalls } = redTeamWorld();
+    w.availableLanes = ['claude-cli']; // grok-cli has no headroom
+    add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await redTeamPass(w);
+    expect(redTeamCalls).toEqual([['claude-cli']]);
+    expect(w.ledger.kinds()).toContain('gate:result:G5:pass');
+  });
+
+  it('with no admitted lane the red team runs deterministic-only (empty lane list)', async () => {
+    const { w, redTeamCalls } = redTeamWorld();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    // A valid independent verdict already exists, so G0 needs no judge seat
+    // and G5 is reached with every paid seat out of headroom.
+    w.decisions.set(p.id, [judgedDecision(p, 'claude-opus-4-8', 'ship', new Date(w.clock.now))]);
+    w.availableLanes = [];
+    await redTeamPass(w);
+    expect(redTeamCalls).toEqual([[]]);
+    expect(w.fake.pulls.size).toBe(1);
+  });
+
+  it('an exhausted per-pass judge budget is never exceeded by the red team', async () => {
+    const { w, redTeamCalls } = redTeamWorld();
+    add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await redTeamPass(w, { foundry: { redTeam: true, judgePerPass: 0 } } as unknown as AshlrConfig);
+    expect(redTeamCalls).toEqual([[]]);
+    expect(w.judgeCalls).toHaveLength(0);
+  });
+
+  it('a proposal parked at G6 does NOT repeat the model red team every tick (cached per diff)', async () => {
+    const { w, redTeamCalls } = redTeamWorld('answered');
+    w.judgeOverride = 'qwen2.5:72b-instruct-q4_K_M'; // G6 never gets a usable verdict → waits
+    add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    for (let tick = 0; tick < 5; tick++) {
+      await redTeamPass(w);
+      w.clock.now += 60_000;
+    }
+    const modelCalls = redTeamCalls.filter((lanes) => lanes.length > 0);
+    expect(modelCalls).toHaveLength(1);
+    // The cached verdict still feeds G5 every tick (no model call behind it).
+    expect(redTeamCalls).toHaveLength(1);
+  });
+
+  it('a FAILED model red team is not re-asked within the judge retry window', async () => {
+    const { w, redTeamCalls } = redTeamWorld('failed');
+    w.judgeOverride = 'qwen2.5:72b-instruct-q4_K_M';
+    add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await redTeamPass(w);
+    w.clock.now += 60_000;
+    await redTeamPass(w);
+    expect(redTeamCalls.map((lanes) => lanes.length > 0)).toEqual([true, false]);
+    w.clock.now += 20 * 60 * 1000;
+    await redTeamPass(w);
+    expect(redTeamCalls.filter((lanes) => lanes.length > 0)).toHaveLength(2);
+  });
+});
+
+describe('standing merge pass — daemon-side capacity publisher (c8)', () => {
+  it('starts the capacity publisher every pass and surfaces a COLD publisher as a note (no silent stall)', async () => {
+    const w = world();
+    const calls: AshlrConfig[] = [];
+    w.deps.ensureCapacityPublisher = (cfg) => {
+      calls.push(cfg);
+      return { state: 'lease-held-elsewhere', reason: 'the native account-metadata lease is not available to the daemon (collector-owned)', lastPublishedAt: null };
+    };
+    const { summary } = await pass(w);
+    expect(calls).toHaveLength(1);
+    expect(summary.notes.some((n) => n.startsWith('seat headroom is cold:'))).toBe(true);
+  });
+
+  it('a publishing or dormant publisher adds no note; a throwing one never fails the pass', async () => {
+    const w = world();
+    w.deps.ensureCapacityPublisher = () => ({ state: 'dormant', reason: 'Verse publishes', lastPublishedAt: null });
+    expect((await pass(w)).summary.notes).toEqual([]);
+    w.deps.ensureCapacityPublisher = () => { throw new Error('boom'); };
+    expect((await pass(w)).summary.notes).toEqual([]);
+  });
+});
+
+describe('standing merge pass — human exits and the owner-lane TTL (P1)', () => {
+  const DAY = 24 * 60 * 60 * 1000;
+  const OWNER_LANE_FILES = { ...SRC_CHANGE, 'package.json': '{ "name": "canary", "version": "1.0.2" }\n' };
+
+  function humanExitRows(w: World) {
+    return w.ledger.entries.filter((e) => e.kind === 'pr:closed' && (e.data as { actor: string }).actor === 'mason');
+  }
+
+  it('a fleet PR a human CLOSES on GitHub gets a pr:closed row (data.actor mason, row actor daemon)', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.pulls.get(pr.number)!.state = 'closed';
+    w.clock.now += 10 * 60 * 1000;
+    const { summary } = await pass(w, []);
+    expect(summary.closed).toBe(1);
+    const rows = humanExitRows(w);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ actor: 'daemon', repo: w.repo, data: { repo: w.repo, number: pr.number, actor: 'mason' } });
+    expect((rows[0]!.data as { reason: string }).reason).toMatch(/closed on GitHub by a human/);
+    expect(w.proposals.get(p.id)!.status).toBe('rejected');
+    // Reconciled once: a later tick writes nothing more.
+    w.clock.now += 60 * 60 * 1000;
+    await pass(w, []);
+    expect(humanExitRows(w)).toHaveLength(1);
+  });
+
+  it('a fleet PR a human MERGES on GitHub gets a pr:closed row and never a merge:landed', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    const pull = w.fake.pulls.get(pr.number)!;
+    pull.state = 'closed';
+    pull.merged = true;
+    pull.mergedAt = new Date(w.clock.now).toISOString();
+    pull.mergeCommitSha = w.fake.headOfPull(pr.number);
+    w.clock.now += 10 * 60 * 1000;
+    await pass(w, []);
+    const rows = humanExitRows(w);
+    expect(rows).toHaveLength(1);
+    expect((rows[0]!.data as { reason: string }).reason).toMatch(/merged on GitHub by a human outside the fleet/);
+    expect(w.ledger.kinds()).not.toContain('merge:landed');
+    expect(w.proposals.get(p.id)!.status).toBe('applied');
+  });
+
+  it('OWNER-LANE TTL: an unreviewed owner-lane PR is kept inside the TTL, then closed and its proposal retired', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: OWNER_LANE_FILES, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    expect((w.ledger.of('pr:opened')[0] as { ownerLane: boolean }).ownerLane).toBe(true);
+
+    w.clock.now += 6 * DAY;
+    await pass(w, []);
+    expect(w.fake.pulls.get(pr.number)!.state).toBe('open');
+    expect(w.proposals.get(p.id)!.status).toBe('pending');
+
+    w.clock.now += 2 * DAY; // 8 days since the proposal and the PR
+    const { summary } = await pass(w, []);
+    expect(w.fake.pulls.get(pr.number)!.state).toBe('closed');
+    expect(summary.closed).toBe(1);
+    expect(w.proposals.get(p.id)!.status).toBe('rejected');
+    expect(w.statuses.at(-1)!.reason).toMatch(/owner-lane proposal unreviewed for 7 days \(TTL\)/);
+    // The fleet's own close is ledgered by closeFleetPr (actor daemon), not as a human exit.
+    const closed = w.ledger.entries.filter((e) => e.kind === 'pr:closed');
+    expect(closed).toHaveLength(1);
+    expect((closed[0]!.data as { actor: string }).actor).toBe('daemon');
+    expect(w.fake.mergeCalls()).toHaveLength(0);
+  });
+
+  it('OWNER-LANE TTL honours proposalTtlDays and counts from the PR opening when it is later than the proposal', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: OWNER_LANE_FILES, ...GROK }));
+    p.createdAt = new Date(w.clock.now - 30 * DAY).toISOString(); // old proposal, fresh PR
+    const cfg = { foundry: { proposalTtlDays: 3 } } as unknown as AshlrConfig;
+    const run = async () => runStandingMergePass({ cfg, policy: w.policy.current!, pending: [...w.proposals.values()].filter((x) => x.status === 'pending'), out: emptyOut(), deps: w.deps });
+    // The first tick's cleanup would reject a 30-day-old proposal outright;
+    // open the PR as if the proposal were fresh, then age it.
+    p.createdAt = new Date(w.clock.now).toISOString();
+    await run();
+    const pr = prOf(w);
+    p.createdAt = new Date(w.clock.now - 30 * DAY).toISOString();
+    w.clock.now += 2 * DAY;
+    await run();
+    expect(w.fake.pulls.get(pr.number)!.state).toBe('open'); // PR is 2 days old < 3
+    w.clock.now += 2 * DAY;
+    await run();
+    expect(w.fake.pulls.get(pr.number)!.state).toBe('closed');
+    expect(w.statuses.at(-1)!.reason).toMatch(/unreviewed for 3 days/);
+  });
+
+  it('OWNER-LANE TTL never closes a PR a human took over (a head the fleet did not push)', async () => {
+    const w = world();
+    const p = add(w, fleetProposal(w.fake, { files: SRC_CHANGE, ...GROK }));
+    await pass(w);
+    const pr = prOf(w);
+    w.fake.pushCommit(pr.headRef, { 'src/human.ts': 'export const human = true;\n' });
+    w.clock.now += 10 * 60 * 1000;
+    await pass(w, []);
+    expect([...pr.labels]).toContain('ashlr:owner-lane');
+    w.clock.now += 30 * DAY;
+    await pass(w, []);
+    expect(w.fake.pulls.get(pr.number)!.state).toBe('open');
+    expect(w.proposals.get(p.id)!.status).toBe('pending');
+  });
+});

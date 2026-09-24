@@ -179,6 +179,24 @@ describe('OvernightPanel — arming', () => {
     expect(screen.getByText('your 9 enrolled repositories')).toBeInTheDocument();
   });
 
+  // P4: the mirrors F5 records are shown APART from the repo count — never added to it.
+  it('states the fleet mirrors separately from the repositories', () => {
+    renderPanel(ok({ ...IDLE, mirrors: 9 }));
+    expect(screen.getByText('your 9 enrolled repositories')).toBeInTheDocument();
+    const line = screen.getByTestId('overnight-mirrors');
+    expect(line).toHaveTextContent('Fleet mirrors: 9 — the standing fleet’s own clones of enrolled repositories, counted apart.');
+    expect(line).toHaveTextContent('A mirror is not an additional repository.');
+    expect(screen.queryByText(/18/)).toBeNull();
+  });
+
+  it('says a mirror count was not recorded for an armed run, and nothing for an older server', () => {
+    const { unmount } = renderPanel(ok({ ...armedStatus(), mirrors: null }));
+    expect(screen.getByTestId('overnight-mirrors')).toHaveTextContent('Fleet mirrors were not recorded for this run');
+    unmount();
+    renderPanel(ok(armedStatus()));
+    expect(screen.queryByTestId('overnight-mirrors')).toBeNull();
+  });
+
   it('shows unstated gate checks as unstated rather than as checks that run', () => {
     renderPanel(
       ok({ ...IDLE, gate: { tests: true, lint: null, typecheck: null, autoMerge: true, branch: 'master' } }),

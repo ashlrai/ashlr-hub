@@ -29,17 +29,16 @@ import {
   type DockPaneId,
   type DockState,
 } from '../shell/dock-catalog.js';
-import type { VerseTerminalLaunchVia } from '../../../../core/verse/workbench-types.js';
 import type { DiffPaneRequest, PreviewOpenRequest, TerminalOpenRequest } from '../shell/slots.js';
 
 /**
- * A terminal request as the dock carries it: C0's TerminalOpenRequest plus
- * HOW an Apps [Launch ▸] runs its app (`via`, `model` — the contract fields
- * on VerseTerminalCreateRequest). The slot's prop type does not name them
- * yet, so they ride as a subtype and TerminalPane reads them through this
- * type; the server resolves the actual command either way, never the page.
+ * A terminal request as the dock carries it. C0's TerminalOpenRequest now
+ * names the Apps [Launch ▸] fields (`via`, `model`) itself, so this is a
+ * plain alias — kept so TerminalPane and the Apps launcher keep one name for
+ * "what the dock hands the Terminal pane". The server resolves the actual
+ * command either way, never the page.
  */
-export type TerminalRequest = TerminalOpenRequest & { via?: VerseTerminalLaunchVia; model?: string };
+export type TerminalRequest = TerminalOpenRequest;
 
 export interface DockRequests {
   terminal: TerminalRequest | null;

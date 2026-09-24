@@ -134,6 +134,9 @@ export function OvernightPanel({
   const disabled = locked || guard.busy;
 
   const repos = status?.repos ?? snapshot.scope?.repos?.length ?? null;
+  // Counted APART from repos: a mirror is the fleet's clone of a repo, not
+  // another repo, so the sentence never adds the two (overnight-contract.ts).
+  const mirrors = status?.mirrors;
   const gate = status?.gate ?? null;
   const checks = gateChecks(gate);
   const unstated = gateUnstated(gate);
@@ -212,6 +215,17 @@ export function OvernightPanel({
         . A change that passes the gate is <strong>merged to {branch} without asking you</strong>. A
         change that fails is discarded and the repository is left as it was.
       </p>
+      {typeof mirrors === 'number' && mirrors > 0 ? (
+        <p className={styles.authorisationBody} data-testid="overnight-mirrors">
+          Fleet mirrors: <strong>{mirrors}</strong> — the standing fleet&rsquo;s own{' '}
+          {mirrors === 1 ? 'clone' : 'clones'} of enrolled repositories, counted apart. A mirror is not an
+          additional repository.
+        </p>
+      ) : mirrors === null && status?.armed ? (
+        <p className={styles.authorisationCaveat} data-testid="overnight-mirrors">
+          Fleet mirrors were not recorded for this run, so how many the standing fleet works in is unknown.
+        </p>
+      ) : null}
       {unstated.length > 0 ? (
         <p className={styles.authorisationCaveat}>
           This build did not state whether {joinPhrase(unstated)}{' '}

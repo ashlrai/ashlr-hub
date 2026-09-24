@@ -15,6 +15,9 @@ import {
   groupFiles,
   hasBranchActivity,
   menuItems,
+  mergeDrift,
+  mergeHeadFact,
+  pinMerge,
   prChip,
   primaryAction,
   type GitStatusView,
@@ -143,5 +146,33 @@ describe('describeGitError', () => {
     expect(describeGitError({ name: 'DispatchDisabledError', status: 404 })).toContain('read-only');
     expect(describeGitError({ name: 'VerseMutationLockedError' })).toContain('mutation token');
     expect(describeGitError(new Error('spawn /Users/op/secret ENOENT'))).not.toContain('/Users');
+  });
+});
+
+// Review 3.10 c16: the Merge dialog asserts only what its pinned read verified.
+describe('merge pin', () => {
+  const pinned = pinMerge(status({ suggested: 'merge', pr: pr({ headSha: 'c'.repeat(40) }), prCheckCounts: { total: 9, passed: 9, failed: 0, pending: 0 } }))!;
+
+  it('says "checks passed, no conflicts" only when the pin verified both', () => {
+    expect(mergeHeadFact(pinned)).toMatchObject({ sha: 'ccccccc', text: 'Head ccccccc, 9/9 checks passed, no conflicts.', verified: true });
+    const pending = pinMerge(status({ pr: pr({ checks: 'pending', mergeable: null }), prCheckCounts: { total: 0, passed: 0, failed: 0, pending: 0 } }))!;
+    const fact = mergeHeadFact(pending);
+    expect(fact.verified).toBe(false);
+    expect(fact.text).not.toMatch(/checks passed|no conflicts/);
+    expect(fact.text).toBe('Head aaaaaaa, checks still running, GitHub has not finished checking for conflicts.');
+    expect(mergeHeadFact({ ...pinned, mergeable: false }).text).toContain('has conflicts');
+    expect(mergeHeadFact({ ...pinned, checks: 'unknown', counts: null }).text).toContain('checks not known');
+  });
+
+  it('flags any drift from the pinned head, PR or verdict', () => {
+    const live = (over: Parameters<typeof pr>[0]) => status({ pr: pr({ headSha: 'c'.repeat(40), ...over }) });
+    expect(mergeDrift(pinned, live({}))).toBeNull();
+    expect(mergeDrift(pinned, live({ headSha: 'e'.repeat(40) }))).toMatch(/changed since you opened this/);
+    expect(mergeDrift(pinned, live({ number: 464 }))).toMatch(/no longer an open/);
+    expect(mergeDrift(pinned, live({ state: 'merged' }))).toMatch(/no longer an open/);
+    expect(mergeDrift(pinned, status({ pr: null }))).toMatch(/no longer an open/);
+    expect(mergeDrift(pinned, null)).toMatch(/no longer an open/);
+    expect(mergeDrift(pinned, live({ checks: 'failing' }))).toMatch(/no longer passing/);
+    expect(mergeDrift(pinned, live({ mergeable: null }))).toMatch(/mergeable/);
   });
 });

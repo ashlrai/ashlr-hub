@@ -27,6 +27,7 @@
  * and plain constants, no node: modules.
  */
 import type { BudgetMode, BudgetPolicy } from '../routing/types.js';
+import type { GoalStatus } from '../types.js';
 import type { FleetTaskInput, RepoHold } from '../fleet/fleet-types.js';
 import type { HarnessHypothesis, HarnessRoutingWeights } from '../learn/harness-types.js';
 
@@ -176,8 +177,17 @@ export interface LeaderDirectivesV1 {
 export type LeaderInverse =
   /** router.tune, lanes.grok, lanes.codex */
   | { op: 'restore-directives'; before: LeaderDirectivesV1 | null }
-  /** goal.focus / pause / reorder / archive — each touched goal's exact prior serialized record (null = did not exist). */
-  | { op: 'restore-goals'; before: { goalId: string; record: string | null }[] }
+  /**
+   * goal.focus / pause / reorder / archive — per touched goal. Since 3.10.1
+   * `record` is null and the prior bytes live ONLY in the local restore
+   * snapshot (actions.json); the inverse carries their sha256 and the prior
+   * status. WHY: this inverse is written to the authority ledger, whose lines
+   * are capped at 64 KB — ten whole goal records overflowed it and every
+   * reorder was undone at once (review 310 d5). A veto restores the snapshot
+   * bytes only when they hash to `recordSha256`; otherwise it puts back the
+   * status. Rows written before 3.10.1 still carry the whole `record`.
+   */
+  | { op: 'restore-goals'; before: { goalId: string; record: string | null; recordSha256?: string; priorStatus?: GoalStatus }[] }
   /** goal.create */
   | { op: 'archive-goal'; goalId: string }
   /** work.dispatch (only while the task is still queued / parked) */

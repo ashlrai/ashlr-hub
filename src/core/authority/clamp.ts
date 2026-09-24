@@ -425,10 +425,25 @@ export function revokeStanding(opts: { actor: FleetActor; reason: string }): Rev
   return revokeResult(core, stop);
 }
 
-/** Revoke, draining variant (the CLI): as revokeStanding, then waits for running agents like stopAutonomyAndDrain. */
-export async function revokeStandingAndDrain(opts: { actor: FleetActor; reason: string; drainMs?: number }): Promise<RevokeResult> {
+/**
+ * Revoke, draining variant (the CLI): as revokeStanding, then waits for running
+ * agents like stopAutonomyAndDrain. `drainMs` / `waitMs` pass straight through
+ * to stopAutonomyAndDrain (same defaults: 30 s drain, 2 s fence wait).
+ *
+ * WHY waitMs IS OPTIONAL HERE TOO: the Verse Revoke route wants the merge
+ * revocation awaited (so its answer can report mergesRevoked) but must answer
+ * as instantly as Stop does — drainMs:0 + waitMs:0. Without this option its
+ * Stop half always waited up to the 2 s fence default. The grant is archived
+ * and KILL armed before any wait either way, so a 0 only skips the waiting.
+ */
+export async function revokeStandingAndDrain(opts: { actor: FleetActor; reason: string; drainMs?: number; waitMs?: number }): Promise<RevokeResult> {
   const reason = cleanReason(opts.reason);
   const core = revokeCore(opts.actor, reason);
-  const stop = await stopAutonomyAndDrain({ actor: opts.actor, reason: `revoked: ${reason}`, ...(opts.drainMs !== undefined ? { drainMs: opts.drainMs } : {}) });
+  const stop = await stopAutonomyAndDrain({
+    actor: opts.actor,
+    reason: `revoked: ${reason}`,
+    ...(opts.drainMs !== undefined ? { drainMs: opts.drainMs } : {}),
+    ...(opts.waitMs !== undefined ? { waitMs: opts.waitMs } : {}),
+  });
   return revokeResult(core, stop);
 }

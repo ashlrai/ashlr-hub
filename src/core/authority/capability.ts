@@ -9,8 +9,11 @@
  *      `resident-standing` capability through activation-permit.ts's existing
  *      WeakMap (so `isDaemonActivationCapability` stays the one runtime check
  *      and a structurally forged object is still rejected);
- *   2. takes one rollout step (addendum §1: advance on met criteria, regress
- *      on a breach) inside the ledger lock;
+ *   2. ledgers any reserve breach the capacity snapshot shows (autonomy used
+ *      a seat past the grant's reserve floor / 5-hour ceiling —
+ *      reserve-breach.ts), then takes one rollout step (addendum §1: advance
+ *      on met criteria, regress on a breach), both inside ONE ledger lock so
+ *      the step already sees this tick's breach;
  *   3. ledgers state transitions it saw (expiry, "authority code changed").
  *
  * Sessions are process-local objects this module issued; a look-alike object
@@ -31,6 +34,7 @@ import {
   recordStandingTransitions,
 } from './effective-config.js';
 import { appendLedger, withLedgerTransaction } from './ledger.js';
+import { currentCapacityForBreachCheck, recordReserveBreachesUnderLock } from './reserve-breach.js';
 import { stepRolloutUnderLock, type RolloutStepResult } from './rollout.js';
 import type { EffectivePolicy } from './types.js';
 
@@ -128,7 +132,17 @@ export function mintStandingTickCapability(session: StandingSession): MintStandi
   const grant = evaluation.grant;
   let policy = evaluation.policy!;
   if (grant) {
-    const stepped = withLedgerTransaction((tx) => stepRolloutUnderLock(tx, grant, Date.now()));
+    const nowMs = Date.now();
+    const observed = policy;
+    const stepped = withLedgerTransaction((tx) => {
+      // WHY here (3.10 review c3/c4): this is the one place that runs on every
+      // standing tick with the verified policy in hand. Recording and stepping
+      // in one transaction means a breach regresses the ladder on the tick it
+      // is seen, never one tick late. A ledger that refuses the breach row
+      // throws, and the mint below fails closed.
+      recordReserveBreachesUnderLock(tx, { capacity: currentCapacityForBreachCheck(), policy: observed, nowMs });
+      return stepRolloutUnderLock(tx, grant, nowMs);
+    });
     if (stepped.ok && stepped.value) {
       lastRolloutStep = stepped.value;
       if (stepped.value.decision !== 'hold') {

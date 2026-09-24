@@ -55,9 +55,9 @@
  * frozen contracts. Never throws out of a public API.
  */
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 
 import type { AshlrConfig } from '../types.js';
 import type { LedgerAppendInput, LedgerEventKind, LedgerReadOptions, LedgerReadResult } from '../authority/types.js';
@@ -1774,7 +1774,7 @@ export async function runSuiteInMirrorWorktree(repo: string, sha: string, opts: 
       let required: ReturnType<typeof detectVerifyCommands>;
       if (detectAt !== sha) {
         if (!mirrorGit(mirror, ['worktree', 'add', '--detach', detectTree, detectAt]).ok) return { ok: false, detail: 'git worktree add (parent) failed' };
-        required = detectVerifyCommands(detectTree, 'merge').filter((c) => c.required !== false);
+        required = rebaseCommandCwds(detectVerifyCommands(detectTree, 'merge').filter((c) => c.required !== false), detectTree);
         mirrorGit(mirror, ['worktree', 'remove', '--force', detectTree]);
       }
       if (!mirrorGit(mirror, ['worktree', 'add', '--detach', worktree, sha]).ok) return { ok: false, detail: 'git worktree add failed' };
@@ -1785,19 +1785,17 @@ export async function runSuiteInMirrorWorktree(repo: string, sha: string, opts: 
     if (!setup.ok) return { result: 'not-run', detail: `the mirror's repo lease is unavailable: ${clean(setup.reason)}`, commandsRun: 0 };
     if (!setup.value.ok) return { result: 'not-run', detail: setup.value.detail, commandsRun: 0 };
     const required = setup.value.required;
-    // Same toolchain trick as inbox/merge.ts linkNodeModules (M293).
-    const nodeModules = join(mirror, 'node_modules');
-    try {
-      if (existsSync(nodeModules)) symlinkSync(nodeModules, join(worktree, 'node_modules'), 'dir');
-    } catch { /* best effort: a missing toolchain surfaces as not-run */ }
     if (required.length === 0) return { result: 'not-run', detail: 'no required verify command', commandsRun: 0 };
+    // The toolchain: the same links (root + pnpm workspace packages) and the
+    // same read-only grants G3 uses — inbox/merge.ts linkVerifyNodeModules.
+    // One helper for both so the watch can never verify with a narrower
+    // toolchain than the gate that admitted the merge (a false `fail`).
+    const { linkVerifyNodeModules, openStandingVerificationConfinement } = await import('../inbox/merge.js');
+    const installGrants = linkVerifyNodeModules(mirror, worktree);
 
     if (standingLive()) {
       try {
-        const { openStandingVerificationConfinement } = await import('../inbox/merge.js');
-        confined = await openStandingVerificationConfinement(worktree, {
-          readOnlyPaths: existsSync(nodeModules) ? [nodeModules] : [],
-        });
+        confined = await openStandingVerificationConfinement(worktree, { readOnlyPaths: installGrants });
       } catch (error) {
         return { result: 'not-run', detail: `suite confinement unavailable under the standing grant: ${clean(errText(error))}`, commandsRun: 0 };
       }
@@ -1853,6 +1851,36 @@ export async function runSuiteInMirrorWorktree(repo: string, sha: string, opts: 
     } catch { /* fall through */ }
     if (!cleaned) cleanup();
   }
+}
+
+/**
+ * Commands detected in the `detect` tree carry an ABSOLUTE `cwd` inside it
+ * (repo-profile's contract parser stores the resolved directory). That tree
+ * is removed before the suite runs in `wt`, so an unrebased `cwd` pointed at
+ * a deleted directory outside the workspace and every package-scoped command
+ * (`"cwd": "packages/a"` — the pnpm-workspace shape) came back
+ * `invalid-command` → `not-run`: the watch could never verify such a repo.
+ * Rebase each onto the same RELATIVE path, which runVerifyCommandAsync
+ * resolves against the suite's worktree. A cwd that is not inside the detect
+ * tree (lexically or physically) is left as it is, so it still fails closed
+ * (`not-run`) instead of silently running somewhere else.
+ */
+function rebaseCommandCwds<T extends { cwd?: string }>(commands: T[], detectTree: string): T[] {
+  const roots = [detectTree, realpathOr(detectTree)];
+  return commands.map((command) => {
+    if (!command.cwd || !isAbsolute(command.cwd)) return command;
+    for (const root of roots) {
+      const rel = relative(root, command.cwd);
+      if (rel.startsWith('..') || isAbsolute(rel)) continue;
+      if (rel === '') {
+        const { cwd: _root, ...rest } = command;
+        void _root;
+        return rest as T;
+      }
+      return { ...command, cwd: rel };
+    }
+    return command;
+  });
 }
 
 function firstFailureLine(output: string): string {

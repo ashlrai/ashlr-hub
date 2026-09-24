@@ -9,7 +9,7 @@
  * At 375 px the table becomes one card per repo (a 7-column table does not
  * fit a phone, and a horizontal scroll hides the action).
  */
-import type { FleetLiveSnapshotV1, FleetRepoRow, RepoHold } from '../../../../core/fleet/fleet-types.js';
+import type { FleetLiveSnapshotV1, FleetMirrorSummary, FleetRepoRow, RepoHold } from '../../../../core/fleet/fleet-types.js';
 import { Sparkline } from '../../../components/charts/Sparkline.js';
 import { Button } from '../../../components/primitives/Button.js';
 import { formatRelative } from '../autonomy/format.js';
@@ -115,6 +115,23 @@ function Holds({ row, now }: { row: FleetRepoRow; now: number }) {
   );
 }
 
+/**
+ * The fleet's own mirror clones, apart from the repo rows. WHY separate: a
+ * mirror is the fleet's working copy of a repo already listed above, so
+ * counting it as a row double-counts the repo (and its pause would not pause
+ * the real one). `undefined` = an older server that does not report mirrors
+ * (say nothing); `null` = the enrollment registry could not be read (say so —
+ * unknown is never "none").
+ */
+export function mirrorsText(mirrors: FleetMirrorSummary | null | undefined): string | null {
+  if (mirrors === undefined) return null;
+  if (mirrors === null) return 'Fleet mirrors: unknown — the enrollment registry could not be read.';
+  if (mirrors.count === 0) return 'Fleet mirrors: none yet — the fleet clones a repo the first time it works on it.';
+  const shown = mirrors.repos.slice(0, 6).join(', ');
+  const more = mirrors.repos.length > 6 ? ` and ${mirrors.repos.length - 6} more` : '';
+  return `Fleet mirrors: ${mirrors.count} working ${mirrors.count === 1 ? 'copy' : 'copies'}${shown ? ` (${shown}${more})` : ''} — the fleet's own clones of the repos above, not repos of their own.`;
+}
+
 const today = (row: FleetRepoRow) => (row.mergesToday === null ? '—' : `${row.mergesToday}${row.maxMergesPerDay !== null ? ` / ${row.maxMergesPerDay}` : ''}`);
 
 export function RepoTable({ read, actions, now, compact }: { read: OptionalRead<FleetLiveSnapshotV1> | undefined; actions: SurfaceActions; now: number; compact: boolean }) {
@@ -179,6 +196,7 @@ export function RepoTable({ read, actions, now, compact }: { read: OptionalRead<
           </table>
         </div>
       )}
+      {live && mirrorsText(live.mirrors) ? <p className={styles.muted}>{mirrorsText(live.mirrors)}</p> : null}
     </Card>
   );
 }

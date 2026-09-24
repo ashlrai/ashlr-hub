@@ -2858,6 +2858,9 @@ async function runGoalInternal(
               delegationScope,
               ...(opts.signal ? { signal: opts.signal } : {}),
               ...(opts.runId ? { runId: opts.runId } : {}),
+              // The SeatRouter's codex seat (RunOptions.seatId): without it a
+              // standing codex run is refused as unconfinable.
+              ...(opts.seatId ? { seatId: opts.seatId } : {}),
             });
             const fallbackStateWithRetention = withSandboxRetention(
               fallback.state,
@@ -2945,6 +2948,7 @@ async function runGoalInternal(
                 delegationScope,
                 ...(opts.signal ? { signal: opts.signal } : {}),
                 ...(opts.runId ? { runId: opts.runId } : {}),
+                ...(opts.seatId ? { seatId: opts.seatId } : {}),
                 deferTerminalAction: true,
               });
               const retention = sandboxRetentionFrom(rawR);

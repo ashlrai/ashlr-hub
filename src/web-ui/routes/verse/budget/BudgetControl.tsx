@@ -33,9 +33,9 @@ import { Switch } from '../../../components/primitives/Switch.js';
 import { EngineMarker } from '../../../components/primitives/Tag.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { describeContextError, useTokenGate } from '../context/use-token-gate.js';
+import { readBudgetRows } from '../usage/capacity-strip-model.js';
 import {
   BUDGET_MODE_OPTIONS,
-  buildBudgetRows,
   budgetSummary,
   clampPercent,
   modeAboveCeiling,
@@ -242,9 +242,16 @@ export interface BudgetControlViewProps {
 
 export function BudgetControlView({ view, preview, nowMs, pending, error, readOnly = false, maxMode = null, onMode, onSeat }: BudgetControlViewProps) {
   const titleId = useId();
-  const rows = buildBudgetRows(view);
+  // The wire view is read defensively (the capacity strip's own guard): this
+  // panel is opened from Apps, the composer's seat chip and the autonomy bar,
+  // and a budget answer of `{}` or a garbled seat entry used to throw inside
+  // buildBudgetRows and take the whole sheet down. A seat whose policy is
+  // malformed is dropped, not shown as "off" — see readBudgetRows.
+  const rows = [...readBudgetRows(view).values()];
   const summary = budgetSummary(rows);
-  const mode = BUDGET_MODE_OPTIONS.find((o) => o.value === view.mode) ?? BUDGET_MODE_OPTIONS[1]!;
+  const knownMode = BUDGET_MODE_OPTIONS.find((o) => o.value === view.mode) ?? null;
+  const mode = knownMode ?? BUDGET_MODE_OPTIONS[1]!;
+  const maxAgeMs = typeof view.readingMaxAgeMs === 'number' && Number.isFinite(view.readingMaxAgeMs) ? view.readingMaxAgeMs : null;
   const ceilingLabel = maxMode ? BUDGET_MODE_OPTIONS.find((o) => o.value === maxMode)?.label ?? maxMode : null;
   const aboveNow = modeAboveCeiling(view.mode, maxMode);
   const chosen = preview?.seatId ? rows.find((r) => r.seatId === preview.seatId) : null;
@@ -269,7 +276,9 @@ export function BudgetControlView({ view, preview, nowMs, pending, error, readOn
           value={view.mode}
           onChange={(next) => { if (next !== view.mode && !modeAboveCeiling(next, maxMode)) onMode(next); }}
         />
-        <p className={styles.modeText}>{mode.description}</p>
+        {/* No option is pressed when the server named no mode we know —
+            showing Balanced there would claim a setting nobody read. */}
+        <p className={styles.modeText}>{knownMode ? mode.description : 'The server did not say which mode is on.'}</p>
         {ceilingLabel ? (
           <p className={styles.modeText} data-ceiling="">
             {aboveNow
@@ -301,7 +310,7 @@ export function BudgetControlView({ view, preview, nowMs, pending, error, readOn
 
       <p className={styles.footnote}>
         Reserves apply to autonomous work only — your own chats can always use a seat. Unknown usage is never treated as
-        headroom: a seat with no reading, or one older than {Math.round(view.readingMaxAgeMs / 60_000)} minutes, is held back.
+        headroom: a seat with no reading, or one {maxAgeMs !== null ? `older than ${Math.round(maxAgeMs / 60_000)} minutes` : 'whose reading is stale'}, is held back.
       </p>
     </section>
   );
@@ -339,8 +348,10 @@ export function BudgetControl({ maxMode = null }: { maxMode?: BudgetMode | null 
   }, [refetchBudget, refetchPreview]);
 
   // The POST response is newer than the cached read until the refetch lands.
+  // A cached read with no parseable sampledAt cannot be shown to be newer, so
+  // the POST's answer wins (NaN comparisons are always false).
   const cached = budget.data;
-  const view = latest && (!cached || Date.parse(latest.sampledAt) >= Date.parse(cached.sampledAt)) ? latest : cached;
+  const view = latest && (!cached || !(Date.parse(latest.sampledAt) < Date.parse(cached.sampledAt))) ? latest : cached;
 
   const apply = useCallback(async (key: string, reason: string, update: Parameters<typeof updateBudget>[0]) => {
     setPending(key);

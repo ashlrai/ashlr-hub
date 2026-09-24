@@ -33,13 +33,21 @@
  * async refresh (≤ 2 s old for a GET; a background refresh every 15 s once
  * anything has asked, so `needsYouItems()` — which activity calls every 5 s
  * — answers from memory in microseconds and never does I/O on its caller's
- * stack). The ledger read yields to the event loop (20 ms budget).
+ * stack). The authority-ledger read yields to the event loop (20 ms budget).
+ * The in-flight dispatches come from an INCREMENTAL, async tail of the
+ * agent-action ledger ({@link createDispatchTail}): each refresh parses only
+ * the bytes appended since the last one, in time-sliced chunks. (The whole-
+ * partition synchronous read it replaces blocked the loop 30–75 ms per
+ * refresh on a dispatching day — review 3.10 c11.)
  *
  * POSTs act as `mason` (the only caller that passes Verse's mutation gate):
  * pause sets an `owner-hold`; resume clears one kind, or every active hold on
  * the repo. The hold store is fleet/quarantine.ts, which ledgers each change.
  */
+import { constants as fsConstants } from 'node:fs';
+import { lstat, open, opendir } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { join } from 'node:path';
 
 import type { ApiModule } from './api-modules.js';
 import type { VerseApiContext } from './verse-api.js';
@@ -79,10 +87,15 @@ import { readJournalSince, readTickState, type FleetJournalRecord, type FleetTic
 import { fleetLaneOf } from '../fleet/dispatch-router.js';
 import { openFleetPrsFromLedger } from '../fleet/backpressure.js';
 import { repoIdentityOfPath } from '../fleet/repo-identity.js';
-import { readAgentActionsDetailed } from '../fleet/agent-action-ledger.js';
+import {
+  agentActionsDir,
+  isSafeAgentActionLedgerDirectory,
+  isSafeAgentActionLedgerFile,
+} from '../fleet/agent-action-ledger.js';
 import { probeDaemonLiveness, type DaemonLivenessV1 } from '../daemon/liveness.js';
 import { daemonPaused } from '../daemon/pause.js';
 import { listEnrolled, readKillSwitch } from '../sandbox/policy.js';
+import { isMirrorPath } from '../fleet/mirrors.js';
 import { audit } from '../sandbox/audit.js';
 import { scrubSecrets } from '../util/scrub.js';
 
@@ -126,9 +139,18 @@ export interface FleetLiveDeps {
   holds(nowMs: number): RepoHold[];
   setHold(req: SetRepoHoldRequest): RepoHoldChange;
   tasks(): TaskQueueRead;
-  /** Dispatches started and not finished since `sinceMs`; null = unknown. */
-  inFlight(sinceMs: number): InFlightDispatch[] | null;
+  /**
+   * Dispatches started and not finished since `sinceMs`; null = unknown.
+   * May answer asynchronously (the default tails the ledger off the loop).
+   */
+  inFlight(sinceMs: number): InFlightDispatch[] | null | Promise<InFlightDispatch[] | null>;
   enrolled(): string[];
+  /**
+   * Is this enrolled path one of the fleet's own mirror clones
+   * (~/.ashlr/fleet/mirrors/…)? Those are working copies of repos Mason
+   * already enrolled or granted, not repos of their own.
+   */
+  isMirror(path: string): boolean;
   repoIdentity(path: string): string | null;
   /** U4's open + recently finished watches. Throws when the store is corrupt (read as unknown). */
   watches(): PostMergeWatchView[];
@@ -136,32 +158,331 @@ export interface FleetLiveDeps {
   greenPct(opts: { repo?: string; sinceMs: number; nowMs: number }): { finished: number; green: number; pct: number | null };
 }
 
-function inFlightDefault(sinceMs: number): InFlightDispatch[] | null {
-  const read = readAgentActionsDetailed({
-    sinceMs,
-    maxBytes: 4 * 1024 * 1024,
-    inspectionOnly: true,
-    filter: (event) => event.kind === 'dispatch',
-  });
-  if (read.sourceState === 'degraded') return null;
-  const ended = new Set<string>();
-  for (const event of read.events) {
-    if (event.runId && (event.action === 'daemon:dispatch' || event.action === 'daemon:dispatch-skip')) ended.add(event.runId);
-  }
-  const out: InFlightDispatch[] = [];
-  for (const event of read.events) {
-    if (event.action !== 'daemon:dispatch-start' || !event.runId || ended.has(event.runId)) continue;
-    out.push({
-      runId: event.runId,
-      itemId: event.itemId ?? null,
-      repoPath: event.repo ?? null,
-      backend: event.backend ?? null,
-      model: event.model ?? null,
-      startedAt: event.ts,
-    });
-  }
-  return out;
+// ---------------------------------------------------------------------------
+// In-flight dispatches: an incremental, async tail of the agent-action ledger
+// ---------------------------------------------------------------------------
+//
+// WHY A TAIL OF ITS OWN (review 3.10 c11): the ledger's reader
+// (`readAgentActionsDetailed`) is synchronous and whole-partition — it reads
+// and JSON-parses every row of every UTC-day file the window touches, then
+// filters. On a dispatching day that is 1.5–3 MB and 30–75 ms of a blocked
+// event loop on EVERY refresh (each 5 s Fleet poll plus the 15 s refresher),
+// against a 20 ms handler budget. The rows this needs are append-only, so a
+// per-partition cursor makes each refresh cost only the bytes appended since
+// the last one; the first (cold) read of a partition is chunked async I/O
+// with the parsing time-sliced ({@link DISPATCH_TAIL_SLICE_MS}), so no single
+// stretch on the loop approaches the budget either.
+//
+// What it keeps from the ledger's own reader: the same directory and file
+// safety checks (owner-only, no symlink, single link, not group/world
+// writable — the ledger's exported predicates), O_NOFOLLOW opens with an
+// inode re-check, the dated-partition naming rule, the "row's UTC day matches
+// its partition" rule, secret scrubbing and length bounds on every string it
+// returns, and the honesty rule: a candidate row it cannot read makes the
+// answer null (unknown), never a smaller count.
+// What it deliberately does differently: only rows naming a
+// `daemon:dispatch*` action are parsed at all. A malformed row of some OTHER
+// kind (a tick, a reflection) no longer turns "agents producing right now"
+// into unknown — it says nothing about dispatches.
+
+const DATED_PARTITION_RE = /^(\d{4}-\d{2}-\d{2})\.jsonl$/;
+const DISPATCH_START = 'daemon:dispatch-start';
+const DISPATCH_TERMINAL = new Set(['daemon:dispatch', 'daemon:dispatch-skip']);
+/** Longest synchronous parsing stretch before yielding to the loop (well inside the 20 ms budget). */
+export const DISPATCH_TAIL_SLICE_MS = 6;
+const DISPATCH_TAIL_CHUNK_BYTES = 256 * 1024;
+/** A partition past this is not tailed (read as unknown) — bounds a cold read and memory. */
+const DISPATCH_TAIL_MAX_PARTITION_BYTES = 64 * 1024 * 1024;
+const DISPATCH_TAIL_MAX_ROW_BYTES = 128 * 1024;
+const DISPATCH_TAIL_MAX_ROWS_PER_PARTITION = 200_000;
+const DISPATCH_TAIL_MAX_DIRECTORY_ENTRIES = 2_048;
+const DISPATCH_TAIL_MAX_LOOSE_FILES = 3;
+
+interface TailedStart {
+  runId: string;
+  ms: number;
+  dispatch: InFlightDispatch;
 }
+
+interface PartitionTail {
+  dev: number;
+  ino: number;
+  /** Bytes consumed — always just past a newline (a half-written last row waits for the next read). */
+  offset: number;
+  starts: Map<string, TailedStart>;
+  ended: Set<string>;
+  rows: number;
+  /** A dispatch row here could not be read: the answer stays unknown until the file is replaced. */
+  unreadable: boolean;
+}
+
+export interface DispatchTail {
+  /** Dispatches started at/after `sinceMs` with no terminal row; null = unknown. Calls are serialized. */
+  read(sinceMs: number): Promise<InFlightDispatch[] | null>;
+  /** Drop every cursor (the next read starts cold). */
+  reset(): void;
+}
+
+export interface DispatchTailOptions {
+  /** The agent-action ledger directory (read per call: HOME/ASHLR_HOME may change under tests). */
+  dir?: () => string;
+  sliceMs?: number;
+  chunkBytes?: number;
+}
+
+function tailText(value: unknown, max: number): string | null {
+  if (typeof value !== 'string' || value.trim() === '') return null;
+  const clean = scrubSecrets(value);
+  return clean.length > max ? `${clean.slice(0, max - 3)}...` : clean;
+}
+
+function validDatedPartition(date: string): boolean {
+  const ms = Date.parse(`${date}T00:00:00.000Z`);
+  return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === date;
+}
+
+function yieldToLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+type DispatchRow =
+  | { kind: 'start'; start: TailedStart }
+  | { kind: 'end'; runId: string }
+  | null
+  | 'unreadable';
+
+/** One candidate line → a start, a terminal row, nothing of interest (null), or unreadable. */
+function dispatchRowOf(line: string, partitionDate: string | null): DispatchRow {
+  if (line.length > DISPATCH_TAIL_MAX_ROW_BYTES || Buffer.byteLength(line, 'utf8') > DISPATCH_TAIL_MAX_ROW_BYTES) return 'unreadable';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return 'unreadable';
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return 'unreadable';
+  const row = parsed as Record<string, unknown>;
+  // A row that merely MENTIONS a dispatch action (in a summary, say) is not one.
+  if (row['kind'] !== 'dispatch') return null;
+  const action = row['action'];
+  if (action !== DISPATCH_START && !(typeof action === 'string' && DISPATCH_TERMINAL.has(action))) return null;
+  if (row['schemaVersion'] !== 1 || typeof row['ts'] !== 'string') return 'unreadable';
+  const ms = Date.parse(row['ts']);
+  if (!Number.isFinite(ms)) return 'unreadable';
+  const ts = new Date(ms).toISOString();
+  if (partitionDate !== null && ts.slice(0, 10) !== partitionDate) return 'unreadable';
+  const runId = tailText(row['runId'], 160);
+  // The ledger's reader skipped a dispatch row without a run id too.
+  if (runId === null) return null;
+  if (action !== DISPATCH_START) return { kind: 'end', runId };
+  const backend = typeof row['backend'] === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/.test(row['backend']) ? row['backend'] : null;
+  return {
+    kind: 'start',
+    start: {
+      runId,
+      ms,
+      dispatch: {
+        runId,
+        itemId: tailText(row['itemId'], 240),
+        repoPath: tailText(row['repo'], 500),
+        backend,
+        model: tailText(row['model'], 160),
+        startedAt: ts,
+      },
+    },
+  };
+}
+
+export function createDispatchTail(opts: DispatchTailOptions = {}): DispatchTail {
+  const dirOf = opts.dir ?? agentActionsDir;
+  const sliceMs = opts.sliceMs ?? DISPATCH_TAIL_SLICE_MS;
+  const chunkBytes = Math.max(1024, opts.chunkBytes ?? DISPATCH_TAIL_CHUNK_BYTES);
+  const partitions = new Map<string, PartitionTail>();
+  let lastDir: string | null = null;
+  let chain: Promise<unknown> = Promise.resolve();
+
+  function consume(p: PartitionTail, line: string, partitionDate: string | null): void {
+    // Only dispatch rows are parsed at all (see the section header).
+    if (!line.includes('daemon:dispatch')) return;
+    p.rows += 1;
+    if (p.rows > DISPATCH_TAIL_MAX_ROWS_PER_PARTITION) {
+      p.unreadable = true;
+      return;
+    }
+    const row = dispatchRowOf(line, partitionDate);
+    if (row === null) return;
+    if (row === 'unreadable') {
+      p.unreadable = true;
+      return;
+    }
+    if (row.kind === 'end') {
+      p.ended.add(row.runId);
+      p.starts.delete(row.runId);
+    } else if (!p.ended.has(row.start.runId)) {
+      p.starts.set(row.start.runId, row.start);
+    }
+  }
+
+  /** Bring one partition's cursor to its current end. false = unreadable (the answer is unknown). */
+  async function tail(dir: string, name: string, partitionDate: string | null): Promise<boolean> {
+    const path = join(dir, name);
+    let st;
+    try {
+      st = await lstat(path);
+    } catch (err) {
+      // Gone between the listing and now (a rotation): nothing in it any more.
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        partitions.delete(name);
+        return true;
+      }
+      return false;
+    }
+    if (!isSafeAgentActionLedgerFile(st)) return false;
+    let p = partitions.get(name);
+    // Replaced (new inode) or truncated: its cursor means nothing — start over.
+    if (p && (p.dev !== st.dev || p.ino !== st.ino || st.size < p.offset)) p = undefined;
+    if (!p) {
+      p = { dev: st.dev, ino: st.ino, offset: 0, starts: new Map(), ended: new Set(), rows: 0, unreadable: false };
+      partitions.set(name, p);
+    }
+    if (p.unreadable) return false;
+    if (st.size === p.offset) return true;
+    if (st.size > DISPATCH_TAIL_MAX_PARTITION_BYTES) return false;
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    const handle = await open(path, fsConstants.O_RDONLY | noFollow);
+    try {
+      const fst = await handle.stat();
+      if (!isSafeAgentActionLedgerFile(fst) || fst.dev !== p.dev || fst.ino !== p.ino) return false;
+      const end = Math.min(fst.size, DISPATCH_TAIL_MAX_PARTITION_BYTES);
+      let position = p.offset;
+      let carry = Buffer.alloc(0);
+      let sliceStart = performance.now();
+      while (position < end) {
+        const want = Math.min(chunkBytes, end - position);
+        const chunk = Buffer.alloc(want);
+        const { bytesRead } = await handle.read(chunk, 0, want, position);
+        if (bytesRead <= 0) break;
+        position += bytesRead;
+        const joined = carry.length > 0 ? Buffer.concat([carry, chunk.subarray(0, bytesRead)]) : chunk.subarray(0, bytesRead);
+        const lastNewline = joined.lastIndexOf(0x0a);
+        if (lastNewline < 0) {
+          carry = Buffer.from(joined);
+          if (carry.length > DISPATCH_TAIL_MAX_ROW_BYTES) {
+            p.unreadable = true;
+            return false;
+          }
+          continue;
+        }
+        carry = Buffer.from(joined.subarray(lastNewline + 1));
+        const lines = joined.toString('utf8', 0, lastNewline).split('\n');
+        sliceStart = performance.now();
+        for (let i = 0; i < lines.length; i += 1) {
+          if ((i & 127) === 127 && performance.now() - sliceStart > sliceMs) {
+            await yieldToLoop();
+            sliceStart = performance.now();
+          }
+          const line = lines[i]!;
+          if (line.trim()) consume(p, line, partitionDate);
+          if (p.unreadable) return false;
+        }
+        // Everything up to the newline is consumed; a half-written last row
+        // stays unread until a later read sees its newline.
+        p.offset = position - carry.length;
+      }
+      return true;
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  }
+
+  async function readOnce(sinceMs: number): Promise<InFlightDispatch[] | null> {
+    const dir = dirOf();
+    if (dir !== lastDir) {
+      partitions.clear();
+      lastDir = dir;
+    }
+    let dirBefore;
+    try {
+      dirBefore = await lstat(dir);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+        // No ledger yet: nothing has ever been dispatched here.
+        partitions.clear();
+        return [];
+      }
+      return null;
+    }
+    if (!isSafeAgentActionLedgerDirectory(dirBefore)) return null;
+    const selected: Array<{ name: string; date: string | null }> = [];
+    try {
+      let seen = 0;
+      let loose = 0;
+      for await (const entry of await opendir(dir)) {
+        seen += 1;
+        if (seen > DISPATCH_TAIL_MAX_DIRECTORY_ENTRIES) return null;
+        if (!entry.name.endsWith('.jsonl')) continue;
+        const date = DATED_PARTITION_RE.exec(entry.name)?.[1] ?? null;
+        if (date === null) {
+          loose += 1;
+          if (loose > DISPATCH_TAIL_MAX_LOOSE_FILES) return null;
+          selected.push({ name: entry.name, date: null });
+          continue;
+        }
+        if (!validDatedPartition(date)) return null;
+        // Same selection as the ledger's reader: a UTC-day file that ends at or after the window start.
+        if (Date.parse(`${date}T23:59:59.999Z`) >= sinceMs) selected.push({ name: entry.name, date });
+      }
+    } catch {
+      return null;
+    }
+    const keep = new Set(selected.map((s) => s.name));
+    for (const name of [...partitions.keys()]) if (!keep.has(name)) partitions.delete(name);
+    for (const { name, date } of selected) {
+      try {
+        if (!(await tail(dir, name, date))) return null;
+      } catch {
+        // Any I/O surprise mid-read: forget the cursor (the next read starts it over) and say unknown.
+        partitions.delete(name);
+        return null;
+      }
+    }
+    try {
+      const dirAfter = await lstat(dir);
+      if (!isSafeAgentActionLedgerDirectory(dirAfter) || dirAfter.dev !== dirBefore.dev || dirAfter.ino !== dirBefore.ino) {
+        partitions.clear();
+        return null;
+      }
+    } catch {
+      partitions.clear();
+      return null;
+    }
+    // A terminal row can land in a later partition than its start (a run across UTC midnight).
+    const ended = new Set<string>();
+    for (const name of keep) for (const runId of partitions.get(name)?.ended ?? []) ended.add(runId);
+    const out: TailedStart[] = [];
+    for (const name of keep) {
+      for (const start of partitions.get(name)?.starts.values() ?? []) {
+        if (start.ms >= sinceMs && !ended.has(start.runId)) out.push(start);
+      }
+    }
+    return out.sort((a, b) => b.ms - a.ms).map((s) => ({ ...s.dispatch }));
+  }
+
+  return {
+    read(sinceMs) {
+      const run = chain.then(() => readOnce(sinceMs));
+      chain = run.catch(() => undefined);
+      return run.catch(() => null);
+    },
+    reset() {
+      partitions.clear();
+      lastDir = null;
+    },
+  };
+}
+
+/** The process-wide tail behind the default `inFlight` dependency. */
+const dispatchTail = createDispatchTail();
 
 function defaultDeps(): FleetLiveDeps {
   return {
@@ -176,8 +497,9 @@ function defaultDeps(): FleetLiveDeps {
     holds: (nowMs) => listRepoHolds({ nowMs }),
     setHold: (req) => setRepoHold(req),
     tasks: () => listTasks({ status: ['queued', 'parked'] }),
-    inFlight: inFlightDefault,
+    inFlight: (sinceMs) => dispatchTail.read(sinceMs),
     enrolled: () => listEnrolled(),
+    isMirror: (path) => isMirrorPath(path),
     repoIdentity: (path) => repoIdentityOfPath(path),
     watches: () => listPostMergeWatches(),
     greenPct: (opts) => postMergeGreenPct(opts),
@@ -510,7 +832,17 @@ export async function buildFleetLiveSnapshot(d: FleetLiveDeps = deps): Promise<B
     journalKnown = false;
   }
   const tasks = safely(() => d.tasks(), { ok: false, reason: 'the task queue could not be read' } as TaskQueueRead);
-  const inFlightRaw = live.alive === true ? safely(() => d.inFlight(since12h), null) : [];
+  // Only while a live daemon provably runs. The window is the in-flight age
+  // cap itself: a start older than that is discarded below anyway, so reading
+  // further back (it was 12 h) only cost parse time.
+  let inFlightRaw: InFlightDispatch[] | null = [];
+  if (live.alive === true) {
+    try {
+      inFlightRaw = await d.inFlight(nowMs - IN_FLIGHT_MAX_AGE_MS);
+    } catch {
+      inFlightRaw = null;
+    }
+  }
   const inFlight = (inFlightRaw ?? []).filter((f) => nowMs - msOf(f.startedAt) <= IN_FLIGHT_MAX_AGE_MS);
 
   // Enrolled path → owner/name.
@@ -520,8 +852,23 @@ export async function buildFleetLiveSnapshot(d: FleetLiveDeps = deps): Promise<B
     if (!identity.has(path)) identity.set(path, safely(() => d.repoIdentity(path), null));
     return identity.get(path) ?? dirLabel(path);
   };
-  const enrolled = safely(() => d.enrolled(), [] as string[]);
-  for (const path of enrolled) repoLabel(path);
+  const enrolledRead = safely<string[] | null>(() => d.enrolled(), null);
+  const enrolledAll = enrolledRead ?? [];
+  // WHY MIRRORS ARE SPLIT OUT (R3f): since the standing fleet stopped
+  // unenrolling Mason's checkouts, the registry holds BOTH his checkouts and
+  // the fleet's mirror clones of them. The repo table is "Mason's repos": a
+  // mirror adds no repo of its own (a granted repo already has a row from the
+  // policy), and a mirror left enrolled after its repo left the grant would
+  // otherwise show up as a phantom row. Mirror paths are still labelled, so a
+  // run that worked in one reads as its owner/name.
+  const mirrorPaths = new Set(enrolledAll.filter((path) => safely(() => d.isMirror(path), false)));
+  const enrolled = enrolledAll.filter((path) => !mirrorPaths.has(path));
+  for (const path of enrolledAll) repoLabel(path);
+  // The mirrors themselves are shown APART (snapshot.mirrors), so the UI can
+  // say what the fleet works in without inflating Mason's repo table.
+  const mirrors = enrolledRead === null
+    ? null
+    : { count: mirrorPaths.size, repos: [...new Set([...mirrorPaths].map((path) => repoLabel(path)))].sort((a, b) => a.localeCompare(b)) };
 
   // ── Runs ────────────────────────────────────────────────────────────────
   const progress = rows ? proposalProgressFromLedger(rows) : new Map<string, ProposalProgress>();
@@ -846,6 +1193,7 @@ export async function buildFleetLiveSnapshot(d: FleetLiveDeps = deps): Promise<B
     runs: runList,
     funnel,
     repos,
+    mirrors,
   };
 
   // ── Needs you (R1) ──────────────────────────────────────────────────────
@@ -987,13 +1335,19 @@ export function needsYouFrom(holds: readonly RepoHold[], rows: readonly LedgerEn
 let cache: BuiltState | null = null;
 let inflight: Promise<BuiltState> | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
+/** The last refresh rejected (cleared by the next success). */
+let refreshFailed = false;
 
 function refresh(): Promise<BuiltState> {
   if (inflight) return inflight;
   inflight = buildFleetLiveSnapshot(deps)
     .then((built) => {
       cache = built;
+      refreshFailed = false;
       return built;
+    }, (err: unknown) => {
+      refreshFailed = true;
+      throw err;
     })
     .finally(() => {
       inflight = null;
@@ -1019,8 +1373,28 @@ export function setFleetLiveDepsForTest(next?: Partial<FleetLiveDeps>): void {
 export function resetFleetLiveApiForTest(): void {
   cache = null;
   inflight = null;
+  refreshFailed = false;
   if (timer) clearInterval(timer);
   timer = null;
+  dispatchTail.reset();
+}
+
+/**
+ * Producer state for the Needs-you drawer (the same contract as leader-api's
+ * and authority-api's). Pure — no I/O, never throws:
+ *   - 'warming' — no snapshot has been built yet and no build has failed
+ *                 (activity shows the source as unavailable, not all-clear);
+ *   - 'error'   — the snapshot is stale, a build failed with nothing cached,
+ *                 or a source it needs could not be read;
+ *   - 'ok'      — needsYouItems() can vouch for what it returns.
+ */
+export type FleetNeedsYouSourceState = 'warming' | 'ok' | 'error';
+
+export function needsYouSourceState(): FleetNeedsYouSourceState {
+  const current = cache;
+  if (!current) return refreshFailed ? 'error' : 'warming';
+  if (Date.now() - current.atMs > NEEDS_YOU_MAX_AGE_MS) return 'error';
+  return current.needsYouProblem === null ? 'ok' : 'error';
 }
 
 /**
@@ -1028,10 +1402,16 @@ export function resetFleetLiveApiForTest(): void {
  * quarantined repos, reverts in the last 24 h, open owner-lane PRs. Stop is
  * the authority source's item (authority-api), not duplicated here.
  *
- * PURE and served from cache: no I/O on the caller's stack. With no snapshot
- * yet, one too old, or a source that could not be read, it THROWS — activity
- * then reports the fleet source as erroring instead of an all-clear it cannot
- * vouch for — and schedules a refresh off the caller's stack.
+ * PURE and served from cache: no I/O on the caller's stack.
+ *   - Before the first snapshot it returns [] and schedules the first read;
+ *     needsYouSourceState() says 'warming' meanwhile. WHY NOT THROW: a throw
+ *     was reported as the source ERRORING on every cold start (activity polls
+ *     before the first 15 s refresh could have landed). The empty answer is
+ *     never read as an all-clear by activity, which maps 'warming' to
+ *     'unavailable'.
+ *   - A snapshot too old, or one whose sources could not be read, THROWS —
+ *     that is a real failure, and activity reports the source as erroring
+ *     instead of an all-clear it cannot vouch for.
  */
 export function needsYouItems(): NeedsYouItem[] {
   ensureRefresher();
@@ -1041,7 +1421,11 @@ export function needsYouItems(): NeedsYouItem[] {
     setImmediate(() => {
       void refresh().catch(() => undefined);
     });
-    throw new Error(current ? 'fleet state is stale; refreshing' : 'fleet state has not been read yet; reading');
+    if (!current) {
+      if (refreshFailed) throw new Error('fleet state could not be read; retrying');
+      return [];
+    }
+    throw new Error('fleet state is stale; refreshing');
   }
   if (current.needsYouProblem !== null) throw new Error(`fleet state is incomplete: ${current.needsYouProblem}`);
   return current.needsYou.map((item) => ({ ...item, actions: item.actions.map((a) => ({ ...a })) }));

@@ -48,6 +48,7 @@ import {
 import { loadProposal, setStatus } from '../inbox/store.js';
 import { measureAutoMergeDiffScope } from '../foundry/automerge-diff-scope.js';
 import { loadBudgetPolicy, readCapacitySnapshot } from '../routing/budget-store.js';
+import { ensureDaemonCapacityPublisher, type PublisherStatus } from '../daemon/capacity-publisher.js';
 import { engineOfSeatId, type BudgetEngine } from '../routing/policy.js';
 import { routeSeat } from '../routing/router.js';
 import { isSelfTargetProposal } from './self.js';
@@ -172,6 +173,30 @@ export interface JudgeSeatLanes {
   nextEligibleAt: string | null;
 }
 
+/**
+ * One G5 red-team run. `frontier` says whether a MODEL was asked
+ * ('answered' / 'failed') or only the deterministic checks ran ('none').
+ */
+export interface RedTeamOutcome {
+  check: G5Check;
+  frontier: 'none' | 'answered' | 'failed';
+}
+
+/**
+ * The red-team memo kept in the proposal's fleet-merge state (under
+ * ~/.ashlr/authority — agent-unreadable, so a producer cannot forge a cached
+ * "survived"). Bound to the exact diff: any change to the diff invalidates it.
+ * Stored as an extra optional field; fleet-merge-state's validator preserves
+ * unknown fields, so no schema bump is needed.
+ */
+interface RedTeamMemo {
+  diffHash: string;
+  check: G5Check;
+  frontier: 'answered' | 'failed';
+  at: string;
+}
+type StandingMergeState = FleetMergeStateV1 & { redTeam?: RedTeamMemo | null };
+
 export interface StandingPassDeps {
   host: HostMergeDeps;
   loadProposal: (id: string) => Proposal | null;
@@ -188,7 +213,13 @@ export interface StandingPassDeps {
   /** null = the decisions ledger is degraded. */
   readDecisions: (proposalId: string, sinceMs: number | null) => DecisionEntry[] | null;
   claimIntegrity: (proposal: Proposal, cfg: AshlrConfig, policy: EffectivePolicy) => Promise<G4Input>;
+  /** G5's flag-gated blast-radius and spec-contract checks (NOT the red team — see `redTeam`). */
   blastChecks: (proposal: Proposal, cfg: AshlrConfig) => Promise<G5Check[]>;
+  /**
+   * G5's red team. `lanes` are the judge lanes the SeatRouter admits right now
+   * (possibly empty ⇒ deterministic checks only, never a model call).
+   */
+  redTeam: (proposal: Proposal, cfg: AshlrConfig, lanes: readonly FleetEngine[]) => Promise<RedTeamOutcome>;
   openScratch: (mirror: string) => FleetGitScratch | string;
   /** The mirror's local head of `branch`; null when unknown. */
   mirrorBranchHead: (repoPath: string, branch: string) => string | null;
@@ -197,6 +228,12 @@ export interface StandingPassDeps {
   /** Lowercase `owner/name` of the mirror's origin; null when it cannot be proven. */
   originOf: (repoPath: string) => string | null;
   postMergeEffects: (proposal: Proposal, cfg: AshlrConfig) => Promise<void>;
+  /**
+   * c8: make sure seat headroom does not depend on the Verse server running —
+   * starts the daemon-side capacity publisher once per process (a no-op
+   * outside a daemon). Its status, when cold, becomes an operator note.
+   */
+  ensureCapacityPublisher: (cfg: AshlrConfig) => PublisherStatus | null;
 }
 
 function hardenedGitRead(repoPath: string, args: readonly string[]): string | null {
@@ -244,32 +281,68 @@ export function defaultJudgeSeatLanes(input: {
 }): JudgeSeatLanes {
   const allowed = allowedJudgeLanes(input.producerFamily, input.waitSinceMs, input.nowMs)
     .filter((lane) => input.policy.engines.includes(lane));
-  if (allowed.length === 0) return { lanes: [], nextEligibleAt: null };
-  const snapshot = readCapacitySnapshot();
-  if (!snapshot) return { lanes: [], nextEligibleAt: null };
-  const seats = snapshot.seats.filter((seat) => {
-    const lane = laneForBudgetEngine(seat.engine);
-    if (!allowed.includes(lane)) return false;
-    const grantSeat = Object.prototype.hasOwnProperty.call(input.policy.spend.seats, seat.seatId)
-      ? input.policy.spend.seats[seat.seatId]
-      : undefined;
-    return grantSeat !== undefined && grantSeat.enabled && grantSeat.roles.includes('judge');
-  });
-  if (seats.length === 0) return { lanes: [], nextEligibleAt: null };
-  let budget;
-  try {
+  return routeJudgeLanes(
+    allowed,
+    (seatId) => {
+      const grantSeat = Object.prototype.hasOwnProperty.call(input.policy.spend.seats, seatId)
+        ? input.policy.spend.seats[seatId]
+        : undefined;
+      return grantSeat !== undefined && grantSeat.enabled && grantSeat.roles.includes('judge');
+    },
     // The grant clamps A9's policy: reserve floors, 5-hour ceilings, max mode (I5).
-    budget = clampBudgetPolicy(loadBudgetPolicy(), input.policy, seats.map((seat) => seat.seatId));
+    (seatIds) => clampBudgetPolicy(loadBudgetPolicy(), input.policy, seatIds),
+    input.nowMs,
+  );
+}
+
+/**
+ * The judge lanes the LEGACY (no-grant) automerge pass may spend on its red
+ * team (fleet/automerge-pass.ts, M191). WHY: that call used to resolve ANY
+ * frontier judge with no router in front of it — the one model call left
+ * that could burn a seat the SeatRouter had already refused (reserve floor,
+ * 5-hour ceiling). It now goes through the SAME router as G5/G6 above: seats
+ * from the published capacity snapshot, A9's budget policy, `routeSeat` for
+ * an autonomous review. With no grant there is nothing to clamp the budget
+ * with and no grant `judge` role, so A9's policy alone decides. Every lane
+ * that stays reviewer-independent of the producer is eligible (the legacy
+ * pass has no G6 wait clock to widen by). A cold / missing snapshot or an
+ * unreadable budget ⇒ no lane ⇒ deterministic checks only (fail closed).
+ */
+export function legacyJudgeSeatLanes(input: { producerFamily: ReviewModelFamily; nowMs: number }): JudgeSeatLanes {
+  // waitSinceMs 0 ⇒ "waited forever": every independent lane, preference order kept.
+  const allowed = allowedJudgeLanes(input.producerFamily, 0, input.nowMs);
+  return routeJudgeLanes(allowed, () => true, () => loadBudgetPolicy(), input.nowMs);
+}
+
+/** Shared router core for defaultJudgeSeatLanes / legacyJudgeSeatLanes. Never throws. */
+function routeJudgeLanes(
+  allowed: readonly FleetEngine[],
+  seatAdmitted: (seatId: string) => boolean,
+  budgetFor: (seatIds: string[]) => ReturnType<typeof loadBudgetPolicy>,
+  nowMs: number,
+): JudgeSeatLanes {
+  try {
+    if (allowed.length === 0) return { lanes: [], nextEligibleAt: null };
+    const snapshot = readCapacitySnapshot();
+    if (!snapshot) return { lanes: [], nextEligibleAt: null };
+    const seats = snapshot.seats.filter((seat) => allowed.includes(laneForBudgetEngine(seat.engine)) && seatAdmitted(seat.seatId));
+    if (seats.length === 0) return { lanes: [], nextEligibleAt: null };
+    let budget;
+    try {
+      budget = budgetFor(seats.map((seat) => seat.seatId));
+    } catch {
+      return { lanes: [], nextEligibleAt: null };
+    }
+    const decision = routeSeat({ task: 'review', difficulty: 'medium', autonomous: true }, seats, budget, { nowMs });
+    const admitted = new Set(decision.candidates.map((id) => laneForBudgetEngine(engineOfSeatId(id))));
+    const nextEligibleAt = decision.exclusions
+      .map((exclusion) => exclusion.nextEligibleAt)
+      .filter((at): at is string => typeof at === 'string')
+      .sort()[0] ?? null;
+    return { lanes: allowed.filter((lane) => admitted.has(lane)), nextEligibleAt };
   } catch {
     return { lanes: [], nextEligibleAt: null };
   }
-  const decision = routeSeat({ task: 'review', difficulty: 'medium', autonomous: true }, seats, budget, { nowMs: input.nowMs });
-  const admitted = new Set(decision.candidates.map((id) => laneForBudgetEngine(engineOfSeatId(id))));
-  const nextEligibleAt = decision.exclusions
-    .map((exclusion) => exclusion.nextEligibleAt)
-    .filter((at): at is string => typeof at === 'string')
-    .sort()[0] ?? null;
-  return { lanes: allowed.filter((lane) => admitted.has(lane)), nextEligibleAt };
 }
 
 async function defaultRunJudge(
@@ -309,7 +382,35 @@ async function defaultClaimIntegrity(proposal: Proposal, cfg: AshlrConfig, polic
   }
 }
 
-/** G5 is SPEC "unchanged": exactly master's flag-gated additive checks. */
+/**
+ * G5's red team, restricted to the router-admitted `lanes` (c2): the model
+ * half resolves only a judge on a lane the SeatRouter admitted under the
+ * grant-clamped budget, exactly like G6 — never an unrouted frontier call. An
+ * empty lane list runs the deterministic checks alone.
+ */
+async function defaultRedTeam(proposal: Proposal, cfg: AshlrConfig, lanes: readonly FleetEngine[]): Promise<RedTeamOutcome> {
+  try {
+    const { redTeamProposal } = await import('./red-team.js');
+    const rt = await redTeamProposal(proposal, cfg, {
+      judge: { producerModel: proposal.engineModel, requireIndependent: true, allowedJudgeEngines: lanes },
+    }) as { verdict?: unknown; detail?: unknown; frontier?: unknown };
+    const frontier = rt?.frontier === 'answered' || rt?.frontier === 'failed' ? rt.frontier : 'none';
+    if (rt?.verdict !== 'broken' && rt?.verdict !== 'survived') {
+      return { check: { name: 'red-team', outcome: 'error', detail: 'untrustworthy result' }, frontier };
+    }
+    const detail = typeof rt.detail === 'string' && rt.detail ? rt.detail : `red team: ${rt.verdict}`;
+    return { check: { name: 'red-team', outcome: rt.verdict === 'broken' ? 'blocked' : 'ok', detail }, frontier };
+  } catch (error) {
+    return { check: { name: 'red-team', outcome: 'error', detail: error instanceof Error ? error.message : String(error) }, frontier: 'none' };
+  }
+}
+
+/**
+ * G5 is SPEC "unchanged": master's flag-gated additive checks. The red team
+ * is NOT here — it can spend a paid judge seat, so evaluateProposal runs it
+ * through the SeatRouter, the per-pass judge budget and a per-diff cache
+ * (runRedTeam).
+ */
 async function defaultBlastChecks(proposal: Proposal, cfg: AshlrConfig): Promise<G5Check[]> {
   const foundry = cfg.foundry as Record<string, unknown> | undefined;
   const checks: G5Check[] = [];
@@ -330,19 +431,6 @@ async function defaultBlastChecks(proposal: Proposal, cfg: AshlrConfig): Promise
       }
     } catch (error) {
       checks.push({ name: 'blast-radius', outcome: 'error', detail: error instanceof Error ? error.message : String(error) });
-    }
-  }
-  if (foundry?.['redTeam'] === true) {
-    try {
-      const { redTeamProposal } = await import('./red-team.js');
-      const rt = await redTeamProposal(proposal, cfg) as { verdict?: unknown; detail?: unknown };
-      if (rt?.verdict !== 'broken' && rt?.verdict !== 'survived') {
-        checks.push({ name: 'red-team', outcome: 'error', detail: 'untrustworthy result' });
-      } else {
-        checks.push({ name: 'red-team', outcome: rt.verdict === 'broken' ? 'blocked' : 'ok', detail: detailOf(rt.detail, `red team: ${rt.verdict}`) });
-      }
-    } catch (error) {
-      checks.push({ name: 'red-team', outcome: 'error', detail: error instanceof Error ? error.message : String(error) });
     }
   }
   const specId = (proposal as unknown as Record<string, unknown>)['specId'];
@@ -413,6 +501,8 @@ export function defaultStandingPassDeps(): StandingPassDeps {
     },
     claimIntegrity: (proposal, cfg, policy) => defaultClaimIntegrity(proposal, cfg, policy),
     blastChecks: (proposal, cfg) => defaultBlastChecks(proposal, cfg),
+    redTeam: (proposal, cfg, lanes) => defaultRedTeam(proposal, cfg, lanes),
+    ensureCapacityPublisher: (cfg) => ensureDaemonCapacityPublisher(cfg),
     openScratch: (mirror) => openGitScratch(mirror),
     mirrorBranchHead: (repoPath, branch) => {
       if (!/^[A-Za-z0-9._/-]{1,200}$/.test(branch)) return null;
@@ -556,6 +646,19 @@ export async function runStandingMergePass(input: {
     requiredChecks: new Map(),
     mergeTimes: new Map(),
   };
+  // c8: every judge-lane / seat decision below reads the capacity snapshot.
+  // The standing pass runs first in every standing tick, so this is where the
+  // daemon takes over publishing when no Verse server does. Cold ⇒ the
+  // snapshot stays stale and paid seats stay ineligible (fail closed); the
+  // note says why instead of leaving the stall silent.
+  try {
+    const publisher = ctx.deps.ensureCapacityPublisher(input.cfg);
+    if (publisher && (publisher.state === 'lease-held-elsewhere' || publisher.state === 'sample-timeout' || publisher.state === 'failed')) {
+      note(ctx, `seat headroom is cold: ${publisher.reason}`);
+    }
+  } catch {
+    // Never fails the pass; readers of a stale snapshot fail closed.
+  }
   try {
     const keys = listFleetMergeStateKeys();
     if (keys === null) {
@@ -860,7 +963,12 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     if (g4.verdict !== 'pass') return rejectProposal(ctx, state, proposal, 'G4', g4);
 
     // ── G5 — blast radius ────────────────────────────────────────────────
-    const g5 = evaluateG5(await deps.blastChecks(proposal, ctx.cfg));
+    const g5Checks = await deps.blastChecks(proposal, ctx.cfg);
+    if ((ctx.cfg.foundry as Record<string, unknown> | undefined)?.['redTeam'] === true) {
+      g5Checks.push(await runRedTeam(ctx, state, proposal, diff, () =>
+        (seat ?? deps.judgeSeatLanes({ producerFamily, policy: livePolicy, waitSinceMs, nowMs })).lanes));
+    }
+    const g5 = evaluateG5(g5Checks);
     if (!recordGate(ctx, state, 'G5', g5, null)) {
       persist(ctx, state);
       return;
@@ -919,6 +1027,68 @@ async function evaluateProposal(proposal: Proposal, ctx: PassContext): Promise<v
     closeGitScratch(scratch);
     unlockFleetMergeState(lock);
   }
+}
+
+/**
+ * G5's red team under a standing grant (review finding c2). The model half is
+ * a paid frontier call, so it obeys the same three limits as G6's judge:
+ *
+ *   1. ROUTED — only lanes `judgeLanes()` returns (the SeatRouter over the
+ *      grant-clamped budget: reserve floors, 5-hour ceilings, grant judge
+ *      seats). No admitted lane ⇒ deterministic checks only, no model call.
+ *   2. BUDGETED — each model call spends one of this pass's `ctx.budget.judge`.
+ *   3. NOT REPEATED — a proposal waiting at G6 re-enters G0..G5 every tick, so
+ *      an ANSWERED red team is cached per exact diff hash and reused; a
+ *      FAILED one is not re-asked within JUDGE_RETRY_MS (deterministic-only in
+ *      between, the red team's own documented best-effort fallback).
+ *
+ * The deterministic half is cheap and always runs when no cached model answer
+ * exists, so a secret/destructive diff is still blocked with no lane at all.
+ */
+async function runRedTeam(
+  ctx: PassContext,
+  state: FleetMergeStateV1,
+  proposal: Proposal,
+  diff: string,
+  judgeLanes: () => readonly FleetEngine[],
+): Promise<G5Check> {
+  const memoState = state as StandingMergeState;
+  const diffHash = hashDiff(diff);
+  const nowMs = ctx.deps.host.nowMs();
+  const memo = validRedTeamMemo(memoState.redTeam, diffHash);
+  if (memo?.frontier === 'answered') return memo.check;
+  const memoMs = memo ? Date.parse(memo.at) : Number.NaN;
+  const failedRecently = memo?.frontier === 'failed' && Number.isFinite(memoMs) && nowMs - memoMs < JUDGE_RETRY_MS;
+  let lanes: readonly FleetEngine[] = [];
+  if (!failedRecently && ctx.budget.judge > 0) {
+    try {
+      lanes = judgeLanes();
+    } catch {
+      lanes = [];
+    }
+  }
+  // Reserve one judge call for this pass only when a model may actually run.
+  if (lanes.length > 0) ctx.budget.judge--;
+  const outcome = await ctx.deps.redTeam(proposal, ctx.cfg, lanes);
+  if (lanes.length > 0 && outcome.frontier !== 'none') {
+    memoState.redTeam = { diffHash, check: outcome.check, frontier: outcome.frontier, at: iso(nowMs) };
+  } else if (lanes.length > 0) {
+    // A lane was admitted but no judge resolved on it: give the budget back.
+    ctx.budget.judge++;
+  }
+  return outcome.check;
+}
+
+function validRedTeamMemo(value: unknown, diffHash: string): RedTeamMemo | null {
+  if (!value || typeof value !== 'object') return null;
+  const memo = value as Partial<RedTeamMemo>;
+  const check = memo.check as Partial<G5Check> | undefined;
+  if (memo.diffHash !== diffHash) return null;
+  if (memo.frontier !== 'answered' && memo.frontier !== 'failed') return null;
+  if (typeof memo.at !== 'string' || !Number.isFinite(Date.parse(memo.at))) return null;
+  if (!check || check.name !== 'red-team' || typeof check.detail !== 'string') return null;
+  if (check.outcome !== 'ok' && check.outcome !== 'blocked' && check.outcome !== 'error') return null;
+  return { diffHash, check: { name: 'red-team', outcome: check.outcome, detail: check.detail }, frontier: memo.frontier, at: memo.at };
 }
 
 /** Test paths the diff touches whose base content or added lines import ashlr-hub Tier-1 code. */
@@ -1256,6 +1426,7 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
         state.outcome = 'closed';
         state.outcomeReason = 'closed on GitHub';
         ctx.summary.closed++;
+        ledgerHumanPrExit(ctx, state, 'closed on GitHub by a human (observed by the daemon)');
       }
       persist(ctx, state);
       return;
@@ -1269,6 +1440,15 @@ async function progressFleetPr(key: string, ctx: PassContext): Promise<void> {
       state.pr.ownerLaneReason = `PR #${live.number} is not authored by ${FLEET_APP_BOT_LOGIN}`;
     }
     if (state.pr.ownerLane) {
+      const expired = ownerLaneExpiry(ctx, state, proposal, live, nowMs);
+      if (expired) {
+        await closeForReason(ctx, state, expired, 'daemon');
+        if (state.outcome === 'closed') {
+          deps.setStatus(proposal.id, 'rejected', `${expired}; its owner-lane PR #${live.number} was closed`, expired);
+          persist(ctx, state);
+        }
+        return;
+      }
       schedule(ctx, state, OWNER_LANE_RECHECK_MS);
       persist(ctx, state);
       return;
@@ -1644,7 +1824,64 @@ async function reconcileMerged(ctx: PassContext, state: FleetMergeStateV1, propo
   state.outcome = 'merged';
   state.outcomeReason = 'merged on GitHub outside the fleet';
   deps.setStatus(proposal.id, 'applied', `fleet PR ${state.repo}#${live.number} was merged on GitHub (not by the fleet)`, 'merged outside the fleet');
+  ledgerHumanPrExit(ctx, state, 'merged on GitHub by a human outside the fleet (observed by the daemon); not a fleet landing');
   note(ctx, `${state.repo}#${live.number} was merged outside the fleet; no landing recorded`);
+}
+
+/**
+ * Ledger a fleet PR that a HUMAN merged or closed on GitHub as `pr:closed`.
+ * WHY: the ledger only heard about exits the fleet itself made (closeFleetPr,
+ * merge:landed), so every PR Mason merged or closed by hand — the normal exit
+ * for an owner-lane PR — stayed "open" to every ledger reader (backpressure's
+ * open-PR count, the Verse "needs you" list) until its `pr:opened` row aged
+ * out. `pr:closed` is the row those readers already subtract; a human merge
+ * is recorded with it too (deliberately NOT merge:landed: the fleet did not
+ * land it, so the post-merge watch and the rollout must never count it).
+ * `data.actor` is 'mason' (the human side); the row's own actor is the daemon
+ * that observed it. Best effort: a refused append is noted, and the tick's
+ * open-PR reconciliation still covers the gap.
+ */
+function ledgerHumanPrExit(ctx: PassContext, state: FleetMergeStateV1, reason: string): void {
+  const pr = state.pr;
+  if (!pr) return;
+  try {
+    const row = ctx.deps.host.appendLedger({
+      kind: 'pr:closed',
+      data: { repo: state.repo, number: pr.number, reason: scrubSecrets(reason).slice(0, 400), actor: 'mason', at: iso(ctx.deps.host.nowMs()) },
+      actor: 'daemon',
+      grantId: ctx.deps.host.policy()?.grantId ?? ctx.policy.grantId,
+      repo: state.repo,
+    });
+    if (!row.ok) note(ctx, `${state.repo}#${pr.number}: the human exit was not ledgered (${row.reason})`);
+  } catch (error) {
+    note(ctx, `${state.repo}#${pr.number}: the human exit was not ledgered (${error instanceof Error ? error.message : String(error)})`);
+  }
+}
+
+/**
+ * The proposal TTL for an OWNER-LANE fleet PR (null = not expired / exempt).
+ * WHY: the TTL retired every other pending proposal, but an owner-lane PR was
+ * only re-checked forever, so its proposal sat pending (and its PR open) for
+ * good. It uses the same `proposalTtlDays` (default 7), counted from the LATER
+ * of the proposal's creation and the PR's opening, so a PR opened late still
+ * gets a full review window.
+ *
+ * Exempt — a human has taken the PR over, and the fleet never closes a human's
+ * work: a head the fleet did not push, a PR not authored by the fleet App, or
+ * an owner-lane label a human added on GitHub.
+ */
+function ownerLaneExpiry(ctx: PassContext, state: FleetMergeStateV1, proposal: Proposal, live: PrSnapshot, nowMs: number): string | null {
+  const pr = state.pr;
+  if (!pr) return null;
+  if (live.authorLogin !== FLEET_APP_BOT_LOGIN || live.headSha !== pr.headSha) return null;
+  if ((pr.ownerLaneReason ?? '').startsWith(`labelled ${OWNER_LANE_LABEL} on GitHub`)) return null;
+  const ttlDays = positiveIntConfig((ctx.cfg.foundry as Record<string, unknown> | undefined)?.['proposalTtlDays'], DEFAULT_PROPOSAL_TTL_DAYS);
+  if (ttlDays <= 0) return null;
+  const anchors = [Date.parse(proposal.createdAt), Date.parse(pr.openedAt)].filter((ms) => Number.isFinite(ms));
+  if (anchors.length === 0) return null;
+  const since = Math.max(...anchors);
+  if (since >= nowMs - ttlDays * 24 * 60 * 60 * 1000) return null;
+  return `auto-rejected: owner-lane proposal unreviewed for ${ttlDays} days (TTL)`;
 }
 
 async function closeForReason(ctx: PassContext, state: FleetMergeStateV1, reason: string, actor: 'daemon' | 'mason'): Promise<void> {

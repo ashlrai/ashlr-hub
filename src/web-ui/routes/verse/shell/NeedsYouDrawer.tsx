@@ -32,6 +32,7 @@ import {
 } from '../../../../core/verse/workbench-types.js';
 import { ApprovalDetail } from '../approvals/ApprovalDetail.js';
 import { useVerseUi } from '../useVerseUi.js';
+import { ReturnKeyIcon } from '../verse-icons.js';
 import { verseBootstrapQuery } from '../verse-queries.js';
 import {
   closeVerseOverlay,
@@ -368,7 +369,7 @@ export function NeedsYouDrawer() {
         {!compact ? (
           <footer className={styles.foot} aria-hidden="true">
             <span><kbd className={styles.key}>J</kbd><kbd className={styles.key}>K</kbd> move</span>
-            <span><kbd className={styles.key}>↩</kbd> open</span>
+            <span><kbd className={styles.key}><ReturnKeyIcon /></kbd> open</span>
             <span><kbd className={styles.key}>A</kbd> approve</span>
             <span><kbd className={styles.key}>R</kbd> reject</span>
             <span><kbd className={styles.key}>V</kbd> veto</span>

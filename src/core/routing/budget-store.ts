@@ -21,6 +21,9 @@
  *  - Load is TOTAL: a missing, oversized or mangled file yields the defaults /
  *    null. The server must boot on any file, and a daemon must fail CLOSED on
  *    a bad snapshot, never crash.
+ *  - An UPDATE never writes over a policy file it could not read (3.10 review
+ *    d7): it refuses with BudgetPolicyUnreadableError and keeps a copy. Only a
+ *    missing file starts from the defaults.
  *  - Writes are atomic (O_EXCL|O_NOFOLLOW temp, fchmod 0600, fsync, rename) in
  *    a directory that must be a real, owned directory.
  *  - Paths re-resolve `homedir()` per call so a relocated HOME (tests) is
@@ -28,7 +31,7 @@
  *  - Nothing persisted here is a secret; free text (labels, reasons, the
  *    provider's reset wording) still goes through `scrubSecrets`.
  */
-import { closeSync, constants as fsConstants, fstatSync, openSync, readSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
+import { closeSync, constants as fsConstants, fstatSync, fsyncSync, lstatSync, openSync, readSync, renameSync, rmSync, statSync, writeSync } from 'node:fs';
 import { open as openAsync, rename as renameAsync, rm as rmAsync } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { homedir } from 'node:os';
@@ -42,6 +45,7 @@ import {
   BUDGET_ENGINES,
   BUDGET_SEAT_ID_RE,
   defaultBudgetPolicy,
+  isBudgetMode,
   sanitizeBudgetPolicy,
   type BudgetEngine,
   type ParsedBudgetUpdate,
@@ -98,9 +102,147 @@ export function loadBudgetPolicy(file: string = budgetPolicyPath()): BudgetPolic
 }
 
 /**
+ * Where the policy file stands, for a WRITER (3.10 review d7). Reads stay
+ * total — `loadBudgetPolicy` answers the defaults for any bad file, which is
+ * right for a reader — but a writer that started from those defaults would
+ * replace the operator's real policy with "defaults + one click". So a writer
+ * asks this first: only `missing` may start from the defaults.
+ *
+ * Only ENOENT is missing. A file that exists but cannot be opened (EACCES,
+ * EMFILE), is a symlink or not a regular file, is over the cap, is not a JSON
+ * object, or carries a `mode` / `seats` this build cannot read (a newer
+ * build's mode, a hand edit) is `unreadable`. Never throws.
+ */
+export type BudgetPolicyFileState =
+  | { state: 'missing' }
+  | { state: 'ok'; policy: BudgetPolicy }
+  | { state: 'unreadable'; reason: string; fingerprint: string | null };
+
+export function readBudgetPolicyFileState(file: string = budgetPolicyPath()): BudgetPolicyFileState {
+  let stat: ReturnType<typeof lstatSync>;
+  try {
+    stat = lstatSync(file);
+  } catch (err) {
+    const code = (err as { code?: unknown } | null)?.code;
+    if (code === 'ENOENT') return { state: 'missing' };
+    return { state: 'unreadable', reason: `could not be inspected (${typeof code === 'string' ? code : 'error'})`, fingerprint: null };
+  }
+  if (stat.isSymbolicLink()) return { state: 'unreadable', reason: 'is a symlink', fingerprint: null };
+  if (!stat.isFile()) return { state: 'unreadable', reason: 'is not a regular file', fingerprint: null };
+  const fingerprint = `${stat.ino}:${stat.size}:${stat.mtimeMs}`;
+  const read = readPrivateFileCapped(file, MAX_POLICY_BYTES);
+  if (!read) return { state: 'unreadable', reason: 'could not be read', fingerprint };
+  if (read.truncated) return { state: 'unreadable', reason: `is larger than ${MAX_POLICY_BYTES} bytes`, fingerprint };
+  let raw: unknown;
+  try {
+    raw = JSON.parse(read.text) as unknown;
+  } catch {
+    return { state: 'unreadable', reason: 'is not valid JSON', fingerprint };
+  }
+  if (!isObject(raw)) return { state: 'unreadable', reason: 'is not a JSON object', fingerprint };
+  // sanitizeBudgetPolicy would quietly turn these into 'balanced' / no seats;
+  // a write on top would make that loss permanent.
+  if ('mode' in raw && !isBudgetMode(raw['mode'])) return { state: 'unreadable', reason: 'has a mode this build does not know', fingerprint };
+  if ('seats' in raw && !isObject(raw['seats'])) return { state: 'unreadable', reason: 'has a malformed seats map', fingerprint };
+  return { state: 'ok', policy: sanitizeBudgetPolicy(raw) };
+}
+
+/**
+ * The write refusal for an unreadable policy file: nothing was written, the
+ * original is untouched, and (when its bytes could be read) a byte-exact
+ * copy sits beside it. Duck-typed like BudgetPolicyError (`code` + `status`)
+ * so a route that forwards them shows the real reason; 503 because the
+ * request was fine and the store is what is unusable.
+ */
+export class BudgetPolicyUnreadableError extends Error {
+  readonly code = 'VERSE_STORE_UNREADABLE' as const;
+  readonly status = 503 as const;
+  readonly file: string;
+  readonly archivedTo: string | null;
+
+  constructor(file: string, reason: string, archivedTo: string | null) {
+    super(
+      `${file} ${reason}; the budget change was not saved so the policy in it is kept. `
+        + (archivedTo ? `A copy is at ${archivedTo}. ` : '')
+        + 'Fix or move the file aside to start from the defaults.',
+    );
+    this.name = 'BudgetPolicyUnreadableError';
+    this.file = file;
+    this.archivedTo = archivedTo;
+  }
+}
+
+/** Largest unreadable policy file still copied aside (the cap is 64 KiB; a runaway file is left in place). */
+const MAX_ARCHIVE_BYTES = 8 * 1024 * 1024;
+/** Copies already made in this process, by file identity, so repeated refused clicks do not pile up archives. */
+const archivedPolicyCopies = new Map<string, string | null>();
+
+/** Byte-exact private copy of an unreadable file beside it; null when its bytes cannot be read. Never throws. */
+function archiveUnreadablePolicy(file: string, fingerprint: string | null, now: Date): string | null {
+  if (!fingerprint) return null;
+  const key = `${file}\0${fingerprint}`;
+  if (archivedPolicyCopies.has(key)) return archivedPolicyCopies.get(key) ?? null;
+  const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+  let bytes: Buffer | null = null;
+  let src = -1;
+  try {
+    src = openSync(file, fsConstants.O_RDONLY | noFollow);
+    const stat = fstatSync(src);
+    if (stat.isFile() && stat.size <= MAX_ARCHIVE_BYTES) {
+      const buf = Buffer.alloc(stat.size);
+      let offset = 0;
+      while (offset < buf.length) {
+        const n = readSync(src, buf, offset, buf.length - offset, offset);
+        if (n <= 0) break;
+        offset += n;
+      }
+      if (offset === buf.length) bytes = buf;
+    }
+  } catch {
+    bytes = null;
+  } finally {
+    if (src >= 0) {
+      try { closeSync(src); } catch { /* never throws */ }
+    }
+  }
+  let target: string | null = null;
+  if (bytes) {
+    const candidate = join(dirname(file), `${basename(file).replace(/\.json$/, '')}.unreadable-${now.toISOString().replace(/[:.]/g, '-')}.json`);
+    let out = -1;
+    try {
+      // O_EXCL: never clobbers an earlier copy; O_NOFOLLOW: never writes through a planted link.
+      out = openSync(candidate, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow, 0o600);
+      let offset = 0;
+      while (offset < bytes.length) {
+        const n = writeSync(out, bytes, offset, bytes.length - offset, offset);
+        if (n <= 0) throw new Error('archive write made no progress');
+        offset += n;
+      }
+      fsyncSync(out);
+      target = candidate;
+    } catch {
+      // A half-written copy would later pass for a real archive.
+      if (out >= 0) {
+        try { rmSync(candidate, { force: true }); } catch { /* best effort */ }
+      }
+    } finally {
+      if (out >= 0) {
+        try { closeSync(out); } catch { /* never throws */ }
+      }
+    }
+  }
+  archivedPolicyCopies.set(key, target);
+  return target;
+}
+
+/**
  * Apply exactly one validated update and persist atomically. Throws
  * `BudgetPolicyError` (VERSE_INVALID 400 / VERSE_TOO_LARGE 413) for a bad
  * update — nothing is written.
+ *
+ * Throws `BudgetPolicyUnreadableError` (503) when the file exists but cannot
+ * be read — nothing is written and a copy is kept (see
+ * readBudgetPolicyFileState). Only a MISSING file starts from the defaults.
  *
  * Read-modify-write without a lock: the only writer is the operator's own
  * Budget panel, one click at a time. Two racing clicks resolve last-writer-
@@ -111,8 +253,13 @@ export function updateBudgetPolicy(
   opts: { now?: Date; file?: string; engineOf?: (seatId: string) => BudgetEngine | undefined } = {},
 ): BudgetPolicy {
   const file = opts.file ?? budgetPolicyPath();
-  const current = loadBudgetPolicy(file);
-  const next = applyBudgetUpdate(current, update, (opts.now ?? new Date()).toISOString(), opts.engineOf);
+  const now = opts.now ?? new Date();
+  const found = readBudgetPolicyFileState(file);
+  if (found.state === 'unreadable') {
+    throw new BudgetPolicyUnreadableError(file, found.reason, archiveUnreadablePolicy(file, found.fingerprint, now));
+  }
+  const current = found.state === 'ok' ? found.policy : defaultBudgetPolicy();
+  const next = applyBudgetUpdate(current, update, now.toISOString(), opts.engineOf);
   ensurePrivateDirectory(dirname(file));
   writePrivateFileAtomic(file, `${JSON.stringify(next, null, 2)}\n`);
   return next;

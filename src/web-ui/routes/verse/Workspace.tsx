@@ -512,12 +512,13 @@ export function Workspace(props: WorkspaceProps) {
           --stat on the server) and nothing should run for a closed one. */}
       {session && handoffOpen ? (
         <Suspense fallback={null}>
-          {/* `initialTarget` preselects the seat "Continue on ‹seat›" named. It
-              is spread (not a named prop) because HandoffDialog (context/)
-              does not declare it yet — until it does, the dialog opens on its
-              own default and the seat is one pick away. Cross-unit request. */}
+          {/* `initialTarget` preselects the seat "Continue on ‹seat›" named;
+              undefined (the plain Hand off… entry) keeps the dialog's own
+              default. HandoffDialog reads it once per open, so a pick made
+              inside the dialog wins, and a seat that has since gone falls
+              back to the default rather than preselecting nothing. */}
           <HandoffDialog session={session} seats={seats} open onClose={() => { setHandoffTarget(null); onHandoffOpenChange(false); }}
-            onCreated={onHandoffCreated} {...(handoffTarget ? { initialTarget: handoffTarget } : {})} />
+            onCreated={onHandoffCreated} initialTarget={handoffTarget ?? undefined} />
         </Suspense>
       ) : null}
       <MutationTokenDialog {...gate.dialog} tokenLabel="Mutation token" tokenHelp="the mutation token ashlr verse printed" />

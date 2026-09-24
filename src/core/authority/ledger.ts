@@ -161,18 +161,28 @@ export interface LedgerRolloutPosition {
 export type LedgerEvidenceKind =
   | 'merge:landed'
   | 'revert:landed'
+  | 'revert:failed'
   | 'post-merge:result'
   | 'gate:would-merge'
   | 'sandbox:violation'
-  | 'reserve:breach';
+  | 'reserve:breach'
+  | 'sandbox:evidence-unknown';
 
+// WHY revert:failed is evidence (3.10 review c6): the rollout waits for the
+// revert of a red merge to settle before it advances, and a failed revert is
+// one of the two ways it settles.
+// WHY sandbox:evidence-unknown is evidence (3.10 d0): a run whose kernel
+// violation evidence is incomplete proves nothing either way, so the rollout
+// must SEE it to hold the stage (it never advances or regresses on it).
 const EVIDENCE_KINDS: ReadonlySet<string> = new Set<LedgerEvidenceKind>([
   'merge:landed',
   'revert:landed',
+  'revert:failed',
   'post-merge:result',
   'gate:would-merge',
   'sandbox:violation',
   'reserve:breach',
+  'sandbox:evidence-unknown',
 ]);
 
 export interface LedgerEvidenceRow {
@@ -180,10 +190,22 @@ export interface LedgerEvidenceRow {
   at: string;
   kind: LedgerEvidenceKind;
   repo: string | null;
-  /** merge / revert: the landing's id; post-merge: the landing it judged. */
+  /**
+   * merge / revert: the landing's id; post-merge: the landing it judged;
+   * revert:failed: the red landing that was NOT reverted.
+   */
   landingId: string | null;
   /** post-merge verdict. */
   verdict: 'green' | 'red' | null;
+  /**
+   * revert:landed only: the merge landing this revert undoes. The rollout
+   * charges a revert to the stage of the merge it reverts, not the stage it
+   * happens to land in (3.10 review c6). Absent/null = unknown (legacy row).
+   */
+  revertsLandingId?: string | null;
+  /** reserve:breach only: which seat and window crossed the line (dedupe per episode). */
+  seatId?: string | null;
+  window?: 'session' | 'weekly' | null;
 }
 
 export interface LedgerAuthorityIndex {
@@ -341,12 +363,18 @@ function indexEntry(index: MutableIndex, entry: LedgerEntry): void {
     // carried it: a revert must never be counted as a merge toward advancing.
     const kind = (entry.kind === 'merge:landed' && data['kind'] === 'revert' ? 'revert:landed' : entry.kind) as LedgerEvidenceKind;
     let landingId: string | null = null;
-    if (kind === 'post-merge:result') landingId = str(data['landingId']);
+    if (kind === 'post-merge:result' || kind === 'revert:failed') landingId = str(data['landingId']);
     else if (kind === 'merge:landed' || kind === 'revert:landed') landingId = str(data['id']);
     const verdict = kind === 'post-merge:result' && (data['verdict'] === 'green' || data['verdict'] === 'red')
       ? data['verdict']
       : null;
-    index.evidence.push({ seq: entry.seq, at: entry.at, kind, repo: entry.repo, landingId, verdict });
+    const row: LedgerEvidenceRow = { seq: entry.seq, at: entry.at, kind, repo: entry.repo, landingId, verdict };
+    if (kind === 'revert:landed') row.revertsLandingId = str(data['revertsLandingId']);
+    if (kind === 'reserve:breach') {
+      row.seatId = str(data['seatId']);
+      row.window = data['window'] === 'session' || data['window'] === 'weekly' ? data['window'] : null;
+    }
+    index.evidence.push(row);
   }
 }
 

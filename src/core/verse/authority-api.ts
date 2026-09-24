@@ -240,6 +240,8 @@ const EMPTY_SUBJECT = Object.freeze({ repo: null, pr: null, seatId: null, sessio
 
 let statusCache: { at: number; status: AuthorityStatusV1; items: NeedsYouItem[]; badge: VerseAutonomyBadge } | null = null;
 let refreshing = false;
+/** The last refresh failed and nothing was ever cached (needsYouSourceState 'error'). */
+let refreshFailed = false;
 
 function killSince(fallback: string): string {
   try {
@@ -373,6 +375,7 @@ export function authorityBadge(status: AuthorityStatusV1): VerseAutonomyBadge {
 function rememberStatus(status: AuthorityStatusV1, evaluation: StandingEvaluation): void {
   const nowMs = Date.parse(status.checkedAt) || Date.now();
   statusCache = { at: Date.now(), status, items: authorityNeedsYouItems(status, evaluation, nowMs), badge: authorityBadge(status) };
+  refreshFailed = false;
 }
 
 function scheduleRefresh(): void {
@@ -382,16 +385,35 @@ function scheduleRefresh(): void {
   // must never pay for it on their own stack.
   setImmediate(() => {
     buildAuthorityStatus()
-      .catch(() => { /* the next call retries; the cache keeps its last good answer */ })
+      // The next call retries; the cache keeps its last good answer. With no
+      // answer at all, needsYouSourceState() says 'error' instead of 'warming'.
+      .catch(() => { refreshFailed = true; })
       .finally(() => { refreshing = false; });
   });
 }
 
 /**
+ * Producer state for the Needs-you drawer (the same contract as leader-api's
+ * and fleet-live-api's): 'warming' until the first refresh lands, 'error' when
+ * it failed with nothing cached, else 'ok'. Pure — no I/O, never throws.
+ *
+ * WHY: before the first refresh needsYouItems() throws, which activity used
+ * to report as the source ERRORING on every cold start. Activity now asks
+ * this first and shows 'warming' as 'unavailable' — neither a false error
+ * nor a false all-clear.
+ */
+export type AuthorityNeedsYouSourceState = 'warming' | 'ok' | 'error';
+
+export function needsYouSourceState(): AuthorityNeedsYouSourceState {
+  if (statusCache) return 'ok';
+  return refreshFailed ? 'error' : 'warming';
+}
+
+/**
  * R1: grant renewal / expiring / paused ("authority code changed —
  * re-approve"), Stop in force, rollout regressions. Pure, served from cache.
- * Before the first refresh completes it throws, so activity reports the
- * source as not answering rather than a false all-clear.
+ * Before the first refresh completes it throws (a caller that does not read
+ * needsYouSourceState() then sees "not answering", never a false all-clear).
  */
 export function needsYouItems(): NeedsYouItem[] {
   if (!statusCache) {
@@ -416,6 +438,7 @@ export function autonomyBadge(): VerseAutonomyBadge | null {
 export function resetAuthorityApiCachesForTest(): void {
   statusCache = null;
   refreshing = false;
+  refreshFailed = false;
   custodyCache = null;
   drafts.clear();
   signingInFlight = false;
@@ -641,11 +664,11 @@ export async function applyAuthorityAction(body: Record<string, unknown>): Promi
       if (reason !== undefined && (typeof reason !== 'string' || reason.length > 300)) {
         return { ok: false, status: 400, code: 'VERSE_INVALID', error: 'reason must be text of at most 300 characters' };
       }
-      // Same reasoning as Stop: await the merge revocation, do not wait for the
-      // drain. revokeStandingAndDrain takes no waitMs, so its Stop may wait up
-      // to clamp's default 2 s for the outward-mutation fence (async — the event
-      // loop is never blocked); the grant is archived and KILL armed before that.
-      const result = await revokeStandingAndDrain({ actor: 'mason', reason: typeof reason === 'string' && reason.trim() ? reason : 'revoked from Verse', drainMs: 0 });
+      // Same reasoning as Stop: await the merge revocation (so mergesRevoked is
+      // a number), but wait for neither the drain nor the outward-mutation
+      // fence — drainMs:0 + waitMs:0 answers instantly. The grant is archived,
+      // the switch lowered and KILL armed before the first await regardless.
+      const result = await revokeStandingAndDrain({ actor: 'mason', reason: typeof reason === 'string' && reason.trim() ? reason : 'revoked from Verse', drainMs: 0, waitMs: 0 });
       invalidateStandingPolicyCache();
       return { ok: true, status: 200, result: { revoke: result } };
     }

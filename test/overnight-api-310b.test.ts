@@ -7,7 +7,7 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import * as http from 'node:http';
-import { rmSync } from 'node:fs';
+import { rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
@@ -297,5 +297,41 @@ describe('mount chain', () => {
     for (const path of ['/api/verse/fleet/live', '/api/verse/overnightx', '/api/verse/overnight/other']) {
       await expect(handleOvernightApi(ctx, req, res, path, 'GET')).resolves.toBe(false);
     }
+  });
+});
+
+describe('mirrors recorded apart from repos (L1 leftover 3)', () => {
+  it('an arm records the mirror count next to the repo count, and GET shows it', async () => {
+    setOvernightApiDepsForTest({
+      killSwitch: () => kill,
+      enrolledCount: () => 2,
+      mirrorCount: () => 4,
+      liveness,
+      autoMerge: () => false,
+      halts: () => [],
+    });
+    const res = await post<OvernightActionResult>({ action: 'arm', stopRule: { kind: 'until-paused' } });
+    expect(res.status).toBe(200);
+    expect(readOvernightStatus()).toMatchObject({ repos: 2, mirrors: 4 });
+    const view = await get<OvernightStatusView>('/api/verse/overnight');
+    expect(view.body).toMatchObject({ repos: 2, mirrors: 4 });
+  });
+
+  it('an unknown mirror count is null (never 0); a status written before the field has none', async () => {
+    setOvernightApiDepsForTest({
+      killSwitch: () => kill,
+      enrolledCount: () => 2,
+      mirrorCount: () => null,
+      liveness,
+      autoMerge: () => false,
+      halts: () => [],
+    });
+    await post({ action: 'arm', stopRule: { kind: 'until-paused' } });
+    expect(readOvernightStatus().mirrors).toBeNull();
+    const dir = join(homedir(), '.ashlr', 'run-window');
+    writeFileSync(join(dir, 'status.json'), JSON.stringify({ recordType: 'daemon-overnight-status', armed: false, repos: 1, gate: null, run: null }));
+    expect('mirrors' in readOvernightStatus()).toBe(false);
+    writeFileSync(join(dir, 'status.json'), JSON.stringify({ recordType: 'daemon-overnight-status', armed: false, repos: 1, mirrors: -3, gate: null, run: null }));
+    expect(readOvernightStatus().mirrors).toBeNull();
   });
 });

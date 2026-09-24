@@ -56,6 +56,7 @@ import {
   type ScorecardTrendPoint,
 } from '../fleet/scorecard.js';
 import type { ApiModule } from './api-modules.js';
+import { engineMeteredness } from '../policy/local-only.js';
 import {
   FLEET_HISTORY_WORKER_KIND,
   normalizeFleetHistoryWorkerRequest,
@@ -589,7 +590,51 @@ function unreadable(scan: DirectoryScan<unknown>): boolean {
   return scan.state === 'degraded' && scan.recordsRead === 0;
 }
 
-function emptyDay(day: string, known: { runs: boolean; proposals: boolean; decisions: boolean; merges: boolean }): FleetHistoryDay {
+/**
+ * A day plus its PER-TOKEN (metered API) spend. ADDITIVE on the wire; declared
+ * here rather than in fleet-history-types.ts only because that file is outside
+ * this change's ownership (CROSS-UNIT: fold `meteredCostUsd` into
+ * `FleetHistoryDay` there). The web's command-model reads it as optional.
+ */
+export interface FleetHistoryDayWithMetered extends FleetHistoryDay {
+  /**
+   * Estimated spend of runs on engines billed PER TOKEN, USD — the only spend
+   * the grant's `meteredUsdPerDay` cap governs. `estCostUsd` prices EVERY run
+   * from a static table, subscription CLI runs included, so charting it
+   * against the metered cap reported Claude/Codex/Grok seat work as a budget
+   * breach (review 3.10 c10). null = runs unreadable (unknown, never 0).
+   */
+  meteredCostUsd: number | null;
+}
+
+/**
+ * How a run's engine is billed, for the metered split.
+ *   subscription — the seat CLIs (claude, codex, grok-cli): their cost is
+ *                  window usage on a flat plan, shown as percent elsewhere.
+ *   free         — builtin or loopback-only (policy/local-only.ts decides).
+ *   per-token    — everything else: api-model engines on a vendor endpoint
+ *                  (the xAI `grok` API, nim, kimi…) and agents that call
+ *                  vendors with API keys (ashlrcode, hermes, opencode).
+ * WHY an engine policy cannot classify ('unknown', e.g. `aw`, or a missing
+ * engine id) counts as per-token: this figure is read against a spend CAP,
+ * and hiding real spend under it is the failure that matters; an unprovable
+ * engine over-reports rather than disappears.
+ */
+export type RunBilling = 'subscription' | 'free' | 'per-token';
+
+const SUBSCRIPTION_ENGINES: ReadonlySet<string> = new Set(['claude', 'codex', 'grok-cli']);
+
+export function runBilling(engine: string): RunBilling {
+  const id = engine.trim().toLowerCase();
+  if (SUBSCRIPTION_ENGINES.has(id)) return 'subscription';
+  try {
+    return engineMeteredness(id) === 'free' ? 'free' : 'per-token';
+  } catch {
+    return 'per-token';
+  }
+}
+
+function emptyDay(day: string, known: { runs: boolean; proposals: boolean; decisions: boolean; merges: boolean }): FleetHistoryDayWithMetered {
   const r = known.runs ? 0 : null;
   const p = known.proposals ? 0 : null;
   const d = known.decisions ? 0 : null;
@@ -602,6 +647,7 @@ function emptyDay(day: string, known: { runs: boolean; proposals: boolean; decis
     merges: { realized: known.merges ? 0 : null },
     claimCheck: { passed: null, flagged: null },
     estCostUsd: known.runs ? 0 : null,
+    meteredCostUsd: known.runs ? 0 : null,
   };
 }
 
@@ -632,8 +678,8 @@ export function buildFleetHistory(input: FleetHistoryInputs): FleetHistoryRespon
     decisions: !unreadable(input.decisions),
     merges: !unreadable(input.proposals) && !duplicateMerge,
   };
-  const byDay = new Map<string, FleetHistoryDay>(keys.map((key) => [key, emptyDay(key, known)]));
-  const dayFor = (ms: number): FleetHistoryDay | undefined => (inWindow(ms) ? byDay.get(dayKey(ms, tzOffsetMinutes)) : undefined);
+  const byDay = new Map<string, FleetHistoryDayWithMetered>(keys.map((key) => [key, emptyDay(key, known)]));
+  const dayFor = (ms: number): FleetHistoryDayWithMetered | undefined => (inWindow(ms) ? byDay.get(dayKey(ms, tzOffsetMinutes)) : undefined);
 
   let lastRunMs: number | null = null;
   let lastProposalMs: number | null = null;
@@ -642,6 +688,8 @@ export function buildFleetHistory(input: FleetHistoryInputs): FleetHistoryRespon
 
   // ── runs ────────────────────────────────────────────────────────────────
   const windowRuns: RunSummary[] = [];
+  // Per build, not module-global: the registry and base-URL env can change.
+  const billingByEngine = new Map<string, RunBilling>();
   for (const run of input.runs.values) {
     lastRunMs = later(lastRunMs, run.updatedMs);
     lastRunMs = later(lastRunMs, run.createdMs);
@@ -654,6 +702,14 @@ export function buildFleetHistory(input: FleetHistoryInputs): FleetHistoryRespon
     else if (run.status === 'aborted') day.runs.aborted = bump(day.runs.aborted);
     else day.runs.unfinished = bump(day.runs.unfinished);
     if (run.estCostUsd !== null && day.estCostUsd !== null) day.estCostUsd += run.estCostUsd;
+    if (run.estCostUsd !== null && day.meteredCostUsd !== null) {
+      let billing = billingByEngine.get(run.engine);
+      if (billing === undefined) {
+        billing = runBilling(run.engine);
+        billingByEngine.set(run.engine, billing);
+      }
+      if (billing === 'per-token') day.meteredCostUsd += run.estCostUsd;
+    }
   }
 
   // ── proposals, verification, merges ───────────────────────────────────

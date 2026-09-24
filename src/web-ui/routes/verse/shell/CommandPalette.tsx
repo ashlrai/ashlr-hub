@@ -23,6 +23,7 @@ import { useFocusTrap } from '../../../components/primitives/focus-trap.js';
 import { useQuery } from '../../../data/hooks.js';
 import { verseBootstrapQuery, verseSessionsQuery } from '../verse-queries.js';
 import { useVerseUi } from '../useVerseUi.js';
+import { ReturnKeyIcon } from '../verse-icons.js';
 import { closeVerseOverlay, openVerseNeedsYou, openVerseSession, requestVerseCommand } from '../verse-ui-store.js';
 import { detectKeyPlatform, findCommand, type WorkbenchCommand } from './command-catalog.js';
 import { argumentItems, buildPaletteItems, paletteView, type PaletteItem } from './palette-model.js';
@@ -274,7 +275,7 @@ export function CommandPalette({ onClose = closeVerseOverlay }: CommandPalettePr
         </div>
         <div className={styles.foot} aria-hidden="true">
           <span><kbd className={styles.key}>↑↓</kbd> move</span>
-          <span><kbd className={styles.key}>↩</kbd> run</span>
+          <span><kbd className={styles.key}><ReturnKeyIcon /></kbd> run</span>
           {activeItem?.argument ? <span><kbd className={styles.key}>⇥</kbd> {activeItem.argument.prompt.toLowerCase()}</span> : null}
           <span><kbd className={styles.key}>esc</kbd> {argFor ? 'back' : 'close'}</span>
           {argFor ? null : <span><kbd className={styles.key}>&gt;</kbd> actions only · <kbd className={styles.key}>#</kbd> chats only</span>}

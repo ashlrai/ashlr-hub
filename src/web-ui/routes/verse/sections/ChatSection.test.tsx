@@ -18,7 +18,7 @@
  */
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
 import { clearMutationToken, markCheckComplete, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
@@ -32,13 +32,18 @@ import { getDockSnapshot, requestTerminal, resetDockStore } from '../dock/dock-s
 import { resetLocalSeen } from '../chat/use-chat-activity.js';
 import { CHAT_PANEL_RANGES, CHAT_PANEL_SIZING_KEY, resetChatPanelSizing } from '../chat-panel-sizing.js';
 import { ApiError } from '../../../data/client.js';
-import { ChatSection, describeChatError } from './ChatSection.js';
+import { ChatSection, describeChatError, preloadChatSurface } from './ChatSection.js';
 
 const TOKEN = 'b'.repeat(64);
 
 function mount() {
   return render(<ToastProvider><ChatSection /></ToastProvider>);
 }
+
+// The chat list and the workspace are their own chunks (3.10 first paint);
+// these tests are about chat behavior, so both are in before any mount and
+// every mount renders the whole surface at once.
+beforeAll(() => preloadChatSurface());
 
 beforeEach(() => {
   window.history.replaceState(null, '', '/verse/');

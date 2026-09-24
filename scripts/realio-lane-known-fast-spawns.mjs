@@ -65,4 +65,8 @@ export const KNOWN_FAST_SPAWN_FILES = [
   // `spawn(` the guard matches is text inside a source scan of
   // verse/session-engine.ts; the file spawns nothing. 0.08s slowest test (2026-09-24).
   'test/local-only-dispatch-paths.test.ts', // <0.1s
+  // 3.10 fix pass (P5): three `node <shim> --flag` children fed a small JSON
+  // request on stdin — no git, no network, no waiting on another process's
+  // output. 0.08s for the one test that spawns (2026-09-24).
+  'test/scorecard-history-sea-310.test.ts', // <0.1s
 ];

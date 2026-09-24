@@ -14,9 +14,14 @@ import { describe, expect, it } from 'vitest';
 import {
   FLEET_LOCAL_SEAT_ID,
   LANE_DEFAULT_SLOTS,
+  FANOUT_LOCAL_EXTRA_MAX,
+  anyFanoutCandidate,
   bestOfNCandidates,
   difficultyOf,
+  fitBestOfNToLanes,
   fleetLaneOf,
+  planFanoutReserve,
+  planStandingBestOfN,
   grantSeatFor,
   planLanes,
   resolveLaneEngines,
@@ -433,5 +438,73 @@ describe('grant seats (mirrors B-U1 standingSeatFor)', () => {
     expect(route.hold).toBeNull();
     expect(route.lane).toBe('local');
     expect(route.seatDecision?.seatId).toBe('local:qwen');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Review c15: best-of-N candidates are charged against the lanes.
+// ---------------------------------------------------------------------------
+
+describe('best-of-N lane accounting (review c15)', () => {
+  const CFG15 = { foundry: { models: { 'llama-server': 'qwen3-coder' } } } as unknown as AshlrConfig;
+  const planned = {
+    run: true as const,
+    reason: 'planned' as const,
+    candidates: [
+      { engine: 'grok-cli' as EngineId },
+      { engine: 'llama-server' as EngineId, model: 'q' },
+      { engine: 'llama-server' as EngineId, model: 'q' },
+    ],
+  };
+  const zero = { local: 0, 'grok-cli': 0, 'claude-cli': 0, codex: 0 };
+
+  it('reserves fan-out slots only when a fan-out is plausible, always leaving the pool a local slot', () => {
+    expect(planFanoutReserve(lanes({ local: 2 }), false)).toEqual(zero);
+    expect(planFanoutReserve(lanes({ local: 2 }), true)).toMatchObject({ local: 1, 'grok-cli': 1, 'claude-cli': 0, codex: 0 });
+    expect(planFanoutReserve(lanes({ local: 4 }), true).local).toBe(FANOUT_LOCAL_EXTRA_MAX);
+    expect(planFanoutReserve(lanes({ local: 1, 'grok-cli': 1 }), true)).toEqual(zero);
+  });
+
+  it('a grok-routed item uses its own slot for Grok and only reserved turns for local candidates', () => {
+    const fitted = fitBestOfNToLanes(planned, 'grok-cli', { ...zero, local: 1 }, CFG15);
+    expect(fitted.run).toBe(true);
+    expect(fitted.candidates.map((c) => c.engine)).toEqual(['grok-cli', 'llama-server']);
+    expect(fitted.laneCharge).toEqual({ ...zero, local: 1 });
+  });
+
+  it('a local-routed item runs one local candidate on its own slot and charges the frontier lane', () => {
+    const fitted = fitBestOfNToLanes(planned, 'local', { ...zero, 'grok-cli': 1 }, CFG15);
+    expect(fitted.candidates.map((c) => c.engine)).toEqual(['grok-cli', 'llama-server']);
+    expect(fitted.laneCharge).toEqual({ ...zero, 'grok-cli': 1 });
+  });
+
+  it('no reserve ⇒ no fan-out (engine diversity cannot be met), never an over-cap run', () => {
+    expect(fitBestOfNToLanes(planned, 'grok-cli', zero, CFG15)).toMatchObject({ run: false, reason: 'no-engine-diversity', candidates: [], laneCharge: zero });
+  });
+
+  it('planStandingBestOfN applies the budget when given one', () => {
+    const plan = planStandingBestOfN({
+      item: { effort: 5, source: 'todo', tags: [] },
+      route: { hold: null, lane: 'grok-cli' },
+      lanes: lanes({ local: 2 }),
+      laneEngines: { local: 'llama-server' as EngineId, 'grok-cli': 'grok-cli' as EngineId, 'claude-cli': null, codex: null },
+      mode: 'balanced',
+      weights: { lambdaCost: 1, lambdaPressure: 1, lambdaLatency: 1, bonThreshold: 'high' },
+      priorFailures: 0,
+      grokAllowed: true,
+      claudeAllowed: false,
+      fanoutBudget: { ...zero, local: 1 },
+      cfg: CFG15,
+    });
+    expect(plan.run).toBe(true);
+    expect(plan.candidates.filter((c) => String(c.engine) === 'llama-server')).toHaveLength(1);
+    expect(plan.laneCharge.local).toBe(1);
+  });
+
+  it('predicts a fan-out from difficulty or a prior failure', () => {
+    expect(anyFanoutCandidate([{ id: 'a', effort: 1, source: 'todo', tags: [] }], 'high', () => 0)).toBe(false);
+    expect(anyFanoutCandidate([{ id: 'a', effort: 5, source: 'todo', tags: [] }], 'high', () => 0)).toBe(true);
+    expect(anyFanoutCandidate([{ id: 'a', effort: 1, source: 'todo', tags: [] }], 'high', () => 1)).toBe(true);
+    expect(anyFanoutCandidate([{ id: 'a', effort: 3, source: 'todo', tags: [] }], 'medium', () => 0)).toBe(true);
   });
 });

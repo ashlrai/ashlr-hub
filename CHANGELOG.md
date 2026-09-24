@@ -339,11 +339,7 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
-## [3.10.0] — DRAFT, not released — autonomy with custody, and a workbench you can live in
-
-> **Draft.** This section describes the `v310-foundation` branch. `package.json` still says 3.9.1; nothing
-> here is published, and no step below has been run on this machine. Numbers are the builders' measurements
-> on this Mac and are re-checked before release.
+## [3.10.0] — 2026-09-24 UTC — autonomy with custody, and a workbench you can live in
 
 The fleet could propose but never finish: every change still waited on Mason, and the only way to let it merge
 was a signing key an agent could read. 3.10 lets it merge on its own — inside a scope Mason signs with Touch
@@ -460,8 +456,9 @@ Codex's `limitReached` flag now survives the evidence path, so an exhausted Code
 | Fonts at first paint | 658 KB | 98 KB |
 | Static assets | 2.4 MB unencoded | 702 KB brotli, immutable |
 
-Not yet met: first-chat-paint JavaScript is 615 KB against a 350 KB target, and the runtime probe still stalls the
-event loop 53–78 ms against a 20 ms budget.
+First-chat-paint JavaScript fell from 615 KB to 366 KB, and `npm run check:first-paint` now fails the build above
+370 KB. Not yet met: the 350 KB target, and the runtime probe still stalls the event loop 53–78 ms against a 20 ms
+budget.
 
 ### Reliability
 
@@ -481,7 +478,12 @@ badge; and an opt-in ⌃⌥Space hotkey that summons Verse with the composer foc
 Claude as a fleet producer (it judges and leads in 3.10, with no tools), per-tool "Ask" permission prompts, side
 chats, split sessions, hunk staging and multi-seat compare.
 
-Verification for this draft runs locally without GitHub Actions and is recorded at release.
+### Verification
+
+Run locally on this Mac (GitHub Actions is off): build, both type-checks, eslint (0 errors), the real-I/O lane,
+docs, the first-paint budget, 4,011 web tests, 173 Rust tests and 32 Swift tests pass. The backend suite passes
+except files that already fail on 3.9.1: release-policy pins, the north-star probe, `npm-cli-launch`, a leftover
+Tauri build folder, and four Universe campaign-recovery files (8 tests).
 
 ## [3.9.1] — 2026-09-24 UTC — Claude usage stays visible after a re-pin
 

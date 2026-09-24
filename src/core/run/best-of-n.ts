@@ -857,6 +857,13 @@ async function runBestOfNInternal(
     /** Optional owner cancellation shared by every candidate in this fan-out. */
     signal?: AbortSignal;
     /**
+     * V3.10: the SeatRouter's seat for the ROUTED engine (`engine`), forwarded
+     * as runEngineSandboxed's `seatId` so an autonomous codex candidate runs on
+     * that seat's profile instead of being refused as unconfinable. A seat
+     * belongs to one engine, so candidates on any other engine never get it.
+     */
+    seatId?: string;
+    /**
      * M333: per-candidate engine/model specs. Candidate i runs on
      * specs[i % specs.length] — one candidate per spec when n matches the
      * list length, cycling when the operator asks for more candidates than
@@ -1027,6 +1034,9 @@ async function runBestOfNInternal(
       ...(invalidSpec.invalidShadow ? { invalidShadow: true as const } : {}),
     }]);
   }
+  // The routed seat only ever applies to the routed engine (see opts.seatId).
+  const seatFor = (e: EngineId): { seatId: string } | Record<string, never> =>
+    opts?.seatId && opts.engine !== undefined && e === opts.engine ? { seatId: opts.seatId } : {};
   const runnerFor = (e: EngineId): typeof runEngineSandboxed => {
     const spec = resolveEngineSpec(e, cfg);
     return spec?.kind === 'api-model' ? runApiModelSandboxed : runEngineSandboxed;
@@ -1462,6 +1472,7 @@ async function runBestOfNInternal(
             : {}),
           existingWorktree: sb,
           runId,
+          ...seatFor(cEngine as EngineId),
           ...(observedCandidateStreamClaim
             ? { runOutputStreamClaim: observedCandidateStreamClaim }
             : {}),
@@ -1608,6 +1619,7 @@ async function runBestOfNInternal(
         ...(effectiveCandidateBudget ? { budget: effectiveCandidateBudget } : {}),
         propose: true,
         runId,
+        ...seatFor(cEngine as EngineId),
         ...(observedCandidateStreamClaim
           ? { runOutputStreamClaim: observedCandidateStreamClaim }
           : {}),

@@ -144,6 +144,7 @@ import type { DaemonCapabilityKind } from '../authority/types.js';
 // Pure (routing + local-only policy only): which fleet lane a backend is.
 import { fleetLaneOf, routingRequestFor } from '../fleet/dispatch-router.js';
 import { routeSeat } from '../routing/router.js';
+import { engineOfSeatId } from '../routing/policy.js';
 // Type-only: erased at compile time, so this does NOT eagerly load
 // self-improve.js/post-merge-credit.js at module init (those are still
 // reached only via the lazy `await import(...)` calls in
@@ -6943,6 +6944,18 @@ export async function tick(
           };
         }
       }
+      // V3.10 (L1): the SeatRouter's codex seat, forwarded to the producer.
+      // Under a standing policy runEngineSandboxed builds codex's per-run
+      // CODEX_HOME from that seat's native profile and refuses a codex run with
+      // no seat (never Mason's own login), so dropping the router's choice made
+      // every standing codex dispatch fail. ONLY codex lanes: grok-cli resolves
+      // its seat from cfg.foundry.grokCli, and a seat of another engine must
+      // never reach a codex run (engineOfSeatId re-checks the pairing).
+      const standingCodexSeatId: string | undefined = (() => {
+        if (!standingTick || fleetLaneOf(backend, routingCfg) !== 'codex') return undefined;
+        const seatId = standingRoute?.seatDecision?.seatId;
+        return typeof seatId === 'string' && seatId.length > 0 && engineOfSeatId(seatId) === 'codex' ? seatId : undefined;
+      })();
       // A standing tick asks the seat gate about EVERY engine (the live hook
       // checks lane, grant role and seat headroom); master asks only for
       // subscription engines, unchanged.
@@ -7353,6 +7366,7 @@ export async function tick(
             beginQueueExecution();
             return runBestOfN(item, routingCfg, {
               n: bestOfN, engine: backend, model: selectedModel,
+              ...(standingCodexSeatId ? { seatId: standingCodexSeatId } : {}),
               budget: itemBudget,
               ...(_bonCandidates ? { candidates: _bonCandidates as never } : {}),
               ...(_bonCandidateConfigRefusal ? { candidateConfigRefusal: _bonCandidateConfigRefusal } : {}),
@@ -7500,6 +7514,7 @@ export async function tick(
               engine: backend, sandboxEngine: true, requireSandbox: true, cwd: item.repo,
               budget: itemBudget, tools: true, noMemory: false, runId: attemptId,
               ...(selectedModel ? { model: selectedModel } : {}),
+              ...(standingCodexSeatId ? { seatId: standingCodexSeatId } : {}),
               workItemId: item.id, workItemGenerationId, workSource: item.source, delegationScope,
               signal: dispatchSignal,
             });
@@ -9346,6 +9361,11 @@ async function runDaemonInEnrollmentScope(
     result: 'ok',
   });
 
+  // 3.10 c8: seat headroom from the first tick, not the first standing pass.
+  // Stopped in the shutdown block below (see startResidentCapacityPublisher).
+  const residentPublisherRun = { dryRun: opts.dryRun, once: opts.once, standing: standing !== null };
+  await startResidentCapacityPublisher(activationCfg, residentPublisherRun);
+
   if (!opts.dryRun && !activation.capability) {
     reconcilePreparedGeneratedRepairReservations();
   }
@@ -10021,6 +10041,9 @@ async function runDaemonInEnrollmentScope(
   }
   transitionToStopping();
   clearInterval(killSwitchPoll);
+  // Also stops a publisher the standing pass started in a one-shot run:
+  // nothing publishes for a daemon that is no longer running.
+  if (!opts.dryRun && standing !== null) await stopResidentCapacityPublisher();
   await cancelDaemonPostTickChildren(
     scheduledResolutionObserver,
     scheduledCutoffCapture,
@@ -10079,6 +10102,68 @@ async function runDaemonInEnrollmentScope(
 
   const finalState = loadDaemonState();
   return terminalFailure ? { ...finalState, terminalFailure } : finalState;
+}
+
+/**
+ * 3.10 c8 follow-up: the daemon-side capacity publisher is owned by the
+ * RESIDENT run, not only by the standing merge pass. WHY: the pass starts it
+ * lazily on its first tick and nothing ever stopped it, so (a) seat headroom
+ * stayed cold until a pass happened to run, and (b) a daemon that stopped
+ * kept an interval (and possibly a short-lived collector holding the native
+ * metadata lease) alive in-process after runDaemon returned. The pass keeps
+ * calling `ensureDaemonCapacityPublisher` (idempotent), so this only moves
+ * the start earlier and adds the stop.
+ *
+ * Only for a resident (non-once, non-dry) run under a standing session: that
+ * is the only daemon whose paid-seat decisions read the snapshot. A one-shot
+ * run ends in one tick and would leave a mid-sample collector behind; the
+ * pass still covers it. The publisher itself refuses outside ASHLR_IN_DAEMON=1
+ * and under vitest, so this never spawns probes from a test.
+ *
+ * Lazy import: keeps capacity-publisher out of loop.ts's static closure, like
+ * every other routing read here. Never throws.
+ */
+export interface ResidentCapacityPublisherModule {
+  ensureDaemonCapacityPublisher(cfg: AshlrConfig): unknown;
+  resetDaemonCapacityPublisherForTest(): void;
+}
+
+const loadCapacityPublisher = async (): Promise<ResidentCapacityPublisherModule> =>
+  import('./capacity-publisher.js');
+
+export function residentCapacityPublisherWanted(run: { dryRun: boolean; once: boolean; standing: boolean }): boolean {
+  return !run.dryRun && !run.once && run.standing;
+}
+
+export async function startResidentCapacityPublisher(
+  cfg: AshlrConfig,
+  run: { dryRun: boolean; once: boolean; standing: boolean },
+  load: () => Promise<ResidentCapacityPublisherModule> = loadCapacityPublisher,
+): Promise<boolean> {
+  if (!residentCapacityPublisherWanted(run)) return false;
+  try {
+    const mod = await load();
+    mod.ensureDaemonCapacityPublisher(cfg);
+    return true;
+  } catch {
+    // Stays cold: readers of a stale snapshot fail closed, and the standing
+    // pass retries `ensureDaemonCapacityPublisher` every tick.
+    return false;
+  }
+}
+
+export async function stopResidentCapacityPublisher(
+  load: () => Promise<ResidentCapacityPublisherModule> = loadCapacityPublisher,
+): Promise<void> {
+  try {
+    // WHY the "ForTest" hook: it is the module's only stop-and-forget entry
+    // (stop the interval, drop the singleton so a later in-process runDaemon
+    // starts a fresh one). An in-flight sample sees `stopped`, stops waiting
+    // and closes its collector — releasing the lease — in its own finally.
+    (await load()).resetDaemonCapacityPublisherForTest();
+  } catch {
+    // Nothing started, or the module failed to load: nothing to stop.
+  }
 }
 
 export async function cancelResolutionObserverBeforeShutdown(

@@ -101,6 +101,13 @@ export interface OvernightStatus {
   /** The one field that may never be absent. */
   readonly armed: boolean;
   readonly repos: number | null;
+  /**
+   * The standing fleet's enrolled mirror clones (~/.ashlr/fleet/mirrors/…),
+   * counted APART from `repos` so the report can show what the fleet works
+   * in without double-counting a repo and its mirror. null = not recorded /
+   * unknown. Optional and additive: absent in a status an older build wrote.
+   */
+  readonly mirrors?: number | null;
   readonly gate: OvernightGate | null;
   readonly run: OvernightRun | null;
 }
@@ -121,6 +128,7 @@ interface StoredStatus {
   readonly recordType: 'daemon-overnight-status';
   readonly armed: boolean;
   readonly repos: number | null;
+  readonly mirrors?: number | null;
   readonly gate: OvernightGate | null;
   readonly run: OvernightRun | null;
 }
@@ -161,6 +169,7 @@ export function readOvernightStatus(): OvernightStatus {
     return {
       armed: parsed.armed === true,
       repos: typeof parsed.repos === 'number' ? parsed.repos : null,
+      ...(parsed.mirrors !== undefined ? { mirrors: countOrNull(parsed.mirrors) } : {}),
       gate: parsed.gate ?? null,
       run: parsed.run ?? null,
     };
@@ -169,12 +178,19 @@ export function readOvernightStatus(): OvernightStatus {
   }
 }
 
+/** A stored count: a non-negative integer, else unknown (never defaulted to 0). */
+function countOrNull(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 /** Merge a partial update into the stored status. Never throws. */
 export function updateOvernightStatus(patch: Partial<OvernightStatus>): OvernightStatus {
   const current = readOvernightStatus();
+  const mirrors = patch.mirrors !== undefined ? patch.mirrors : current.mirrors;
   const next: OvernightStatus = {
     armed: patch.armed ?? current.armed,
     repos: patch.repos !== undefined ? patch.repos : current.repos,
+    ...(mirrors !== undefined ? { mirrors } : {}),
     gate: patch.gate !== undefined ? patch.gate : current.gate,
     run: patch.run !== undefined ? patch.run : current.run,
   };
@@ -378,11 +394,13 @@ export function overnightRunInProgress(status: OvernightStatus = readOvernightSt
  */
 export function requestOvernightRun(
   stopRule: RunWindowStopRule,
-  opts: { repos?: number | null; gate?: OvernightGate | null; runId?: string } = {},
+  opts: { repos?: number | null; mirrors?: number | null; gate?: OvernightGate | null; runId?: string } = {},
 ): OvernightStatus {
   return updateOvernightStatus({
     armed: true,
     repos: opts.repos ?? null,
+    // Recorded per arm (an arm without a count clears a stale one to unknown).
+    mirrors: opts.mirrors ?? null,
     gate: opts.gate ?? null,
     run: {
       runId: opts.runId ?? randomUUID(),

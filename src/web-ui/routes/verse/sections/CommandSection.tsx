@@ -20,11 +20,14 @@
  * surface. Polling runs only while Command is the visible surface
  * (usePollWhileVisible), at ≥ 2 s per the performance budget.
  */
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
 import { Swimlane } from '../../../components/charts/Swimlane.js';
 import type { ChartStatus } from '../../../components/charts/ChartFrame.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
+import { getQuerySnapshot, subscribeQuery } from '../../../data/cache.js';
+import type { VerseBootstrap } from '../../../data/api-types.js';
+import { VERSE_BOOTSTRAP_KEY } from '../verse-queries.js';
 import { budgetQuery } from '../budget/budget-queries.js';
 import { useNow } from '../autonomy/use-ticker.js';
 import { usePollWhileVisible } from '../shell/section-visibility.js';
@@ -100,6 +103,19 @@ export function CommandSection() {
   const actions = useSurfaceActions();
   const lastLooked = useLastLooked();
 
+  // The seat roster, for Claude's reset WORDS (the budget route carries only
+  // machine reset instants, which Claude never publishes — command-model
+  // bindingResetText). Read from the cache WITHOUT fetching: the console
+  // loads bootstrap at startup and the chat surfaces keep it live, and a
+  // bootstrap read here would cost ~384 ms of server event loop per poll
+  // (useSeatsRefresh.ts). No roster → the card says "reset time not reported".
+  const roster = useSyncExternalStore(
+    useCallback((listener: () => void) => subscribeQuery(VERSE_BOOTSTRAP_KEY, listener), []),
+    () => getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY),
+    () => getQuerySnapshot<VerseBootstrap>(VERSE_BOOTSTRAP_KEY),
+  );
+  const seats = roster.data?.seats ?? null;
+
   const [readings, setReadings] = useState(seatReadings);
   const view = budget.data ?? null;
   useEffect(() => {
@@ -114,10 +130,12 @@ export function CommandSection() {
   const darkSince = live?.state === 'dark' ? live.lastActivityAt ?? hist?.darkSince ?? null : hist?.darkSince ?? null;
 
   const kpis = useMemo(
-    () => buildKpis({ fleet: live, history: hist, learning: learning.data?.value ?? null, policy: auth?.policy ?? null }),
-    [live, hist, learning.data, auth],
+    // `budget` puts each paid seat's window usage (percent, never dollars) in
+    // the metered-spend caption (review 3.10 c10).
+    () => buildKpis({ fleet: live, history: hist, learning: learning.data?.value ?? null, policy: auth?.policy ?? null, budget: view }),
+    [live, hist, learning.data, auth, view],
   );
-  const burns = useMemo(() => seatBurns(view, readings), [view, readings]);
+  const burns = useMemo(() => seatBurns(view, readings, seats), [view, readings, seats]);
   const since = sinceYouLooked({ lastLookedAt: lastLooked, fleet: live, leader: leader.data?.value ?? null, activity: activity.data });
 
   const windowH = compact ? 6 : 12;

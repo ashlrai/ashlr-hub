@@ -31,7 +31,7 @@
  * Mutations go through one guard: if no mutation token is held,
  * MutationTokenDialog opens and the action re-runs once unlocked.
  */
-import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, type ComponentProps, type ComponentType, type CSSProperties } from 'react';
 import type { VerseCreateSessionRequest, VerseSession } from '../../../data/api-types.js';
 import { MutationTokenDialog } from '../../../components/auth/MutationTokenDialog.js';
 import { Button } from '../../../components/primitives/Button.js';
@@ -42,8 +42,7 @@ import { ApiError, DispatchDisabledError } from '../../../data/client.js';
 import { useMutationHold, useQuery, useRefresh } from '../../../data/hooks.js';
 import { insertIntoComposer } from '../chat/composer-bridge.js';
 import { forgetComposerMemory } from '../chat/composer-state.js';
-import { otherRunningChats } from '../chat/tasks-model.js';
-import { lastTurnFiles } from '../chat/turn-files.js';
+import type { ChatTask } from '../chat/tasks-model.js';
 import { requestTranscriptFind, requestTranscriptStep } from '../chat/transcript-jump.js';
 import { noteSessionSeen, useChatActivity } from '../chat/use-chat-activity.js';
 import { useSessionRoots } from '../chat/use-session-roots.js';
@@ -56,7 +55,8 @@ import { useCommandHandler } from '../shell/command-bus.js';
 import { matchCommand } from '../shell/command-catalog.js';
 import { useSectionVisible } from '../shell/section-visibility.js';
 import type { TurnFileChange } from '../shell/slots.js';
-import { Sidebar, type SidebarRowActions } from '../Sidebar.js';
+import type { Sidebar as SidebarComponent, SidebarRowActions } from '../Sidebar.js';
+import { SkeletonLine } from '../../../components/primitives/Skeleton.js';
 import { useVerseSession } from '../useVerseSession.js';
 import { useVerseUi } from '../useVerseUi.js';
 import { openVerseListChannel } from '../verse-events.js';
@@ -81,14 +81,133 @@ import {
   setVerseSection,
   setVerseSidebarCollapsed,
 } from '../verse-ui-store.js';
-import { firstRunnableModel, seatById } from '../verse-model.js';
-import { Workspace } from '../Workspace.js';
+import type { Workspace as WorkspaceComponent } from '../Workspace.js';
 import styles from './ChatSection.module.css';
 
 // Loaded on first use, not with the chat: the dock starts closed and the
 // new-chat dialog opens on request (SPEC-310C budget: chat critical JS).
 const DockHost = lazy(() => import('../dock/DockHost.js').then((m) => ({ default: m.DockHost })));
 const NewChatDialog = lazy(() => import('../NewChatDialog.js').then((m) => ({ default: m.NewChatDialog })));
+
+/**
+ * A component in its own chunk whose download starts the moment THIS module
+ * evaluates — not when React first renders it — so it streams in parallel
+ * with the chat's first paint instead of after it.
+ *
+ * WHY (SPEC-310A §1: chat first-paint critical JS ≤ 350 KB, measured by
+ * scripts/check-first-paint-budget.mjs). React + react-dom alone are ~220 KB
+ * of that; the chat list, the transcript, the composer and the markdown
+ * renderer were another ~290 KB in this chunk. The section's frame (its
+ * grid, the banners, every mutation and key handler) paints from this chunk;
+ * the workspace and the chat list paint a beat later from theirs, over
+ * skeletons in their own shape so nothing jumps.
+ *
+ * Once the module is in, every later mount renders it synchronously (no
+ * Suspense flash when you come back to Chat). Which of the two a mount uses
+ * is fixed for that mount's life: swapping the lazy wrapper for the loaded
+ * component mid-life would remount the subtree and drop its state — the
+ * composer's draft, the transcript's scroll.
+ */
+function preloadedLazy<P extends object>(load: () => Promise<ComponentType<P>>): { Slot: ComponentType<P>; ready: () => Promise<ComponentType<P>> } {
+  let loaded: ComponentType<P> | null = null;
+  let pending: Promise<ComponentType<P>> | null = null;
+  const ready = (): Promise<ComponentType<P>> => {
+    // A failed download is not cached: the next mount (or retry) asks again.
+    pending ??= load().then((c) => (loaded = c), (err: unknown) => { pending = null; throw err; });
+    return pending;
+  };
+  const Lazy = lazy(() => ready().then((c) => ({ default: c })));
+  function Slot(props: P) {
+    const [Ready] = useState<ComponentType<P> | null>(() => loaded);
+    return Ready ? <Ready {...props} /> : <Lazy {...props} />;
+  }
+  if (typeof window !== 'undefined') void ready().catch(() => undefined);
+  return { Slot, ready };
+}
+
+const WorkspaceModule = preloadedLazy<ComponentProps<typeof WorkspaceComponent>>(() => import('../Workspace.js').then((m) => m.Workspace));
+const Workspace = WorkspaceModule.Slot;
+const SidebarModule = preloadedLazy<ComponentProps<typeof SidebarComponent>>(() => import('../Sidebar.js').then((m) => m.Sidebar));
+const Sidebar = SidebarModule.Slot;
+
+/**
+ * The two derivations only the workspace's tasks row and the dock read
+ * (tool-semantics, sidebar-model and line-diff come with them, ~12 KB). Both
+ * consumers are lazy chunks that import these modules themselves, so the
+ * download is shared and the values are in before either consumer mounts;
+ * until then there is honestly nothing to show.
+ */
+const DERIVATIONS = preloadedModule(() => Promise.all([import('../chat/tasks-model.js'), import('../chat/turn-files.js')])
+  .then(([tasks, files]) => ({ otherRunningChats: tasks.otherRunningChats, lastTurnFiles: files.lastTurnFiles })));
+/** Seat lookups for ⌘N "New chat on…" — the only first-paint-path use of verse-model (5.6 KB). */
+const SEAT_MODEL = preloadedModule(() => import('../verse-model.js').then((m) => ({ firstRunnableModel: m.firstRunnableModel, seatById: m.seatById })));
+const NO_TASKS: readonly ChatTask[] = [];
+const NO_TURN_FILES: TurnFileChange[] = [];
+
+/**
+ * A module (not a component) on the same terms as preloadedLazy: fetched when
+ * this module evaluates, read synchronously once in. useLoaded() re-renders
+ * its caller once, when it lands; a failed load leaves it null (the values it
+ * would have computed stay empty) and is retried on the next mount.
+ */
+function preloadedModule<M>(load: () => Promise<M>): { ready: () => Promise<M>; useLoaded: () => M | null } {
+  let loaded: M | null = null;
+  let pending: Promise<M> | null = null;
+  const ready = (): Promise<M> => {
+    pending ??= load().then((m) => (loaded = m), (err: unknown) => { pending = null; throw err; });
+    return pending;
+  };
+  function useLoaded(): M | null {
+    const [mod, setMod] = useState<{ current: M | null }>(() => ({ current: loaded }));
+    useEffect(() => {
+      if (mod.current) return undefined;
+      let live = true;
+      ready().then((m) => { if (live) setMod({ current: m }); }, () => undefined);
+      return () => { live = false; };
+    }, [mod]);
+    return mod.current;
+  }
+  if (typeof window !== 'undefined') void ready().catch(() => undefined);
+  return { ready, useLoaded };
+}
+
+/**
+ * Resolves when the chat's own chunks (workspace, chat list) are in. Tests
+ * await it so a mount renders the whole surface synchronously; nothing in the
+ * app needs to — the Suspense skeletons cover the gap.
+ */
+export function preloadChatSurface(): Promise<unknown> {
+  return Promise.all([WorkspaceModule.ready(), SidebarModule.ready(), DERIVATIONS.ready(), SEAT_MODEL.ready()]);
+}
+
+/**
+ * The chat list's shape while its chunk loads. A <nav> like the real one, so
+ * the grid rules written against `.chat > nav` (collapsed = display:none, the
+ * phone-width overlay) hold for it too — but NOT named "Chats": that name is
+ * the loaded list's, and a placeholder answering to it would be a lie.
+ */
+function SidebarSkeleton() {
+  return (
+    <nav className={styles.sidebarSkeleton} aria-busy="true" aria-label="Loading chat list">
+      {[64, 82, 58, 76, 70].map((w) => <SkeletonLine key={w} width={`${w}%`} />)}
+    </nav>
+  );
+}
+
+/** The workspace column's shape while its chunk loads: header, a few lines, the composer bar. */
+function WorkspaceSkeleton() {
+  return (
+    <div className={styles.workspaceSkeleton} role="status" aria-label="Loading chat">
+      <div className={styles.skeletonHeader}><SkeletonLine width="32%" /></div>
+      <div className={styles.skeletonBody}>
+        <SkeletonLine width="72%" />
+        <SkeletonLine width="88%" />
+        <SkeletonLine width="64%" />
+      </div>
+      <div className={styles.skeletonComposer}><SkeletonLine width="100%" /></div>
+    </div>
+  );
+}
 
 const SELECTED_KEY = 'ashlr.verse.selected.v1';
 
@@ -409,9 +528,14 @@ export function ChatSection() {
 
   // The shell's one-shot command, consumed once by nonce.
   const handledCommand = useRef(0);
+  const seatModel = SEAT_MODEL.useLoaded();
   useEffect(() => {
     const command = ui.command;
     if (!command || command.nonce === handledCommand.current) return;
+    // "New chat on…" resolves its seat through verse-model, which loads just
+    // after first paint: leave the command pending (unconsumed) until it is
+    // in — this effect re-runs when it lands.
+    if (command.name === 'new-chat' && !seatModel) return;
     handledCommand.current = command.nonce;
     switch (command.name) {
       case 'open-session':
@@ -422,6 +546,7 @@ export function ChatSection() {
         break;
       case 'new-chat': {
         // "New chat on…" carries a seat (and maybe a project); ⌘N carries neither.
+        const { seatById, firstRunnableModel } = seatModel!;
         const seat = command.seatId ? seatById(seats, command.seatId) : undefined;
         // The model this project last used on that seat, else the seat's first runnable one.
         const remembered = lastVerseSeat(command.projectPath ?? null);
@@ -437,7 +562,7 @@ export function ChatSection() {
         break;
     }
     clearVerseCommand();
-  }, [ui.command, openNewChat, seats, setSelectedId]);
+  }, [ui.command, openNewChat, seats, setSelectedId, seatModel]);
 
   // The catalog's chat-scope commands, for the palette, the menu and keys.
   const handlers: ReadonlyArray<[string, () => void | boolean]> = [
@@ -531,11 +656,15 @@ export function ChatSection() {
   } as CSSProperties;
 
   // ---- dock data ------------------------------------------------------------------
+  const derive = DERIVATIONS.useLoaded();
   const otherRunning = useMemo(
-    () => otherRunningChats(sessions, chatActivity.activity, selectedId),
-    [sessions, chatActivity.activity, selectedId],
+    () => (derive ? derive.otherRunningChats(sessions, chatActivity.activity, selectedId) : NO_TASKS),
+    [derive, sessions, chatActivity.activity, selectedId],
   );
-  const turnFiles = useMemo<TurnFileChange[]>(() => lastTurnFiles(view.events, roots.roots), [roots.roots, view.events]);
+  const turnFiles = useMemo<TurnFileChange[]>(
+    () => (derive ? derive.lastTurnFiles(view.events, roots.roots) : NO_TURN_FILES),
+    [derive, roots.roots, view.events],
+  );
 
   const actions: SidebarRowActions = {
     setPinned: (id, pinned) => setMeta(id, { pinned }, pinned ? 'Pinning a chat.' : 'Unpinning a chat.'),
@@ -549,12 +678,14 @@ export function ChatSection() {
   return (
     <div ref={chatRef} className={styles.chat} style={style}
       data-sidebar={sidebarCollapsed ? 'collapsed' : 'open'} data-dock={dockColumn ? 'open' : 'closed'}>
+      <Suspense fallback={<SidebarSkeleton />}>
       <Sidebar sessions={sessions} sessionsStatus={sessionsQuery.status} sessionsError={sessionsQuery.error?.message ?? null}
         projects={projects} seats={seats} selectedId={selectedId} query={query} onQuery={setQuery}
         onSelect={selectFromList} onNew={() => openNewChat()}
         onRetry={() => { refetchSessions(); refetchBootstrap(); }}
         onCollapse={() => setVerseSidebarCollapsed(true)} onDisconnect={() => { void clearReadSession(); }}
         activity={chatActivity.activity} meta={chatActivity.meta} localSeen={chatActivity.localSeen} actions={actions} />
+      </Suspense>
       {sidebarCollapsed ? null : <ChatResizer side="sidebar" label="Resize chat list" className={styles.resize} />}
       {/* At phone width the sidebar floats over the transcript; the scrim dismisses it. */}
       <button type="button" className={styles.scrim} aria-label="Close chat list" tabIndex={-1}
@@ -570,6 +701,7 @@ export function ChatSection() {
             Read-only: this server was started without dispatch. Run <code>ashlr verse</code> to send messages.
           </div>
         ) : null}
+        <Suspense fallback={<WorkspaceSkeleton />}>
         <Workspace view={view} seats={seats} projects={projects} dispatchEnabled={dispatchEnabled} locked={!hold.hasHold}
           hasAnySessions={sessions.length > 0} onSend={send} onStop={() => stop()}
           onRename={(title) => (selectedId ? renameChat(selectedId, title) : Promise.resolve(false))}
@@ -580,6 +712,7 @@ export function ChatSection() {
           handoffOpen={handoffFor !== null && handoffFor === selectedId}
           onHandoffOpenChange={(open) => setHandoffFor(open ? selectedId : null)}
           otherRunning={otherRunning} />
+        </Suspense>
       </div>
       {dockOpen ? (
         <Suspense fallback={null}>

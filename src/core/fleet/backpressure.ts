@@ -43,6 +43,7 @@ import { scrubSecrets } from '../util/scrub.js';
 import { ensurePrivateDirectory, readPrivateFileCapped, writePrivateFileAtomic } from '../verse/preferences.js';
 import { routeKey, type RouteDemotion } from './dispatch-router.js';
 import type { GateId, RepoHold } from './fleet-types.js';
+import type { FleetMergeStateRead } from './fleet-merge-state.js';
 
 export const BACKPRESSURE_LIMITS = Object.freeze({
   maxOpenFleetPrsPerRepo: 3,
@@ -386,33 +387,162 @@ export function evaluateBackpressure(input: BackpressureInput): BackpressureVerd
 // Open fleet PRs (from the ledger)
 // ---------------------------------------------------------------------------
 
+/** One fleet PR the ledger says is open. */
+export interface OpenFleetPrRef {
+  /** nameWithOwner, as ledgered. */
+  repo: string;
+  number: number;
+  /** The proposal it carries (its fleet merge state key); null for a revert PR. */
+  proposalId: string | null;
+  /** When it was (re)opened — the ledger row's time. */
+  openedAt: string;
+}
+
+/** `${repo lowercased}#${number}` — the key PR observations are joined on. */
+export function fleetPrKey(repo: string, number: number): string {
+  return `${repo.toLowerCase()}#${number}`;
+}
+
 /**
- * Open fleet PRs per repo from ledger rows: `pr:opened` minus `pr:closed`,
- * plus `pr:reopened`, minus a merge / revert landing on the same PR. Repos
- * absent from the result have none open.
+ * Fleet PRs the LEDGER says are open: `pr:opened` / `pr:reopened` minus
+ * `pr:closed` and a merge / revert landing on the same PR.
+ *
+ * The ledger only hears about closes and merges the FLEET makes. A PR Mason
+ * merges or closes on GitHub (the expected exit for an owner-lane PR) never
+ * gets a row, so this alone over-counts until the `pr:opened` row ages out of
+ * the evidence window (review c5) — the tick reconciles it with
+ * `reconcileOpenFleetPrs` before it pauses anything.
  */
-export function openFleetPrsFromLedger(entries: readonly LedgerEntry[]): Record<string, number> {
-  const open = new Map<string, string>(); // `${repo}#${n}` → repo
+export function openFleetPrRefsFromLedger(entries: readonly LedgerEntry[]): OpenFleetPrRef[] {
+  const open = new Map<string, OpenFleetPrRef>();
   for (const entry of entries) {
     switch (entry.kind) {
       case 'pr:opened':
-        open.set(`${entry.data.repo.toLowerCase()}#${entry.data.number}`, entry.data.repo);
+        open.set(fleetPrKey(entry.data.repo, entry.data.number), {
+          repo: entry.data.repo,
+          number: entry.data.number,
+          proposalId: entry.data.proposalId,
+          openedAt: entry.data.at || entry.at,
+        });
         break;
-      case 'pr:reopened':
-        open.set(`${entry.data.repo.toLowerCase()}#${entry.data.number}`, entry.data.repo);
+      case 'pr:reopened': {
+        const key = fleetPrKey(entry.data.repo, entry.data.number);
+        const known = open.get(key);
+        open.set(key, {
+          repo: entry.data.repo,
+          number: entry.data.number,
+          proposalId: known?.proposalId ?? null,
+          openedAt: entry.data.at || entry.at,
+        });
         break;
+      }
       case 'pr:closed':
-        open.delete(`${entry.data.repo.toLowerCase()}#${entry.data.number}`);
+        open.delete(fleetPrKey(entry.data.repo, entry.data.number));
         break;
       case 'merge:landed':
       case 'revert:landed':
-        open.delete(`${entry.data.repo.toLowerCase()}#${entry.data.prNumber}`);
+        open.delete(fleetPrKey(entry.data.repo, entry.data.prNumber));
         break;
       default:
         break;
     }
   }
+  return [...open.values()];
+}
+
+/**
+ * Open fleet PRs per repo from ledger rows alone (see
+ * `openFleetPrRefsFromLedger` for why the tick reconciles this). Repos absent
+ * from the result have none open.
+ */
+export function openFleetPrsFromLedger(entries: readonly LedgerEntry[]): Record<string, number> {
   const counts: Record<string, number> = {};
-  for (const repo of open.values()) counts[repo] = (counts[repo] ?? 0) + 1;
+  for (const ref of openFleetPrRefsFromLedger(entries)) counts[ref.repo] = (counts[ref.repo] ?? 0) + 1;
   return counts;
+}
+
+/** What GitHub (or the fleet's own record of it) says about one PR; null = could not tell. */
+export type ObservedPrState = 'open' | 'closed' | 'merged' | null;
+
+/**
+ * How long a PR whose state cannot be observed keeps counting as open. WHY
+ * bounded: unknown fails closed (the PR may well be open), but a GitHub
+ * outage or a missing App token must not pause a repo for the whole 7-day
+ * evidence window — and while GitHub is unreadable the fleet cannot open a
+ * PR anyway, so dropping a stale unknown cannot let PRs pile up.
+ */
+export const UNKNOWN_PR_STATE_COUNT_MS = 24 * 60 * 60_000;
+
+/**
+ * Open fleet PRs per repo after reconciling the ledger with observed PR
+ * state (review c5): a PR observed merged or closed — by the fleet's merge
+ * state or by GitHub — no longer counts; one observed open counts; one whose
+ * state is unknown counts only while it was opened within
+ * UNKNOWN_PR_STATE_COUNT_MS. Pure.
+ */
+export function reconcileOpenFleetPrs(
+  refs: readonly OpenFleetPrRef[],
+  observed: ReadonlyMap<string, ObservedPrState>,
+  nowMs: number,
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const ref of refs) {
+    const state = observed.get(fleetPrKey(ref.repo, ref.number)) ?? null;
+    if (state === 'closed' || state === 'merged') continue;
+    if (state === null) {
+      const openedMs = Date.parse(ref.openedAt);
+      if (Number.isFinite(openedMs) && nowMs - openedMs > UNKNOWN_PR_STATE_COUNT_MS) continue;
+    }
+    counts[ref.repo] = (counts[ref.repo] ?? 0) + 1;
+  }
+  return counts;
+}
+
+/**
+ * The fleet's own record of a PR (fleet/fleet-merge-state.ts, kept current by
+ * the standing merge pass polling GitHub): terminal when the PR was closed or
+ * merged there, or the record reached an outcome; open when it still says
+ * open; null when there is no usable record.
+ */
+export function prStateFromMergeState(read: FleetMergeStateRead, number: number): ObservedPrState {
+  if (read.state !== 'ok') return null;
+  const pr = read.record.pr;
+  if (!pr || pr.number !== number) return null;
+  if (pr.state === 'merged') return 'merged';
+  if (pr.state === 'closed') return 'closed';
+  if (read.record.outcome === 'merged') return 'merged';
+  if (read.record.outcome !== null) return 'closed';
+  return 'open';
+}
+
+// ---------------------------------------------------------------------------
+// Waiting for verification (review c1)
+// ---------------------------------------------------------------------------
+
+/** Gates that run BEFORE G3; a proposal parked at one of them is not waiting on the verifier. */
+const PRE_VERIFY_GATES: readonly GateId[] = ['G0', 'G1', 'G1b', 'G2'];
+
+/**
+ * Is a pending, not-yet-verified proposal actually waiting for the VERIFIER?
+ * SPEC-310B §3 brake 2 exists because G3 is the bottleneck — so only work G3
+ * will reach counts. Not counted (each would otherwise hold the WHOLE fleet
+ * with work nothing will verify):
+ *   - a proposal with a fleet PR (owner lane: no verification is spent) or a
+ *     terminal outcome;
+ *   - one parked at a gate before G3 — G0 (no judge seat, daily cap, holds),
+ *     G1 owner lane, G2 over the stage's caps (it waits for the rollout);
+ *   - an unreadable merge state (the pass skips it too).
+ * Counted: no merge state yet (the pass has not reached it — it may go
+ * straight to G3), and a record whose pre-G3 gates all passed.
+ */
+export function awaitsVerification(read: FleetMergeStateRead): boolean {
+  if (read.state === 'missing') return true;
+  if (read.state === 'corrupt') return false;
+  const record = read.record;
+  if (record.pr !== null || record.outcome !== null) return false;
+  for (const gate of PRE_VERIFY_GATES) {
+    const memo = record.gates[gate];
+    if (memo && memo.verdict !== 'pass') return false;
+  }
+  return true;
 }

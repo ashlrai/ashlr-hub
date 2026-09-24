@@ -127,3 +127,11 @@
 @media (max-width: 767.98px) {
   .rail { display: none; }
 }
+
+/* The marker glyphs are SVG (ChapterRail.tsx MARKER_PATH): 1em of the
+   parent's 2xs text, sitting on its baseline like the glyphs did. */
+.markerIcon {
+  display: block;
+  width: 1em;
+  height: 1em;
+}

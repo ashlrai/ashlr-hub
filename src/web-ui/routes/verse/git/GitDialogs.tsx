@@ -14,7 +14,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react';
 import { Button } from '../../../components/primitives/Button.js';
 import { Dialog } from '../../../components/primitives/Dialog.js';
-import { defaultPrTitle, diffstatText, formatCount, type GitStatusView } from './git-model.js';
+import { defaultPrTitle, diffstatText, formatCount, mergeDrift, mergeHeadFact, type GitStatusView, type PinnedMerge } from './git-model.js';
 import styles from './GitDialogs.module.css';
 
 interface BaseProps {
@@ -226,50 +226,56 @@ export function CreatePrDialog({ open, status, onClose, onSubmit, error, busy, d
 // Merge
 // ---------------------------------------------------------------------------
 
-export interface MergeDialogProps extends BaseProps {
+export interface MergeDialogProps extends Omit<BaseProps, 'status'> {
+  /** The PR as it was when the dialog opened — what the operator is confirming (git-model.ts `pinMerge`). */
+  pin: PinnedMerge;
+  /** The latest polled status for the same root; only used to notice drift, never to change what is shown or sent. */
+  live: GitStatusView | null;
   onSubmit: () => void;
 }
 
-export function MergeDialog({ open, status, onClose, onSubmit, error, busy }: MergeDialogProps) {
+export function MergeDialog({ open, pin, live, onClose, onSubmit, error, busy }: MergeDialogProps) {
   const titleId = useId();
   const confirmRef = useRef<HTMLButtonElement>(null);
-  const pr = status.pr;
-  if (!pr) return null;
-  const counts = status.prCheckCounts;
-  const shortSha = pr.headSha ? pr.headSha.slice(0, 7) : '—';
+  const head = mergeHeadFact(pin);
+  // Merge stays disabled when the pin itself is not verified (the facts line
+  // then says what is missing) or when the live PR moved away from it.
+  const drift = mergeDrift(pin, live);
+  const blocked = drift ?? (head.verified ? null : 'This head has not passed every check GitHub needs to merge it.');
   return (
     <Dialog
       open={open}
       onClose={onClose}
       titleId={titleId}
-      title={`Merge #${pr.number}?`}
-      description={pr.title}
+      title={`Merge #${pin.number}?`}
+      description={pin.title}
       initialFocusRef={confirmRef}
     >
       <form
         className={styles.form}
         onSubmit={(e) => {
           e.preventDefault();
-          if (!busy) onSubmit();
+          if (!busy && blocked === null) onSubmit();
         }}
         onKeyDown={submitOnModEnter}
       >
         <Facts>
           <Fact>
-            Squash-merges <Branch name={pr.headRef || status.branch} /> into <Branch name={pr.baseRef || status.base} /> on GitHub.
+            Squash-merges <Branch name={pin.headRef || null} /> into <Branch name={pin.baseRef || null} /> on GitHub.
           </Fact>
-          <Fact>
-            Head <code className={styles.ref}>{shortSha}</code>, {counts && counts.total > 0 ? `${counts.passed}/${counts.total} checks passed` : 'checks passed'}, no conflicts.
+          <Fact tone={head.verified ? 'neutral' : 'warning'}>
+            Head <code className={styles.ref}>{head.sha}</code>, {head.detail}
           </Fact>
-          <Fact>GitHub re-checks the head first: if a commit landed after this, nothing merges. Admin overrides are never used.</Fact>
+          <Fact>Only this head merges: GitHub re-checks it first, so if a commit landed after it, nothing merges. Admin overrides are never used.</Fact>
+          {blocked !== null ? <Fact tone="warning">{blocked}</Fact> : null}
         </Facts>
         <ErrorLine error={error} />
         <div className={styles.actions}>
           <Button variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button ref={confirmRef} type="submit" variant="primary" busy={busy}>
-            Merge #{pr.number}
+          <Button ref={confirmRef} type="submit" variant="primary" busy={busy} disabled={blocked !== null}>
+            Merge #{pin.number}
           </Button>
         </div>
       </form>

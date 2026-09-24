@@ -52,14 +52,22 @@ import { fileURLToPath } from 'node:url';
  * closure already reaches changes nothing in the digest; listing it anyway
  * keeps it in the surface if an import refactor ever drops the path to it.
  *
- * NOT roots, deliberately: daemon/loop.js and fleet/tick-hooks-live.js. They
- * ORCHESTRATE — every decision they make is a call into a module listed here
- * (mint / claim of the capability, currentStandingPolicy, the gates,
- * confinement) — but each drags in the whole daemon, the Verse server and
- * Universe (≈590 files, measured 2026-09-24, vs ≈356 without them). As roots
- * they would pause the grant on nearly every deploy, which is exactly the
- * human bottleneck the addendum removes. They stay Tier-1 protected paths,
- * so the fleet can never change them; only Mason's own deploys can.
+ * Spend / engine deciders (3.10 review d4): fleet/tick-hooks-live.js,
+ * daemon/loop.js, run/best-of-n.js and vision/leader.js ARE roots. They were
+ * left out as "orchestrators" on the theory that every decision they make is
+ * a call into a module listed here — but that is false for spend: tick-hooks-
+ * live is the only place the stored budget is clamped to the grant on the
+ * fleet dispatch path (`clampBudget(loadBudget(), policy, …)`), it switches
+ * Codex seats on under the grant's reserve floor itself (applyCodexDirective),
+ * and loop.js decides which Codex seat a standing run may use. A deploy that
+ * changed any of that ran under the OLD grant with no pause — the exact I2
+ * hole ("changed authority code cannot run under an old grant"). The price:
+ * their closure pulls in the daemon, the Verse server and Universe (≈578
+ * source files vs ≈359, measured 2026-09-24), so more deploys pause the grant
+ * until Mason re-approves. The cheaper long-term shape is to move those
+ * decisions into a small module under an existing root and drop these four
+ * roots again; until then correctness wins over re-approval friction. They
+ * are also Tier-1 protected paths, so the fleet itself can never change them.
  */
 export const AUTHORITY_SURFACE_ROOTS = Object.freeze([
   'dist/core/authority/',
@@ -81,6 +89,16 @@ export const AUTHORITY_SURFACE_ROOTS = Object.freeze([
   'dist/core/fleet/mirrors.js',
   'dist/core/fleet/manager.js',
   'dist/core/fleet/reviewer-independence.js',
+  // Spend / engine deciders (3.10 review d4 — see above).
+  'dist/core/fleet/tick-hooks-live.js',
+  'dist/core/daemon/loop.js',
+  'dist/core/run/best-of-n.js',
+  'dist/core/vision/leader.js',
+  // Already in the closure; listed so an import refactor cannot drop them.
+  'dist/core/fleet/subscription-usage.js',
+  'dist/core/fleet/router.js',
+  'dist/core/run/best-of-n-policy.js',
+  'dist/core/vision/leader-seat.js',
   'dist/core/sandbox/',
   'dist/core/policy/',
   'dist/core/routing/policy.js',

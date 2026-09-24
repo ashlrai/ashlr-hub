@@ -8,7 +8,7 @@
  * custody helper, isolated tmp HOME. REAL-IO: real git (see
  * test/helpers/throughput-310b.ts).
  */
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, writeFileSync, chmodSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -21,8 +21,12 @@ import {
   type BareOrigin,
 } from './helpers/throughput-310b.js';
 import {
+  MIRROR_DEPS_RETRY_MS,
   ensureMirror,
   fleetMirrorsRoot,
+  installMirrorDependencies,
+  planMirrorDependencies,
+  type MirrorDependencyInstallPlan,
   githubOriginUrl,
   isMirrorPath,
   listMirrors,
@@ -542,4 +546,170 @@ describe('ashlr mirror CLI', () => {
     }
     expect(existsSync(fleetMirrorsRoot())).toBe(false);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Review c0: mirrors carry their dependencies (G3 / the post-merge watch
+// symlink <mirror>/node_modules — a clone without them can never verify).
+// ---------------------------------------------------------------------------
+
+const EMPTY_NPM_LOCK = (name: string, version = '1.0.0'): string => `${JSON.stringify({
+  name, version, lockfileVersion: 3, requires: true, packages: { '': { name, version } },
+}, null, 2)}\n`;
+
+describe('mirror dependencies (review c0)', () => {
+  function nodeRepo(nameWithOwner: string): BareOrigin {
+    return origin(nameWithOwner, {
+      'README.md': '# node repo\n',
+      '.gitignore': 'node_modules\n',
+      'package.json': `${JSON.stringify({ name: 'widget', version: '1.0.0', devDependencies: { vitest: '^3.0.0' } })}\n`,
+      'package-lock.json': EMPTY_NPM_LOCK('widget'),
+    });
+  }
+
+  /** A fake installer that records calls and writes a marker like a real install would. */
+  function fakeInstaller(result: { ok: boolean; reason?: string } = { ok: true }) {
+    const calls: { plan: MirrorDependencyInstallPlan; path: string }[] = [];
+    const install = async (plan: MirrorDependencyInstallPlan, path: string) => {
+      calls.push({ plan, path });
+      if (result.ok) {
+        mkdirSync(join(path, 'node_modules', '.bin'), { recursive: true });
+        writeFileSync(join(path, 'node_modules', '.bin', 'vitest'), '#!/bin/sh\n');
+      } else {
+        mkdirSync(join(path, 'node_modules', 'half'), { recursive: true });
+      }
+      return { ok: result.ok, reason: result.reason ?? (result.ok ? 'installed' : 'npm ci failed: ETARGET') };
+    };
+    return { calls, install };
+  }
+
+  it('installs from the committed lockfile once, and git clean no longer wipes node_modules every tick', async () => {
+    nodeRepo('acme/node');
+    const installer = fakeInstaller();
+    const first = await ensureMirror({ nameWithOwner: 'acme/node' }, deps({ installDependencies: installer.install }));
+    expect(first.ok).toBe(true);
+    expect(installer.calls).toHaveLength(1);
+    expect(installer.calls[0]!.plan).toMatchObject({ kind: 'install', manager: 'npm', lockfile: 'package-lock.json' });
+    expect(installer.calls[0]!.plan.argv).toEqual(expect.arrayContaining(['npm', 'ci', '--ignore-scripts']));
+    const path = mirrorPathFor('acme/node');
+    // The path G3 (inbox/merge.ts linkNodeModules) and the post-merge watch link.
+    expect(existsSync(join(path, 'node_modules', '.bin', 'vitest'))).toBe(true);
+    expect(readMirrorState('acme/node')?.deps).toMatchObject({ status: 'installed', manager: 'npm' });
+
+    // An agent-style leftover that is NOT a dependency dir is still cleaned.
+    writeFileSync(join(path, 'stray.log'), 'x');
+    const second = await ensureMirror({ nameWithOwner: 'acme/node' }, deps({ installDependencies: installer.install }));
+    expect(second.ok).toBe(true);
+    expect(installer.calls).toHaveLength(1); // same lockfile ⇒ no reinstall
+    expect(existsSync(join(path, 'node_modules', '.bin', 'vitest'))).toBe(true);
+    expect(existsSync(join(path, 'stray.log'))).toBe(false);
+  }, REAL_IO_TIMEOUT);
+
+  it('a changed lockfile or a swapped node_modules gets a full clean and a fresh install', async () => {
+    const made = nodeRepo('acme/node');
+    const installer = fakeInstaller();
+    await ensureMirror({ nameWithOwner: 'acme/node' }, deps({ installDependencies: installer.install }));
+    const path = mirrorPathFor('acme/node');
+    writeFileSync(join(path, 'node_modules', 'planted.js'), 'evil');
+    made.push({ 'package-lock.json': EMPTY_NPM_LOCK('widget', '1.0.1'), 'package.json': `${JSON.stringify({ name: 'widget', version: '1.0.1', devDependencies: { vitest: '^3.0.0' } })}\n` }, 'bump');
+    const bumped = await ensureMirror({ nameWithOwner: 'acme/node' }, deps({ installDependencies: installer.install }));
+    expect(bumped.ok).toBe(true);
+    expect(installer.calls).toHaveLength(2);
+    expect(existsSync(join(path, 'node_modules', 'planted.js'))).toBe(false);
+
+    // Replace the directory wholesale (a different inode) ⇒ reinstall.
+    rmSync(join(path, 'node_modules'), { recursive: true, force: true });
+    mkdirSync(join(path, 'node_modules'));
+    writeFileSync(join(path, 'node_modules', 'planted.js'), 'evil');
+    await ensureMirror({ nameWithOwner: 'acme/node' }, deps({ installDependencies: installer.install }));
+    expect(installer.calls).toHaveLength(3);
+    expect(existsSync(join(path, 'node_modules', 'planted.js'))).toBe(false);
+  }, REAL_IO_TIMEOUT);
+
+  it('a failed install fails closed: the mirror is not current, the tick pauses the repo with the reason, and it is not retried every tick', async () => {
+    nodeRepo('acme/node');
+    let now = new Date('2026-09-24T12:00:00.000Z');
+    const installer = fakeInstaller({ ok: false, reason: 'npm ci failed: ETARGET No matching version' });
+    const d = deps({ installDependencies: installer.install, now: () => now });
+    const prep = await prepareMirrorsForTick(policyOf('acme/node'), d);
+    expect(prep.ready).toHaveLength(0);
+    expect(prep.pausedRepoPaths).toEqual([mirrorPathFor('acme/node')]);
+    expect(prep.failed[0]!.reason).toMatch(/dependencies could not be installed from package-lock\.json: npm ci failed: ETARGET/);
+    // A half-written tree is removed rather than verified against.
+    expect(existsSync(join(mirrorPathFor('acme/node'), 'node_modules'))).toBe(false);
+    expect(readMirrorState('acme/node')).toMatchObject({ lastSyncOk: false, deps: { status: 'failed' } });
+
+    now = new Date(now.getTime() + 60_000);
+    const again = await ensureMirror({ nameWithOwner: 'acme/node' }, d);
+    expect(again.ok).toBe(false);
+    expect(again.reason).toMatch(/retried after/);
+    expect(installer.calls).toHaveLength(1);
+
+    now = new Date(now.getTime() + MIRROR_DEPS_RETRY_MS);
+    await ensureMirror({ nameWithOwner: 'acme/node' }, d);
+    expect(installer.calls).toHaveLength(2);
+  }, REAL_IO_TIMEOUT);
+
+  it('refuses unpinned or ambiguous installs with a clear reason, and leaves non-Node repos alone', async () => {
+    origin('acme/unpinned', { 'package.json': `${JSON.stringify({ name: 'u', dependencies: { left: '*' } })}\n` });
+    const installer = fakeInstaller();
+    const unpinned = await ensureMirror({ nameWithOwner: 'acme/unpinned' }, deps({ installDependencies: installer.install }));
+    expect(unpinned.ok).toBe(false);
+    expect(unpinned.reason).toMatch(/declares dependencies but no lockfile is committed/);
+
+    origin('acme/plain');
+    const plain = await ensureMirror({ nameWithOwner: 'acme/plain' }, deps({ installDependencies: installer.install }));
+    expect(plain.ok).toBe(true);
+    expect(readMirrorState('acme/plain')?.deps).toMatchObject({ status: 'none' });
+    expect(installer.calls).toHaveLength(0);
+  }, REAL_IO_TIMEOUT);
+
+  it('plans npm / pnpm / yarn / bun from the committed lockfile and packageManager', () => {
+    const dir = join(fx.home, 'plan-fixture');
+    const write = (files: Record<string, string>) => {
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(dir, { recursive: true });
+      for (const [name, body] of Object.entries(files)) writeFileSync(join(dir, name), body);
+    };
+    const pkg = (extra: Record<string, unknown> = {}) => JSON.stringify({ name: 'x', dependencies: { a: '1.0.0' }, ...extra });
+    write({ 'package.json': pkg(), 'package-lock.json': '{}' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'install', manager: 'npm', argv: ['npm', 'ci', '--ignore-scripts', '--no-audit', '--no-fund', '--prefer-offline'] });
+    write({ 'package.json': pkg({ packageManager: 'pnpm@10.28.2' }), 'pnpm-lock.yaml': 'lockfileVersion: 9\n' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'install', manager: 'pnpm', argv: expect.arrayContaining(['pnpm', 'install', '--frozen-lockfile', '--ignore-scripts']) });
+    write({ 'package.json': pkg(), 'yarn.lock': '# yarn\n' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'install', manager: 'yarn', argv: expect.arrayContaining(['--frozen-lockfile', '--ignore-scripts']) });
+    write({ 'package.json': pkg({ packageManager: 'yarn@4.1.0' }), 'yarn.lock': '# yarn\n' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'install', manager: 'yarn', argv: expect.arrayContaining(['--immutable', '--mode=skip-build']) });
+    write({ 'package.json': pkg(), 'bun.lock': '{}' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'install', manager: 'bun', argv: expect.arrayContaining(['bun', 'install', '--frozen-lockfile', '--ignore-scripts']) });
+    write({ 'package.json': pkg(), 'bun.lock': '{}', 'package-lock.json': '{}' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'refuse', reason: expect.stringMatching(/several lockfiles/) });
+    write({ 'package.json': pkg({ packageManager: 'bun@1.2.0' }), 'bun.lock': '{}', 'package-lock.json': '{}' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'install', manager: 'bun' });
+    write({ 'package.json': pkg({ packageManager: 'pnpm@9.0.0' }), 'package-lock.json': '{}' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'refuse', reason: expect.stringMatching(/pnpm-lock\.yaml/) });
+    write({ 'package.json': JSON.stringify({ name: 'x' }) });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'none' });
+    write({ 'Cargo.toml': '[package]\n' });
+    expect(planMirrorDependencies(dir)).toMatchObject({ kind: 'none' });
+    // The key moves with the lockfile.
+    write({ 'package.json': pkg(), 'package-lock.json': '{"a":1}' });
+    const k1 = planMirrorDependencies(dir);
+    write({ 'package.json': pkg(), 'package-lock.json': '{"a":2}' });
+    const k2 = planMirrorDependencies(dir);
+    expect(k1.kind === 'install' && k2.kind === 'install' && k1.key !== k2.key).toBe(true);
+  });
+
+  it('the production installer runs a real frozen npm ci (zero-dependency lockfile, no network)', async () => {
+    const dir = join(fx.home, 'real-npm');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'package.json'), `${JSON.stringify({ name: 'p', version: '1.0.0' })}\n`);
+    writeFileSync(join(dir, 'package-lock.json'), EMPTY_NPM_LOCK('p'));
+    const plan = planMirrorDependencies(dir);
+    expect(plan.kind).toBe('install');
+    const run = await installMirrorDependencies(plan as MirrorDependencyInstallPlan, dir);
+    expect(run).toMatchObject({ ok: true });
+    // The lockfile is untouched (frozen).
+    expect(readFileSync(join(dir, 'package-lock.json'), 'utf8')).toBe(EMPTY_NPM_LOCK('p'));
+  }, REAL_IO_TIMEOUT);
 });

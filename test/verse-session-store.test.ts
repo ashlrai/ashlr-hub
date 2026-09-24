@@ -135,7 +135,7 @@ describe('foldTextDeltas', () => {
     expect(render(folded)).toEqual(render(log));
   });
 
-  it('merges a run that a tool call / cancel ends into its FIRST delta (same seq, at, key)', () => {
+  it('KEEPS VERBATIM a run that a tool call / cancel ends with no message after it (resume stays exact — c19)', () => {
     const log = stamp([
       { type: 'user-message', turnId: 't', text: 'go' },
       { type: 'turn-started', turnId: 't', pid: 1 },
@@ -148,12 +148,22 @@ describe('foldTextDeltas', () => {
       { type: 'cancelled', turnId: 't' },
       { type: 'turn-done', turnId: 't', ok: false, nativeSessionId: null, durationMs: 1 },
     ]);
-    const folded = foldTextDeltas(log);
-    const deltas = folded.filter((e) => e.type === 'text-delta');
-    expect(deltas).toEqual([
-      { seq: 3, at: AT, type: 'text-delta', turnId: 't', text: 'I will read it' },
-      { seq: 7, at: AT, type: 'text-delta', turnId: 't', text: 'half an answer' },
+    // Merging these into their first delta (the old rule) hid the tail from a
+    // client whose resume cursor sat inside the run.
+    expect(foldTextDeltas(log)).toBe(log);
+  });
+
+  it('a run that ends another turn\'s bubble and is then superseded keeps only its first delta (merged, same seq)', () => {
+    const log = stamp([
+      { type: 'user-message', turnId: 'a', text: 'go' },
+      { type: 'text-delta', turnId: 'a', text: 'A1' },
+      { type: 'text-delta', turnId: 'b', text: 'B1' },
+      { type: 'text-delta', turnId: 'b', text: 'B2' },
+      { type: 'assistant-message', turnId: 'b', text: 'B1B2' },
     ]);
+    const folded = foldTextDeltas(log);
+    expect(folded.map((e) => e.seq)).toEqual([1, 2, 3, 5]);
+    expect(folded[2]).toMatchObject({ type: 'text-delta', turnId: 'b', text: 'B1B2' });
     expect(render(folded)).toEqual(render(log));
   });
 
@@ -173,6 +183,55 @@ describe('foldTextDeltas', () => {
       const seqs = folded.map((e) => e.seq);
       expect(seqs, `seed ${seed}`).toEqual([...new Set(seqs)].sort((a, b) => a - b));
     }
+  });
+});
+
+describe('resume across compaction (review 3.10 c19)', () => {
+  /** What a client holds after receiving raw events ≤ k, then reconnecting (?after=k) to the folded log. */
+  function resumed(raw: readonly VerseEvent[], folded: readonly VerseEvent[], k: number): VerseEvent[] {
+    return [...raw.filter((e) => e.seq <= k), ...folded.filter((e) => e.seq > k)];
+  }
+
+  it('the reported case: cursor inside a cancelled reply still receives the rest of it', () => {
+    const raw = stamp([
+      { type: 'user-message', turnId: 't', text: 'go' },
+      { type: 'turn-started', turnId: 't', pid: 1 },
+      { type: 'text-delta', turnId: 't', text: 'The answer ' },
+      { type: 'text-delta', turnId: 't', text: 'is forty' },
+      { type: 'text-delta', turnId: 't', text: '-two.' },
+      { type: 'cancelled', turnId: 't' },
+      { type: 'turn-done', turnId: 't', ok: false, nativeSessionId: null, durationMs: 1 },
+    ]);
+    const folded = foldTextDeltas(raw);
+    // The client had seq 3 ('The answer ') when the stream dropped.
+    const items = render(resumed(raw, folded, 3)) as Array<{ kind: string; text?: string }>;
+    expect(items.find((i) => i.kind === 'assistant')?.text).toBe('The answer is forty-two.');
+    expect(render(resumed(raw, folded, 3))).toEqual(render(raw));
+  });
+
+  it('for 1000 randomized logs and EVERY cursor, raw ≤ k + folded > k renders exactly like the raw log', () => {
+    for (let seed = 1; seed <= 1000; seed += 1) {
+      const raw = randomLog(seed);
+      const folded = foldTextDeltas(raw);
+      for (let k = 0; k <= raw.length; k += 1) {
+        expect(render(resumed(raw, folded, k)), `seed ${seed}, cursor ${k}`).toEqual(render(raw));
+      }
+    }
+  });
+
+  it('holds through the store: compactEvents + readEvents(after) completes a partially streamed turn', () => {
+    const raw = appendAll(store, 'r1', [
+      { type: 'user-message', turnId: 't', text: 'go' },
+      { type: 'text-delta', turnId: 't', text: 'one ' },
+      { type: 'text-delta', turnId: 't', text: 'two ' },
+      { type: 'text-delta', turnId: 't', text: 'three' },
+      { type: 'error', turnId: 't', message: 'the CLI died' },
+      { type: 'turn-done', turnId: 't', ok: false, nativeSessionId: null, durationMs: 1 },
+    ]);
+    store.compactEvents('r1');
+    const cursor = raw[1]!.seq; // the client had only 'one '
+    const client = [...raw.filter((e) => e.seq <= cursor), ...store.readEvents('r1', cursor)];
+    expect(render(client)).toEqual(render(raw));
   });
 });
 

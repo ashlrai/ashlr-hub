@@ -49,6 +49,7 @@ import { probeDaemonLiveness, type DaemonLivenessV1 } from '../daemon/liveness.j
 import { readPostMergeHalts } from '../daemon/post-merge-halt.js';
 import { currentStandingPolicy } from '../authority/effective-config.js';
 import { listEnrolled, readKillSwitch } from '../sandbox/policy.js';
+import { isMirrorPath } from '../fleet/mirrors.js';
 import { audit } from '../sandbox/audit.js';
 
 export const VERSE_OVERNIGHT_REPORT_PATH = `${VERSE_OVERNIGHT_PATH}/report`;
@@ -108,10 +109,21 @@ export interface OvernightApiDeps {
   now(): number;
   liveness(): DaemonLivenessV1;
   killSwitch(): 'active' | 'inactive' | 'unknown';
+  /** Enrolled repositories — Mason's checkouts, WITHOUT the fleet's mirror clones; null = unreadable. */
   enrolledCount(): number | null;
+  /** Enrolled fleet mirror clones (~/.ashlr/fleet/mirrors/…), counted apart; null = unreadable. */
+  mirrorCount(): number | null;
   /** Does a standing policy let anything merge right now? */
   autoMerge(): boolean;
   halts(): OvernightReportHalt[];
+}
+
+function safeIsMirror(path: string): boolean {
+  try {
+    return isMirrorPath(path);
+  } catch {
+    return false;
+  }
 }
 
 function defaultDeps(): OvernightApiDeps {
@@ -125,9 +137,20 @@ function defaultDeps(): OvernightApiDeps {
         return 'unknown';
       }
     },
+    // WHY TWO COUNTS (R3f): the registry now holds Mason's checkouts AND the
+    // standing fleet's mirror clones of them, so one length double-counts
+    // every granted repo. Repositories are the checkouts; mirrors are shown
+    // apart. A path that cannot be classified counts as a repository.
     enrolledCount: () => {
       try {
-        return listEnrolled().length;
+        return listEnrolled().filter((path) => !safeIsMirror(path)).length;
+      } catch {
+        return null;
+      }
+    },
+    mirrorCount: () => {
+      try {
+        return listEnrolled().filter((path) => safeIsMirror(path)).length;
       } catch {
         return null;
       }
@@ -346,7 +369,15 @@ function arm(res: ServerResponse, body: Record<string, unknown>): void {
     refusal(res, 409, note);
     return;
   }
-  const enrolled = deps.enrolledCount();
+  const checkouts = deps.enrolledCount();
+  const mirrors = checkouts === null ? null : deps.mirrorCount();
+  // A run has work when anything is enrolled. The recorded repo count is the
+  // checkouts; only when the registry holds nothing but mirrors (a standing
+  // fleet whose grant covers repos Mason never enrolled) are the mirrors the
+  // repositories — each mirror is one repo, so counting both would double it.
+  const enrolled = checkouts === null
+    ? null
+    : checkouts > 0 ? checkouts : (mirrors ?? 0);
   if (enrolled === null || enrolled === 0) {
     const note = enrolled === null
       ? 'Refused: the enrollment registry could not be read, so it is not known what a run would work on.'
@@ -381,7 +412,9 @@ function arm(res: ServerResponse, body: Record<string, unknown>): void {
     autoMerge: deps.autoMerge(),
     branch: null,
   };
-  const status = requestOvernightRun(rule, { repos: enrolled, gate });
+  // Mirrors are recorded apart from the repo count (the report shows both;
+  // one number would double-count every granted repo and its mirror).
+  const status = requestOvernightRun(rule, { repos: enrolled, mirrors, gate });
   // Honest about persistence: only a record that reads back armed is armed.
   const reread = readOvernightStatus();
   if (!reread.armed || reread.run?.runId !== status.run?.runId) {
@@ -391,10 +424,15 @@ function arm(res: ServerResponse, body: Record<string, unknown>): void {
     return;
   }
   const daemon = daemonView();
-  const note = daemon.alive === true
+  const scope = checkouts !== null && checkouts > 0 && mirrors !== null && mirrors > 0
+    ? ` Scope: ${checkouts} enrolled ${checkouts === 1 ? 'repository' : 'repositories'}, plus ${mirrors} fleet ${mirrors === 1 ? 'mirror' : 'mirrors'} the standing fleet works in.`
+    : checkouts === 0 && mirrors !== null && mirrors > 0
+      ? ` Scope: ${mirrors} fleet ${mirrors === 1 ? 'mirror' : 'mirrors'} (no checkouts are enrolled).`
+      : '';
+  const note = (daemon.alive === true
     ? `Armed — ${resolved.window.describe}. The running daemon takes it on its next cycle; it ends by pausing, never by the kill switch.`
     : `Armed — ${resolved.window.describe}. No daemon is running right now (${daemon.reason.replace(/\.$/, '')}), `
-      + 'so it starts when the daemon next does. Arming never starts one.';
+      + 'so it starts when the daemon next does. Arming never starts one.') + scope;
   auditAction('arm', `overnight run armed: ${resolved.window.describe}`, true);
   sendJson(res, 200, { ok: true, note, status: overnightStatusView(reread) } satisfies OvernightActionResult);
 }

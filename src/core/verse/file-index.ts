@@ -9,15 +9,22 @@
  *     (execFile, 5 s timeout, 32 MB output cap), so a huge repo never blocks
  *     the event loop and `.gitignore`d build output never pollutes results;
  *   - a bounded directory walk when the root is not a git work tree (skips
- *     dot-directories, node_modules, dist/build output; ≤ 20,000 entries);
+ *     dot-directories, node_modules, dist/build output; ≤ 20,000 entries,
+ *     ≤ 40,000 directories, ≤ 5 s) — ASYNC as well: one `fs.promises.readdir`
+ *     per directory, with the per-entry bookkeeping time-sliced, so no stretch
+ *     on the loop approaches the 20 ms handler budget. (It was one synchronous
+ *     readdirSync loop: 55–255 ms of a frozen server per walk — review 3.10 c12.)
  *   - cached per root for 30 s, and concurrent requests share one listing.
+ *     An EXPIRED listing is served as-is while a fresh one is built in the
+ *     background (stale-while-revalidate), so after the first `@` in a chat a
+ *     keystroke never waits for a listing again.
  *
  * Matching is a subsequence fuzzy score (fzf-style bonuses for a basename
  * hit, word starts and consecutive runs). 20k paths score in a few ms. The
  * index reads names only — never file contents.
  */
 import { execFile } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdir } from 'node:fs/promises';
 import { join, relative, sep } from 'node:path';
 
 import type { VerseFileMatch } from './workbench-types.js';
@@ -46,21 +53,56 @@ function gitListFiles(root: string): Promise<string[] | null> {
   });
 }
 
-/** Breadth-first, bounded walk for a root that is not a git work tree. */
-export function walkFiles(root: string, limit = FILE_INDEX_MAX_FILES): string[] {
+/** A non-git walk stops (with what it found so far) after this long. */
+export const FILE_INDEX_WALK_DEADLINE_MS = 5_000;
+/** Longest synchronous stretch of walk bookkeeping before yielding to the loop. */
+const WALK_SLICE_MS = 6;
+
+export interface WalkOptions {
+  limit?: number;
+  deadlineMs?: number;
+  now?: () => number;
+}
+
+function yieldToLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+/**
+ * Breadth-first, bounded, ASYNC walk for a root that is not a git work tree:
+ * at most `limit` files, `limit × 2` directories and `deadlineMs` of wall
+ * time. Every directory read is `fs.promises.readdir` (the event loop runs
+ * other requests while the disk works), and the synchronous bookkeeping
+ * between reads yields every {@link WALK_SLICE_MS}. Symlinks are never
+ * followed (they can point anywhere, including back up).
+ */
+export async function walkFiles(root: string, opts: WalkOptions = {}): Promise<string[]> {
+  const limit = opts.limit ?? FILE_INDEX_MAX_FILES;
+  const now = opts.now ?? (() => performance.now());
+  const deadline = now() + (opts.deadlineMs ?? FILE_INDEX_WALK_DEADLINE_MS);
   const out: string[] = [];
   const queue: string[] = [root];
+  let head = 0;
   let visited = 0;
-  while (queue.length > 0 && out.length < limit && visited < limit * 2) {
-    const dir = queue.shift()!;
+  let sliceStart = performance.now();
+  while (head < queue.length && out.length < limit && visited < limit * 2) {
+    if (now() >= deadline) break;
+    const dir = queue[head]!;
+    head += 1;
     visited += 1;
     let entries;
     try {
-      entries = readdirSync(dir, { withFileTypes: true });
+      entries = await readdir(dir, { withFileTypes: true });
     } catch {
       continue;
     }
-    for (const entry of entries) {
+    sliceStart = performance.now();
+    for (let i = 0; i < entries.length; i += 1) {
+      if ((i & 255) === 255 && performance.now() - sliceStart > WALK_SLICE_MS) {
+        await yieldToLoop();
+        sliceStart = performance.now();
+      }
+      const entry = entries[i]!;
       if (entry.name.startsWith('.')) continue;
       const abs = join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -77,9 +119,6 @@ export function walkFiles(root: string, limit = FILE_INDEX_MAX_FILES): string[] 
 export const defaultListFiles: ListFiles = async (root) => {
   const fromGit = await gitListFiles(root);
   if (fromGit !== null) return fromGit;
-  // The walk is synchronous; yield first so a burst of keystrokes cannot
-  // stack several walks inside one tick.
-  await new Promise((resolve) => setImmediate(resolve));
   return walkFiles(root);
 };
 
@@ -161,15 +200,39 @@ export function createFileIndex(opts: FileIndexOptions = {}): VerseFileIndex {
   const list = opts.list ?? defaultListFiles;
   const now = opts.now ?? Date.now;
   const ttl = opts.ttlMs ?? FILE_INDEX_TTL_MS;
-  const cache = new Map<string, { at: number; files: Promise<string[]> }>();
+  const cache = new Map<string, { at: number; files: Promise<string[]>; refreshing: boolean }>();
+
+  function remember(root: string, entry: { at: number; files: Promise<string[]>; refreshing: boolean }): void {
+    cache.delete(root);
+    cache.set(root, entry);
+    // Bounded: a long-lived server that saw many projects keeps the newest few.
+    if (cache.size > 16) cache.delete(cache.keys().next().value as string);
+  }
 
   function filesFor(root: string): Promise<string[]> {
     const hit = cache.get(root);
     if (hit && now() - hit.at < ttl) return hit.files;
+    if (hit) {
+      // STALE-WHILE-REVALIDATE (review 3.10 c12): the expired listing answers
+      // this keystroke now; a fresh one replaces it when it is ready. One
+      // refresh per root at a time.
+      if (!hit.refreshing) {
+        hit.refreshing = true;
+        const next = list(root).catch(() => null);
+        void next.then((files) => {
+          if (cache.get(root) !== hit) return; // cleared or evicted meanwhile
+          if (files === null) {
+            // A failed refresh keeps the old listing; the next keystroke retries.
+            hit.refreshing = false;
+            return;
+          }
+          remember(root, { at: now(), files: Promise.resolve(files), refreshing: false });
+        });
+      }
+      return hit.files;
+    }
     const files = list(root).catch(() => [] as string[]);
-    cache.set(root, { at: now(), files });
-    // Bounded: a long-lived server that saw many projects keeps the newest few.
-    if (cache.size > 16) cache.delete(cache.keys().next().value as string);
+    remember(root, { at: now(), files, refreshing: false });
     return files;
   }
 

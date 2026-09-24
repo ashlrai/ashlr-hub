@@ -137,7 +137,7 @@ describe('the build script', () => {
     expect(script.packageNameOf('marked')).toBe('marked');
   });
 
-  it('the production roots cover every authority-deciding module family, not the orchestrators', () => {
+  it('the production roots cover every authority-deciding module family, including the spend / engine deciders', () => {
     for (const rootSpec of [
       'dist/core/authority/',
       'dist/core/daemon/activation-permit.js',
@@ -152,9 +152,21 @@ describe('the build script', () => {
     ]) {
       expect(script.AUTHORITY_SURFACE_ROOTS).toContain(rootSpec);
     }
-    // Orchestrators whose closure is the whole daemon: Tier-1 protected, not surface roots (see the script).
-    expect(script.AUTHORITY_SURFACE_ROOTS).not.toContain('dist/core/daemon/loop.js');
-    expect(script.AUTHORITY_SURFACE_ROOTS).not.toContain('dist/core/fleet/tick-hooks-live.js');
+    // 3.10 review d4: tick-hooks-live clamps the stored budget to the grant and
+    // switches Codex seats on under the reserve floor itself; loop picks the
+    // standing Codex seat; best-of-n and the Leader choose engines / seats. A
+    // deploy that changes any of them must pause the grant (I2), so they are
+    // roots — no longer excluded as "orchestrators".
+    for (const decider of [
+      'dist/core/fleet/tick-hooks-live.js',
+      'dist/core/daemon/loop.js',
+      'dist/core/run/best-of-n.js',
+      'dist/core/vision/leader.js',
+      'dist/core/fleet/subscription-usage.js',
+      'dist/core/vision/leader-seat.js',
+    ]) {
+      expect(script.AUTHORITY_SURFACE_ROOTS, decider).toContain(decider);
+    }
   });
 
   it('shares the canonical encoding with the runtime byte for byte', () => {

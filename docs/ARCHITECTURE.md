@@ -54,8 +54,10 @@ execution path or an activation recipe:
 │  1. End-State Spec  ──────────────────  ashlr vision            │
 │     (northStar + endState prose)         core/vision/spec.ts    │
 │            │                                                    │
-│  2. Elon Strategist  ─────────────────  ashlr vision review     │
-│     (decomposes spec → strategic goals)  core/vision/strategist │
+│  2. Leader (tick)  ───────────────────  ashlr leader tick       │
+│     (budget-gated memo → vetoable        core/vision/leader.ts  │
+│      goals/actions; `vision review`                             │
+│      is an alias since 3.10)                                    │
 │            │                                                    │
 │  3. Goals + Milestone Planner  ───────  ashlr goals plan        │
 │     (ordered milestones per goal,        core/goals/planner.ts  │
@@ -203,12 +205,15 @@ and evaluator isolation profile. Do not infer one path's confinement from anothe
 | `advance.ts` | `advanceGoal`: execute the next pending milestone through the sandboxed, proposal-only swarm path. |
 | `conductor.ts` | `runConductor`: the `ashlr loop` backend. Advances active goals first, falls back to `runDaemon`. |
 
-### `src/core/vision/` — Elon Strategist
+### `src/core/vision/` — Leader (and the legacy Strategist)
 
 | File | Responsibility |
 |------|---------------|
 | `spec.ts` | `EndStateSpec` CRUD: northStar + endState prose. |
-| `strategist.ts` | `runStrategist`: frontier model reads the spec + fleet state → strategic briefing → goal evolution. |
+| `leader.ts` | The Leader (3.10): `leaderTick` applies class-B actions past their veto window, grades due moves and starts a run only when one is due (06:30 slot, or 10 fleet merges / a revert / a seat reset / a high-severity insight; at most 3 runs a day). Each run writes a memo with class A/B/C actions, each with a recorded inverse for `ashlr leader veto`. Reached by `ashlr leader tick`, `ashlr vision review` (an alias), `ashlr comms ask-vision` and the nightly oversight plist. |
+| `leader-seat.ts` | Routes a Leader run to a seat the router admits (grok and local models; Claude only for the weekly deep run inside the reserve; never Codex; no cloud fallback). Without a standing grant: free local models only, and the memo is a dry run. |
+| `context.ts` | `gatherStrategicContext`: per-repo health/commits/tests for enrolled repos (fleet mirror clones skipped outside the autonomous lane), outcome ledger, fleet counts. |
+| `strategist.ts` | Legacy `runStrategist` (frontier model → strategic briefing). No CLI path runs it since 3.10; its briefing readers (`previewBriefingAdoption` and friends) still serve `vision preview/shadow/approve/reconcile`. |
 | `playbook.ts` | Strategic playbook builder. |
 
 ### `src/core/inbox/` — Proposal lifecycle

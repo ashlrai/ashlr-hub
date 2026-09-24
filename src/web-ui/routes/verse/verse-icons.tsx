@@ -88,6 +88,21 @@ export function SidebarIcon(props: IconProps) {
 }
 
 /**
+ * The Return key (↩) as a key-legend glyph, 1em and inline so it sits in a
+ * <kbd> like the letters around it. WHY drawn: of the fonts the console
+ * serves, only the 230 KB full Plex face has U+21A9, so typing it into the
+ * palette's or the drawer's key legend fetched that face each time one opened
+ * (3.10 first-paint review; global.css scopes the full faces).
+ */
+export function ReturnKeyIcon(props: IconProps) {
+  return (
+    <Icon width="1em" height="1em" style={{ display: 'inline-block', verticalAlign: '-0.125em' }} {...props}>
+      <path d="M13 3.5v5a2 2 0 0 1-2 2H3.5" /><path d="M6 8 3.5 10.5 6 13" />
+    </Icon>
+  );
+}
+
+/**
  * The rail's own expand/collapse control: the same framed panel as the two
  * pane toggles above, plus a chevron saying which way it is about to move.
  * ONE glyph that rotates rather than two drawings, so the control reads as a

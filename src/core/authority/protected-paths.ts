@@ -101,6 +101,14 @@ export const TIER1_SOURCE_PATTERNS: readonly string[] = Object.freeze([
   'src/core/fleet/tick-hooks-live.ts',
   'src/core/fleet/manager.ts',
   'src/core/fleet/reviewer-independence.ts',
+  // Spend / engine deciders (3.10 review d4): each decides which paid seat or
+  // engine autonomy may use, so each is an authority-surface root too.
+  'src/core/fleet/subscription-usage.ts',
+  'src/core/fleet/router.ts',
+  'src/core/run/best-of-n.ts',
+  'src/core/run/best-of-n-policy.ts',
+  'src/core/vision/leader.ts',
+  'src/core/vision/leader-seat.ts',
   // Sandbox, policy and routing
   'src/core/sandbox/**',
   'src/core/policy/**',
@@ -147,6 +155,7 @@ export const TIER1_TEST_STEMS: readonly string[] = Object.freeze([
   'provenance', 'sandboxed-engine', 'leader-apply', 'harness-registry', 'revocation', 'agent-semantic',
   'home-isolation', 'tier1',
   'engine-registry', 'native-profile', 'experiments', 'heldout', 'tasks-heldout',
+  'best-of-n', 'subscription-usage', 'leader-seat', 'reserve-breach',
 ]);
 
 const ALL_REPO_RULES: readonly ProtectedPathRule[] = [
@@ -517,11 +526,53 @@ export function protectedPathHits(paths: readonly string[], opts: ProtectedPathO
 }
 
 /**
+ * The ashlr-hub test files G1 sends to the owner lane under the `tier1-test`
+ * rule — by name (TIER1_TEST_STEMS), as a safety suite, or because their
+ * content imports Tier-1 source — computed with the SAME matchProtectedPath the
+ * gate runs. PURE: the caller supplies each test file's content (null = not
+ * scanned for imports). Sorted, unique, repo-relative.
+ *
+ * WHY an explicit list and not globs (3.10 review c14): the import half of
+ * the rule has no glob form, and GitHub's CODEOWNERS syntax has no character
+ * classes, so a name-stem glob either misses separators or over-matches
+ * (`*gate*` owns `delegate.test.ts`). An exact list keeps GitHub and G1 in
+ * agreement; the CODEOWNERS test walks test/ and fails when a new Tier-1 test
+ * is missing, so the list cannot silently fall behind.
+ */
+export function tier1TestPathsIn(files: Iterable<{ path: string; content: string | null }>): string[] {
+  const out = new Set<string>();
+  for (const file of files) {
+    const path = normalizeRepoPath(file.path);
+    if (!path || !path.toLowerCase().startsWith('test/')) continue;
+    const imports = testContentImportsTier1(path, [file.content]);
+    const hit = matchProtectedPath(path, imports ? { selfRepo: true, testsImportingTier1: new Set([path]) } : { selfRepo: true });
+    if (hit?.ruleId === TIER1_TEST_RULE_ID) out.add(path);
+  }
+  return [...out].sort();
+}
+
+/** Characters CODEOWNERS treats specially (or GitHub does not support): a path holding one cannot be listed literally. */
+const CODEOWNERS_UNSAFE_PATH_RE = /[\s#![\]\\*?]/u;
+
+export interface CodeownersRenderOptions {
+  selfRepo: boolean;
+  /**
+   * ashlr-hub only: the `tier1-test` owner-lane files (tier1TestPathsIn over
+   * the checkout's test/ tree). Rendered one per line so GitHub holds the
+   * same Tier-1 tests G1 does. Omitted = none rendered (other repos).
+   */
+  tier1TestPaths?: readonly string[];
+}
+
+/**
  * The owner-lane rules rendered as CODEOWNERS lines, so B-U1's CODEOWNERS and
  * this list cannot drift (the App is never a code owner, so GitHub itself
- * holds every one of these paths for Mason's review).
+ * holds every one of these paths for Mason's review). For ashlr-hub the
+ * `tier1-test` rule — which lives in matchProtectedPath, not in
+ * PROTECTED_PATH_RULES — is rendered from `tier1TestPaths` (3.10 review c14:
+ * it used to be dropped, so GitHub owned none of the invariant suites).
  */
-export function renderCodeownersBlock(owner: string, opts: { selfRepo: boolean }): string {
+export function renderCodeownersBlock(owner: string, opts: CodeownersRenderOptions): string {
   if (!/^@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\/[A-Za-z0-9._-]+)?$/.test(owner)) {
     throw new Error('CODEOWNERS owner must be @user or @org/team');
   }
@@ -536,6 +587,18 @@ export function renderCodeownersBlock(owner: string, opts: { selfRepo: boolean }
       // CODEOWNERS anchors a leading "/" at the repo root; a "**/" prefix matches anywhere.
       const rendered = pattern.startsWith('**/') ? pattern : `/${pattern}`;
       lines.push(`${rendered} ${owner}`);
+    }
+  }
+  if (opts.selfRepo && opts.tier1TestPaths && opts.tier1TestPaths.length > 0) {
+    const paths = [...new Set(opts.tier1TestPaths)].sort();
+    lines.push(`# ${TIER1_TEST_RULE_ID}: ${TIER1_TEST_WHY}`);
+    lines.push('# (every test G1 holds by name, safety suite or Tier-1 import; test/authority-codeowners-310b.test.ts regenerates this list)');
+    for (const raw of paths) {
+      const path = normalizeRepoPath(raw);
+      if (!path || !path.toLowerCase().startsWith('test/') || CODEOWNERS_UNSAFE_PATH_RE.test(path)) {
+        throw new Error(`cannot list ${JSON.stringify(raw)} in CODEOWNERS: not a plain test/ path`);
+      }
+      lines.push(`/${path} ${owner}`);
     }
   }
   return `${lines.join('\n')}\n`;

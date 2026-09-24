@@ -163,6 +163,9 @@ function deps(): Partial<LiveHooksDeps> {
     listEnrolled: () => [...w.enrolled],
     repoIdentity: (path) => (path === PATH ? REPO : path === STALE_MIRROR ? 'ashlrai/stale' : null),
     waitingVerify: async () => w.waiting,
+    // Never GitHub / the real ledger from a unit test: unknown PR state, no breach rows.
+    observeFleetPrs: async () => new Map(),
+    recordReserveBreaches: async () => 0,
     installed: () => true,
     tierOf: (engine) => {
       const id: string = engine;
@@ -451,6 +454,9 @@ describe('B-U9 — harness, canary, verdicts, experiments', () => {
     w.waiting = 0;
     let now = NOW;
     const idleHooks = createLiveTickHooks({ deps: { ...deps(), now: () => now } });
+    // Review c15: idle also needs the loop's last merged backlog to be empty
+    // (an unknown backlog is not idle).
+    idleHooks.standingBacklog([]);
     await idleHooks.beforeTick({ ...ctx, nowMs: now });
     expect(calls.experiments).toHaveLength(1);
     expect(calls.experiments[0]!.depth()).toBe(0);
@@ -480,6 +486,7 @@ describe('B-U9 — harness, canary, verdicts, experiments', () => {
   it('stops a running experiment when a mint is refused', async () => {
     w.waiting = 0;
     const hooks = createLiveTickHooks({ deps: deps() });
+    hooks.standingBacklog([]);
     await hooks.beforeTick(ctx);
     const run = createStandingRun({
       session: { sessionId: 's', grantId: 'g', openedAt: NOW_ISO },
@@ -495,8 +502,11 @@ describe('B-U9 — harness, canary, verdicts, experiments', () => {
 describe('U7 — best-of-N, grok model, routing weights', () => {
   it('plans Grok + 2 local candidates for hard work and one attempt for easy work', async () => {
     const hooks = createLiveTickHooks({ deps: deps() });
-    await hooks.beforeTick(ctx);
     const hard = item({ id: 'hard', effort: 5 });
+    // Review c15: the loop's previous backlog showed hard work, so beforeTick
+    // held the best-of-N reserve back from the pool's lane caps.
+    hooks.standingBacklog([hard]);
+    await hooks.beforeTick(ctx);
     hooks.route(hard, CFG);
     const plan = hooks.bestOfNPlan(hard, { maxPercent: 70 });
     expect(plan).toMatchObject({ run: true, reason: 'planned' });
@@ -518,15 +528,17 @@ describe('U7 — best-of-N, grok model, routing weights', () => {
       createdAt: NOW_ISO, updatedAt: NOW_ISO, goalId: null, landingId: null, insightId: null, dedupeKey: null, lastProposalId: null,
     } as unknown as FleetTask];
     const hooks = createLiveTickHooks({ deps: deps() });
-    await hooks.beforeTick(ctx);
     const retried = item({ id: `fleet-task:${taskId}`, effort: 1 });
+    hooks.standingBacklog([retried]);
+    await hooks.beforeTick(ctx);
     hooks.route(retried, CFG);
     expect(hooks.bestOfNPlan(retried, { maxPercent: 70 })).toMatchObject({ run: true });
 
     w.directives = { v: 1, updatedAt: NOW_ISO, routerTuning: { bonThreshold: 'medium' }, grokLanes: null, codexEnabled: null };
     const tuned = createLiveTickHooks({ deps: deps() });
-    await tuned.beforeTick(ctx);
     const medium = item({ id: 'medium', effort: 3 });
+    tuned.standingBacklog([medium]);
+    await tuned.beforeTick(ctx);
     tuned.route(medium, CFG);
     expect(tuned.bestOfNPlan(medium, { maxPercent: 70 })).toMatchObject({ run: true });
   });
@@ -595,7 +607,7 @@ describe('U7 — restricted-judge credentials', () => {
     await hooks.afterDispatch({ itemId: 'item-1', repoPath: PATH, runId: 'r', backend: 'builtin', model: null, lane: 'local', seatId: 'local', dispatched: true, skipReason: null, proposalId: 'p-1', spentUsd: 0, at: NOW_ISO });
     const landing = { v: 1, seq: 9, at: NOW_ISO, actor: 'daemon', grantId: 'g-1', repo: REPO, prevHash: '0'.repeat(64), hash: '1'.repeat(64), kind: 'merge:landed', data: { id: 'L1', kind: 'merge', repo: REPO, prNumber: 3, proposalId: 'p-1', landedAt: NOW_ISO } } as unknown as LedgerEntry;
     const run = createStandingRun({ session: { sessionId: 's', grantId: 'g', openedAt: NOW_ISO }, mint: () => ({ ok: false, reason: 'x' }), judgeCredentials: null, hooks });
-    expect(await run.notifyLedgerRows([gate('p-1', 'pass'), landing])).toEqual({ landings: 1, verdicts: 1 });
+    expect(await run.notifyLedgerRows([gate('p-1', 'pass'), landing])).toEqual({ landings: 1, verdicts: 1, reserveBreaches: 0 });
     expect(landings).toEqual(['L1']);
     expect(calls.outcomes).toEqual([{ passed: true, versionId: 'h-0009' }]);
   });
