@@ -91,6 +91,16 @@ Every chart has a table twin (its ⋯ menu, or `T` when the card has focus), a
 designed empty state ("Fleet dark since Sep 1") and a hatched fill for values
 that were not measured. An unmeasured value is shown as "—", never as zero.
 
+**Seat burn-down history.** Command's per-seat burn-downs keep the whole
+window across reloads. Each seat's 5-hour and weekly readings are logged to
+`~/.ashlr/routing/capacity-history.jsonl` (0600) by the Verse server and by the
+daemon, and served from `GET /api/verse/budget/history`. The log holds at least
+8 days and stays under about 2 MiB; once it is full, older readings are thinned
+per seat before any are dropped. To stop recording, set
+`ASHLR_CAPACITY_HISTORY=0` in the environment of the Verse server and the
+daemon. Both then stop writing, and the burn-downs keep only what the page
+reads while it is open plus whatever the log already holds.
+
 ### Needs you (⌘J)
 
 One drawer for everything waiting on you: owner-lane PRs the fleet may not

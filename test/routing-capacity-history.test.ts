@@ -8,6 +8,7 @@
  * collector, probe or seat is ever started.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as os from 'node:os';
@@ -17,14 +18,17 @@ import type { AddressInfo } from 'node:net';
 import {
   appendCapacityHistory,
   buildCapacityHistoryResponse,
+  capacityHistoryDisabled,
   capacityHistoryPath,
   collapseFlatRuns,
   compactCapacityHistory,
+  HISTORY_COMPACT_TARGET_BYTES,
   HISTORY_FLAT_ROW_MS,
   HISTORY_KEEP_MS,
   HISTORY_MAX_BYTES,
   HISTORY_MAX_POINTS_PER_SERIES,
   historyRowsFromSeats,
+  historyWindowClass,
   parseHistoryLine,
   readCapacityHistory,
   recordCapacityHistoryFromSnapshot,
@@ -55,9 +59,12 @@ const iso = (ms: number) => new Date(ms).toISOString();
 
 let home: string;
 let savedHome: string | undefined;
+let savedHistoryFlag: string | undefined;
 
 beforeEach(() => {
   savedHome = process.env['HOME'];
+  savedHistoryFlag = process.env['ASHLR_CAPACITY_HISTORY'];
+  delete process.env['ASHLR_CAPACITY_HISTORY'];
   home = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'capacity-history-')));
   process.env['HOME'] = home;
   resetCapacityHistoryApiForTest();
@@ -67,6 +74,8 @@ afterEach(() => {
   resetCapacityHistoryApiForTest();
   setBudgetCapacitySourceForTest();
   process.env['HOME'] = savedHome;
+  if (savedHistoryFlag === undefined) delete process.env['ASHLR_CAPACITY_HISTORY'];
+  else process.env['ASHLR_CAPACITY_HISTORY'] = savedHistoryFlag;
   fs.rmSync(home, { recursive: true, force: true });
 });
 
@@ -128,6 +137,63 @@ describe('rows from a snapshot', () => {
     const rows = historyRowsFromSeats([seat], { nowMs: NOW, source: 'verse' });
     // Both are weekly now; the peak (40) is the weekly reading, and there is no session row.
     expect(rows.map((r) => [r.window, r.usedPct])).toEqual([['weekly', 40]]);
+  });
+});
+
+// Review finding (3.10.1): headroom.ts reclassifies a Codex primary as
+// 'session' once its reset is < 5 h 15 min away, so a weekly-only primary
+// used to jump to the session series for its last hours.
+describe('stable series for a weekly-only Codex primary', () => {
+  const RESET = NOW + 6 * HOUR; // > 5 h 15 min away at NOW: weekly by headroom.ts
+  function codexSolo(observedAt: number, used: number, resetAt = RESET, jitterMs = 0): SeatCapacity {
+    return {
+      seatId: 'codex:solo', engine: 'codex', label: 'Solo Codex', free: false,
+      windows: [{ id: 'codex_codex_primary', usedPercent: used, resetsAt: iso(resetAt + jitterMs), resetDescription: null, limitReached: false }],
+      signedOut: false, reachable: null, contextWindow: 272_000, observedAt: iso(observedAt), spentTodayUsd: null,
+    };
+  }
+
+  it('keeps recording the primary on its weekly line through its last hours, then starts the next period there too', () => {
+    const at = (ms: number, used: number, resetAt?: number, jitter = 0) =>
+      appendCapacityHistory([codexSolo(ms, used, resetAt, jitter)], { source: 'verse', nowMs: ms });
+    expect(at(NOW, 92).appended).toBe(1);
+    // Inside the last 5 h 15 min (headroom.ts now says 'session'), with the
+    // countdown's one-second jitter on the reset.
+    expect(at(NOW + HOUR, 94, RESET, 1000).appended).toBe(1);
+    expect(at(NOW + 3 * HOUR, 97, RESET, -1000).appended).toBe(1);
+    expect(at(RESET - 5 * MIN, 99).appended).toBe(1);
+    // The window resets; the next period is a week out.
+    expect(at(RESET + MIN, 1, RESET + 7 * DAY).appended).toBe(1);
+    const rows = readCapacityHistory();
+    expect(rows.map((r) => [r.window, r.usedPct])).toEqual([['weekly', 92], ['weekly', 94], ['weekly', 97], ['weekly', 99], ['weekly', 1]]);
+    const body = buildCapacityHistoryResponse(rows, { nowMs: RESET + MIN, days: 8 });
+    expect(body.series.map((s) => [s.seatId, s.window, s.points.map((p) => p[1])])).toEqual([
+      ['codex:solo', 'weekly', [92, 94, 97, 99, 1]],
+    ]);
+  });
+
+  it('a primary first seen inside its last hours has no weekly evidence: the headroom class stands', () => {
+    const rows = historyRowsFromSeats([codexSolo(NOW + 2 * HOUR, 95)], { nowMs: NOW + 2 * HOUR, source: 'verse' });
+    expect(rows.map((r) => r.window)).toEqual(['session']);
+  });
+
+  it('a real 5-hour primary beside a weekly secondary stays on the session line', () => {
+    appendCapacityHistory([codex(NOW, 60, 33)], { source: 'verse', nowMs: NOW });
+    appendCapacityHistory([codex(NOW + MIN, 61, 33)], { source: 'verse', nowMs: NOW + MIN });
+    expect(readCapacityHistory().map((r) => [r.window, r.usedPct])).toEqual([['session', 60], ['weekly', 33], ['session', 61]]);
+  });
+
+  it('never moves a primary whose reset only coincides with a weekly window the classifier already sees', () => {
+    // A 5-hour primary resetting in the same minute as the weekly secondary:
+    // the weekly row's reset is the secondary's, so the primary is not it.
+    const seat = codex(NOW, 60, 33, NOW + 2 * HOUR);
+    const primary = seat.windows[0]!;
+    expect(historyWindowClass(seat, primary, NOW, iso(NOW + 2 * HOUR))).toBe('session');
+    // Without that secondary, the same evidence keeps the primary weekly.
+    const solo = { ...seat, windows: [primary] };
+    expect(historyWindowClass(solo, primary, NOW, iso(NOW + 2 * HOUR))).toBe('weekly');
+    // Evidence for another reset instant is no evidence.
+    expect(historyWindowClass(solo, primary, NOW, iso(NOW + 3 * HOUR))).toBe('session');
   });
 });
 
@@ -230,7 +296,7 @@ describe('storage', () => {
     expect(appendCapacityHistory([claude(NOW + MIN, 11, 40)], { source: 'verse', nowMs: NOW + MIN }).compacted).toBe(false);
   });
 
-  it('caps the file by bytes, keeping the newest rows', () => {
+  it('caps the file by bytes: older rows are thinned per series before any series loses its start', () => {
     const file = capacityHistoryPath();
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const lines: string[] = [];
@@ -243,12 +309,184 @@ describe('storage', () => {
     fs.writeFileSync(file, `${lines.join('\n')}\n`, { mode: 0o600 });
     const result = appendCapacityHistory([claude(NOW, 10, 40)], { source: 'verse', nowMs: NOW });
     expect(result).toMatchObject({ appended: 2, compacted: true, error: null });
-    const size = fs.statSync(file).size;
-    expect(size).toBeLessThanOrEqual(HISTORY_MAX_BYTES);
+    expect(fs.statSync(file).size).toBeLessThanOrEqual(HISTORY_COMPACT_TARGET_BYTES);
     const rows = readCapacityHistory();
     expect(rows.at(-1)).toMatchObject({ seat: 'claude-a', window: 'weekly', usedPct: 40 });
-    // Oldest went first.
-    expect(rows[0]!.ts > iso(NOW - DAY)).toBe(true);
+    // Every seat keeps its first reading (the start of its window) and its
+    // extremes — nothing was cut off the front of any series.
+    const written = lines.map((l) => parseHistoryLine(l)!);
+    for (let s = 0; s < 50; s++) {
+      const seat = `seat-${s}`;
+      const series = rows.filter((r) => r.seat === seat);
+      const before = written.filter((r) => r.seat === seat);
+      expect(series[0]).toEqual(before[0]);
+      expect(Math.min(...series.map((r) => r.usedPct))).toBe(Math.min(...before.map((r) => r.usedPct)));
+      expect(Math.max(...series.map((r) => r.usedPct))).toBe(Math.max(...before.map((r) => r.usedPct)));
+    }
+  });
+
+  /** A realistic multi-seat week: `sessionSeats` busy 5-hour windows (a row every 3 min) and `weeklySeats` weekly windows (a row every 10 min). */
+  function multiSeatWeek(opts: { sessionSeats: string[]; weeklySeats: string[]; fromMs: number; toMs: number }): string[] {
+    const lines: { t: number; line: string }[] = [];
+    const push = (t: number, seat: string, window: 'session' | 'weekly', usedPct: number, resetsAt?: number) => {
+      lines.push({ t, line: JSON.stringify({ ts: iso(t).replace('.000Z', 'Z'), seat, window, usedPct, ...(resetsAt ? { resetsAt: iso(resetsAt).replace('.000Z', 'Z') } : {}), source: 'daemon' }) });
+    };
+    opts.sessionSeats.forEach((seat, n) => {
+      const period = 5 * HOUR;
+      const offset = n * 37 * MIN;
+      for (let t = opts.fromMs; t <= opts.toMs; t += 3 * MIN) {
+        const into = (t - offset) % period;
+        // A 0→99 climb over the window, then the reset drop.
+        push(t, seat, 'session', Math.floor((into / period) * 100), seat.startsWith('codex') ? t - into + period : undefined);
+      }
+    });
+    opts.weeklySeats.forEach((seat, n) => {
+      const period = 7 * DAY;
+      const offset = n * 11 * HOUR;
+      for (let t = opts.fromMs; t <= opts.toMs; t += 10 * MIN) {
+        const into = (t - offset) % period;
+        push(t, seat, 'weekly', Math.floor((into / period) * 100), seat.startsWith('codex') ? t - into + period : undefined);
+      }
+    });
+    return lines.sort((a, b) => a.t - b.t).map((l) => l.line);
+  }
+
+  it('a 15-series setup (5 Claude, 2 Codex, 1 Grok) keeps every seat\'s whole 8-day window through byte compaction', () => {
+    const file = capacityHistoryPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const claudes = ['claude-1', 'claude-2', 'claude-3', 'claude-4', 'claude-5'];
+    const codexes = ['codex:a', 'codex:b'];
+    const start = NOW - HISTORY_KEEP_MS + 30 * MIN;
+    const lines = multiSeatWeek({ sessionSeats: [...claudes, ...codexes], weeklySeats: [...claudes, ...codexes, 'grok'], fromMs: start, toMs: NOW - MIN });
+    const text = `${lines.join('\n')}\n`;
+    // Past the cap (the file is compacted at 2 MiB) and fully readable.
+    expect(Buffer.byteLength(text)).toBeGreaterThan(HISTORY_MAX_BYTES);
+    expect(Buffer.byteLength(text)).toBeLessThan(2 * HISTORY_MAX_BYTES);
+    fs.writeFileSync(file, text, { mode: 0o600 });
+    const recentBefore = lines.filter((l) => Date.parse((JSON.parse(l) as CapacityHistoryRow).ts) >= NOW - DAY).length;
+
+    const result = appendCapacityHistory([claude(NOW, 10, 40)], { source: 'verse', nowMs: NOW });
+    expect(result).toMatchObject({ appended: 2, compacted: true, error: null });
+    expect(fs.statSync(file).size).toBeLessThanOrEqual(HISTORY_COMPACT_TARGET_BYTES);
+
+    const rows = readCapacityHistory();
+    const keys = [...new Set(rows.map((r) => `${r.seat}#${r.window}`))].filter((k) => !k.startsWith('claude-a#'));
+    expect(keys).toHaveLength(15);
+    for (const key of keys) {
+      const series = rows.filter((r) => `${r.seat}#${r.window}` === key);
+      // The start of the window survived: the first row is the fixture's first.
+      expect(Date.parse(series[0]!.ts), key).toBe(start);
+      // The last day is untouched, the older days thinned to ≤ 2 rows per
+      // 30 min (besides the series' own first row).
+      const old = series.slice(1).filter((r) => Date.parse(r.ts) < NOW - DAY);
+      const perSlot = new Map<number, number>();
+      for (const r of old) {
+        const slot = Math.floor(Date.parse(r.ts) / (30 * MIN));
+        perSlot.set(slot, (perSlot.get(slot) ?? 0) + 1);
+      }
+      expect(Math.max(...perSlot.values()), key).toBeLessThanOrEqual(2);
+    }
+    expect(rows.filter((r) => Date.parse(r.ts) >= NOW - DAY && r.seat !== 'claude-a')).toHaveLength(recentBefore);
+    // A thinned 5-hour window still shows its reset drop, days back.
+    const session = rows.filter((r) => r.seat === 'claude-1' && r.window === 'session' && Date.parse(r.ts) < NOW - 3 * DAY);
+    expect(session.some((r, i) => i > 0 && session[i - 1]!.usedPct - r.usedPct >= 90)).toBe(true);
+    // And the response serves the full 8 days for every seat.
+    const body = buildCapacityHistoryResponse(rows, { nowMs: NOW, days: 8 });
+    for (const series of body.series.filter((s) => s.seatId !== 'claude-a')) expect(series.points[0]![0]).toBe(start);
+  });
+
+  it('a larger setup (40 series) is thinned harder, still without losing any seat\'s window start', () => {
+    const file = capacityHistoryPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    // The steady state after earlier compactions: days already thinned to
+    // two rows per 30 min per series, and still over the cap.
+    const seats = Array.from({ length: 20 }, (_, i) => `claude-${String(i).padStart(2, '0')}`);
+    const start = NOW - HISTORY_KEEP_MS + HOUR;
+    const lines: string[] = [];
+    for (let t = start; t < NOW; t += 15 * MIN) {
+      for (const seat of seats) {
+        for (const window of ['session', 'weekly'] as const) {
+          lines.push(JSON.stringify({ ts: iso(t).replace('.000Z', 'Z'), seat, window, usedPct: Math.floor(t / (15 * MIN)) % 100, source: 'daemon' }));
+        }
+      }
+    }
+    const text = `${lines.join('\n')}\n`;
+    expect(Buffer.byteLength(text)).toBeGreaterThan(HISTORY_MAX_BYTES);
+    expect(Buffer.byteLength(text)).toBeLessThan(2 * HISTORY_MAX_BYTES);
+    fs.writeFileSync(file, text, { mode: 0o600 });
+    const newest = parseHistoryLine(lines.at(-1)!)!.ts;
+    expect(compactCapacityHistory(file, NOW)).toBeGreaterThan(0);
+    expect(fs.statSync(file).size).toBeLessThanOrEqual(HISTORY_COMPACT_TARGET_BYTES);
+    const rows = readCapacityHistory();
+    for (const seat of seats) {
+      for (const window of ['session', 'weekly'] as const) {
+        const series = rows.filter((r) => r.seat === seat && r.window === window);
+        expect(Date.parse(series[0]!.ts), `${seat}#${window}`).toBe(start);
+        expect(series.at(-1)!.ts).toBe(newest);
+      }
+    }
+  });
+
+  it('drops the oldest rows only as a last resort (a burst inside the newest hour no thinning step touches)', () => {
+    const file = capacityHistoryPath();
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const lines: string[] = [];
+    let bytes = 0;
+    const from = NOW - 55 * MIN;
+    for (let i = 0; bytes <= HISTORY_MAX_BYTES + 4096; i++) {
+      const l = JSON.stringify({ ts: iso(from + Math.floor(i / 12) * 1500).replace(/\.\d{3}Z$/, 'Z'), seat: `seat-${i % 12}`, window: 'session', usedPct: Math.floor(i / 12) % 100, source: 'verse' });
+      lines.push(l);
+      bytes += l.length + 1;
+    }
+    fs.writeFileSync(file, `${lines.join('\n')}\n`, { mode: 0o600 });
+    expect(Date.parse((JSON.parse(lines.at(-1)!) as CapacityHistoryRow).ts)).toBeLessThan(NOW);
+    compactCapacityHistory(file, NOW);
+    expect(fs.statSync(file).size).toBeLessThanOrEqual(HISTORY_COMPACT_TARGET_BYTES);
+    const rows = readCapacityHistory();
+    expect(rows.at(-1)).toEqual(parseHistoryLine(lines.at(-1)!));
+    expect(Date.parse(rows[0]!.ts)).toBeGreaterThan(from);
+  });
+
+  it.skipIf(process.platform === 'win32')('a FIFO at the history or snapshot path is refused at once, never hangs the process', () => {
+    // Run in a child with a deadline: a blocking open() of a FIFO cannot be
+    // interrupted inside this worker, so a regression must fail, not hang.
+    const dir = path.join(home, '.ashlr', 'routing');
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const fifo = path.join(dir, 'capacity-history.jsonl');
+    const snapshotFifo = path.join(dir, 'capacity.json');
+    expect(spawnSync('mkfifo', [fifo, snapshotFifo]).status).toBe(0);
+    const moduleUrl = new URL('../src/core/routing/capacity-history.ts', import.meta.url).href;
+    const seat = claude(NOW, 10, 40);
+    const source = `
+      const m = await import(${JSON.stringify(moduleUrl)});
+      const seat = ${JSON.stringify(seat)};
+      const nowMs = ${NOW};
+      const out = {
+        append: m.appendCapacityHistory([seat], { source: 'verse', nowMs, file: ${JSON.stringify(fifo)} }),
+        read: m.readCapacityHistory({ file: ${JSON.stringify(fifo)} }),
+        compacted: m.compactCapacityHistory(${JSON.stringify(fifo)}, nowMs),
+        fromSnapshot: m.recordCapacityHistoryFromSnapshot(undefined, 'verse', { nowMs, snapshotFile: ${JSON.stringify(snapshotFifo)}, file: ${JSON.stringify(path.join(dir, 'other.jsonl'))} }),
+      };
+      process.stdout.write(JSON.stringify(out));
+    `;
+    const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '--eval', source], {
+      cwd: process.cwd(),
+      env: { ...process.env, HOME: home, USERPROFILE: home },
+      encoding: 'utf8',
+      timeout: 30_000,
+    });
+    expect(child.error, `child did not finish: ${child.stderr}`).toBeUndefined();
+    expect(child.status, child.stderr).toBe(0);
+    const out = JSON.parse(child.stdout) as Record<string, { appended?: number; error?: string | null } | unknown[] | number>;
+    expect(out['append']).toMatchObject({ appended: 0 });
+    expect((out['append'] as { error: string | null }).error).not.toBeNull();
+    expect(out['read']).toEqual([]);
+    expect(out['compacted']).toBe(0);
+    expect(out['fromSnapshot']).toEqual({ appended: 0, compacted: false, error: null });
+    // Neither pipe was replaced or written through.
+    expect(fs.lstatSync(fifo).isFIFO()).toBe(true);
+    expect(fs.lstatSync(snapshotFifo).isFIFO()).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'other.jsonl'))).toBe(false);
   });
 
   it('compaction also removes one observation recorded twice', () => {
@@ -265,6 +503,24 @@ describe('storage', () => {
     writeCapacitySnapshot([claude(NOW - MIN, 20, 50), local], new Date(NOW));
     expect(recordCapacityHistoryFromSnapshot(undefined, 'verse', { nowMs: NOW }).appended).toBe(2);
     expect(readCapacityHistory().map((r) => r.source)).toEqual(['verse', 'verse']);
+  });
+});
+
+describe('ASHLR_CAPACITY_HISTORY=0', () => {
+  it('turns every recorder off in the store: no row, no file, no snapshot read', () => {
+    expect(capacityHistoryDisabled({ ASHLR_CAPACITY_HISTORY: '0' })).toBe(true);
+    expect(capacityHistoryDisabled({ ASHLR_CAPACITY_HISTORY: '1' })).toBe(false);
+    expect(capacityHistoryDisabled({})).toBe(false);
+    writeCapacitySnapshot([claude(NOW - MIN, 20, 50)], new Date(NOW));
+    process.env['ASHLR_CAPACITY_HISTORY'] = '0';
+    const nothing = { appended: 0, compacted: false, error: null };
+    expect(appendCapacityHistory([claude(NOW, 10, 40)], { source: 'daemon', nowMs: NOW })).toEqual(nothing);
+    expect(recordCapacityHistoryFromSnapshot(undefined, 'verse', { nowMs: NOW })).toEqual(nothing);
+    expect(recordServerCapacityHistory(NOW)).toEqual(nothing);
+    expect(fs.existsSync(capacityHistoryPath())).toBe(false);
+    // An explicit env wins over the process's (the same switch, injectable).
+    expect(appendCapacityHistory([claude(NOW, 10, 40)], { source: 'daemon', nowMs: NOW, env: {} }).appended).toBe(2);
+    expect(appendCapacityHistory([claude(NOW + MIN, 11, 40)], { source: 'daemon', nowMs: NOW + MIN, env: { ASHLR_CAPACITY_HISTORY: '0' } }).appended).toBe(0);
   });
 });
 
@@ -406,6 +662,21 @@ describe('GET /api/verse/budget/history', () => {
     resetCapacityHistoryApiForTest();
     expect((await get('/api/verse/budget?x=1')).status).toBe(400);
     expect(readCapacityHistory()).toHaveLength(2);
+  });
+
+  it('ASHLR_CAPACITY_HISTORY=0: a budget read records nothing, and the route still serves what exists', async () => {
+    const now = Date.now();
+    appendCapacityHistory([claude(now - HOUR, 20, 50)], { source: 'daemon', nowMs: now });
+    const before = fs.readFileSync(capacityHistoryPath(), 'utf8');
+    process.env['ASHLR_CAPACITY_HISTORY'] = '0';
+    const reading: CapacityReading = { seats: [claude(now - 20_000, 33, 61), local], sampledAt: new Date(now).toISOString() };
+    setBudgetCapacitySourceForTest(async () => reading);
+    expect((await get('/api/verse/budget')).status).toBe(200);
+    expect(budgetCalls).toBe(1);
+    expect(fs.readFileSync(capacityHistoryPath(), 'utf8')).toBe(before);
+    const { status, body } = await get<CapacityHistoryResponse>('/api/verse/budget/history');
+    expect(status).toBe(200);
+    expect(body.series.map((s) => [s.window, s.points.map((p) => p[1])])).toEqual([['session', [20]], ['weekly', [50]]]);
   });
 });
 

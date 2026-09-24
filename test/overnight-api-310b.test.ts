@@ -409,4 +409,18 @@ describe('post-merge discard reasons read as prose (3.10.1: no ".;", no "..")', 
     expect(joinReasonParts(['a doubled stop..', 'a joined one.;', 'last'])).toBe('a doubled stop; a joined one; last');
     expect(joinReasonParts([])).toBe('');
   });
+
+  // Review finding (3.10.1): the ".." collapse used to match anywhere, so a
+  // failure detail's relative path or git range was silently rewritten.
+  it('joinReasonParts never rewrites ".." inside a path or a git range — only a sentence-final doubled stop', () => {
+    expect(joinReasonParts(["verify command could not be run: Cannot find module '../dist/cli.js'", 'git range abc123..def456 unreadable'])).toBe(
+      "verify command could not be run: Cannot find module '../dist/cli.js'; git range abc123..def456 unreadable");
+    expect(joinReasonParts(['see ../x', 'a..b'])).toBe('see ../x; a..b');
+    expect(joinReasonParts(['cannot cd .. now', 'range origin/main.. unreadable'])).toBe('cannot cd .. now; range origin/main.. unreadable');
+    expect(joinReasonParts(['restore ../../state failed.'])).toBe('restore ../../state failed.');
+    // A sentence-final doubled stop still collapses: at the end, before ";", before a new sentence.
+    expect(joinReasonParts(['typecheck failed..; lint timed out'])).toBe('typecheck failed; lint timed out');
+    expect(joinReasonParts(['typecheck failed.. Back it out'])).toBe('typecheck failed. Back it out');
+    expect(joinReasonParts(['(exit 1)..', 'Lint failed'])).toBe('(exit 1). Lint failed');
+  });
 });
