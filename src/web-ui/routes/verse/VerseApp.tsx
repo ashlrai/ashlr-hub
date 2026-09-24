@@ -74,6 +74,7 @@ import {
   type VerseSectionId,
 } from './verse-ui-store.js';
 import styles from './VerseApp.module.css';
+import { usedPercentText } from './percent-text.js';
 
 export { SECTION_MODULES };
 
@@ -492,7 +493,7 @@ function RailCapacityButton({ rail, expanded }: { rail: RailStatusModule; expand
         </span>
         {expanded ? (
           <span className={styles.railLabel}>
-            {capacity.label} {capacity.limitReached ? 'limit' : `${Math.round(capacity.usedPercent)}%`}
+            {capacity.label} {capacity.limitReached ? 'limit' : usedPercentText(capacity.usedPercent)}
           </span>
         ) : null}
       </button>

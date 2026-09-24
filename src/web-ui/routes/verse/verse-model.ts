@@ -8,6 +8,7 @@ import type { Tone } from '../../components/primitives/StatusBadge.js';
 // context-math is PURE and browser-safe by contract (its only import is
 // type-only), so a value import here does not drag node into the bundle.
 import { budgetFor, canonicalModelId, claudeAutocompactFlag, reconcileAutoCompactAt } from '../../../core/verse/context-math.js';
+import { usedPercentText } from './percent-text.js';
 
 export const ENGINE_ORDER: readonly VerseEngine[] = ['claude', 'codex', 'grok', 'local'];
 
@@ -290,11 +291,10 @@ export function seatCapacity(seat: VerseSeat): SeatCapacityNote {
   const pct = Math.max(0, Math.min(100, binding.usedPercent));
   const where = seatWindowLabel(binding.id);
   if (pct >= 100) return { cls: 'blocked', usedPercent: null, text: `${where} limit reached` };
-  const rounded = Math.round(pct);
   return {
     cls: pct >= TIGHT_PERCENT ? 'tight' : 'ready',
     usedPercent: pct,
-    text: `${rounded}% of ${where} used`,
+    text: `${usedPercentText(pct)} of ${where} used`,
   };
 }
 

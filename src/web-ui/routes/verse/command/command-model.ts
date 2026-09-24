@@ -22,6 +22,7 @@ import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import type { EffectivePolicy } from '../../../../core/authority/types.js';
 import type { StatTileDelta } from '../../../components/charts/StatTile.js';
 import { asSentence, localTimes, parseLegacyReason } from '../fleet/why-seat-model.js';
+import { usedPercentText } from '../percent-text.js';
 
 const DAY = 86_400_000;
 const HOUR = 3_600_000;
@@ -107,7 +108,7 @@ export function subscriptionUsage(view: BudgetView | null | undefined): string |
     const seat = info.get(h.seatId);
     if (!seat || seat.free) continue;
     const used = h.bindingWindow === 'session' ? h.sessionUsedPercent : h.bindingWindow === 'weekly' ? h.weeklyUsedPercent : null;
-    parts.push(`${seat.label} ${used === null || !Number.isFinite(used) ? '—' : `${Math.round(used)}%`}`);
+    parts.push(`${seat.label} ${used === null || !Number.isFinite(used) ? '—' : usedPercentText(used)}`);
   }
   return parts.length ? `${parts.join(' · ')} of window used` : null;
 }

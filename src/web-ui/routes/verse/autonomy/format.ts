@@ -11,6 +11,7 @@
 import { describeResetAt } from '../../../../core/verse/seat-readiness.js';
 import { formatDayLabel, formatPercent } from '../../../components/charts/format.js';
 import { isAbsolutePath, projectName } from '../verse-model.js';
+import { usedPercentText } from '../percent-text.js';
 
 /** What we render when a value genuinely is not known. */
 export const UNKNOWN = '—';
@@ -38,10 +39,7 @@ export function formatWholePercent(fraction: number | null | undefined): string 
  * described two ways. Bar WIDTHS stay numeric; only the words use this.
  */
 export function percentText(used: number): string {
-  if (!Number.isFinite(used)) return UNKNOWN;
-  const clamped = Math.max(0, Math.min(100, used));
-  if (clamped > 99 && clamped < 100) return '99%';
-  return formatWholePercent(clamped / 100);
+  return usedPercentText(used);
 }
 
 /** An ISO-8601 instant (a date WITH a time) anywhere inside a sentence. */

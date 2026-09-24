@@ -36,6 +36,7 @@ import { capacityRowFor, windowSentence } from '../usage/capacity-strip-model.js
 import type { SeatChoice } from '../SeatSelector.js';
 import { firstRunnableModel, seatCapacity, SEAT_CAPACITY_WORD, seatWindowLabel } from '../verse-model.js';
 import styles from './composer.module.css';
+import { usedPercentText } from '../percent-text.js';
 
 const BudgetControl = lazy(async () => ({ default: (await import('../budget/BudgetControl.js')).BudgetControl }));
 
@@ -118,7 +119,7 @@ export function CapacityRing({ window: reading, size = 14 }: { window: VerseSeat
 
 function windowLine(reading: VerseSeatWindow): string {
   const label = seatWindowLabel(reading.id);
-  const used = reading.limitReached ? 'limit reached' : reading.usedPercent === null ? 'no reading' : `${Math.round(reading.usedPercent)}% used`;
+  const used = reading.limitReached ? 'limit reached' : reading.usedPercent === null ? 'no reading' : `${usedPercentText(reading.usedPercent)} used`;
   const reset = reading.resetDescription ?? (reading.resetsAt ? `resets ${new Date(reading.resetsAt).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' })}` : null);
   return `${label}: ${used}${reset ? ` · ${reset}` : ''}`;
 }
@@ -186,7 +187,7 @@ export function SeatChip({ seats, seat, engine, label, name = label, disabled = 
   const ring = engine === 'local' ? null : ringWindow(current);
   const others = seats.filter((s) => s.id !== seat.seatId && s.health.state !== 'unavailable' && firstRunnableModel(s) !== null);
   const ringText = ring && (ring.usedPercent !== null || ring.limitReached)
-    ? `${seatWindowLabel(ring.id)} ${ring.limitReached ? 'limit reached' : `${Math.round(ring.usedPercent ?? 0)}% used`}`
+    ? `${seatWindowLabel(ring.id)} ${ring.limitReached ? 'limit reached' : `${usedPercentText(ring.usedPercent ?? 0)} used`}`
     : engine === 'local' ? 'no usage limits' : 'no capacity reading';
 
   useEffect(() => () => { if (tipTimer.current) clearTimeout(tipTimer.current); }, []);
