@@ -688,6 +688,9 @@ const WORDS_RESET_SLACK_MS = 15 * 60_000;
  * more than one window ahead, no more than a few minutes past). Words that
  * fail either test stay words, and the card says the reset is not placed.
  */
+/** Earliest instant accepted as a real reset (2000-01-01T00:00:00Z). */
+const PLAUSIBLE_RESET_FLOOR_MS = Date.UTC(2000, 0, 1);
+
 export function bindingReset(
   machine: string | null,
   resetText: string | null,
@@ -695,7 +698,9 @@ export function bindingReset(
   nowMs: number,
 ): { at: number; from: 'provider' | 'words' } | null {
   const at = machine ? Date.parse(machine) : NaN;
-  if (Number.isFinite(at)) return { at, from: 'provider' };
+  // A placeholder instant (epoch 0 or anything before 2000) is not a reset —
+  // fall through to the provider's words, as if no instant were sent.
+  if (Number.isFinite(at) && at >= PLAUSIBLE_RESET_FLOOR_MS) return { at, from: 'provider' };
   if (resetText === null || windowMs === null) return null;
   const words = resetInstantFromWords(resetText, nowMs);
   if (words === null || words < nowMs - WORDS_RESET_SLACK_MS || words > nowMs + windowMs + WORDS_RESET_SLACK_MS) return null;

@@ -276,6 +276,9 @@ describe('bindingReset', () => {
   it('prefers the machine instant, else places the words', () => {
     expect(bindingReset('2026-09-26T00:00:00Z', 'Sep 25 at 6:59pm (America/New_York)', WEEK, now)).toEqual({ at: Date.parse('2026-09-26T00:00:00Z'), from: 'provider' });
     expect(bindingReset(null, 'Sep 25 at 6:59pm (America/New_York)', WEEK, now)).toEqual({ at: Date.parse('2026-09-25T22:59:00Z'), from: 'words' });
+    // Placeholder machine instants are not resets: fall through to the words.
+    expect(bindingReset('1970-01-01T00:00:00.000Z', 'Sep 25 at 6:59pm (America/New_York)', WEEK, now)).toEqual({ at: Date.parse('2026-09-25T22:59:00Z'), from: 'words' });
+    expect(bindingReset('1999-12-31T23:59:59Z', null, WEEK, now)).toBeNull();
   });
 
   it('refuses words that cannot close the window the reading is in', () => {

@@ -27,8 +27,9 @@ import { BurnDown } from '../../../components/charts/BurnDown.js';
 import { ChartFrame } from '../../../components/charts/ChartFrame.js';
 import { TableView, type TableColumn } from '../../../components/charts/TableView.js';
 import { CHART_SEQUENTIAL } from '../../../components/charts/colors.js';
-import { areaPath, linePath, linearScale, niceTicks, splitRuns, type BurnPoint } from '../../../components/charts/chart-math.js';
+import { areaPath, linePath, linearScale, niceTicks, splitRuns, tickGutter, type BurnPoint } from '../../../components/charts/chart-math.js';
 import { useChartWidth } from '../../../components/charts/useChartWidth.js';
+import { useTextScale } from '../../../components/charts/useTextScale.js';
 import plot from '../../../components/charts/plot.module.css';
 import { EngineMarker } from '../../../components/primitives/Tag.js';
 import { asClause } from '../autonomy/format.js';
@@ -103,7 +104,9 @@ function TrailingWindow({
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
   const inWindow = points.filter((p) => p.t >= from && p.t <= to).sort((a, b) => a.t - b.t);
-  const padL = Math.min(56, Math.max(28, Math.max(...PERCENT_TICKS.map((t) => pct(t).length)) * 7 + 10));
+  const textScale = useTextScale();
+  // Same gutter rule as the chart kit, so Large/XLarge display sizes fit too.
+  const padL = tickGutter(PERCENT_TICKS.map((t) => pct(t)), 28, 56, textScale);
   const plotW = Math.max(40, width - padL - PAD_R);
   const plotH = CHART_HEIGHT - PAD_T - PAD_B;
   const xs = linearScale(from, to, padL, padL + plotW);
