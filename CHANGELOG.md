@@ -339,6 +339,19 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.9.1] — 2026-09-24 UTC — Claude usage stays visible after a re-pin
+
+- **The Claude usage meter went blind on any seat re-pinned to Claude Code
+  2.1.280** — the seat Opus 5.5 needs. The usage probe accepted exactly one
+  build (2.1.257) and failed closed on every other, so the one seat nearest
+  its weekly limit showed no percentages at all. It now accepts a list of
+  VERIFIED builds (`CLAUDE_USAGE_VERIFIED_VERSIONS`: 2.1.257, 2.1.280). 2.1.280
+  was verified the same two ways the original pin was: the binary defines
+  `/usage` as a local, non-interactive command, and a live `-p /usage` run
+  reported `num_turns: 0`, `total_cost_usd: 0` and parsed to the five-hour,
+  weekly and weekly-Fable windows. Any other build still fails closed — an
+  unverified build could route the slash command to a model.
+
 ## [3.9.0] — 2026-09-24 UTC — the context meter tells the truth, and long sessions have somewhere to go
 
 The Verse context meter was wrong on every engine, in a different way each time,

@@ -178,7 +178,7 @@ export const CLAUDE_VERSION_REASON: CoreAccountsModule['VERSE_CLAUDE_VERSION_REA
   'usage-version-unsupported';
 
 export const CLAUDE_USAGE_PINNED_VERSION: CoreAccountsModule['VERSE_CLAUDE_USAGE_PINNED_VERSION'] =
-  '2.1.257';
+  '2.1.280';
 
 /** `byDay` is the wire key (T's deviation 1); `DailyUsage` below mirrors core. */
 const WIRE_DAILY_USAGE_KEYS = {

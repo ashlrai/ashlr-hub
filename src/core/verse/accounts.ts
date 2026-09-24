@@ -155,12 +155,13 @@ const RECLAIM_POLL_MS = 500;
 const EVIDENCE_HEARTBEAT_MS = 1_000;
 
 /**
- * The Claude usage probe is version-pinned and FAILS CLOSED on any other
- * version (`src/core/resources/claude-account-usage.ts`). Surfacing the pin is
- * the whole point: the fix is a one-line constant bump, and a silent "unknown"
- * would hide it.
+ * The Claude usage probe runs only on VERIFIED Claude Code builds and FAILS
+ * CLOSED on any other version (`CLAUDE_USAGE_VERIFIED_VERSIONS` in
+ * `src/core/resources/claude-account-usage.ts`). This constant is the NEWEST
+ * verified build, kept for display; the drift test asserts it is the last entry
+ * of that list. Surfacing the gate is the point: a silent "unknown" would hide it.
  */
-export const VERSE_CLAUDE_USAGE_PINNED_VERSION = '2.1.257';
+export const VERSE_CLAUDE_USAGE_PINNED_VERSION = '2.1.280';
 
 /** The probe's verbatim reason when the installed Claude Code is not the pin. */
 export const VERSE_CLAUDE_VERSION_REASON = 'usage-version-unsupported';
@@ -753,9 +754,9 @@ function providerNotes(
     }
     if (record.reason === VERSE_CLAUDE_VERSION_REASON) {
       notes.push(
-        `The Claude usage probe is pinned to Claude Code ${VERSE_CLAUDE_USAGE_PINNED_VERSION} and failed closed ` +
-        `with "${VERSE_CLAUDE_VERSION_REASON}". The fix is a one-line pin bump in ` +
-        'src/core/resources/claude-account-usage.ts.',
+        `The Claude usage probe runs only on verified Claude Code builds (newest: ${VERSE_CLAUDE_USAGE_PINNED_VERSION}) ` +
+        `and failed closed with "${VERSE_CLAUDE_VERSION_REASON}". Verify the new build's /usage is local and ` +
+        'zero-cost, then add it to CLAUDE_USAGE_VERIFIED_VERSIONS in src/core/resources/claude-account-usage.ts.',
       );
     }
   }
