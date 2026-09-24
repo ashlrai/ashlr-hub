@@ -24,9 +24,10 @@ import { CHART_DIVERGING_NEG, CHART_SEQUENTIAL, CHART_SEQUENTIAL_SOFT, hatchPatt
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, HatchPattern, clampTooltipLeft } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { MIN_TIME_SPAN_MS, allIntegers, axisTicks, ensureSpan, isPlausibleTime, layoutAxisLabels, linearScale } from './chart-math.js';
+import { MIN_TIME_SPAN_MS, allIntegers, axisTicks, ensureSpan, isPlausibleTime, labelCharPx, layoutAxisLabels, linearScale, tickGutter } from './chart-math.js';
 import { formatTimeLabel, timeLabelLadder } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 
 export interface StepPoint {
@@ -117,6 +118,7 @@ export function StepBand({
   const formatTime = (ms: number): string => (isPlausibleTime(ms) ? (formatTimeProp ?? formatTimeLabel)(ms) : '—');
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const textScale = useTextScale();
   const [active, setActive] = useState<number | null>(null);
   const liveId = useId();
   const hatchId = hatchPatternId(useId());
@@ -148,21 +150,22 @@ export function StepBand({
   const ticks = yAxis.ticks;
   // Kit labels take their precision from the step; a lift above zero wears "+".
   const tickLabels = formatValueProp ? yAxis.labels : yAxis.labels.map((l, i) => (ticks[i]! > 0 ? `+${l}` : l));
-  const padL = Math.min(56, Math.max(30, Math.max(...tickLabels.map((l) => l.length)) * 7 + 10));
+  const padL = tickGutter(tickLabels, 30, 56, textScale);
   const plotW = Math.max(40, width - padL - PAD_R);
   const plotH = height - PAD_T - PAD_B;
   const xs = linearScale(x0, x1, padL, padL + plotW);
   const ys = linearScale(ticks[0]!, ticks[ticks.length - 1]!, PAD_T + plotH, PAD_T);
   const cx = (t: number) => Math.min(padL + plotW, Math.max(padL, xs(t)));
 
-  // Start / end labels, collision-free: the end (now) outranks the start.
+  // Start / end labels, collision-free at the operator's Display size: the
+  // end (now) outranks the start.
   const ladder = timeLabelLadder(x0, x1, formatTimeProp, [x0, x1]);
   const xLabels = layoutAxisLabels(
     [
       { key: 'start', x: padL, anchor: 'start', priority: 2, variants: ladder.map((f) => f(x0)) },
       { key: 'end', x: padL + plotW, anchor: 'end', priority: 3, variants: ladder.map((f) => f(x1)) },
     ],
-    { min: padL, max: padL + plotW },
+    { min: padL, max: padL + plotW, charPx: labelCharPx(textScale) },
   );
 
   // One path per run of known steps; a null step breaks the line.

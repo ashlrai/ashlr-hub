@@ -25,6 +25,7 @@ import { ChartTooltip, EngineTick, HatchPattern, clampTooltipLeft } from './Char
 import { TableView, type TableColumn } from './TableView.js';
 import { formatCompact } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 import styles from './MatrixHeatmap.module.css';
 
@@ -104,6 +105,7 @@ export function MatrixHeatmap({
 }: MatrixHeatmapProps) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const textScale = useTextScale();
   const [focus, setFocus] = useState<{ r: number; c: number } | null>(null);
   const liveId = useId();
   const hatchId = hatchPatternId(useId());
@@ -128,7 +130,8 @@ export function MatrixHeatmap({
   const rowTotalMax = Math.max(1, ...totals.rows.map((t) => t ?? 0));
   const colTotalMax = Math.max(1, ...totals.columns.map((t) => t ?? 0));
   const showNumbers = cellW >= 28;
-  const labelChars = Math.floor(labelW / 7);
+  // 7 px a character at 12 px text, scaled to the Display size.
+  const labelChars = Math.floor(labelW / (7 * textScale));
 
   const cellValue = (r: number, c: number): number | null => {
     const v = values[r]?.[c];

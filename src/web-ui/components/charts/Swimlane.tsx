@@ -23,8 +23,9 @@ import { CHART_QUEUED_OUTLINE, hatchPatternId, toneColor, type ChartEngine, type
 import { ChartFrame, type ChartStatus } from './ChartFrame.js';
 import { ChartLegend, ChartTooltip, EngineTick, HatchPattern, clampTooltipLeft, type ChartLegendItem } from './ChartParts.js';
 import { TableView, type TableColumn } from './TableView.js';
-import { MIN_TIME_SPAN_MS, ensureSpan, isPlausibleTime, layoutAxisLabels, linearScale } from './chart-math.js';
+import { MIN_TIME_SPAN_MS, ensureSpan, isPlausibleTime, labelCharPx, layoutAxisLabels, linearScale } from './chart-math.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 import styles from './Swimlane.module.css';
 
@@ -171,6 +172,7 @@ export function Swimlane({
   const tickLabel = formatTick ?? spanTickFormatter(from, to);
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const textScale = useTextScale();
   const [scrollTop, setScrollTop] = useState(0);
   const [hover, setHover] = useState<{ lane: number; item: number } | null>(null);
   const liveId = useId();
@@ -184,7 +186,8 @@ export function Swimlane({
   // (plus room for the engine tick and monogram when lanes carry one).
   const tickW = lanes.some((l) => l.engine !== undefined) ? 18 : 0;
   const labelW = Math.max(72, Math.min(160, Math.round(width * 0.24))) + tickW;
-  const labelChars = Math.floor((labelW - tickW) / 7);
+  // 7 px a character at 12 px text, scaled to the Display size.
+  const labelChars = Math.floor((labelW - tickW) / (7 * textScale));
   const plotW = Math.max(40, width - labelW - 8);
   const xs = linearScale(from, Math.max(to, from + 1), labelW, labelW + plotW);
   const virtual = lanes.length > VIRTUALIZE_AFTER;
@@ -293,7 +296,7 @@ export function Swimlane({
       required: i === 0 || i === ticks.length - 1,
       variants: [tickLabel(t)],
     })),
-    { min: labelW, max: labelW + plotW },
+    { min: labelW, max: labelW + plotW, charPx: labelCharPx(textScale) },
   );
 
   const axis = (

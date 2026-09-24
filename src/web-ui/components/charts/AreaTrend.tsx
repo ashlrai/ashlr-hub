@@ -25,17 +25,20 @@ import {
   dodgeLabels,
   ensureSpan,
   isTimeAxis,
+  labelCharPx,
   layoutAxisLabels,
   linePath,
   linearScale,
   percentScale,
   splitRuns,
   thinIndexes,
+  tickGutter,
   xKeeper,
   type XY,
 } from './chart-math.js';
 import { formatCompact, formatTimeLabel, timeLabelLadder } from './format.js';
 import { useChartWidth } from './useChartWidth.js';
+import { useTextScale } from './useTextScale.js';
 import plot from './plot.module.css';
 
 export interface AreaTrendSeries extends Series {
@@ -72,9 +75,13 @@ export interface AreaTrendProps {
 const PAD_T = 12;
 const PAD_B = 26;
 const PAD_R = 12;
+/* End-label estimates are for 12 px text and are multiplied by the Display
+   size (useTextScale) where they are used. END_LABEL_MAX is a budget of plot
+   width, not a text measure, so it stays in px: at a larger size a long name
+   falls back to the legend sooner rather than squeezing the plot. */
 const END_LABEL_CH = 6.6;
 const END_LABEL_MAX = 120;
-/** Line height of a direct end label: two closer than this overlap. */
+/** Line height of a direct end label at 12 px: two closer than this overlap. */
 const END_LABEL_GAP_Y = 14;
 
 interface Row {
@@ -102,6 +109,7 @@ export function AreaTrend({
   const formatY = formatYProp ?? formatCompact;
   const wrapRef = useRef<HTMLDivElement>(null);
   const width = useChartWidth(wrapRef, fixedWidth);
+  const textScale = useTextScale();
   const [active, setActive] = useState<number | null>(null);
   const liveId = useId();
 
@@ -139,8 +147,7 @@ export function AreaTrend({
   const ticksY = yAxis.ticks;
   const yMin = ticksY[0]!;
   const yMax = ticksY[ticksY.length - 1]!;
-  const tickLabelW = Math.max(...yAxis.labels.map((l) => l.length)) * 7 + 10;
-  const padL = Math.min(64, Math.max(28, tickLabelW));
+  const padL = tickGutter(yAxis.labels, 28, 64, textScale);
   const plotH = height - PAD_T - PAD_B;
   const ys = linearScale(yMin, yMax, PAD_T + plotH, PAD_T);
 
@@ -150,7 +157,7 @@ export function AreaTrend({
   // names the series. Decided before the x scale: the gutter they need is
   // what plotW is measured against.
   const endLabelW = !stacked && series.length <= 4
-    ? Math.max(0, ...series.map((s) => s.label.length)) * END_LABEL_CH + 6
+    ? Math.max(0, ...series.map((s) => s.label.length)) * END_LABEL_CH * textScale + 6
     : 0;
   const endPoints = series.flatMap((s, si) => {
     for (let r = rows.length - 1; r >= 0; r--) {
@@ -160,7 +167,7 @@ export function AreaTrend({
     return [];
   });
   const dodged = endLabelW > 0 && endLabelW <= END_LABEL_MAX && width >= 420
-    ? dodgeLabels(endPoints, END_LABEL_GAP_Y, PAD_T, PAD_T + plotH)
+    ? dodgeLabels(endPoints, END_LABEL_GAP_Y * textScale, PAD_T, PAD_T + plotH)
     : null;
   const showEndLabels = dodged !== null && endPoints.length > 0;
   const padR = PAD_R + (showEndLabels ? endLabelW : 0);
@@ -229,7 +236,7 @@ export function AreaTrend({
         variants: ladder.map((f) => f(rows[i]!.x)),
       };
     }),
-    { min: padL, max: padL + plotW },
+    { min: padL, max: padL + plotW, charPx: labelCharPx(textScale) },
   );
 
   function indexAt(clientX: number): number | null {
