@@ -7,6 +7,8 @@ import { clearMutationToken, setMutationToken } from '../../../data/auth-store.j
 import { stubSurfaceFetch } from '../command/fetch-stub.test-support.js';
 import { reasoningDigest } from '../command/fixtures.test-support.js';
 import { mockCompactViewport, mockWideViewport, type ViewportMock } from '../shell/viewport.test-support.js';
+import { showTable } from '../../../components/charts/chart-test-support.js';
+import { formatDayLabel } from '../../../components/charts/format.js';
 
 let vp: ViewportMock | null = null;
 beforeEach(() => {
@@ -92,6 +94,46 @@ describe('MindSection', () => {
     const numeric = [...fig.querySelectorAll('svg text')].map((t) => t.textContent ?? '').filter((t) => /^-?[\d.,]+$/.test(t));
     expect(numeric.length).toBeGreaterThan(1);
     for (const label of numeric) expect(Number.isInteger(Number(label.replace(/,/g, ''))), label).toBe(true);
+  });
+
+  it('labels each trend day as the calendar day the digest names — in the axis, the tooltip and the table alike', async () => {
+    // The digest's days are calendar days. A UTC-midnight stamp labelled in
+    // the local zone read one day early west of UTC ("2026-09-24" → "Sep 23");
+    // run under TZ=America/Los_Angeles to see it.
+    const now = Date.now();
+    const live = reasoningDigest('live', now);
+    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/reasoning/digest': live } });
+    render(<MindSection />);
+    const fig = await screen.findByRole('figure', { name: 'Struggles and wins' });
+    await waitFor(() => expect(fig.querySelector('svg')).not.toBeNull());
+    const days = live.trends.map((t) => formatDayLabel(t.day));
+    // The axis ends on the last day.
+    const axis = [...fig.querySelectorAll('svg text')].map((t) => t.textContent ?? '');
+    expect(axis).toContain(days.at(-1));
+    showTable('Struggles and wins');
+    const whens = within(fig).getAllByRole('row').slice(1).map((r) => within(r).getAllByRole('cell')[0]!.textContent);
+    expect(whens).toEqual(days);
+  });
+
+  it('never offers two identical Repo choices — two agents\' scratchpads, or one folder spelled two ways', async () => {
+    const now = Date.now();
+    const A = '/private/tmp/claude-501/-Users-me-hub/9d28bdb1-aaaa/scratchpad/grokpad';
+    const B = '/private/tmp/claude-501/-Users-me-hub/1234abcd-bbbb/scratchpad/grokpad';
+    const live = reasoningDigest('live', now);
+    const repoOf: Record<string, string> = { i1: A, i2: B, i3: '/tmp/e2e/proj', i4: '/private/tmp/e2e/proj' };
+    const digest = { ...live, insights: live.insights.map((i) => (repoOf[i.id] ? { ...i, repo: repoOf[i.id]! } : i)) };
+    stubSurfaceFetch({ kind: 'live', now, routes: { '/api/reasoning/digest': digest } });
+    render(<MindSection />);
+    const select = await screen.findByRole('combobox', { name: 'Repo' });
+    const options = within(select).getAllByRole('option').map((o) => o.textContent);
+    // Before: "grokpad (scratchpad) · scratch" twice and "proj (e2e) · scratch" twice.
+    expect(new Set(options).size).toBe(options.length);
+    expect(options.sort()).toEqual(['All', 'ashlr-hub', 'ashlrcode', 'grokpad (1234abcd-bbbb) · scratch', 'grokpad (9d28bdb1-aaaa) · scratch', 'proj · scratch'].sort());
+    // The cards (i1, i2, i3) use the same labels, each with its own path as the tooltip.
+    const list = screen.getByRole('list', { name: 'Reasoning insights' });
+    expect(within(list).getByText('grokpad (9d28bdb1-aaaa)')).toHaveAttribute('title', A);
+    expect(within(list).getByText('grokpad (1234abcd-bbbb)')).toHaveAttribute('title', B);
+    expect(within(list).getByText('proj')).toHaveAttribute('title', '/tmp/e2e/proj');
   });
 
   it('facets the matrix by repo', async () => {

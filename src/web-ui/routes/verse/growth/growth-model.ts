@@ -24,9 +24,13 @@ import type { BarStackSegment } from '../../../components/charts/BarStack.js';
 import { toneColor } from '../../../components/charts/colors.js';
 import type { ForestRow } from '../../../components/charts/ForestPlot.js';
 import type { StepMarker, StepPoint } from '../../../components/charts/StepBand.js';
+import { calendarDayStart } from './calendar-day.js';
 
 export interface WeekBin {
-  /** Epoch ms of the window's last day (UTC midnight). */
+  /**
+   * Epoch ms of the window's last day at the viewer's LOCAL midnight
+   * (`calendarDayStart`), so every local time label names that day.
+   */
   end: number;
   /** YYYY-MM-DD of the last day. */
   endDay: string;
@@ -49,7 +53,7 @@ export function weeklyBins(days: readonly FleetHistoryDay[]): WeekBin[] {
       return total;
     };
     const lastDay = week[week.length - 1]!.day;
-    bins.unshift({ end: Date.parse(`${lastDay}T00:00:00Z`), endDay: lastDay, merges: sum((d) => d.merges.realized), costUsd: sum((d) => d.estCostUsd) });
+    bins.unshift({ end: calendarDayStart(lastDay), endDay: lastDay, merges: sum((d) => d.merges.realized), costUsd: sum((d) => d.estCostUsd) });
   }
   return bins;
 }
@@ -79,17 +83,70 @@ export interface ModelOutcomes {
   models: ModelStats[];
 }
 
-/** A short, readable model label ("qwen3.8:27b", "grok-4.7"). */
-export function modelLabel(m: Pick<ModelStats, 'engine' | 'model'>): string {
-  const model = m.model.includes('/') ? m.model.split('/').pop()! : m.model;
-  return model.length > 18 ? `${model.slice(0, 17)}…` : model;
+/** The longest model name an axis category keeps before it is shortened. */
+export const MODEL_LABEL_MAX = 18;
+
+/** A snapshot date at the end of a model id: `-20251001`, `-2025-10-01`, `@20251001`. */
+const DATE_SUFFIX = /[-@](?:\d{8}|\d{4}-\d{2}-\d{2})$/;
+
+/**
+ * `name` shortened to at most `max` characters by cutting at a word boundary
+ * (a space, `-` or `:`) and closing with "…" — never mid-word
+ * (`grok-4.7-fast-reasoning` → `grok-4.7-fast…`). A name with no boundary
+ * early enough stays whole: a long label beats a broken word.
+ */
+function cutAtBoundary(name: string, max = MODEL_LABEL_MAX): string {
+  if (name.length <= max) return name;
+  const head = name.slice(0, max);
+  const at = Math.max(head.lastIndexOf(' '), head.lastIndexOf('-'), head.lastIndexOf(':'));
+  return at > 0 ? `${name.slice(0, at)}…` : name;
+}
+
+/**
+ * Each model's axis name, UNIQUE across the chart. A model reads as its id
+ * without a vendor path or snapshot date (`claude-haiku-4-5`), shortened only
+ * at a word boundary. Names that would read the same — two dated snapshots of
+ * one model, two long ids sharing a prefix, one tag on two engines — step
+ * down TOGETHER through the same fuller forms until they differ: the whole
+ * name, the id with its date, the id with its vendor path, `engine:model`
+ * (so `claude-haiku-4-5-20251001` and `claude-haiku-4-5` both keep plain
+ * ids). An ordinal ("#2") is the last resort: two columns never share a label.
+ */
+export function modelLabels(models: readonly Pick<ModelStats, 'engine' | 'model'>[]): string[] {
+  // One rung per form, the same rungs for every model (a form that adds
+  // nothing for this model simply repeats), so a group steps in lockstep.
+  const ladders = models.map((m) => {
+    const id = m.model.includes('/') ? m.model.split('/').pop()! : m.model;
+    const name = id.replace(DATE_SUFFIX, '') || id;
+    return [cutAtBoundary(name), name, id, m.model, `${m.engine}:${m.model}`];
+  });
+  const level = models.map(() => 0);
+  const current = () => ladders.map((l, i) => l[level[i]!]!);
+  const rungs = ladders[0]?.length ?? 0;
+  for (let rung = 1; rung < rungs; rung++) {
+    const labels = current();
+    const seen = new Map<string, number>();
+    for (const l of labels) seen.set(l, (seen.get(l) ?? 0) + 1);
+    const clashing = labels.map((l) => seen.get(l)! > 1);
+    if (!clashing.includes(true)) break;
+    clashing.forEach((clash, i) => {
+      if (clash) level[i] = rung;
+    });
+  }
+  const taken = new Set<string>();
+  return current().map((l) => {
+    let label = l;
+    for (let n = 2; taken.has(label); n++) label = `${l} #${n}`;
+    taken.add(label);
+    return label;
+  });
 }
 
 /** Top `limit` models by dispatches, each split into what its dispatches became. */
 export function modelOutcomes(models: readonly ModelStats[], limit = 6): ModelOutcomes {
   const top = [...models].filter((m) => m.dispatches > 0).sort((a, b) => b.dispatches - a.dispatches).slice(0, limit);
   return {
-    categories: top.map(modelLabel),
+    categories: modelLabels(top),
     values: top.map((m) => {
       const merged = Math.max(0, m.merged);
       const ship = Math.max(0, m.shipVerdicts - merged);

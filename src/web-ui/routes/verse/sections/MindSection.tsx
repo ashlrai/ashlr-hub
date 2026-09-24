@@ -52,9 +52,12 @@ export function MindSection() {
   const saved = useQuery(verseWorkspacesQuery, { freshMs: NAMES_FRESH_MS });
 
   const d = digest.data?.value ?? null;
+  // The facet offers one entry per folder; the labels cover every spelling an
+  // insight recorded (`/tmp/x` and `/private/tmp/x` read the same), so a card
+  // and the facet always agree.
   const repos = useMemo(() => insightRepos(d), [d]);
   const names = useMemo(() => projectNames(saved.data?.workspaces, bootstrap.data?.projects), [saved.data, bootstrap.data]);
-  const places = useMemo(() => projectLabels(repos, names), [repos, names]);
+  const places = useMemo(() => projectLabels(d ? d.insights.flatMap((i) => (i.repo ? [i.repo] : [])) : [], names), [d, names]);
   const placeText = (r: string) => {
     const p = places.get(r);
     return p ? `${p.label}${p.scratch ? ' · scratch' : ''}` : r;

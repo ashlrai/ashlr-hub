@@ -21,7 +21,7 @@ import { ForestPlot } from '../../../components/charts/ForestPlot.js';
 import { Funnel } from '../../../components/charts/Funnel.js';
 import { StepBand } from '../../../components/charts/StepBand.js';
 import { dailyValues, historyStatus, pipelineFunnel, sourceCaveat } from '../../../components/charts/fleet-history-view.js';
-import { formatDayLabel, formatUsd } from '../../../components/charts/format.js';
+import { formatTimeLabel, formatUsd } from '../../../components/charts/format.js';
 import { RefreshIndicator } from '../../../components/primitives/RefreshIndicator.js';
 import { useQuery, useRefetch } from '../../../data/hooks.js';
 import { modelsQuery } from '../../../data/queries.js';
@@ -78,7 +78,10 @@ export function GrowthSection() {
   const learnStatus = (emptyMessage: string, hasData: boolean): ChartStatus =>
     !learning.data ? { kind: 'loading' } : !learn ? unknownFrom(learning.data.reason, 'self-improvement did not answer.') : hasData ? { kind: 'ready' } : { kind: 'empty', message: emptyMessage };
 
-  const weekLabel = (ms: number) => `wk to ${formatDayLabel(new Date(ms).toISOString().slice(0, 10))}`;
+  // A week bin sits at its last day's LOCAL midnight (growth-model
+  // `weeklyBins`), so this label and the chart's own fallback rung (the
+  // local `formatTimeLabel`) name the same calendar day in every zone.
+  const weekLabel = (ms: number) => `wk to ${formatTimeLabel(ms)}`;
 
   return (
     <Surface title="Growth" actions={[history, learning].some((q) => q.status === 'refreshing') ? <RefreshIndicator /> : null}>

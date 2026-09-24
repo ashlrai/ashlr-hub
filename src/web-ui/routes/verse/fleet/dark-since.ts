@@ -58,6 +58,21 @@ export function darkSinceDay(iso: string): string {
 }
 
 /**
+ * The chart state for a DARK live fleet, from THE dark-since instant: "Fleet
+ * dark since Sep 1" (the viewer's local day). When the server knows the fleet
+ * is dark but not since when (`darkSince: null` — a fresh install, a cleared
+ * ledger and journal), it says just "Fleet dark.", as Command's line does —
+ * never "since <today>" from the snapshot's own `generatedAt`.
+ */
+export function fleetDarkStatus(live: FleetLiveSnapshotV1): ChartStatus {
+  const since = fleetDarkSince(live);
+  const detail = live.stateReason?.trim() || undefined;
+  if (since !== null && Number.isFinite(Date.parse(since))) return { kind: 'dark', since: darkSinceDay(since), detail };
+  if (!detail) return { kind: 'empty', message: 'Fleet dark.' };
+  return { kind: 'empty', message: `Fleet dark. ${/[.!?…]$/.test(detail) ? detail : `${detail}.`}` };
+}
+
+/**
  * A chart status built over fleet HISTORY, re-worded: history's `darkSince`
  * is "quiet since" (the last run or proposal), so its dark state becomes a
  * plain "No fleet runs or proposals since Aug 18." Every other status passes
