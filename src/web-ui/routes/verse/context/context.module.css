@@ -1,0 +1,377 @@
+/*
+ * routes/verse/context/context.module.css — the handoff dialog, the project
+ * memory panel and the message-search results. One file because the three
+ * share one control vocabulary with the new-chat dialog (NewChatDialog.module.css)
+ * and the resources panel: micro-labels in the display face, hairline fields,
+ * a single accent-filled primary, ghost secondaries. DESIGN-V2 §1: no cards,
+ * no shadows outside the dialog itself, colour only where it carries meaning.
+ */
+
+/* ======================================================================
+   Shared field vocabulary
+   ====================================================================== */
+
+.label {
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.optional { font-weight: var(--font-weight-regular); letter-spacing: 0; text-transform: none; opacity: 0.8; }
+
+.field { display: grid; gap: var(--space-1); min-width: 0; }
+.row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); min-width: 0; }
+.row > .input { flex: 1 1 12rem; min-width: 0; }
+
+.input,
+.textarea {
+  width: 100%;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  transition: border-color var(--duration-fast) var(--ease-standard), box-shadow var(--duration-fast) var(--ease-standard);
+}
+.input { min-height: var(--control-h); padding: 0 var(--space-2); }
+.textarea {
+  display: block;
+  min-height: 8rem;
+  padding: var(--space-2);
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  white-space: pre-wrap;
+}
+.input::placeholder,
+.textarea::placeholder { color: var(--text-tertiary); }
+.input:hover:not(:disabled),
+.textarea:hover:not(:disabled) { border-color: var(--border-strong); }
+/* Same focus treatment as NewChatDialog and the Input primitive. */
+.input:focus-visible,
+.textarea:focus-visible { border-color: var(--border-focus); box-shadow: var(--shadow-focus-ring); }
+.textarea:disabled { opacity: 0.7; cursor: progress; }
+
+.hint { margin: 0; font-size: var(--text-xs-size); line-height: var(--text-xs-line); color: var(--text-tertiary); }
+.hint code,
+.locked code { font-size: 0.95em; }
+.warn {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--status-warning-solid);
+  color: var(--status-warning-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.error {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--status-danger-solid);
+  color: var(--status-danger-fg);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+
+/* Buttons: one filled primary per surface; everything else is a ghost. */
+.primary,
+.secondary,
+.cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm-size);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard),
+    border-color var(--duration-fast) var(--ease-standard);
+}
+.primary { padding: 0 var(--space-4); background: var(--accent-600); color: var(--accent-contrast); }
+.primary:hover:not(:disabled),
+.primary:active:not(:disabled) { background: var(--accent-700); }
+.secondary { border-color: var(--border-default); color: var(--text-primary); }
+.secondary:hover:not(:disabled) { background: var(--bg-hover); border-color: var(--border-strong); }
+.secondary:active:not(:disabled) { background: var(--bg-active); }
+.cancel { color: var(--text-secondary); }
+.cancel:hover { background: var(--bg-hover); color: var(--text-primary); }
+.cancel:active { background: var(--bg-active); }
+.primary:disabled,
+.secondary:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--accent-500);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.link:hover { color: var(--accent-600); }
+
+.small { min-height: var(--control-h-sm); padding: 0 var(--space-2); font-size: var(--text-xs-size); }
+
+/* The quiet running marker: a pulsing dot, never a spinner (DESIGN-V2 §4). */
+.pending {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: var(--status-running-solid);
+  animation: context-pulse 1.8s ease-out infinite;
+}
+@keyframes context-pulse {
+  0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--status-running-solid) 55%, transparent); }
+  100% { box-shadow: 0 0 0 5px transparent; }
+}
+@media (prefers-reduced-motion: reduce) {
+  :root:not([data-motion="full"]) .pending { animation: none; }
+}
+:root[data-motion="reduce"] .pending { animation: none; }
+
+/* ======================================================================
+   Handoff dialog
+   ====================================================================== */
+
+.dialogWidth { width: min(640px, calc(100vw - 32px)); max-height: 86vh; }
+.form { display: grid; gap: var(--space-4); }
+
+/* The optional, spending path sits on a hairline rule so it reads as an
+   aside to the free flow around it, not as a step in it. */
+.aside {
+  display: grid;
+  gap: var(--space-2);
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--border-default);
+}
+
+.locked {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-sm);
+  color: var(--text-secondary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.locked p { margin: 0; }
+
+/* Fit verdict: text first; the rule on its edge is reinforcement, never the
+   only signal (DESIGN-V2 §6). */
+.fit {
+  margin: 0;
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--border-default);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+.fit-ok { border-left-color: var(--status-success-solid); }
+.fit-warn { border-left-color: var(--status-warning-solid); }
+.fit-danger { border-left-color: var(--status-danger-solid); color: var(--status-danger-fg); }
+.fit-unknown { border-left-style: dashed; }
+
+.cost {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--space-2); }
+.blocked {
+  flex: 1 1 12rem;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+/* ======================================================================
+   Project memory (a section of the resources panel)
+   Mirrors ResourcesPanel.module.css `.section + .section`: it is mounted as
+   a sibling of those sections, never inside one, so it carries its own rule.
+   ====================================================================== */
+
+.memory {
+  display: grid;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+  padding: var(--space-4) var(--space-4) 0;
+  border-top: 1px solid var(--border-subtle);
+  min-width: 0;
+}
+.memoryHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.memoryState { font-weight: var(--font-weight-regular); letter-spacing: 0; text-transform: none; color: var(--text-secondary); }
+.memoryHeadAction {
+  margin-left: auto;
+  padding: 0 var(--space-1);
+  border-radius: var(--radius-xs);
+  color: var(--text-tertiary);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-regular);
+  letter-spacing: 0;
+  text-transform: none;
+}
+.memoryHeadAction:hover { color: var(--text-primary); background: var(--bg-hover); }
+
+.memoryBody {
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  padding: var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code, var(--bg-input));
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.memoryMeta { display: flex; flex-wrap: wrap; gap: var(--space-1) var(--space-2); }
+.memoryFiles { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: var(--space-1); }
+.memoryFiles code {
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-2xs-size, 11px);
+}
+.memoryActions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
+.memoryActions .spacer { flex: 1; }
+.danger { color: var(--status-danger-fg); }
+.danger:hover:not(:disabled) { background: var(--status-danger-bg); border-color: var(--status-danger-solid); }
+.counter { font-variant-numeric: tabular-nums; }
+.counterOver { color: var(--status-danger-fg); }
+
+/* ======================================================================
+   Message search (the sidebar's lower half while a query is typed)
+   ====================================================================== */
+
+.search { padding-top: var(--space-4); min-width: 0; }
+.searchBox {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 0 var(--space-3) var(--space-2);
+}
+.searchBox .input { padding-left: var(--space-2); }
+.searchHead {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-1);
+  margin: 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  line-height: 1.4;
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-label, 0.06em);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+.searchCount {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+  font-weight: var(--font-weight-regular);
+}
+.searchNote { padding: var(--space-1) var(--space-3); }
+.searchError {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-3);
+  color: var(--status-danger-fg);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+}
+
+.hits { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.hit {
+  display: grid;
+  grid-template-columns: 2px minmax(0, 1fr) auto;
+  grid-template-areas:
+    'marker title time'
+    'marker snippet snippet';
+  column-gap: var(--space-2);
+  row-gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  color: var(--text-secondary);
+  text-align: left;
+  transition: background var(--duration-fast) var(--ease-standard), color var(--duration-fast) var(--ease-standard);
+}
+.hit:hover { background: var(--bg-hover); color: var(--text-primary); }
+.hit:active { background: var(--bg-active); }
+.hitMarker {
+  grid-area: marker;
+  align-self: stretch;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--verse-engine, var(--text-tertiary));
+}
+.hitTitle {
+  grid-area: title;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: var(--text-sm-size);
+  line-height: var(--text-sm-line);
+}
+.hitTime {
+  grid-area: time;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs-size, 11px);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-secondary);
+}
+.hitSnippet {
+  grid-area: snippet;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line);
+  overflow-wrap: anywhere;
+}
+.hitWho { color: var(--text-tertiary); }
+/* A match is marked by weight AND tint — never tint alone (DESIGN-V2 §6). */
+.hitSnippet mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--accent-500) 18%, transparent);
+  color: var(--text-primary);
+  font-weight: var(--font-weight-semibold);
+}
+.engine-claude { --verse-engine: var(--engine-claude, #c96442); }
+.engine-codex { --verse-engine: var(--engine-codex, #10a37f); }
+.engine-grok { --verse-engine: var(--engine-grok, #6b7280); }
+.engine-local { --verse-engine: var(--engine-local, #7c5cff); }

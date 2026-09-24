@@ -171,6 +171,27 @@ export type {
 } from '../../core/verse/types.js';
 
 /**
+ * Verse 3.9 — context accuracy + orchestration (docs/VERSE-CONTEXT.md): the
+ * per-mode budget and its provenance, the fit verdict, the handoff preview,
+ * cross-session search, operator preferences and project memory. Same frozen
+ * contract, same type-only rule — types.ts stays free of node imports, so
+ * these add nothing to the bundle.
+ */
+export type {
+  VerseContextBudget,
+  VerseContextFit,
+  VerseContextMode,
+  VerseFitVerdict,
+  VerseHandoffPreview,
+  VersePreferences,
+  VersePreferencesUpdate,
+  VerseProjectMemory,
+  VerseSearchHit,
+  VerseSearchResponse,
+  VerseWindowSource,
+} from '../../core/verse/types.js';
+
+/**
  * Verse V2 control plane (routes/verse/autonomy, routes/verse/approvals).
  * `AuditEntry` is the append-only autonomous/sandbox action record behind
  * `GET /api/verse/audit` — the "what did it do while I was asleep" table.

@@ -8,14 +8,20 @@
  * Ollama `/api/ps` row with `size_vram`, an `/api/show` body with
  * `capabilities` + `model_info`, and an LM Studio `/api/v0/models` row.
  */
-import { describe, it, expect, beforeEach} from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { AshlrConfig } from '../src/core/types.js';
 import {
   collectVerseLocalModels,
+  contextWindowFromTagSuffix,
   normalizeLocalBaseUrl,
+  ollamaServerLogPath,
+  parseOllamaServerLog,
+  probeLlamaSlotContext,
+  readOllamaServerDefault,
+  resolveLocalContextWindow,
   numCtxFromShowParameters,
   nativeContextFromModelInfo,
   placementOf,
@@ -29,6 +35,32 @@ import {
   VERSE_LOCAL_LAST_GOOD_TTL_MS,
 } from '../src/core/verse/local-models.js';
 import { discoverSeats, localSeatIsSelectable, VERSE_LOCAL_TAG_RE } from '../src/core/verse/seats.js';
+
+// ---------------------------------------------------------------------------
+// Isolation — the window resolver reads ~/.ollama/logs/server.log and
+// OLLAMA_CONTEXT_LENGTH, so neither a real Ollama log nor a developer's shell
+// may leak into an assertion.
+// ---------------------------------------------------------------------------
+
+let isoHome: string;
+let savedHome: string | undefined;
+let savedOllamaCtx: string | undefined;
+
+beforeEach(() => {
+  isoHome = fs.mkdtempSync(path.join(os.tmpdir(), 'ashlr-verse-local-models-home-'));
+  savedHome = process.env.HOME;
+  savedOllamaCtx = process.env.OLLAMA_CONTEXT_LENGTH;
+  process.env.HOME = isoHome;
+  delete process.env.OLLAMA_CONTEXT_LENGTH;
+});
+
+afterEach(() => {
+  if (savedHome === undefined) delete process.env.HOME;
+  else process.env.HOME = savedHome;
+  if (savedOllamaCtx === undefined) delete process.env.OLLAMA_CONTEXT_LENGTH;
+  else process.env.OLLAMA_CONTEXT_LENGTH = savedOllamaCtx;
+  fs.rmSync(isoHome, { recursive: true, force: true });
+});
 
 // ---------------------------------------------------------------------------
 // Fixtures — verbatim provider shapes
@@ -115,7 +147,7 @@ interface Routes {
 }
 
 function fakeFetch(routes: Routes, log?: string[]): typeof fetch {
-  return (async (input: RequestInfo | URL, init?: RequestInit) => {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
     const url = String(input);
     const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
     const missing = { ok: false, status: 404, json: async () => ({}) };
@@ -198,6 +230,7 @@ describe('verse local models — /api/show', () => {
     expect(detail!.capabilities).toEqual(['completion', 'tools', 'thinking']);
     // `num_ctx` is the effective window; `model_info` is the architecture max.
     expect(detail!.contextWindow).toBe(65_536);
+    expect(detail!.numCtx).toBe(65_536);
     expect(detail!.nativeContextLength).toBe(262_144);
     expect(detail!.parameterSize).toBe('79.7B');
     expect(detail!.quantization).toBe('Q4_K_M');
@@ -318,6 +351,7 @@ describe('verse local models — collectVerseLocalModels', () => {
 describe('verse seats — local seat visibility by tool capability', () => {
   const detail = (supportsTools: boolean | null) => ({
     contextWindow: 4_096,
+    numCtx: null,
     nativeContextLength: 4_096,
     capabilities: supportsTools === null ? [] : supportsTools ? ['tools'] : ['embedding'],
     supportsTools,
@@ -457,5 +491,220 @@ describe('a timed-out probe does not erase a known-good reading', () => {
   it('retains for a bounded window, not indefinitely', () => {
     expect(VERSE_LOCAL_LAST_GOOD_TTL_MS).toBeGreaterThan(0);
     expect(VERSE_LOCAL_LAST_GOOD_TTL_MS).toBeLessThanOrEqual(60_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// V3.9 — the ONE local context-window resolver
+// ---------------------------------------------------------------------------
+
+const showDetail = (over: { numCtx?: number | null; native?: number | null } = {}) => ({
+  contextWindow: over.numCtx ?? over.native ?? null,
+  numCtx: over.numCtx ?? null,
+  nativeContextLength: over.native ?? null,
+  capabilities: ['completion', 'tools'],
+  supportsTools: true,
+  parameterSize: null,
+  quantization: null,
+  family: null,
+  arch: 'qwen35',
+});
+
+describe('resolveLocalContextWindow — precedence', () => {
+  it('1. the llama-server lane uses the per-slot window, whatever the Modelfile pins', () => {
+    expect(resolveLocalContextWindow({
+      tag: 'qwen3.8:27b-q8_0', lane: 'llama-server', llamaSlotWindow: 65_536, detail: showDetail({ native: 262_144 }),
+    })).toEqual({ window: 65_536, source: 'runtime', basis: 'llama-slot' });
+    // …but a slot figure never applies on the Ollama lane.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', llamaSlotWindow: 65_536, detail: showDetail({ numCtx: 8_192, native: 131_072 }),
+    }).window).toBe(8_192);
+    // A slot probe that said nothing falls through to Ollama's figure.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'llama-server', llamaSlotWindow: null, detail: showDetail({ numCtx: 8_192, native: 131_072 }),
+    })).toEqual({ window: 8_192, source: 'provider-catalog', basis: 'num-ctx' });
+  });
+
+  it('2. a pinned num_ctx wins, capped at the trained length', () => {
+    expect(resolveLocalContextWindow({ tag: 't', lane: 'ollama', detail: showDetail({ numCtx: 65_536, native: 262_144 }) }))
+      .toEqual({ window: 65_536, source: 'provider-catalog', basis: 'num-ctx' });
+    // bge-m3 with `num_ctx 262144` is served at its 8192 training length.
+    expect(resolveLocalContextWindow({ tag: 't', lane: 'ollama', detail: showDetail({ numCtx: 262_144, native: 8_192 }) }).window)
+      .toBe(8_192);
+    expect(resolveLocalContextWindow({ tag: 't', lane: 'ollama', detail: showDetail({ numCtx: 16_384, native: null }) }).window)
+      .toBe(16_384);
+    // A pin beats a resident instance loaded with some client's num_ctx.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: showDetail({ numCtx: 65_536, native: 262_144 }), residentContext: 8_192,
+    }).window).toBe(65_536);
+  });
+
+  it('3. unpinned: the server default, then residency (only when no default is known), then the trained max', () => {
+    const unpinned = showDetail({ native: 262_144 });
+    // A runner another client loaded with options.num_ctx=8192 must not define
+    // Verse's window: Verse's turns send no num_ctx and get the server default.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: unpinned, residentContext: 8_192,
+      serverDefault: { contextLength: 262_144, source: 'server-log-vram' },
+    })).toEqual({ window: 262_144, source: 'provider-catalog', basis: 'server-default' });
+    // …nor overstate it with a LARGER foreign num_ctx.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: unpinned, residentContext: 131_072,
+      serverDefault: { contextLength: 65_536, source: 'server-log-env' },
+    })).toEqual({ window: 65_536, source: 'provider-catalog', basis: 'server-default' });
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: unpinned, serverDefault: { contextLength: 4_096, source: 'server-log-vram' },
+    })).toEqual({ window: 4_096, source: 'provider-catalog', basis: 'server-default' });
+    // No server default known: residency is the best live fact, capped by native.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: unpinned, residentContext: 32_768, serverDefault: { contextLength: null, source: null },
+    })).toEqual({ window: 32_768, source: 'runtime', basis: 'resident' });
+    expect(resolveLocalContextWindow({ tag: 't', lane: 'ollama', detail: unpinned, residentContext: 32_768 }))
+      .toEqual({ window: 32_768, source: 'runtime', basis: 'resident' });
+    // No native length: the default is never applied uncapped, so a resident
+    // allocation (a real one) is used before the named fallback.
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: showDetail({}), residentContext: 40_960,
+      serverDefault: { contextLength: 262_144, source: 'server-log-vram' },
+    })).toEqual({ window: 40_960, source: 'runtime', basis: 'resident' });
+    // The default is capped by the trained length (an 8k model is never 256k).
+    expect(resolveLocalContextWindow({
+      tag: 't', lane: 'ollama', detail: showDetail({ native: 8_192 }), serverDefault: { contextLength: 262_144, source: 'env' },
+    }).window).toBe(8_192);
+    expect(resolveLocalContextWindow({ tag: 't', lane: 'ollama', detail: unpinned, serverDefault: null }))
+      .toEqual({ window: 262_144, source: 'fallback', basis: 'native-estimate' });
+  });
+
+  it('never applies a server default without a trained length to cap it', () => {
+    expect(resolveLocalContextWindow({
+      tag: 'mystery:latest', lane: 'ollama', detail: showDetail({}), serverDefault: { contextLength: 262_144, source: 'env' },
+    })).toEqual({ window: 65_536, source: 'fallback', basis: 'default' });
+  });
+
+  it('4. /api/show failed: the tag suffix (any separator), then the named default', () => {
+    expect(resolveLocalContextWindow({ tag: 'qwen3.8:27b-ctx64k', lane: 'ollama', detail: null }))
+      .toEqual({ window: 65_536, source: 'fallback', basis: 'tag-suffix' });
+    expect(resolveLocalContextWindow({ tag: 'qwen3-coder-next:ctx128k', lane: 'ollama', detail: null }).window).toBe(131_072);
+    expect(resolveLocalContextWindow({ tag: 'llama3.2:3b', lane: 'ollama', detail: null }))
+      .toEqual({ window: 65_536, source: 'fallback', basis: 'default' });
+    expect(contextWindowFromTagSuffix('qwen3.8:27b-ctx64k')).toBe(65_536);
+  });
+
+  it('caps a pinned num_ctx above the trained length in /api/show itself', async () => {
+    const detail = await probeOllamaModelDetail(fakeFetch({
+      show: () => ({
+        parameters: 'num_ctx 262144',
+        model_info: { 'general.architecture': 'bert', 'bert.context_length': 8_192 },
+        capabilities: ['embedding'],
+      }),
+    }), 'http://x', 'bge-m3');
+    expect(detail!.numCtx).toBe(262_144);
+    expect(detail!.contextWindow).toBe(8_192);
+  });
+});
+
+describe('Ollama server default — env and server.log', () => {
+  const CONFIG_LINE = (ctx: number) =>
+    `time=2026-09-21T01:08:55.194-04:00 level=INFO source=routes.go:1955 msg="server config" env="map[HTTPS_PROXY: OLLAMA_CONTEXT_LENGTH:${ctx} OLLAMA_DEBUG:INFO OLLAMA_KEEP_ALIVE:30m0s]"`;
+  const VRAM_LINE = (n: number) =>
+    `time=2026-09-21T01:08:55.358-04:00 level=INFO source=routes.go:2062 msg="vram-based default context" total_vram="107.5 GiB" default_num_ctx=${n}`;
+
+  it('parses the real line shapes', () => {
+    expect(parseOllamaServerLog([CONFIG_LINE(0), 'noise', VRAM_LINE(262_144)].join('\n')))
+      .toEqual({ contextLengthEnv: null, vramDefault: 262_144 });
+    expect(parseOllamaServerLog([CONFIG_LINE(8192), VRAM_LINE(262_144)].join('\n')))
+      .toEqual({ contextLengthEnv: 8_192, vramDefault: 262_144 });
+    expect(parseOllamaServerLog('')).toEqual({ contextLengthEnv: null, vramDefault: null });
+  });
+
+  it('prefers the running server\'s own config, then its VRAM default, and our env only when the log is silent', () => {
+    const logPath = path.join(isoHome, 'server.log');
+    fs.writeFileSync(logPath, [CONFIG_LINE(0), VRAM_LINE(32_768)].join('\n'));
+    expect(readOllamaServerDefault({ env: {}, logPath })).toEqual({ contextLength: 32_768, source: 'server-log-vram' });
+    // The hub's own environment (a shell export Ollama.app never saw) does NOT
+    // override what the server logged it runs with.
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '16384' }, logPath }))
+      .toEqual({ contextLength: 32_768, source: 'server-log-vram' });
+
+    fs.writeFileSync(logPath, [CONFIG_LINE(8_192), VRAM_LINE(262_144)].join('\n'));
+    expect(readOllamaServerDefault({ env: {}, logPath })).toEqual({ contextLength: 8_192, source: 'server-log-env' });
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '16384' }, logPath }))
+      .toEqual({ contextLength: 8_192, source: 'server-log-env' });
+
+    // No usable log line (or no log): the env is the last resort.
+    fs.writeFileSync(logPath, 'noise only\n');
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '16384' }, logPath }))
+      .toEqual({ contextLength: 16_384, source: 'env' });
+    const missing = path.join(isoHome, 'no-such.log');
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '16384' }, logPath: missing }))
+      .toEqual({ contextLength: 16_384, source: 'env' });
+    // `0` / junk in the environment is "unset", as Ollama itself reads it.
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: '0' }, logPath: missing }))
+      .toEqual({ contextLength: null, source: null });
+    expect(readOllamaServerDefault({ env: { OLLAMA_CONTEXT_LENGTH: 'lots' }, logPath: missing }))
+      .toEqual({ contextLength: null, source: null });
+  });
+
+  it('reads ~/.ollama/logs/server.log by default and reports unknown when it is absent', () => {
+    expect(ollamaServerLogPath()).toBe(path.join(isoHome, '.ollama', 'logs', 'server.log'));
+    expect(readOllamaServerDefault()).toEqual({ contextLength: null, source: null });
+    process.env.OLLAMA_CONTEXT_LENGTH = '12288';
+    expect(readOllamaServerDefault()).toEqual({ contextLength: 12_288, source: 'env' });
+    fs.mkdirSync(path.join(isoHome, '.ollama', 'logs'), { recursive: true });
+    fs.writeFileSync(ollamaServerLogPath(), VRAM_LINE(4_096));
+    expect(readOllamaServerDefault()).toEqual({ contextLength: 4_096, source: 'server-log-vram' });
+  });
+
+  it('feeds the Usage view the same figure the seat picker shows', async () => {
+    const snapshot = await collectVerseLocalModels({
+      ollamaServerDefault: { contextLength: 32_768, source: 'server-log-vram' },
+      fetchImpl: fakeFetch({
+        tags: { models: [{ name: 'qwen3.8:27b-q8_0' }] },
+        ps: { models: [] },
+        show: () => ({ model_info: { 'general.architecture': 'qwen35', 'qwen35.context_length': 262_144 }, capabilities: ['tools'] }),
+      }),
+    });
+    const model = snapshot.ollama.models[0]!;
+    expect(model.contextLength).toBe(32_768);
+    expect(model.nativeContextLength).toBe(262_144);
+  });
+});
+
+describe('llama-server per-slot context', () => {
+  function llamaFetch(routes: { props?: unknown; slots?: unknown }, seen: string[] = []): typeof fetch {
+    return (async (input: string | URL | Request) => {
+      const url = String(input);
+      seen.push(url);
+      const reply = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+      if (url.endsWith('/props') && routes.props !== undefined) return reply(routes.props);
+      if (url.endsWith('/slots') && routes.slots !== undefined) return reply(routes.slots);
+      return { ok: false, status: 404, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+  }
+
+  it('reads /props.default_generation_settings.n_ctx first (the live server, not our flags)', async () => {
+    const seen: string[] = [];
+    const reading = await probeLlamaSlotContext(llamaFetch({
+      props: { total_slots: 4, default_generation_settings: { n_ctx: 65_536 } },
+      slots: [{ id: 0, n_ctx: 65_536 }, { id: 1, n_ctx: 65_536 }, { id: 2, n_ctx: 65_536 }, { id: 3, n_ctx: 65_536 }],
+    }, seen), 'http://127.0.0.1:8080/v1/');
+    expect(reading).toEqual({ perSlot: 65_536, totalSlots: 4, source: 'props' });
+    // `/v1` and trailing slashes are stripped: /props lives at the origin.
+    expect(seen.sort()).toEqual(['http://127.0.0.1:8080/props', 'http://127.0.0.1:8080/slots']);
+  });
+
+  it('falls back to /slots[0].n_ctx, then floor(-c / total_slots)', async () => {
+    expect(await probeLlamaSlotContext(llamaFetch({ props: { total_slots: 2 }, slots: [{ id: 0, n_ctx: 32_768 }, { id: 1, n_ctx: 32_768 }] }), 'http://h:8080'))
+      .toEqual({ perSlot: 32_768, totalSlots: 2, source: 'slots' });
+    expect(await probeLlamaSlotContext(llamaFetch({ props: { total_slots: 4 } }), 'http://h:8080', { requestedContext: 262_144 }))
+      .toEqual({ perSlot: 65_536, totalSlots: 4, source: 'requested' });
+    // Without the server's slot count, the requested -c alone is not a per-slot figure.
+    expect(await probeLlamaSlotContext(llamaFetch({}), 'http://h:8080', { requestedContext: 262_144 }))
+      .toEqual({ perSlot: null, totalSlots: null, source: null });
+  });
+
+  it('never throws on a dead server', async () => {
+    const dead = (async () => { throw new Error('ECONNREFUSED'); }) as unknown as typeof fetch;
+    await expect(probeLlamaSlotContext(dead, 'http://127.0.0.1:1')).resolves.toEqual({ perSlot: null, totalSlots: null, source: null });
   });
 });

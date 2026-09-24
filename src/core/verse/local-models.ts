@@ -33,7 +33,15 @@
  *  - No secrets: these are loopback HTTP metadata reads with no auth material.
  */
 
-import { totalmem, freemem } from 'node:os';
+import { closeSync, constants as fsConstants, fstatSync, openSync, readSync } from 'node:fs';
+import { freemem, homedir, totalmem } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  VERSE_DEFAULT_CONTEXT_WINDOWS,
+  type VerseLocalDispatch,
+  type VerseWindowSource,
+} from './types.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -186,8 +194,15 @@ export interface VerseLocalModelsSnapshot {
 
 /** What `seats.ts` needs from `/api/show` for ONE tag. */
 export interface VerseOllamaModelDetail {
-  /** Effective context: Modelfile `num_ctx` wins over the architecture maximum. */
+  /**
+   * Pinned context when the Modelfile pins one — `min(num_ctx, native)`, since
+   * Ollama caps a pin at the trained length — else the architecture maximum.
+   * The latter is an UPPER BOUND on what an unpinned tag is served; the real
+   * figure comes from {@link resolveLocalContextWindow}.
+   */
   contextWindow: number | null;
+  /** Modelfile `PARAMETER num_ctx`, verbatim; null when the tag pins none. */
+  numCtx?: number | null;
   nativeContextLength: number | null;
   capabilities: string[];
   supportsTools: boolean | null;
@@ -205,6 +220,11 @@ export interface VerseLocalProbeOptions {
   timeoutMs?: number;
   /** Override the known-good retention window (tests). */
   lastGoodTtlMs?: number;
+  /**
+   * Ollama's unpinned-request default. `undefined` reads it
+   * ({@link readOllamaServerDefault}); tests pass a value or `null` (unknown).
+   */
+  ollamaServerDefault?: VerseOllamaServerDefault | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -464,7 +484,10 @@ export async function probeOllamaModelDetail(
   }
 
   return {
-    contextWindow: numCtx ?? native.value,
+    // A pin above the trained length is capped by Ollama itself (it logs
+    // "requested context size too large … n_ctx_train"), so never report more.
+    contextWindow: numCtx !== null ? Math.min(numCtx, native.value ?? numCtx) : native.value,
+    numCtx,
     nativeContextLength: native.value,
     capabilities,
     supportsTools,
@@ -475,10 +498,264 @@ export async function probeOllamaModelDetail(
   };
 }
 
+// ---------------------------------------------------------------------------
+// The ONE local context-window resolver (seats and the Usage view both use it)
+// ---------------------------------------------------------------------------
+
+/**
+ * `qwen3-coder-next:ctx64k` / `qwen3.8:27b-ctx64k` / `foo_ctx128K` → tokens;
+ * null when the tag carries no such suffix.
+ *
+ * The suffix may follow `:`, `-` or `_`. It used to be `/:ctx(\d+)k$/`, which
+ * missed the house default `qwen3.8:27b-ctx64k` entirely because its suffix
+ * follows a hyphen. Only a LAST RESORT: it is a naming convention, not a
+ * runtime statement, and is consulted only when `/api/show` failed.
+ */
+export function contextWindowFromTagSuffix(tag: string): number | null {
+  const m = /(?:^|[:_-])ctx(\d+)k$/i.exec(tag);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 && n <= 16_384 ? n * 1024 : null;
+}
+
+/**
+ * The context Ollama gives a request that does NOT pin `num_ctx`, and where
+ * that figure came from. Null `contextLength` means none could be read.
+ *
+ * Ollama does not expose this over HTTP. It is, in order of authority:
+ *  - `server-log-env`  — `OLLAMA_CONTEXT_LENGTH` as the RUNNING server printed
+ *                        it in its `server config` line. This is the value the
+ *                        server actually runs with, so it outranks everything;
+ *  - `server-log-vram` — the server's own `vram-based default context …
+ *                        default_num_ctx=N`, which Ollama derives from GPU
+ *                        memory (262144 on a 107 GiB machine, far less on a
+ *                        small one — which is why the architecture maximum is
+ *                        NOT a safe stand-in);
+ *  - `env`             — `OLLAMA_CONTEXT_LENGTH` (> 0) in THIS process's
+ *                        environment. Last resort, used only when no server log
+ *                        is readable: on macOS Ollama.app does not inherit the
+ *                        shell that launched the hub, so a variable exported
+ *                        there for some other tool says nothing about the
+ *                        server — ranking it first let the hub's environment
+ *                        silently decide every unpinned tag's window (and the
+ *                        CLAUDE_CODE_MAX_CONTEXT_TOKENS a chat is launched with).
+ */
+export interface VerseOllamaServerDefault {
+  contextLength: number | null;
+  source: 'env' | 'server-log-env' | 'server-log-vram' | null;
+}
+
+/** Ollama writes its server log here on macOS and in the default Linux install. */
+export function ollamaServerLogPath(home: string = homedir()): string {
+  return join(home, '.ollama', 'logs', 'server.log');
+}
+
+/**
+ * Head of the server log to scan. Ollama rotates `server.log` on every start,
+ * so the startup block (config dump on line 1, VRAM default ~line 10) is at
+ * the TOP of the current file however long the server has been running.
+ */
+const OLLAMA_LOG_HEAD_BYTES = 256 * 1024;
+
+/** Pure: the last startup facts in a server-log excerpt. */
+export function parseOllamaServerLog(text: string): { contextLengthEnv: number | null; vramDefault: number | null } {
+  let contextLengthEnv: number | null = null;
+  let vramDefault: number | null = null;
+  for (const line of text.split('\n')) {
+    if (line.includes('msg="server config"')) {
+      const m = /OLLAMA_CONTEXT_LENGTH:(\d{1,9})(?=[\s\]])/.exec(line);
+      contextLengthEnv = m ? Number(m[1]) : null;
+    } else if (line.includes('default context') || line.includes('default_num_ctx')) {
+      const m = /default_num_ctx=(\d{1,9})\b/.exec(line);
+      if (m) vramDefault = Number(m[1]);
+    }
+  }
+  return {
+    contextLengthEnv: contextLengthEnv !== null && contextLengthEnv > 0 ? contextLengthEnv : null,
+    vramDefault: vramDefault !== null && vramDefault > 0 ? vramDefault : null,
+  };
+}
+
+function readHead(path: string, maxBytes: number): string | null {
+  let fd: number | null = null;
+  try {
+    const noFollow = typeof fsConstants.O_NOFOLLOW === 'number' ? fsConstants.O_NOFOLLOW : 0;
+    fd = openSync(path, fsConstants.O_RDONLY | noFollow);
+    if (!fstatSync(fd).isFile()) return null;
+    const buf = Buffer.alloc(maxBytes);
+    const n = readSync(fd, buf, 0, maxBytes, 0);
+    const text = buf.subarray(0, Math.max(0, n)).toString('utf8');
+    // Parse whole lines only: a line cut by the byte cap is dropped.
+    const cut = n >= maxBytes ? text.lastIndexOf('\n') : text.length;
+    return cut > 0 ? text.slice(0, cut) : text;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/**
+ * Read Ollama's unpinned-request default: the server's own log first, this
+ * process's environment only when the log says nothing (see
+ * {@link VerseOllamaServerDefault}). Never throws; unknown is `{null, null}`.
+ */
+export function readOllamaServerDefault(
+  opts: { env?: NodeJS.ProcessEnv; logPath?: string } = {},
+): VerseOllamaServerDefault {
+  const text = readHead(opts.logPath ?? ollamaServerLogPath(), OLLAMA_LOG_HEAD_BYTES);
+  if (text !== null) {
+    const parsed = parseOllamaServerLog(text);
+    if (parsed.contextLengthEnv !== null) return { contextLength: parsed.contextLengthEnv, source: 'server-log-env' };
+    if (parsed.vramDefault !== null) return { contextLength: parsed.vramDefault, source: 'server-log-vram' };
+  }
+  const env = opts.env ?? process.env;
+  const fromEnv = Number((env['OLLAMA_CONTEXT_LENGTH'] ?? '').trim());
+  if (Number.isFinite(fromEnv) && fromEnv > 0) return { contextLength: Math.floor(fromEnv), source: 'env' };
+  return { contextLength: null, source: null };
+}
+
+/**
+ * llama-server's PER-SLOT context — what one agent actually gets on the
+ * llama-server lane, whatever the tag's Modelfile says (`-c 262144 --parallel
+ * 4` is 65536 per slot). Read back from the live server, exactly as
+ * `local-runtime/llama/health.ts` derives `contextPerSlot`:
+ *
+ *   `/props.default_generation_settings.n_ctx` → `/slots[0].n_ctx` →
+ *   `floor(requestedContext / total_slots)` (the `-c` we launched it with,
+ *   from the ownership record, over the slot count the SERVER reports).
+ *
+ * Null when the server does not answer — the caller then falls back to the
+ * Ollama figure and says so. Never throws.
+ */
+export async function probeLlamaSlotContext(
+  fetchImpl: typeof fetch,
+  origin: string,
+  opts: { timeoutMs?: number; requestedContext?: number | null } = {},
+): Promise<{ perSlot: number | null; totalSlots: number | null; source: 'props' | 'slots' | 'requested' | null }> {
+  const timeoutMs = opts.timeoutMs ?? VERSE_LOCAL_PROBE_TIMEOUT_MS;
+  const base = origin.replace(/\/+$/, '').replace(/\/v1$/, '');
+  const [props, slots] = await Promise.all([
+    fetchJsonDetailed(fetchImpl, `${base}/props`, timeoutMs),
+    fetchJsonDetailed(fetchImpl, `${base}/slots`, timeoutMs),
+  ]);
+  const { deriveSlotCapacity } = await import('../local-runtime/llama/health.js');
+  const capacity = deriveSlotCapacity(
+    { httpStatus: props.failure === null ? 200 : null, body: props.body, error: props.failure },
+    { httpStatus: slots.failure === null ? 200 : null, body: slots.body, error: slots.failure },
+  );
+  const totalSlots = capacity.configured;
+  const generation = isRecord(props.body) ? props.body['default_generation_settings'] : null;
+  const fromProps = isRecord(generation) ? num(generation['n_ctx']) : null;
+  if (fromProps !== null && fromProps > 0) return { perSlot: Math.floor(fromProps), totalSlots, source: 'props' };
+  const first = Array.isArray(slots.body) ? slots.body[0] : null;
+  const fromSlots = isRecord(first) ? num(first['n_ctx']) : null;
+  if (fromSlots !== null && fromSlots > 0) return { perSlot: Math.floor(fromSlots), totalSlots, source: 'slots' };
+  const requested = opts.requestedContext ?? null;
+  if (requested !== null && requested > 0 && totalSlots !== null && totalSlots > 0) {
+    return { perSlot: Math.floor(requested / totalSlots), totalSlots, source: 'requested' };
+  }
+  return { perSlot: null, totalSlots, source: null };
+}
+
+/** How a local window was decided — for notes and tests, never for the wire. */
+export type VerseLocalWindowBasis =
+  | 'llama-slot'
+  | 'num-ctx'
+  | 'resident'
+  | 'server-default'
+  | 'native-estimate'
+  | 'tag-suffix'
+  | 'default';
+
+export interface VerseLocalWindow {
+  window: number;
+  source: VerseWindowSource;
+  basis: VerseLocalWindowBasis;
+}
+
+export interface VerseLocalWindowInput {
+  tag: string;
+  lane: VerseLocalDispatch;
+  /** llama-server per-slot context; consulted ONLY on the llama-server lane. */
+  llamaSlotWindow?: number | null;
+  /** `/api/show` for this tag; null when it failed. */
+  detail: VerseOllamaModelDetail | null;
+  /**
+   * `/api/ps` `context_length` when this tag is resident. Consulted only when
+   * no server default is known: it describes whatever request LOADED the
+   * runner, which may have pinned its own `options.num_ctx`.
+   */
+  residentContext?: number | null;
+  serverDefault?: VerseOllamaServerDefault | null;
+}
+
+/**
+ * THE local context-window resolver. Precedence (docs/VERSE-CONTEXT.md §1):
+ *
+ *  1. llama-server lane — the per-slot `n_ctx` (`runtime`). The Modelfile is
+ *     irrelevant there: llama-server allocates per slot.
+ *  2. Ollama, `num_ctx` pinned — `min(num_ctx, native)` (`provider-catalog`:
+ *     the runtime's own model record).
+ *  3. Ollama, not pinned — `min(serverDefault, native)` (`provider-catalog`),
+ *     serverDefault being what the server would give an unpinned request
+ *     (its logged OLLAMA_CONTEXT_LENGTH, else its VRAM default, else this
+ *     process's env — {@link readOllamaServerDefault}).
+ *  4. Ollama, not pinned, no server default known — the resident instance's
+ *     `/api/ps` context (`runtime`), capped by native. Only here, because
+ *     residency describes the request that loaded the runner, and ANOTHER
+ *     client's `/api/chat` with `options.num_ctx=8192` loads it at 8192. Verse's
+ *     turns send no num_ctx, so Ollama reloads the tag at its default: letting
+ *     a foreign runner define the window told the CLI 8192 (every turn blocked)
+ *     or, with a larger foreign num_ctx, overstated it (overflow without
+ *     compaction). With neither, the trained maximum — marked `fallback`,
+ *     because Ollama may allocate far less.
+ *  5. `/api/show` said nothing usable — the tag suffix, then
+ *     `VERSE_DEFAULT_CONTEXT_WINDOWS.local`, both `fallback`.
+ *
+ * A server default is never used WITHOUT a native length to cap it: a 262144
+ * VRAM default applied to an 8k embedding model would be a 32× overstatement.
+ * (With no native length, residency — a real allocation — is the best fact.)
+ */
+export function resolveLocalContextWindow(input: VerseLocalWindowInput): VerseLocalWindow {
+  const slot = input.lane === 'llama-server' ? positive(input.llamaSlotWindow) : null;
+  if (slot !== null) return { window: slot, source: 'runtime', basis: 'llama-slot' };
+
+  const detail = input.detail;
+  const native = positive(detail?.nativeContextLength ?? null);
+  const numCtx = positive(detail?.numCtx ?? null);
+  if (numCtx !== null) {
+    return { window: native !== null ? Math.min(numCtx, native) : numCtx, source: 'provider-catalog', basis: 'num-ctx' };
+  }
+
+  if (detail !== null) {
+    const serverDefault = positive(input.serverDefault?.contextLength ?? null);
+    if (native !== null && serverDefault !== null) {
+      return { window: Math.min(serverDefault, native), source: 'provider-catalog', basis: 'server-default' };
+    }
+    const resident = positive(input.residentContext ?? null);
+    if (resident !== null) {
+      return { window: native !== null ? Math.min(resident, native) : resident, source: 'runtime', basis: 'resident' };
+    }
+    if (native !== null) return { window: native, source: 'fallback', basis: 'native-estimate' };
+  }
+
+  const fromSuffix = contextWindowFromTagSuffix(input.tag);
+  if (fromSuffix !== null) return { window: fromSuffix, source: 'fallback', basis: 'tag-suffix' };
+  return { window: VERSE_DEFAULT_CONTEXT_WINDOWS['local'] ?? 65_536, source: 'fallback', basis: 'default' };
+}
+
+function positive(value: number | null | undefined): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+}
+
 async function collectOllama(
   fetchImpl: typeof fetch,
   baseUrl: string,
   timeoutMs: number,
+  serverDefault: VerseOllamaServerDefault | null,
 ): Promise<VerseLocalRuntimeReport> {
   // Reachability gets the long budget; per-model detail keeps the short one.
   // A detail probe that times out costs one row; a reachability probe that
@@ -523,7 +800,15 @@ async function collectOllama(
       placement: live ? placementOf(live.sizeBytes, sizeVramBytes) : 'unknown',
       gpuPercent: live && live.sizeBytes !== null ? percentOf(sizeVramBytes, live.sizeBytes) : null,
       expiresAt: live?.expiresAt ?? null,
-      contextLength: live?.contextLength ?? detail?.contextWindow ?? null,
+      // Resident: what the loaded instance was given — a fact about the runner
+      // in memory now (possibly loaded by another client's num_ctx, which is
+      // why the SEAT window does not trust it). Otherwise what the next
+      // unpinned request WILL be given — the same resolver the seats use. Null
+      // only when `/api/show` itself failed: the tag-suffix guess is not a
+      // runtime fact.
+      contextLength: live?.contextLength ?? (detail !== null
+        ? resolveLocalContextWindow({ tag: tag.tag, lane: 'ollama', detail, serverDefault }).window
+        : null),
       nativeContextLength: detail?.nativeContextLength ?? null,
       parameterSize: detail?.parameterSize ?? tag.parameterSize,
       quantization: detail?.quantization ?? tag.quantization,
@@ -631,8 +916,9 @@ export async function collectVerseLocalModels(
 
   const ttlMs = opts.lastGoodTtlMs ?? VERSE_LOCAL_LAST_GOOD_TTL_MS;
   const now = Date.now();
+  const serverDefault = opts.ollamaServerDefault !== undefined ? opts.ollamaServerDefault : readOllamaServerDefault();
   const [ollamaFresh, lmStudioFresh] = await Promise.all([
-    collectOllama(fetchImpl, ollamaBaseUrl, timeoutMs).catch((): VerseLocalRuntimeReport => ({
+    collectOllama(fetchImpl, ollamaBaseUrl, timeoutMs, serverDefault).catch((): VerseLocalRuntimeReport => ({
       reachable: false, baseUrl: ollamaBaseUrl, models: [], reason: 'ollama-probe-failed',
     })),
     probeLmStudioModels(fetchImpl, lmStudioBaseUrl, timeoutMs).catch((): VerseLocalRuntimeReport => ({

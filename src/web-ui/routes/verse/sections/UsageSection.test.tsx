@@ -747,3 +747,76 @@ describe('UsageSection — per-account depth on demand', () => {
     expect(grid!.contains(detail!)).toBe(true);
   });
 });
+
+/**
+ * V3.9 — context efficiency per seat, computed in the browser from the session
+ * records bootstrap already carries. Pinned where the convenient number would
+ * lie: a mean of per-chat ratios, 0% for a provider that reported nothing,
+ * and an empty table presented as seats at zero.
+ */
+describe('UsageSection — context efficiency per seat', () => {
+  const usage = (over: Record<string, number>) => ({
+    inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 0, contextWindow: null, ...over,
+  });
+  const sessionRow = (over: Record<string, unknown>) => ({
+    id: 's', title: 'Chat', projectPath: '/Users/mason/dev/hub', engine: 'claude', accountId: 'claude', seatId: 'claude',
+    model: 'claude-fable-5-1', nativeSessionId: null, createdAt: '2026-09-23T10:00:00.000Z', updatedAt: '2026-09-23T10:00:00.000Z',
+    status: 'idle', turnCount: 1, lastError: null, usage: usage({}), ...over,
+  });
+  const withSessions = {
+    ...BOOTSTRAP,
+    seats: [
+      {
+        ...BOOTSTRAP.seats[0],
+        models: [{ id: 'claude-fable-5-1', label: 'Fable 5.1', contextWindow: 1_000_000, autoCompactAt: 367_000, windowSource: 'cli-catalog' }],
+        contextWindow: 1_000_000,
+      },
+      BOOTSTRAP.seats[1],
+    ],
+    sessions: [
+      sessionRow({ id: 'a', turnCount: 2, usage: usage({ inputTokens: 900, cacheCreationTokens: 100, contextTokens: 1_000 }) }),
+      sessionRow({
+        id: 'b', turnCount: 200, compactionCount: 3, contextMode: 'expansive',
+        usage: usage({ inputTokens: 90_000, cacheReadTokens: 900_000, cacheCreationTokens: 10_000, contextTokens: 600_000, contextWindow: 1_000_000 }),
+      }),
+      sessionRow({ id: 'g', seatId: 'grok', engine: 'grok', model: 'grok-4.7', turnCount: 4, usage: usage({ inputTokens: 5_000 }) }),
+    ],
+  };
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('aggregates cache hit and compactions per seat from summed tokens', async () => {
+    evictAll();
+    vi.stubGlobal('fetch', routes({ '/api/verse/bootstrap': () => json(withSessions) }));
+    render(<UsageSection />);
+    const table = await screen.findByRole('table', { name: /Context efficiency per seat/ });
+    const rows = within(table).getAllByRole('row').slice(1);
+    // The seat cell reads "<label> · <engine>"; rows are sorted by prompt tokens.
+    expect(rows.map((r) => within(r).getAllByRole('cell')[0]!.textContent)).toEqual(['Claude Max · Claude', 'Grok · Grok']);
+    const [claude, grok] = rows as [HTMLElement, HTMLElement];
+    const cells = within(claude).getAllByRole('cell').map((c) => c.textContent);
+    // Chats, turns, prompt tokens, cache hit (900k / 1.001M — not the 45%
+    // a mean of the two chats' ratios would say), compactions, expansive,
+    // and the fullest context against its window.
+    expect(cells.slice(1)).toEqual(['2', '202', '1M', '90%', '3', '1', '600k / 1M · 60%']);
+    expect(within(grok).getByText('none reported')).toBeInTheDocument();
+    expect(within(table).queryByText('0%')).not.toBeInTheDocument();
+  });
+
+  it('says an empty history is empty, not a seat at 0%', async () => {
+    evictAll();
+    vi.stubGlobal('fetch', routes());
+    render(<UsageSection />);
+    expect(await screen.findByText(/No chats yet, so there is nothing to measure/)).toBeInTheDocument();
+    expect(screen.queryByRole('table', { name: /Context efficiency per seat/ })).not.toBeInTheDocument();
+  });
+
+  it('says why when the chat list could not be read, instead of drawing an empty table', async () => {
+    evictAll();
+    vi.stubGlobal('fetch', routes({ '/api/verse/bootstrap': () => new Response('boom', { status: 500 }) }));
+    render(<UsageSection />);
+    expect(await screen.findByText(/The chat list could not be read.*so efficiency cannot be computed/)).toBeInTheDocument();
+  });
+});

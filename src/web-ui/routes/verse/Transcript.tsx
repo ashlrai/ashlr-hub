@@ -18,10 +18,16 @@
  *     tool payloads, and a jump to the first failure;
  *   - Alt+↑/↓ (and plain ↑/↓ once a turn has focus) step between turns.
  *
+ * V3.9: a native compaction renders as a divider that says what the CLI
+ * reported ("Auto-compacted 812k → 41k in 1m 58s" / "Codex compacted its
+ * context"), and a chat started as a handoff opens with "Continued from
+ * <source>", which links back to the chat it continues.
+ *
  * Follows the newest message unless the operator scrolled up, in which case
  * a "Jump to latest" control appears.
  */
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import type { VerseEngine, VerseSession } from '../../data/api-types.js';
 import { SkeletonLine } from '../../components/primitives/Skeleton.js';
 import { FileActivity } from './chat/FileActivity.js';
 import { TranscriptNav } from './chat/TranscriptNav.js';
@@ -30,8 +36,16 @@ import { buildTurns, createTurnCache, noteAnchorId, searchTurns, turnAnchorId } 
 import { MessageMarkdown } from './MessageMarkdown.js';
 import { ToolUseCard } from './ToolUseCard.js';
 import { ArrowDownIcon } from './verse-icons.js';
-import { formatDuration } from './verse-model.js';
-import { groupTranscriptItems, type ToolGroupItem, type ToolGroupMember, type Transcript as TranscriptModel, type TranscriptRenderItem } from './verse-store.js';
+import { ENGINE_LABEL, formatDuration } from './verse-model.js';
+import {
+  formatTokens,
+  groupTranscriptItems,
+  type ToolGroupItem,
+  type ToolGroupMember,
+  type Transcript as TranscriptModel,
+  type TranscriptItem,
+  type TranscriptRenderItem,
+} from './verse-store.js';
 import styles from './Transcript.module.css';
 
 export interface TranscriptProps {
@@ -40,6 +54,31 @@ export interface TranscriptProps {
   loadError: string | null;
   onRetry?: () => void;
   emptyHint?: string;
+  /** Names the CLI in compaction dividers whose counts are unknown ("Codex compacted its context"). */
+  engine?: VerseEngine;
+  /** V3.9: this chat was started as a handoff; the header links back to the source. */
+  handoffFrom?: VerseSession['handoffFrom'] | null;
+  /** Opens another chat (the handoff source). Absent → the source is named but not a link. */
+  onOpenSession?: (sessionId: string) => void;
+}
+
+type CompactionItem = Extract<TranscriptItem, { kind: 'compaction' }>;
+
+/**
+ * One line for a native compaction, from exactly what the CLI reported:
+ * "Auto-compacted 812k → 41k in 1m 58s" when claude/grok sent the counts,
+ * "Codex compacted its context" when the CLI records only that it happened.
+ * Never a number the CLI did not give.
+ */
+export function describeCompaction(item: Pick<CompactionItem, 'trigger' | 'preTokens' | 'postTokens' | 'durationMs'>, engine?: VerseEngine): string {
+  const verb = item.trigger === 'manual' ? 'Compacted on request' : 'Auto-compacted';
+  const took = item.durationMs !== null && item.durationMs > 0 ? ` in ${formatDuration(item.durationMs)}` : '';
+  if (item.preTokens !== null && item.postTokens !== null) {
+    return `${verb} ${formatTokens(item.preTokens)} → ${formatTokens(item.postTokens)}${took}`;
+  }
+  if (item.preTokens !== null) return `${verb} at ${formatTokens(item.preTokens)}${took}`;
+  const who = engine ? ENGINE_LABEL[engine] : 'The CLI';
+  return `${who} compacted its context${took}`;
 }
 
 const FOLLOW_THRESHOLD_PX = 48;
@@ -48,7 +87,7 @@ const NAV_MIN_TURNS = 3;
 /** How long a jumped-to element keeps its locator tint. */
 const FLASH_MS = 1400;
 
-export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint }: TranscriptProps) {
+export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint, engine, handoffFrom = null, onOpenSession }: TranscriptProps) {
   const scroller = useRef<HTMLDivElement>(null);
   const turnNodes = useRef(new Map<string, HTMLElement>());
   const flashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -79,6 +118,9 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint }
     const out = new Set<string>();
     let last: { turnId: string | null; kind: string } | null = null;
     for (const item of transcript.items) {
+      // A compaction between a Stop and its turn-done explains nothing and
+      // hides nothing; it must not break the pairing.
+      if (item.kind === 'compaction') continue;
       if (item.kind === 'turn-done' && !item.ok && last && last.turnId === item.turnId && (last.kind === 'cancelled' || last.kind === 'error')) {
         out.add(item.key);
       }
@@ -249,10 +291,23 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint }
           onJumpTurn={jumpToTurn} focusToken={focusToken} />
       ) : null}
       <div ref={scroller} className={styles.transcript} onScroll={onScroll} role="log" aria-live="polite" aria-relevant="additions text">
+        {handoffFrom ? (
+          <p className={styles.continued} data-kind="handoff-from">
+            <span className={styles.continuedLabel}>Continued from</span>{' '}
+            {onOpenSession ? (
+              <button type="button" className={styles.continuedLink} onClick={() => onOpenSession(handoffFrom.sessionId)}
+                title="Open the chat this one continues">
+                {handoffFrom.title || 'Untitled chat'}
+              </button>
+            ) : <span className={styles.continuedTitle}>{handoffFrom.title || 'Untitled chat'}</span>}
+          </p>
+        ) : null}
         {transcript.items.length === 0 ? (
           <div className={styles.empty}>
-            <p className={styles.emptyTitle}>Say something to begin.</p>
-            <p className={styles.emptyBody}>{emptyHint ?? 'The agent can read and edit this project. Ask for a change, a review, or an explanation.'}</p>
+            <p className={styles.emptyTitle}>{handoffFrom ? 'Review the handoff, then send it.' : 'Say something to begin.'}</p>
+            <p className={styles.emptyBody}>{emptyHint ?? (handoffFrom
+              ? 'The note in the message box was drafted from the previous chat\'s log. Edit it freely — nothing is sent until you press Send.'
+              : 'The agent can read and edit this project. Ask for a change, a review, or an explanation.')}</p>
           </div>
         ) : null}
         <ol className={styles.list} onKeyDown={onListKeyDown}>
@@ -272,7 +327,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint }
               aria-label={`Turn ${index + 1} of ${model.turns.length}`}
             >
               <ol className={styles.turnItems}>
-                {turn.items.map((item) => renderItem(item, model.facts, explained))}
+                {turn.items.map((item) => renderItem(item, model.facts, explained, engine))}
               </ol>
               {turn.files.length > 0 ? <FileActivity files={turn.files} onJump={jumpToTool} /> : null}
               {turn.errorCount > 0 && turn.firstErrorAnchor ? (
@@ -301,7 +356,7 @@ export function Transcript({ transcript, loaded, loadError, onRetry, emptyHint }
   );
 }
 
-function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, explained: Set<string>) {
+function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, explained: Set<string>, engine?: VerseEngine) {
   switch (item.kind) {
     case 'user':
       return (
@@ -338,6 +393,19 @@ function renderItem(item: TranscriptRenderItem, facts: Map<string, ToolFacts>, e
       return (
         <li key={item.key} className={styles.item} data-kind="error">
           <div id={noteAnchorId(item.key)} role="alert" className={`${styles.note} ${styles.noteError}`}>{item.message}</div>
+        </li>
+      );
+    case 'compaction':
+      // A divider, not a message: the conversation continues on both sides of
+      // it, but the agent sees everything above it only as a summary.
+      return (
+        <li key={item.key} className={`${styles.item} ${styles.compaction}`} data-kind="compaction">
+          <span className={styles.compactionRule} aria-hidden="true" />
+          <span className={styles.compactionText}>
+            <span className={styles.compactionTitle}>{describeCompaction(item, engine)}</span>
+            <span className={styles.compactionNote}>Earlier turns now reach the agent only as a summary; the full transcript stays here.</span>
+          </span>
+          <span className={styles.compactionRule} aria-hidden="true" />
         </li>
       );
     case 'cancelled':

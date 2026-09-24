@@ -17,6 +17,8 @@
  * private window with storage blocked still runs the app.
  */
 
+import { CHARS_PER_TOKEN, occupancy } from '../../../../core/verse/context-math.js';
+
 const DRAFT_KEY = 'ashlr.verse.drafts.v1';
 const SENT_KEY = 'ashlr.verse.sent.v1';
 
@@ -44,14 +46,17 @@ function readMap<T>(key: string, parse: (value: unknown) => T | null): Record<st
   return out;
 }
 
-function writeMap(key: string, map: Record<string, unknown>): void {
+/** True when the write landed; false when storage refused it (blocked, over quota). */
+function writeMap(key: string, map: Record<string, unknown>): boolean {
   // Insertion order is recency order: every write deletes before re-inserting.
   const ids = Object.keys(map);
   for (const stale of ids.slice(0, Math.max(0, ids.length - SESSION_LIMIT))) delete map[stale];
   try {
     localStorage.setItem(key, JSON.stringify(map));
+    return true;
   } catch {
-    /* best-effort */
+    /* best-effort — the caller decides whether a refusal loses anything */
+    return false;
   }
 }
 
@@ -66,19 +71,41 @@ const asHistory = (value: unknown): string[] | null => {
   return list.length > 0 ? list : null;
 };
 
+/**
+ * Drafts whose last write storage REFUSED, held for the page's lifetime ('' =
+ * a clear that could not be written) and consulted BEFORE storage.
+ *
+ * WHY: `localStorage` writes fail silently (blocked storage, a full quota),
+ * and one draft is not a convenience but the only copy of something: the
+ * handoff note. The dialog hands it over with `saveDraft` and the new chat's
+ * Composer restores it with `loadDraft`; with storage refusing, the edited
+ * note — possibly written after a paid summary turn — simply vanished. An
+ * entry here is always newer than whatever storage holds for that chat, and a
+ * later write that lands removes it, so storage is the answer again.
+ */
+const unsavedDrafts = new Map<string, string>();
+
 /** The unsent draft for this chat, or `''`. */
 export function loadDraft(sessionId: string | null | undefined): string {
   if (!sessionId) return '';
+  const unsaved = unsavedDrafts.get(sessionId);
+  if (unsaved !== undefined) return unsaved;
   return readMap(DRAFT_KEY, asText)[sessionId] ?? '';
 }
 
 /** Persist (or clear, when empty) the draft for this chat. */
 export function saveDraft(sessionId: string | null | undefined, text: string): void {
   if (!sessionId) return;
+  const clean = text.trim().length > 0 ? text.slice(0, TEXT_LIMIT) : '';
   const map = readMap(DRAFT_KEY, asText);
   delete map[sessionId];
-  if (text.trim().length > 0) map[sessionId] = text.slice(0, TEXT_LIMIT);
-  writeMap(DRAFT_KEY, map);
+  if (clean) map[sessionId] = clean;
+  unsavedDrafts.delete(sessionId);
+  if (!writeMap(DRAFT_KEY, map)) {
+    unsavedDrafts.set(sessionId, clean);
+    // Bounded like storage: oldest refusals go first.
+    for (const stale of [...unsavedDrafts.keys()].slice(0, Math.max(0, unsavedDrafts.size - SESSION_LIMIT))) unsavedDrafts.delete(stale);
+  }
 }
 
 /** Messages sent in this chat, oldest first. */
@@ -108,6 +135,7 @@ export function pushHistory(sessionId: string | null | undefined, text: string):
  */
 export function forgetComposerMemory(sessionId: string | null | undefined): void {
   if (!sessionId) return;
+  unsavedDrafts.delete(sessionId);
   for (const [key, parse] of [
     [DRAFT_KEY, asText],
     [SENT_KEY, asHistory],
@@ -128,6 +156,7 @@ export function forgetComposerMemory(sessionId: string | null | undefined): void
  * the one thing that used to survive it.
  */
 export function clearComposerMemory(): void {
+  unsavedDrafts.clear();
   for (const key of [DRAFT_KEY, SENT_KEY]) {
     try {
       localStorage.removeItem(key);
@@ -145,52 +174,75 @@ export const VERSE_SENT_STORAGE_KEY = SENT_KEY;
 // ---------------------------------------------------------------------------
 
 /**
- * Characters per token. A rough English/code average, and rough is the
- * point: the real count is the provider's, which this app does not have
- * before the turn runs. Every surface that shows this figure marks it `≈`
- * and never presents it as measured (DESIGN §6, VERSE-TELEMETRY-V2).
+ * Characters per token — context-math's CHARS_PER_TOKEN, the one estimator
+ * every surface uses (handoff size, fit badges, this hint). A rough
+ * English/code average, and rough is the point: the real count is the
+ * provider's, which this app does not have before the turn runs. Every
+ * surface that shows this figure marks it `≈` and never presents it as
+ * measured (DESIGN §6, VERSE-TELEMETRY-V2).
  */
-const CHARS_PER_TOKEN = 4;
-
 export function estimateTokens(text: string): number {
   const trimmed = text.trim();
   if (trimmed.length === 0) return 0;
   return Math.max(1, Math.ceil(trimmed.length / CHARS_PER_TOKEN));
 }
 
-export type CostTone = 'ok' | 'warn' | 'danger';
+/** `over` = the projection is past the whole window, not just the compaction point. */
+export type CostTone = 'warn' | 'danger' | 'over';
 
 export interface CostHint {
   /** Estimated tokens for the draft itself. */
   draftTokens: number;
-  /** Context occupancy this message would push the session to, as a percent. */
+  /** Occupancy this message would push the session to (current + draft), in tokens. */
+  projectedTokens: number;
+  /** …as a percent of the context WINDOW (the meter's track), unclamped. */
   projectedPercent: number;
+  /** Where the CLI auto-compacts, when known. */
+  autoCompactAt: number | null;
+  /** True when the projection reaches the compaction point: the CLI compacts before or during this turn. */
+  pastCompaction: boolean;
   tone: CostTone;
+  /** False when the current occupancy is itself an upper bound (codex before its rollout is read). */
+  exact: boolean;
+}
+
+/** The session's context budget as the composer sees it (verse-model `sessionContextBudget`). */
+export interface CostBudget {
+  contextTokens: number | null | undefined;
+  contextWindow: number | null | undefined;
+  autoCompactAt?: number | null;
+  exact?: boolean;
 }
 
 /**
- * What sending this draft would do to the context window — or null when the
- * window is unknown, the box is empty, or the session is still comfortable.
- * The thresholds are the ContextMeter's, so the hint and the 2px line under
- * the header never disagree about when things are getting tight.
+ * What sending this draft would do to the context — or null when the window
+ * is unknown, the box is empty, or the session stays comfortable.
+ *
+ * The tones are context-math `occupancy()`'s — measured against the
+ * COMPACTION point when it is known (warn from 80%, danger from 95%), else
+ * against the window — which is exactly what colours the ContextMeter, so the
+ * hint and the meter can never disagree about when things are getting tight.
  */
-export function costHint(
-  text: string,
-  contextTokens: number | null | undefined,
-  contextWindow: number | null | undefined,
-  warnPercent: number,
-  dangerPercent: number,
-): CostHint | null {
+export function costHint(text: string, budget: CostBudget): CostHint | null {
   const draftTokens = estimateTokens(text);
   if (draftTokens === 0) return null;
-  const window = typeof contextWindow === 'number' && contextWindow > 0 ? contextWindow : null;
+  const window = typeof budget.contextWindow === 'number' && budget.contextWindow > 0 ? budget.contextWindow : null;
   if (window === null) return null;
-  const used = typeof contextTokens === 'number' && Number.isFinite(contextTokens) ? Math.max(0, contextTokens) : 0;
-  const projectedPercent = Math.min(999, Math.round(((used + draftTokens) / window) * 100));
-  if (projectedPercent < warnPercent) return null;
+  const used = typeof budget.contextTokens === 'number' && Number.isFinite(budget.contextTokens) ? Math.max(0, budget.contextTokens) : 0;
+  const projected = occupancy({
+    contextTokens: used + draftTokens,
+    contextWindow: window,
+    autoCompactAt: budget.autoCompactAt ?? null,
+    contextTokensExact: budget.exact,
+  });
+  if (projected.tone === 'ok' || projected.tone === 'unknown') return null;
   return {
     draftTokens,
-    projectedPercent,
-    tone: projectedPercent >= dangerPercent ? 'danger' : 'warn',
+    projectedTokens: projected.tokens,
+    projectedPercent: Math.min(999, Math.round((projected.ofWindow ?? 0) * 100)),
+    autoCompactAt: projected.autoCompactAt,
+    pastCompaction: projected.ofCompaction !== null && projected.ofCompaction >= 1,
+    tone: projected.tone,
+    exact: projected.exact,
   };
 }

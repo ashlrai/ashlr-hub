@@ -64,6 +64,9 @@ export const REAL_IO_TEST_FILES = [
   'test/verse-local-dispatch.test.ts', // real loopback HTTP server standing in for Ollama's discovery endpoints
   'test/verse-accounts.test.ts', // real collector lease acquisition and private evidence files in a tmp root
   'test/verse-api.test.ts', // real web server bind + SSE tails against an in-memory fake engine
+  'test/verse-api-context.test.ts', // real web server bind + real memory/preference files in a tmp HOME (V3.9 routes)
+  'test/verse-context-fit.test.ts', // real `git init`/`git ls-files` in temp repos to measure context fit
+  'test/verse-session-handoff.test.ts', // real temp git repos for the handoff note's `git diff --stat`
   'test/verse-control-api.test.ts', // real web server bind + real enrollment/audit/kill-switch state in a tmp HOME
   'test/verse-daemon-pause.test.ts', // real web server bind + real git repos, pause/kill sentinels and audit in a tmp HOME
   'test/universe-control-execution.test.ts', // private signed effect and interrupted settlement records
@@ -100,6 +103,7 @@ export const REAL_IO_TEST_FILES = [
   'test/resource-allocation-refresh.test.ts', // allocation changes across owned quota refresh and admission
   'test/resource-native-profile-review.test.ts', // independent native environment and process identity fixtures
   'test/resource-profile-integration.test.ts', // actual CLI preparation and generated inert native launchers
+  'test/resource-profile-repin.test.ts', // private profiles, inert native execve through repinned launchers
   'test/universe-resource-runtime-check.test.ts', // explicit private runtime and sterile Git workspace reads
   'test/resource-launcher-compatibility.test.ts', // bounded inert CLI help/version subprocesses
   'test/resource-commissioning-integration.test.ts', // built public CLI with private inert multi-account fixtures

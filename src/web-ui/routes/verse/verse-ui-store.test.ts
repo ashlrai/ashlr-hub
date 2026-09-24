@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clampWidth,
   clearVerseCommand,
+  dismissVerseAdvice,
+  isVerseAdviceDismissed,
   getVerseUiState,
   requestVerseCommand,
   resetVerseUi,
@@ -155,5 +157,41 @@ describe('verse-ui-store', () => {
     expect(clampWidth(-3, VERSE_SIDEBAR)).toBe(VERSE_SIDEBAR.def);
     localStorage.setItem(VERSE_UI_STORAGE_KEY, '{not json');
     expect(() => resetVerseUi()).not.toThrow();
+  });
+});
+
+describe('verse ui store — dismissed context advice', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    resetVerseUi();
+  });
+
+  it('remembers a dismissal per session and per evidence key', () => {
+    expect(isVerseAdviceDismissed('vs_1', 'handoff:suggest:0')).toBe(false);
+    dismissVerseAdvice('vs_1', 'handoff:suggest:0');
+    expect(isVerseAdviceDismissed('vs_1', 'handoff:suggest:0')).toBe(true);
+    // Escalated evidence is a different key, and another chat is unaffected.
+    expect(isVerseAdviceDismissed('vs_1', 'handoff:urge:0')).toBe(false);
+    expect(isVerseAdviceDismissed('vs_2', 'handoff:suggest:0')).toBe(false);
+  });
+
+  it('never persists: advice is evidence, and a reload must re-evaluate it', () => {
+    dismissVerseAdvice('vs_1', 'expansive:2');
+    for (let i = 0; i < localStorage.length; i += 1) {
+      expect(localStorage.getItem(localStorage.key(i)!) ?? '').not.toContain('expansive:2');
+    }
+    resetVerseUi();
+    expect(isVerseAdviceDismissed('vs_1', 'expansive:2')).toBe(false);
+  });
+
+  it('ignores empty ids and stays bounded, forgetting the oldest sessions first', () => {
+    dismissVerseAdvice('', 'handoff:suggest:0');
+    dismissVerseAdvice('vs_1', '');
+    expect(isVerseAdviceDismissed('', 'handoff:suggest:0')).toBe(false);
+    for (let i = 0; i < 60; i += 1) dismissVerseAdvice(`vs_${i}`, 'k');
+    expect(isVerseAdviceDismissed('vs_0', 'k')).toBe(false);
+    expect(isVerseAdviceDismissed('vs_9', 'k')).toBe(false);
+    expect(isVerseAdviceDismissed('vs_10', 'k')).toBe(true);
+    expect(isVerseAdviceDismissed('vs_59', 'k')).toBe(true);
   });
 });

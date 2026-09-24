@@ -10,8 +10,65 @@
  * Built through the real types, so a change to the contract breaks these
  * fixtures at compile time rather than leaving the UI tests passing against a
  * shape the server no longer sends.
+ *
+ * V3.9 — every model option carries its real context budget, computed with
+ * the SAME formulas the server uses (core/verse/context-math.ts), from the
+ * ground truth in docs/VERSE-CONTEXT.md §1: 1M Claude models compact at 367k
+ * in Standard and 967k in Expansive; Codex measures against 258.4k and
+ * compacts at 244.8k (Expansive: 828.4k / 784.8k, told `872000`); Grok
+ * compacts at 400k of 500k; a 64k local tag at 32.5k.
  */
-import type { VerseSeat } from '../../data/api-types.js';
+import type { VerseModelOption, VerseSeat } from '../../data/api-types.js';
+import {
+  CLAUDE_STANDARD_AUTOCOMPACT_WINDOW,
+  claudeAutoCompactAt,
+  codexAutoCompactAt,
+  codexEffectiveWindow,
+  grokAutoCompactAt,
+} from '../../../core/verse/context-math.js';
+import type { VerseWindowSource } from '../../../core/verse/types.js';
+
+/**
+ * A Claude model option exactly as model-windows builds one: 1M-native models
+ * get a capped Standard budget and an `auto` Expansive one; 200k models get
+ * their native budget and no second mode.
+ */
+export function claudeOption(
+  id: string,
+  label: string,
+  window: number,
+  maxOutputTokens: number,
+  over: Partial<VerseModelOption> = {},
+): VerseModelOption {
+  const native1m = window >= 1_000_000;
+  return {
+    id,
+    label,
+    contextWindow: window,
+    autoCompactAt: claudeAutoCompactAt(window, maxOutputTokens, native1m ? CLAUDE_STANDARD_AUTOCOMPACT_WINDOW : null),
+    expansive: native1m ? { contextWindow: window, autoCompactAt: claudeAutoCompactAt(window, maxOutputTokens, null) } : null,
+    maxOutputTokens,
+    windowSource: 'cli-catalog',
+    minCliVersion: null,
+    unavailableReason: null,
+    ...over,
+  };
+}
+
+/** A codex catalog entry projected the way model-windows does: 95% effective, 90%-of-raw compaction. */
+export function codexOption(id: string, label: string, maxWindow: number, source: VerseWindowSource = 'provider-catalog'): VerseModelOption {
+  const raw = 272_000;
+  return {
+    id,
+    label,
+    contextWindow: codexEffectiveWindow(raw, 95),
+    autoCompactAt: codexAutoCompactAt(raw),
+    expansive: maxWindow > raw
+      ? { contextWindow: codexEffectiveWindow(maxWindow, 95), autoCompactAt: codexAutoCompactAt(maxWindow), providerWindow: maxWindow }
+      : null,
+    windowSource: source,
+  };
+}
 
 type Capacity = NonNullable<VerseSeat['capacity']>;
 type CapacityWindow = Capacity['windows'][number];
@@ -47,8 +104,8 @@ const NATIVE_BASE: VerseSeat = {
   engine: 'claude',
   label: 'Claude Max',
   accountId: 'claude',
-  models: [{ id: 'claude-opus-5', label: 'Opus 5', contextWindow: 200_000 }],
-  contextWindow: 200_000,
+  models: [claudeOption('claude-opus-5', 'Opus 5', 1_000_000, 64_000)],
+  contextWindow: 1_000_000,
   health: { state: 'ready', summary: null, windows: [], observedAt: null },
 };
 
@@ -124,7 +181,97 @@ export const LOCAL_SEAT_V2: VerseSeat = {
   engine: 'local',
   label: 'Qwen3 Coder (local)',
   accountId: 'local',
-  models: [{ id: 'qwen3-coder', label: 'qwen3-coder', contextWindow: 65_536 }],
+  models: [{ id: 'qwen3-coder', label: 'qwen3-coder', contextWindow: 65_536, autoCompactAt: claudeAutoCompactAt(65_536, null), windowSource: 'runtime' }],
   contextWindow: 65_536,
+  health: { state: 'ready', summary: null, windows: [], observedAt: null },
+};
+
+// ---------------------------------------------------------------------------
+// V3.9 context seats — shaped like Mason's roster on 2026-09-23
+// ---------------------------------------------------------------------------
+
+/** The note seats.ts writes when a seat's pinned CLI is older than one installed. */
+export const CLAUDE_SKEW_NOTE =
+  'Pinned to Claude Code 2.1.257; 2.1.280 is installed — Opus 5.5 needs it. Re-pin with: ashlr resources profile repin --directory <dir> --executable <path>';
+
+export const OPUS_55_REASON = 'needs Claude Code 2.1.280; this seat runs 2.1.257';
+
+/**
+ * claude-a: pinned to 2.1.257, so Opus 5.5 is LISTED but unavailable, and the
+ * first (default) model is a runnable one.
+ */
+export const CLAUDE_CONTEXT_SEAT: VerseSeat = {
+  id: 'claude-a',
+  engine: 'claude',
+  label: 'Claude Max',
+  accountId: 'claude-a',
+  models: [
+    claudeOption('claude-fable-5-1', 'Fable 5.1', 1_000_000, 128_000),
+    claudeOption('claude-opus-5-5', 'Opus 5.5', 1_000_000, 128_000, { minCliVersion: '2.1.280', unavailableReason: OPUS_55_REASON }),
+    claudeOption('claude-haiku-4-5-20251001', 'Haiku 4.5', 200_000, 32_000),
+  ],
+  contextWindow: 1_000_000,
+  health: { state: 'ready', summary: null, windows: [], observedAt: null },
+  cliVersion: '2.1.257',
+  notes: [CLAUDE_SKEW_NOTE],
+};
+
+/** codex-b: its own catalog — GPT-6 Astra with an 872k expansive budget, GPT-5.5 with none. */
+export const CODEX_CONTEXT_SEAT: VerseSeat = {
+  id: 'codex-b',
+  engine: 'codex',
+  label: 'Work Codex',
+  accountId: 'codex-b',
+  models: [codexOption('gpt-6-astra', 'GPT-6 Astra', 872_000), codexOption('gpt-5.5', 'GPT-5.5', 272_000)],
+  contextWindow: codexEffectiveWindow(272_000, 95),
+  health: { state: 'ready', summary: null, windows: [], observedAt: null },
+  cliVersion: '0.155.0',
+};
+
+export const CODEX_CATALOG_NOTE = "Model list is Verse's built-in list until this seat's first turn fetches its own catalog.";
+
+/** codex-a: never ran a turn, so no catalog yet — the documented fallback list, and a note saying so. */
+export const CODEX_UNFETCHED_SEAT: VerseSeat = {
+  id: 'codex-a',
+  engine: 'codex',
+  label: 'Personal Codex',
+  accountId: 'codex-a',
+  models: [codexOption('gpt-5.5', 'GPT-5.5', 272_000, 'documented')],
+  contextWindow: codexEffectiveWindow(272_000, 95),
+  health: { state: 'ready', summary: null, windows: [], observedAt: null },
+  cliVersion: '0.136.0',
+  notes: [CODEX_CATALOG_NOTE],
+};
+
+/** grok-a: one budget, 400k of 500k; no expansive mode exists. */
+export const GROK_CONTEXT_SEAT: VerseSeat = {
+  id: 'grok-a',
+  engine: 'grok',
+  label: 'Grok',
+  accountId: 'grok-a',
+  models: [{ id: 'grok-4.7-build-fast', label: 'Grok 4.7 Fast', contextWindow: 500_000, autoCompactAt: grokAutoCompactAt(500_000, 80), windowSource: 'provider-catalog' }],
+  contextWindow: 500_000,
+  health: { state: 'ready', summary: null, windows: [], observedAt: null },
+};
+
+/** A 64k local tag: Verse tells the CLI the window, so it compacts at 32.5k. */
+export const LOCAL_CONTEXT_SEAT: VerseSeat = {
+  id: 'local:qwen3.8:27b-ctx64k',
+  engine: 'local',
+  label: 'Qwen3.8 27B (local)',
+  accountId: 'local',
+  models: [{ id: 'qwen3.8:27b-ctx64k', label: 'qwen3.8:27b-ctx64k', contextWindow: 65_536, autoCompactAt: claudeAutoCompactAt(65_536, null), windowSource: 'runtime' }],
+  contextWindow: 65_536,
+  health: { state: 'ready', summary: null, windows: [], observedAt: null },
+};
+
+/** A model whose window nothing knows — the picker must say so, never guess. */
+export const UNKNOWN_WINDOW_SEAT: VerseSeat = {
+  id: 'claude-x',
+  engine: 'claude',
+  label: 'Claude Team',
+  accountId: 'claude-x',
+  models: [{ id: 'claude-mystery-9', label: 'Mystery 9', contextWindow: null }],
+  contextWindow: null,
   health: { state: 'ready', summary: null, windows: [], observedAt: null },
 };

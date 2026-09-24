@@ -274,6 +274,9 @@
 .meter-warn { --meter-color: var(--status-warning-solid); --meter-text: var(--status-warning-fg); }
 .meter-danger { --meter-color: var(--status-danger-solid); --meter-text: var(--status-danger-fg); }
 .meter-unknown { --meter-color: var(--border-strong); --meter-text: var(--text-tertiary); }
+/* Past the WINDOW (not just the compaction point): the same danger pair, and
+   the percent says "10x%" in words — state is never colour alone (§6). */
+.meter-over { --meter-color: var(--status-danger-solid); --meter-text: var(--status-danger-fg); }
 
 /* Pinned to the header's bottom edge: full width, exactly 2px, no label. */
 .meterTrack {
@@ -289,8 +292,22 @@
   background: var(--meter-color);
   transition: width var(--duration-slow) var(--ease-decelerate), background var(--duration-base) var(--ease-standard);
 }
+/* Where the CLI auto-compacts, on the same full-window scale as the fill: a
+   6px mark rising from the track, so "compacts ≈367k" is visible without
+   reading the numbers. Tertiary text, not a status colour — it is a scale
+   mark, and the tone already says how close the fill is to it. */
+.meterTick {
+  position: absolute;
+  bottom: 0;
+  width: 2px;
+  height: 6px;
+  margin-left: -1px;
+  background: var(--text-tertiary);
+  border-radius: var(--radius-xs);
+  pointer-events: none;
+}
 .meterInline .meterTrack {
-  position: static;
+  position: relative;
   width: 64px;
   background: var(--meter-track);
   border-radius: var(--radius-full);
@@ -307,11 +324,182 @@
   color: var(--text-tertiary);
 }
 .meterTokens { white-space: nowrap; }
+.meterCompact { white-space: nowrap; }
 /* Both halves of the pair are tabular (the wrapper sets it) — but the percent
    also needs a reserved width, or the strip's right edge shifts as it crosses
    9 -> 10 -> 100 while a turn streams. */
 .meterPercent { min-width: 4ch; text-align: right; }
 .meterPercent { color: var(--meter-text); font-weight: var(--font-weight-medium); }
+
+/* ---- context mode chip + menu ------------------------------------------ */
+/* A ghost chip beside the meter: the WORD is the state (Standard/Expansive),
+   and expansive also takes the accent so a costlier mode is never silent. */
+.modeWrap { position: relative; flex-shrink: 0; display: inline-flex; }
+.modeChip {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+  font-size: var(--text-2xs-size, 11px);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  transition: color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+.modeChip:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.modeChip:active:not(:disabled) { background: var(--bg-active); }
+.modeChip:disabled { opacity: 0.4; cursor: not-allowed; }
+.modeChip[data-mode='expansive'] { border-color: var(--accent-500); color: var(--text-primary); }
+.modeMenu {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  z-index: var(--z-dropdown);
+  width: max-content;
+  min-width: 280px;
+  max-width: min(380px, calc(100vw - var(--space-6)));
+  /* ContextModeControl replaces this placement with a measured, viewport-
+     clamped position: fixed (modeMenuPlacement) whenever layout exists; this
+     absolute one is only the no-layout fallback. */
+  padding: var(--space-1);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface-raised);
+  color: var(--text-primary);
+  box-shadow: var(--shadow-menu, var(--shadow-md));
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.modeMenuHeading {
+  padding: var(--space-2) var(--space-2) var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line, 1.4);
+}
+.modeItem {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  width: 100%;
+  padding: var(--space-2);
+  border-radius: var(--radius-xs);
+  text-align: left;
+  color: var(--text-primary);
+}
+.modeItem:hover:not(:disabled),
+.modeItem:focus-visible { background: var(--bg-hover); }
+.modeItem:active:not(:disabled) { background: var(--bg-active); }
+.modeItem:disabled { opacity: 0.5; cursor: not-allowed; }
+.modeItem[aria-checked='true'] { box-shadow: inset 2px 0 0 var(--accent-500); }
+.modeItemPrimary { font-size: var(--text-sm-size); font-weight: var(--font-weight-medium); }
+.modeItemSecondary { font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
+.modeMenuNote {
+  padding: var(--space-1) var(--space-2);
+  color: var(--text-tertiary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line, 1.4);
+}
+/* The one menu note that is NOT free: switching down past Standard's
+   compaction point compacts on the next turn. Warning ink, words carry it. */
+.modeMenuWarn {
+  margin: 0 var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  border-left: 2px solid var(--status-warning-fg, var(--accent-500));
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line, 1.4);
+}
+.modeMenuError {
+  padding: var(--space-1) var(--space-2) var(--space-2);
+  color: var(--status-danger-fg);
+  font-size: var(--text-xs-size);
+}
+
+/* ---- context advice: notes under the header ----------------------------- */
+/* Same measure as the transcript column, a 2px rule for the level and words
+   for everything else. Not a modal, not a toast: the operator reads it when
+   they look up, and it stays until acted on or waved off. */
+.advice {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  /* The transcript's reading column: --measure-read inside the same gutter. */
+  box-sizing: border-box;
+  width: 100%;
+  max-width: calc(var(--measure-read) + 2 * var(--space-6));
+  margin: 0 auto;
+  padding: var(--space-3) var(--space-6) 0;
+}
+.adviceNote {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--status-warning-solid);
+  border-radius: var(--radius-xs);
+  background: var(--status-warning-bg);
+}
+.adviceNote[data-level='urge'] { border-left-color: var(--status-danger-solid); background: var(--status-danger-bg); }
+.adviceNote[data-kind='expansive'] { border-left-color: var(--accent-500); background: var(--bg-hover); }
+.adviceNote[data-kind='compact'] { border-left-color: var(--border-strong, var(--border-default)); background: var(--bg-hover); }
+/* "Compact now" is a form (focus field + submit), so the note's row layout
+   moves onto the form: body left, actions right, stacked at phone width. */
+.compactForm { flex: 1; min-width: 0; display: flex; align-items: flex-start; gap: var(--space-3); }
+.compactLabel { margin-top: var(--space-1); color: var(--text-secondary); font-size: var(--text-xs-size); font-weight: var(--font-weight-medium); }
+.compactInput {
+  width: 100%;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: var(--text-xs-size);
+}
+.compactInput:focus-visible { outline: 2px solid var(--accent-500); outline-offset: 1px; }
+/* The one action in the mode menu, set apart from the two radio choices. */
+.modeItemAction { margin-top: var(--space-1); border-top: 1px solid var(--border-subtle); border-radius: 0 0 var(--radius-xs) var(--radius-xs); }
+.adviceBody { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: var(--space-1); }
+.adviceTitle { font-size: var(--text-sm-size); font-weight: var(--font-weight-medium); color: var(--text-primary); }
+.adviceReasons {
+  margin: 0;
+  padding-left: var(--space-4);
+  list-style: disc;
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line, 1.4);
+}
+.adviceFine { color: var(--text-secondary); font-size: var(--text-xs-size); line-height: var(--text-xs-line, 1.4); }
+.adviceActions { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: var(--space-1); }
+.adviceAction {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h-xs);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  font-size: var(--text-xs-size);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  transition: border-color var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard);
+}
+.adviceAction:hover:not(:disabled) { border-color: var(--accent-500); }
+.adviceAction:active:not(:disabled) { background: var(--bg-active); }
+.adviceAction:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Shown after a handoff chat was created but the host could not switch to it. */
+.adviceStatus {
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--accent-500);
+  color: var(--text-secondary);
+  font-size: var(--text-xs-size);
+  line-height: var(--text-xs-line, 1.4);
+}
 
 /* ---- empty state ------------------------------------------------------- */
 .emptyState {
@@ -364,6 +552,11 @@
    from the right-hand end inwards: the lockup and the pane toggles are the
    last things standing, because they are "where am I" and "give me my space
    back". */
+/* The "compacts ≈367k" half goes first: the tick on the track still marks
+   the point, and the tooltip says it in full. */
+@media (max-width: 1100px) {
+  .meterCompact { display: none; }
+}
 @media (max-width: 900px) {
   .seatPill { max-width: 20ch; }
   .seatPill[data-seat-capacity] { max-width: 28ch; }
@@ -386,6 +579,10 @@
      rather than three half-truncated things. */
   .seatPill { display: none; }
   .header { gap: var(--space-2); }
+  .advice { padding: var(--space-2) var(--space-3) 0; }
+  .adviceNote { flex-direction: column; }
+  .compactForm { flex-direction: column; }
+  .adviceActions { flex-direction: row; align-items: center; }
 }
 /* Guarded like every other animated surface here (tokens.css, global.css,
    Transcript, Sidebar, Composer, ResourcesPanel): appearance-store.ts writes

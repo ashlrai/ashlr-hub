@@ -20,11 +20,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ToastProvider } from '../../../components/primitives/Toast.js';
 import { clearMutationToken, markCheckComplete, setMutationToken } from '../../../data/auth-store.js';
 import { evictAll } from '../../../data/cache.js';
-import { ev, MockEventSource, verseFetch } from '../fixtures.test-support.js';
+import { bootstrap as bootstrapFixture, ev, MockEventSource, session as sessionFixture, verseFetch } from '../fixtures.test-support.js';
+import { CLAUDE_CONTEXT_SEAT } from '../seat-fixtures.test-support.js';
 import { resetVerseStore } from '../verse-store.js';
 import { resetVerseUi } from '../verse-ui-store.js';
 import { CHAT_PANEL_RANGES, CHAT_PANEL_SIZING_KEY, resetChatPanelSizing } from '../chat-panel-sizing.js';
-import { ChatSection } from './ChatSection.js';
+import { ApiError } from '../../../data/client.js';
+import { ChatSection, describeChatError } from './ChatSection.js';
 
 const TOKEN = 'b'.repeat(64);
 
@@ -245,6 +247,48 @@ describe('ChatSection sessions', () => {
   });
 });
 
+describe('ChatSection refusals', () => {
+  const UNAVAILABLE = 'model claude-opus-5-5 cannot run on seat claude-a: needs Claude Code 2.1.280; this seat runs 2.1.257';
+
+  it('says why a 409 was refused instead of calling every 409 "a turn is already running"', () => {
+    const unavailable = new ApiError('POST … failed (HTTP 409).', 409, '/api/verse/sessions/vs_1/turns', UNAVAILABLE, 'VERSE_MODEL_UNAVAILABLE');
+    const text = describeChatError(unavailable);
+    expect(text).toContain(`${UNAVAILABLE}.`);
+    expect(text).toContain('Continue in a fresh chat');
+    expect(text).toContain('ashlr resources profile repin');
+    expect(text).not.toMatch(/already running/);
+    // The busy refusal — coded or from an older, codeless server — keeps its copy.
+    expect(describeChatError(new ApiError('x', 409, '/p', 'busy', 'VERSE_SESSION_BUSY'))).toBe('A turn is already running in this chat. Stop it first.');
+    expect(describeChatError(new ApiError('x', 409, '/p'))).toBe('A turn is already running in this chat. Stop it first.');
+    // Any other refusal: the route's own sentence, not the HTTP wrapper.
+    expect(describeChatError(new ApiError('POST /p failed (HTTP 400): bad.', 400, '/p', 'model x has no expansive context mode', 'VERSE_INVALID')))
+      .toBe('model x has no expansive context mode');
+  });
+
+  it('shows the model-unavailable reason when a send is refused, and leaves the chat idle', async () => {
+    const { fetch, state } = verseFetch();
+    const refusing = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input.toString();
+      if (path === '/api/verse/sessions/vs_1/turns' && init?.method === 'POST') {
+        state.calls.push({ path, method: 'POST', body: undefined, headers: {} });
+        return new Response(JSON.stringify({ code: 'VERSE_MODEL_UNAVAILABLE', error: UNAVAILABLE }), { status: 409, headers: { 'content-type': 'application/json' } });
+      }
+      return (fetch as unknown as typeof globalThis.fetch)(input, init);
+    });
+    vi.stubGlobal('fetch', refusing);
+    setMutationToken(TOKEN);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    await user.type(await screen.findByRole('textbox', { name: 'Message' }), 'hello{Enter}');
+    expect(await screen.findByText(/needs Claude Code 2\.1\.280/)).toBeInTheDocument();
+    expect(screen.queryByText(/already running/)).toBeNull();
+    // Idle again: Send is back, not Stop.
+    await waitFor(() => expect(screen.getByRole('button', { name: /Send message/ })).toBeInTheDocument());
+    expect(state.calls.some((c) => c.path === '/api/verse/sessions/vs_1/turns')).toBe(true);
+  });
+});
+
 describe('ChatSection layout', () => {
   it('collapses and restores the sidebar, persisting the choice under ashlr.verse.ui.v2', async () => {
     const { fetch } = verseFetch();
@@ -458,5 +502,103 @@ describe('ChatSection resizers', () => {
     await user.click(screen.getByRole('button', { name: 'Show chat list' }));
     expect(screen.getByRole('separator', { name: 'Resize chat list' }))
       .toHaveAttribute('aria-valuenow', String(SIDE.def + 32));
+  });
+});
+
+/**
+ * V3.9 wiring this section owns: the dialog's own write goes through the same
+ * token guard as every chat mutation, the create body carries the mode on
+ * screen, the resources panel reads the open chat's log, and a handoff chat
+ * links back to the chat it continues.
+ */
+describe('ChatSection — context orchestration wiring', () => {
+  const jsonResponse = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } });
+
+  /** verseFetch plus the V3.9 reads/writes the dialog makes. */
+  function contextFetch(boot = bootstrapFixture({ seats: [CLAUDE_CONTEXT_SEAT] })) {
+    const base = verseFetch({ bootstrap: boot });
+    const posted: unknown[] = [];
+    let prefs = { version: 1, seats: {} as Record<string, { contextMode?: string }>, memory: { enabled: true, disabledProjects: [] as string[] } };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = typeof input === 'string' ? input : input.toString();
+      const method = init?.method ?? 'GET';
+      if (path === '/api/verse/preferences' && method === 'GET') return jsonResponse(prefs);
+      if (path === '/api/verse/preferences' && method === 'POST') {
+        const body = JSON.parse(String(init?.body)) as { seatId: string; contextMode: string };
+        posted.push({ body, token: (init?.headers as Record<string, string>)['x-ashlr-token'] });
+        prefs = { ...prefs, seats: { ...prefs.seats, [body.seatId]: { contextMode: body.contextMode } } };
+        return jsonResponse(prefs);
+      }
+      if (path.startsWith('/api/verse/context-fit')) {
+        return jsonResponse({ roots: [{ path: '/Users/mason/dev/hub', files: 10, bytes: 400_000, estTokens: 100_000, truncated: false }], totalEstTokens: 100_000, estimator: 'bytes/4', sampledAt: '2026-09-23T10:00:00.000Z' });
+      }
+      // verseFetch types its mock loosely; it IS a fetch.
+      return (base.fetch as unknown as typeof globalThis.fetch)(input, init);
+    });
+    return { fetch: fetchMock, state: base.state, posted };
+  }
+
+  it('saves a seat default through the mutation-token guard, then creates the chat in that mode', async () => {
+    const { fetch, state, posted } = contextFetch();
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await screen.findByRole('button', { name: /Fix the login bug/ });
+    await user.click(within(screen.getByRole('navigation', { name: 'Chats' })).getByRole('button', { name: 'New chat' }));
+    const dialog = await screen.findByRole('dialog', { name: 'New chat' });
+    await within(dialog).findByRole('radio', { name: 'Standard', checked: true });
+    await user.click(within(dialog).getByRole('radio', { name: 'Expansive' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Make Expansive the default for Claude Max' }));
+
+    // No token held: the guard asks first, and nothing is written yet.
+    const unlock = await screen.findByRole('dialog', { name: 'Unlock actions' });
+    expect(posted).toEqual([]);
+    await user.type(within(unlock).getByLabelText('Mutation token'), TOKEN);
+    await user.click(within(unlock).getByRole('button', { name: 'Unlock' }));
+    await waitFor(() => expect(posted).toEqual([{ body: { seatId: 'claude-a', contextMode: 'expansive' }, token: TOKEN }]));
+    expect(await screen.findByText('New chats on Claude Max now start in Expansive.')).toBeInTheDocument();
+
+    await user.click(within(screen.getByRole('dialog', { name: 'New chat' })).getByRole('button', { name: 'Start chat' }));
+    await waitFor(() => expect(state.calls.some((c) => c.path === '/api/verse/sessions' && c.method === 'POST')).toBe(true));
+    expect(state.calls.find((c) => c.path === '/api/verse/sessions' && c.method === 'POST')!.body)
+      .toEqual({ projectPath: '/Users/mason/dev/hub', seatId: 'claude-a', model: 'claude-fable-5-1', contextMode: 'expansive' });
+  });
+
+  it('feeds the open chat’s log to the resources panel’s per-turn figures', async () => {
+    const boot = bootstrapFixture();
+    const { fetch } = verseFetch({
+      bootstrap: boot,
+      details: {
+        vs_1: {
+          session: boot.sessions[0]!,
+          events: [
+            ev(1, 'usage', { turnId: 't1', usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 30_000, contextWindow: null } }),
+            ev(2, 'usage', { turnId: 't2', usage: { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheCreationTokens: 0, contextTokens: 50_000, contextWindow: null } }),
+          ],
+        },
+        vs_2: { session: boot.sessions[1]!, events: [] },
+      },
+    });
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /Fix the login bug/ }));
+    const efficiency = await screen.findByLabelText('Context efficiency');
+    await waitFor(() => expect(within(efficiency).getByText('Peak context', { selector: 'dt' }).nextElementSibling).toHaveTextContent('50k'));
+    expect(within(efficiency).getByText('Avg context / turn', { selector: 'dt' }).nextElementSibling).toHaveTextContent('40k');
+  });
+
+  it('opens the chat a handoff continues from its "Continued from" link', async () => {
+    const boot = bootstrapFixture();
+    const handoff = sessionFixture({ id: 'vs_3', title: 'Fix the login bug · part 2', updatedAt: '2026-09-19T11:00:00.000Z', handoffFrom: { sessionId: 'vs_1', title: 'Fix the login bug' } });
+    const { fetch } = verseFetch({ bootstrap: { ...boot, sessions: [handoff, ...boot.sessions] } });
+    vi.stubGlobal('fetch', fetch);
+    const user = userEvent.setup();
+    mount();
+    await user.click(await screen.findByRole('button', { name: /part 2/ }));
+    await screen.findByRole('heading', { name: 'Fix the login bug · part 2' });
+    await user.click(within(screen.getByRole('log')).getByRole('button', { name: 'Fix the login bug' }));
+    expect(await screen.findByRole('heading', { name: 'Fix the login bug' })).toBeInTheDocument();
+    expect(localStorage.getItem('ashlr.verse.selected.v1')).toBe('vs_1');
   });
 });

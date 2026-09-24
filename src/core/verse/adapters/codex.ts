@@ -1,24 +1,62 @@
 /**
  * Codex adapter.
  *
- * Launch: turn 1 is `codex exec --json --model <m> --cd <cwd> --sandbox
+ * Launch: turn 1 is `codex exec [-c …] --json --model <m> --cd <cwd> --sandbox
  * workspace-write -` with the prompt on stdin; later turns are
- * `codex exec resume <thread_id> --json -` (also stdin). The thread id is not
- * known until the first turn's `thread.started` line, so `nativeSessionId`
+ * `codex exec resume <thread_id> [-c …] --json -` (also stdin). The thread id is
+ * not known until the first turn's `thread.started` line, so `nativeSessionId`
  * is null until then and the engine adopts it from `turn-done`.
+ *
+ * Every per-session setting rides on `-c key=value` config overrides, never on
+ * flags, because `exec resume` accepts `-c` but not `--add-dir`/`--cd`: turn 1
+ * and turn N of one chat must be launched with the SAME settings. Overrides:
+ *   - `sandbox_workspace_write.writable_roots` — extra workspace roots, plus the
+ *     shared project-memory directory when this session may write it;
+ *   - `model_context_window` + `model_auto_compact_token_limit` — expansive
+ *     mode only, ALWAYS as a pair (raising only the window breaks codex's
+ *     auto-compaction, openai/codex#16068);
+ *   - `developer_instructions` — the shared project-memory block.
+ * Each key was verified as a KNOWN, correctly typed config field on both
+ * pinned binaries (0.136.0 and 0.155.0-alpha.9.2), on `exec` and `exec
+ * resume`, with `--strict-config` and an empty scratch CODEX_HOME — see
+ * `strictConfigVerified` below for the no-spend method.
  *
  * Parse (codex JSONL; shapes as consumed by src/core/run/engines.ts
  * normaliseEngineOutputLine and src/core/resources/worker.ts parseCodex):
  *   thread.started{thread_id}
  *   item.started/item.completed{item:{id,type:'agent_message'|'command_execution'|
  *     'file_change'|'mcp_tool_call'|'reasoning', ...}}
- *   turn.completed{usage:{input_tokens,cached_input_tokens,output_tokens}}
+ *   turn.completed{usage:{input_tokens,cached_input_tokens,[cache_write_input_tokens],output_tokens}}
  *   turn.failed{error:{message}} / error{message}
+ *
+ * Telemetry (V3.9): stdout never carries per-call context, so the exact meter,
+ * the window, compactions and the TRUE per-turn usage come from the thread's
+ * own rollout file (core/verse/codex-rollout.ts) via `pollTelemetry` (live)
+ * and `afterTurn` (final). See `afterCodexTurn` for why the turn's `usage`
+ * event is emitted there rather than from the parser.
  */
 
-import { verseSessionRoots, type VerseSession, type VerseTurnLaunch } from '../types.js';
+import {
+  budgetFor,
+  canonicalModelId,
+  CODEX_EFFECTIVE_WINDOW_PERCENT,
+  codexAutoCompactAt,
+} from '../context-math.js';
+import {
+  advanceCodexTurnTracker,
+  codexNativeStatePath,
+  codexTotals,
+  codexTurnUsage,
+  createCodexTurnTracker,
+  isCodexThreadId,
+  locateCodexRollout,
+  type CodexTokenTotals,
+  type CodexTurnTracker,
+} from '../codex-rollout.js';
+import { legacyModelOptionFallback } from '../model-windows.js';
+import { verseSessionRoots, type VerseModelOption, type VerseSession, type VerseTurnLaunch, type VerseUsage } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
-import type { VerseAdapter, VerseParsedEvent, VerseTurnParser } from './index.js';
+import type { VerseAdapter, VerseAdapterTurnContext, VerseParsedEvent, VerseTurnParser } from './index.js';
 import { parseJsonObjectLine } from './claude.js';
 
 type JsonObject = Record<string, unknown>;
@@ -29,10 +67,6 @@ function isObject(value: unknown): value is JsonObject {
 
 function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
-}
-
-function num(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 function safeJson(value: unknown): string {
@@ -85,19 +119,152 @@ function tomlString(value: string): string {
  * zzz_bogus_subfield`", and `-c 'sandbox_workspace_write.writable_roots=
  * ["/tmp"]'` passes config loading and starts the run.
  */
-function writableRootsOverride(extraRoots: readonly string[]): string[] {
-  if (extraRoots.length === 0) return [];
-  const array = extraRoots.map(tomlString).join(',');
+function writableRootsOverride(roots: readonly string[]): string[] {
+  const unique = [...new Set(roots.filter((root) => typeof root === 'string' && root.length > 0))];
+  if (unique.length === 0) return [];
+  const array = unique.map(tomlString).join(',');
   return ['-c', `sandbox_workspace_write.writable_roots=[${array}]`];
 }
 
+function positiveInt(value: unknown): number | null {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.floor(value) : null;
+}
+
+/**
+ * The seat option a session's model resolves to: the exact stored id first,
+ * then its canonical form — the same lookup the engine uses, so the flags the
+ * CLI is given and the budget the meter shows come from one option.
+ *
+ * A launch snapshot written before 3.9 lists `{id, label, contextWindow}` and
+ * no budgets, so it would deny an expansive mode the live seat (and so the
+ * UI) offers for the same model. `legacyModelOptionFallback` — the one rule the
+ * engine's `effectiveModelOption` also applies — borrows the documented
+ * budgets for such a snapshot, so a switch the engine accepts is a switch
+ * this adapter actually carries out.
+ */
+function modelOptionFor(launch: VerseSeatLaunch, model: string): VerseModelOption | null {
+  const models = Array.isArray(launch.seat?.models) ? launch.seat.models : [];
+  const wanted = canonicalModelId(model);
+  const snapshot = models.find((m) => m.id === model) ?? models.find((m) => canonicalModelId(m.id) === wanted) ?? null;
+  return legacyModelOptionFallback('codex', model, snapshot);
+}
+
+/**
+ * Expansive mode → the config pair that makes codex measure against, and
+ * compact inside, the model's catalog maximum. BOTH keys or neither: codex
+ * resets its token accounting when only `model_context_window` is set and
+ * then never auto-compacts (openai/codex#16068), so a half-applied override
+ * is worse than none.
+ *
+ * `providerWindow` is the RAW window codex must be told (872_000 for GPT-6 /
+ * GPT-5.6); codex itself then measures against 95% of it (828_400), which is
+ * the budget's `contextWindow`. An older option that carries only the
+ * effective window is inverted through the same 95% — never guessed upward.
+ *
+ * Standard mode passes nothing: codex's own catalog budget applies, and a
+ * session switched back from expansive simply stops sending the pair.
+ */
+export function codexContextOverrides(session: Pick<VerseSession, 'contextMode' | 'model'>, launch: VerseSeatLaunch): string[] {
+  if (session.contextMode !== 'expansive') return [];
+  const budget = budgetFor(modelOptionFor(launch, session.model), 'expansive');
+  if (!budget) return [];
+  const effective = positiveInt(budget.contextWindow);
+  const providerWindow = positiveInt(budget.providerWindow ?? null)
+    ?? (effective !== null ? Math.round((effective * 100) / CODEX_EFFECTIVE_WINDOW_PERCENT) : null);
+  if (providerWindow === null) return [];
+  const limit = Math.min(positiveInt(budget.autoCompactAt) ?? codexAutoCompactAt(providerWindow), providerWindow);
+  return ['-c', `model_context_window=${providerWindow}`, '-c', `model_auto_compact_token_limit=${limit}`];
+}
+
+/** The launch's pinned project memory, when it is well-formed. */
+function memoryOf(launch: VerseSeatLaunch): { dir: string; block: string; writable: boolean } | null {
+  const memory = launch.memory;
+  if (!memory || typeof memory !== 'object') return null;
+  const { dir, block, writable } = memory;
+  if (typeof dir !== 'string' || !dir.startsWith('/') || typeof block !== 'string' || block.trim().length === 0) return null;
+  return { dir, block, writable: writable === true };
+}
+
+/**
+ * Shared project memory → codex.
+ *
+ *  - The block rides as `developer_instructions` on EVERY turn — `exec` AND
+ *    every `exec resume` — byte-identical (it was snapshotted at
+ *    createSession), so the prompt prefix — and with it the provider's prompt
+ *    cache — is stable, and a compaction cannot summarise it away the way it
+ *    would a first-turn stdin prefix.
+ *  - The memory directory joins the sandbox's writable roots only when this
+ *    session may write it (`writable === true` exactly; anything else is
+ *    read-only). Reading needs no grant: workspace-write keeps the whole disk
+ *    readable.
+ *
+ * WHY resending does not append the block to the thread every turn, and why
+ * sending it on turn 1 only would be WRONG (checked 2026-09-23 without a model
+ * call, against this machine's ~4,000 real rollouts and both pinned binaries):
+ *  - Codex persists a context BASELINE in the rollout and diffs each new turn
+ *    against it; resume restores the baseline from the file. 0.136 (codex-a)
+ *    documents its TurnContextItem as "persist once per real user turn after
+ *    computing that turn's model-visible context updates … so resume/fork
+ *    replay can recover the latest durable baseline". 0.142+ (codex-b's
+ *    0.155) writes `world_state` records instead — one `full` snapshot, then
+ *    `full:false` records carrying ONLY the sections that changed — and
+ *    `managed_developer_instructions` (this config key) is one of those
+ *    sections ("failed to restore world-state section snapshot" in 0.155).
+ *  - Observed: an unchanged fragment is never re-sent mid-thread. In main
+ *    threads, `<skills_instructions>` was re-emitted 53 times — all with a
+ *    CHANGED text, 0 identical — and `<permissions instructions>` 6 times, 5
+ *    changed plus 1 forced by a model switch; 72 turns resumed after >6 h idle
+ *    (process restarts) re-emitted nothing. So an identical block is a no-op.
+ *  - Compaction rebuilds the full developer context from the CURRENT
+ *    process's settings (526 of 537 compacted records carry the permissions
+ *    and skills blocks in `replacement_history`). A resume launched WITHOUT
+ *    the key would therefore lose the memory block at its first compaction
+ *    (and on 0.142+ record the section as changed to empty).
+ *  Honest gap: no rollout here has ever carried a non-empty
+ *  developer_instructions (all 1,351 `managed_developer_instructions`
+ *  snapshots are `{}`), and no `codex exec resume` thread exists locally, so
+ *  the no-duplication claim rests on the sibling sections above. If a real
+ *  multi-turn rollout ever shows the block repeating, the fix is NOT turn-1
+ *  only (see compaction) but upstream.
+ */
+function memoryOverrides(launch: VerseSeatLaunch): { writableRoots: string[]; config: string[] } {
+  const memory = memoryOf(launch);
+  if (!memory) return { writableRoots: [], config: [] };
+  return {
+    writableRoots: memory.writable ? [memory.dir] : [],
+    config: ['-c', `developer_instructions=${tomlString(memory.block)}`],
+  };
+}
+
+/**
+ * How the config keys above were verified WITHOUT a model call (2026-09-23):
+ * `CODEX_HOME=<empty scratch dir> codex exec [resume <id>] --strict-config
+ * -c <key>=<value> -c 'model_instructions_file="/nonexistent"' --json -`.
+ * An unknown key fails config loading ("unknown configuration field"); a
+ * known one gets past it and stops at the missing instructions file — before
+ * authentication, so nothing can reach a provider. Kept as data so the method
+ * travels with the keys it vouches for.
+ */
+export const strictConfigVerified: readonly string[] = [
+  'sandbox_workspace_write.writable_roots',
+  'model_context_window',
+  'model_auto_compact_token_limit',
+  'developer_instructions',
+];
+
 function buildCodexLaunch(session: VerseSession, text: string, launch: VerseSeatLaunch): VerseTurnLaunch {
   const prefix = launch.launcher ? [...launch.launcher] : ['codex'];
-  const extraRoots = verseSessionRoots(session).slice(1);
-  const writable = writableRootsOverride(extraRoots);
+  const memory = memoryOverrides(launch);
+  const config = [
+    ...writableRootsOverride([...verseSessionRoots(session).slice(1), ...memory.writableRoots]),
+    ...codexContextOverrides(session, launch),
+    ...memory.config,
+  ];
   const argv = session.turnCount > 0 && session.nativeSessionId
-    ? [...prefix, 'exec', 'resume', session.nativeSessionId, ...writable, '--json', '-']
-    : [...prefix, 'exec', ...writable, '--json', '--model', session.model, '--cd', session.projectPath, '--sandbox', 'workspace-write', '-'];
+    ? [...prefix, 'exec', 'resume', session.nativeSessionId, ...config, '--json', '-']
+    // Always the CANONICAL id: a stored alias (e.g. a pre-3.9 record) must
+    // reach the CLI as the model the label promised.
+    : [...prefix, 'exec', ...config, '--json', '--model', canonicalModelId(session.model), '--cd', session.projectPath, '--sandbox', 'workspace-write', '-'];
   return { argv, cwd: session.projectPath, env: {}, stdin: text };
 }
 
@@ -155,8 +322,7 @@ export function createCodexParser(turnId: string): VerseTurnParser {
   const startedTools = new Set<string>();
   const completedTools = new Set<string>();
   const emittedMessages = new Set<string>();
-  let usage: VerseParsedEvent | null = null;
-  let usageEmitted = false;
+  let reported: CodexTokenTotals | null = null;
 
   function handleItem(out: VerseParsedEvent[], phase: 'started' | 'completed', item: JsonObject): void {
     const type = str(item['type']);
@@ -204,29 +370,11 @@ export function createCodexParser(turnId: string): VerseTurnParser {
         return;
       }
       case 'turn.completed': {
-        const u = isObject(ev['usage']) ? ev['usage'] : null;
-        if (u) {
-          const input = num(u['input_tokens']);
-          const cached = num(u['cached_input_tokens']);
-          usage = {
-            type: 'usage',
-            turnId,
-            usage: {
-              // codex's input_tokens already includes the cached portion, so
-              // split it: the session totals (engine sums input + cache read)
-              // must count each token once.
-              inputTokens: Math.max(0, input - cached),
-              outputTokens: num(u['output_tokens']),
-              cacheReadTokens: Math.min(cached, input),
-              cacheCreationTokens: 0,
-              // `exec --json` has no per-call prompt size — only the turn
-              // total across every model call — so the codex context meter is
-              // a per-turn UPPER BOUND; the engine clamps it to the window.
-              contextTokens: input,
-              contextWindow: null,
-            },
-          };
-        }
+        // Held, not emitted: see `afterCodexTurn`. On `exec resume` this figure
+        // is the THREAD's running total, so only the rollout can say what this
+        // turn used; the printed figure is the fallback when it cannot.
+        const usage = codexTotals(ev['usage']);
+        if (usage) reported = usage;
         return;
       }
       case 'turn.failed':
@@ -241,7 +389,7 @@ export function createCodexParser(turnId: string): VerseTurnParser {
     }
   }
 
-  return {
+  const parser: VerseTurnParser = {
     push(line: string): VerseParsedEvent[] {
       const ev = parseJsonObjectLine(line);
       if (!ev) return [];
@@ -250,21 +398,254 @@ export function createCodexParser(turnId: string): VerseTurnParser {
       return out;
     },
     finish(_exitCode: number | null): VerseParsedEvent[] {
-      // Exit-code errors are the engine's to report (it also has the stderr tail).
-      const out: VerseParsedEvent[] = [];
-      if (usage && !usageEmitted) {
-        usageEmitted = true;
-        out.push(usage);
-      }
-      return out;
+      // Exit-code errors are the engine's to report (it also has the stderr
+      // tail); this turn's `usage` is emitted by `afterTurn`, which runs next.
+      return [];
     },
     nativeSessionId(): string | null {
       return threadId;
     },
   };
+  const read = (): CodexTokenTotals | null => reported;
+  reportedUsage.set(parser, read);
+  rememberByTurn(turnId, read);
+  return parser;
+}
+
+// ---------------------------------------------------------------------------
+// Telemetry hooks (V3.9)
+// ---------------------------------------------------------------------------
+
+/**
+ * `turn.completed.usage` as the CLI printed it, per parser. A WeakMap rather
+ * than a method so the frozen `VerseTurnParser` interface is untouched and
+ * the figure dies with its parser.
+ */
+const reportedUsage = new WeakMap<VerseTurnParser, () => CodexTokenTotals | null>();
+
+/**
+ * The same getters keyed by turn id, for a hook context whose `parser` is a
+ * WRAPPER around the codex parser (an engine or test that decorates parser
+ * output). Bounded, and each entry is dropped once `afterTurn` has read it.
+ */
+const reportedByTurn = new Map<string, () => CodexTokenTotals | null>();
+const MAX_TRACKED_TURNS = 64;
+
+function rememberByTurn(turnId: string, read: () => CodexTokenTotals | null): void {
+  if (typeof turnId !== 'string' || turnId.length === 0) return;
+  reportedByTurn.delete(turnId);
+  if (reportedByTurn.size >= MAX_TRACKED_TURNS) {
+    const oldest = reportedByTurn.keys().next().value;
+    if (oldest !== undefined) reportedByTurn.delete(oldest);
+  }
+  reportedByTurn.set(turnId, read);
+}
+
+/**
+ * What the codex parser captured from `turn.completed`, or null (none printed
+ * / not a codex parser). Looked up by parser identity, then by `turnId`.
+ */
+export function codexReportedUsage(parser: VerseTurnParser, turnId?: string): CodexTokenTotals | null {
+  try {
+    const read = reportedUsage.get(parser) ?? (turnId !== undefined ? reportedByTurn.get(turnId) : undefined);
+    return read?.() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Per-turn hook scratch, kept in `ctx.state` under this key. */
+const STATE_KEY = 'codexRollout';
+
+interface CodexHookState {
+  tracker: CodexTurnTracker;
+  /** Located rollout for this turn's thread (private path; never leaves this module). */
+  file: string | null;
+  /** The bounded full-tree search runs at most once per turn; later polls only probe the id's own date. */
+  searched: boolean;
+  /** Identity of the last `context` reading emitted, so a poll never repeats one. */
+  emittedReading: string | null;
+  /** Compactions already emitted (the tracker's list is append-only). */
+  emittedCompactions: number;
+}
+
+function hookState(ctx: VerseAdapterTurnContext): CodexHookState {
+  const existing = ctx.state[STATE_KEY] as CodexHookState | undefined;
+  if (existing && typeof existing === 'object' && existing.tracker) return existing;
+  const fresh: CodexHookState = {
+    tracker: createCodexTurnTracker(),
+    file: null,
+    searched: false,
+    emittedReading: null,
+    emittedCompactions: 0,
+  };
+  ctx.state[STATE_KEY] = fresh;
+  return fresh;
+}
+
+/**
+ * Read whatever the thread's rollout gained since the last call. False when
+ * there is nothing to read yet (no thread id, no pinned CODEX_HOME, no file).
+ */
+function observe(ctx: VerseAdapterTurnContext, state: CodexHookState): boolean {
+  const threadId = ctx.nativeSessionId;
+  if (!isCodexThreadId(threadId)) return false;
+  const nativeState = codexNativeStatePath(ctx.launch?.launcher ?? null);
+  if (!nativeState) return false;
+  if (!state.file) {
+    state.file = locateCodexRollout(nativeState, threadId, { fullScan: !state.searched });
+    state.searched = true;
+    if (!state.file) return false;
+  }
+  if (advanceCodexTurnTracker(state.tracker, state.file, ctx.startedAt, threadId)) return true;
+  // Pruned or replaced mid-turn: look it up again next time.
+  state.file = null;
+  return false;
+}
+
+/**
+ * Whether the tracker's latest reading describes the context NOW. A reading
+ * this turn produced always does. One left over from the previous turn does
+ * only when this turn demonstrably made no model call — otherwise the prompt
+ * has grown past it and presenting it as exact would understate occupancy.
+ */
+function currentReading(state: CodexHookState, reported: CodexTokenTotals | null): CodexTurnTracker['reading'] {
+  const reading = state.tracker.initialized ? state.tracker.reading : null;
+  if (!reading) return null;
+  if (reading.inTurn) return reading;
+  const noCallsThisTurn = state.tracker.calls === 0 && (!reported || reported.inputTokens === 0);
+  return noCallsThisTurn ? reading : null;
+}
+
+function compactionEvents(ctx: VerseAdapterTurnContext, state: CodexHookState, final: boolean): VerseParsedEvent[] {
+  const out: VerseParsedEvent[] = [];
+  const all = state.tracker.compactions;
+  while (state.emittedCompactions < all.length) {
+    const compaction = all[state.emittedCompactions]!;
+    // Mid-turn, wait for the post-compaction reading so the divider can say
+    // "240k → 35k"; after the turn, emit what is known.
+    if (!final && compaction.postTokens === null) break;
+    state.emittedCompactions += 1;
+    out.push({
+      type: 'compaction',
+      turnId: ctx.turnId,
+      // `exec` has no manual compact verb; every rollout compaction is codex's own.
+      trigger: 'auto',
+      preTokens: compaction.preTokens,
+      postTokens: compaction.postTokens,
+      durationMs: null,
+    });
+  }
+  return out;
+}
+
+function contextEvent(ctx: VerseAdapterTurnContext, reading: NonNullable<CodexTurnTracker['reading']>): VerseParsedEvent {
+  return { type: 'context', turnId: ctx.turnId, contextTokens: reading.tokens, contextWindow: reading.window, exact: true };
+}
+
+/** Codex usage totals → Verse's disjoint buckets (codex's input INCLUDES cached and cache-write tokens). */
+function verseUsageFrom(totals: CodexTokenTotals): Pick<VerseUsage, 'inputTokens' | 'outputTokens' | 'cacheReadTokens' | 'cacheCreationTokens'> {
+  const input = totals.inputTokens;
+  const cacheRead = Math.min(totals.cachedInputTokens, input);
+  const cacheWrite = Math.min(totals.cacheWriteInputTokens, input - cacheRead);
+  return {
+    inputTokens: input - cacheRead - cacheWrite,
+    outputTokens: totals.outputTokens,
+    cacheReadTokens: cacheRead,
+    cacheCreationTokens: cacheWrite,
+  };
+}
+
+/**
+ * Live meter: while the turn runs, every new `token_count` becomes an exact
+ * `context` reading, and a compaction becomes a divider as soon as the
+ * reading after it lands. Never emits usage (that is `afterTurn`'s, once).
+ */
+export function pollCodexTelemetry(ctx: VerseAdapterTurnContext): VerseParsedEvent[] {
+  try {
+    const state = hookState(ctx);
+    if (!observe(ctx, state)) return [];
+    const out = compactionEvents(ctx, state, false);
+    const reading = state.tracker.reading;
+    if (reading?.inTurn) {
+      const key = `${reading.offset}:${reading.tokens}:${reading.window ?? ''}`;
+      if (key !== state.emittedReading) {
+        state.emittedReading = key;
+        out.push(contextEvent(ctx, reading));
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * After the process exits: any compactions not yet shown, then THE turn's
+ * `usage` event, then the final exact `context` reading.
+ *
+ * WHY USAGE IS EMITTED HERE AND NOT BY THE PARSER. The engine SUMS `usage`
+ * events into the session's totals, and codex's `turn.completed.usage` on
+ * `exec resume` is the thread's running total (codex seeds its token counter
+ * from the rollout on resume). Emitted from the parser, turn N would add turns
+ * 1…N again. The parser runs before this hook and cannot read files, so it
+ * holds the printed figure and this hook emits exactly one `usage` per turn
+ * from the best evidence (`codexTurnUsage`): the CLI's own per-turn record,
+ * else the sum of this turn's calls, else the printed figure — converted to a
+ * delta when it matches the rollout's running total. With no readable rollout
+ * the printed figure is used as-is, marked as an upper-bound reading.
+ */
+export function afterCodexTurn(ctx: VerseAdapterTurnContext): VerseParsedEvent[] {
+  const out: VerseParsedEvent[] = [];
+  let reported: CodexTokenTotals | null = null;
+  try { reported = codexReportedUsage(ctx.parser, ctx.turnId); } catch { reported = null; }
+  reportedByTurn.delete(ctx.turnId);
+  let state: CodexHookState | null = null;
+  try {
+    state = hookState(ctx);
+    observe(ctx, state);
+    out.push(...compactionEvents(ctx, state, true));
+  } catch {
+    // Telemetry is best effort; the usage below still falls back to stdout.
+  }
+
+  try {
+    const tracker = state?.tracker.initialized ? state.tracker : null;
+    const firstTurn = !(ctx.session.turnCount > 0 && ctx.session.nativeSessionId);
+    const turn = codexTurnUsage(tracker, reported, firstTurn);
+    const reading = state ? currentReading(state, reported) : null;
+    if (turn) {
+      const buckets = verseUsageFrom(turn.totals);
+      out.push({
+        type: 'usage',
+        turnId: ctx.turnId,
+        usage: {
+          ...buckets,
+          // Exact when the rollout says what is in context now; otherwise the
+          // turn's own prompt total, an UPPER BOUND (it sums every call).
+          contextTokens: reading ? reading.tokens : turn.totals.inputTokens,
+          contextWindow: reading ? reading.window : tracker?.taskStartedWindow ?? null,
+          contextTokensExact: reading !== null,
+        },
+      });
+    }
+    if (reading) out.push(contextEvent(ctx, reading));
+  } catch {
+    // Never let a telemetry failure take the turn's usage with it.
+    if (reported && !out.some((event) => event.type === 'usage')) {
+      out.push({
+        type: 'usage',
+        turnId: ctx.turnId,
+        usage: { ...verseUsageFrom(reported), contextTokens: reported.inputTokens, contextWindow: null, contextTokensExact: false },
+      });
+    }
+  }
+  return out;
 }
 
 export const codexAdapter: VerseAdapter = {
   buildLaunch: buildCodexLaunch,
   createParser: createCodexParser,
+  pollTelemetry: pollCodexTelemetry,
+  afterTurn: afterCodexTurn,
 };

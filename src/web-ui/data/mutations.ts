@@ -8,8 +8,8 @@
  *
  * Routes mirror the mutating surface documented at the top of
  * src/core/web/api.ts. Every one of these 404s (not 401/403) when the
- * server was started without --allow-dispatch — apiPost already maps that
- * to DispatchDisabledError.
+ * server was started without --allow-dispatch — apiPost maps that code-less
+ * 404 to DispatchDisabledError (a 404 carrying a `code` stays an ApiError).
  */
 import { apiPost } from './client.js';
 import { getMutationToken, touchMutationHold } from './auth-store.js';

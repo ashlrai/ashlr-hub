@@ -27,6 +27,7 @@ that every integration, provider or autonomous effect is active.
 | Decide whether to give one agent the whole context window or four a quarter each | [Plan deep, execute wide](LOCAL-CONTEXT-STRATEGY.md) |
 | Cut a release and publish without CI | [Releasing locally](RELEASING-LOCALLY.md) |
 | See what multi-folder workspaces, GitHub and MCP management still need | [Workspaces build contract](VERSE-WORKSPACES.md) |
+| Read a Verse chat's context meter, choose standard or expansive context, and continue a long session in a fresh chat | [Verse context windows — source guide](https://github.com/ashlrai/ashlr-hub/blob/master/docs/VERSE-CONTEXT.md) |
 
 The CLI's `universe help`, `resources pool --help` and `runtime help` describe
 the command surface in the exact binary you are running. A source guide may

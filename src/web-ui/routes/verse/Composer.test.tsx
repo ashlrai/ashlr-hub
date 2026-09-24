@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { cleanup as cleanupRender, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT } from './fixtures.test-support.js';
-import { Composer, type ComposerProps } from './Composer.js';
+import { CLAUDE_1M_SEAT, CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT } from './fixtures.test-support.js';
+import { Composer, costConsequence, type ComposerProps } from './Composer.js';
+import { clearComposerMemory, costHint, loadDraft, saveDraft } from './chat/composer-state.js';
+import type { VerseSeat } from '../../data/api-types.js';
 
 const SEATS = [CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT];
 
@@ -183,5 +185,106 @@ describe('Composer — depth for a long day', () => {
     await user.type(screen.getByRole('textbox', { name: 'Message' }), 'ship it');
     await user.keyboard('{Meta>}{Enter}{/Meta}');
     await waitFor(() => expect(p.onSend).toHaveBeenCalledWith('ship it'));
+  });
+});
+
+describe('Composer — V3.9 cost hint on the compaction point', () => {
+  beforeEach(() => localStorage.clear());
+  afterEach(() => localStorage.clear());
+
+  it('warns against the compaction point, not the window, and says how much is left', async () => {
+    const user = userEvent.setup();
+    // 300k of a 1M window is 30% — comfortable by the old rule — but 82% of the way to compaction at 367k.
+    render(<Composer {...props({ sessionId: 'vs_1', contextTokens: 300_000, contextWindow: 1_000_000, autoCompactAt: 367_000 })} />);
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'one more thing');
+    const hint = screen.getByRole('status');
+    expect(hint).toHaveAttribute('data-tone', 'warn');
+    expect(hint).toHaveTextContent('30% of the context window');
+    expect(hint).toHaveTextContent('About 67k left before the CLI auto-compacts.');
+  });
+
+  it('says the CLI will compact when the message reaches the compaction point', () => {
+    const hint = costHint('x'.repeat(40_000), { contextTokens: 360_000, contextWindow: 1_000_000, autoCompactAt: 367_000 })!;
+    expect(hint.pastCompaction).toBe(true);
+    expect(hint.tone).toBe('danger');
+    expect(costConsequence(hint)).toContain('the CLI will summarise earlier turns during this reply');
+  });
+
+  it('calls out a projection past the whole window', () => {
+    const hint = costHint('ask', { contextTokens: 210_000, contextWindow: 200_000, autoCompactAt: 167_000 })!;
+    expect(hint.tone).toBe('over');
+    expect(hint.projectedPercent).toBe(105);
+    expect(costConsequence(hint)).toContain('past the whole window');
+  });
+
+  it('flags an upper-bound reading instead of presenting it as measured', () => {
+    const hint = costHint('ask', { contextTokens: 240_000, contextWindow: 258_400, autoCompactAt: 244_800, exact: false })!;
+    expect(hint.exact).toBe(false);
+    expect(costConsequence(hint)).toContain('upper bound');
+  });
+
+  it('stays quiet for a comfortable session and for an unknown window', () => {
+    expect(costHint('hello', { contextTokens: 100_000, contextWindow: 1_000_000, autoCompactAt: 367_000 })).toBeNull();
+    expect(costHint('hello', { contextTokens: 190_000, contextWindow: null })).toBeNull();
+    expect(costHint('   ', { contextTokens: 190_000, contextWindow: 200_000 })).toBeNull();
+  });
+
+  it('explains a pre-filled handoff note until it is sent', async () => {
+    const user = userEvent.setup();
+    saveDraft('vs_new', 'Continuing “Old chat”. Goal: finish it.');
+    const p = props({ sessionId: 'vs_new', handoffDraft: true });
+    render(<Composer {...p} />);
+    const box = screen.getByRole('textbox', { name: 'Message' });
+    expect(box).toHaveValue('Continuing “Old chat”. Goal: finish it.');
+    expect(screen.getByText(/Handoff note drafted from the previous chat/)).toBeInTheDocument();
+    expect(p.onSend).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Send message' }));
+    await waitFor(() => expect(p.onSend).toHaveBeenCalledWith('Continuing “Old chat”. Goal: finish it.'));
+    expect(screen.queryByText(/Handoff note drafted/)).toBeNull();
+  });
+
+  it('keeps a handoff note in memory when storage refuses the write, and the new chat still opens with it', async () => {
+    // Blocked or full storage: setItem throws. The note is the ONLY copy.
+    const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('quota', 'QuotaExceededError');
+    });
+    try {
+      saveDraft('vs_blocked', 'Handoff note: keep going.');
+      expect(loadDraft('vs_blocked')).toBe('Handoff note: keep going.');
+      render(<Composer {...props({ sessionId: 'vs_blocked', handoffDraft: true })} />);
+      expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Handoff note: keep going.');
+      // A clear that also cannot be written must not resurrect the note.
+      saveDraft('vs_blocked', '');
+      expect(loadDraft('vs_blocked')).toBe('');
+    } finally {
+      setItem.mockRestore();
+      clearComposerMemory();
+    }
+    // Once storage accepts a write again, storage is the answer.
+    saveDraft('vs_blocked', 'stored');
+    expect(localStorage.getItem('ashlr.verse.drafts.v1')).toContain('stored');
+    expect(loadDraft('vs_blocked')).toBe('stored');
+  });
+
+  it('draws no cost warning from an upper bound past the compaction point', () => {
+    // A codex turn total, not the prompt: nothing honest to say about "past the window".
+    expect(costHint('x'.repeat(400), { contextTokens: 697_060, contextWindow: 258_400, autoCompactAt: 244_800, exact: false })).toBeNull();
+  });
+
+  it('never offers a model the seat cannot run in the new-chat menu', async () => {
+    const user = userEvent.setup();
+    // A seat whose FIRST listed model needs a newer CLI.
+    const skewed: VerseSeat = { ...CLAUDE_1M_SEAT, id: 'claude-b', label: 'Claude B', models: [CLAUDE_1M_SEAT.models[1]!, CLAUDE_1M_SEAT.models[0]!] };
+    const allUnavailable: VerseSeat = { ...CLAUDE_1M_SEAT, id: 'claude-c', label: 'Claude C', models: [CLAUDE_1M_SEAT.models[1]!] };
+    const p = props({ seats: [CLAUDE_SEAT, skewed, allUnavailable] });
+    render(<Composer {...p} />);
+    await user.click(screen.getByRole('button', { name: /Claude Max · Opus 5/ }));
+    const menu = screen.getByRole('menu', { name: 'Seat' });
+    expect(within(menu).queryByRole('menuitem', { name: /Claude C/ })).toBeNull();
+    const item = within(menu).getByRole('menuitem', { name: /New chat on Claude B/ });
+    expect(item).toHaveTextContent('Opus 5');
+    expect(item).not.toHaveTextContent('Opus 5.5');
+    await user.click(item);
+    expect(p.onSeatChange).toHaveBeenCalledWith({ seatId: 'claude-b', model: 'claude-opus-5' });
   });
 });

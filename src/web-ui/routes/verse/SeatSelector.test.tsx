@@ -2,8 +2,20 @@ import { describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { CLAUDE_SEAT, CODEX_SEAT, LOCAL_SEAT } from './fixtures.test-support.js';
-import { CLAUDE_TIGHT_SEAT, CODEX_CREDITS_SEAT, UNREAD_SEAT } from './seat-fixtures.test-support.js';
-import { decodeSeatChoice, defaultSeatChoice, encodeSeatChoice, SeatSelector } from './SeatSelector.js';
+import {
+  CLAUDE_CONTEXT_SEAT,
+  CLAUDE_SKEW_NOTE,
+  CLAUDE_TIGHT_SEAT,
+  CODEX_CONTEXT_SEAT,
+  CODEX_CREDITS_SEAT,
+  GROK_CONTEXT_SEAT,
+  LOCAL_CONTEXT_SEAT,
+  OPUS_55_REASON,
+  UNKNOWN_WINDOW_SEAT,
+  UNREAD_SEAT,
+} from './seat-fixtures.test-support.js';
+import { decodeSeatChoice, defaultSeatChoice, encodeSeatChoice, SeatSelector, seatOptionTitle } from './SeatSelector.js';
+import { WINDOW_SOURCE_TEXT } from './verse-model.js';
 
 const SEATS = [LOCAL_SEAT, CODEX_SEAT, CLAUDE_SEAT];
 
@@ -17,7 +29,8 @@ describe('SeatSelector', () => {
     const codex = screen.getByRole('option', { name: /Personal Codex — GPT-5.5/ }) as HTMLOptionElement;
     expect(codex).toBeDisabled();
     expect(codex.textContent).toContain('unavailable: quota exhausted until 14:00');
-    expect(codex).toHaveAttribute('title', 'Unavailable: quota exhausted until 14:00');
+    // The reason leads the tooltip; the model's context sentence follows it.
+    expect(codex.getAttribute('title')?.split('\n')[0]).toBe('Unavailable: quota exhausted until 14:00');
 
     // The option name now carries the seat's capacity too — see the
     // "capacity at the point of choice" block below for why.
@@ -128,5 +141,74 @@ describe('SeatSelector — plan and binding window from the capacity record', ()
     // An absent figure already says "unread"; "no reading" on every row is noise.
     expect(option.textContent).not.toContain('no capacity reading');
     expect(option).not.toBeDisabled();
+  });
+});
+
+/**
+ * V3.9 — every row says what context it buys. The picker used to show no
+ * window at all, and the only one near it was the seat's DEFAULT model's
+ * (200k for every 1M Claude model).
+ */
+describe('SeatSelector — context per model', () => {
+  const SEATS_V39 = [CLAUDE_CONTEXT_SEAT, CODEX_CONTEXT_SEAT, GROK_CONTEXT_SEAT, LOCAL_CONTEXT_SEAT];
+
+  it('shows each model’s own window and compaction point', () => {
+    render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}} />);
+    expect(screen.getByRole('option', { name: /Claude Max — Fable 5\.1 · 1M ctx · compacts ≈367k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Claude Max — Haiku 4\.5 · 200k ctx · compacts ≈167k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Work Codex — GPT-6 Astra · 258k ctx · compacts ≈245k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Grok — Grok 4\.7 Fast · 500k ctx · compacts ≈400k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k · 66k ctx · compacts ≈33k$/ })).toBeInTheDocument();
+  });
+
+  it('lists a model the pinned CLI cannot run, disabled, with the reason', () => {
+    render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}} />);
+    const opus = screen.getByRole('option', { name: /Claude Max — Opus 5\.5/ }) as HTMLOptionElement;
+    expect(opus).toBeDisabled();
+    expect(opus.textContent).toContain(`(unavailable: ${OPUS_55_REASON})`);
+    expect(opus.getAttribute('title')?.split('\n')[0]).toBe(`Unavailable: ${OPUS_55_REASON}`);
+    // Its siblings on the same seat stay choosable.
+    expect(screen.getByRole('option', { name: /Claude Max — Fable 5\.1/ })).not.toBeDisabled();
+  });
+
+  it('carries the pinned CLI version and the seat notes in every row’s tooltip', () => {
+    render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}} />);
+    const fable = screen.getByRole('option', { name: /Claude Max — Fable 5\.1/ });
+    const title = fable.getAttribute('title') ?? '';
+    expect(title).toContain('1M-token window; compacts at about 367k in Standard. Expansive runs to about 967k before compacting.');
+    expect(title).toContain('Runs Claude Code 2.1.257.');
+    expect(title).toContain(CLAUDE_SKEW_NOTE);
+    expect(seatOptionTitle(GROK_CONTEXT_SEAT, GROK_CONTEXT_SEAT.models[0]!, null)).toBe(
+      `500k-token window; compacts at about 400k. Window ${WINDOW_SOURCE_TEXT['provider-catalog']}.`,
+    );
+  });
+
+  it('says a window is unknown rather than printing a default', () => {
+    render(<SeatSelector seats={[UNKNOWN_WINDOW_SEAT]} value={null} onChange={() => {}} />);
+    expect(screen.getByRole('option', { name: 'Claude Team — Mystery 9 · window unknown' })).toBeInTheDocument();
+  });
+
+  it('adds a fit verdict to every row once the chosen folders are sized', () => {
+    render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}} workingSetTokens={300_000} />);
+    expect(screen.getByRole('option', { name: /Fable 5\.1 .* · code fits, tight$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-6 Astra .* · code needs expansive$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /GPT-5\.5 .* · code too big — split$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /qwen3\.8:27b-ctx64k .* · code too big — split$/ })).toBeInTheDocument();
+  });
+
+  it('shows the budget of the mode each row would run in', () => {
+    render(<SeatSelector seats={SEATS_V39} value={null} onChange={() => {}}
+      modeFor={(seat) => (seat.id === 'claude-a' || seat.id === 'grok-a' ? 'expansive' : 'standard')} />);
+    expect(screen.getByRole('option', { name: /Fable 5\.1 · 1M ctx · compacts ≈967k \(expansive\)$/ })).toBeInTheDocument();
+    // A model with no expansive budget falls back to its one real budget.
+    expect(screen.getByRole('option', { name: /Haiku 4\.5 · 200k ctx · compacts ≈167k$/ })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /Grok 4\.7 Fast · 500k ctx · compacts ≈400k$/ })).toBeInTheDocument();
+  });
+
+  it('defaults to a RUNNABLE model even when an unavailable one is listed first', () => {
+    const skewFirst = { ...CLAUDE_CONTEXT_SEAT, models: [CLAUDE_CONTEXT_SEAT.models[1]!, CLAUDE_CONTEXT_SEAT.models[2]!] };
+    expect(defaultSeatChoice([skewFirst])).toEqual({ seatId: 'claude-a', model: 'claude-haiku-4-5-20251001' });
+    const nothingRunnable = { ...CLAUDE_CONTEXT_SEAT, models: [CLAUDE_CONTEXT_SEAT.models[1]!] };
+    expect(defaultSeatChoice([nothingRunnable, GROK_CONTEXT_SEAT])).toEqual({ seatId: 'grok-a', model: 'grok-4.7-build-fast' });
   });
 });

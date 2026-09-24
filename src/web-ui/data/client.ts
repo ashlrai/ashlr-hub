@@ -17,13 +17,28 @@ export class ApiError extends Error {
      * it is the text the route author wrote for a person to read.
      */
     public readonly detail: string | null = null,
+    /**
+     * The route's machine-readable refusal code (`VERSE_SESSION_NOT_FOUND`,
+     * `VERSE_SESSION_BUSY`, …) when the body carried one; null otherwise. Lets a
+     * caller branch on WHAT was refused without parsing the sentence.
+     */
+    public readonly code: string | null = null,
   ) {
     super(message);
     this.name = 'ApiError';
   }
 }
 
-/** Raised specifically for 404s on mutation routes: --allow-dispatch is off. */
+/**
+ * Raised for the 404 a mutation route answers when --allow-dispatch is off.
+ *
+ * That gate answers a bare `{ error: 'not found' }` — deliberately the same
+ * body as a route that does not exist, so a read-only server does not
+ * advertise its write surface. A route that DOES exist and refuses with a 404
+ * of its own ("session not found") says so with a `code`; apiPost keeps those
+ * as plain ApiErrors, so a deleted chat is never reported as "this server is
+ * read-only".
+ */
 export class DispatchDisabledError extends ApiError {
   constructor(path: string) {
     super('This server was started without --allow-dispatch, so mutations are disabled.', 404, path);
@@ -70,36 +85,50 @@ export async function apiPost<T>(
     body: JSON.stringify(body ?? {}),
     signal,
   });
-  if (res.status === 404) {
-    throw new DispatchDisabledError(path);
-  }
   if (res.status === 401) {
     throw new ApiError('Mutation token was rejected.', 401, path);
   }
   if (!res.ok) {
-    let detail = '';
-    try {
-      // `error` is the documented refusal field, but the Verse control plane
-      // answers a refused daemon/scope action with a full result body whose
-      // plain-language sentence lives in `note` and which has NO `error` key
-      // at all (see VerseDaemonActionResult). Reading only `error` threw away
-      // sentences like "no repositories are enrolled, so the loop would do
-      // nothing" and left the caller with a bare status code to guess from.
-      const j = (await res.json()) as { error?: unknown; note?: unknown };
-      const message = typeof j.error === 'string' && j.error ? j.error : typeof j.note === 'string' ? j.note : '';
-      detail = message;
-    } catch {
-      /* body wasn't JSON */
+    const { detail, code } = await readRefusal(res);
+    // Only a CODELESS 404 is the dispatch gate (see DispatchDisabledError).
+    // An unknown sub-path on an older server is codeless too and lands here
+    // as well — the two are indistinguishable by design, so callers that
+    // word this error must not assert which one it was.
+    if (res.status === 404 && code === null) {
+      throw new DispatchDisabledError(path);
     }
     throw new ApiError(
       `POST ${path} failed (HTTP ${res.status})${detail ? `: ${detail}` : ''}.`,
       res.status,
       path,
       detail || null,
+      code,
     );
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
+}
+
+/**
+ * The refusal sentence and code from a failed POST's body, if it had any.
+ *
+ * `error` is the documented refusal field, but the Verse control plane
+ * answers a refused daemon/scope action with a full result body whose
+ * plain-language sentence lives in `note` and which has NO `error` key at all
+ * (see VerseDaemonActionResult). Reading only `error` threw away sentences
+ * like "no repositories are enrolled, so the loop would do nothing" and left
+ * the caller with a bare status code to guess from.
+ */
+async function readRefusal(res: Response): Promise<{ detail: string; code: string | null }> {
+  try {
+    const j = (await res.json()) as { error?: unknown; note?: unknown; code?: unknown };
+    const detail = typeof j.error === 'string' && j.error ? j.error : typeof j.note === 'string' ? j.note : '';
+    const code = typeof j.code === 'string' && j.code ? j.code : null;
+    return { detail, code };
+  } catch {
+    /* body wasn't JSON */
+    return { detail: '', code: null };
+  }
 }
 
 /** Build the SSE URL, carrying the client proof as the query-string proof

@@ -226,6 +226,7 @@ export function resetVerseUi(): void {
   state = DEFAULTS;
   nonce = 0;
   seatMemory = null;
+  adviceDismissals.clear();
   try {
     localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem(SEAT_STORAGE_KEY);
@@ -329,3 +330,40 @@ export function rememberVerseSeat(projectPath: string, seat: VerseSeatMemory): v
 }
 
 export const VERSE_SEAT_STORAGE_KEY = SEAT_STORAGE_KEY;
+
+// ---------------------------------------------------------------------------
+// Dismissed context advice, per session (NOT persisted)
+// ---------------------------------------------------------------------------
+
+/**
+ * Which context-advice notes ("continue in a fresh chat", "expansive may
+ * help") the operator waved off, per session.
+ *
+ * WHY IN MEMORY ONLY. Advice is evidence about the session as it is NOW, the
+ * same reason `pendingApprovals` is never persisted: a dismissal restored
+ * from storage after a reload would silence a note whose evidence has since
+ * grown. Held here rather than in component state so that ⌘K-ing away and
+ * back does not bring back a note that was just dismissed.
+ *
+ * The key names the EVIDENCE (ContextAdvice composes it from the advice level
+ * and the compaction count), so a note returns on its own when it escalates.
+ */
+const adviceDismissals = new Map<string, Set<string>>();
+/** Bounded like the other per-session memories. */
+const ADVICE_SESSION_LIMIT = 50;
+
+export function dismissVerseAdvice(sessionId: string, key: string): void {
+  if (!sessionId || !key) return;
+  const set = adviceDismissals.get(sessionId) ?? new Set<string>();
+  set.add(key);
+  // Re-insert so Map order stays recency order, then trim the oldest.
+  adviceDismissals.delete(sessionId);
+  adviceDismissals.set(sessionId, set);
+  for (const stale of [...adviceDismissals.keys()].slice(0, Math.max(0, adviceDismissals.size - ADVICE_SESSION_LIMIT))) {
+    adviceDismissals.delete(stale);
+  }
+}
+
+export function isVerseAdviceDismissed(sessionId: string, key: string): boolean {
+  return adviceDismissals.get(sessionId)?.has(key) ?? false;
+}

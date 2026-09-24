@@ -257,9 +257,11 @@ cache keys it affects) and, if it should be reachable from ⌘K, add a
 `command-palette/commands.ts`.
 
 **Mutating routes 404, not 401/403, when `--allow-dispatch` is off.**
-`client.ts`'s `apiPost` maps that specifically to `DispatchDisabledError` so
-the UI can say "this server was started without dispatch enabled" instead
-of a generic failure.
+`client.ts`'s `apiPost` maps a 404 whose body carries NO `code` to
+`DispatchDisabledError`, so the UI can say "this server was started without
+dispatch enabled" instead of a generic failure. A 404 that carries a `code`
+(e.g. `VERSE_SESSION_NOT_FOUND`) is a real answer from a live route and stays
+an `ApiError` with that code.
 
 ---
 

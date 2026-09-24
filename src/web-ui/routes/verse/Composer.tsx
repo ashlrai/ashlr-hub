@@ -17,11 +17,10 @@
  */
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import type { VerseSeat } from '../../data/api-types.js';
-import { CONTEXT_DANGER_PERCENT, CONTEXT_WARN_PERCENT } from './ContextMeter.js';
-import { costHint, loadDraft, loadHistory, pushHistory, saveDraft } from './chat/composer-state.js';
+import { costHint, loadDraft, loadHistory, pushHistory, saveDraft, type CostHint } from './chat/composer-state.js';
 import { DictationButton } from './DictationButton.js';
 import type { SeatChoice } from './SeatSelector.js';
-import { seatCapacity, SEAT_CAPACITY_WORD, seatPillLabel } from './verse-model.js';
+import { firstRunnableModel, seatCapacity, SEAT_CAPACITY_WORD, seatPillLabel } from './verse-model.js';
 import { formatTokens } from './verse-store.js';
 import styles from './Composer.module.css';
 
@@ -38,9 +37,22 @@ export interface ComposerProps {
   locked: boolean;
   /** True when this session already has turns — the hint row has done its job. */
   hintSeen?: boolean;
-  /** Live context occupancy, for the pre-send cost hint. */
+  /**
+   * Live context occupancy, for the pre-send cost hint — the SAME budget the
+   * header meter draws (verse-model `sessionContextBudget`), so the two can
+   * never disagree about when things are tight.
+   */
   contextTokens?: number | null;
   contextWindow?: number | null;
+  /** Where the CLI auto-compacts; the hint's tone is measured against it. */
+  autoCompactAt?: number | null;
+  /** False when `contextTokens` is an upper bound (codex before its rollout is read). */
+  contextExact?: boolean;
+  /**
+   * The box was pre-filled with a handoff note (V3.9) that has not been sent
+   * yet: the help row says so, because the first send IS the first spend.
+   */
+  handoffDraft?: boolean;
   onSend: (text: string) => Promise<boolean> | boolean;
   onStop: () => void;
   onSeatChange: (choice: SeatChoice) => void;
@@ -65,7 +77,7 @@ const MAX_HEIGHT_RATIO = 0.4;
 const MAX_HEIGHT_FALLBACK_PX = 320;
 
 export function Composer({ sessionId = null, seats, seat, engine, running, disabled, disabledReason, locked,
-  hintSeen = false, contextTokens = null, contextWindow = null,
+  hintSeen = false, contextTokens = null, contextWindow = null, autoCompactAt = null, contextExact = true, handoffDraft = false,
   onSend, onStop, onSeatChange, autoFocus = false }: ComposerProps) {
   // A draft survives ⌘K, a reload and a crash; it is restored on mount and
   // written back on every keystroke (Composer is keyed by session id, so a
@@ -92,9 +104,10 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
   const tooLong = useMemo(() => new TextEncoder().encode(text).length > MAX_TEXT_BYTES, [text]);
   const canSend = !disabled && !running && !sending && text.trim().length > 0 && !tooLong;
   const showHint = !hintSeen && !sentHere;
+  const showHandoffHelp = handoffDraft && !sentHere && text.trim().length > 0;
   const cost = useMemo(
-    () => costHint(text, contextTokens, contextWindow, CONTEXT_WARN_PERCENT, CONTEXT_DANGER_PERCENT),
-    [text, contextTokens, contextWindow],
+    () => costHint(text, { contextTokens, contextWindow, autoCompactAt, exact: contextExact }),
+    [text, contextTokens, contextWindow, autoCompactAt, contextExact],
   );
 
   // Persist the draft as it is typed, but not ON every keystroke — see
@@ -294,15 +307,17 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
         <p className={styles.cost} data-tone={cost.tone} role="status">
           <span className={styles.costFigure}>≈{formatTokens(cost.draftTokens)}</span> tokens for this message —
           sending would reach <span className={styles.costFigure}>{cost.projectedPercent}%</span> of the context window.
-          {cost.tone === 'danger' ? ' Start a new chat to keep the agent sharp.' : ''}
+          {costConsequence(cost)}
           <span className="visually-hidden"> This is an estimate; the provider counts the real total.</span>
         </p>
       ) : null}
-      <p id={helpId} className={`${styles.help} ${showHint || tooLong || listening || running || disabled || historyAt !== -1 ? '' : styles.helpQuiet}`}>
+      <p id={helpId} className={`${styles.help} ${showHint || tooLong || listening || running || disabled || historyAt !== -1 || showHandoffHelp ? '' : styles.helpQuiet}`}>
         {tooLong ? <span role="alert" className={styles.helpError}>Message is over 64 KB — trim it before sending.</span>
           : listening ? 'Listening… Esc stops dictation.'
             : disabled && disabledReason ? disabledReason
               : running ? <>Reply in progress — your draft stays here · <kbd>⌘.</kbd> or Stop interrupts the turn</>
+                : showHandoffHelp
+                  ? <>Handoff note drafted from the previous chat — review or edit it; nothing is spent until you press Send.</>
                 : historyAt !== -1 ? <>Recalled message {historyAt + 1} of {history.current.length} · <kbd>↓</kbd> returns to your draft</>
                   : showHint
                     ? <><kbd>Enter</kbd> sends · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>↑</kbd> recalls · <kbd>⌘N</kbd> new chat · <kbd>⌘K</kbd> switch</>
@@ -310,6 +325,22 @@ export function Composer({ sessionId = null, seats, seat, engine, running, disab
       </p>
     </form>
   );
+}
+
+/**
+ * The sentence after the percentage: what actually happens if this is sent.
+ * Worded from the compaction point when it is known, because that — not the
+ * window — is where the agent starts losing detail.
+ */
+export function costConsequence(cost: CostHint): string {
+  const bound = cost.exact ? '' : ' (The current size is an upper bound, so this may overstate it.)';
+  if (cost.tone === 'over') return ` That is past the whole window — the CLI must compact first, or the turn fails. Continue in a fresh chat.${bound}`;
+  if (cost.pastCompaction) return ` That reaches the auto-compaction point, so the CLI will summarise earlier turns during this reply. Continue in a fresh chat to keep full detail.${bound}`;
+  if (cost.autoCompactAt !== null) {
+    const left = Math.max(0, cost.autoCompactAt - cost.projectedTokens);
+    return ` About ${formatTokens(left)} left before the CLI auto-compacts.${cost.tone === 'danger' ? ' Start a new chat to keep the agent sharp.' : ''}${bound}`;
+  }
+  return `${cost.tone === 'danger' ? ' Start a new chat to keep the agent sharp.' : ''}${bound}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +363,9 @@ function SeatPill({ seats, seat, engine, disabled, onNewChat }: SeatPillProps) {
   const current = seatById(seats, seat.seatId);
   const tint = engine ?? current?.engine;
   const label = seatPillLabel(seats, { seatId: seat.seatId, engine: tint ?? 'claude', model: seat.model });
-  const options = seats.filter((s) => s.health.state !== 'unavailable' && s.models.length > 0);
+  // A seat whose every model is listed as unavailable (e.g. needs a newer
+  // CLI) cannot start a chat, so it is not offered as one.
+  const options = seats.filter((s) => s.health.state !== 'unavailable' && firstRunnableModel(s) !== null);
 
   useEffect(() => {
     if (!open) return;
@@ -387,14 +420,15 @@ function SeatPill({ seats, seat, engine, disabled, onNewChat }: SeatPillProps) {
             // health is `unknown` by construction, so a seat with a 100%-used
             // weekly window looked exactly like a fresh one.
             const capacity = seatCapacity(s);
+            const model = firstRunnableModel(s)!;
             return (
               <button key={s.id} type="button" role="menuitem" className={`${styles.seatMenuItem} ${styles[`engine-${s.engine}`] ?? ''}`}
                 data-capacity={capacity.cls}
-                onClick={() => { setOpen(false); onNewChat({ seatId: s.id, model: s.models[0]!.id }); }}>
+                onClick={() => { setOpen(false); onNewChat({ seatId: s.id, model: model.id }); }}>
                 <span className={styles.engineDot} aria-hidden="true" />
                 <span className={styles.seatMenuText}>
                   <span className={styles.seatMenuPrimary}>New chat on {s.label}</span>
-                  <span className={styles.seatMenuSecondary}>{s.models[0]!.label}{s.id === seat.seatId ? ' · same seat' : ''}</span>
+                  <span className={styles.seatMenuSecondary}>{model.label}{s.id === seat.seatId ? ' · same seat' : ''}</span>
                   {capacity.cls === 'unread' ? null : (
                     <span className={styles.seatMenuCapacity}>
                       {SEAT_CAPACITY_WORD[capacity.cls]} · {capacity.text}

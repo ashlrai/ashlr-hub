@@ -534,3 +534,51 @@
 }
 :root[data-motion="reduce"] .turn[data-flash],
 :root[data-motion="reduce"] [data-flash] { animation: none; }
+
+/* ---- V3.9: native compaction divider ------------------------------------ */
+/* A hairline either side of one centred line: the conversation continues
+   across it, but everything above now reaches the agent only as a summary.
+   Tertiary text and no status colour — compaction is the CLI working as
+   designed, not a failure (DESIGN §6: never alarm by colour). */
+.compaction {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.compactionRule { flex: 1; min-width: var(--space-4); height: 1px; background: var(--border-subtle); }
+.compactionText {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  text-align: center;
+}
+.compactionTitle {
+  font-family: var(--font-display);
+  font-size: var(--text-xs-size);
+  font-variant-numeric: tabular-nums;
+  font-weight: var(--font-weight-medium);
+  color: var(--text-secondary);
+}
+.compactionNote { font-size: var(--text-2xs-size, 11px); color: var(--text-tertiary); }
+
+/* ---- V3.9: "Continued from <source>" ------------------------------------ */
+.continued {
+  max-width: var(--measure-read);
+  margin: 0 auto var(--space-6);
+  padding-left: var(--space-4);
+  border-left: 2px solid var(--accent-500);
+  color: var(--text-tertiary);
+  font-size: var(--text-sm-size);
+}
+.continuedLabel { color: var(--text-tertiary); }
+.continuedTitle { color: var(--text-secondary); font-weight: var(--font-weight-medium); }
+.continuedLink {
+  color: var(--text-primary);
+  font-weight: var(--font-weight-medium);
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 2px;
+}
+.continuedLink:hover { text-decoration-color: var(--accent-500); }

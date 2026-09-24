@@ -11,25 +11,47 @@
  * Parse: NDJSON in the Anthropic Messages API wire format (message_start,
  * content_block_start/delta/stop, message_delta{usage}, message_stop). The
  * parser is the shared Anthropic-stream parser, which also accepts claude's
- * `stream_event` wrapper and whole-message envelopes.
+ * `stream_event` wrapper and whole-message envelopes. Grok's terminal `result`
+ * carries `modelUsage.<key>.contextWindow` on the current model's row only
+ * (the key can differ from the CLI id — `grok-4.6-build` for `grok-4.6`), and
+ * a `system/compact_boundary` line marks an auto-compaction; the shared parser
+ * turns both into the usage event's window and a `compaction` event.
+ *
+ * V3.9 context. Grok has no per-invocation compaction budget flag, so there
+ * are no mode flags: it always runs its catalog budget (80% of 500k). Shared
+ * project memory reaches it as `--rules=<block>` — `--rules <RULES>` "Extra
+ * rules to append to the system prompt" (alias `--append-system-prompt`) is in
+ * `grok --help` on the pinned 0.2.118 binary. Grok can reach only `--cwd`, so
+ * the memory directory itself is never granted; the block carries the file's
+ * contents and says this seat may only read it (`writable: false`).
  */
 
+import { canonicalModelId } from '../context-math.js';
 import type { VerseSession, VerseTurnLaunch } from '../types.js';
 import type { VerseSeatLaunch } from '../session-engine.js';
 import type { VerseAdapter } from './index.js';
 import { createAnthropicStreamParser } from './claude.js';
+
+/** The launch record's memory block, when the snapshot is well-formed; anything else means memory off. */
+function launchMemoryBlock(launch: VerseSeatLaunch): string | null {
+  const memory: unknown = launch.memory;
+  if (typeof memory !== 'object' || memory === null) return null;
+  const block = (memory as { block?: unknown }).block;
+  return typeof block === 'string' && block.trim().length > 0 ? block : null;
+}
 
 function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatLaunch): VerseTurnLaunch {
   if (!session.nativeSessionId) {
     throw new Error('grok session is missing its native session id');
   }
   const prefix = launch.launcher ? [...launch.launcher] : ['grok'];
+  const memoryBlock = launchMemoryBlock(launch);
   const argv = [
     ...prefix,
     '--output-format', 'streaming-messages-json',
     '--include-partial-messages',
     '--cwd', session.projectPath,
-    '--model', session.model,
+    '--model', canonicalModelId(session.model),
     // NOT 'acceptEdits'. Grok's acceptEdits auto-approves edits but NOT
     // `run_terminal_command`, and there is no interactive approver in a seat, so
     // the first shell command cancels the turn: measured
@@ -51,6 +73,11 @@ function buildGrokLaunch(session: VerseSession, text: string, launch: VerseSeatL
     // `workspaces.ts engineSupportsExtraRoots()` returns false for grok, so
     // the roots view marks the extras unreachable and says why, instead of
     // letting the operator believe the agent can see them.
+
+    // Shared project memory, the SAME snapshotted block every turn (cache-
+    // stable). The `=` spelling is the one clap accepts for a value that
+    // starts with `-`, exactly as for `--single` below.
+    ...(memoryBlock !== null ? [`--rules=${memoryBlock}`] : []),
     ...(session.turnCount > 0 ? ['--resume', session.nativeSessionId] : ['--session-id', session.nativeSessionId]),
     `--single=${text}`,
   ];

@@ -262,13 +262,20 @@ export const KNOWN_MODELS: readonly ModelEntry[] = [
   // minEffort 2: measured ~590 s/task against 53-381 s for the previous
   // generation. Consistent, but too slow to be the pick for trivial work —
   // `maxEffort: 1` queries keep falling through to the lighter entries.
+  //
+  // NO 'long-context' (Verse 3.9). The tag is `…-ctx64k`: its Modelfile pins
+  // `num_ctx 65536`, Ollama serves it at exactly 65536 (`n_ctx_slot = 65536`
+  // in every server log), and on the llama-server lane each slot gets 65536
+  // too. That is below the >=100k the capability promises, so tagging it sent
+  // long-context work to a model that would overflow. The architecture's
+  // 262144 is reachable only through a differently pinned tag.
   {
     id: `local-coder:${DEFAULT_LOCAL_MODEL_TAG}`,
     engine: 'local-coder' as EngineId,
     tier: 'mid',
     costPerMTokIn: 0,
     costPerMTokOut: 0,
-    capabilities: ['coder', 'reasoning', 'long-context'],
+    capabilities: ['coder', 'reasoning'],
     minEffort: 2,
   },
 

@@ -339,6 +339,207 @@ superseded, not a setup procedure. Use [runtime activation authority](docs/RUNTI
 and the [current architecture boundary](docs/ARCHITECTURE.md#legacy-fleet-activation-boundary).
 Neither the historical record nor a successful test activates a resident fleet.
 
+## [3.9.0] — 2026-09-24 UTC — the context meter tells the truth, and long sessions have somewhere to go
+
+The Verse context meter was wrong on every engine, in a different way each time,
+and a session that was filling up had nowhere to go but a cold new chat. The
+numbers below were read from the pinned CLI binaries, each seat's own model
+catalog and every September Codex rollout on this machine; no paid model was
+prompted to produce them. `docs/VERSE-CONTEXT.md` is the new authority for all of it.
+
+### Behaviour change: new Claude chats compact at ≈367k, existing ones keep ≈967k
+
+- **New Claude chats on a 1M model start in Standard** and compact at ≈367k
+  (`--autocompact 400000`), not near 967k as every Claude chat did before.
+  Expansive — the old full window — is one click away, and can be a seat's default.
+- **Chats created before 3.9 keep the window they ran with.** A Claude chat with
+  no recorded mode is marked **Expansive** the first time 3.9 loads it and runs
+  with `--autocompact auto`, exactly as before, so upgrading compacts nothing and
+  spends nothing. Codex, Grok, local and 200k-Claude chats from before 3.9 stay
+  Standard, which is what they already ran at.
+- **Switching a chat to Standard above ≈367k compacts it on the next turn.** The
+  CLI then summarizes the whole context — on a paid seat that spends usage — and
+  early turns survive only as that summary. The same holds for a Codex chat
+  switched back from Expansive above 244.8k. Switching to Expansive is always
+  free. The mode menu warns before you switch.
+
+### Windows read from the CLIs, not assumed
+
+- **Claude.** Six of the eight models run a **1M** window and compact near
+  967k; Verse showed 200k for all of them, so a Fable session went red at 180k
+  and then sat at 100 % while it grew to 967k — hiding exactly the range where
+  every turn is most expensive. Each model now carries its real window, and the
+  window the CLI reports at runtime (`result.modelUsage`) wins, which also
+  catches the CLI dropping a session to 200k when long-context credit runs out.
+- **"Opus 5.5" was running Opus 5.** Verse offered `claude-opus-5.5`; Claude
+  Code's id parser rejects the dotted suffix and falls back to a substring match
+  on `claude-opus-5`. The real id is `claude-opus-5-5`, which needs Claude Code
+  2.1.280 — and the claude-a seat is pinned to 2.1.257. Opus 5.5 is now listed on
+  that seat **disabled, with the reason** and the fix
+  (`ashlr resources profile repin`, new in this release — below), rather than
+  silently running a different model. Old sessions keep their recorded id, but
+  their turns now ask for the real model, so on a seat that cannot run it the
+  turn is refused up front (409 `VERSE_MODEL_UNAVAILABLE`, with the reason)
+  instead of starting a CLI that would reject the id. A client that still sends
+  `claude-opus-5.5` when creating a chat gets `claude-opus-5-5`.
+- **Codex.** The CLI measures against 95 % of the window — 258,400, reported by
+  every one of 151,715 rollout readings — and compacts near 244,800. Occupancy was
+  the turn's *summed* input — a median 28.8× the real last-call prompt across 260
+  recent turns — so the meter sat red on almost every turn. It now comes from the
+  seat's own rollout — the last call's `last_token_usage.total_tokens`, the
+  figure Codex itself compacts against, and the window the rollout reports —
+  read every 2 s during a turn; until that is readable the figure is marked `≤`. The rollout also fixes per-turn usage: on `exec resume`,
+  Codex's reported usage is the whole thread's running total, which Verse would
+  have added again every turn (no Verse codex chat had run yet, so no stored
+  total is wrong). Models come from each seat's own catalog, so hidden slugs are
+  no longer offered.
+- **Grok** is 500k compacting at 400k, not 256k — the meter read twice the real
+  fill. Labels come from the catalog ("Grok 4.7 Fast"), and only its `.info`
+  entries are read: the same file carries a per-model `api_key` field. Like
+  Claude, the window Grok reports at runtime wins.
+- **Local.** Claude Code assumes 200k for a model it does not know, so a local
+  seat never compacted before a 64k runner overflowed. Verse now tells it the
+  real window (`CLAUDE_CODE_MAX_CONTEXT_TOKENS`), resolves that window from what
+  the runner actually serves (llama-server's per-slot window on that lane,
+  Ollama's own server default for unpinned tags — preferred over whatever
+  context a resident runner was loaded with, since another app may have loaded
+  it at 8k), and parses `-ctx64k` tags, which the old suffix pattern missed.
+  Before every local turn the chat's stored window is refreshed from live
+  discovery, so the window the CLI is told and the one the meter shows are the
+  same, current number. Tags under a 56k window are listed disabled with the
+  reason: after Claude Code's 33k reserve and its ~15k base prompt they would
+  compact on every turn. The fleet's model catalog no longer
+  tags the 64k local coder `long-context` (a capability defined as ≥ 100k), which
+  had routed long-context work to a model that would overflow.
+- Readings are stored **unclamped**: an overflow is information, and the old
+  clamp erased it on disk.
+
+### Compaction you can see
+
+Native compactions become persisted `compaction` events — Claude and Grok from
+`compact_boundary`, Codex from its rollout, sized from the readings just before
+and after it — with a transcript divider ("Auto-compacted 967k → 19k in 1m 58s")
+and a per-session count. The meter draws the whole window with a tick at the
+compaction point and warns at 80 % / 95 % of **that point**. The old fixed
+70 / 90 % of the window turned red only after Grok and Codex had already
+compacted.
+
+**Compact now** — in the chip beside the meter on every Claude and local session
+(a "Context" chip where the model has no second mode), and in the handoff banner — sends `/compact` as an ordinary turn,
+through the same gate as every turn, and the divider reads "Compacted on
+request". It was verified headless on a local seat, where it is free but slow
+(about 2½ minutes for a 15k context on a 27B model). **On a paid seat it spends
+usage**: the CLI reads the whole context to write its summary.
+
+### Standard and expansive context
+
+A new chat on any Claude 1M model now compacts at ≈367k by default
+(`--autocompact 400000`) instead of ≈967k (chats from before 3.9 keep ≈967k —
+above). Each turn re-sends the whole conversation, and long-context
+recall degrades with length on every published benchmark, so a session held
+near 900k re-reads about 2.3× what one held under 400k does. **Expansive** mode
+restores the full window — and on GPT-6 / GPT-5.6 raises Codex to its 872k
+catalog maximum, passing `model_context_window` and
+`model_auto_compact_token_limit` together (one without the other breaks Codex's
+compaction). The mode is per session, applies from the next turn, can be a
+seat's default, and exists only where it is real. Verse may suggest it; it never
+switches it on. The menu's cost note is the ratio of the two compaction points
+(≈2.6× on Claude, ≈3.2× on Codex). On Codex every Expansive surface also says
+that GPT-5.6 requests above 272k reportedly count about 2× against plan limits
+(one secondary source; GPT-6 Astra reportedly exempt) — if that holds, a turn
+near the expansive limit counts nearer 6× a standard one.
+
+### Continue in a fresh chat
+
+A banner appears when a session nears its compaction point, has compacted twice,
+or has sat idle past the prompt cache's lifetime with a large context. It builds
+a handoff note from the session's own log — goal, latest asks, state, files,
+commands, errors, `git diff --stat` per root — with no model call, lets you edit
+it and pick any seat (a Claude chat can continue on Codex), creates the new
+session for free and leaves the note in its composer. Nothing is sent until you
+press send.
+
+### Shared memory, fit, search, efficiency
+
+- **Project memory:** one private directory per project under
+  `~/.ashlr/verse/memory/`, shared by every seat, with a fixed instruction block
+  that stays byte-identical across turns so the prompt cache survives. On by
+  default, per-project opt-out, editable from the Resources panel. Claude and
+  local seats get the directory with `--add-dir` and the block with
+  `--append-system-prompt`; Codex through `-c` overrides (a writable root and
+  `developer_instructions`), since `exec resume` takes no `--add-dir`. Grok, whose
+  CLI can be granted nothing beyond its working directory, gets a read-only
+  snapshot through `--rules`. **It is not free on a paid seat:** the block (up
+  to 6 KB) rides in the system prompt of every turn of every new session —
+  cached after the first turn, but cached tokens still count — and it asks the
+  agent to read and update `MEMORY.md`, which is extra tool calls and output.
+  Turn it off per project, or for every project, in the Resources panel.
+  The editor shows the sanitized copy the API serves and says so; a save that
+  would write `[REDACTED]` placeholders over real values is refused.
+- **Context fit:** per-model verdicts — fits, tight, needs expansive, or split —
+  for a folder or workspace, from `git ls-files` sizes, plus each engine's base
+  prompt (local 15k, measured; Claude 25k, Codex 15k, Grok 20k, estimated), so
+  a handoff note fits the 64k local seat while a whole repository shows split.
+- **Session search** across past chats from the sidebar: a bounded keyword scan
+  of Verse's own session store (newest 200 sessions, 20 MB of message text), with
+  no index and no embeddings.
+- **Efficiency:** cache-hit ratio, context per turn, compactions and an
+  idle-cache warning, computed in the browser.
+
+Memory aside, all of it is deterministic and spends nothing: the handoff
+preview, context fit, search and the efficiency stats make no model call. The
+only model calls remain the turns you send, through the same local-only-gated
+chokepoint as before.
+
+### Re-pin a seat to a newer CLI
+
+`ashlr resources profile repin --directory <profile> --executable <binary>`
+points an existing prepared native profile at another CLI binary — the fix the
+claude-a seat's note names for Opus 5.5. It changes only the pinned executable
+(the launcher's one `const profile=` line and `profile.json`) and refuses a
+profile that is not unmodified `prepare` output. `--dry-run` checks everything
+and writes nothing. A real repin first saves `launcher.mjs`, `profile.json` and
+`command.json` as `.prev` files — one rollback set; restoring all three restores
+the old pin. Re-running an interrupted repin finishes it, repinning to the
+current binary reports `unchanged`, and failures say whether the profile
+changed. It does not check sign-in: run `ashlr resources launcher check`
+afterwards. The command ships in the built CLI, so it needs `npm run build` in a
+source checkout.
+
+### For API clients
+
+- New routes under `/api/verse`: `POST /sessions/:id/context-mode`,
+  `POST /sessions/:id/handoff-preview`, `GET`/`POST /preferences`,
+  `GET /context-fit`, `GET /search`, `GET`/`POST /memory`. None starts a model
+  call. `handoff-preview` is a POST because it runs `git`, so like every POST it
+  answers 404 on a read-only server.
+- `POST /sessions` is now strict: an unknown key is a 400, and `workspaceName` is
+  refused (the server fills it from `workspaceId`). New sessions always carry
+  `memoryEnabled`, `false` when memory is off for the project.
+- The new GETs reject unknown or duplicated query parameters; `context-fit`
+  takes `extraRoots` repeated once per root, because a comma is legal in a path.
+- `POST /memory` content is capped at 64 KiB; that route alone accepts a body
+  of up to 2 × 64 KiB + 8 KiB so a full-size file survives JSON escaping. It
+  answers 409 `VERSE_MEMORY_REDACTED` when the content holds more `[REDACTED]`
+  placeholders than the file on disk, and `GET`/`POST /memory` responses carry
+  `contentSanitized: true` whenever the content sent is not the file's bytes.
+- New sessions always record `contextMode` (`'standard'` included); an absent
+  key marks a pre-3.9 record (resolved as above).
+- New persisted events `compaction` and `context`; `context` may carry
+  `contextWindowSource` (absent = `runtime`), so a catalog budget written after
+  a mode switch is not shown as a measurement. `VERSE_HANDOFF_SUMMARY_REQUEST`
+  (`types.ts`) is the fixed "summarize first" turn. The full additive contract
+  is in `docs/VERSE-CONTRACT-V1.md`.
+
+### Hygiene
+
+- `eslint.config.js` ignores `.claude/**`. Agent worktrees there produced about
+  98k lint errors, which made `npm run lint` — and so `prepublishOnly` — fail on
+  this machine.
+- Two release-truth test pins that asserted superseded facts (npm provenance,
+  removed on purpose in `e24a7dae`, and the pre-rewrite desktop README) now
+  assert the current policy.
+
 ## [3.8.0] — 2026-09-23 UTC — local-only actually prevents spend
 
 Two gates that make a promise the UI was already making. Both landed after the

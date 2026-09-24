@@ -29,7 +29,7 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import type { AshlrConfig } from '../types.js';
 import { readClaudeUsage, type ClaudeUsageResult } from '../fabric/claude-usage.js';
 import type { VerseSeatLaunch } from './session-engine.js';
@@ -41,9 +41,38 @@ import {
   type VerseAccountWindow,
 } from './accounts.js';
 import { DEFAULT_LOCAL_MODEL_TAG } from '../run/model-catalog.js';
-import { probeOllamaModelDetail, type VerseOllamaModelDetail } from './local-models.js';
 import {
-  VERSE_DEFAULT_CONTEXT_WINDOWS,
+  claudeAutoCompactAt,
+  LOCAL_MIN_USABLE_WINDOW,
+  localWindowUsable,
+  sessionOverheadTokens,
+} from './context-math.js';
+import {
+  contextWindowFromTagSuffix,
+  probeLlamaSlotContext,
+  probeOllamaModelDetail,
+  probeOllamaResident,
+  readOllamaServerDefault,
+  resolveLocalContextWindow,
+  type VerseLocalWindow,
+  type VerseOllamaModelDetail,
+  type VerseOllamaServerDefault,
+} from './local-models.js';
+import {
+  claudeModelOptions,
+  claudeModelsNeedingNewerCli,
+  cliVersionFromExecutable,
+  codexModelOptions,
+  compareCliVersions,
+  defaultClaudeVersionsRoot,
+  grokModelOptions,
+  joinClaudeLabels,
+  localModelOption,
+  newestInstalledClaudeVersion,
+  readCodexCatalog,
+  readGrokCatalog,
+} from './model-windows.js';
+import {
   type VerseBootstrap,
   type VerseEngine,
   type VerseModelOption,
@@ -57,64 +86,29 @@ import {
 } from './types.js';
 
 // ---------------------------------------------------------------------------
-// Model catalogue — one const so the lists are easy to edit.
+// Model catalogue — built per seat by model-windows.ts
 // ---------------------------------------------------------------------------
 
 type NativeEngine = Exclude<VerseEngine, 'local'>;
 
+/**
+ * The BUILT-IN lists: what a native seat offers when nothing better is known
+ * (a Claude seat whose CLI version could not be read, a codex/grok seat that
+ * has not fetched its own catalog yet). Real seats are built per account by
+ * {@link nativeSeatModels} from the seat's own catalog and pinned binary —
+ * see core/verse/model-windows.ts, which holds every window and the evidence
+ * for it. Exported for tests and for callers that need the documented
+ * defaults without a discovery pass.
+ *
+ * Never hard-code a model list here again. Two past failures this replaced:
+ * Claude models all inherited the CLI's 200k "unknown model" window while the
+ * CLI ran six of them at 1M, and `claude-opus-5.5` (dotted) was offered even
+ * though every Claude Code binary resolves that spelling to Opus 5.
+ */
 export const VERSE_NATIVE_MODELS: Readonly<Record<NativeEngine, readonly VerseModelOption[]>> = {
-  claude: [
-    // Every id below was checked against the CLI's own model catalog, not
-    // recalled. The discriminator: an id the catalog does not know answers
-    // `[claude-code:unrecognized_model]` and warns that it "isn't described by
-    // this version's model catalog"; a known id goes straight through to auth.
-    // Checked and REJECTED on this machine, so do not add them back from
-    // memory: claude-sonnet-4-8, claude-haiku-4-1.
-    { id: 'claude-fable-5-1', label: 'Claude Fable 5.1', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
-    // NOTE the dot. `claude-opus-5-5` is NOT in the catalog; only the dotted
-    // form is. That differs from Opus 4.8, which the CLI accepts either way,
-    // so the spelling here is the one that was actually checked.
-    { id: 'claude-opus-5.5', label: 'Claude Opus 5.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
-    { id: 'claude-fable-5', label: 'Claude Fable 5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
-    { id: 'claude-opus-5', label: 'Claude Opus 5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
-    { id: 'claude-opus-4-8', label: 'Claude Opus 4.8', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
-    { id: 'claude-opus-4-5', label: 'Claude Opus 4.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
-    { id: 'claude-sonnet-5', label: 'Claude Sonnet 5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
-    { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['claude'] ?? null },
-  ],
-  codex: [
-    // Read from the CLI's own catalog cache
-    // (~/.ashlr/native-profiles/<account>/native-state/models_cache.json), which
-    // carries the ids, display names and 272,000-token window the service
-    // reported. Not recalled — `codex models` needs an interactive terminal and
-    // was sitting on a hook-trust prompt, and the cache is the same authority
-    // without asking anyone to trust anything.
-    //
-    // `gpt-5.5-mini` used to be listed here and is NOT in the catalog.
-    { id: 'gpt-6-astra', label: 'GPT-6 Astra', contextWindow: 272_000 },
-    { id: 'gpt-6-sol', label: 'GPT-6 Sol', contextWindow: 272_000 },
-    { id: 'gpt-6-luna', label: 'GPT-6 Luna', contextWindow: 272_000 },
-    { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', contextWindow: 272_000 },
-    { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', contextWindow: 272_000 },
-    { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', contextWindow: 272_000 },
-    { id: 'gpt-5.5', label: 'GPT-5.5', contextWindow: 272_000 },
-    { id: 'gpt-reserve', label: 'GPT-Reserve', contextWindow: 272_000 },
-  ],
-  grok: [
-    // Verified against `grok models` run with GROK_HOME pinned to the seat's own
-    // native profile. Two things this list has been wrong about before:
-    //   - ids were once guessed ('grok-4', 'grok-4-fast'); the CLI rejects both
-    //     with `unknown model id`, so every Grok turn failed before inference.
-    //   - the list then went stale, offering only 4.6/4.5 after the CLI had
-    //     moved its default to 4.7. Verse could not select the default model.
-    // Never invent or assume a provider's ids, and re-read them from the CLI
-    // rather than from a bare `grok models`, which reads the UNPINNED home and
-    // reports "not authenticated" even while the seat's profile is signed in.
-    { id: 'grok-4.7', label: 'Grok 4.7', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
-    { id: 'grok-4.7-build-fast', label: 'Grok 4.7 Build Fast', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
-    { id: 'grok-4.6', label: 'Grok 4.6', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
-    { id: 'grok-4.5', label: 'Grok 4.5', contextWindow: VERSE_DEFAULT_CONTEXT_WINDOWS['grok'] ?? null },
-  ],
+  claude: claudeModelOptions(null),
+  codex: codexModelOptions(null),
+  grok: grokModelOptions(null),
 };
 
 /**
@@ -157,6 +151,23 @@ export interface VerseSeatDiscoveryOptions {
    * Tests pass it explicitly; the server never does.
    */
   collector?: VerseAccountCollector | null;
+  /**
+   * Where Claude Code keeps one file per installed version (default
+   * `~/.local/share/claude/versions`). Read only to tell an operator that a
+   * newer binary than their seat's pin is already installed.
+   */
+  claudeVersionsRoot?: string;
+  /**
+   * llama-server's origin for the per-slot window probe on the llama-server
+   * lane. Default: `resolveLlamaServerOrigin(cfg)`. Tests pass it so a real
+   * llama-server on this machine can never leak into a hermetic run.
+   */
+  llamaServerOrigin?: string;
+  /**
+   * Ollama's unpinned-request default context. `undefined` reads it from the
+   * environment / server log ({@link readOllamaServerDefault}).
+   */
+  ollamaServerDefault?: VerseOllamaServerDefault | null;
 }
 
 export interface VerseSeatDiscovery {
@@ -313,6 +324,147 @@ function readConnections(accountsRoot: string): ConnectionAccount[] {
     out.push({ id, label, provider, command: [...command] });
   }
   return out;
+}
+
+// ---------------------------------------------------------------------------
+// Native profile — the pinned binary and the seat's own state directory
+// ---------------------------------------------------------------------------
+
+/**
+ * What a native seat's profile says about the CLI it is pinned to. PRIVATE:
+ * `nativeStatePath` and `executable` are machine paths and never reach a seat
+ * as-is; only the derived version, catalog-derived models and home-relative
+ * remediation text do.
+ */
+export interface VerseSeatProfile {
+  /** The profile directory (`<…>/native-profiles/<account>`). */
+  directory: string;
+  /** The provider CLI's pinned home: CODEX_HOME / GROK_HOME / CLAUDE_CONFIG_DIR. */
+  nativeStatePath: string | null;
+  /** The one binary the launcher execs. */
+  executable: string | null;
+}
+
+const MAX_PROFILE_BYTES = 64 * 1024;
+
+/**
+ * Locate and read `<profile>/profile.json` from an account's launcher argv —
+ * the same derivation `mcp-seat-view.resolveAccountStateRoots` uses
+ * (`…/launcher.mjs` ⇒ its directory's `profile.json`), but lifting the
+ * executable too, which the seat needs to know which CLI version it runs.
+ *
+ * A profile whose `provider` disagrees with the account is IGNORED rather
+ * than half-trusted: reading a grok catalog for a codex seat would be worse
+ * than reading none. Returns null whenever anything is missing.
+ */
+export function readSeatProfile(command: readonly string[], provider: NativeEngine): VerseSeatProfile | null {
+  const launcher = command.find((part) => typeof part === 'string' && part.endsWith('launcher.mjs'));
+  if (launcher === undefined || !isAbsolute(launcher)) return null;
+  const directory = dirname(launcher);
+  let manifest: unknown;
+  try {
+    const raw = readFileSync(join(directory, 'profile.json'), 'utf8');
+    if (raw.length > MAX_PROFILE_BYTES) return null;
+    manifest = JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
+  if (!isRecord(manifest)) return null;
+  if (manifest['provider'] !== undefined && manifest['provider'] !== provider) return null;
+  const absolute = (value: unknown): string | null =>
+    typeof value === 'string' && value.length > 0 && value.length <= 4096 && isAbsolute(value) ? value : null;
+  return {
+    directory,
+    nativeStatePath: absolute(manifest['nativeStatePath']),
+    executable: absolute(manifest['executable']),
+  };
+}
+
+/** `~/…` for a path under home, so remediation text is copyable but not machine-specific. */
+function homeRelative(path: string): string {
+  const home = homedir();
+  const rel = relative(home, path);
+  if (rel.length === 0 || rel.startsWith('..') || isAbsolute(rel)) return path;
+  return `~/${rel.split(sep).join('/')}`;
+}
+
+/** Stable-partition: runnable models first, so `models[0]` (the default) always runs. */
+function runnableFirst(models: VerseModelOption[]): VerseModelOption[] {
+  return [
+    ...models.filter((m) => !m.unavailableReason),
+    ...models.filter((m) => m.unavailableReason),
+  ];
+}
+
+/**
+ * The operator command that points a prepared native profile at another CLI
+ * binary (src/cli/resources.ts routes `resources` → `profile` → `repin`). It is
+ * a constant because the seat note is copy-paste remediation: a spelling that
+ * does not route (`ashlr resource-profile …` never existed) is worse than no
+ * hint, and tests pin the exact text through this one name.
+ */
+export const VERSE_REPIN_COMMAND = 'ashlr resources profile repin';
+
+export const VERSE_CATALOG_PENDING_NOTE =
+  "Model list is Verse's built-in list until this seat's first turn fetches its own catalog.";
+
+/**
+ * One native seat's models, pinned CLI version and notes.
+ *
+ * Every source is the SEAT's: its own catalog file under its profile's
+ * `nativeStatePath` and the binary its launcher execs. The unpinned global
+ * homes (`~/.codex`, `~/.grok`, `~/.claude`) belong to a different account or
+ * binary and are never read — codex-a and codex-b run different CLI versions
+ * with different catalogs on this very machine.
+ */
+export function nativeSeatModels(
+  provider: NativeEngine,
+  profile: VerseSeatProfile | null,
+  opts: { claudeVersionsRoot?: string } = {},
+): { models: VerseModelOption[]; cliVersion: string | null; notes: string[] } {
+  const cliVersion = profile?.executable ? cliVersionFromExecutable(profile.executable) : null;
+  const notes: string[] = [];
+
+  if (provider === 'claude') {
+    const models = runnableFirst(claudeModelOptions(cliVersion));
+    const tooOld = claudeModelsNeedingNewerCli(cliVersion);
+    if (tooOld.length > 0 && cliVersion !== null) {
+      const needed = tooOld
+        .map((spec) => spec.minCliVersion as string)
+        .reduce((a, b) => (compareCliVersions(a, b) >= 0 ? a : b));
+      const versionsRoot = opts.claudeVersionsRoot ?? defaultClaudeVersionsRoot();
+      const newest = newestInstalledClaudeVersion(versionsRoot);
+      const labels = joinClaudeLabels(tooOld);
+      const verb = tooOld.length === 1 ? 'needs' : 'need';
+      if (newest !== null && compareCliVersions(newest, needed) >= 0 && compareCliVersions(newest, cliVersion) > 0) {
+        const dir = profile ? homeRelative(profile.directory) : '<profile directory>';
+        notes.push(
+          `Pinned to Claude Code ${cliVersion}; ${newest} is installed — ${labels} ${verb} it. `
+          + `Re-pin with: ${VERSE_REPIN_COMMAND} --directory ${dir} --executable ${homeRelative(join(versionsRoot, newest))}`,
+        );
+      } else {
+        notes.push(`Pinned to Claude Code ${cliVersion}; ${labels} ${verb} ${needed} or newer, which is not installed on this machine.`);
+      }
+    } else if (cliVersion === null && models.some((m) => m.minCliVersion)) {
+      const gated = models.filter((m) => m.minCliVersion).map((m) => m.label.replace(/^Claude\s+/, ''));
+      notes.push(
+        `Could not tell which Claude Code version this seat is pinned to; ${gated.join(', ')} `
+        + 'may silently run as an older model on an older binary.',
+      );
+    }
+    return { models, cliVersion, notes };
+  }
+
+  const statePath = profile?.nativeStatePath ?? null;
+  if (provider === 'codex') {
+    const catalog = statePath ? readCodexCatalog(statePath) : null;
+    if (catalog === null) notes.push(VERSE_CATALOG_PENDING_NOTE);
+    return { models: runnableFirst(codexModelOptions(catalog)), cliVersion, notes };
+  }
+
+  const catalog = statePath ? readGrokCatalog(statePath) : null;
+  if (catalog === null) notes.push(VERSE_CATALOG_PENDING_NOTE);
+  return { models: runnableFirst(grokModelOptions(catalog)), cliVersion, notes };
 }
 
 // ---------------------------------------------------------------------------
@@ -649,13 +801,11 @@ export function localSeatPreferenceRank(tag: string, preferred: readonly string[
   return preferred.length * 2;
 }
 
-/** `qwen3-coder-next:ctx64k` → 65536; null when no such suffix. */
-export function contextWindowFromTagSuffix(tag: string): number | null {
-  const m = /:ctx(\d+)k$/i.exec(tag);
-  if (!m) return null;
-  const n = Number(m[1]);
-  return Number.isFinite(n) && n > 0 ? n * 1024 : null;
-}
+/**
+ * Re-exported: the tag-suffix parser now lives beside the one local window
+ * resolver in local-models.ts (and accepts `-ctx64k`, which it used to miss).
+ */
+export { contextWindowFromTagSuffix };
 
 /** `qwen3-coder-next:ctx64k` → "Qwen3-Coder-Next (local)". */
 export function localSeatLabel(tag: string): string {
@@ -670,16 +820,110 @@ export function localSeatLabel(tag: string): string {
   return variant && variant !== 'latest' ? `${pretty} ${variant} (local)` : `${pretty} (local)`;
 }
 
+function formatWindow(n: number): string {
+  return n.toLocaleString('en-US');
+}
+
+/**
+ * Plain-language caveats for one local seat's window, or none. Only the cases
+ * where the number on screen is weaker than it looks get a note: a figure
+ * Ollama actually allocates (pinned num_ctx, resident instance, its own
+ * default, llama-server's slot) needs no apology.
+ */
+export function localWindowNotes(resolved: VerseLocalWindow, lane: VerseLocalDispatch, slotReported: boolean): string[] {
+  const notes: string[] = [];
+  if (lane === 'llama-server' && !slotReported) {
+    notes.push(
+      'llama-server did not report its per-slot context, so this window is Ollama\'s figure for the tag; '
+      + 'turns on the llama-server lane get one slot\'s share, which may be less.',
+    );
+  }
+  if (resolved.basis === 'native-estimate') {
+    notes.push(
+      `Ollama's default context for models without a pinned num_ctx could not be read; ${formatWindow(resolved.window)} `
+      + 'is this model\'s trained maximum, and Ollama may allocate less.',
+    );
+  } else if (resolved.basis === 'tag-suffix' || resolved.basis === 'default') {
+    notes.push(`Ollama did not describe this model; the ${formatWindow(resolved.window)}-token context window is an estimate.`);
+  }
+  return notes;
+}
+
+/**
+ * Why a local window cannot host a Claude Code session, or null when it can.
+ *
+ * Local turns run Claude Code with `CLAUDE_CODE_MAX_CONTEXT_TOKENS=<window>`
+ * (the window must be stated: the CLI otherwise assumes 200k and overflows
+ * the runner). The CLI then reserves up to 20k for the reply and compacts
+ * 13k below that, so a 32,768 window compacts at 0 — below its own ~15k fixed
+ * prompt — and every turn is blocked or loops through compaction. Such a seat
+ * is LISTED with this reason (the operator learns why, and which tag would
+ * work) rather than offered as runnable or silently hidden.
+ */
+export function localWindowUnusableReason(window: number): string | null {
+  if (localWindowUsable(window)) return null;
+  const compactAt = claudeAutoCompactAt(window, null, null);
+  return `Context window ${formatWindow(window)} is too small for Claude Code: it would compact at `
+    + `≈${Math.round(compactAt / 1000)}k tokens, with no real room above its ~${Math.round(sessionOverheadTokens('local') / 1000)}k base prompt. `
+    + `Use a tag with a window of at least ${formatWindow(LOCAL_MIN_USABLE_WINDOW)} tokens.`;
+}
+
+/**
+ * The per-slot window on the llama-server lane, or null. The origin is
+ * llama-server's own (NOT the Anthropic proxy turns are dispatched to): the
+ * proxy has no `/props`. The imports are lazy for the same reason as
+ * {@link resolveLocalDispatchBaseUrl} — an operator who never opted into this
+ * lane must not pay for the process-table machinery on boot.
+ */
+async function llamaSlotWindow(
+  cfg: AshlrConfig,
+  fetchImpl: typeof fetch,
+  explicitOrigin: string | undefined,
+): Promise<number | null> {
+  try {
+    let origin = explicitOrigin;
+    if (origin === undefined) {
+      const { resolveLlamaServerOrigin } = await import('../local-runtime/llama/config.js');
+      origin = resolveLlamaServerOrigin(cfg);
+    }
+    // The `-c` we launched it with, but only from a record that describes THIS
+    // server: a record for another port says nothing about the one answering.
+    let requestedContext: number | null = null;
+    try {
+      const { readOwnershipRecord } = await import('../local-runtime/llama/record.js');
+      const record = readOwnershipRecord();
+      const port = Number.parseInt(new URL(origin).port, 10);
+      if (record !== null && record.port === port && typeof record.requestedContext === 'number') {
+        requestedContext = record.requestedContext;
+      }
+    } catch {
+      requestedContext = null;
+    }
+    const reading = await probeLlamaSlotContext(fetchImpl, origin, { timeoutMs: OLLAMA_TIMEOUT_MS, requestedContext });
+    return reading.perSlot;
+  } catch {
+    return null;
+  }
+}
+
 async function discoverLocalSeats(
   fetchImpl: typeof fetch,
   baseUrl: string,
   preferred: readonly string[],
   dispatch: { lane: VerseLocalDispatch; baseUrl: string },
+  windows: {
+    /** Pending llama-server per-slot probe; null on the Ollama lane. */
+    llamaSlot: Promise<number | null> | null;
+    /** Ollama's unpinned-request default; read lazily, only if a tag needs it. */
+    serverDefault: () => VerseOllamaServerDefault | null;
+  },
 ): Promise<{ seats: VerseSeat[]; launches: Map<string, VerseSeatLaunch>; localRuntime: VerseBootstrap['localRuntime'] }> {
   // DISCOVERY IS OLLAMA'S, ALWAYS. `/api/tags` names the installed models and
   // `/api/show` carries the context window and the `tools` capability that
   // decides whether a tag can be a seat at all; llama-server implements
-  // neither. `dispatch` only changes where the resulting seats SEND turns.
+  // neither. `dispatch` changes where the resulting seats SEND turns — and, on
+  // the llama-server lane, the window (llama-server allocates per slot,
+  // whatever the tag's Modelfile says).
   const probe = await probeOllamaTags(fetchImpl, baseUrl);
   const localRuntime: VerseBootstrap['localRuntime'] = {
     ollama: { reachable: probe.reachable, baseUrl, models: probe.tags },
@@ -691,40 +935,75 @@ async function discoverLocalSeats(
   const launches = new Map<string, VerseSeatLaunch>();
   if (!probe.reachable) return { seats, launches, localRuntime };
 
-  // One /api/show per installed tag: it carries BOTH the effective context
-  // window and the tool capability that decides whether this can be a seat.
-  const details = await Promise.all(
-    probe.tags.map((tag) => probeOllamaModelDetail(fetchImpl, baseUrl, tag, OLLAMA_TIMEOUT_MS)),
-  );
-  const selectable: Array<{ tag: string; contextWindow: number }> = [];
+  // One /api/show per installed tag: it carries BOTH the context facts and the
+  // tool capability that decides whether this can be a seat. The llama-server
+  // slot probe (if any) runs concurrently.
+  const [details, slotWindow] = await Promise.all([
+    Promise.all(probe.tags.map((tag) => probeOllamaModelDetail(fetchImpl, baseUrl, tag, OLLAMA_TIMEOUT_MS))),
+    windows.llamaSlot ?? Promise.resolve(null),
+  ]);
+  const selectable: Array<{ tag: string; detail: VerseOllamaModelDetail | null }> = [];
   probe.tags.forEach((tag, i) => {
     const detail = details[i] ?? null;
-    if (!localSeatIsSelectable(detail, tag)) return;
-    selectable.push({
-      tag,
-      contextWindow: detail?.contextWindow
-        ?? contextWindowFromTagSuffix(tag)
-        ?? VERSE_DEFAULT_CONTEXT_WINDOWS['local']
-        ?? 65_536,
-    });
+    if (localSeatIsSelectable(detail, tag)) selectable.push({ tag, detail });
   });
 
-  // Preferred model first, then discovery order. `sort` is stable, so every
-  // tag that is not preferred keeps the order `/api/tags` reported it in.
-  selectable.sort(
-    (a, b) => localSeatPreferenceRank(a.tag, preferred) - localSeatPreferenceRank(b.tag, preferred),
+  // Unpinned tags need what Ollama would ACTUALLY allocate an unpinned request:
+  // the server's default (its log, else our env). `/api/ps` residency is read
+  // only when no default is known — a resident runner may have been loaded by
+  // another client's `options.num_ctx`, so it is not what Verse's turns get
+  // (local-models.ts `resolveLocalContextWindow`). Both reads are skipped when
+  // every tag pins num_ctx or the llama-server slot already answered.
+  const needsServerFacts = slotWindow === null
+    && selectable.some(({ detail }) => detail !== null && (detail.numCtx ?? null) === null);
+  const serverDefault = needsServerFacts ? windows.serverDefault() : null;
+  // (A tag with no native length cannot use the default either — it is never
+  // applied uncapped — so residency is its best fact too.)
+  const needsResidency = needsServerFacts && (
+    (serverDefault?.contextLength ?? null) === null
+    || selectable.some(({ detail }) => detail !== null && (detail.numCtx ?? null) === null && (detail.nativeContextLength ?? null) === null)
   );
+  const resident = needsResidency ? await probeOllamaResident(fetchImpl, baseUrl, OLLAMA_TIMEOUT_MS) : null;
+  const residentByTag = new Map((resident ?? []).map((row) => [row.tag, row.contextLength]));
 
-  selectable.forEach(({ tag, contextWindow }) => {
+  const observedAt = new Date().toISOString();
+  const built = selectable.map(({ tag, detail }) => {
+    const resolved = resolveLocalContextWindow({
+      tag,
+      lane: dispatch.lane,
+      llamaSlotWindow: slotWindow,
+      detail,
+      residentContext: residentByTag.get(tag) ?? null,
+      serverDefault,
+    });
+    const notes = localWindowNotes(resolved, dispatch.lane, slotWindow !== null);
+    const label = localSeatLabel(tag);
+    const unavailableReason = localWindowUnusableReason(resolved.window);
+    const option = localModelOption(tag, label.replace(/ \(local\)$/, ''), resolved.window, resolved.source);
     const seat: VerseSeat = {
       id: `local:${tag}`,
       engine: 'local',
-      label: localSeatLabel(tag),
+      label,
       accountId: 'local',
-      models: [{ id: tag, label: localSeatLabel(tag).replace(/ \(local\)$/, ''), contextWindow }],
-      contextWindow,
-      health: { state: 'ready', summary: null, windows: [], observedAt: new Date().toISOString() },
+      // Present only when set, so a usable seat's wire shape is unchanged.
+      models: [unavailableReason !== null ? { ...option, unavailableReason } : option],
+      contextWindow: resolved.window,
+      health: { state: 'ready', summary: null, windows: [], observedAt },
+      ...(notes.length > 0 ? { notes } : {}),
     };
+    return { tag, seat, usable: unavailableReason === null };
+  });
+
+  // Usable seats first, then preferred model first, then discovery order.
+  // `sort` is stable, so every tag that is not preferred keeps the order
+  // `/api/tags` reported it in — and a preferred tag whose window is too small
+  // never becomes the default ahead of one that can actually run.
+  built.sort((a, b) => {
+    if (a.usable !== b.usable) return a.usable ? -1 : 1;
+    return localSeatPreferenceRank(a.tag, preferred) - localSeatPreferenceRank(b.tag, preferred);
+  });
+
+  built.forEach(({ seat }) => {
     seats.push(seat);
     launches.set(seat.id, {
       seat,
@@ -763,7 +1042,10 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
     // Codex-only evidence file.
     const telemetry = buildSeatTelemetry(accountsRoot, { collector: opts.collector });
     for (const account of accounts) {
-      const models = VERSE_NATIVE_MODELS[account.provider].map((m) => ({ ...m }));
+      // Models come from THIS seat's own catalog and pinned binary.
+      const profile = readSeatProfile(account.command, account.provider);
+      const built = nativeSeatModels(account.provider, profile, { claudeVersionsRoot: opts.claudeVersionsRoot });
+      const models = built.models;
       const facets = nativeSeatFacets(account.id, account.provider, telemetry, claudeUsage);
       const seat: VerseSeat = {
         id: account.id,
@@ -771,10 +1053,16 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
         label: account.label,
         accountId: account.id,
         models,
-        contextWindow: models[0]?.contextWindow ?? null,
+        // `models[0]` is the default and is always runnable (runnableFirst),
+        // so the seat's headline window is one a new session can actually get.
+        contextWindow: models.find((m) => !m.unavailableReason)?.contextWindow ?? null,
         health: facets.health,
       };
       if (facets.capacity) seat.capacity = facets.capacity;
+      // Both optional and absent when there is nothing to say, so an ordinary
+      // seat's wire shape does not change.
+      if (built.cliVersion !== null) seat.cliVersion = built.cliVersion;
+      if (built.notes.length > 0) seat.notes = built.notes;
       seats.push(seat);
       // The launcher command stays here — it is the account's identity.
       launches.set(seat.id, { seat, launcher: account.command, ollamaBaseUrl });
@@ -788,10 +1076,16 @@ export async function discoverSeats(cfg: AshlrConfig, opts: VerseSeatDiscoveryOp
   };
   try {
     const dispatchBaseUrl = await resolveLocalDispatchBaseUrl(cfg, dispatchLane, ollamaBaseUrl);
-    const local = await discoverLocalSeats(fetchImpl, ollamaBaseUrl, preferredLocalTags(cfg), {
-      lane: dispatchLane,
-      baseUrl: dispatchBaseUrl,
-    });
+    const local = await discoverLocalSeats(
+      fetchImpl,
+      ollamaBaseUrl,
+      preferredLocalTags(cfg),
+      { lane: dispatchLane, baseUrl: dispatchBaseUrl },
+      {
+        llamaSlot: dispatchLane === 'llama-server' ? llamaSlotWindow(cfg, fetchImpl, opts.llamaServerOrigin) : null,
+        serverDefault: () => (opts.ollamaServerDefault !== undefined ? opts.ollamaServerDefault : readOllamaServerDefault()),
+      },
+    );
     localRuntime = local.localRuntime;
     for (const seat of local.seats) {
       if (launches.has(seat.id)) continue;

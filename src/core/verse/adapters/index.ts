@@ -33,10 +33,44 @@ export interface VerseTurnParser {
   nativeSessionId(): string | null;
 }
 
+/**
+ * V3.9 — what a telemetry hook gets. Hooks are the ONE place an adapter may
+ * read the filesystem: some CLIs (codex) never put exact per-call context on
+ * stdout, only in their own session files. Hooks must be bounded (tail reads,
+ * size caps), synchronous, fast, and must never throw.
+ */
+export interface VerseAdapterTurnContext {
+  session: VerseSession;
+  launch: VerseSeatLaunch;
+  turnId: string;
+  /** Epoch ms when the process was spawned. */
+  startedAt: number;
+  /** Native id observed so far this turn (parser), else the session's. */
+  nativeSessionId: string | null;
+  /** This turn's parser, for hooks that need what it captured. */
+  parser: VerseTurnParser;
+  /** Per-turn scratch the hooks own (e.g. a file offset); starts empty. */
+  state: Record<string, unknown>;
+}
+
 export interface VerseAdapter {
   buildLaunch(session: VerseSession, text: string, launch: VerseSeatLaunch): VerseTurnLaunch;
   createParser(turnId: string): VerseTurnParser;
+  /**
+   * V3.9, optional. Polled every VERSE_TELEMETRY_POLL_MS while a turn runs
+   * (live meter). Typically returns `context` events.
+   */
+  pollTelemetry?(ctx: VerseAdapterTurnContext): VerseParsedEvent[];
+  /**
+   * V3.9, optional. Called once after the process exits and AFTER the
+   * parser's `finish()` events were applied. Typically returns `context` and
+   * `compaction` events read from the CLI's own session files.
+   */
+  afterTurn?(ctx: VerseAdapterTurnContext): VerseParsedEvent[];
 }
+
+/** V3.9 — live telemetry poll interval for adapters that implement `pollTelemetry`. */
+export const VERSE_TELEMETRY_POLL_MS = 2_000;
 
 export function adapterFor(engine: VerseEngine): VerseAdapter {
   switch (engine) {
